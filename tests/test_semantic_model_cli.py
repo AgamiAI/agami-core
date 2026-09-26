@@ -39,6 +39,8 @@ def _model(root: Path) -> None:
     (root / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
         "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
         "description": "o", "default_filters": ["{alias}.deleted_at IS NULL"],
+        # The caveat, not the filter, is what makes this table's COUNT(*) worth proposing (#404).
+        "caveats": ["Soft-deleted orders are still rows"],
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "deleted_at", "type": "timestamp"},
                     {"name": "total", "type": "decimal"}]}))
@@ -46,7 +48,12 @@ def _model(root: Path) -> None:
         "name": "order_items", "schema": "public", "storage_connection": "c", "grain": ["id"],
         "description": "oi",
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
-                    {"name": "order_id", "type": "integer"}, {"name": "qty", "type": "integer"}]}))
+                    {"name": "order_id", "type": "integer"}, {"name": "qty", "type": "integer"},
+                    # A unit is something SUM carries that the aggregation class does not, so this
+                    # one survives #404 — and it is the only metric here with no caveat prose, so
+                    # it is also the only one that still auto-approves.
+                    {"name": "weight", "type": "decimal", "aggregation": "additive",
+                     "unit": "kg"}]}))
     (root / "subject_areas" / "s" / "relationships.yaml").write_text(yaml.safe_dump({
         "relationships": [{"from_table": "order_items", "from_column": "order_id",
                            "to_table": "orders", "to_column": "id", "relationship": "many_to_one",
@@ -98,15 +105,28 @@ def test_suggest_metrics_writes_and_auto_approves_trivial(tmp_path):
     _model(tmp_path)
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     d = json.loads(out)
-    assert rc == 0 and d["written"] >= 2, d   # at least orders_count + order_items_count
-    assert d["auto_approved"] >= 1, d         # the COUNT(*) measures auto-approve
-    f = tmp_path / "subject_areas" / "s" / "metrics" / "orders_count.yaml"
-    assert f.exists()
-    met = yaml.safe_load(f.read_text())
-    # COUNT(*) is judgment-free → auto-approved with a system sign-off (incl. timestamp)
-    assert met["confidence"] == "confirmed" and met["review_state"] == "approved"
-    assert met["signed_off_by"] == "agami_suggest" and met["signed_off_role"] == "system"
-    assert met.get("signed_off_at")
+    # Two survive #404, for the two different reasons, and only one of them auto-approves.
+    # `orders` carries a caveat its COUNT(*) has to respect; `order_items.weight` carries a unit.
+    # `order_items`' own COUNT(*) is one row per id with no caveat, so it would restate its name
+    # and is no longer proposed at all.
+    assert rc == 0 and d["written"] == 2, d
+    assert d["auto_approved"] == 1, d
+    mets = tmp_path / "subject_areas" / "s" / "metrics"
+    assert not (mets / "order_items_count.yaml").exists()
+
+    # A unit is not prose, so SUM(weight) is still judgment-free → system sign-off, no queue.
+    plain = yaml.safe_load((mets / "order_items_total_weight.yaml").read_text())
+    assert plain["confidence"] == "confirmed" and plain["review_state"] == "approved"
+    assert plain["signed_off_by"] == "agami_suggest" and plain["signed_off_role"] == "system"
+    assert plain.get("signed_off_at")
+    assert plain["bindings"] == {"PostgreSQL": "SUM(weight)"} and plain["unit"] == "kg"
+
+    # The caveat is unverified prose and is the whole reason this metric exists, so it waits for a
+    # person — and it arrives carrying the caveat, not just citing it.
+    met = yaml.safe_load((mets / "orders_count.yaml").read_text())
+    assert met["review_state"] == "unreviewed" and met["confidence"] == "proposed"
+    assert not met.get("signed_off_at")
+    assert met["calculation"].endswith("Soft-deleted orders are still rows.")
     assert met["bindings"] == {"PostgreSQL": "COUNT(*)"}
 
 

@@ -131,13 +131,15 @@ def test_suggest_metrics_gated_on_aggregation():
     t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
                 description="o", columns=[
                     m.Column(name="id", type="integer", primary_key=True, aggregation="dimension"),
-                    m.Column(name="amount", type="decimal", aggregation="additive"),
-                    m.Column(name="discount_rate", type="decimal", aggregation="averageable"),
+                    m.Column(name="amount", type="decimal", aggregation="additive", unit="USD"),
+                    m.Column(name="discount_rate", type="decimal", aggregation="averageable",
+                             unit="percent"),
                     m.Column(name="status", type="string", aggregation="dimension"),
-                    m.Column(name="weird", type="decimal", aggregation="unknown")])
+                    m.Column(name="weird", type="decimal", aggregation="unknown", unit="USD")])
     mets = build.suggest_metrics(t, D.get_dialect("postgresql"))
     names = {x["name"] for x in mets}
-    assert "orders_count" in names
+    # The units are what make these two worth naming at all (#404, below); the class is what
+    # decides WHICH aggregate each one gets.
     assert "orders_total_amount" in names           # additive → SUM
     assert "orders_avg_discount_rate" in names      # averageable → AVG
     assert not any("status" in n or "weird" in n for n in names)  # dimension/unknown skipped
@@ -167,10 +169,9 @@ def test_suggest_metrics_rate_and_duration_patterns():
     dur = mets["incident_avg_duration_days"]   # start+end timestamp pair → dialect DATEDIFF
     assert dur["bindings"]["Redshift"] == "AVG(DATEDIFF('day', opened_at, resolved_at))"
     assert dur["unit"] == "days"
-    # auto-approve policy: COUNT(*) is judgment-free → approved; flag RATES (CASE) and the
-    # DURATION pair (heuristic start/end) carry a choice the engine could miss → stay proposed.
-    assert mets["incident_count"]["review_state"] == "approved"
-    assert mets["incident_count"]["confidence"] == "confirmed"
+    # auto-approve policy: flag RATES (CASE) and the DURATION pair (heuristic start/end) carry a
+    # choice the engine could miss → they stay proposed. (COUNT(*)'s side is asserted in
+    # test_suggest_metrics_auto_approve_stamps_signoff_timestamp, on a table that proposes one.)
     assert mets["incident_made_sla_rate"]["review_state"] == "unreviewed"
     assert mets["incident_is_active_rate"]["review_state"] == "unreviewed"
     assert dur["review_state"] == "unreviewed" and dur["confidence"] == "proposed"
@@ -182,14 +183,14 @@ def test_suggest_metrics_skips_opaque_columns_until_described():
     cols = [
         m.Column(name="id", type="integer", primary_key=True),
         m.Column(name="active_to", type="boolean", description_source="ai_unknown"),
-        m.Column(name="cost", type="decimal", aggregation="additive", description="acquisition cost"),
+        m.Column(name="cost", type="decimal", aggregation="additive", description="acquisition cost",
+                 unit="USD"),
     ]
     t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
                 description="a", columns=cols)
     names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
     assert "alm_asset_active_to_rate" not in names   # opaque column → no metric proposed
-    assert "alm_asset_total_cost" in names           # described column → metric proposed
-    assert "alm_asset_count" in names                # COUNT(*) is column-independent, always kept
+    assert "alm_asset_total_cost" in names           # described column with a unit → proposed
 
     # once the column is described, the SAME call now proposes its metric (the re-pass).
     cols[1].description_source = "ai"
@@ -228,16 +229,22 @@ def test_suggest_metrics_inherits_column_unit():
     mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
     assert mets["alm_asset_total_cost"]["unit"] == "USD"          # SUM(cost) inherits USD
     assert mets["alm_asset_avg_margin_pct"]["unit"] == "percent"  # AVG inherits percent
-    assert "unit" not in mets["alm_asset_total_quantity"]         # column has no unit → metric has none
-    assert "unit" not in mets["alm_asset_count"]                  # COUNT(*) is unitless
+    # The unit is also the reason those two exist: a unit-less additive column with no caveat on an
+    # unfiltered table gets no metric, because its `aggregation` class already licenses SUM (#404).
+    assert "alm_asset_total_quantity" not in mets
+    assert "alm_asset_count" not in mets
 
 
 def test_suggest_metrics_auto_approve_stamps_signoff_timestamp():
     from semantic_model import dialects as D
-    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+    # Both survive #404 without a caveat: the composite grain means COUNT(*) may not be counting
+    # things, and the unit is something SUM(amount) carries that the class does not. Neither adds
+    # unverified prose, so both are still judgment-free and still auto-approve.
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id", "line_no"],
                 description="o", columns=[
                     m.Column(name="id", type="integer", primary_key=True),
-                    m.Column(name="amount", type="decimal", aggregation="additive")])
+                    m.Column(name="line_no", type="integer"),
+                    m.Column(name="amount", type="decimal", aggregation="additive", unit="USD")])
     mets = {x["name"]: x for x in build.suggest_metrics(
         t, D.get_dialect("postgresql"), now="2026-06-16T00:00:00Z")}
     # the trivial COUNT/SUM carry the full sign-off block (Rule-1 trust parity)
@@ -245,3 +252,92 @@ def test_suggest_metrics_auto_approve_stamps_signoff_timestamp():
         assert mets[nm]["review_state"] == "approved"
         assert mets[nm]["signed_off_at"] == "2026-06-16T00:00:00Z"
         assert mets[nm]["signed_off_by"] == "agami_suggest"
+
+
+def test_a_caveat_that_justifies_a_plain_metric_arrives_with_it():
+    """A metric proposed *because* a caveat exists, that then ships without it, is the empty
+    metric #404 removes wearing a better justification. `Metric` has no caveats field, so the
+    caveat goes into the one prose field it has."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", caveats=["Voided orders are still rows"], columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive",
+                             caveats=["Excludes tax"])])
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert mets["orders_count"]["calculation"] == \
+        "Number of orders records. Voided orders are still rows."
+    assert mets["orders_total_amount"]["calculation"] == \
+        "Total amount across orders. Excludes tax."
+
+
+def test_a_caveat_keeps_a_trivial_metric_out_of_the_auto_approve_lane():
+    """The binding is still `COUNT(*)`, but the caveat is unverified prose and it is the whole
+    reason the metric exists — so it goes to the review queue, like a rate or a duration. Before
+    #404 the same metric was proposed for every table and auto-approving it claimed only that
+    COUNT(*) is COUNT(*)."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", caveats=["Voided orders are still rows"], columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive",
+                             unit="USD", caveats=["Excludes tax"])])
+    mets = {x["name"]: x for x in build.suggest_metrics(
+        t, D.get_dialect("postgresql"), now="2026-06-16T00:00:00Z")}
+    for nm in ("orders_count", "orders_total_amount"):
+        assert mets[nm]["review_state"] == "unreviewed", nm
+        assert mets[nm]["confidence"] == "proposed", nm
+        assert "signed_off_at" not in mets[nm], nm
+    # A unit alone is not prose, so it does not cost the metric its sign-off.
+    plain = m.Table(name="items", schema="public", storage_connection="c", grain=["id"],
+                    description="i", columns=[
+                        m.Column(name="id", type="integer", primary_key=True),
+                        m.Column(name="qty", type="integer", aggregation="additive", unit="each")])
+    only = build.suggest_metrics(plain, D.get_dialect("postgresql"))[0]
+    assert only["name"] == "items_total_qty" and only["review_state"] == "approved"
+
+
+@pytest.mark.parametrize("grain,proposed", [
+    (["id"], False),            # one key, and it IS the grain → COUNT(*) counts things
+    (["id", "line_no"], True),  # composite grain → a row is not a thing
+    ([], True),                 # no declared grain → we cannot claim it counts things
+    (["order_id"], True),       # key declared, grain says otherwise → believe the grain
+])
+def test_count_is_proposed_only_where_a_row_might_not_be_a_thing(grain, proposed):
+    """The other arm of the COUNT(*) gate (#404). Both clauses matter: an introspected model
+    derives `primary_key` FROM `grain` so they agree, but a curated one can mark a key that the
+    declared grain contradicts, and the grain is the one that says what a row is."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=grain,
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="line_no", type="integer"),
+                    m.Column(name="order_id", type="integer")])
+    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    assert ("orders_count" in names) is proposed
+
+
+@pytest.mark.parametrize("cap,expected", [(2, 2), (1, 1), (0, 0), (-1, 0), (-5, 0)])
+def test_the_cap_is_clamped_at_zero_not_floored_at_one(cap, expected):
+    """`0` can honestly mean none now that a row count is no longer unconditional — but a negative
+    cap must not reach Python's negative slice, where `-1` returns every proposal but the last."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive", unit="USD"),
+                    m.Column(name="is_rush", type="boolean"),
+                    m.Column(name="is_gift", type="boolean")])
+    assert len(build.suggest_metrics(
+        t, D.get_dialect("postgresql"), max_per_table=cap)) == expected
+
+
+def test_a_default_filter_alone_does_not_license_a_plain_metric():
+    """The binding is a bare COUNT(*)/SUM(col) and execute_sql does not apply a table's default
+    filters, so the proposal would not carry the filter that was its whole justification (#404)."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", default_filters=["{alias}.deleted_at IS NULL"], columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive")])
+    assert build.suggest_metrics(t, D.get_dialect("postgresql")) == []
