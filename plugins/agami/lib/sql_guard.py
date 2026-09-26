@@ -444,9 +444,8 @@ _DANGEROUS_FN_RE = re.compile(
     # to the pool exactly as the Postgres advisory locks do; `LOAD_FILE` is the MySQL
     # spelling of `pg_read_file`; the replica-wait calls block until a position is
     # reached, which is an unbounded sleep with a timeout argument.
-    # `SLEEP` also catches Oracle's `DBMS_LOCK.SLEEP(n)`, which is spelled with the same
-    # callable name. `IS_FREE_LOCK` / `IS_USED_LOCK` are deliberately NOT here: they read
-    # lock state and take none.
+    # `IS_FREE_LOCK` / `IS_USED_LOCK` are deliberately NOT here: they read lock state and
+    # take none.
     r"sleep|benchmark|load_file|"
     r"get_lock|release_lock|release_all_locks|"
     r"master_pos_wait|source_pos_wait|wait_for_executed_gtid_set|"
@@ -474,10 +473,21 @@ _DANGEROUS_FN_RE = re.compile(
     # Federated query against another engine — remote SQL, same shape as `dblink`.
     r"external_query|"
     # --- Oracle ------------------------------------------------------------------------
-    # The package-qualified side-effect and egress primitives: session sleep and pipes,
-    # job/scheduler submission, nested-SQL execution (`DBMS_XMLGEN.GETXML` is Oracle's
-    # `query_to_xml`), and the network/file packages that reach off the box. Matched as
-    # `PKG . MEMBER`, so an unrelated `REQUEST(...)` on another engine is untouched.
+    # The package-qualified side-effect and egress primitives: locks and pipes, job/scheduler
+    # submission, nested-SQL execution (`DBMS_XMLGEN.GETXML` is Oracle's `query_to_xml`), and
+    # the network/file packages that reach off the box. Matched as `PKG . MEMBER`, so an
+    # unrelated `REQUEST(...)` on another engine is untouched.
+    #
+    # Denied at PACKAGE level, not member level, and that is the fail-closed choice rather than
+    # laziness. Only some members are reachable from a bare SELECT — `DBMS_LOCK.REQUEST`,
+    # `DBMS_PIPE.RECEIVE_MESSAGE`, `DBMS_XMLGEN.GETXML`, `UTL_HTTP.REQUEST` and
+    # `UTL_INADDR.GET_HOST_ADDRESS` are functions, while `DBMS_LOCK.SLEEP`, the `DBMS_SCHEDULER`
+    # / `DBMS_JOB` / `DBMS_AQ` entry points and most of `UTL_FILE` / `UTL_SMTP` / `UTL_TCP` are
+    # procedures, or take record types SQL cannot construct. Enumerating the reachable members
+    # would make the list depend on our reading of one Oracle version's package surface; a
+    # package whose PURPOSE is off-box I/O or job control has no reachable member this gate
+    # should pass, so the whole name goes. (`OPENXML` above is the opposite case and is left
+    # out: there the single entry point is unreachable, so denying it buys nothing.)
     r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xslprocessor)\s*\.\s*\w+|"
     r"utl_(?:http|smtp|tcp|file|inaddr)\s*\.\s*\w+|"
     r"httpuritype|"
