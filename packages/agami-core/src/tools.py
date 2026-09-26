@@ -1393,8 +1393,8 @@ def _large_tables(org) -> dict[str, int]:
     return out
 
 
-def _cross_area_map(org, scope) -> dict[str, Any]:
-    """The cross-area edges as an adjacency map: `{"joins": {t: [t, …]}, "areas": {t: area}}`.
+def _cross_area_map(org, scope) -> dict[str, list[str]]:
+    """The cross-area edges as an adjacency map: `{from_table: [to_table, …]}`.
 
     Several declared edges can reach the same pair of tables through different columns — nine
     reference columns on one table all pointing at the user table, say. This tier carries no
