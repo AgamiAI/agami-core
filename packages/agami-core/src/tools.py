@@ -37,7 +37,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple
 
 # ---------------------------------------------------------------------------
 # Paths & config resolution (mirrors execute_sql.py / file-layout.md exactly)
@@ -1406,35 +1406,22 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
     an agent acts on is a TABLE NAME — which is what `dataset_names` takes — and the one
     parameter an area would serve is `area`, which the instructions tell clients to omit.
     """
-    # A node is published bare when the bare name identifies one table and schema-qualified when
-    # it does not — the model's own rule (`validator._resolve_dataset` matches leniently so an
-    # author need not qualify what is unambiguous; `_check_table_name_across_schemas` records that
-    # an unqualified reference to an ambiguous name is refused). Qualifying exactly where bare
-    # would be refused keeps every name here one the caller can pass back to `dataset_names`.
-    from semantic_model.models import table_key
-
-    schemas_per_name: dict[str, set[str]] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            sch, bare = table_key(t.name, t.schema_name)
-            schemas_per_name.setdefault(bare, set()).add(sch)
-
-    def _node(table: str, schema: Optional[str]) -> str:
-        """The name this table is published under. Spelled as the model spells it; only the
-        ambiguity TEST folds case."""
-        bare = _bare_name(table)
-        sch, folded = table_key(table, schema)
-        if sch and len(schemas_per_name.get(folded, ())) > 1:
-            return f"{sch}.{bare}" if schema in (None, "") else f"{schema}.{bare}"
-        return bare
-
+    # Names are published BARE, which is the only form the next call can honour: `_resolve_scope`
+    # strips every qualifier from `dataset_names`, and the bare name then resolves first-match. A
+    # qualified node would look precise and select a different table — publishing `public.orders`
+    # and receiving `archive.orders` is worse than publishing an ambiguity the caller can see.
+    #
+    # So where one name is declared under two schemas, both edges land on one node here. That is a
+    # fiction only in the sense the whole path is one: `dataset_names` cannot tell those tables
+    # apart either. #258 is the fix — the served model has no schema column at all, so the
+    # qualifier is gone before this tool answers. When it lands, this block should publish the
+    # qualified name, and `models.table_key` is the comparison to do it with.
     joins: dict[str, set[str]] = {}
     for r in org.cross_subject_area_relationships:
         if scope.level != "datasource" and scope.area not in (r.from_subject_area,
                                                               r.to_subject_area):
             continue
-        joins.setdefault(_node(r.from_table, r.from_schema), set()).add(
-            _node(r.to_table, r.to_schema))
+        joins.setdefault(_bare_name(r.from_table), set()).add(_bare_name(r.to_table))
     return {t: sorted(v) for t, v in sorted(joins.items())}
 
 

@@ -121,13 +121,14 @@ def test_an_area_scope_drops_a_bridge_that_touches_neither_end(tmp_path, monkeyp
     assert "budgets" not in block
 
 
-def test_two_same_named_tables_in_different_schemas_stay_two_nodes(tmp_path, monkeypatch):
-    """The model permits one table name under two schemas — `_check_table_name_across_schemas`
-    only WARNS, and cross-area extraction keys by (schema, name). Publishing both under one bare
-    key would merge two bridges into one.
+def test_an_ambiguous_name_is_published_bare_because_that_is_what_the_next_call_takes(
+        tmp_path, monkeypatch):
+    """`_resolve_scope` strips every qualifier from `dataset_names` and resolves first-match, so a
+    qualified node would look precise and select a DIFFERENT table — published `public.orders`,
+    received `archive.orders`. Both edges therefore land on one node.
 
-    Qualified only where bare would be ambiguous, which is the rule `_resolve_dataset` states: an
-    author need not qualify an unambiguous name, and an ambiguous unqualified one is refused.
+    That merge is honest rather than desirable: the next call cannot tell those tables apart
+    either. #258 is the fix, and when it lands this should publish the qualified name.
     """
     import yaml
 
@@ -154,75 +155,18 @@ def test_two_same_named_tables_in_different_schemas_stay_two_nodes(tmp_path, mon
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
 
     joins = _block("acme")
-    assert "public.orders" in joins and "archive.orders" in joins
-    assert "orders" not in joins, "an ambiguous bare name must not be published"
+    assert not any("." in k for k in joins), "a name the next call cannot honour must not be published"
+    assert set(joins["orders"]) == {"users", "ledger"}, "both edges land on the one node"
 
 
-def test_a_qualifier_embedded_in_the_name_counts_as_the_schema(tmp_path, monkeypatch):
-    """`public.orders` with the `from_schema` field unset is a shape the loader accepts and
-    models on disk use. Reading only the field treats it as schema-less, so it collides with a
-    same-named table in another schema and gets published under an ambiguous bare name."""
-    import yaml
-
-    art = tmp_path / "art"
-    root = art / "acme"
-    _model(root)
-    fin = root / "subject_areas" / "finance"
-    (fin / "tables" / "orders.yaml").write_text(yaml.safe_dump({
-        "name": "orders", "schema": "archive", "storage_connection": "c", "grain": ["id"],
-        "description": "archived orders",
-        "columns": [{"name": "id", "type": "integer", "primary_key": True}]}))
-    sa = yaml.safe_load((fin / "subject_area.yaml").read_text())
-    sa["tables"].append({"storage_connection": "c", "schema": "archive", "table": "orders"})
-    (fin / "subject_area.yaml").write_text(yaml.safe_dump(sa))
-    doc = yaml.safe_load((root / "datasource.yaml").read_text())
-    # Qualifier in the NAME, no schema field.
-    doc["cross_subject_area_relationships"].append({
-        "from_table": "archive.orders", "to_table": "ledger",
-        "from_column": "id", "to_column": "id",
-        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
-        "review_state": "unreviewed",
-        "from_subject_area": "finance", "to_subject_area": "finance"})
-    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-
-    joins = _block("acme")
-    assert "archive.orders" in joins, "the embedded qualifier must be read as the schema"
-    assert "orders" not in joins
-
-
-def test_ambiguity_folds_case_the_way_the_validator_does(tmp_path, monkeypatch):
-    """`_check_table_name_across_schemas` lowercases both halves, so `Orders` in one schema and
-    `orders` in another are ONE ambiguous name to the model — and it says such a table "must use
-    the qualified form". A case-sensitive test sees two distinct names and publishes both bare."""
-    import yaml
-
-    art = tmp_path / "art"
-    root = art / "acme"
-    _model(root)
-    fin = root / "subject_areas" / "finance"
-    (fin / "tables" / "Orders.yaml").write_text(yaml.safe_dump({
-        "name": "Orders", "schema": "archive", "storage_connection": "c", "grain": ["id"],
-        "description": "archived orders",
-        "columns": [{"name": "id", "type": "integer", "primary_key": True},
-                    {"name": "assigned_to", "type": "integer"}]}))
-    sa = yaml.safe_load((fin / "subject_area.yaml").read_text())
-    sa["tables"].append({"storage_connection": "c", "schema": "archive", "table": "Orders"})
-    (fin / "subject_area.yaml").write_text(yaml.safe_dump(sa))
-    doc = yaml.safe_load((root / "datasource.yaml").read_text())
-    doc["cross_subject_area_relationships"].append({
-        "from_table": "Orders", "from_schema": "archive", "to_table": "ledger",
-        "to_schema": "public", "from_column": "assigned_to", "to_column": "id",
-        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
-        "review_state": "unreviewed",
-        "from_subject_area": "finance", "to_subject_area": "finance"})
-    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-
-    joins = _block("acme")
-    assert "archive.Orders" in joins and "public.orders" in joins
-    assert "orders" not in joins and "Orders" not in joins, \
-        "a name the validator calls ambiguous must not be published bare, whatever its case"
+def test_every_published_name_is_one_dataset_names_accepts(profile):
+    """The property the whole block exists for. Asserted by round trip rather than by reading:
+    every node is passed back and must return a table."""
+    for node in _block(profile):
+        out = tools.tool_get_datasource_schema(
+            {"datasource": profile, "dataset_names": [node]})
+        tables = json.JSONDecoder().raw_decode(out)[0].get("tables") or {}
+        assert tables, f"{node!r} was published but resolves to no table"
 
 
 def test_an_unambiguous_name_is_not_needlessly_qualified(profile):
