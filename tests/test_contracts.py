@@ -18,7 +18,6 @@ pytest.importorskip("pydantic")
 
 import contracts  # noqa: E402
 from contracts import (  # noqa: E402
-    CrossAreaMap,
     DatasourceSchemaResult,
     ExecuteSqlResult,
     ListDatasourcesResult,
@@ -64,10 +63,7 @@ def test_get_datasource_schema_index_roundtrip_is_subject_area_primary():
         "subject_areas": [
             {"name": "sales", "description": "Orders + revenue", "table_count": 2},
         ],
-        "cross_area_relationships": {
-            "joins": {"orders": ["ledger"]},
-            "areas": {"orders": "sales", "ledger": "finance"},
-        },
+        "cross_area_relationships": {"orders": ["ledger"]},
         "note": "Per-table detail is lazy-loaded.",
     }
     out = _roundtrip(DatasourceSchemaResult, sample)
@@ -101,16 +97,15 @@ def test_get_datasource_schema_summary_roundtrip_carries_named_tables():
     assert _roundtrip(DatasourceSchemaResult, sample) == sample
 
 
-def test_cross_area_map_roundtrip():
-    """An adjacency map, not one object per edge: several edges can reach the same pair of tables
-    by different columns, and this tier carries no columns to tell them apart."""
-    sample = {"joins": {"orders": ["users"]}, "areas": {"orders": "sales", "users": "people"}}
-    assert _roundtrip(CrossAreaMap, sample) == sample
-
-
-def test_cross_area_map_defaults_to_empty_halves():
-    m = CrossAreaMap.model_validate({})
-    assert m.joins == {} and m.areas == {}
+def test_cross_area_map_is_a_plain_adjacency_dict():
+    """`{from_table: [to_table, …]}` and nothing else. A `{table: area}` half rode here briefly
+    (#402); the routing answer an agent acts on is a table name, which `dataset_names` takes."""
+    sample = {
+        "datasource": "acme",
+        "mode": "index",
+        "cross_area_relationships": {"orders": ["ledger", "users"]},
+    }
+    assert _roundtrip(DatasourceSchemaResult, sample) == sample
 
 
 def test_prompt_examples_empty_roundtrip():

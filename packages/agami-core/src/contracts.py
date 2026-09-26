@@ -138,20 +138,16 @@ class SubjectAreaSummary(_Contract):
     table_count: int | None = None
 
 
-class CrossAreaMap(_Contract):
-    """The cross-area routing map: which table bridges to which, and what area each sits in.
-
-    An adjacency map rather than one object per declared edge. The edges that reach the same pair
-    of tables differ only by their join columns, and this tier does not carry columns — so as a
-    list they serialized identically and a wide model spent most of the block repeating itself.
-    """
-
-    # {from_table: [to_table, …]} — the routing answer: which table to ask for next.
-    joins: dict[str, list[str]] = Field(default_factory=dict)
-    # {table: subject_area} for every table named above. The edge list used to carry the two area
-    # names on each entry; keeping the mapping here preserves that without repeating it per edge,
-    # and it is the only place a response names the area a table belongs to.
-    areas: dict[str, str] = Field(default_factory=dict)
+# The cross-area routing map: `{from_table: [to_table, …]}` — which table bridges to which, so a
+# caller knows what to ask `dataset_names` for next.
+#
+# An adjacency map rather than one object per declared edge. Edges reaching the same pair of
+# tables differ only by their join columns, and this tier carries no columns, so as a list they
+# serialized identically and a wide model spent most of the block repeating itself.
+#
+# A name is schema-qualified only where the bare form would be ambiguous, matching the rule the
+# model states for a dataset reference.
+CrossAreaMap = dict[str, list[str]]
 
 
 class DatasourceSchemaResult(_Contract):

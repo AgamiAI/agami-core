@@ -11,6 +11,10 @@ several edges that reach the SAME pair through different columns: the column is 
 telling those apart and this tier carries no columns, so they still serialized identically. An
 adjacency map states each bridge once.
 
+It carries the bridges and nothing else: a `{table: subject_area}` half rode here briefly and
+was removed (#402) — the routing answer an agent acts on is a table name, which `dataset_names`
+takes, and the one parameter an area would serve is one the instructions tell clients to omit.
+
 The join mechanics stay off this tier on purpose — a `dataset_names` call returns each edge in full
 (columns, `on`, cardinality, trust block) via `loader._relationships_among`. This tier answers the
 routing question: which table do I ask for next.
@@ -95,29 +99,13 @@ def _block(profile: str) -> dict:
 
 
 def test_each_bridge_is_named_once(profile):
-    assert _block(profile)["joins"] == {"budgets": ["ledger"], "orders": ["users"],
-                                        "returns": ["users"]}
+    assert _block(profile) == {"budgets": ["ledger"], "orders": ["users"], "returns": ["users"]}
 
 
 def test_five_declared_edges_collapse_to_three_bridges(profile):
     """Three of the five reach orders→users by different columns. The routing answer is one."""
-    joins = _block(profile)["joins"]
-    assert sum(len(v) for v in joins.values()) == 3, \
+    assert sum(len(v) for v in _block(profile).values()) == 3, \
         "edges differing only by join column must not repeat the bridge they name"
-
-
-def test_the_area_each_table_belongs_to_survives(profile):
-    """The per-edge form carried `from`/`to` area names. Dropping them would be a regression —
-    and this is the only place a response says which area a table is in."""
-    assert _block(profile)["areas"] == {"budgets": "finance", "ledger": "finance",
-                                        "orders": "sales", "returns": "sales",
-                                        "users": "people"}
-
-
-def test_every_table_named_in_joins_has_an_area(profile):
-    block = _block(profile)
-    named = set(block["joins"]) | {t for v in block["joins"].values() for t in v}
-    assert named <= set(block["areas"]), "a bridge names a table with no declared area"
 
 
 def test_an_area_scope_drops_a_bridge_that_touches_neither_end(tmp_path, monkeypatch):
@@ -129,96 +117,23 @@ def test_an_area_scope_drops_a_bridge_that_touches_neither_end(tmp_path, monkeyp
     out = tools.tool_get_datasource_schema(
         {"datasource": "acme", "mode": "index", "area": "people"})
     block = json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
-    assert block["joins"] == {"orders": ["users"], "returns": ["users"]}
-    assert "budgets" not in block["joins"] and "ledger" not in block["areas"]
-
-
-def test_a_table_defined_in_one_area_keeps_that_area_when_an_edge_says_otherwise(
-        tmp_path, monkeypatch):
-    """A TableRef makes multi-area membership legal and the validator does not check an edge's
-    declared area against the table's. Reading the area off the edges made the answer depend on
-    declaration order in datasource.yaml; it is resolved from where the table is DEFINED."""
-    import yaml
-
-    art = tmp_path / "art"
-    root = art / "acme"
-    _model(root)
-    doc = yaml.safe_load((root / "datasource.yaml").read_text())
-    doc["cross_subject_area_relationships"].append({
-        "from_table": "users", "to_table": "ledger", "from_column": "id", "to_column": "id",
-        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
-        "review_state": "unreviewed",
-        # This edge claims `users` is in sales. `users` is DEFINED in people.
-        "from_subject_area": "sales", "to_subject_area": "finance"})
-    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    assert _block("acme")["areas"]["users"] == "people"
-
-
-def test_a_schema_qualified_endpoint_still_resolves_to_where_it_is_defined(tmp_path, monkeypatch):
-    """Endpoints may be schema-qualified (`public.users`) while the table definition is not, so
-    the membership lookup normalises both sides. Unnormalised it would miss and fall back to the
-    edge's label — silently, and exactly in the case the resolution exists to fix."""
-    import yaml
-
-    art = tmp_path / "art"
-    root = art / "acme"
-    _model(root)
-    doc = yaml.safe_load((root / "datasource.yaml").read_text())
-    doc["cross_subject_area_relationships"].append({
-        "from_table": "public.users", "to_table": "public.ledger", "from_column": "id",
-        "to_column": "id", "join_type": "LEFT", "relationship": "many_to_one",
-        "confidence": "proposed", "review_state": "unreviewed",
-        # Qualified, and claiming an area `users` is not defined in.
-        "from_subject_area": "sales", "to_subject_area": "finance"})
-    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    block = _block("acme")
-    assert block["areas"]["users"] == "people"
-    # And one table is one entry, however its edges spell it.
-    assert "public.users" not in block["joins"] and "public.users" not in block["areas"]
-    assert block["joins"]["users"] == ["ledger"]
-
-
-def test_an_area_scope_keeps_a_bridge_whose_endpoint_is_defined_in_that_area(
-        tmp_path, monkeypatch):
-    """The filter runs on the RESOLVED areas, so a scoped map is a subset of the unscoped one.
-    Filtering on the edge's labels while reporting the resolved area lets the two disagree."""
-    import yaml
-
-    art = tmp_path / "art"
-    root = art / "acme"
-    _model(root)
-    doc = yaml.safe_load((root / "datasource.yaml").read_text())
-    doc["cross_subject_area_relationships"].append({
-        "from_table": "users", "to_table": "ledger", "from_column": "id", "to_column": "id",
-        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
-        "review_state": "unreviewed",
-        # `users` is DEFINED in people; this edge labels it sales. Scoping to people must keep it.
-        "from_subject_area": "sales", "to_subject_area": "finance"})
-    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
-    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
-    out = tools.tool_get_datasource_schema(
-        {"datasource": "acme", "mode": "index", "area": "people"})
-    block = json.JSONDecoder().raw_decode(out)[0]["cross_area_relationships"]
-    assert block["joins"].get("users") == ["ledger"], \
-        "a bridge the unscoped map reports under `people` must survive a `people` scope"
+    assert block == {"orders": ["users"], "returns": ["users"]}
+    assert "budgets" not in block
 
 
 def test_two_same_named_tables_in_different_schemas_stay_two_nodes(tmp_path, monkeypatch):
     """The model permits one table name under two schemas — `_check_table_name_across_schemas`
     only WARNS, and cross-area extraction keys by (schema, name). Publishing both under one bare
-    key would merge two bridges into one and report whichever area was written last.
+    key would merge two bridges into one.
 
-    Qualified only where bare would be ambiguous, which is the rule `_resolve_dataset` states:
-    an author need not qualify an unambiguous name, and an ambiguous unqualified one is refused.
+    Qualified only where bare would be ambiguous, which is the rule `_resolve_dataset` states: an
+    author need not qualify an unambiguous name, and an ambiguous unqualified one is refused.
     """
     import yaml
 
     art = tmp_path / "art"
     root = art / "acme"
     _model(root)
-    # A second `orders`, in another schema, defined in finance.
     fin = root / "subject_areas" / "finance"
     (fin / "tables" / "orders.yaml").write_text(yaml.safe_dump({
         "name": "orders", "schema": "archive", "storage_connection": "c", "grain": ["id"],
@@ -238,23 +153,48 @@ def test_two_same_named_tables_in_different_schemas_stay_two_nodes(tmp_path, mon
     (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
 
-    block = _block("acme")
-    # Two distinct nodes, each qualified because the bare name no longer identifies one table.
-    assert "public.orders" in block["joins"] and "archive.orders" in block["joins"]
-    assert "orders" not in block["joins"], "an ambiguous bare name must not be published"
-    # And each keeps the area it is DEFINED in, rather than the last one written.
-    assert block["areas"]["public.orders"] == "sales"
-    assert block["areas"]["archive.orders"] == "finance"
+    joins = _block("acme")
+    assert "public.orders" in joins and "archive.orders" in joins
+    assert "orders" not in joins, "an ambiguous bare name must not be published"
+
+
+def test_a_qualifier_embedded_in_the_name_counts_as_the_schema(tmp_path, monkeypatch):
+    """`public.orders` with the `from_schema` field unset is a shape the loader accepts and
+    models on disk use. Reading only the field treats it as schema-less, so it collides with a
+    same-named table in another schema and gets published under an ambiguous bare name."""
+    import yaml
+
+    art = tmp_path / "art"
+    root = art / "acme"
+    _model(root)
+    fin = root / "subject_areas" / "finance"
+    (fin / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "archive", "storage_connection": "c", "grain": ["id"],
+        "description": "archived orders",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True}]}))
+    sa = yaml.safe_load((fin / "subject_area.yaml").read_text())
+    sa["tables"].append({"storage_connection": "c", "schema": "archive", "table": "orders"})
+    (fin / "subject_area.yaml").write_text(yaml.safe_dump(sa))
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    # Qualifier in the NAME, no schema field.
+    doc["cross_subject_area_relationships"].append({
+        "from_table": "archive.orders", "to_table": "ledger",
+        "from_column": "id", "to_column": "id",
+        "join_type": "LEFT", "relationship": "many_to_one", "confidence": "proposed",
+        "review_state": "unreviewed",
+        "from_subject_area": "finance", "to_subject_area": "finance"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    joins = _block("acme")
+    assert "archive.orders" in joins, "the embedded qualifier must be read as the schema"
+    assert "orders" not in joins
 
 
 def test_ambiguity_folds_case_the_way_the_validator_does(tmp_path, monkeypatch):
     """`_check_table_name_across_schemas` lowercases both halves, so `Orders` in one schema and
     `orders` in another are ONE ambiguous name to the model — and it says such a table "must use
-    the qualified form". A case-sensitive ambiguity test sees two distinct names, publishes both
-    bare, and hands the caller a name its own scope gate would refuse.
-
-    The published name keeps the model's spelling; only the test folds.
-    """
+    the qualified form". A case-sensitive test sees two distinct names and publishes both bare."""
     import yaml
 
     art = tmp_path / "art"
@@ -279,7 +219,7 @@ def test_ambiguity_folds_case_the_way_the_validator_does(tmp_path, monkeypatch):
     (root / "datasource.yaml").write_text(yaml.safe_dump(doc))
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
 
-    joins = _block("acme")["joins"]
+    joins = _block("acme")
     assert "archive.Orders" in joins and "public.orders" in joins
     assert "orders" not in joins and "Orders" not in joins, \
         "a name the validator calls ambiguous must not be published bare, whatever its case"
@@ -288,8 +228,17 @@ def test_ambiguity_folds_case_the_way_the_validator_does(tmp_path, monkeypatch):
 def test_an_unambiguous_name_is_not_needlessly_qualified(profile):
     """The counterpart: qualifying every name would be noise, and the model's own convention is
     that an author need not qualify what is unambiguous."""
+    joins = _block(profile)
+    assert joins.get("orders") == ["users"]
+    assert not any("." in k for k in joins)
+
+
+def test_the_areas_half_is_gone(profile):
+    """#402. It reported where each table is defined, and nothing read it — `dataset_names` takes
+    a table name, and `area` is a parameter the instructions tell clients to omit."""
     block = _block(profile)
-    assert "users" in block["joins"].get("orders", []) and "public.users" not in block["areas"]
+    assert isinstance(block, dict)
+    assert all(isinstance(v, list) for v in block.values()), "values are bridge lists, not areas"
 
 
 def test_the_dead_field_is_no_longer_projected(profile):

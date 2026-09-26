@@ -1401,78 +1401,41 @@ def _cross_area_map(org, scope) -> dict[str, Any]:
     columns, so as a list those edges were indistinguishable and the block repeated itself. A map
     states each bridge once.
 
-    `areas` keeps what the per-edge form carried on `from`/`to`: it is the only place a response
-    names the subject area a table belongs to, and an agent that wants to scope its next call by
-    area has nowhere else to read it.
+    Only the bridges. A `{table: subject_area}` half was carried here briefly (#402): the
+    per-edge form it replaced repeated the two area names on every edge, but the routing answer
+    an agent acts on is a TABLE NAME — which is what `dataset_names` takes — and the one
+    parameter an area would serve is `area`, which the instructions tell clients to omit.
     """
-    # Resolve the area from where the table is DEFINED, not from whichever edge named it last. A
-    # TableRef lets one table be a member of several areas without being duplicated (the validator
-    # documents that as supported and does not check an edge's declared area against the table's
-    # membership), so two edges can legitimately disagree about a table and reading the area off
-    # the edges makes the answer depend on declaration order in datasource.yaml.
-    #
-    # Keyed by (schema, bare name) with a bare fallback, the way `build.extract_cross_area_
-    # relationships` resolves the same question. A bare-only key merges `sales.orders` and
-    # `archive.orders` — which the model permits and `_check_table_name_across_schemas` only WARNS
-    # about — into one entry whose area is whichever was written last.
-    # Folded the way `_check_table_name_across_schemas` folds — case-insensitively, and with a
-    # missing schema and an empty one the same thing. That check is what DECIDES a name is
-    # ambiguous, so comparing any other way publishes a bare name in a model the validator has
-    # already said must be queried qualified (`Orders` in one schema, `orders` in another is one
-    # ambiguous name to it and two distinct ones to a case-sensitive key).
-    def _key(schema: Optional[str], name: str) -> tuple[str, str]:
-        return (schema or "").lower(), _bare_name(name).lower()
+    # A node is published bare when the bare name identifies one table and schema-qualified when
+    # it does not — the model's own rule (`validator._resolve_dataset` matches leniently so an
+    # author need not qualify what is unambiguous; `_check_table_name_across_schemas` records that
+    # an unqualified reference to an ambiguous name is refused). Qualifying exactly where bare
+    # would be refused keeps every name here one the caller can pass back to `dataset_names`.
+    from semantic_model.models import table_key
 
-    defined_in: dict[tuple[str, str], str] = {}
-    bare_defined_in: dict[str, str] = {}
     schemas_per_name: dict[str, set[str]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            sch, bare = _key(t.schema_name, t.name)
-            # Both first-wins. Two areas CAN define the same (schema, name) — the validator does
-            # not complain — and for a duplicate definition there is no right answer, so the two
-            # lookups must at least agree with each other and be stable across runs.
-            defined_in.setdefault((sch, bare), sa.name)
-            bare_defined_in.setdefault(bare, sa.name)
+            sch, bare = table_key(t.name, t.schema_name)
             schemas_per_name.setdefault(bare, set()).add(sch)
 
-    def _area_of(table: str, schema: Optional[str], declared: str) -> str:
-        """Where `table` is defined; the edge's own label for a table no area defines."""
-        sch, bare = _key(schema, table)
-        return defined_in.get((sch, bare)) or bare_defined_in.get(bare) or declared
-
     def _node(table: str, schema: Optional[str]) -> str:
-        """The name this table is published under: bare, or qualified when bare is ambiguous.
-
-        The model's own rule (`validator._resolve_dataset`, `_check_table_name_across_schemas`):
-        an author need not qualify an unambiguous name, and an unqualified reference to an
-        ambiguous one is refused. Qualifying exactly where the bare form would be refused keeps
-        every name here one the caller can pass straight back to `dataset_names`.
-
-        The name is published as the model spells it; only the ambiguity TEST folds case.
-        """
+        """The name this table is published under. Spelled as the model spells it; only the
+        ambiguity TEST folds case."""
         bare = _bare_name(table)
-        if schema and len(schemas_per_name.get(bare.lower(), ())) > 1:
-            return f"{schema}.{bare}"
+        sch, folded = table_key(table, schema)
+        if sch and len(schemas_per_name.get(folded, ())) > 1:
+            return f"{sch}.{bare}" if schema in (None, "") else f"{schema}.{bare}"
         return bare
 
     joins: dict[str, set[str]] = {}
-    areas: dict[str, str] = {}
     for r in org.cross_subject_area_relationships:
-        from_area = _area_of(r.from_table, r.from_schema, r.from_subject_area)
-        to_area = _area_of(r.to_table, r.to_schema, r.to_subject_area)
-        # Scope on the RESOLVED areas, so a scoped map is a subset of the unscoped one. Filtering
-        # on the edge's labels while reporting the resolved area lets the two disagree: a bridge
-        # whose endpoint is defined in the scoped area would be dropped here yet listed under that
-        # area when unscoped.
-        if scope.level != "datasource" and scope.area not in (from_area, to_area):
+        if scope.level != "datasource" and scope.area not in (r.from_subject_area,
+                                                              r.to_subject_area):
             continue
-        from_node = _node(r.from_table, r.from_schema)
-        to_node = _node(r.to_table, r.to_schema)
-        areas[from_node], areas[to_node] = from_area, to_area
-        joins.setdefault(from_node, set()).add(to_node)
-    return {"joins": {t: sorted(v) for t, v in sorted(joins.items())},
-            "areas": dict(sorted(areas.items()))}
+        joins.setdefault(_node(r.from_table, r.from_schema), set()).add(
+            _node(r.to_table, r.to_schema))
+    return {t: sorted(v) for t, v in sorted(joins.items())}
 
 
 def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
@@ -1675,9 +1638,8 @@ def _schema_payload(
         # only thing telling them apart and this tier does not carry columns. On a wide model the
         # block ran 283 entries for 181 distinct facts.
         #
-        # An adjacency map states each fact once. It answers the same routing question — WHICH
-        # table bridges the areas, so the agent knows what to ask for next — and `areas` keeps the
-        # area names the per-edge form carried, without repeating them on every edge.
+        # An adjacency map states each fact once, and answers the same routing question — WHICH
+        # table bridges the areas, so the agent knows what to ask for next.
         #
         # The join mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately:
         # a `dataset_names` call returns them in full on its own `relationships` block, so
@@ -1690,7 +1652,7 @@ def _schema_payload(
     # key. It also keeps the old emptiness test working: the block was a list, so a client writing
     # `if response["cross_area_relationships"]:` read False on a model with no cross-area edges —
     # and an empty MAP is truthy, so leaving it in place would silently flip that branch.
-    if not result["cross_area_relationships"]["joins"]:
+    if not result["cross_area_relationships"]:
         del result["cross_area_relationships"]
     # At area scope the map is that one area. `subject_areas` is not emitted at all on the table
     # tier — that branch does not call this function.

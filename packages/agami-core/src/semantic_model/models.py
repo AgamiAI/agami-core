@@ -56,6 +56,31 @@ def bare_name(qualified: str) -> str:
     return qualified.split(".")[-1]
 
 
+def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
+    """The comparable identity of a table reference: ``(schema, bare name)``, folded.
+
+    One helper because comparing table references two different ways is how one half of a
+    comparison comes to disagree with the other. Three rules, all of them borrowed rather than
+    invented:
+
+    * **The schema may be embedded in the name.** ``public.orders`` with no ``schema`` field is a
+      shape the loader accepts and models on disk use, so the qualifier is parsed out when the
+      field is absent. Reading only the field treats such a reference as schema-less, and it then
+      collides with a same-named table in another schema.
+    * **Case is folded**, and a missing schema and an empty one are the same schema — exactly what
+      ``validator._check_table_name_across_schemas`` does. That check DECIDES when a bare name is
+      ambiguous, so any other fold disagrees with the authority on the question.
+    * **The bare half is the last dotted segment**, via `bare_name`, so a three-part reference
+      resolves the same way everywhere.
+
+    Returns a tuple suitable as a dict key or for equality; never for display, since both halves
+    are lower-cased.
+    """
+    bare = bare_name(name or "")
+    embedded = name.rsplit(".", 1)[0] if name and "." in name else None
+    return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
+
+
 # ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------

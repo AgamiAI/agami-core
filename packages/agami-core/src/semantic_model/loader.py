@@ -625,9 +625,28 @@ def _relationships_among(
     """
     names = {_table_alias(t) for t in tables} | set(tables)
 
+    # The TIER test compares schema-qualified identity, which the membership test above cannot:
+    # `names` is bare, so with `orders` declared in two schemas a request for `public.orders`
+    # would classify an `archive.orders` edge as full and resend the governance block for a table
+    # the caller never asked for. `table_key` parses a qualifier out of the name when the schema
+    # field is unset, so the legacy `public.orders` shape compares the same as the split form.
+    #
+    # Schema-less requests keep the bare behaviour: a caller that names no schema cannot be asking
+    # for one in particular, and a model with no schemas at all (SQLite) has nothing to compare.
+    from .models import table_key
+
+    requested = {table_key(t) for t in tables}
+    requested_bare = {bare for _sch, bare in requested}
+
+    def _requested(name: str, schema: Optional[str]) -> bool:
+        sch, bare = table_key(name, schema)
+        if any(s for s, _b in requested):          # the caller qualified at least one table
+            return (sch, bare) in requested or (not sch and bare in requested_bare)
+        return bare in requested_bare
+
     def _both_ends_requested(rel) -> bool:
-        return (_table_alias(rel.from_table) in names
-                and _table_alias(rel.to_table) in names)
+        return (_requested(rel.from_table, rel.from_schema)
+                and _requested(rel.to_table, rel.to_schema))
 
     out: list[dict[str, Any]] = []
     areas = [org.subject_area(area)] if area else org.subject_areas
