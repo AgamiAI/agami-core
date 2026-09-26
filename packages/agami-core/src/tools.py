@@ -165,12 +165,15 @@ _SHARED_INSTRUCTIONS = (
     "fan the pair out per datasource rather than walking them one at a time.\n"
     "If a get_datasource_schema response carries `prompt_examples`, the datasource has stored "
     "examples: fetch them before writing SQL if you have not already.\n"
-    "Dialect: take it from the `database_type` list_datasources reports for that datasource, and "
-    "never assume one. A metric's `binding` already arrives resolved to that dialect, so copy it "
-    "rather than translating it — but the rest of the statement is yours to write in the right "
-    "one, and date arithmetic, string functions and casts are where a guess shows up. When a "
-    "get_datasource_schema response carries `dialect_rules`, follow them: they list what that "
-    "engine rejects and what to write instead.\n"
+    "Dialect: list_datasources reports it per datasource as `engine` (what the model declares) "
+    "and `database_type` (what the connection's DSN says). Take it from there and never assume "
+    "one; where they differ, `engine` is what the rules were chosen by. A metric's `binding` "
+    "already arrives resolved to that dialect, so copy it rather than translating it — but the "
+    "rest of the statement is yours to write in the right one, and date arithmetic, string "
+    "functions and casts are where a guess shows up. When list_datasources carries "
+    "`dialect_rules`, follow them: they list what that engine rejects and what to write instead. "
+    "A get_datasource_schema response names the engine and points back here rather than repeating "
+    "them, so fetch them once per datasource.\n"
     "The receipt is on EVERY status execute_sql returns, and execute_sql's own description defines "
     "its five sections — columns, tables, joins, aggregates, assumptions — field by field, "
     "including what each status value means. Read it there. What belongs here is what you DO with "
@@ -1096,7 +1099,12 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     store = Store.from_env()
     if store is not None:
         try:
-            from model_store import list_datasources, model_descriptions, model_table_counts
+            from model_store import (
+                list_datasources,
+                model_descriptions,
+                model_engines,
+                model_table_counts,
+            )
 
             org_id = _current_org_id()
             # Two grouped queries, not per-datasource. `description` is what makes this tool able to
@@ -1105,11 +1113,17 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             # get_datasource_schema on each candidate purely to choose, and that is the ~60 KB call.
             counts = model_table_counts(store, org_id=org_id)
             descriptions = model_descriptions(store, org_id=org_id)
+            # The engine the model declares, and what that engine rejects. Both ride HERE rather
+            # than on every `get_datasource_schema` response, where the rules were identical on
+            # all four tiers and re-sent on each call of a multi-call question (#405). This is the
+            # call that answers "which datasource, on what engine", so the dialect belongs with it.
+            engines = model_engines(store, org_id=org_id)
             out = [
                 {
                     "datasource": ds,
                     "database_type": _served_db_type(ds),
                     "table_count": counts.get(ds, 0),
+                    **_dialect_fields(engines.get(ds)),
                     # No `model_present` here. It was the literal `True`: this list is built FROM
                     # `datasource_model` rows, so the field could never be false, and reporting a
                     # constant as though a check ran implies a verification that did not happen.
@@ -1157,6 +1171,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                 "datasource": profile,
                 "database_type": _db_type_for(profile, creds),
                 "table_count": table_count,
+                **_dialect_fields(_local_engine(pdir)),
                 "model_present": (pdir / "datasource.yaml").exists(),
                 "is_active": profile == active,
             }
@@ -1170,6 +1185,62 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             indent=2,
         )
     return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+
+
+def _dialect_fields(engine: "str | None") -> dict[str, Any]:
+    """`engine` + `dialect_rules` for a listing entry, or `{}` when the model declares no engine.
+
+    The rules used to ride every `get_datasource_schema` response — identical on all four tiers,
+    and re-sent on each call of a multi-call question (#405). They describe the ENGINE, which does
+    not vary with the scope being asked about, so they belong on the call that answers "which
+    datasource, on what engine" and is made once.
+
+    `engine` is the model's own `storage_type`. It is emitted beside `database_type` rather than
+    replacing it: that field is derived from the DSN and reports the connection's scheme, which is
+    `postgres` for a Redshift warehouse reached the usual way (#401). Both are a client's answer to
+    "what dialect", and they can disagree — so the one the MODEL declares is the one the rules are
+    chosen by, and it is named.
+    """
+    if not engine:
+        return {}
+    from sql_dialect_rules import dialect_rules_for
+
+    rules = dialect_rules_for(engine)
+    return {"engine": engine, **({"dialect_rules": rules} if rules else {})}
+
+
+def _local_engine(profile_dir: Path) -> "str | None":
+    """The engine a local profile's model declares, read without building the whole model.
+
+    `list_datasources` is the cheap call — it reports a table count by globbing, not by loading —
+    so this reads the one key it needs rather than paying a full parse for a listing entry. Same
+    rule as the served path: one declared engine or nothing.
+
+    A connection is written EITHER inline with its `storage_type` OR as a `{name, ref}` pointer
+    into `datasources/<name>/storage.yaml`, and the generator writes the pointer form — so
+    reading only the inline key finds nothing on a real model. Both are followed, the way
+    `loader.load_datasource` follows them.
+    """
+    import yaml
+
+    def _read(path: Path) -> dict:
+        try:
+            return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeDecodeError, ValueError):
+            return {}
+
+    doc = _read(profile_dir / "datasource.yaml")
+    engines: set[str] = set()
+    for c in doc.get("storage_connections") or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("storage_type"):
+            engines.add(c["storage_type"])
+            continue
+        ref = c.get("ref") or f"datasources/{c.get('name')}/storage.yaml"
+        engines.add(_read(profile_dir / ref).get("storage_type"))
+    engines.discard(None)
+    return engines.pop() if len(engines) == 1 else None
 
 
 def _served_db_type(datasource: str) -> str:
@@ -1821,11 +1892,14 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # A pointer, never the examples (#301). Counted datasource-wide whatever `area` scoped this call:
     # an area-scoped count would hide exactly the other areas' examples an `area` filter drops.
     pointer = {"stored": example_count, "next": _EXAMPLES_REMINDER} if example_count else None
-    # What this engine rejects, handed over before the SQL is written (#325). Added beside the pointer
-    # on both branches below, so on the budgeted branch it is inside what the budget measures.
-    from sql_dialect_rules import dialect_rules_for
-
-    dialect_rules = dialect_rules_for(engine)
+    # A POINTER to what this engine rejects, never the rules themselves (#405). They describe the
+    # ENGINE, which does not vary with the scope being asked about — so the same ~1,750 chars rode
+    # every tier and were re-sent on each call of a multi-call question. `list_datasources` carries
+    # them now, and this says where, for a client that reached here without making that call.
+    #
+    # Same shape as the examples pointer beside it, and for the same reason: a block that is
+    # identical on every response is a thing to name, not to repeat.
+    dialect = ({"engine": engine, "rules_from": "list_datasources"} if engine else None)
 
     if scope.level == "table":
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
@@ -1856,8 +1930,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # which carries only endpoints.
         if pointer:
             result["prompt_examples"] = pointer
-        if dialect_rules:
-            result["dialect_rules"] = dialect_rules
+        if dialect:
+            result["dialect"] = dialect
     else:
         # Sized by the areas IN SCOPE, not by the whole datasource. The ladder and the budget are
         # unchanged (both out of this spec's scope); what changes is the count fed to the selector,
@@ -1879,8 +1953,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             result = _schema_payload(org, profile, mode, matched, metrics, L, scope, index=index)
             if pointer:
                 result["prompt_examples"] = pointer
-            if dialect_rules:
-                result["dialect_rules"] = dialect_rules
+            if dialect:
+                result["dialect"] = dialect
             if len(json.dumps(result, default=str)) <= _SCHEMA_CHAR_BUDGET:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
@@ -3962,8 +4036,13 @@ TOOLS: dict[str, dict[str, Any]] = {
         "read_only": True,
         "description": (
             "List the datasources this deployment serves. Each entry carries `datasource`, "
-            "`database_type` and `table_count`, plus the `description` its model declares WHEN it "
+            "`database_type`, `engine` and `table_count`, plus the `description` its model declares WHEN it "
             "declares one — enough to route a question without pulling a schema per candidate. "
+            "`engine` is the dialect the MODEL declares and is what any `dialect_rules` here were "
+            "chosen by; `database_type` is derived from the connection's DSN and can differ (a "
+            "Redshift warehouse reached over a postgresql:// DSN reads as postgres). On an engine "
+            "with known gaps the entry also carries `dialect_rules` — what it rejects and what to "
+            "write instead — sent here once rather than on every schema call. "
             # `description` is conditional on the served path and absent on the local one, so it is
             # the one field here a client must not assume: the whole point of this tool is routing
             # without a schema call, and an agent that treats a missing key as an error re-adds the
@@ -4013,9 +4092,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "while you are writing the statement, rather than meeting them on the receipt "
             "afterwards. When the datasource has stored examples the response also carries "
             "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
-            "get_prompt_examples, which ranks them — no example is sent here. On an engine with "
-            "known gaps (Redshift today) it also carries `dialect_rules`: what that engine rejects "
-            "and what to write instead. Follow them when writing the SQL."
+            "get_prompt_examples, which ranks them — no example is sent here. The response names "
+            "the engine under `dialect` and points at list_datasources for its `dialect_rules` "
+            "(what that engine rejects, and what to write instead) rather than repeating them on "
+            "every call; fetch them once per datasource and follow them when writing the SQL."
         ),
         "inputSchema": {
             "type": "object",

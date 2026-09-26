@@ -39,6 +39,8 @@ def _model(root: Path) -> None:
     (root / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
         "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
         "description": "o", "default_filters": ["{alias}.deleted_at IS NULL"],
+        # The caveat, not the filter, is what makes this table's COUNT(*) worth proposing (#404).
+        "caveats": ["Soft-deleted orders are still rows"],
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "deleted_at", "type": "timestamp"},
                     {"name": "total", "type": "decimal"}]}))
@@ -98,10 +100,14 @@ def test_suggest_metrics_writes_and_auto_approves_trivial(tmp_path):
     _model(tmp_path)
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     d = json.loads(out)
-    assert rc == 0 and d["written"] >= 2, d   # at least orders_count + order_items_count
-    assert d["auto_approved"] >= 1, d         # the COUNT(*) measures auto-approve
+    # `orders` carries a caveat its COUNT(*) has to respect, so the metric says something its own
+    # name does not and is worth proposing. `order_items` is one row per id with no caveat, so its
+    # COUNT(*) would restate its name and is no longer proposed (#404).
+    assert rc == 0 and d["written"] == 1, d
+    assert d["auto_approved"] == 1, d         # the COUNT(*) measure auto-approves
     f = tmp_path / "subject_areas" / "s" / "metrics" / "orders_count.yaml"
     assert f.exists()
+    assert not (tmp_path / "subject_areas" / "s" / "metrics" / "order_items_count.yaml").exists()
     met = yaml.safe_load(f.read_text())
     # COUNT(*) is judgment-free → auto-approved with a system sign-off (incl. timestamp)
     assert met["confidence"] == "confirmed" and met["review_state"] == "approved"

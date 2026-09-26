@@ -211,6 +211,34 @@ def model_descriptions(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, str
     return {r["datasource"]: r["description"] for r in rows if (r["description"] or "").strip()}
 
 
+def model_engines(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, str]:
+    """`{datasource: engine}` for the org's served datasources, in ONE grouped query.
+
+    The engine is the `storage_type` its connections declare — `Redshift`, `Snowflake`, … — and
+    it is what picks the dialect rules a client needs before writing SQL. Unlike `description` it
+    is not a promoted column, so this decodes the doc; still one query and one pass, not a model
+    load per datasource, which is the cost `list_datasources` exists to avoid.
+
+    A datasource is omitted when its connections declare no engine, or declare two different ones
+    — the same rule `tools._engine_of` applies, because "which dialect" has no single answer then
+    and guessing one is worse than saying nothing.
+    """
+    out: dict[str, str] = {}
+    rows = store.query(
+        "SELECT datasource, doc FROM datasource_model WHERE org_id = ?", (org_id,)
+    )
+    for r in rows:
+        try:
+            doc = json.loads(r["doc"])
+        except (TypeError, ValueError):
+            continue
+        engines = {c.get("storage_type") for c in (doc.get("storage_connections") or [])}
+        engines.discard(None)
+        if len(engines) == 1:
+            out[r["datasource"]] = engines.pop()
+    return out
+
+
 def model_table_counts(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, int]:
     """`{datasource: table_count}` for the org's served datasources, in ONE grouped query — so the
     datasource listing sizes itself without a per-datasource round trip (no N+1) and without

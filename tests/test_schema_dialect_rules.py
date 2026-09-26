@@ -1,8 +1,11 @@
-"""A schema response on an engine with known gaps carries what that engine rejects (#325).
+"""A client on an engine with known gaps is told what that engine rejects (#325), once (#405).
 
-The client was told the engine and still wrote PostgreSQL that Redshift rejects, and every such
-statement cost a warehouse round trip and a retry. The rules ride on the schema response, the call
-made before any SQL is written, so the statement is right the first time.
+It was told the engine and still wrote PostgreSQL that Redshift rejects, and every such statement
+cost a warehouse round trip and a retry. The rules rode on the schema response until #405: they
+describe the ENGINE, so they did not vary with the scope being asked about, and the same ~1,750
+chars were re-sent on every call of a multi-call question. `list_datasources` carries them now —
+the call that answers "which datasource, on what engine", made once — and a schema response names
+the engine and points back at it.
 """
 
 from __future__ import annotations
@@ -26,6 +29,10 @@ def _serve(tmp_path, monkeypatch, storage_type: str) -> None:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
     tools.resolved_org_id.cache_clear()
+    # `list_datasources` enumerates credentials profiles on this path, not artifact directories, so
+    # a model on disk with no profile beside it is listed nowhere. The schema tools don't need it.
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "local" / "credentials").write_text("[crm]\nurl = postgresql://u:p@h/db\n")
     org = Datasource(
         datasource="crm",
         storage_connections=[StorageConnection(name="warehouse", storage_type=storage_type)],
@@ -40,25 +47,42 @@ def _head(out: str) -> dict:
     return head
 
 
-def test_a_redshift_schema_carries_the_rules(tmp_path, monkeypatch):
+def test_list_datasources_carries_the_rules(tmp_path, monkeypatch):
+    _serve(tmp_path, monkeypatch, "Redshift")
+
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+    assert entry["engine"] == "Redshift"
+    assert entry["dialect_rules"] == sql_dialect_rules.dialect_rules_for("Redshift")
+    # The gaps observed in real failures, each with its rewrite.
+    for construct in ("FILTER", "LISTAGG", "DATEADD", "SUBSTRING", "BOOLEAN"):
+        assert construct in entry["dialect_rules"]
+
+
+@pytest.mark.parametrize("args", [
+    {},                              # datasource scope
+    {"dataset_names": ["x"]},        # the call made immediately before writing SQL
+])
+def test_a_schema_response_points_at_them_instead_of_repeating_them(tmp_path, monkeypatch, args):
+    """Both branches build their response separately, so both are checked. Neither carries the
+    rules; each names the engine and says where they are, so a client that reached here without
+    listing datasources knows to go back."""
+    _serve(tmp_path, monkeypatch, "Redshift")
+
+    head = _head(tools.tool_get_datasource_schema({"datasource": "crm", **args}))
+
+    assert "dialect_rules" not in head, "the rules must not ride every schema response"
+    assert head["dialect"] == {"engine": "Redshift", "rules_from": "list_datasources"}
+
+
+def test_the_pointer_costs_a_fraction_of_the_rules(tmp_path, monkeypatch):
+    """The point of the move. Asserted so a future change cannot quietly put them back."""
     _serve(tmp_path, monkeypatch, "Redshift")
 
     head = _head(tools.tool_get_datasource_schema({"datasource": "crm"}))
 
-    assert head["dialect_rules"] == sql_dialect_rules.dialect_rules_for("Redshift")
-    # The gaps observed in real failures, each with its rewrite.
-    for construct in ("FILTER", "LISTAGG", "DATEADD", "SUBSTRING", "BOOLEAN"):
-        assert construct in head["dialect_rules"]
-
-
-def test_a_table_scoped_call_carries_them_too(tmp_path, monkeypatch):
-    """The call made immediately before writing SQL is the table-scoped one; it builds its response
-    on a separate branch, so it is checked separately."""
-    _serve(tmp_path, monkeypatch, "Redshift")
-
-    head = _head(tools.tool_get_datasource_schema({"datasource": "crm", "dataset_names": ["x"]}))
-
-    assert head["dialect_rules"]
+    assert len(json.dumps(head["dialect"])) * 10 < len(
+        sql_dialect_rules.dialect_rules_for("Redshift"))
 
 
 def test_an_engine_without_known_gaps_gets_nothing(tmp_path, monkeypatch):

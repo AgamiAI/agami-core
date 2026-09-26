@@ -638,18 +638,29 @@ def _is_trivial_measure(binding_sql: str) -> bool:
     return bool(_TRIVIAL_BINDING_RE.match(binding_sql or ""))
 
 
+def _with_caveats(prose: str, caveats: list[str]) -> str:
+    """The caveat is the reason the metric was proposed, so it has to arrive with it.
+
+    `Metric` has no caveats field — its one prose field is `calculation` — and a metric proposed
+    *because* a caveat exists, that then ships without it, is the empty metric #404 removes wearing
+    a better justification. Appended, not substituted, so the intent still reads first.
+    """
+    return prose if not caveats else prose + ". " + " ".join(
+        c if c.rstrip().endswith((".", "!", "?")) else c.rstrip() + "." for c in caveats)
+
+
 def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                     now: Optional[str] = None) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
-      • count of rows;
+      • count of rows, when `COUNT(*)` may not be counting things or a caveat rides on it;
       • SUM of `additive` columns, AVG of `averageable` columns (gated on aggregation class —
-        never SUM an id, never AVG a status code);
+        never SUM an id, never AVG a status code — and on carrying a unit or a caveat, #404);
       • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
         pattern — fraction true);
       • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
         pattern — `AVG(end − start)` via the dialect's day-difference form).
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
-    bulk in the explorer. Count is always kept; the rest are capped at max_per_table.
+    bulk in the explorer. Capped at max_per_table.
 
     Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
     propose a metric on a column we can't explain (its prose would just restate opaque SQL).
@@ -657,8 +668,30 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     so no duplicates)."""
     t = table.name
     st = dialect.name
-    out: list[dict] = [{"name": f"{t}_count", "calculation": f"Number of {t} records",
-                        "bindings": {st: "COUNT(*)"}, "source_tables": [t]}]
+    out: list[dict] = []
+    # A plain aggregate over a column whose `aggregation` class already licenses it is not a
+    # metric — `runtime._check_aggregation_semantics` enforces that class on every statement,
+    # with or without a named metric, so `{t}_total_{c}` adds a name and nothing else. Proposed
+    # per table and per column it produced most of a wide model's catalogue: 137 of 175 served
+    # metrics whose whole binding was a bare COUNT(*)/SUM(col)/AVG(col) (#404).
+    #
+    # A plain aggregate is proposed only when the PROPOSAL carries something the class does not —
+    # and only something the generator actually writes onto the metric: a unit (the `unit` field),
+    # a caveat (appended to the `calculation` prose), or a grain that makes `COUNT(*)` count
+    # something other than things. A table `default_filters` deliberately does NOT license one:
+    # execute_sql does not apply default filters, and a bare `COUNT(*)` binding does not embed
+    # them, so a filtered table's plain count says exactly as little as any other. A curator can
+    # still add any plain metric by hand; this is only what the generator proposes unprompted.
+    #
+    # One primary key means one row per thing, so COUNT(*) counts things. A composite or absent
+    # grain means it may not, and THAT is worth naming.
+    pk_cols = [c.name for c in table.columns if c.primary_key]
+    counts_things = len(pk_cols) == 1 and list(getattr(table, "grain", []) or []) == pk_cols
+    t_caveats = list(getattr(table, "caveats", None) or [])
+    if t_caveats or not counts_things:
+        out.append({"name": f"{t}_count",
+                    "calculation": _with_caveats(f"Number of {t} records", t_caveats),
+                    "bindings": {st: "COUNT(*)"}, "source_tables": [t]})
     ts_cols: list[str] = []
     for c in table.columns:
         if c.primary_key:
@@ -674,14 +707,21 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                         "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
                         "source_tables": [t]})
             continue
-        if c.aggregation == "additive":
-            m = {"name": f"{t}_total_{c.name}", "calculation": f"Total {c.name} across {t}",
+        # A plain SUM/AVG is proposed only when something beyond the aggregation class rides on
+        # the metric itself: a unit the formatter needs, or a caveat the aggregate must respect.
+        # Without one of those the class already says everything the metric would.
+        c_caveats = list(getattr(c, "caveats", None) or [])
+        worth_naming = bool(c_caveats) or bool(c.unit)
+        if c.aggregation == "additive" and worth_naming:
+            m = {"name": f"{t}_total_{c.name}",
+                 "calculation": _with_caveats(f"Total {c.name} across {t}", c_caveats),
                  "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]}
             if c.unit:  # SUM(col) carries the column's unit — USD column → USD total
                 m["unit"] = c.unit
             out.append(m)
-        elif c.aggregation == "averageable":
-            m = {"name": f"{t}_avg_{c.name}", "calculation": f"Average {c.name} in {t}",
+        elif c.aggregation == "averageable" and worth_naming:
+            m = {"name": f"{t}_avg_{c.name}",
+                 "calculation": _with_caveats(f"Average {c.name} in {t}", c_caveats),
                  "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]}
             if c.unit:  # AVG(col) is in the same unit as the column
                 m["unit"] = c.unit
@@ -696,7 +736,7 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                     "calculation": f"Average days from {s} to {e} in {t}",
                     "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
                     "source_tables": [t], "unit": "days"})
-    out = out[: max(1, max_per_table)]
+    out = out[:max_per_table]
     for m in out:
         binding = next(iter(m.get("bindings", {}).values()), "")
         if _is_trivial_measure(binding):

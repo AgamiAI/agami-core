@@ -44,6 +44,39 @@ below corresponds to one such version.
   its default, so one response no longer omits the common value on one edge and states it on the
   next.
 
+- **The SQL dialect rules ride `list_datasources`, not every schema response (#405).** They
+  describe the ENGINE, so they never varied with the scope being asked about — the same ~1,750
+  chars were re-sent on all four `get_datasource_schema` tiers and on every call of a multi-call
+  question. They now sit on the call that answers "which datasource, on what engine", which is
+  made once: a listing entry gains `engine` (the `storage_type` the model declares) and
+  `dialect_rules`. A schema response carries `dialect: {engine, rules_from: "list_datasources"}`
+  instead — it still names the engine, and a client that arrived without listing datasources is
+  told where to get the rules. On a wide model the `mode="index"` call goes from 50,178 to 48,470
+  chars, and the saving repeats per call.
+
+  `engine` is emitted beside `database_type`, not instead of it: that field is derived from the
+  DSN and reports the connection's scheme, which is `postgres` for a Redshift warehouse reached
+  the usual way. The two can disagree, so the one the MODEL declares is the one the rules are
+  chosen by, and it is named.
+
+- **The metric generator stops proposing metrics that restate their own name (#404).** A plain
+  aggregate over a column whose `aggregation` class already licenses it is not a metric:
+  `_check_aggregation_semantics` enforces that class on every statement with or without a named
+  metric, so `orders_total_amount = SUM(amount)` adds a name and nothing else. Proposed per table
+  and per column, these were most of a wide model's catalogue — 137 of 175 served metrics had a
+  bare `COUNT(*)` / `SUM(col)` / `AVG(col)` as their whole binding.
+
+  `suggest_metrics` now proposes a plain aggregate only when the proposal carries something the
+  class does not, and only something it actually writes onto the metric: a `unit` (the formatter
+  needs it), a caveat (appended to the `calculation` prose, so the caveat that justified the
+  metric arrives with it), or — for `COUNT(*)` — a grain that is not exactly one primary key, which
+  means it may not be counting things. A table's `default_filters` deliberately does **not**
+  license one: `execute_sql` does not apply default filters and a bare `COUNT(*)` binding does not
+  embed them, so a filtered table's plain count says exactly as little as any other. Flag rates and
+  duration pairs are unaffected — those encode a choice. Re-run against the same wide model, the
+  generator's plain-aggregate proposals fall from 203 to 58. A curator can still add any plain
+  metric by hand; this is only what the generator proposes unprompted.
+
 ## [0.9.6] — 2026-09-23
 
 ### Changed
