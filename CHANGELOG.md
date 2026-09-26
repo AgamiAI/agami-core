@@ -21,9 +21,11 @@ below corresponds to one such version.
   projection drops the join columns on purpose — mechanics belong on the `dataset_names` tier —
   but the column is the only thing telling apart several edges that reach the same pair of
   tables, so those serialized identically and every copy was sent: 283 entries for 181 distinct
-  facts, 32,596 chars. It is now an adjacency map, `{table: [table, …]}`, at 5,112 chars. A
-  name is schema-qualified only where the bare form would be ambiguous, matching the rule the
-  model already states for a dataset reference. The key is omitted entirely when there is
+  facts, 32,596 chars. It is now an adjacency map, `{table: [table, …]}`, at 5,112 chars. Names
+  are bare, which is the only form `dataset_names` can honour: it strips every qualifier and
+  resolves first-match, so a qualified node would look precise and select a different table.
+  Where one name is declared under two schemas both edges land on one node — a merge the next
+  call cannot avoid either, and #258 is its fix. The key is omitted entirely when there is
   nothing to route — an empty map is truthy where the old empty list was not.
 
   `dataset_names` sent every relationship *touching* a requested table in full. On a hub table —
