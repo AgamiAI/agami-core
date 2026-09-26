@@ -70,14 +70,16 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     * **Case is folded**, and a missing schema and an empty one are the same schema — exactly what
       ``validator._check_table_name_across_schemas`` does. That check DECIDES when a bare name is
       ambiguous, so any other fold disagrees with the authority on the question.
-    * **The bare half is the last dotted segment**, via `bare_name`, so a three-part reference
-      resolves the same way everywhere.
+    * **The bare half is the last dotted segment** (`bare_name`), and an embedded schema is the
+      segment immediately before it — so `catalog.schema.table` reads its schema as `schema`,
+      the way a qualified reference is read, rather than as `catalog.schema`.
 
     Returns a tuple suitable as a dict key or for equality; never for display, since both halves
     are lower-cased.
     """
+    parts = (name or "").split(".")
     bare = bare_name(name or "")
-    embedded = name.rsplit(".", 1)[0] if name and "." in name else None
+    embedded = parts[-2] if len(parts) > 1 else None
     return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
 
 

@@ -257,3 +257,23 @@ def test_the_hub_request_is_smaller_than_sending_every_edge_in_full(org):
     full = sum(len(json.dumps(r.model_dump(exclude_none=True)))
                for r in org.cross_subject_area_relationships)
     assert len(json.dumps(rels)) < full
+
+
+# --- the identity comparison both tiers depend on -------------------------------------------
+
+
+@pytest.mark.parametrize("name,schema,expected", [
+    ("public.orders", None, ("public", "orders")),      # qualifier embedded in the name
+    ("public.orders", "archive", ("archive", "orders")),  # the field wins over the embedded one
+    ("Orders", "PUBLIC", ("public", "orders")),          # both halves fold
+    ("orders", "", ("", "orders")),                      # empty schema
+    ("orders", None, ("", "orders")),                    # and a missing one are the same
+    ("catalog.schema.table", None, ("schema", "table")),  # the segment BEFORE the bare name
+])
+def test_table_key_is_one_comparison(name, schema, expected):
+    """Every claim its docstring makes, asserted. Comparing table references two different ways
+    is how one half of a comparison came to disagree with the other — three review rounds on this
+    PR were that, in three places."""
+    from semantic_model.models import table_key
+
+    assert table_key(name, schema) == expected
