@@ -11,7 +11,9 @@ It is defense in depth at the application layer; the underlying connection is *a
 expected to run under a read-only role. The statement-shape checks are dialect-neutral;
 the dangerous-function deny-list is not, so it names the side-effecting primitives of
 every engine the executor dispatches to — Postgres / Redshift, MySQL, Snowflake,
-Databricks, SQL Server, BigQuery, Oracle, SQLite / DuckDB — and not Postgres alone.
+Databricks, SQL Server, BigQuery, Oracle, SQLite — and not Postgres alone. Trino and DuckDB
+add no entry: what they expose is reached with `CALL`, `INSTALL` or `LOAD`, which the
+opening-keyword step refuses before this list is consulted.
 
 `check_read_only(sql)` returns `None` when the SQL is a single safe read-only
 statement, else a `guardrail.Refusal` carrying `rule=read_only`, the rejection text as
@@ -425,6 +427,9 @@ _DANGEROUS_FN_RE = re.compile(
     r"pg_promote|pg_wal_replay_pause|pg_wal_replay_resume|"
     r"pg_backup_start|pg_backup_stop|pg_start_backup|pg_stop_backup|"
     r"pg_(?:create|copy)_(?:physical|logical)_replication_slot|"
+    # `pg_replication_origin_\w+` is a prefix for the same reason as `SYSTEM$…`: it takes the
+    # read-only members (`_oid`, `_progress`, `_session_progress`) with the mutating ones, and
+    # replication administration is not a query over the tables the model declares.
     r"pg_logical_emit_message|pg_logical_slot_get_\w+|pg_replication_origin_\w+|"
     # Notification — `pg_notify` is the function spelling of the denied `NOTIFY` keyword,
     # and the keyword deny cannot see it: `\bNOTIFY\b` does not fire inside `pg_notify`
@@ -446,16 +451,29 @@ _DANGEROUS_FN_RE = re.compile(
     # reached, which is an unbounded sleep with a timeout argument.
     # `IS_FREE_LOCK` / `IS_USED_LOCK` are deliberately NOT here: they read lock state and
     # take none.
+    #
+    # THE COST OF A BARE WORD, STATED. These are the first entries that are ordinary English,
+    # and `\bWORD\s*\(` cannot tell a call from the OTHER construct with that shape — a CTE or
+    # derived-table column list. `WITH benchmark (region, target) AS (…)` and
+    # `JOIN (…) AS benchmark (region)` are refused, naming a function the statement does not
+    # contain. Accepted rather than fixed: the shapes that carry a column list are open-ended
+    # (`WITH a AS (…), benchmark (x) AS (…)` is not reachable by a lookbehind on `WITH`), and a
+    # lookaround that let a call through in some position would be a bypass, which is the one
+    # direction this gate must not fail in. `sleep` and `benchmark` are the realistic
+    # collisions; both are pure time-wasters already bounded by the executor's per-statement
+    # timeout, so dropping them is a live option — `REJECT_CTE_NAME_COLLISION` in
+    # `tests/test_sql_guard.py` pins the behaviour either way.
     r"sleep|benchmark|load_file|"
     r"get_lock|release_lock|release_all_locks|"
     r"master_pos_wait|source_pos_wait|wait_for_executed_gtid_set|"
     # --- Snowflake ---------------------------------------------------------------------
     # The whole `SYSTEM$…` namespace, as a namespace. It holds `SYSTEM$ABORT_SESSION`,
     # `SYSTEM$CANCEL_ALL_QUERIES`, `SYSTEM$WAIT` and `SYSTEM$PIPE_FORCE_RESUME` beside
-    # read-only members like `SYSTEM$CLUSTERING_INFORMATION`, and denying the namespace
-    # over-refuses the read-only ones on purpose: they are account administration and
-    # introspection, never a query over the tables the model declares, so nothing a
-    # caller is meant to send loses. A per-member list would go stale the next release.
+    # read-only members, and denying the namespace over-refuses those on purpose. Not because
+    # they are all administration — `SYSTEM$TYPEOF(col)` is a scalar over a VARIANT column, so
+    # it IS a query over a declared table and it is refused with the rest — but because a
+    # per-member list is the worse failure: it would go stale the next Snowflake release, and
+    # staleness on a deny-list means a new side-effecting member ships allowed.
     # (`$` here is a literal inside a `SYSTEM$NAME` identifier, not a dollar-quote opener —
     # `_neutralize` only consumes `$…$` pairs, which this is not.)
     r"system\$\w+|"
@@ -478,21 +496,24 @@ _DANGEROUS_FN_RE = re.compile(
     # the network/file packages that reach off the box. Matched as `PKG . MEMBER`, so an
     # unrelated `REQUEST(...)` on another engine is untouched.
     #
-    # Denied at PACKAGE level, not member level, and that is the fail-closed choice rather than
-    # laziness. Only some members are reachable from a bare SELECT — `DBMS_LOCK.REQUEST`,
-    # `DBMS_PIPE.RECEIVE_MESSAGE`, `DBMS_XMLGEN.GETXML`, `UTL_HTTP.REQUEST` and
-    # `UTL_INADDR.GET_HOST_ADDRESS` are functions, while `DBMS_LOCK.SLEEP`, the `DBMS_SCHEDULER`
-    # / `DBMS_JOB` / `DBMS_AQ` entry points and most of `UTL_FILE` / `UTL_SMTP` / `UTL_TCP` are
-    # procedures, or take record types SQL cannot construct. Enumerating the reachable members
-    # would make the list depend on our reading of one Oracle version's package surface; a
-    # package whose PURPOSE is off-box I/O or job control has no reachable member this gate
-    # should pass, so the whole name goes. (`OPENXML` above is the opposite case and is left
-    # out: there the single entry point is unreachable, so denying it buys nothing.)
+    # Denied at PACKAGE level, and FAIL-CLOSED INSURANCE is the honest reason — not that every
+    # package has a reachable member, because several do not. `DBMS_LOCK.REQUEST`,
+    # `DBMS_PIPE.RECEIVE_MESSAGE`, `DBMS_XMLGEN.GETXML`, `DBMS_XSLPROCESSOR.READ2CLOB` (reads a
+    # server file), `UTL_HTTP.REQUEST` and `UTL_INADDR.GET_HOST_ADDRESS` are functions and carry
+    # the load. `DBMS_SCHEDULER` / `DBMS_JOB` / `DBMS_AQ` / `UTL_FILE` / `UTL_SMTP` / `UTL_TCP`
+    # expose procedures, or functions over record types SQL cannot construct, so today nothing
+    # in them reaches a bare SELECT. They stay because that claim rests on one reading of one
+    # Oracle version's package surface: being wrong about a member costs a hole, being wrong
+    # about a package costs six tokens. `OPENXML` above is NOT this case and is left out — its
+    # single entry point is unreachable by construction (the handle needs `EXEC
+    # sp_xml_preparedocument`), which no Oracle release can change.
     r"dbms_(?:lock|pipe|scheduler|job|aq|xmlgen|xslprocessor)\s*\.\s*\w+|"
     r"utl_(?:http|smtp|tcp|file|inaddr)\s*\.\s*\w+|"
     r"httpuritype|"
-    # --- SQLite / DuckDB ---------------------------------------------------------------
+    # --- SQLite ------------------------------------------------------------------------
     # Loading a shared library from a SELECT is code execution in the database process.
+    # SQLite only: DuckDB has no such scalar function — it loads extensions with the
+    # `INSTALL` / `LOAD` statements, which the opening-keyword step already refuses.
     r"load_extension"
     r")\s*\(",
     re.IGNORECASE,

