@@ -758,7 +758,10 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                     "calculation": f"Average days from {s} to {e} in {t}",
                     "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
                     "source_tables": [t], "unit": "days"})
-    out = out[:max_per_table]
+    # Clamped, not floored at 1: a row count is no longer unconditional so `0` can honestly mean
+    # none, but a negative cap must not fall through to Python's negative slice, where `-1` would
+    # quietly return every proposal except the last.
+    out = out[: max(0, max_per_table)]
     for m in out:
         binding = next(iter(m.get("bindings", {}).values()), "")
         # A caveat-carrying metric is NOT judgment-free, however trivial its binding. Before #404

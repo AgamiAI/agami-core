@@ -317,6 +317,21 @@ def test_count_is_proposed_only_where_a_row_might_not_be_a_thing(grain, proposed
     assert ("orders_count" in names) is proposed
 
 
+@pytest.mark.parametrize("cap,expected", [(2, 2), (1, 1), (0, 0), (-1, 0), (-5, 0)])
+def test_the_cap_is_clamped_at_zero_not_floored_at_one(cap, expected):
+    """`0` can honestly mean none now that a row count is no longer unconditional — but a negative
+    cap must not reach Python's negative slice, where `-1` returns every proposal but the last."""
+    from semantic_model import dialects as D
+    t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
+                description="o", columns=[
+                    m.Column(name="id", type="integer", primary_key=True),
+                    m.Column(name="amount", type="decimal", aggregation="additive", unit="USD"),
+                    m.Column(name="is_rush", type="boolean"),
+                    m.Column(name="is_gift", type="boolean")])
+    assert len(build.suggest_metrics(
+        t, D.get_dialect("postgresql"), max_per_table=cap)) == expected
+
+
 def test_a_default_filter_alone_does_not_license_a_plain_metric():
     """The binding is a bare COUNT(*)/SUM(col) and execute_sql does not apply a table's default
     filters, so the proposal would not carry the filter that was its whole justification (#404)."""

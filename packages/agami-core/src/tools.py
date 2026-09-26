@@ -1224,15 +1224,24 @@ def _local_engine(profile_dir: Path) -> "str | None":
     reading the inline key alone finds nothing on a real model.
 
     Every read is best-effort: this is a listing, and a model too malformed to parse should cost
-    its own entry's `engine`, not the whole call. That is also why `_read` insists on a mapping —
-    a YAML file holding a scalar or a list parses fine and then has no `.get`.
+    its own entry's `engine`, not the whole call. Three ways that can happen, all handled the same
+    way — unreadable bytes, YAML that does not parse (`yaml.YAMLError` is NOT a `ValueError`), and
+    YAML that parses to a scalar or a list, which has no `.get`.
+
+    PyYAML itself is optional: the base install declares no dependencies and YAML arrives with the
+    `[model]` extra, so a bare install reaching this must lose the engine field rather than the
+    tool. `list_datasources` is the one tool that has to answer on a stdlib-only install — it is
+    how an operator finds out what this deployment has.
     """
-    import yaml
+    try:
+        import yaml
+    except ImportError:  # no `[model]` extra: list the datasources, just without their engine
+        return None
 
     def _read(path: Path) -> dict:
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
+        except (OSError, UnicodeDecodeError, ValueError, yaml.YAMLError):
             return {}
         return doc if isinstance(doc, dict) else {}
 

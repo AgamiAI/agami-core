@@ -10,6 +10,7 @@ the engine and points back at it.
 
 from __future__ import annotations
 
+import builtins
 import json
 
 import pytest
@@ -133,15 +134,40 @@ def test_a_connection_that_declares_nothing_does_not_hide_the_engine(tmp_path, m
     assert entry["engine"] == "Redshift"
 
 
-def test_a_malformed_model_costs_its_own_engine_not_the_whole_listing(tmp_path, monkeypatch):
-    """This path never parsed these files before #405. A listing that dies on one unparseable
-    model would be a worse regression than the saving is a win."""
+@pytest.mark.parametrize("content", [
+    "just a string, not a mapping\n",   # parses fine, and then has no `.get`
+    "storage_connections: [\n",         # does not parse at all — yaml.YAMLError, NOT a ValueError
+    "\xff\xfe not utf-8",               # unreadable bytes
+])
+def test_a_malformed_model_costs_its_own_engine_not_the_whole_listing(
+        tmp_path, monkeypatch, content):
+    """This path never parsed these files before #405, so it could not break on them. A listing
+    that dies on one unparseable model is a worse regression than the saving is a win — and the
+    three ways it can be unparseable raise three unrelated exception types."""
     _serve(tmp_path, monkeypatch, "Redshift")
-    (tmp_path / "crm" / "datasource.yaml").write_text("just a string, not a mapping\n")
+    (tmp_path / "crm" / "datasource.yaml").write_text(content, errors="surrogateescape")
 
     entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
 
     assert entry["datasource"] == "crm"
+    assert "engine" not in entry and "dialect_rules" not in entry
+
+
+def test_without_the_yaml_extra_the_listing_loses_the_engine_not_the_tool(tmp_path, monkeypatch):
+    """The base install declares no dependencies; YAML comes with `[model]`. `list_datasources` is
+    how an operator finds out what a deployment has, so it has to answer on a bare install."""
+    _serve(tmp_path, monkeypatch, "Redshift")
+    real_import = builtins.__import__
+
+    def no_yaml(name, *a, **kw):
+        if name == "yaml":
+            raise ImportError("No module named 'yaml'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_yaml)
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+    assert entry["datasource"] == "crm" and entry["database_type"] == "postgres"
     assert "engine" not in entry and "dialect_rules" not in entry
 
 
