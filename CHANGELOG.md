@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-09-26
+
 ### Changed
 
 - **`get_datasource_schema` stops repeating the join graph at both tiers.** Two wire-shape
