@@ -312,34 +312,49 @@ def test_a_case_only_miss_inside_a_declared_area_is_a_typo(profile):
     assert "is in subject area" not in err["remediation"]
 
 
-def test_a_table_named_with_its_schema_is_not_refused_as_its_own_typo(tmp_path, monkeypatch):
-    """A table whose own `name` carries its schema is indexed in full while `dataset_names` arrives
-    bare (#258), so it does not resolve. That is a known gap, not the caller's mistake: refusing it
-    suggested back the very name that was sent."""
+def _qualify_orders(art: Path) -> None:
+    """Rename `orders` to carry its schema in its own `name`, the #258 shape."""
     import yaml
 
-    art = tmp_path / "art"
-    _write_model(art / "acme")
     tfile = art / "acme" / "subject_areas" / SALES / "tables" / "orders.yaml"
     doc = yaml.safe_load(tfile.read_text())
     doc["name"], doc["schema"] = "public.orders", None
     tfile.write_text(yaml.safe_dump(doc))
+
+
+def test_a_table_named_with_its_schema_is_not_refused_and_is_given_a_way_in(tmp_path, monkeypatch):
+    """A table whose own `name` carries its schema is indexed in full while `dataset_names` arrives
+    bare (#258), so neither spelling reaches it. Refusing it suggested back the very name sent; a
+    bare "not found" left an agent that had copied the name exactly with no next move."""
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    _qualify_orders(art)
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
 
-    head = _call("acme", dataset_names=["orders"])
-    assert "error" not in head, "not refused"
-    assert "orders" not in head["tables"]["orders"].get("did_you_mean", [])
+    for sent in ("orders", "public.orders"):
+        head = _call("acme", dataset_names=[sent])
+        assert "error" not in head, "not refused"
+        entry = head["tables"]["orders"]
+        assert "did_you_mean" not in entry
+        assert f"area={SALES!r}" in entry["hint"]
+    # And the way in works: the area lists it.
+    assert "public.orders" in _call("acme", area=SALES)["tables"]
 
 
-def test_a_broken_model_keeps_the_loaders_error(profile, tmp_path):
-    """A named datasource that exists but fails to load is not a typo of itself: the loader's
-    message names the missing file, and "did you mean 'acme'?" would hide it."""
+def test_a_broken_model_keeps_the_loaders_error(tmp_path, monkeypatch):
+    """A named datasource that exists but fails to load is not a typo of itself, nor of a sibling:
+    the loader's message names the missing file, and "did you mean 'acme2'?" would replace it."""
     import shutil
 
-    shutil.rmtree(tmp_path / "art" / "acme" / "subject_areas" / PEOPLE)
-    err = _call(profile)["error"]
-    assert "did_you_mean" not in err
-    assert PEOPLE in err["remediation"]
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    shutil.copytree(art / "acme", art / "acme2")
+    shutil.rmtree(art / "acme" / "subject_areas" / PEOPLE)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    err = _call("acme")["error"]
+    assert "did_you_mean" not in err and "datasources" not in err
+    assert "subject_area.yaml" in err["remediation"]
 
 
 def test_a_served_deployment_suggests_the_served_list_or_nothing(profile, monkeypatch):
@@ -354,20 +369,107 @@ def test_a_served_deployment_suggests_the_served_list_or_nothing(profile, monkey
     assert tools._known_datasources() is None
 
 
-def test_suggestions_are_capped_per_call(profile):
-    """Each suggestion scans every name in the model and nothing bounds how many names a caller
-    sends, so only the first few misses are searched. The rest are still named."""
-    many = [f"bogus{i}" for i in range(30)]
-    tables = _call(profile, dataset_names=["orders", *many])["tables"]
-    assert (
-        sum("did_you_mean" in tables[n] or "hint" in tables[n] for n in many)
-        <= tools._SUGGESTED_MISSES
-    )
-    assert all(tables[n]["error"] for n in many)
+def test_a_served_typo_is_answered_from_the_served_list(profile, monkeypatch):
+    """End to end on the served path: the suggestion comes from what the org serves, never from the
+    model folder that happens to sit on disk."""
+    import execute_sql
 
-    missed = _call(profile, metric_names=[*many, *many])["unknown_metric_names"]
-    assert [m["name"] for m in missed] == many, "deduped, and every miss still named"
+    monkeypatch.setattr(execute_sql, "_hosted", lambda: True)
+    monkeypatch.setattr(tools, "_served_datasources", lambda _org: ["acme-prod", "beta"])
+    monkeypatch.setattr(tools, "_model_version", lambda _p: None)
+
+    def _missing(p):
+        raise FileNotFoundError(f"No semantic model in the database for datasource {p!r}.")
+
+    monkeypatch.setattr(tools, "get_cached_org", _missing)
+    err = _call("acme-prd")["error"]
+    assert err["did_you_mean"] == ["acme-prod"]
+    assert err["datasources"] == ["acme-prod", "beta"]
+
+
+NEAR = [f"orders{i}" for i in range(30)]  # every one close to `orders`, so every one would search
+
+
+def test_table_suggestions_are_capped_beside_a_real_table(profile):
+    """Each search scans every name in the model and nothing bounds how many names a caller sends.
+    Near-misses, so an uncapped search WOULD suggest for every one of them."""
+    tables = _call(profile, dataset_names=["orders", *NEAR])["tables"]
+    searched = [n for n in NEAR if "did_you_mean" in tables[n]]
+    assert len(searched) == tools._SUGGESTED_MISSES
+    assert all(tables[n] == {"error": "not found in scope"} for n in NEAR if n not in searched)
+
+
+def test_table_suggestions_are_capped_in_the_refusal(profile):
+    """Past the cap a name is left out of `did_you_mean`, not given `[]` — an empty list says
+    "searched, nothing close", and these were not searched."""
+    err = _call(profile, dataset_names=NEAR)["error"]
+    assert len(err["did_you_mean"]) == tools._SUGGESTED_MISSES
+    assert all(err["did_you_mean"].values())
+    assert all(repr(n) in err["remediation"] for n in NEAR), "every miss still named"
+
+
+def test_table_suggestions_are_capped_in_the_misplaced_refusal(profile):
+    err = _call(profile, area=PEOPLE, dataset_names=["orders", *NEAR])["error"]
+    assert err["remediation"].count("Did you mean") == tools._SUGGESTED_MISSES
+
+
+def test_metric_suggestions_are_capped_and_deduped(profile):
+    near = [f"order_count{i}" for i in range(30)]
+    missed = _call(profile, metric_names=[*near, *near])["unknown_metric_names"]
+    assert [m["name"] for m in missed] == near, "deduped, and every miss still named"
+    assert sum("did_you_mean" in m for m in missed) == tools._SUGGESTED_MISSES
     assert all(set(m) == {"name"} for m in missed[tools._SUGGESTED_MISSES :])
+
+
+def test_a_metric_named_with_a_parenthesis_is_not_a_collision_key(tmp_path, monkeypatch):
+    """`revenue (net)` is a metric's real name, not the key `_all_metrics` gives a second
+    `revenue`. Matching keys by prefix called it "outside this call's scope" from inside its own."""
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    _add_metric(art / "acme", SALES, "revenue (net)", ["orders"])
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    [miss] = _call("acme", area=SALES, metric_names=["revenue"])["unknown_metric_names"]
+    assert "outside" not in miss.get("hint", "").lower()
+    assert miss["did_you_mean"] == ["revenue (net)"]
+
+
+def test_a_wrong_kind_name_beside_a_misplaced_table_gets_its_hint(profile):
+    """The same name got a worse answer depending on what else was in the list: `sales` beside a
+    misplaced table was fuzzy-matched to `users` instead of being called an area."""
+    remediation = _call(profile, area=PEOPLE, dataset_names=["orders", SALES])["error"][
+        "remediation"
+    ]
+    assert "is a subject area, not a table" in remediation
+    assert "users" not in remediation
+    remediation = _call(profile, area=PEOPLE, dataset_names=["orders", "amount"])["error"][
+        "remediation"
+    ]
+    assert "is a column, not a table. It is on: orders" in remediation
+
+
+def test_a_misspelt_area_is_named_before_the_tables_it_would_scope(profile):
+    """With `area` misspelt every table looks misplaced; the area is the mistake to name."""
+    err = _call(profile, area="salez", dataset_names=["orders"])["error"]
+    assert err["did_you_mean"] == [SALES]
+
+
+def test_the_advice_for_listing_tables_holds_on_a_wide_model(profile, monkeypatch):
+    """An unscoped call on a wide model is index-tier and lists no table names, so "call without
+    scope to list tables" sent the agent where the answer is not. Follow the advice actually given,
+    with the model forced to index, and the tables come back."""
+    err = _call(profile, dataset_names=["zzzzzz"])["error"]
+    assert "with `area`" in err["remediation"] and "(or neither)" not in err["remediation"]
+    assert "call without scope to list" not in tools.TOOLS["get_datasource_schema"]["description"]
+    # A wide model in miniature: more than one area in scope is index-tier, one area is not —
+    # the real selector's shape (it sizes by the areas IN SCOPE), with the threshold at 1.
+    monkeypatch.setattr(tools, "_auto_mode_for", lambda n: "index" if n > 1 else "full")
+    assert _call(profile)["mode"] == "index"
+    assert "tables" not in _call(profile), "the unscoped call really lists no tables"
+    listed = _call(profile, area=SALES)
+    assert {"orders", "order_items"} <= set(
+        t["name"] for sa in listed["subject_areas"] for t in sa["tables"]
+    )
 
 
 # --- the advertised surface says where a name comes from ----------------------------------------
