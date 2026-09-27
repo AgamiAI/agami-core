@@ -67,6 +67,7 @@ try:
 except ImportError:  # pragma: no cover
     _HAVE_SQLGLOT = False
 
+from .loader import _exposed_groups_for, _visible_columns
 from .models import (
     Column,
     Datasource,
@@ -78,6 +79,7 @@ from .models import (
     bare_name as _bare,
 )
 from .sql_dialect import DialectUnresolved, engines_disagree, resolve_datasource_dialect
+from .suggest import did_you_mean
 
 
 def _exp_nodes(*names: str) -> tuple[type, ...]:
@@ -1706,6 +1708,9 @@ def check_column_scope(sql: str, org: Datasource,
             output_by_select.setdefault(id(sel), set()).add(al.alias.lower())
 
     offending: set[str] = set()
+    # The declared tables each offending column was judged against — what the refusal may list. Only
+    # tables the statement itself reads: never the rest of the model (see `_declared_listing`).
+    judged: dict[str, set[tuple]] = {}
     for col in tree.find_all(exp.Column):
         name = col.name
         if not name:
@@ -1730,6 +1735,7 @@ def check_column_scope(sql: str, org: Datasource,
             if phys and lname not in declared[phys]:
                 # Bare `table.column`: the schema half is the model's to know, not the echo's.
                 offending.add(f"{phys[1]}.{name}")
+                judged.setdefault(f"{phys[1]}.{name}", set()).add(phys)
             continue
         # unqualified: judge against the tables its own SELECT reads directly
         if sel is not None and lname in output_by_select.get(id(sel), set()):
@@ -1742,21 +1748,101 @@ def check_column_scope(sql: str, org: Datasource,
         if not local:
             continue  # no declared physical table in this scope to judge against — fail-open
         offending.add(name)
+        judged.setdefault(name, set()).update(local)
 
     if not offending:
         return None
     cols = sorted(offending)
-    # Echo-only, exactly as the table-scope refusal above: the column names here all came out of
-    # the caller's own statement, and the model's declared column set is never rendered — and
-    # bounded by `_echo_identifiers` for the same reason, this being the gate a statement with four
-    # thousand fabricated columns reaches.
+    # `detail` is echo-only, exactly as the table-scope refusal above: the column names here all
+    # came out of the caller's own statement, bounded by `_echo_identifiers` because this is the
+    # gate a statement with four thousand fabricated columns reaches.
+    #
+    # `remediation` is the ONE place a refusal lists declared names (#386, a recorded amendment of
+    # the no-enumeration rule — see SECURITY.md). Without it the agent was told THAT `created` is
+    # not declared and not what it could use instead, so it repaired by guessing again. It lists
+    # only the declared columns of tables the statement itself reads, which the same caller gets
+    # from get_datasource_schema(dataset_names=[...]); never another table, never the table-scope
+    # refusal, whose declared set is the whole datasource.
     return guardrail.refuse(
         guardrail.RULE_COLUMN_SCOPE,
         detail="query references column(s) not in the semantic model: " + _echo_identifiers(cols)
                + " — only columns declared on the model's tables may be queried.",
-        remediation="Add the column to the model (agami-connect / '/agami-model'), "
+        remediation=_declared_listing(org, cols, judged)
+                    + "Add the column to the model (agami-connect / '/agami-model'), "
                     "or remove it from the query.",
     )
+
+
+# How much a column-scope refusal lists: tables the statement read, and columns per table. The
+# statement is the caller's, so a query naming every declared table must not turn one refusal into
+# the whole model; past a cap the count is stated so the caller knows the list is partial.
+_LIST_MAX_TABLES = 5
+_LIST_MAX_COLUMNS = 40
+
+
+def _declared_listing(org: Datasource, offending: list[str],
+                      judged: dict[str, set[tuple]]) -> str:
+    """The repair a column-scope refusal offers: what the tables it judged DO declare, and for each
+    refused column the closest declared one among those listed. Ends with a space.
+
+    Exactly what `get_datasource_schema(dataset_names=[...])` shows the same caller, and no more: a
+    table read in its owning area exposes only the column groups that area's TableRef names, so the
+    listing does too — a hidden column listed here would be a disclosure the schema response
+    deliberately withholds. The near-miss searches the LISTED columns only, which bounds it by the
+    two caps rather than by the width of whatever tables a statement names.
+
+    Names are model-authored, so they cannot carry the caller's text back; they still pass the
+    control-character filter, since an introspected model holds whatever the database's own names
+    were — but not the caller-input allow-list, which would print `Order Date` as a name that does
+    not exist. A near-miss is a hint for a TYPO and says so: a column can be left out of the model on
+    purpose, and the instructions forbid answering with a near neighbour.
+    """
+    # Never empty: a column is refused only against a declared table it was judged on.
+    keys = set().union(*judged.values())
+    names: dict[tuple, str] = {}
+    columns: dict[tuple, list[str]] = {}
+    seen: dict[tuple, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            key = (_tkey(t.schema_name) or None, _tkey(t.name))
+            if key not in keys:
+                continue
+            names.setdefault(key, t.name)
+            have, had = columns.setdefault(key, []), seen.setdefault(key, set())
+            for c in _visible_columns(t, _exposed_groups_for(sa, t.name)):
+                if _tkey(c.name) not in had:
+                    had.add(_tkey(c.name))
+                    have.append(c.name)
+    ordered = sorted(columns, key=lambda k: (names[k].lower(), k[0] or ""))
+    listed = ordered[:_LIST_MAX_TABLES]
+    bare_count: dict[str, int] = {}
+    for k in listed:
+        bare_count[k[1]] = bare_count.get(k[1], 0) + 1
+
+    def label(k: tuple) -> str:
+        # Two schemas' `orders` under one bare label could not be told apart (#332's shape).
+        return f"{k[0]}.{names[k]}" if bare_count[k[1]] > 1 and k[0] else names[k]
+
+    parts = []
+    for key in listed:
+        shown = columns[key][:_LIST_MAX_COLUMNS]
+        more = len(columns[key]) - len(shown)
+        parts.append(f"{_echo_expr(label(key))}: {', '.join(_echo_expr(c) for c in shown)}"
+                     + (f" and {more} more" if more > 0 else ""))
+    text = "Declared on the table(s) this statement reads — " + "; ".join(parts)
+    if len(ordered) > _LIST_MAX_TABLES:
+        text += f"; and {len(ordered) - _LIST_MAX_TABLES} more table(s)"
+    text += ". "
+    near = []
+    for col in offending[:_ECHO_MAX_NAMES]:
+        pool = [c for k in listed if k in judged[col] for c in columns[k][:_LIST_MAX_COLUMNS]]
+        guesses = did_you_mean(col.rsplit(".", 1)[-1], pool, n=2)
+        if guesses:
+            near.append(f"{_echo_name(col)} → {', '.join(_echo_expr(g) for g in guesses)}")
+    if near:
+        text += ("Closest declared: " + "; ".join(near) + " — use one only if it is the same "
+                 "column, since a column can be absent from the model on purpose. ")
+    return text
 
 
 def _cardinality_index(org: Datasource) -> list[Relationship]:
