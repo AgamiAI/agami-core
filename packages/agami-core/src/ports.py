@@ -170,10 +170,6 @@ class Adapters:
     # suggestion: the model chooses what to call, so withholding the tool is the control. Subtractive
     # only — it filters the one shared registry and never adds or reshapes a tool. See
     # `mcp_http.build_server` for where it is applied (both list AND call, deliberately).
-    #
-    # Hiding `get_datasource_schema` does not hide column names from a caller who keeps
-    # `execute_sql`: a column-scope refusal lists the declared columns of the tables its statement
-    # reads (#386; SECURITY.md, "What a refusal may name").
     tool_visibility: Callable[[str], bool] | None = None
     # `statement_limits(org_id) -> {"max_rows": int | None, "timeout_s": int | None} | None` supplies an
     # organisation's own row cap and statement deadline (#329). None (the default) is today's

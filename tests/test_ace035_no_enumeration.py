@@ -15,18 +15,6 @@ The locked rule, in two halves:
     schema-listing endpoint, reachable by anyone who can send one deliberately-wrong statement —
     which is the recon surface a later slice exists to close.
 
-**Amended once, deliberately (#386).** A `column_scope` refusal's `remediation` lists the declared
-columns of the tables the refused statement ITSELF reads, capped, with the closest declared name for
-each refused column. Without it the agent was told THAT a column is not declared and not what it
-could use, so it repaired by guessing again, refused after refused. The same caller gets exactly
-this set from `get_datasource_schema(dataset_names=[…])`; every declared column is queryable by
-design (an unreadable one is not declared); and the names are the model's, so they cannot carry
-the caller's text back. What stays forbidden, and is asserted below: any other table or its
-columns, on any rule; and any declared column at all on every rule but `column_scope` — the
-table-scope refusal's declared set would be the whole datasource. The residual, recorded in
-SECURITY.md: a consumer that hides `get_datasource_schema` from a caller while exposing
-`execute_sql` gives that caller the referenced tables' column names this way.
-
 **This file is lock-in, not a fix.** All five gates were echo-only when they were converted, and the
 per-statement timeout that has since joined them is too; it is asserted here so a later reword cannot
 quietly turn a refusal into a listing. Unlike the rest of this spec's tests, the property this one
@@ -112,9 +100,6 @@ DECLARED_NAMES = (
 # reach a refusal by being echoed, so if one appears there it came from the model — which is the
 # definition of an enumeration. `test_the_canaries_are_real` keeps them honest.
 CANARIES = ("ledger_archive", "internal_ref", "entry_code")
-
-# Each declared table's columns: what a `column_scope` refusal may list for a statement reading it.
-COLUMNS_OF = {"orders": ("id", "amount", "internal_ref"), "ledger_archive": ("id", "entry_code")}
 
 
 @pytest.fixture(autouse=True)
@@ -380,29 +365,19 @@ def _mentions(text: str, name: str) -> bool:
     return re.search(rf"\b{re.escape(name)}\b", text, re.IGNORECASE) is not None
 
 
-def _assert_echo_only(body: dict, sql: str, rule: str | None = None) -> None:
+def _assert_echo_only(body: dict, sql: str) -> None:
     """The whole rule, over the whole serialized tool-edge body — not just `detail`.
 
     The body is what a caller actually receives, so `refusal.detail`, `refusal.remediation`,
     `refusal.reason`, `refusal.rule` and every other key are all in scope at once. Scanning the
     serialized form is also why this cannot be satisfied by moving a leak from one field to another.
-
-    `rule` is the one exception's key: for `column_scope` alone, the declared columns of the tables
-    the statement itself names are allowed too (#386). Nothing else widens.
     """
     text = json.dumps(body)
-    allowed = {name for name in DECLARED_NAMES if _mentions(sql, name)}
-    if rule == guardrail.RULE_COLUMN_SCOPE:
-        for table, columns in COLUMNS_OF.items():
-            if _mentions(sql, table):
-                allowed.update(columns)
     for canary in CANARIES:
-        if canary in allowed:
-            continue
         assert not _mentions(text, canary), f"canary {canary!r} leaked into: {text}"
     for name in DECLARED_NAMES:
-        if name in allowed:
-            continue  # the caller sent it (or, for column_scope, its table): nothing new
+        if _mentions(sql, name):
+            continue  # the caller sent it; naming it back discloses nothing it did not already have
         assert not _mentions(text, name), f"declared name {name!r} leaked into: {text}"
 
 
@@ -430,7 +405,7 @@ def test_no_declared_name_the_caller_did_not_send_reaches_a_refusal(
 
     assert body["status"] == "refused", body
     assert body["refusal"]["rule"] == rule, body
-    _assert_echo_only(body, sql, rule)
+    _assert_echo_only(body, sql)
 
 
 @pytest.mark.parametrize("route", list(ROUTES), ids=list(ROUTES))
@@ -595,9 +570,7 @@ def test_four_thousand_invented_columns_do_not_become_a_four_thousand_name_detai
     assert "and 3995 more" in detail  # the rest are counted, not listed
     # The names shown are the caller's own, and they are real names rather than an ellipsis.
     assert "c0" in detail
-    # The listing is bounded the same way: one table's declared columns, not the caller's 4,000.
-    assert len(body["refusal"]["remediation"]) < 1000, body["refusal"]["remediation"]
-    _assert_echo_only(body, _MANY_COLUMNS_SQL, guardrail.RULE_COLUMN_SCOPE)
+    _assert_echo_only(body, _MANY_COLUMNS_SQL)
 
 
 def test_the_echo_helper_bounds_each_axis_independently():
@@ -736,35 +709,6 @@ def test_the_scanner_can_go_red():
         enumerating["refusal"]["remediation"] = leak
         with pytest.raises(AssertionError):
             _assert_echo_only(enumerating, sql)
-
-
-def test_the_column_scope_exception_does_not_reach_another_table():
-    """The #386 amendment is confined to the tables the statement reads. A column-scope refusal for
-    `SELECT ref_no FROM orders` listing `ledger_archive`'s columns — or naming that table at all —
-    is still an enumeration, and must still trip."""
-    sql = "SELECT ref_no FROM orders"
-    body = {"status": "refused", "refusal": {
-        "reason": "out_of_scope", "rule": "column_scope",
-        "detail": "query references column(s) not in the semantic model: ref_no",
-        "remediation": "Declared on the table(s) this statement reads — orders: id, amount, "
-                       "internal_ref. Closest declared: ref_no → internal_ref."}}
-    _assert_echo_only(body, sql, guardrail.RULE_COLUMN_SCOPE)  # the shape shipped: clean
-    for leak in ("ledger_archive: id, entry_code", "also see entry_code"):
-        widened = json.loads(json.dumps(body))
-        widened["refusal"]["remediation"] += " " + leak
-        with pytest.raises(AssertionError):
-            _assert_echo_only(widened, sql, guardrail.RULE_COLUMN_SCOPE)
-
-
-def test_no_other_rule_may_list_declared_columns():
-    """The exception is `column_scope`'s alone: the same listing on a table-scope refusal — whose
-    declared set would be the whole datasource — is an enumeration."""
-    sql = "SELECT ref_no FROM orders"
-    body = {"status": "refused", "refusal": {
-        "reason": "out_of_scope", "rule": "table_scope", "detail": "…",
-        "remediation": "Declared on the table(s) this statement reads — orders: id, internal_ref."}}
-    with pytest.raises(AssertionError):
-        _assert_echo_only(body, sql, guardrail.RULE_TABLE_SCOPE)
 
 
 def test_echoing_the_callers_own_identifier_is_allowed():

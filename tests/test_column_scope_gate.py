@@ -61,13 +61,11 @@ def _assert_star_refused(refusal) -> None:
 
 
 def _assert_columns_refused(refusal, *columns: str) -> None:
-    """The refusal names exactly `columns` in `detail` and nothing else.
+    """The refusal names exactly `columns` and nothing else.
 
     Replaces the old `.columns == [...]` + `"x" in .reason` pair: the offending names are now
-    echoed into `detail`, still byte-exact. `remediation` now leads with the declared columns of the
-    tables the statement reads (#386, the one recorded exception to echo-only) and still ends with
-    the sentence it always carried; `test_ace035_gate_verdict_parity.py` and
-    `test_ace035_no_enumeration.py` hold the listing to those tables.
+    echoed into `detail`. Exact equality rather than substring is strictly stronger — it also
+    catches a refusal that had grown a list of the columns the model DOES declare.
     """
     assert refusal is not None
     assert refusal.rule == guardrail.RULE_COLUMN_SCOPE
@@ -75,9 +73,8 @@ def _assert_columns_refused(refusal, *columns: str) -> None:
     assert refusal.detail == ("query references column(s) not in the semantic model: "
                               + ", ".join(columns)
                               + " — only columns declared on the model's tables may be queried.")
-    assert refusal.remediation.startswith("Declared on the table(s) this statement reads — ")
-    assert refusal.remediation.endswith("Add the column to the model (agami-connect / "
-                                        "'/agami-model'), or remove it from the query.")
+    assert refusal.remediation == ("Add the column to the model (agami-connect / '/agami-model'), "
+                                   "or remove it from the query.")
 
 
 # --- SELECT * ban ----------------------------------------------------------

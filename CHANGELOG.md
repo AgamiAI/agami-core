@@ -58,16 +58,6 @@ below corresponds to one such version.
   - The tool description now says where each name comes from and what to do with a miss. The
     server instructions extend the column rule to area, table and metric names.
 
-- **A `column_scope` refusal lists what the tables it read DO declare (#386).** It said that
-  `created` was not declared and not what the agent could use, so the agent repaired by guessing
-  again: refused, guessed, refused. `remediation` now leads with the declared columns of the
-  tables the refused statement reads (up to 40 per table and 5 tables, the rest counted), and the
-  closest declared name for each refused column, worded as a typo hint: a column can be absent on
-  purpose. `detail` is unchanged. This is a recorded amendment of the rule that a refusal never
-  lists the declared surface: no other table, and no other refusal, lists anything
-  (`test_ace035_no_enumeration.py` enforces both; SECURITY.md, "What a refusal may name", states
-  the residual for integrators who hide `get_datasource_schema` from a caller).
-
 ## [0.9.7] — 2026-09-26
 
 ### Changed
