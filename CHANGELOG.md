@@ -14,49 +14,18 @@ below corresponds to one such version.
 
 ### Changed
 
-- **`get_datasource_schema` answers a wrong name with the right ones.** An agent that passes a
-  name the model does not have is usually one edit from a real one: a plural dropped, a case
-  changed, a schema prefix added. Or it put a real name in the wrong parameter. A bare "not found"
-  made it guess again. Every miss now carries `did_you_mean`: the closest real names, best first,
-  and nothing when nothing is close.
-  - `dataset_names`: an unknown table beside real ones gets `did_you_mean` on its own entry. A
-    scope where *no* named table exists is now refused, the rule `area` already follows. Before,
-    it came back as an empty model that read as "this datasource has none".
-  - `area`: the closest areas lead the refusal, ahead of the full list.
-  - Mixed-up kinds get a `hint` naming the right parameter: an area passed as a table, a table
-    passed as an area, a column passed as a table (with the tables that hold it).
-  - `area` + `dataset_names` that disagree: the refusal says which area each table is really in,
-    and treats a table in no area as a typo.
-  - `metric_names`: a name that selected nothing was dropped without a word. It is now listed in
-    `unknown_metric_names`, with `did_you_mean`, or a `hint` when the metric exists outside the
-    declared scope. It is still not added: naming a metric never widens the scope.
-  - `datasource`: a typo lists the real datasources, with the closest first. A datasource that
-    exists but fails to load keeps the loader's error, which names the missing file.
-  - A metric name two areas share points at the in-scope key (`name (area)`), not elsewhere.
-  - An exact match is suggested alone, and the name sent is never suggested back. The same words
-    in another order (`orders_fact`) count as exact. Fuzzy matching uses a 0.7 similarity floor,
-    not difflib's 0.6: on an 80-area test model that cut suggestions for unrelated words from 17%
-    to about 1% with the same typo recall.
-  - Only the first 10 distinct misses of each kind (tables, metrics) are searched; the rest are
-    still named. Each search scans the whole model, and nothing bounds how many names a caller
-    sends. The `area` + `dataset_names` check now looks each table up once instead of rescanning
-    the area per name, which cost seconds for a few thousand names.
-  - A misspelt `area` is named before the tables it would scope.
-  - Values of the wrong shape are repaired or refused, not misread. A lone string for
-    `dataset_names` or `metric_names` was split into letters ("No table named 'o'"); it is now a
-    list of one. A list for `area` was ignored, answering the whole datasource; a list of one now
-    scopes, and several are refused. An unknown `mode` became `summary` silently; it is now
-    refused with the valid modes.
-  - A table the model defines but `dataset_names` cannot reach yet (its model `name` carries its
-    schema, #258) is not refused; it is told to use its area.
-  - `get_prompt_examples` gives the same answers for `area`. An unknown area answered as a real,
-    empty one: served, only the cross-area examples came back; locally, the "no examples" note.
-    It is now refused with `did_you_mean`, checked against the model (an area the model has but
-    with no examples still answers empty). Omitting `area` is unchanged: the top examples across
-    every area. A list of one narrows, and any other non-string is refused; before, it was read
-    as no scope and returned every area.
-  - The tool description now says where each name comes from and what to do with a miss. The
-    server instructions extend the column rule to area, table and metric names.
+- **`get_datasource_schema` answers a wrong name with the right ones.** A datasource, area,
+  table or metric name the model does not have now comes back with `did_you_mean` (the closest
+  real names, or nothing when nothing is close), and a `hint` when a real name was sent in the
+  wrong parameter: an area as a table, a column as a table, a table as an area. A table scope
+  naming only unknown tables is refused rather than answered as an empty model; unknown
+  `metric_names` are reported in `unknown_metric_names` instead of dropped. Values of the wrong
+  shape are repaired where the intent is clear (`"orders"` for `["orders"]`, `["sales"]` for
+  `"sales"`) and otherwise refused as `invalid_argument`; an unknown `mode` is refused rather
+  than silently becoming `summary`. The tool description now says where each name comes from.
+- **`get_prompt_examples` refuses an unknown `area`** with the same suggestions, instead of
+  answering as if it were a real area with no examples. Omitting `area` still returns the top
+  examples across every area.
 
 ## [0.9.7] — 2026-09-26
 

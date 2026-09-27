@@ -315,7 +315,9 @@ def test_an_unknown_area_is_refused_on_a_served_deployment(tmp_path, monkeypatch
     assert [e["question"] for e in ok["examples"]] == ["how many rows overall"]
 
 
-@pytest.mark.parametrize("omitted", [{}, {"area": None}, {"area": ""}, {"area": []}])
+@pytest.mark.parametrize(
+    "omitted", [{}, {"area": None}, {"area": ""}, {"area": "   "}, {"area": []}, {"area": [""]}]
+)
 def test_an_omitted_area_ranks_across_every_area_on_a_served_deployment(
     tmp_path, monkeypatch, local_model, omitted
 ):
@@ -335,3 +337,44 @@ def test_an_omitted_area_ranks_across_every_area_on_a_served_deployment(
     out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "query": "by", **omitted}))
     assert {e["question"] for e in out["examples"]} == {
         "orders by region", "assets by status", "rows overall"}
+
+
+def test_a_padded_area_narrows_like_the_clean_one_on_a_served_deployment(
+    tmp_path, monkeypatch, local_model
+):
+    """" sales " passed the stripped check and then reached `area = ?` unstripped, matching no area:
+    only the cross-area examples came back, the "real but empty" answer the check exists to stop."""
+    from semantic_model import loader
+
+    org = loader.load_datasource(tmp_path / "main")
+    url = _seed(tmp_path, [
+        {"area": "sales", "question": "orders by region", "sql": "SELECT 1"},
+        {"area": None, "question": "rows overall", "sql": "SELECT 3"},
+    ])
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setattr(tools, "get_cached_org", lambda _p: org)
+
+    for padded in (" sales ", "sales\n", [" sales"]):
+        out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": padded}))
+        assert {e["question"] for e in out["examples"]} == {"orders by region", "rows overall"}
+    # Case is not repaired: the served query is case-sensitive, so `Sales` is a different name.
+    err = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": "Sales"}))
+    assert err["error"]["did_you_mean"] == ["sales"]
+
+
+def test_the_examples_tool_ignores_arguments_it_does_not_take(local_model):
+    """The shape check is shared, but a tool is only held to its own parameters: `mode` means
+    nothing to this one and must not be refused as "Unknown `mode`"."""
+    out = tools.tool_get_prompt_examples({"datasource": local_model, "mode": "compact"})
+    assert "subject area: sales" in out
+
+
+def test_a_broken_model_does_not_fail_an_examples_call(local_model, monkeypatch):
+    """The area check is advice. This tool never loaded the model before it, so a model that fails
+    to load for any reason leaves the examples served as they were."""
+    def _broken(_p):
+        raise ValueError("model failed validation")
+
+    monkeypatch.setattr(tools, "get_cached_org", _broken)
+    out = tools.tool_get_prompt_examples({"datasource": local_model, "area": "sales"})
+    assert "subject area: sales" in out

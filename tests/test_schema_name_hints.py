@@ -426,12 +426,19 @@ def test_table_suggestions_are_capped_in_the_refusal(profile):
     err = _call(profile, dataset_names=NEAR)["error"]
     assert len(err["did_you_mean"]) == tools._SUGGESTED_MISSES
     assert all(err["did_you_mean"].values())
-    assert all(repr(n) in err["remediation"] for n in NEAR), "every miss still named"
+    # The prose names the searched ones and counts the rest — the count is the caller's own.
+    assert (
+        f"And {len(NEAR) - tools._SUGGESTED_MISSES} more unknown table name(s)."
+        in (err["remediation"])
+    )
 
 
 def test_table_suggestions_are_capped_in_the_misplaced_refusal(profile):
     err = _call(profile, area=PEOPLE, dataset_names=["orders", *NEAR])["error"]
-    assert err["remediation"].count("Did you mean") == tools._SUGGESTED_MISSES
+    # Every typo the refusal SHOWS gets its suggestion; `orders` (really misplaced) takes a slot.
+    shown = sorted(["orders", *NEAR])[: tools._SUGGESTED_MISSES]
+    assert err["remediation"].count("Did you mean") == len(shown) - 1
+    assert f"And {len(NEAR) + 1 - tools._SUGGESTED_MISSES} more." in err["remediation"]
 
 
 def test_metric_suggestions_are_capped_and_deduped(profile):
@@ -622,3 +629,45 @@ def test_an_unknown_mode_is_refused_with_the_valid_ones(profile):
     assert "auto, full, summary, index" in err["remediation"]
     assert _call(profile, mode=" FULL ")["mode"] == "full", "case and spacing are not a mistake"
     assert _call(profile, mode=1)["error"]["kind"] == "invalid_argument"
+
+
+# --- round-3 review findings ---------------------------------------------------------------------
+
+
+def test_a_blank_mode_is_auto_as_it_always_was(profile):
+    """`(mode or "auto")` read "" as auto; the shape check refused it. Clients fill unset optional
+    strings with "", and this is the most-called tool."""
+    for blank in ("", "   "):
+        head = _call(profile, mode=blank)
+        assert "error" not in head and head["requested_mode"] == "auto"
+
+
+def test_an_embedders_tuple_is_a_list(profile):
+    assert _call(profile, dataset_names=("orders",))["scope"]["tables"] == ["orders"]
+
+
+def test_a_column_hidden_by_its_areas_exposure_is_never_hinted(tmp_path, monkeypatch):
+    """A hint may name only what get_datasource_schema would show. `secret_note` is outside the
+    column groups its owning area exposes, so "it is a column on orders" would disclose it."""
+    import yaml
+
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    tfile = art / "acme" / "subject_areas" / SALES / "tables" / "orders.yaml"
+    doc = yaml.safe_load(tfile.read_text())
+    doc["columns"].append({"name": "secret_note", "type": "string"})
+    doc["column_groups"] = {"core": ["id", "amount"], "internal": ["secret_note"]}
+    tfile.write_text(yaml.safe_dump(doc))
+    sa = art / "acme" / "subject_areas" / SALES / "subject_area.yaml"
+    sdoc = yaml.safe_load(sa.read_text())
+    for ref in sdoc["tables"]:
+        if ref["table"] == "orders":
+            ref["expose_column_groups"] = ["core"]
+    sa.write_text(yaml.safe_dump(sdoc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    shown = _call("acme", dataset_names=["orders"])["tables"]["orders"]["columns"]
+    assert "secret_note" not in {c["name"] for c in shown}, "the premise: the schema hides it"
+    err = _call("acme", dataset_names=["secret_note"])["error"]
+    assert "hints" not in err and "orders" not in err["remediation"]
+    assert "is a column" in _call("acme", dataset_names=["amount"])["error"]["hints"]["amount"]

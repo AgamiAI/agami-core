@@ -1625,13 +1625,19 @@ class _ModelNames(NamedTuple):
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
+        from semantic_model import loader as L
+
         tables: dict[str, str] = {}
         columns: dict[str, list[str]] = {}
         for sa in org.subject_areas:
             for t in sa.tables_defined:
                 bare = _bare_name(t.name)
                 tables.setdefault(bare, sa.name)
-                for c in t.columns:
+                # Only the columns `get_datasource_schema` would show: a table read in its owning
+                # area exposes the column groups that area's TableRef names, and a hint naming a
+                # column outside them would disclose what the schema response deliberately hides.
+                exposed = L._exposed_groups_for(sa, t.name)
+                for c in L._visible_columns(t, exposed):
                     columns.setdefault(c.name.casefold(), []).append(bare)
         metric_keys = {k: (m.name, a) for k, (m, a) in _all_metrics(org).items()}
         return cls(
@@ -1686,10 +1692,14 @@ class _ModelNames(NamedTuple):
         # nothing close", and these were not searched.
         hints = {n: h for n in names if (h := self.table_hint(n))}
         guesses = {n: self.table_guesses(n) for n in names[:_SUGGESTED_MISSES] if n not in hints}
+        # Named in prose only up to the cap too: past it the count is the caller's own number, and
+        # a statement of thousands of names is not thousands of sentences of refusal.
         sentences = [
             f"No table named {n!r} in {profile!r}. {self.miss_advice(n, guesses)}".rstrip()
-            for n in names
+            for n in names[:_SUGGESTED_MISSES]
         ]
+        if len(names) > _SUGGESTED_MISSES:
+            sentences.append(f"And {len(names) - _SUGGESTED_MISSES} more unknown table name(s).")
         if not any(guesses.values()) and not hints:
             sentences.append(_LIST_TABLES_ADVICE)
         error: dict[str, Any] = {
@@ -1830,10 +1840,15 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
     return Scope("datasource", None, ())
 
 
-_SCHEMA_MODES = ("auto", "full", "summary", "index")
+# The mode ladder plus `auto`, from the one table that defines the ladder.
+_SCHEMA_MODES = ("auto", *_SCHEMA_MODE_DOWNGRADE)
+# Every key `_normalized_args` repairs; a tool passes the subset it actually takes.
+_SHAPED_KEYS = ("dataset_names", "metric_names", "area", "mode")
 
 
-def _normalized_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]":
+def _normalized_args(
+    args: dict[str, Any], keys: "tuple[str, ...]" = _SHAPED_KEYS
+) -> "tuple[dict[str, Any], str | None]":
     """`args` with the shape mistakes an agent makes repaired, or the refusal for one that isn't.
 
     Neither transport validates arguments against the advertised schema, so these arrived as-is.
@@ -1841,7 +1856,10 @@ def _normalized_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]
     `area` was dropped, silently answering the WHOLE datasource to a caller that believed it had
     scoped to one area; an unknown `mode` quietly became `summary`. Where the intent is
     unambiguous — one name where a list of one was meant — it is repaired; otherwise refused,
-    naming what is expected.
+    naming what is expected. Blank means "not given" for every key, as it always did for `mode`:
+    clients commonly fill an unset optional string with "".
+
+    Only `keys` are looked at, so a tool is never refused over an argument it does not take.
     """
     fixed = dict(args)
 
@@ -1850,37 +1868,47 @@ def _normalized_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]
         return fixed, json.dumps({"error": error}, indent=2)
 
     for key in ("dataset_names", "metric_names"):
+        if key not in keys:
+            continue
         value = fixed.get(key)
         if isinstance(value, str):
             fixed[key] = [value] if value.strip() else []
+        elif isinstance(value, tuple):
+            fixed[key] = list(value)  # an embedder's tuple; no JSON transport can send one
         elif value is not None and not isinstance(value, list):
             return refuse(f'`{key}` must be a list of names, e.g. ["name"].')
-    area = fixed.get("area")
-    if isinstance(area, list):
-        if not area:
-            fixed["area"] = None  # an empty list names no area, as an empty string does
-        elif len(area) == 1 and isinstance(area[0], str):
-            fixed["area"] = area[0]
-        else:
-            return refuse(
-                "`area` takes ONE subject area name. To cover several, call once per area, or "
-                "name their tables in `dataset_names`."
-            )
-    elif area is not None and not isinstance(area, str):
-        return refuse("`area` must be a subject area name (a string).")
-    mode = fixed.get("mode")
-    if mode is not None:
-        folded = mode.strip().lower() if isinstance(mode, str) else ""
-        if folded not in _SCHEMA_MODES:
-            guesses = _did_you_mean(str(mode), _SCHEMA_MODES)
-            lead = f"Unknown `mode` {mode!r}."
-            if guesses:
-                lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
-            return refuse(
-                f"{lead} Valid modes: {', '.join(_SCHEMA_MODES)}; omit it for auto.",
-                did_you_mean=guesses,
-            )
-        fixed["mode"] = folded
+    if "area" in keys:
+        area = fixed.get("area")
+        if isinstance(area, list):
+            if len(area) > 1 or (area and not isinstance(area[0], str)):
+                return refuse(
+                    "`area` takes ONE subject area name. To cover several, call once per area, "
+                    "or name their tables in `dataset_names`."
+                )
+            area = area[0] if area else None
+        elif area is not None and not isinstance(area, str):
+            return refuse("`area` must be a subject area name (a string).")
+        # Stored STRIPPED: the served examples query matches `area = ?` on the value it is given,
+        # so " sales " passed a stripped check and then matched no area — only the cross-area
+        # examples came back, the "real but empty" answer the check exists to prevent.
+        fixed["area"] = (area or "").strip() or None
+    if "mode" in keys:
+        mode = fixed.get("mode")
+        if isinstance(mode, str) and not mode.strip():
+            mode = None
+        if mode is not None:
+            folded = mode.strip().lower() if isinstance(mode, str) else ""
+            if folded not in _SCHEMA_MODES:
+                guesses = _did_you_mean(str(mode), _SCHEMA_MODES)
+                lead = f"Unknown `mode` {mode!r}."
+                if guesses:
+                    lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
+                return refuse(
+                    f"{lead} Valid modes: {', '.join(_SCHEMA_MODES)}; omit it for auto.",
+                    did_you_mean=guesses,
+                )
+            mode = folded
+        fixed["mode"] = mode
     return fixed, None
 
 
@@ -2208,8 +2236,10 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # it and sends the agent looking in the wrong place.
             if all(names.area_of(t) is None for t in misplaced):
                 return names.unknown_tables_error(misplaced, profile)
-            typos = [t for t in misplaced if names.area_of(t) is None]
-            guesses = {t: names.table_guesses(t) for t in typos[:_SUGGESTED_MISSES]}
+            # Searched for exactly the names the refusal shows, so every one it names gets its
+            # suggestion and nothing past the cap is searched.
+            shown = sorted(misplaced)[:_SUGGESTED_MISSES]
+            guesses = {t: names.table_guesses(t) for t in shown if names.area_of(t) is None}
             located = [
                 f"{t!r} is in subject area {a!r}."
                 if (a := names.area_of(t))
@@ -2217,13 +2247,16 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 # a contradiction ("'sales' is in no subject area. 'sales' is a subject area").
                 else names.table_hint(t)
                 or f"{t!r} is in no subject area. {names.miss_advice(t, guesses)}".rstrip()
-                for t in sorted(misplaced)
+                for t in shown
             ]
+            if len(misplaced) > _SUGGESTED_MISSES:
+                located.append(f"And {len(misplaced) - _SUGGESTED_MISSES} more.")
             return json.dumps(
                 {
                     "error": {
                         "kind": "not_found",
-                        "remediation": f"Table(s) {', '.join(sorted(misplaced))} are not in subject area "
+                        "remediation": f"Table(s) {', '.join(sorted(misplaced)[:_SUGGESTED_MISSES])}"
+                        f"{' and more' if len(misplaced) > _SUGGESTED_MISSES else ''} are not in subject area "
                         f"{scope.area!r}. {' '.join(located)} Drop `area` to scope by table alone, "
                         f"or name tables from that area.",
                     }
@@ -2414,14 +2447,17 @@ def _unknown_example_area(area: Any, profile: str) -> "str | None":
     agent as "this area has none" — the wrong lesson, and a reason to write SQL without them.
 
     Checked against the model, since that is what defines the areas; an area with no examples is
-    real and still answers empty. Where no model loads the old behaviour stands: there is nothing
-    to say the name is wrong against.
+    real and still answers empty. Where the model does not load, for any reason, the old behaviour
+    stands: there is nothing to say the name is wrong against.
     """
     if not (isinstance(area, str) and area.strip()):
         return None
     try:
         org = get_cached_org(profile)
-    except (FileNotFoundError, ImportError):
+    except Exception:
+        # Any load failure, not only a missing model: this tool never loaded the model before,
+        # and a check that only advises must not turn a broken model into a failed examples call.
+        # `get_datasource_schema` is where a broken model is reported.
         return None
     if any(sa.name == area.strip() for sa in org.subject_areas):
         return None
@@ -2438,7 +2474,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     """
     # The same shape repair and refusal as `get_datasource_schema`: an `area` sent as a list was
     # dropped, and the caller got every area's examples while believing it had narrowed to one.
-    args, malformed = _normalized_args(args)
+    args, malformed = _normalized_args(args, keys=("area",))
     if malformed is not None:
         return malformed
     # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
@@ -4534,7 +4570,7 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["auto", "full", "summary", "index"],
+                    "enum": list(_SCHEMA_MODES),
                     "description": "Verbosity; default auto (sized by subject-area count + char budget).",
                 },
                 "area": {
