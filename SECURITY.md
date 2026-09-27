@@ -68,6 +68,24 @@ the read-only grant recipe we publish does not revoke them. Every answer and eve
 row states that the checks did not run, so a result is never presented as governed when it
 was not.
 
+### What a refusal may name
+
+A refusal names back the identifiers the caller's own statement used, sanitized and capped.
+It never lists what the model declares, with one recorded exception (#386): a column-scope
+refusal lists the declared columns of the tables that statement reads (capped per table and in
+tables), with the closest declared name for each refused column. Without it an agent repaired a
+refused column by guessing again. The same caller can fetch exactly that set with
+`get_datasource_schema`, and every declared column is queryable by design: a column whose values
+must not be readable is left out of the model, and is then absent from the list too.
+
+Nothing else widens: no other table, and no declared name on any other refusal (the table-scope
+refusal's declared set would be the whole datasource). `tests/test_ace035_no_enumeration.py`
+enforces both halves.
+
+The residual, for integrators: if you narrow the tool surface per caller (`Adapters.tool_visibility`)
+so that a caller can run `execute_sql` but not call `get_datasource_schema`, that caller can learn
+the column names of any declared table it names in a statement, one refusal per table.
+
 Everything in the list above (read-only, confinement to safe functions, and the resource
 bounds) is unaffected by this setting, as is your database role. **A statement that the
 read-only or dangerous-function gate would refuse must never become executable because this

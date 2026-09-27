@@ -154,7 +154,8 @@ _SHARED_INSTRUCTIONS = (
     "tables you are about to write (`dataset_names`) before concluding a column is missing.\n"
     "A scope refusal is a repair, not a dead end. `status:'refused'` on rule `column_scope` or "
     "`table_scope` is most often the same mistake as the database's `column_not_found` and takes "
-    "the same fix: re-read what that table declares, rewrite with declared names, and retry. "
+    "the same fix: rewrite with declared names and retry. A `column_scope` refusal's "
+    "`remediation` lists what the tables your statement reads DO declare; use it. "
     "Read the refusal's `detail` first, because two cases are not that. A table name matching "
     "more than one schema is repaired by qualifying it (`schema.table`), not by renaming it. And "
     "a column can be absent from the model ON PURPOSE, which is how a model author makes one "
@@ -1599,62 +1600,11 @@ _LIST_TABLES_ADVICE = (
 _SUGGESTED_MISSES = 10
 
 
-# difflib's similarity floor for a fuzzy suggestion. Measured on an 80-area, 2,900-table synthetic
-# model: 0.6 (difflib's default) suggested something for 17% of unrelated dictionary words; 0.7
-# cut that to about 1% with the same recall on single and double typos; 0.75 began losing
-# abbreviations (`ord_items` for `order_items`).
-_FUZZY_CUTOFF = 0.7
-
-
-def _word_set(name: str) -> frozenset[str]:
-    """The words of a name, ignoring case, order and separators."""
-    return frozenset(w for w in re.split(r"[\s_-]+", _bare_name(name).casefold()) if w)
-
-
 def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]:
-    """Up to `n` of `candidates` a caller most plausibly meant by `name`, best first.
+    """`semantic_model.suggest.did_you_mean`, imported lazily as every `semantic_model` symbol is."""
+    from semantic_model.suggest import did_you_mean
 
-    An agent's wrong name is nearly always one edit from a real one — a case change, a plural
-    dropped, a separator lost, a schema prefix added, words swapped — so those are tried before a
-    fuzzy match, which alone ranks `order` nearer `order_items` than `orders`. Nothing close
-    returns `[]`: an unrelated suggestion reads as an answer, and is how a guess reaches SQL. For
-    the same reason an exact match is returned alone, and the name asked for is never suggested
-    back — a suggestion the caller already tried is a loop, not a hint.
-    """
-    import difflib
-
-    def fold(s: str) -> str:
-        # Spaces too: metrics are often named in words (`order count`) and asked for in
-        # snake_case (`order_count`).
-        return re.sub(r"[\s_-]+", "", _bare_name(s).casefold())
-
-    asked = _bare_name(name)
-    # Folded once per candidate: this runs over every table in the model, once per missed name.
-    pool = {c: fold(c) for c in candidates if c and _bare_name(c) != asked}
-    want = fold(name)
-    if not want:
-        return []
-    exact = [c for c, f in pool.items() if f == want]
-    if exact:
-        return exact[:n]
-    # The same words in another order (`orders_fact` for `fact_orders`) is as certain as a case
-    # change, and neither containment nor a character-level fuzzy match finds it.
-    words = _word_set(name)
-    same_words = [c for c in pool if len(words) > 1 and _word_set(c) == words]
-    if same_words:
-        return same_words[:n]
-    # Containment either way, shortest gap first. The length floor stops a two-letter name from
-    # matching half the model.
-    contains = sorted(
-        (c for c, f in pool.items() if len(want) >= 3 and (want in f or f in want)),
-        key=lambda c: abs(len(pool[c]) - len(want)),
-    )
-    by_fold = {f: c for c, f in reversed(pool.items())}  # first occurrence wins
-    fuzzy = [
-        by_fold[f]
-        for f in difflib.get_close_matches(want, list(by_fold), n=n, cutoff=_FUZZY_CUTOFF)
-    ]
-    return list(dict.fromkeys(contains + fuzzy))[:n]
+    return did_you_mean(name, candidates, n)
 
 
 class _ModelNames(NamedTuple):
