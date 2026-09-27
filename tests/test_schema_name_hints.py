@@ -504,3 +504,9 @@ def test_the_described_matching_is_the_matching(profile):
     """Case-sensitive and schema prefix ignored, as `dataset_names` now says."""
     assert "error" in _call(profile, dataset_names=["Orders"])
     assert _call(profile, dataset_names=["public.orders"])["tables"]["orders"]["columns"]
+
+
+def test_a_metric_close_to_nothing_anywhere_says_so(profile):
+    """Searched in scope and out of it, nothing close: the one case where `[]` is the true answer."""
+    [miss] = _call(profile, metric_names=["zzzzzz"])["unknown_metric_names"]
+    assert miss == {"name": "zzzzzz", "did_you_mean": []}
