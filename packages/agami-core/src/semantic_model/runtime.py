@@ -1781,7 +1781,7 @@ _LIST_MAX_COLUMNS = 40
 def _declared_listing(org: Datasource, offending: list[str],
                       judged: dict[str, set[tuple]]) -> str:
     """The repair a column-scope refusal offers: what the tables it judged DO declare, and for each
-    refused column the closest declared one on those tables. Ends with a space, or is empty.
+    refused column the closest declared one on those tables. Ends with a space.
 
     Names are model-authored, not the caller's, so they cannot carry the caller's text back; they
     still go through `_echo_name`, since a model built by introspection holds whatever the
@@ -1790,9 +1790,8 @@ def _declared_listing(org: Datasource, offending: list[str],
     """
     from .suggest import did_you_mean
 
-    keys = set().union(*judged.values()) if judged else set()
-    if not keys:
-        return ""
+    # Never empty: a column is refused only against a declared table it was judged on.
+    keys = set().union(*judged.values())
     names: dict[tuple, str] = {}
     columns: dict[tuple, list[str]] = {}
     for sa in org.subject_areas:
