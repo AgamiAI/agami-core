@@ -1881,6 +1881,58 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
     return Scope("datasource", None, ())
 
 
+_SCHEMA_MODES = ("auto", "full", "summary", "index")
+
+
+def _schema_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]":
+    """`args` with the shape mistakes an agent makes repaired, or the refusal for one that isn't.
+
+    Neither transport validates arguments against the advertised schema, so these arrived as-is.
+    A lone string for a list was iterated letter by letter ("No table named 'o'"); a list for
+    `area` was dropped, silently answering the WHOLE datasource to a caller that believed it had
+    scoped to one area; an unknown `mode` quietly became `summary`. Where the intent is
+    unambiguous — one name where a list of one was meant — it is repaired; otherwise refused,
+    naming what is expected.
+    """
+    fixed = dict(args)
+
+    def refuse(remediation: str, **extra: Any) -> "tuple[dict[str, Any], str]":
+        error = {"kind": "invalid_argument", "remediation": remediation, **extra}
+        return fixed, json.dumps({"error": error}, indent=2)
+
+    for key in ("dataset_names", "metric_names"):
+        value = fixed.get(key)
+        if isinstance(value, str):
+            fixed[key] = [value] if value.strip() else []
+        elif value is not None and not isinstance(value, list):
+            return refuse(f'`{key}` must be a list of names, e.g. ["name"].')
+    area = fixed.get("area")
+    if isinstance(area, list):
+        if len(area) == 1 and isinstance(area[0], str):
+            fixed["area"] = area[0]
+        else:
+            return refuse(
+                "`area` takes ONE subject area name. To cover several, call once per area, or "
+                "name their tables in `dataset_names`."
+            )
+    elif area is not None and not isinstance(area, str):
+        return refuse("`area` must be a subject area name (a string).")
+    mode = fixed.get("mode")
+    if mode is not None:
+        folded = mode.strip().lower() if isinstance(mode, str) else ""
+        if folded not in _SCHEMA_MODES:
+            guesses = _did_you_mean(str(mode), _SCHEMA_MODES)
+            lead = f"Unknown `mode` {mode!r}."
+            if guesses:
+                lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
+            return refuse(
+                f"{lead} Valid modes: {', '.join(_SCHEMA_MODES)}; omit it for auto.",
+                did_you_mean=guesses,
+            )
+        fixed["mode"] = folded
+    return fixed, None
+
+
 def _scoped_metrics(
     org, metrics: dict[str, tuple[Any, str | None]], scope: Scope
 ) -> dict[str, tuple[Any, str | None]]:
@@ -2095,6 +2147,11 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `metric_index` (name->description for every metric in scope) + `large_tables` are always
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
+    # A malformed argument is answered before anything is loaded: it is the same mistake on any
+    # datasource, and repairing it first means the checks below see the shape they expect.
+    args, malformed = _schema_args(args)
+    if malformed is not None:
+        return malformed
     # With several datasources served, an omission is refused before it can resolve to a fallback
     # (#327); `_choose_datasource_error` names the choices.
     choices = _datasources_to_choose_from(args)
@@ -2313,9 +2370,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         in_scope_areas = sum(
             1 for sa in org.subject_areas if scope.level == "datasource" or sa.name == scope.area
         )
+        # `mode` was validated on entry, so this is always a rung of the ladder.
         mode = _auto_mode_for(in_scope_areas) if requested_mode == "auto" else requested_mode
-        if mode not in _SCHEMA_MODE_DOWNGRADE:
-            mode = "summary"
         # Only full mode assembles the per-table `tables` block (the sole index consumer), and the
         # loop only ever DOWNGRADES from full — so build the index iff we start at full, else a
         # wide model that starts in `mode="index"` (the case this optimizes) would pay a wasted

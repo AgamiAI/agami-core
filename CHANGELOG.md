@@ -42,6 +42,11 @@ below corresponds to one such version.
     sends. The `area` + `dataset_names` check now looks each table up once instead of rescanning
     the area per name, which cost seconds for a few thousand names.
   - A misspelt `area` is named before the tables it would scope.
+  - Values of the wrong shape are repaired or refused, not misread. A lone string for
+    `dataset_names` or `metric_names` was split into letters ("No table named 'o'"); it is now a
+    list of one. A list for `area` was ignored, answering the whole datasource; a list of one now
+    scopes, and several are refused. An unknown `mode` became `summary` silently; it is now
+    refused with the valid modes.
   - A table the model defines but `dataset_names` cannot reach yet (its model `name` carries its
     schema, #258) is not refused; it is told to use its area.
   - The tool description now says where each name comes from and what to do with a miss. The

@@ -570,3 +570,55 @@ def test_a_wrong_kind_name_in_the_misplaced_refusal_is_not_also_in_no_area(profi
         "remediation"
     ]
     assert f"{SALES!r} is in no subject area" not in remediation
+
+
+# --- a value of the wrong SHAPE -------------------------------------------------------------------
+#
+# Neither transport validates arguments against the advertised schema, so a lone string, a list
+# where one name belongs, or an unknown `mode` reached the handler as sent.
+
+
+def test_a_lone_table_name_is_a_list_of_one(profile):
+    """It was iterated letter by letter: "No table named 'o' ... 'r' ... 'd'"."""
+    head = _call(profile, dataset_names="orders")
+    assert head["scope"]["tables"] == ["orders"]
+    assert head["tables"]["orders"]["columns"]
+
+
+def test_a_lone_metric_name_is_a_list_of_one(profile):
+    head = _call(profile, metric_names="order_count")
+    assert "unknown_metric_names" not in head
+    assert [m["name"] for m in head["metrics"]] == ["order_count"]
+
+
+def test_an_area_sent_as_a_list_of_one_still_scopes(profile):
+    """It was dropped, answering the WHOLE datasource to a caller that believed it had scoped."""
+    assert _call(profile, area=[SALES])["scope"] == {"level": "area", "area": SALES, "tables": []}
+
+
+def test_several_areas_are_refused_not_widened_to_all(profile):
+    err = _call(profile, area=[SALES, PEOPLE])["error"]
+    assert err["kind"] == "invalid_argument"
+    assert "ONE subject area" in err["remediation"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("dataset_names", {"orders": 1}),
+        ("metric_names", 7),
+        ("area", 3),
+    ],
+)
+def test_a_value_of_no_usable_shape_is_refused_naming_the_shape(profile, key, value):
+    err = _call(profile, **{key: value})["error"]
+    assert err["kind"] == "invalid_argument" and f"`{key}`" in err["remediation"]
+
+
+def test_an_unknown_mode_is_refused_with_the_valid_ones(profile):
+    """It quietly became `summary`, so the caller never learned its `ful` had not been honoured."""
+    err = _call(profile, mode="ful")["error"]
+    assert err["did_you_mean"] == ["full"]
+    assert "auto, full, summary, index" in err["remediation"]
+    assert _call(profile, mode=" FULL ")["mode"] == "full", "case and spacing are not a mistake"
+    assert _call(profile, mode=1)["error"]["kind"] == "invalid_argument"
