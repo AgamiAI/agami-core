@@ -36,6 +36,12 @@ below corresponds to one such version.
   - An exact match is suggested alone, and the name sent is never suggested back.
   - Only the first 10 distinct misses in a call are searched; the rest are still named. Each
     search scans the whole model, and nothing bounds how many names a caller sends.
+  - The tool now says where a name comes from, so fewer wrong ones are sent. `area` is a
+    `subject_areas[].name`; `dataset_names` are exact, case-sensitive table names; `metric_names`
+    are `metric_index` keys, with `name (area)` for a name two areas share. The description adds
+    what to do with a miss: take a suggestion only when it means what the user asked, list what
+    exists when nothing fits, and never retry with another guess. The server instructions extend
+    the column rule ("a plausible name is not a declared one") to area, table and metric names.
 
 ## [0.9.7] — 2026-09-26
 

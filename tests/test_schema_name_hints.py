@@ -368,3 +368,37 @@ def test_suggestions_are_capped_per_call(profile):
     missed = _call(profile, metric_names=[*many, *many])["unknown_metric_names"]
     assert [m["name"] for m in missed] == many, "deduped, and every miss still named"
     assert all(set(m) == {"name"} for m in missed[tools._SUGGESTED_MISSES :])
+
+
+# --- the advertised surface says where a name comes from ----------------------------------------
+#
+# The response can only repair a wrong name after the fact. What prevents one is the description
+# read while the call is written, so each parameter says what a valid value looks like — and each
+# claim is checked against the behaviour it describes, so the text cannot drift from it.
+
+
+def _schema_tool() -> dict:
+    return tools.TOOLS["get_datasource_schema"]
+
+
+def test_each_name_parameter_says_where_its_values_come_from():
+    props = _schema_tool()["inputSchema"]["properties"]
+    assert "`subject_areas[].name`" in props["area"]["description"]
+    assert "case-sensitive" in props["dataset_names"]["description"]
+    assert "`metric_index`" in props["metric_names"]["description"]
+    assert "`name (area)`" in props["metric_names"]["description"]
+
+
+def test_the_tool_says_what_to_do_with_a_miss():
+    desc = _schema_tool()["description"]
+    assert "`did_you_mean`" in desc and "Never retry with another guessed name" in desc
+
+
+def test_the_server_instructions_extend_the_column_rule_to_every_name():
+    assert "area, table and metric names" in tools.server_instructions()
+
+
+def test_the_described_matching_is_the_matching(profile):
+    """Case-sensitive and schema prefix ignored, as `dataset_names` now says."""
+    assert "error" in _call(profile, dataset_names=["Orders"])
+    assert _call(profile, dataset_names=["public.orders"])["tables"]["orders"]["columns"]

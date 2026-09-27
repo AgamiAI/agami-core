@@ -147,7 +147,9 @@ _SHARED_INSTRUCTIONS = (
     "other aggregates over `*` are fine — there the star is inside the call and the projection is "
     "the aggregate, so it is not affected by any of this. "
     "A plausible name is not a declared one, and a column missing from the table's "
-    "own entry is out of scope however obvious it looks beside the ones that are there. A "
+    "own entry is out of scope however obvious it looks beside the ones that are there. The same "
+    "holds for area, table and metric names: copy them from a response, never from the user's "
+    "wording. A "
     "response sized down to `summary` or `index` carries no columns at all, so ask for the "
     "tables you are about to write (`dataset_names`) before concluding a column is missing.\n"
     "A scope refusal is a repair, not a dead end. `status:'refused'` on rule `column_scope` or "
@@ -4392,7 +4394,14 @@ TOOLS: dict[str, dict[str, Any]] = {
             "get_prompt_examples, which ranks them — no example is sent here. The response names "
             "the engine under `dialect` and points at list_datasources for its `dialect_rules` "
             "(what that engine rejects, and what to write instead) rather than repeating them on "
-            "every call; fetch them once per datasource and follow them when writing the SQL."
+            "every call; fetch them once per datasource and follow them when writing the SQL. "
+            # Here and not only in the server instructions: a host may weight those below its own,
+            # and the moment a name is chosen is the moment this description is being read.
+            "Names are never derived from the user's wording — copy them from a previous "
+            "response. A name the model lacks comes back with `did_you_mean` and sometimes a "
+            "`hint`: retry with a suggestion only when it means what the user asked, and say so "
+            "when it changes the meaning; if nothing fits, call without scope to list what exists. "
+            "Never retry with another guessed name."
         ),
         "inputSchema": {
             "type": "object",
@@ -4414,7 +4423,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "type": "string",
                     "description": (
                         "Scope to one subject area: its tables and metrics, plus the "
-                        "cross-area metrics."
+                        "cross-area metrics. A `subject_areas[].name` exactly as a previous "
+                        "response gave it."
                     ),
                 },
                 "dataset_names": {
@@ -4422,7 +4432,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": (
                         "Scope to these tables — full field-level detail, their joins, and the "
-                        "metrics that apply to them (no downgrade). Narrowest scope."
+                        "metrics that apply to them (no downgrade). Narrowest scope. Table names "
+                        "exactly as listed; case-sensitive; a schema prefix is ignored."
                     ),
                 },
                 "query": {
@@ -4436,7 +4447,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Return full detail for these named metrics. Selects detail; does not scope."
+                        "Return full detail for these named metrics. Selects detail; does not "
+                        "scope. Keys of `metric_index`, copied exactly — a name two areas share "
+                        "is keyed `name (area)`."
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,
