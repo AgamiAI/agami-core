@@ -92,10 +92,12 @@ def _call(profile: str, **args) -> dict:
         ("order", "orders"),          # a plural dropped
         ("orderitems", "order_items"),  # a separator dropped
         ("public.ordrs", "orders"),   # schema-qualified, as agents often write them
+        ("order_count", "order count"),  # snake_case for a metric named in words
     ],
 )
 def test_the_closest_real_name_comes_first(name, expected_first):
-    assert tools._did_you_mean(name, ["orders", "order_items", "users"])[0] == expected_first
+    candidates = ["orders", "order_items", "users", "order count"]
+    assert tools._did_you_mean(name, candidates)[0] == expected_first
 
 
 def test_nothing_close_suggests_nothing():
@@ -207,3 +209,5 @@ def test_an_unknown_datasource_names_the_real_ones(profile):
     assert err["kind"] == "not_found"
     assert err["did_you_mean"] == ["acme"]
     assert err["datasources"] == ["acme"]
+    # A typo of a model that exists is not a model to go and build.
+    assert "agami-connect" not in err["remediation"]

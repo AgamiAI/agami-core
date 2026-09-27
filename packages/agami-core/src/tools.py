@@ -1593,7 +1593,9 @@ def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]
     import difflib
 
     def fold(s: str) -> str:
-        return _bare_name(s).casefold().replace("_", "").replace("-", "")
+        # Spaces too: metrics are often named in words (`order count`) and asked for in
+        # snake_case (`order_count`).
+        return re.sub(r"[\s_-]+", "", _bare_name(s).casefold())
 
     pool = list(dict.fromkeys(c for c in candidates if c))
     want = fold(name)
@@ -1922,10 +1924,12 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
     if known:
         guesses = _did_you_mean(profile, known)
         if guesses:
+            # The loader's own message ends "run agami-connect to introspect this database" —
+            # advice for a missing model, and wrong for a typo of one that exists.
             error["did_you_mean"] = guesses
             error["remediation"] = (
                 f"No datasource named {profile!r}. Did you mean "
-                f"{', '.join(repr(g) for g in guesses)}? {remediation}"
+                f"{', '.join(repr(g) for g in guesses)}? Known datasources: {', '.join(known)}."
             )
         error["datasources"] = known
     return json.dumps({"error": error}, indent=2)
