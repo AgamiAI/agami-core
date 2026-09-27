@@ -1582,13 +1582,22 @@ def _bare_name(name: str) -> str:
     return bare_name(name or "")
 
 
+# How many distinct missed names in one call get suggestions. Each one scans every candidate name
+# in the model, and nothing bounds how many names a caller sends — on a wide model a thousand bad
+# names cost seconds of CPU that every other request on the process waits behind. Past the cap a
+# miss is still named, just without the search.
+_SUGGESTED_MISSES = 10
+
+
 def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]:
     """Up to `n` of `candidates` a caller most plausibly meant by `name`, best first.
 
     An agent's wrong name is nearly always one edit from a real one — a case change, a plural
     dropped, a separator lost, a schema prefix added — so those are tried in that order before a
     fuzzy match, which alone ranks `order` nearer `order_items` than `orders`. Nothing close
-    returns `[]`: an unrelated suggestion reads as an answer, and is how a guess reaches SQL.
+    returns `[]`: an unrelated suggestion reads as an answer, and is how a guess reaches SQL. For
+    the same reason an exact match is returned alone, and the name asked for is never suggested
+    back — a suggestion the caller already tried is a loop, not a hint.
     """
     import difflib
 
@@ -1597,20 +1606,24 @@ def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]
         # snake_case (`order_count`).
         return re.sub(r"[\s_-]+", "", _bare_name(s).casefold())
 
-    pool = list(dict.fromkeys(c for c in candidates if c))
+    asked = _bare_name(name)
+    # Folded once per candidate: this runs over every table in the model, once per missed name.
+    pool = {c: fold(c) for c in candidates if c and _bare_name(c) != asked}
     want = fold(name)
     if not want:
         return []
-    exact = [c for c in pool if fold(c) == want]
+    exact = [c for c, f in pool.items() if f == want]
+    if exact:
+        return exact[:n]
     # Containment either way, shortest gap first. The length floor stops a two-letter name from
     # matching half the model.
     contains = sorted(
-        (c for c in pool if len(want) >= 3 and (want in fold(c) or fold(c) in want)),
-        key=lambda c: abs(len(fold(c)) - len(want)),
+        (c for c, f in pool.items() if len(want) >= 3 and (want in f or f in want)),
+        key=lambda c: abs(len(pool[c]) - len(want)),
     )
-    by_fold = {fold(c): c for c in reversed(pool)}  # first occurrence wins
+    by_fold = {f: c for c, f in reversed(pool.items())}  # first occurrence wins
     fuzzy = [by_fold[f] for f in difflib.get_close_matches(want, list(by_fold), n=n, cutoff=0.6)]
-    return list(dict.fromkeys(exact + contains + fuzzy))[:n]
+    return list(dict.fromkeys(contains + fuzzy))[:n]
 
 
 class _ModelNames(NamedTuple):
@@ -1623,7 +1636,9 @@ class _ModelNames(NamedTuple):
     areas: list[str]
     tables: dict[str, str]  # bare table name -> the area that defines it
     columns: dict[str, list[str]]  # casefolded column name -> bare names of the tables holding it
-    metrics: dict[str, "str | None"]  # metric name -> its area (None for the cross-area bucket)
+    # Keyed as `_all_metrics` keys them: a name two areas share is `name` for the first and
+    # `name (area)` for the rest, and that key is what `metric_names` selects by.
+    metric_keys: dict[str, "str | None"]  # key -> its area (None for the cross-area bucket)
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
@@ -1635,13 +1650,17 @@ class _ModelNames(NamedTuple):
                 tables.setdefault(bare, sa.name)
                 for c in t.columns:
                     columns.setdefault(c.name.casefold(), []).append(bare)
-        metrics = {m.name: a for m, a in _all_metrics(org).values()}
-        return cls([sa.name for sa in org.subject_areas], tables, columns, metrics)
+        metric_keys = {k: a for k, (_m, a) in _all_metrics(org).items()}
+        return cls([sa.name for sa in org.subject_areas], tables, columns, metric_keys)
 
     def area_of(self, table: str) -> "str | None":
-        """The area defining `table`, matched case-insensitively — a hint, not a resolution."""
-        folded = _bare_name(table).casefold()
-        return next((a for t, a in self.tables.items() if t.casefold() == folded), None)
+        """The area defining `table`, matched EXACTLY as the loader matches.
+
+        Folding case here once told a caller `'Orders' is in subject area 'sales'` — true of
+        `orders`, and a name that still resolved nowhere on retry. A case-only miss is a typo, and
+        `did_you_mean` is what answers it.
+        """
+        return self.tables.get(_bare_name(table))
 
     def table_hint(self, name: str) -> "str | None":
         """Why `name` is not a table, when it is a real name of another kind."""
@@ -1659,13 +1678,17 @@ class _ModelNames(NamedTuple):
         """Why `name` is not an area, when it is a table."""
         area = self.area_of(name)
         if area:
-            return (f"{name!r} is a table (in subject area {area!r}), not an area: pass it in "
-                    f"`dataset_names`.")
+            return (
+                f"{name!r} is a table (in subject area {area!r}), not an area: pass it in "
+                f"`dataset_names`."
+            )
         return None
 
     def unknown_tables_error(self, names: list[str], profile: str) -> str:
         """The refusal for a table scope in which no named table exists."""
-        guesses = {n: self._table_guesses(n) for n in names}
+        guesses = {
+            n: self.table_guesses(n) if i < _SUGGESTED_MISSES else [] for i, n in enumerate(names)
+        }
         hints = {n: h for n in names if (h := self.table_hint(n))}
         sentences = []
         for n in names:
@@ -1677,8 +1700,11 @@ class _ModelNames(NamedTuple):
             sentences.append(s)
         if not any(guesses.values()) and not hints:
             sentences.append("Call get_datasource_schema with `area` (or neither) to list tables.")
-        error: dict[str, Any] = {"kind": "not_found", "remediation": " ".join(sentences),
-                                 "did_you_mean": guesses}
+        error: dict[str, Any] = {
+            "kind": "not_found",
+            "remediation": " ".join(sentences),
+            "did_you_mean": guesses,
+        }
         if hints:
             error["hints"] = hints
         return json.dumps({"error": error}, indent=2)
@@ -1686,7 +1712,7 @@ class _ModelNames(NamedTuple):
     def unknown_table_entry(self, name: str) -> dict[str, Any]:
         """The per-table miss beside tables that did resolve."""
         entry: dict[str, Any] = {"error": "not found in scope"}
-        guesses = self._table_guesses(name)
+        guesses = self.table_guesses(name)
         if guesses:
             entry["did_you_mean"] = guesses
         hint = self.table_hint(name)
@@ -1694,23 +1720,47 @@ class _ModelNames(NamedTuple):
             entry["hint"] = hint
         return entry
 
-    def unknown_metric(self, name: str, in_scope: Iterable[str]) -> dict[str, Any]:
+    def unknown_metric(
+        self, name: str, in_scope: Mapping[str, tuple[Any, "str | None"]]
+    ) -> dict[str, Any]:
         """A `metric_names` entry that selected nothing — reported so it is not silently dropped.
 
         A metric that exists outside the declared scope is SAID to, and left out: naming it here
         must not widen the scope, and calling it unknown would send the agent inventing one.
         """
         entry: dict[str, Any] = {"name": name}
-        if name in self.metrics:
-            area = self.metrics[name]
-            where = f"subject area {area!r}" if area else "the cross-area metrics"
-            entry["hint"] = (f"{name!r} is in {where}, outside this call's scope. Widen `area` or "
-                             f"`dataset_names` to include it.")
+        # A name two areas share selects only by its key, so the bare name can miss while the
+        # metric it names IS in scope — under `name (area)`. Point at that key, not elsewhere.
+        shared = [k for k, (m, _a) in in_scope.items() if m.name == name]
+        if shared:
+            entry["did_you_mean"] = shared
+            entry["hint"] = (
+                f"More than one area defines {name!r}; pass the key of the one you mean."
+            )
             return entry
-        entry["did_you_mean"] = _did_you_mean(name, in_scope)
+        outside = [k for k, a in self.metric_keys.items() if k == name or k.startswith(f"{name} (")]
+        if not outside:
+            guesses = _did_you_mean(name, in_scope)
+            if guesses:
+                entry["did_you_mean"] = guesses
+                return entry
+            # Nothing close in scope. An empty list would read as "no such metric", so look once
+            # outside it — as a hint, since a suggestion here would widen the declared scope.
+            outside = _did_you_mean(name, self.metric_keys)
+            if not outside:
+                entry["did_you_mean"] = []
+                return entry
+        where = "; ".join(
+            f"{k!r} in {'subject area ' + repr(a) if a else 'the cross-area metrics'}"
+            for k in outside
+            for a in [self.metric_keys[k]]
+        )
+        entry["hint"] = (
+            f"Outside this call's scope: {where}. Widen `area` or `dataset_names` to include it."
+        )
         return entry
 
-    def _table_guesses(self, name: str) -> list[str]:
+    def table_guesses(self, name: str) -> list[str]:
         return _did_you_mean(name, self.tables)
 
 
@@ -1910,9 +1960,13 @@ def _known_datasources() -> "list[str] | None":
 
     None when neither can answer, so a refusal says nothing rather than guess at the choices.
     """
-    served = _served_datasources(_current_org_id())
-    if served is not None:
-        return served
+    from execute_sql import _hosted  # local import: keeps the module import graph acyclic
+
+    if _hosted():
+        # None here means a configured store that could not be asked. The disk is not a stand-in
+        # for it: what sits in a served container's artifacts dir is not what the org serves, and
+        # `_choose_datasource_error` stays silent on the same failure for the same reason.
+        return _served_datasources(_current_org_id())
     # A missing artifacts dir globs to nothing rather than raising.
     return sorted(p.parent.name for p in resolve_artifacts_dir().glob("*/datasource.yaml"))
 
@@ -1921,6 +1975,10 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
     """The refusal for a NAMED datasource with no model, naming the ones that have one."""
     error: dict[str, Any] = {"kind": "not_found", "remediation": remediation}
     known = _known_datasources()
+    if known and profile in known:
+        # The name is right and the model is broken — a dangling `ref`, a missing area directory.
+        # The loader's message names the file; a list of datasources would only hide it.
+        return json.dumps({"error": error}, indent=2)
     if known:
         guesses = _did_you_mean(profile, known)
         if guesses:
@@ -2027,14 +2085,21 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             )
         ]
         if misplaced:
+            misplaced = list(dict.fromkeys(misplaced))
             names = _ModelNames.of(org)
             # A table in NO area is a typo, not a misplacement: "not in subject area X" is true of
             # it and sends the agent looking in the wrong place.
             if all(names.area_of(t) is None for t in misplaced):
                 return names.unknown_tables_error(misplaced, profile)
+            typos = {
+                t: names.table_guesses(t) if i < _SUGGESTED_MISSES else []
+                for i, t in enumerate(t for t in misplaced if names.area_of(t) is None)
+            }
             located = [
-                f"{t!r} is in subject area {a!r}." if (a := names.area_of(t))
+                f"{t!r} is in subject area {a!r}."
+                if (a := names.area_of(t))
                 else f"{t!r} is in no subject area."
+                + (f" Did you mean {', '.join(repr(g) for g in typos[t])}?" if typos[t] else "")
                 for t in sorted(misplaced)
             ]
             return json.dumps(
@@ -2062,9 +2127,11 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             lead += f" {hint}"
         elif guesses:
             lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
-        error: dict[str, Any] = {"kind": "not_found",
-                                 "remediation": f"{lead} Known areas: {known}.",
-                                 "did_you_mean": guesses}
+        error: dict[str, Any] = {
+            "kind": "not_found",
+            "remediation": f"{lead} Known areas: {known}.",
+            "did_you_mean": guesses,
+        }
         if hint:
             error["hint"] = hint
         return json.dumps({"error": error}, indent=2)
@@ -2082,11 +2149,17 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     selected = matched or list(metrics)
     # A name that selected nothing used to vanish without a word, so the agent read the detail it
     # got back as the metric it asked for.
-    missed = [n for n in (args.get("metric_names") or []) if n not in metrics]
+    missed = list(
+        dict.fromkeys(str(n) for n in (args.get("metric_names") or []) if n not in metrics)
+    )
     unknown_metrics = None
+    names: _ModelNames | None = None  # built on the first miss, then shared by the table branch
     if missed:
         names = _ModelNames.of(org)
-        unknown_metrics = [names.unknown_metric(str(n), metrics) for n in missed]
+        unknown_metrics = [
+            names.unknown_metric(n, metrics) if i < _SUGGESTED_MISSES else {"name": n}
+            for i, n in enumerate(missed)
+        ]
 
     # Read before the response is built, so the stored-example pointer is inside the JSON the size
     # budget below measures — every piece still on ONE DB connection (see _context_sources).
@@ -2103,7 +2176,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     #
     # Same shape as the examples pointer beside it, and for the same reason: a block that is
     # identical on every response is a thing to name, not to repeat.
-    dialect = ({"engine": engine, "rules_from": "list_datasources"} if engine else None)
+    dialect = {"engine": engine, "rules_from": "list_datasources"} if engine else None
 
     if scope.level == "table":
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
@@ -2113,13 +2186,19 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # The loader's own verdict on each name, so "unknown" means exactly what it failed to find.
         missing = [n for n, t in ctx["tables"].items() if isinstance(t, dict) and "error" in t]
         if missing:
-            names = _ModelNames.of(org)
-            if len(missing) == len(ctx["tables"]):
+            names = names or _ModelNames.of(org)
+            # Only a name the model does not define is a caller's mistake. One it DOES define but
+            # the loader could not resolve — a table whose own `name` carries its schema, which the
+            # index keys in full while `dataset_names` arrives bare (#258) — keeps the loader's
+            # answer: refusing it would suggest the very name the caller already sent.
+            unknown = [n for n in missing if names.area_of(n) is None]
+            if unknown and len(unknown) == len(ctx["tables"]):
                 # Same rule as an unknown `area`: a scope that does not exist is refused, never
                 # answered as an empty model the agent would read as "this datasource has none".
-                return names.unknown_tables_error(missing, profile)
-            for n in missing:
-                ctx["tables"][n] = names.unknown_table_entry(n)
+                return names.unknown_tables_error(unknown, profile)
+            for i, n in enumerate(unknown):
+                if i < _SUGGESTED_MISSES:
+                    ctx["tables"][n] = names.unknown_table_entry(n)
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
@@ -2196,7 +2275,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         result["unknown_metric_names"] = unknown_metrics
     # The boundary the never-hide guarantee is relative to. A guarantee stated against a scope is
     # only honest if the reader can see which scope they got.
-    result["scope"] ={"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
+    result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
     # What execute_sql must be sent back on a hosted deployment (#364).
     result["model_version"] = model_version
 

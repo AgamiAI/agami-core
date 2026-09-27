@@ -37,34 +37,62 @@ def _write_model(root: Path) -> None:
     )
 
     def _metric(name: str, source_tables: list[str]) -> dict:
-        return {"name": name, "calculation": f"the {name}", "description": f"the {name}",
-                "bindings": {"PostgreSQL": f"SUM({name})"}, "source_tables": source_tables,
-                "confidence": "proposed", "review_state": "unreviewed"}
+        return {
+            "name": name,
+            "calculation": f"the {name}",
+            "description": f"the {name}",
+            "bindings": {"PostgreSQL": f"SUM({name})"},
+            "source_tables": source_tables,
+            "confidence": "proposed",
+            "review_state": "unreviewed",
+        }
 
     def _area(name: str, tables: dict[str, list[str]], metrics: list[dict]) -> None:
         adir = root / "subject_areas" / name
         (adir / "tables").mkdir(parents=True)
         (adir / "metrics").mkdir(parents=True)
         for t, cols in tables.items():
-            (adir / "tables" / f"{t}.yaml").write_text(yaml.safe_dump({
-                "name": t, "schema": "public", "storage_connection": "c", "grain": ["id"],
-                "description": f"{t} table",
-                "columns": [{"name": "id", "type": "integer", "primary_key": True}]
-                + [{"name": c, "type": "string"} for c in cols]}))
+            (adir / "tables" / f"{t}.yaml").write_text(
+                yaml.safe_dump(
+                    {
+                        "name": t,
+                        "schema": "public",
+                        "storage_connection": "c",
+                        "grain": ["id"],
+                        "description": f"{t} table",
+                        "columns": [{"name": "id", "type": "integer", "primary_key": True}]
+                        + [{"name": c, "type": "string"} for c in cols],
+                    }
+                )
+            )
         for m in metrics:
             (adir / "metrics" / f"{m['name']}.yaml").write_text(yaml.safe_dump(m))
-        (adir / "subject_area.yaml").write_text(yaml.safe_dump({
-            "name": name, "description": f"{name} area",
-            "tables": [{"storage_connection": "c", "schema": "public", "table": t}
-                       for t in tables]}))
+        (adir / "subject_area.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": name,
+                    "description": f"{name} area",
+                    "tables": [
+                        {"storage_connection": "c", "schema": "public", "table": t} for t in tables
+                    ],
+                }
+            )
+        )
 
-    _area(SALES, {"orders": ["amount"], "order_items": ["sku"]},
-          [_metric("order_count", ["orders"])])
+    _area(
+        SALES, {"orders": ["amount"], "order_items": ["sku"]}, [_metric("order_count", ["orders"])]
+    )
     _area(PEOPLE, {"users": ["email"]}, [_metric("headcount", ["users"])])
-    (root / "datasource.yaml").write_text(yaml.safe_dump({
-        "datasource": "acme", "version": 1,
-        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
-        "subject_areas": [f"subject_areas/{SALES}", f"subject_areas/{PEOPLE}"]}))
+    (root / "datasource.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "datasource": "acme",
+                "version": 1,
+                "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+                "subject_areas": [f"subject_areas/{SALES}", f"subject_areas/{PEOPLE}"],
+            }
+        )
+    )
 
 
 @pytest.fixture()
@@ -87,11 +115,11 @@ def _call(profile: str, **args) -> dict:
 @pytest.mark.parametrize(
     ("name", "expected_first"),
     [
-        ("ordrs", "orders"),          # a typo
-        ("Orders", "orders"),         # case alone
-        ("order", "orders"),          # a plural dropped
+        ("ordrs", "orders"),  # a typo
+        ("Orders", "orders"),  # case alone
+        ("order", "orders"),  # a plural dropped
         ("orderitems", "order_items"),  # a separator dropped
-        ("public.ordrs", "orders"),   # schema-qualified, as agents often write them
+        ("public.ordrs", "orders"),  # schema-qualified, as agents often write them
         ("order_count", "order count"),  # snake_case for a metric named in words
     ],
 )
@@ -153,7 +181,9 @@ def test_a_column_named_as_a_table_names_the_table_it_lives_in(profile):
 def test_an_unknown_area_leads_with_the_closest_real_one(profile):
     err = _call(profile, area="salez")["error"]
     assert err["did_you_mean"] == [SALES]
-    assert err["remediation"].startswith(f"No subject area named 'salez' in 'acme'. Did you mean {SALES!r}?")
+    assert err["remediation"].startswith(
+        f"No subject area named 'salez' in 'acme'. Did you mean {SALES!r}?"
+    )
 
 
 def test_a_table_named_as_an_area_says_which_parameter_it_belongs_in(profile):
@@ -211,3 +241,130 @@ def test_an_unknown_datasource_names_the_real_ones(profile):
     assert err["datasources"] == ["acme"]
     # A typo of a model that exists is not a model to go and build.
     assert "agami-connect" not in err["remediation"]
+
+
+# --- review findings (#410): each reproduced before the fix ---------------------------------------
+
+
+def _add_metric(root: Path, area: str, name: str, source_tables: list[str]) -> None:
+    import yaml
+
+    (root / "subject_areas" / area / "metrics" / f"{name}.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": name,
+                "calculation": f"the {name}",
+                "description": f"the {name}",
+                "bindings": {"PostgreSQL": f"SUM({name})"},
+                "source_tables": source_tables,
+                "confidence": "proposed",
+                "review_state": "unreviewed",
+            }
+        )
+    )
+
+
+def test_an_exact_match_is_suggested_alone():
+    """`Order_Count` means `order_count`; a fuzzy extra beside it only invites the wrong pick."""
+    assert tools._did_you_mean("Order_Count", ["order_count", "headcount"]) == ["order_count"]
+
+
+def test_the_name_asked_for_is_never_suggested_back():
+    assert tools._did_you_mean("orders", ["orders", "order_items"]) == ["order_items"]
+
+
+def test_a_metric_name_two_areas_share_points_at_the_in_scope_key(tmp_path, monkeypatch):
+    """`_all_metrics` keys the second copy `order_count (people)`, so inside `people` the bare name
+    misses. It used to be told the metric was "outside this call's scope" — the scope it was in."""
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    _add_metric(art / "acme", PEOPLE, "order_count", ["users"])
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    [miss] = _call("acme", area=PEOPLE, metric_names=["order_count"])["unknown_metric_names"]
+    assert miss["did_you_mean"] == ["order_count (people)"]
+    assert "outside" not in miss["hint"]
+
+    # The other direction: the other area's key, from inside `sales`, is outside — and is never
+    # answered with the same-named metric that happens to be in scope.
+    [miss] = _call("acme", area=SALES, metric_names=["order_count (people)"])[
+        "unknown_metric_names"
+    ]
+    assert "did_you_mean" not in miss
+    assert PEOPLE in miss["hint"] and "outside" in miss["hint"].lower()
+
+
+def test_a_misspelt_metric_outside_the_scope_is_hinted_not_left_empty(profile):
+    """`did_you_mean: []` reads as "no such metric" — the reading that sends an agent inventing
+    one. The closest match outside the scope is named, as a hint, so the scope stays as declared."""
+    [miss] = _call(profile, dataset_names=["orders"], metric_names=["headcnt"])[
+        "unknown_metric_names"
+    ]
+    assert "headcount" in miss["hint"] and PEOPLE in miss["hint"]
+    assert "did_you_mean" not in miss
+
+
+def test_a_case_only_miss_inside_a_declared_area_is_a_typo(profile):
+    """It once read "'Orders' is not in subject area 'sales'. 'Orders' is in subject area 'sales'"
+    — both halves about a name that resolves nowhere."""
+    err = _call(profile, area=SALES, dataset_names=["Orders"])["error"]
+    assert err["did_you_mean"] == {"Orders": ["orders"]}
+    assert "is in subject area" not in err["remediation"]
+
+
+def test_a_table_named_with_its_schema_is_not_refused_as_its_own_typo(tmp_path, monkeypatch):
+    """A table whose own `name` carries its schema is indexed in full while `dataset_names` arrives
+    bare (#258), so it does not resolve. That is a known gap, not the caller's mistake: refusing it
+    suggested back the very name that was sent."""
+    import yaml
+
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    tfile = art / "acme" / "subject_areas" / SALES / "tables" / "orders.yaml"
+    doc = yaml.safe_load(tfile.read_text())
+    doc["name"], doc["schema"] = "public.orders", None
+    tfile.write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    head = _call("acme", dataset_names=["orders"])
+    assert "error" not in head, "not refused"
+    assert "orders" not in head["tables"]["orders"].get("did_you_mean", [])
+
+
+def test_a_broken_model_keeps_the_loaders_error(profile, tmp_path):
+    """A named datasource that exists but fails to load is not a typo of itself: the loader's
+    message names the missing file, and "did you mean 'acme'?" would hide it."""
+    import shutil
+
+    shutil.rmtree(tmp_path / "art" / "acme" / "subject_areas" / PEOPLE)
+    err = _call(profile)["error"]
+    assert "did_you_mean" not in err
+    assert PEOPLE in err["remediation"]
+
+
+def test_a_served_deployment_suggests_the_served_list_or_nothing(profile, monkeypatch):
+    """With a store configured, the disk is not a stand-in for it: an unreachable store says nothing
+    rather than list whatever model folders sit in the container."""
+    import execute_sql
+
+    monkeypatch.setattr(execute_sql, "_hosted", lambda: True)
+    monkeypatch.setattr(tools, "_served_datasources", lambda _org: ["acme-prod", "beta"])
+    assert tools._known_datasources() == ["acme-prod", "beta"]
+    monkeypatch.setattr(tools, "_served_datasources", lambda _org: None)
+    assert tools._known_datasources() is None
+
+
+def test_suggestions_are_capped_per_call(profile):
+    """Each suggestion scans every name in the model and nothing bounds how many names a caller
+    sends, so only the first few misses are searched. The rest are still named."""
+    many = [f"bogus{i}" for i in range(30)]
+    tables = _call(profile, dataset_names=["orders", *many])["tables"]
+    assert (
+        sum("did_you_mean" in tables[n] or "hint" in tables[n] for n in many)
+        <= tools._SUGGESTED_MISSES
+    )
+    assert all(tables[n]["error"] for n in many)
+
+    missed = _call(profile, metric_names=[*many, *many])["unknown_metric_names"]
+    assert [m["name"] for m in missed] == many, "deduped, and every miss still named"
+    assert all(set(m) == {"name"} for m in missed[tools._SUGGESTED_MISSES :])

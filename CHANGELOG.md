@@ -30,7 +30,12 @@ below corresponds to one such version.
   - `metric_names`: a name that selected nothing was dropped without a word. It is now listed in
     `unknown_metric_names`, with `did_you_mean`, or a `hint` when the metric exists outside the
     declared scope. It is still not added: naming a metric never widens the scope.
-  - `datasource`: a typo lists the real datasources, with the closest first.
+  - `datasource`: a typo lists the real datasources, with the closest first. A datasource that
+    exists but fails to load keeps the loader's error, which names the missing file.
+  - A metric name two areas share points at the in-scope key (`name (area)`), not elsewhere.
+  - An exact match is suggested alone, and the name sent is never suggested back.
+  - Only the first 10 distinct misses in a call are searched; the rest are still named. Each
+    search scans the whole model, and nothing bounds how many names a caller sends.
 
 ## [0.9.7] — 2026-09-26
 
