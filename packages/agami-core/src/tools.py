@@ -4617,8 +4617,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Narrow to one subject area. A served deployment returns that area "
                         "plus the cross-area examples; the local file path has no cross-area "
-                        "bucket on disk, so it returns that area alone. A `subject_areas[].name` "
-                        "exactly as get_datasource_schema gave it; an unknown one is refused."
+                        "bucket on disk, so it returns that area alone. Omit it for the top "
+                        "examples across ALL areas. A `subject_areas[].name` exactly as "
+                        "get_datasource_schema gave it; a misspelt one is refused, never widened."
                     ),
                 },
                 "top_k": {

@@ -313,3 +313,25 @@ def test_an_unknown_area_is_refused_on_a_served_deployment(tmp_path, monkeypatch
     assert err["error"]["did_you_mean"] == ["sales"]
     ok = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": "sales"}))
     assert [e["question"] for e in ok["examples"]] == ["how many rows overall"]
+
+
+@pytest.mark.parametrize("omitted", [{}, {"area": None}, {"area": ""}, {"area": []}])
+def test_an_omitted_area_ranks_across_every_area_on_a_served_deployment(
+    tmp_path, monkeypatch, local_model, omitted
+):
+    """Leaving `area` out is deliberate: the caller wants the best examples wherever they live. Only
+    a NAMED area is checked against the model, so no spelling of "none" may be refused or narrowed."""
+    from semantic_model import loader
+
+    org = loader.load_datasource(tmp_path / "main")
+    url = _seed(tmp_path, [
+        {"area": "sales", "question": "orders by region", "sql": "SELECT 1"},
+        {"area": "assets", "question": "assets by status", "sql": "SELECT 2"},
+        {"area": None, "question": "rows overall", "sql": "SELECT 3"},
+    ])
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setattr(tools, "get_cached_org", lambda _p: org)
+
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "query": "by", **omitted}))
+    assert {e["question"] for e in out["examples"]} == {
+        "orders by region", "assets by status", "rows overall"}
