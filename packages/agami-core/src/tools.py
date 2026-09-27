@@ -1806,7 +1806,8 @@ class _ModelNames(NamedTuple):
         if shared:
             entry["did_you_mean"] = shared
             entry["hint"] = (
-                f"More than one area defines {name!r}; pass the key of the one you mean."
+                f"{name!r} is defined more than once, so each is keyed by where it is defined; "
+                f"pass the key of the one you mean."
             )
             return entry
         outside = [

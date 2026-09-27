@@ -33,7 +33,10 @@ below corresponds to one such version.
   - `datasource`: a typo lists the real datasources, with the closest first. A datasource that
     exists but fails to load keeps the loader's error, which names the missing file.
   - A metric name two areas share points at the in-scope key (`name (area)`), not elsewhere.
-  - An exact match is suggested alone, and the name sent is never suggested back.
+  - An exact match is suggested alone, and the name sent is never suggested back. The same words
+    in another order (`orders_fact`) count as exact. Fuzzy matching uses a 0.7 similarity floor,
+    not difflib's 0.6: on an 80-area test model that cut suggestions for unrelated words from 17%
+    to about 1% with the same typo recall.
   - Only the first 10 distinct misses of each kind (tables, metrics) are searched; the rest are
     still named. Each search scans the whole model, and nothing bounds how many names a caller
     sends. The `area` + `dataset_names` check now looks each table up once instead of rescanning
