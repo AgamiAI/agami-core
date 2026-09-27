@@ -12,6 +12,21 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **`get_datasource_schema` answers a wrong name with the right ones.** A datasource, area,
+  table or metric name the model does not have now comes back with `did_you_mean` (the closest
+  real names, or nothing when nothing is close), and a `hint` when a real name was sent in the
+  wrong parameter: an area as a table, a column as a table, a table as an area. A table scope
+  naming only unknown tables is refused rather than answered as an empty model; unknown
+  `metric_names` are reported in `unknown_metric_names` instead of dropped. Values of the wrong
+  shape are repaired where the intent is clear (`"orders"` for `["orders"]`, `["sales"]` for
+  `"sales"`) and otherwise refused as `invalid_argument`; an unknown `mode` is refused rather
+  than silently becoming `summary`. The tool description now says where each name comes from.
+- **`get_prompt_examples` refuses an unknown `area`** with the same suggestions, instead of
+  answering as if it were a real area with no examples. Omitting `area` still returns the top
+  examples across every area.
+
 ## [0.9.7] — 2026-09-26
 
 ### Changed

@@ -191,6 +191,9 @@ class DatasourceSchemaResult(_Contract):
     # declares no single engine. Declared because a client that arrived here without listing
     # datasources acts on it.
     dialect: dict[str, Any] | None = None
+    # One `{"name", "did_you_mean" | "hint"}` per `metric_names` entry that selected nothing; absent
+    # when every name resolved. Declared because the alternative was the silent drop it replaces.
+    unknown_metric_names: list[dict[str, Any]] | None = None
     # Pass 2 (dataset_names): per-table context + relationships/metrics from get_table_context.
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None

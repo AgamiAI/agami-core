@@ -23,7 +23,13 @@ import sql_dialect_rules  # noqa: E402
 import tools  # noqa: E402
 import yaml  # noqa: E402
 from semantic_model import build  # noqa: E402
-from semantic_model.models import Datasource, StorageConnection, SubjectArea  # noqa: E402
+from semantic_model.models import (  # noqa: E402
+    Column,
+    Datasource,
+    StorageConnection,
+    SubjectArea,
+    Table,
+)
 
 
 def _serve(tmp_path, monkeypatch, storage_type: str, *, second_engine: str | None = None,
@@ -42,7 +48,12 @@ def _serve(tmp_path, monkeypatch, storage_type: str, *, second_engine: str | Non
     org = Datasource(
         datasource="crm",
         storage_connections=conns,
-        subject_areas=[SubjectArea(name="Sales", description="Sales area")],
+        # One real table, so the table-scoped call below reaches its branch rather than the
+        # refusal every-name-unknown now gets.
+        subject_areas=[SubjectArea(
+            name="Sales", description="Sales area",
+            tables_defined=[Table(name="x", storage_connection="warehouse",
+                                  columns=[Column(name="id", type="integer")])])],
     )
     build.write_tree(org, tmp_path / "crm")
     if dangling_ref:
