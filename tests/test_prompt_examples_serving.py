@@ -157,17 +157,28 @@ def test_an_area_with_no_examples_on_disk_gives_the_empty_note(local_library):
     assert "prompt_examples" in out["note"]
 
 
-@pytest.mark.parametrize("bad", [True, 1, 0, [], {}, 3.5])
-def test_a_non_string_area_does_not_crash_the_local_path(local_library, bad):
-    """`(x or "").strip()` raises on any TRUTHY non-string, and this handler is reachable outside
-    a schema-validating transport — tests and embedders call it directly.
-
-    It is a regression risk specific to this change: before `area` was honoured on the local path
-    the argument was ignored entirely, so no input could crash it. Treated as "no scope" rather
-    than refused — this path returns the curated library and has no vocabulary for an input error.
-    """
-    out = tools.tool_get_prompt_examples({"datasource": local_library, "area": bad})
+@pytest.mark.parametrize("empty", [None, "", []])
+def test_an_empty_area_is_no_scope(local_library, empty):
+    out = tools.tool_get_prompt_examples({"datasource": local_library, "area": empty})
     assert "subject area: sales" in out and "subject area: assets" in out
+
+
+def test_an_area_sent_as_a_list_of_one_still_narrows(local_library):
+    """`["sales"]` was read as no scope: every area's examples, to a caller that believed it had
+    narrowed to one."""
+    out = tools.tool_get_prompt_examples({"datasource": local_library, "area": ["sales"]})
+    assert "subject area: sales" in out and "subject area: assets" not in out
+
+
+@pytest.mark.parametrize("bad", [True, 1, 0, {}, 3.5, ["sales", "assets"]])
+def test_an_area_of_no_usable_shape_is_refused_not_widened(local_library, bad):
+    """This path used to treat any non-string as "no scope" — no crash, but the caller got every
+    area while believing it had asked for one. It is now refused, naming what `area` takes, the
+    same answer `get_datasource_schema` gives."""
+    err = json.loads(tools.tool_get_prompt_examples({"datasource": local_library, "area": bad}))[
+        "error"
+    ]
+    assert err["kind"] == "invalid_argument" and "`area`" in err["remediation"]
 
 
 def test_a_whitespace_only_area_is_no_scope_not_an_empty_scope(local_library):
@@ -206,3 +217,99 @@ def test_one_undecodable_area_does_not_take_down_the_others(local_library, tmp_p
 
     assert "subject area: sales" in out
     assert "subject area: assets" not in out
+
+
+# --- an area the model does not have -------------------------------------------------------------
+
+
+@pytest.fixture()
+def local_model(tmp_path, monkeypatch):
+    """A local install with a semantic model (areas `sales`, `assets`) and examples for `sales`."""
+    import yaml
+
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "AGAMI_PROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    root = tmp_path / "main"
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"})
+    )
+    for area, table in (("sales", "orders"), ("assets", "devices")):
+        adir = root / "subject_areas" / area
+        (adir / "tables").mkdir(parents=True)
+        (adir / "tables" / f"{table}.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": table,
+                    "schema": "public",
+                    "storage_connection": "c",
+                    "grain": ["id"],
+                    "columns": [{"name": "id", "type": "integer", "primary_key": True}],
+                }
+            )
+        )
+        (adir / "subject_area.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": area,
+                    "tables": [{"storage_connection": "c", "schema": "public", "table": table}],
+                }
+            )
+        )
+    (root / "datasource.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "datasource": "main",
+                "version": 1,
+                "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+                "subject_areas": ["subject_areas/sales", "subject_areas/assets"],
+            }
+        )
+    )
+    (root / "prompt_examples" / "sales").mkdir(parents=True)
+    (root / "prompt_examples" / "sales" / "examples.yaml").write_text(
+        "- question: how many orders\n  sql: SELECT 1\n"
+    )
+    tools.bootstrap_paths()
+    return "main"
+
+
+def test_an_unknown_area_is_refused_with_the_real_ones_locally(local_model):
+    """It answered as a real area with no examples — the "no examples" note — which reads to an
+    agent as "this area has none" and is a reason to write SQL without them."""
+    err = json.loads(tools.tool_get_prompt_examples({"datasource": local_model, "area": "salez"}))[
+        "error"
+    ]
+    assert err["kind"] == "not_found"
+    assert err["did_you_mean"] == ["sales"]
+    assert "Known areas: assets, sales." in err["remediation"]
+
+
+def test_a_table_sent_as_an_area_says_which_parameter_it_belongs_in(local_model):
+    err = json.loads(tools.tool_get_prompt_examples({"datasource": local_model, "area": "orders"}))[
+        "error"
+    ]
+    assert "not an area" in err["hint"] and "'sales'" in err["hint"]
+
+
+def test_a_real_area_with_no_examples_still_answers_empty(local_model):
+    """Only an area the MODEL lacks is refused; one it has, with no examples yet, is real."""
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_model, "area": "assets"}))
+    assert out["examples"] == []
+
+
+def test_an_unknown_area_is_refused_on_a_served_deployment(tmp_path, monkeypatch, local_model):
+    """Served, the query is `area = ? OR area IS NULL`, so an unknown area returned the cross-area
+    examples alone — a plausible, non-empty answer to a question nobody asked."""
+    from semantic_model import loader
+
+    org = loader.load_datasource(tmp_path / "main")
+    url = _seed(tmp_path, [{"area": None, "question": "how many rows overall", "sql": "SELECT 3"}])
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    monkeypatch.setattr(tools, "get_cached_org", lambda _p: org)
+
+    err = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": "salez"}))
+    assert err["error"]["did_you_mean"] == ["sales"]
+    ok = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": "sales"}))
+    assert [e["question"] for e in ok["examples"]] == ["how many rows overall"]

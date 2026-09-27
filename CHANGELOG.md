@@ -49,6 +49,11 @@ below corresponds to one such version.
     refused with the valid modes.
   - A table the model defines but `dataset_names` cannot reach yet (its model `name` carries its
     schema, #258) is not refused; it is told to use its area.
+  - `get_prompt_examples` gives the same answers for `area`. An unknown area answered as a real,
+    empty one: served, only the cross-area examples came back; locally, the "no examples" note.
+    It is now refused with `did_you_mean`, checked against the model (an area the model has but
+    with no examples still answers empty). A list of one narrows, and any other non-string is
+    refused; before, it was read as no scope and returned every area.
   - The tool description now says where each name comes from and what to do with a miss. The
     server instructions extend the column rule to area, table and metric names.
 

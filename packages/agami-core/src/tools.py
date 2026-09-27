@@ -1884,7 +1884,7 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
 _SCHEMA_MODES = ("auto", "full", "summary", "index")
 
 
-def _schema_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]":
+def _normalized_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]":
     """`args` with the shape mistakes an agent makes repaired, or the refusal for one that isn't.
 
     Neither transport validates arguments against the advertised schema, so these arrived as-is.
@@ -1908,7 +1908,9 @@ def _schema_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]":
             return refuse(f'`{key}` must be a list of names, e.g. ["name"].')
     area = fixed.get("area")
     if isinstance(area, list):
-        if len(area) == 1 and isinstance(area[0], str):
+        if not area:
+            fixed["area"] = None  # an empty list names no area, as an empty string does
+        elif len(area) == 1 and isinstance(area[0], str):
             fixed["area"] = area[0]
         else:
             return refuse(
@@ -1931,6 +1933,31 @@ def _schema_args(args: dict[str, Any]) -> "tuple[dict[str, Any], str | None]":
             )
         fixed["mode"] = folded
     return fixed, None
+
+
+def _unknown_area_error(org, area: str, profile: str) -> str:
+    """The refusal for an `area` the model does not have, naming the ones it does.
+
+    Shared by `get_datasource_schema` and `get_prompt_examples`, which take the same parameter and
+    so owe the same answer to the same mistake.
+    """
+    names = _ModelNames.of(org)
+    known = ", ".join(sorted(names.areas))
+    guesses = _did_you_mean(area, names.areas)
+    hint = names.area_hint(area)
+    lead = f"No subject area named {area!r} in {profile!r}."
+    if hint:
+        lead += f" {hint}"
+    elif guesses:
+        lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
+    error: dict[str, Any] = {
+        "kind": "not_found",
+        "remediation": f"{lead} Known areas: {known}.",
+        "did_you_mean": guesses,
+    }
+    if hint:
+        error["hint"] = hint
+    return json.dumps({"error": error}, indent=2)
 
 
 def _scoped_metrics(
@@ -2149,7 +2176,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     """
     # A malformed argument is answered before anything is loaded: it is the same mistake on any
     # datasource, and repairing it first means the checks below see the shape they expect.
-    args, malformed = _schema_args(args)
+    args, malformed = _normalized_args(args)
     if malformed is not None:
         return malformed
     # With several datasources served, an omission is refused before it can resolve to a fallback
@@ -2206,23 +2233,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # exist, and an empty model reads to an agent as "this datasource has none" — after which
         # it invents table names. Every neighbouring surface names the miss: `get_table_context`
         # returns `{"error": "not found in scope"}` per table, `get_subject_area_bundle` raises.
-        names = _ModelNames.of(org)
-        known = ", ".join(sorted(names.areas))
-        guesses = _did_you_mean(scope.area, names.areas)
-        hint = names.area_hint(scope.area)
-        lead = f"No subject area named {scope.area!r} in {profile!r}."
-        if hint:
-            lead += f" {hint}"
-        elif guesses:
-            lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
-        error: dict[str, Any] = {
-            "kind": "not_found",
-            "remediation": f"{lead} Known areas: {known}.",
-            "did_you_mean": guesses,
-        }
-        if hint:
-            error["hint"] = hint
-        return json.dumps({"error": error}, indent=2)
+        return _unknown_area_error(org, scope.area, profile)
     if scope.level == "table" and scope.area:
         # `area` + `dataset_names` is a compound declaration: these tables, in that area. It
         # VALIDATES rather than overriding the per-table lookup — overriding is what returned
@@ -2446,6 +2457,28 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _unknown_example_area(area: Any, profile: str) -> "str | None":
+    """The refusal for an `area` the datasource's model does not have, or None.
+
+    An unknown area used to answer as if it were real and empty: served, `area = ? OR area IS NULL`
+    returned only the cross-area examples; locally, the "no examples" note. Either reads to an
+    agent as "this area has none" — the wrong lesson, and a reason to write SQL without them.
+
+    Checked against the model, since that is what defines the areas; an area with no examples is
+    real and still answers empty. Where no model loads the old behaviour stands: there is nothing
+    to say the name is wrong against.
+    """
+    if not (isinstance(area, str) and area.strip()):
+        return None
+    try:
+        org = get_cached_org(profile)
+    except (FileNotFoundError, ImportError):
+        return None
+    if any(sa.name == area.strip() for sa in org.subject_areas):
+        return None
+    return _unknown_area_error(org, area.strip(), profile)
+
+
 def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     """Ask Agami `get_prompt_examples`: the few-shot library.
 
@@ -2454,6 +2487,11 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
+    # The same shape repair and refusal as `get_datasource_schema`: an `area` sent as a list was
+    # dropped, and the caller got every area's examples while believing it had narrowed to one.
+    args, malformed = _normalized_args(args)
+    if malformed is not None:
+        return malformed
     # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
     # examples from a guessed datasource would teach SQL for the wrong one.
     choices = _datasources_to_choose_from(args)
@@ -2462,6 +2500,9 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
         if choose is not None:
             return choose
     profile = _resolve_call_datasource(args)
+    unknown_area = _unknown_example_area(args.get("area"), profile)
+    if unknown_area is not None:
+        return unknown_area
 
     from store import Store
 
@@ -2507,13 +2548,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # served query is `area = ? OR area IS NULL`, i.e. that area PLUS the cross-area bucket; on
     # disk the bucket has no directory to live in, so the named area alone is the whole of it.
     _area = args.get("area")
-    # `isinstance` rather than a bare truthiness test: `(x or "").strip()` raises on any TRUTHY
-    # non-string (`True`, `1`), and this handler is reachable outside a schema-validating
-    # transport — tests and embedders call it directly. Before `area` was honoured here the local
-    # path ignored it entirely and could not crash on it, so guarding is keeping a promise this
-    # function already made rather than hardening it. A non-string is treated as no scope, which
-    # is what the caller got before, rather than being refused: this path returns the curated
-    # library and has no vocabulary for an input error.
+    # Always a string or None here: `_normalized_args` repaired or refused every other shape.
     wanted = _area.strip() if isinstance(_area, str) else ""
     blocks: list[str] = []
     if ex_dir.is_dir():
@@ -4632,7 +4667,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Narrow to one subject area. A served deployment returns that area "
                         "plus the cross-area examples; the local file path has no cross-area "
-                        "bucket on disk, so it returns that area alone."
+                        "bucket on disk, so it returns that area alone. A `subject_areas[].name` "
+                        "exactly as get_datasource_schema gave it; an unknown one is refused."
                     ),
                 },
                 "top_k": {
