@@ -1599,11 +1599,23 @@ _LIST_TABLES_ADVICE = (
 _SUGGESTED_MISSES = 10
 
 
+# difflib's similarity floor for a fuzzy suggestion. Measured on an 80-area, 2,900-table synthetic
+# model: 0.6 (difflib's default) suggested something for 17% of unrelated dictionary words; 0.7
+# cut that to about 1% with the same recall on single and double typos; 0.75 began losing
+# abbreviations (`ord_items` for `order_items`).
+_FUZZY_CUTOFF = 0.7
+
+
+def _word_set(name: str) -> frozenset[str]:
+    """The words of a name, ignoring case, order and separators."""
+    return frozenset(w for w in re.split(r"[\s_-]+", _bare_name(name).casefold()) if w)
+
+
 def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]:
     """Up to `n` of `candidates` a caller most plausibly meant by `name`, best first.
 
     An agent's wrong name is nearly always one edit from a real one — a case change, a plural
-    dropped, a separator lost, a schema prefix added — so those are tried in that order before a
+    dropped, a separator lost, a schema prefix added, words swapped — so those are tried before a
     fuzzy match, which alone ranks `order` nearer `order_items` than `orders`. Nothing close
     returns `[]`: an unrelated suggestion reads as an answer, and is how a guess reaches SQL. For
     the same reason an exact match is returned alone, and the name asked for is never suggested
@@ -1625,6 +1637,12 @@ def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]
     exact = [c for c, f in pool.items() if f == want]
     if exact:
         return exact[:n]
+    # The same words in another order (`orders_fact` for `fact_orders`) is as certain as a case
+    # change, and neither containment nor a character-level fuzzy match finds it.
+    words = _word_set(name)
+    same_words = [c for c in pool if len(words) > 1 and _word_set(c) == words]
+    if same_words:
+        return same_words[:n]
     # Containment either way, shortest gap first. The length floor stops a two-letter name from
     # matching half the model.
     contains = sorted(
@@ -1632,7 +1650,10 @@ def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]
         key=lambda c: abs(len(pool[c]) - len(want)),
     )
     by_fold = {f: c for c, f in reversed(pool.items())}  # first occurrence wins
-    fuzzy = [by_fold[f] for f in difflib.get_close_matches(want, list(by_fold), n=n, cutoff=0.6)]
+    fuzzy = [
+        by_fold[f]
+        for f in difflib.get_close_matches(want, list(by_fold), n=n, cutoff=_FUZZY_CUTOFF)
+    ]
     return list(dict.fromkeys(contains + fuzzy))[:n]
 
 
@@ -1651,6 +1672,7 @@ class _ModelNames(NamedTuple):
     # name rides beside the key because a key alone cannot tell `revenue (people)`, a collision,
     # from a metric really named `revenue (net)`.
     metric_keys: dict[str, "tuple[str, str | None]"]  # key -> (metric name, area or None)
+    folded_tables: frozenset[str]  # casefolded bare table names, for "is this a table at all"
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
@@ -1663,7 +1685,13 @@ class _ModelNames(NamedTuple):
                 for c in t.columns:
                     columns.setdefault(c.name.casefold(), []).append(bare)
         metric_keys = {k: (m.name, a) for k, (m, a) in _all_metrics(org).items()}
-        return cls([sa.name for sa in org.subject_areas], tables, columns, metric_keys)
+        return cls(
+            [sa.name for sa in org.subject_areas],
+            tables,
+            columns,
+            metric_keys,
+            frozenset(t.casefold() for t in tables),
+        )
 
     def area_of(self, table: str) -> "str | None":
         """The area defining `table`, matched EXACTLY as the loader matches.
@@ -1675,8 +1703,15 @@ class _ModelNames(NamedTuple):
         return self.tables.get(_bare_name(table))
 
     def table_hint(self, name: str) -> "str | None":
-        """Why `name` is not a table, when it is a real name of another kind."""
+        """Why `name` is not a table, when it is a real name of another kind.
+
+        Only when no table answers to it in any case: a name can be an area AND a table
+        (`payments`), and there `Payments` is a case typo of the table — telling the caller it "is a
+        subject area, not a table" would be false.
+        """
         folded = name.casefold()
+        if _bare_name(folded) in self.folded_tables:
+            return None
         area = next((a for a in self.areas if a.casefold() == folded), None)
         if area:
             return f"{area!r} is a subject area, not a table: pass it as `area`."
@@ -2160,7 +2195,10 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             located = [
                 f"{t!r} is in subject area {a!r}."
                 if (a := names.area_of(t))
-                else f"{t!r} is in no subject area. {names.miss_advice(t, guesses)}".rstrip()
+                # A wrong-kind hint says what the name IS; "in no subject area" beside it read as
+                # a contradiction ("'sales' is in no subject area. 'sales' is a subject area").
+                else names.table_hint(t)
+                or f"{t!r} is in no subject area. {names.miss_advice(t, guesses)}".rstrip()
                 for t in sorted(misplaced)
             ]
             return json.dumps(

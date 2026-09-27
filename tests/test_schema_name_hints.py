@@ -121,11 +121,32 @@ def _call(profile: str, **args) -> dict:
         ("orderitems", "order_items"),  # a separator dropped
         ("public.ordrs", "orders"),  # schema-qualified, as agents often write them
         ("order_count", "order count"),  # snake_case for a metric named in words
+        ("items_order", "order_items"),  # the same words in another order
     ],
 )
 def test_the_closest_real_name_comes_first(name, expected_first):
     candidates = ["orders", "order_items", "users", "order count"]
     assert tools._did_you_mean(name, candidates)[0] == expected_first
+
+
+@pytest.mark.parametrize("word", ["sandcastles", "unicorns", "mosquito", "sedative", "scion"])
+def test_an_unrelated_word_suggests_nothing(word):
+    """Each of these drew a suggestion at difflib's default cutoff on a wide synthetic model
+    (`sandcastles` -> `stg_cases`), and an unrelated suggestion reads as an answer."""
+    wide = [
+        "stg_cases",
+        "cases",
+        "dim_course",
+        "courses",
+        "dim_position",
+        "media_trip_events",
+        "cases_archive",
+        "inspections",
+        "sessions",
+        "fact_orders",
+        "order_items",
+    ]
+    assert tools._did_you_mean(word, wide) == []
 
 
 def test_nothing_close_suggests_nothing():
@@ -142,7 +163,7 @@ def test_a_scope_of_only_unknown_tables_is_refused_with_the_closest_real_ones(pr
     model — an empty model reads to an agent as "this datasource has none"."""
     err = _call(profile, dataset_names=["ordrs"])["error"]
     assert err["kind"] == "not_found"
-    assert err["did_you_mean"] == {"ordrs": ["orders", "order_items"]}
+    assert err["did_you_mean"] == {"ordrs": ["orders"]}
     assert "orders" in err["remediation"]
 
 
@@ -207,7 +228,7 @@ def test_a_misspelt_table_inside_a_declared_area_is_a_typo_not_a_misplacement(pr
     """Before this, `ordrs` with `area` was reported as "not in subject area" — true, and useless:
     it is in no area at all."""
     err = _call(profile, area=SALES, dataset_names=["ordrs"])["error"]
-    assert err["did_you_mean"] == {"ordrs": ["orders", "order_items"]}
+    assert err["did_you_mean"] == {"ordrs": ["orders"]}
 
 
 # --- metric_names -------------------------------------------------------------------------------
@@ -510,3 +531,42 @@ def test_a_metric_close_to_nothing_anywhere_says_so(profile):
     """Searched in scope and out of it, nothing close: the one case where `[]` is the true answer."""
     [miss] = _call(profile, metric_names=["zzzzzz"])["unknown_metric_names"]
     assert miss == {"name": "zzzzzz", "did_you_mean": []}
+
+
+def test_a_case_typo_of_a_name_that_is_both_an_area_and_a_table_is_a_table_typo(
+    tmp_path, monkeypatch
+):
+    """Found on a wide model: `payments` was an area AND a table, and `Payments` was told it "is a
+    subject area, not a table" — false, and it hid the one-letter fix."""
+    import yaml
+
+    art = tmp_path / "art"
+    _write_model(art / "acme")
+    tdir = art / "acme" / "subject_areas" / SALES / "tables"
+    (tdir / f"{PEOPLE}.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": PEOPLE,
+                "schema": "public",
+                "storage_connection": "c",
+                "grain": ["id"],
+                "columns": [{"name": "id", "type": "integer", "primary_key": True}],
+            }
+        )
+    )
+    sa = art / "acme" / "subject_areas" / SALES / "subject_area.yaml"
+    doc = yaml.safe_load(sa.read_text())
+    doc["tables"].append({"storage_connection": "c", "schema": "public", "table": PEOPLE})
+    sa.write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+
+    err = _call("acme", dataset_names=["People"])["error"]
+    assert "hints" not in err
+    assert err["did_you_mean"] == {"People": [PEOPLE]}
+
+
+def test_a_wrong_kind_name_in_the_misplaced_refusal_is_not_also_in_no_area(profile):
+    remediation = _call(profile, area=PEOPLE, dataset_names=["orders", SALES])["error"][
+        "remediation"
+    ]
+    assert f"{SALES!r} is in no subject area" not in remediation
