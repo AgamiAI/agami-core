@@ -865,16 +865,17 @@ def test_a_malformed_missed_entry_is_stored_rather_than_raised(served):
             {"kind": "table", "name": "b", "did_you_mean": "orders"},
             {"kind": "table", "name": "c", "did_you_mean": 7},
             {"kind": "table", "name": _Unprintable()},
+            "orders",
         ],
     )
 
     row = _one(served)
-    empty, none, text, number, unprintable = _missed(row)
+    empty, none, text, number, unprintable, bare = _missed(row)
     assert empty == {"kind": "", "name": ""}
     assert none == {"kind": "table", "name": "a"}
     assert text["did_you_mean"] == ["orders"] and number["did_you_mean"] == ["7"]
-    assert isinstance(unprintable["name"], str)
-    assert row["miss_count"] == 5
+    assert isinstance(unprintable["name"], str) and bare == {"kind": "", "name": "orders"}
+    assert row["miss_count"] == 6
 
 
 def test_building_missed_entries_stops_once_the_budget_is_spent(monkeypatch):
