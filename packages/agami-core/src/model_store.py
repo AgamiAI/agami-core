@@ -646,8 +646,10 @@ class DbActivitySink:
             "INSERT INTO tool_calls (id, ts, org_id, actor, tool_name, datasource, sql, row_count, "
             "execution_ms, success, error_kind, source, user_question, agent_query, thread_id, "
             "correlation_id, refusal_detail, refusal_remediation, audit_id, basis, "
-            "conversation_id, client_model, datasource_source, example_id, example_use) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "conversation_id, client_model, datasource_source, example_id, example_use, "
+            "arguments, missed, miss_count, result_chars, result_tokens_est) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?, ?)",
             (
                 uuid4().hex,
                 record.ts,
@@ -694,6 +696,14 @@ class DbActivitySink:
                 # above so an embedder on an older record shape writes NULLs.
                 getattr(record, "example_id", None),
                 getattr(record, "example_use", None),
+                # What the call was sent, what missed and the reply's size (027, ACE-159),
+                # `getattr`-guarded like the columns above so an embedder on an older record shape
+                # writes NULLs.
+                getattr(record, "arguments", None),
+                getattr(record, "missed", None),
+                getattr(record, "miss_count", None),
+                getattr(record, "result_chars", None),
+                getattr(record, "result_tokens_est", None),
             ),
         )
         self._store.commit()

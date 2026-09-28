@@ -36,6 +36,12 @@ below corresponds to one such version.
 - **`get_prompt_examples` refuses an unknown `area`** with the same suggestions, instead of
   answering as if it were a real area with no examples. Omitting `area` still returns the top
   examples across every area.
+- **The activity log records what each tool call really did (ACE-159).** A failed `execute_sql`
+  on the HTTP server records its real kind (`syntax`, `timeout`, `auth`, …) instead of `failed`.
+  Each tool call now also records the parameters it was sent, the names the model did not have
+  and what was offered instead, how many names missed, and the size of the reply. A call that
+  answered with one name missing is still a success, with a miss count above zero. Migration
+  `027_tool_calls_facts.sql` adds the five columns; no tool response changes.
 
 ### Fixed
 

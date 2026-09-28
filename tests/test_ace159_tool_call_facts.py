@@ -8,6 +8,8 @@ The failure-kind and miss criteria are driven over the real HTTP transport (`mcp
 under a `TestClient`) and read back from the row, not by calling `record_tool_call` directly. The
 typed outcome and the per-call context exist only on that path, and the last time a recorded field
 was tested only at the function, the column was NULL on every production row while the tests passed.
+The one exception is a wrong-shape argument, which the MCP SDK rejects over HTTP before the handler
+runs; see `_as_the_transport_records`.
 
 Synthetic throughout: agami-core is public.
 """
@@ -35,6 +37,7 @@ if str(PKG_SRC) not in sys.path:
 import execute_sql  # noqa: E402
 import tools  # noqa: E402
 from store import Store  # noqa: E402
+
 from test_schema_name_hints import _write_model  # noqa: E402
 
 PROFILE = "acme"
@@ -66,6 +69,17 @@ def served(tmp_path, monkeypatch):
     monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://your-host.example.com")
     monkeypatch.setenv("AGAMI_SIGNING_SECRET", "x" * 40)
+    # Served, the model is read from the database, so it is seeded there from the tree on disk.
+    import model_store
+    from semantic_model import loader
+
+    tools.resolved_org_id.cache_clear()
+    s = Store.connect(app_db)
+    model_store.write_datasource(
+        s, PROFILE, loader.load_datasource(artifacts / PROFILE), org_id=tools._current_org_id()
+    )
+    s.commit()
+    s.close()
     return app_db
 
 
@@ -90,18 +104,36 @@ def _http(calls, *, executor=None, extra_tools=None) -> list[str]:
             tools.set_injected_executor(None)
         elif executor is not None:
             tools.set_injected_executor(executor)
-        init = client.post("/mcp", headers=headers, json={
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                       "clientInfo": {"name": "t", "version": "1"}}})
+        init = client.post(
+            "/mcp",
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "1"},
+                },
+            },
+        )
         session = init.headers.get("mcp-session-id")
         headers2 = {**headers, **({"mcp-session-id": session} if session else {})}
-        client.post("/mcp", headers=headers2,
-                    json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        client.post(
+            "/mcp", headers=headers2, json={"jsonrpc": "2.0", "method": "notifications/initialized"}
+        )
         for i, (name, arguments) in enumerate(calls):
-            resp = client.post("/mcp", headers=headers2, json={
-                "jsonrpc": "2.0", "id": 10 + i, "method": "tools/call",
-                "params": {"name": name, "arguments": arguments}})
+            resp = client.post(
+                "/mcp",
+                headers=headers2,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 10 + i,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
             assert resp.status_code == 200, resp.text
             texts.append(resp.json()["result"]["content"][0]["text"])
     return texts
@@ -204,7 +236,9 @@ def test_one_real_and_one_unknown_table_is_a_success_with_one_miss(served):
 
 def test_a_partial_miss_past_the_suggestion_cap_is_still_counted(served):
     unknown = [f"zz_unknown_{i:02d}" for i in range(tools._SUGGESTED_MISSES + 2)]
-    _http([("get_datasource_schema", {"datasource": PROFILE, "dataset_names": ["orders", *unknown]})])
+    _http(
+        [("get_datasource_schema", {"datasource": PROFILE, "dataset_names": ["orders", *unknown]})]
+    )
 
     row = _one(served)
     assert row["success"] == 1 and row["miss_count"] == len(unknown)
@@ -221,8 +255,14 @@ def test_a_defined_but_unresolvable_table_is_not_a_miss(served, monkeypatch):
         return ctx
 
     monkeypatch.setattr(tools, "_table_contexts", _one_unresolved)
-    _http([("get_datasource_schema",
-            {"datasource": PROFILE, "dataset_names": ["orders", "order_items"]})])
+    _http(
+        [
+            (
+                "get_datasource_schema",
+                {"datasource": PROFILE, "dataset_names": ["orders", "order_items"]},
+            )
+        ]
+    )
 
     row = _one(served)
     assert (row["success"], row["miss_count"], row["missed"]) == (1, None, None)
@@ -282,8 +322,14 @@ def test_a_scope_where_no_named_table_exists_records_every_name(served):
 
 
 def test_tables_outside_the_declared_area_are_misplaced_or_unknown(served):
-    _http([("get_datasource_schema",
-            {"datasource": PROFILE, "area": "sales", "dataset_names": ["users", "usrs"]})])
+    _http(
+        [
+            (
+                "get_datasource_schema",
+                {"datasource": PROFILE, "area": "sales", "dataset_names": ["users", "usrs"]},
+            )
+        ]
+    )
 
     row = _one(served)
     assert (row["success"], row["miss_count"]) == (0, 2)
@@ -293,37 +339,89 @@ def test_tables_outside_the_declared_area_are_misplaced_or_unknown(served):
 
 
 def test_misplaced_tables_all_in_no_area_are_unknown_tables(served):
-    _http([("get_datasource_schema",
-            {"datasource": PROFILE, "area": "sales", "dataset_names": ["usrs"]})])
+    _http(
+        [
+            (
+                "get_datasource_schema",
+                {"datasource": PROFILE, "area": "sales", "dataset_names": ["usrs"]},
+            )
+        ]
+    )
 
     (miss,) = _missed(_one(served))
     assert miss["kind"] == "table" and miss["name"] == "usrs"
 
 
+def _as_the_transport_records(name: str, handler, arguments: dict) -> str:
+    """The handler run and recorded exactly as `mcp_http._call_tool` composes it: inside a Context
+    this frame owns, reset first, with the overrides read back out of it.
+
+    For the wrong-shape arguments only. Over HTTP the MCP SDK validates arguments against the tool's
+    `inputSchema` before the handler runs, so a `mode` outside its enum or an `area` sent as a list
+    never reaches the handler there, and no `tool_calls` row is written for it at all. The handler's
+    own refusal is what a transport without that validation (stdio, an embedder's dispatch) returns.
+    """
+    ctx = contextvars.copy_context()
+    ctx.run(tools.reset_typed_outcome)
+    reply = ctx.run(handler, arguments)
+    tools.record_tool_call(
+        name=name,
+        arguments=arguments,
+        result_text=reply,
+        execution_ms=1,
+        actor=ACTOR,
+        **tools.typed_outcome_overrides(ctx),
+    )
+    return reply
+
+
 def test_an_invalid_argument_records_the_key_and_the_value_sent(served):
-    (reply,) = _http([("get_datasource_schema", {"datasource": PROFILE, "mode": "sumary"})])
+    reply = _as_the_transport_records(
+        "get_datasource_schema",
+        tools.tool_get_datasource_schema,
+        {"datasource": PROFILE, "mode": "sumary"},
+    )
 
     row = _one(served)
     assert (row["success"], row["error_kind"]) == (0, "invalid_argument")
-    assert _missed(row) == [{
-        "kind": "argument", "name": "mode", "value": "sumary",
-        "did_you_mean": _error(reply)["did_you_mean"],
-    }]
+    assert _missed(row) == [
+        {
+            "kind": "argument",
+            "name": "mode",
+            "value": "sumary",
+            "did_you_mean": _error(reply)["did_you_mean"],
+        }
+    ]
 
 
-def test_an_invalid_argument_that_is_not_a_string_records_only_the_key(served):
-    _http([("get_datasource_schema", {"datasource": PROFILE, "area": ["sales", "people"]})])
+@pytest.mark.parametrize(
+    "arguments, key",
+    [
+        ({"area": ["sales", "people"]}, "area"),
+        ({"area": 7}, "area"),
+        ({"dataset_names": 7}, "dataset_names"),
+    ],
+)
+def test_an_invalid_argument_that_is_not_a_string_records_only_the_key(served, arguments, key):
+    _as_the_transport_records(
+        "get_datasource_schema",
+        tools.tool_get_datasource_schema,
+        {"datasource": PROFILE, **arguments},
+    )
 
-    assert _missed(_one(served)) == [{"kind": "argument", "name": "area", "did_you_mean": []}]
+    assert _missed(_one(served)) == [{"kind": "argument", "name": key, "did_you_mean": []}]
 
 
 # --- SC4: metric misses --------------------------------------------------------------------------
 
 
 def test_every_reported_unknown_metric_is_a_recorded_miss(served):
-    names = ["order_cnt", "headcount"] + [f"zz_metric_{i:02d}" for i in range(tools._SUGGESTED_MISSES)]
-    (reply,) = _http([("get_datasource_schema",
-                       {"datasource": PROFILE, "area": "sales", "metric_names": names})])
+    names = ["order_cnt", "headcount"] + [
+        f"zz_metric_{i:02d}" for i in range(tools._SUGGESTED_MISSES)
+    ]
+    (reply,) = _http(
+        [("get_datasource_schema", {"datasource": PROFILE, "area": "sales", "metric_names": names})]
+    )
 
     reported = json.JSONDecoder().raw_decode(reply)[0]["unknown_metric_names"]
     row = _one(served)
@@ -355,10 +453,12 @@ def test_an_examples_call_omitting_the_area_records_no_miss(served):
 
 
 def test_misses_do_not_leak_into_the_next_tool(served):
-    _http([
-        ("get_datasource_schema", {"datasource": PROFILE, "area": "sale"}),
-        ("list_datasources", {}),
-    ])
+    _http(
+        [
+            ("get_datasource_schema", {"datasource": PROFILE, "area": "sale"}),
+            ("list_datasources", {}),
+        ]
+    )
 
     first, second = _rows(served)
     assert first["miss_count"] == 1
@@ -370,16 +470,26 @@ def test_misses_do_not_leak_into_the_next_tool(served):
 
 def test_arguments_hold_what_was_sent_apart_from_own_column_keys(served):
     sent = {
-        "datasource": PROFILE, "area": "sales", "mode": "summary", "query": "revenue by month",
-        "metric_names": ["order_count"], "thread_id": "t1", "correlation_id": "c1",
-        "user_question": "how are sales?", "client_model": "demo-model",
+        "datasource": PROFILE,
+        "area": "sales",
+        "mode": "summary",
+        "query": "revenue by month",
+        "metric_names": ["order_count"],
+        "thread_id": "t1",
+        "correlation_id": "c1",
+        "user_question": "how are sales?",
+        "client_model": "demo-model",
     }
     _http([("get_datasource_schema", sent)])
 
     row = _one(served)
     assert json.loads(row["arguments"]) == {
-        "values": {"area": "sales", "mode": "summary", "query": "revenue by month",
-                   "metric_names": ["order_count"]},
+        "values": {
+            "area": "sales",
+            "mode": "summary",
+            "query": "revenue by month",
+            "metric_names": ["order_count"],
+        },
         "truncated": False,
     }
     assert (row["thread_id"], row["user_question"]) == ("t1", "how are sales?")
@@ -392,18 +502,24 @@ def test_arguments_on_the_examples_tool_hold_query_and_top_k(served):
 
 
 def test_a_call_sent_only_own_column_keys_records_null(served):
-    _http([
-        ("list_datasources", {}),
-        ("execute_sql", {"sql": "DELETE FROM orders", "datasource": PROFILE, "raw_query": "x"}),
-    ])
+    _http(
+        [
+            ("list_datasources", {}),
+            ("execute_sql", {"sql": "DELETE FROM orders", "datasource": PROFILE, "raw_query": "x"}),
+        ]
+    )
 
     assert [r["arguments"] for r in _rows(served)] == [None, None]
 
 
 def _record(name: str, arguments, **kw):
     tools.record_tool_call(
-        name=name, arguments=arguments, result_text=kw.pop("result_text", "{}"),
-        execution_ms=1, actor=ACTOR, **kw,
+        name=name,
+        arguments=arguments,
+        result_text=kw.pop("result_text", "{}"),
+        execution_ms=1,
+        actor=ACTOR,
+        **kw,
     )
 
 
@@ -422,11 +538,13 @@ def test_example_is_its_own_column_only_on_execute_sql(served):
 
 
 def test_the_reply_size_is_the_text_the_client_received(served):
-    replies = _http([
-        ("list_datasources", {}),
-        ("get_datasource_schema", {"datasource": PROFILE}),
-        ("execute_sql", {"sql": "DELETE FROM orders", "datasource": PROFILE}),
-    ])
+    replies = _http(
+        [
+            ("list_datasources", {}),
+            ("get_datasource_schema", {"datasource": PROFILE}),
+            ("execute_sql", {"sql": "DELETE FROM orders", "datasource": PROFILE}),
+        ]
+    )
 
     for reply, row in zip(replies, _rows(served), strict=True):
         assert row["result_chars"] == len(reply)
@@ -437,8 +555,11 @@ def test_a_raising_handler_records_no_size(served):
     def _boom(args):
         raise RuntimeError("boom")
 
-    probe = {"handler": _boom, "description": "probe",
-             "inputSchema": {"type": "object", "properties": {}}}
+    probe = {
+        "handler": _boom,
+        "description": "probe",
+        "inputSchema": {"type": "object", "properties": {}},
+    }
     _http([("probe", {})], extra_tools={"probe": probe})
 
     row = _one(served)
@@ -511,14 +632,16 @@ def test_wide_and_deep_values_are_cut(served):
     deep: dict = {"leaf": 1}
     for _ in range(6):
         deep = {"d": deep}
-    _record("acme_tool", {"many": list(range(500)), "wide": {str(i): i for i in range(500)},
-                          "deep": deep})
+    _record(
+        "acme_tool",
+        {"many": list(range(500)), "wide": {str(i): i for i in range(500)}, "deep": deep},
+    )
 
     doc = json.loads(_one(served)["arguments"])
     assert doc["truncated"] is True
     assert len(doc["values"]["many"]) == tools.AUDIT_ARG_LIST_MAX_ITEMS
     assert len(doc["values"]["wide"]) == tools.AUDIT_ARG_LIST_MAX_ITEMS
-    assert doc["values"]["deep"]["d"]["d"]["d"] == {"d": None}
+    assert doc["values"]["deep"]["d"]["d"] == {"d": None}  # the top-level parameters are depth 0
 
 
 def test_top_level_keys_past_the_cap_are_dropped(served):
@@ -540,9 +663,17 @@ class _Opaque:
 
 
 def test_a_long_missed_name_and_its_suggestions_are_bounded(served):
-    _record("acme_tool", {}, missed=[
-        {"kind": "table", "name": "  " + "n" * 500 + "\n", "did_you_mean": ["a", "b", "c", "d"]},
-    ])
+    _record(
+        "acme_tool",
+        {},
+        missed=[
+            {
+                "kind": "table",
+                "name": "  " + "n" * 500 + "\n",
+                "did_you_mean": ["a", "b", "c", "d"],
+            },
+        ],
+    )
 
     row = _one(served)
     doc = json.loads(row["missed"])
@@ -552,10 +683,12 @@ def test_a_long_missed_name_and_its_suggestions_are_bounded(served):
     assert doc["truncated"] is True and row["miss_count"] == 1
 
 
-def test_bounding_never_raises_on_a_value_whose_str_is_hostile(served):
-    _record("acme_tool", {"v": float("inf"), "b": True, "n": None})
+def test_scalars_are_kept_and_a_non_finite_float_stays_valid_json(served):
+    _record("acme_tool", {"v": float("inf"), "b": True, "n": None, "f": 1.5})
 
-    assert json.loads(_one(served)["arguments"])["values"]["b"] is True
+    stored = _one(served)["arguments"]
+    assert "Infinity" not in stored.replace('"inf"', "")
+    assert json.loads(stored)["values"] == {"v": "inf", "b": True, "n": None, "f": 1.5}
 
 
 # --- SC9: the migration ---------------------------------------------------------------------------
@@ -585,9 +718,20 @@ def test_an_older_record_shape_still_writes(served):
     import model_store
 
     older = SimpleNamespace(
-        ts="2026-09-27T00:00:00Z", org_id="local", actor=ACTOR, tool_name="execute_sql",
-        datasource=PROFILE, sql="SELECT 1", row_count=1, execution_ms=1, success=True,
-        error_kind=None, source="mcp", user_question=None, agent_query=None, thread_id=None,
+        ts="2026-09-27T00:00:00Z",
+        org_id="local",
+        actor=ACTOR,
+        tool_name="execute_sql",
+        datasource=PROFILE,
+        sql="SELECT 1",
+        row_count=1,
+        execution_ms=1,
+        success=True,
+        error_kind=None,
+        source="mcp",
+        user_question=None,
+        agent_query=None,
+        thread_id=None,
         correlation_id=None,
     )
     s = Store.connect(served)
