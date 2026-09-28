@@ -197,6 +197,11 @@ class Refusal:
     data value. An identifier the caller put in its own statement may be **echoed** back — that
     discloses nothing it did not already have. The declared surface is never **enumerated**: a
     refusal that lists the alternatives is a schema-listing endpoint.
+
+    One recorded exception (#386): a `column_scope` refusal's `remediation` lists the declared
+    columns of the tables the refused statement itself reads — what `get_datasource_schema` shows
+    the same caller for those tables — capped. Nothing else, on any rule. See SECURITY.md, "What a
+    refusal may name", and `tests/test_ace035_no_enumeration.py`.
     """
 
     reason: RefusalReason

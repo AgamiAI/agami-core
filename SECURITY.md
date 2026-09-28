@@ -75,4 +75,26 @@ bounds) is unaffected by this setting, as is your database role. **A statement t
 read-only or dangerous-function gate would refuse must never become executable because this
 setting is off; if you find one, that is a guard bypass and in scope for a report.**
 
+### What a refusal may name
+
+A refusal names back the identifiers the caller's own statement used, sanitized and capped.
+It never lists what the model declares, with one recorded exception (#386): a column-scope
+refusal lists the declared columns of the tables that statement reads (capped per table and in
+tables), with the closest listed name for each refused column. Without the list, an agent
+repaired a refused column by guessing again.
+
+A table's listed columns are exactly the ones `get_datasource_schema` shows the same caller for
+it: a subject area that exposes only some of a table's column groups (`expose_column_groups`)
+hides the rest here too. Every declared column is queryable by design: a column whose values must
+not be readable is left out of the model, and is then absent from the list too.
+
+Nothing else widens: no other table, and no declared name on any other refusal (the table-scope
+refusal's declared set would be the whole datasource). `tests/test_ace035_no_enumeration.py`
+enforces both halves.
+
+The residual, for integrators: if you narrow the tool surface per caller (`Adapters.tool_visibility`)
+so that a caller can run `execute_sql` but not call `get_datasource_schema`, that caller can learn
+the visible column names of any declared table it names in a statement, up to five tables and the
+first 40 columns of each per refusal.
+
 Thank you for helping keep agami-core and its users safe.

@@ -12,6 +12,16 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Security
+
+- **A `column_scope` refusal lists what the tables it read DO declare (#386).** It said a column
+  was not declared and not what the agent could use, so the agent guessed again: refused,
+  guessed, refused. `remediation` now leads with the declared columns of the tables the refused
+  statement reads — the same columns `get_datasource_schema` shows for them, up to 40 per table
+  and 5 tables — and the closest listed name for each refused column, as a typo hint. This is a
+  recorded amendment of the rule that a refusal never lists the declared surface; see SECURITY.md,
+  "What a refusal may name", for the boundary and the residual.
+
 ### Changed
 
 - **`get_datasource_schema` answers a wrong name with the right ones.** A datasource, area,
