@@ -3145,7 +3145,12 @@ def _emit(
     from execute_sql import _last_outcome
 
     _last_outcome.set(
-        (env.status, env.refusal.rule if env.refusal is not None else None, row_count)
+        (
+            env.status,
+            env.refusal.rule if env.refusal is not None else None,
+            env.failure.kind if env.failure is not None else None,
+            row_count,
+        )
     )
     return json.dumps(body, indent=2, default=str)
 
@@ -3909,15 +3914,17 @@ def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
     outcome = ctx.get(_last_outcome)
     if outcome is None:
         return overrides
-    status, rule, row_count = outcome
+    status, rule, kind, row_count = outcome
     success = status == "ok"
     return {
         **overrides,
         "success": success,
         # The rule the gate chose, straight off the `Refusal` — strictly more informative than the
-        # status alone, and no longer a `json.loads` of our own output. `status` is the fallback for
-        # a `failed`, which has a kind rather than a rule.
-        "error_kind": None if success else (rule or status),
+        # status alone, and no longer a `json.loads` of our own output. A `failed` has a kind rather
+        # than a rule, and records it (ACE-159): the status alone said `failed` for a syntax error
+        # and a timeout alike. The rule comes first, so `audit_unavailable`'s skip in
+        # `_record_tool_call`, which reads the rule off `error_kind`, is unchanged.
+        "error_kind": None if success else (rule or kind or status),
         "row_count": row_count,
     }
 
