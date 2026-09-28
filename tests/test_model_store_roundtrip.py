@@ -428,3 +428,73 @@ def test_index_floor_sheds_full_metrics_and_flags_truncated(tmp_path, monkeypatc
     assert head["metrics"] == []  # full detail shed at the floor
     assert len(head["metric_index"]) == 200  # but every metric is still listed by name
     assert len(json.dumps(head)) <= tools._SCHEMA_CHAR_BUDGET  # shedding brought it under budget
+
+
+# ---------------------------------------------------------------------------
+# model_engines — the SERVED half of #405. `test_schema_dialect_rules.py` deletes AGAMI_DB_URL,
+# so every assertion there runs the local `_local_engine` branch; a hosted deployment losing its
+# engine and dialect rules entirely would not have failed a test.
+# ---------------------------------------------------------------------------
+
+
+def _seeded(*orgs) -> Store:
+    s = Store.connect("sqlite://")
+    s.run_migrations()
+    for name, doc in orgs:
+        model_store.write_datasource(s, name, Datasource.model_validate(doc))
+    return s
+
+
+def _with_engines(name, *engines):
+    doc = dict(FULL_ORG, datasource=name)
+    doc["storage_connections"] = [
+        {"name": f"c{i}", "storage_type": e} for i, e in enumerate(engines)
+    ]
+    return name, doc
+
+
+def test_model_engines_reports_one_engine_per_datasource_in_one_query():
+    s = _seeded(_with_engines("main", "Redshift"), _with_engines("other", "Snowflake"))
+    assert model_store.model_engines(s) == {"main": "Redshift", "other": "Snowflake"}
+    s.close()
+
+
+def test_model_engines_omits_a_datasource_whose_connections_disagree():
+    """"Which dialect" has no single answer then, and a guess sends a client to write SQL in the
+    wrong one. Omission is what makes the listing leave `engine` and `dialect_rules` out."""
+    s = _seeded(_with_engines("mixed", "Redshift", "Snowflake"), _with_engines("plain", "MySQL"))
+    assert model_store.model_engines(s) == {"plain": "MySQL"}
+    s.close()
+
+
+def test_model_engines_repeats_one_engine_declared_twice():
+    """Two connections onto the same engine is one answer, not an ambiguity."""
+    s = _seeded(_with_engines("twice", "Redshift", "Redshift"))
+    assert model_store.model_engines(s) == {"twice": "Redshift"}
+    s.close()
+
+
+def test_model_engines_is_scoped_to_the_org():
+    s = _seeded(_with_engines("main", "Redshift"))
+    assert model_store.model_engines(s, org_id="someone-else") == {}
+    s.close()
+
+
+def test_a_served_listing_carries_the_engine_and_its_dialect_rules(tmp_path, monkeypatch):
+    """The end of the #405 path on the branch a hosted deployment actually takes."""
+    import sql_dialect_rules
+
+    db_url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(db_url)
+    s.run_migrations()
+    model_store.write_datasource(
+        s, "main", Datasource.model_validate(_with_engines("main", "Redshift")[1]))
+    s.commit()
+    s.close()
+
+    monkeypatch.setenv("AGAMI_DB_URL", db_url)
+    tools.resolved_org_id.cache_clear()
+    entry = json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+    assert entry["engine"] == "Redshift"
+    assert entry["dialect_rules"] == sql_dialect_rules.dialect_rules_for("Redshift")
