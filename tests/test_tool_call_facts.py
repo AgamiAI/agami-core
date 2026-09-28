@@ -775,6 +775,21 @@ def test_a_long_missed_name_and_its_suggestions_are_bounded(served):
     assert doc["truncated"] is True and row["miss_count"] == 1
 
 
+def test_a_cut_suggestion_alone_marks_the_misses_truncated(served):
+    """The flag reports every cut. A long suggestion was cut to the cap while the envelope still
+    said `truncated: false`, because only the name's and the kind's cuts were counted."""
+    _record(
+        "acme_tool",
+        {},
+        missed=[{"kind": "table", "name": "ordrs", "did_you_mean": ["o" * 500]}],
+    )
+
+    doc = json.loads(_one(served)["missed"])
+    (entry,) = doc["entries"]
+    assert entry["did_you_mean"] == ["o" * tools.AUDIT_MISS_NAME_MAX_CHARS]
+    assert doc["truncated"] is True
+
+
 def test_scalars_are_kept_and_a_non_finite_float_stays_valid_json(served):
     _record("acme_tool", {"v": float("inf"), "b": True, "n": None, "f": 1.5})
 

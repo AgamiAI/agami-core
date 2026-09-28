@@ -3548,11 +3548,16 @@ def _bounded_missed(misses: list[dict[str, Any]] | None) -> str | None:
         offered = miss.get("did_you_mean")
         if offered is not None:
             offered = list(offered) if isinstance(offered, (list, tuple)) else [offered]
-            entry["did_you_mean"] = [
-                _audit_text(s, AUDIT_MISS_NAME_MAX_CHARS)[0]
-                for s in offered[:AUDIT_MISS_SUGGESTIONS]
+            bounded = [
+                _audit_text(s, AUDIT_MISS_NAME_MAX_CHARS) for s in offered[:AUDIT_MISS_SUGGESTIONS]
             ]
-            truncated = truncated or len(offered) > AUDIT_MISS_SUGGESTIONS
+            entry["did_you_mean"] = [text for text, _cut in bounded]
+            # Each suggestion's own cut counts too: the flag reports every cut, not only the name's.
+            truncated = (
+                truncated
+                or len(offered) > AUDIT_MISS_SUGGESTIONS
+                or any(cut for _text, cut in bounded)
+            )
         entries.append(entry)
     # Dropped to fit, as `_bounded_arguments` does; `miss_count` keeps the true total.
     kept = _fitting(entries, budget)
