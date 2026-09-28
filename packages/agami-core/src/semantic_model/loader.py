@@ -559,10 +559,95 @@ def _column_detail(col: Column, include: list[str]) -> dict[str, Any]:
     return d
 
 
+# The join, and what governs whether it can run. Everything an agent needs to WRITE the join —
+# so an edge reduced to these keys is still usable, which is why the lean tier below is a
+# projection and not a removal.
+#
+# `on` is here because an edge carries EITHER from_column/to_column OR that SQL-expression escape
+# hatch (CAST, compound and function-based joins), never both. Omitting it would leave the lean
+# form of such an edge with no join condition at all.
+_JOIN_KEYS = ("from_table", "to_table", "from_column", "to_column", "on",
+              "from_schema", "to_schema", "join_type", "relationship")
+
+
+def _lean_edge(d: dict[str, Any]) -> dict[str, Any]:
+    """An edge projected to its join, for a table the caller did not ask for.
+
+    Dropped: the sign-off block, `review_state`/`confidence`, the subject-area labels, and
+    `description` — whose GENERATED form restates the two columns present in the same object
+    (a curator can write a real one, and that is the case this trades away).
+
+    Dropping the trust block costs the agent nothing, which is the part worth stating: the
+    receipt recomputes `review_state` and the sign-off for each join the STATEMENT actually
+    wrote, from the model, at execution time (`runtime.py`). An unreviewed-join warning does not
+    depend on these fields having ridden along in the schema response.
+
+    `executable` survives whenever it is NOT `same_engine`: it says whether one statement can
+    perform this join at all, so dropping it on a `split` edge invites a join that cannot run.
+    Omitting the common value keeps the ordinary case free and the cross-engine case correct.
+    (`federated` is not reachable here — `Relationship` rejects it outright as metric-only, so
+    the values that survive this branch are `split` and `informational`.)
+    """
+    out = {k: d[k] for k in _JOIN_KEYS if k in d}
+    # `executable` has a non-optional default, so `exclude_none` always leaves it present.
+    if d["executable"] != "same_engine":
+        out["executable"] = d["executable"]
+    return out
+
+
+def _full_edge(d: dict[str, Any]) -> dict[str, Any]:
+    """An edge for a table pair the caller asked for — everything, minus what says nothing.
+
+    `for_questions_about` is deprecated and never written (see its note on `Relationship`), so it
+    rides along as an empty list on every edge. `executable` is dropped at its default for the
+    reason `_lean_edge` drops it: naming the ordinary case on every edge is repetition, and a
+    response that omits it on one edge and states it on the next is worse than either rule.
+    """
+    out = {k: v for k, v in d.items() if k != "for_questions_about"}
+    if out.get("executable") == "same_engine":
+        del out["executable"]
+    return out
+
+
 def _relationships_among(
     org: Datasource, tables: list[str], area: Optional[str]
 ) -> list[dict[str, Any]]:
+    """Every edge touching a requested table — in full where BOTH ends were requested.
+
+    An edge to a table the caller did not ask for cannot SELECT from the other side: the caller
+    has no columns for it. It is still worth sending, because the scope gate admits any table the
+    model declares and a correlated `EXISTS` needs only the join key — so dropping those edges
+    would force a round trip for the subquery case. Sending them in full is the other extreme: on
+    a hub table (a user or group dimension half the warehouse references) the block reached
+    98,724 chars for a two-table request, of which four edges joined the two tables asked for.
+
+    So: full detail where the caller can read both sides, the join itself everywhere else.
+    """
     names = {_table_alias(t) for t in tables} | set(tables)
+
+    # The TIER test compares schema-qualified identity, which the membership test above cannot:
+    # `names` is bare, so with `orders` declared in two schemas a request for `public.orders`
+    # would classify an `archive.orders` edge as full and resend the governance block for a table
+    # the caller never asked for. `table_key` parses a qualifier out of the name when the schema
+    # field is unset, so the legacy `public.orders` shape compares the same as the split form.
+    #
+    # Schema-less requests keep the bare behaviour: a caller that names no schema cannot be asking
+    # for one in particular, and a model with no schemas at all (SQLite) has nothing to compare.
+    from .models import table_key
+
+    requested = {table_key(t) for t in tables}
+    requested_bare = {bare for _sch, bare in requested}
+
+    def _requested(name: str, schema: Optional[str]) -> bool:
+        sch, bare = table_key(name, schema)
+        if any(s for s, _b in requested):          # the caller qualified at least one table
+            return (sch, bare) in requested or (not sch and bare in requested_bare)
+        return bare in requested_bare
+
+    def _both_ends_requested(rel) -> bool:
+        return (_requested(rel.from_table, rel.from_schema)
+                and _requested(rel.to_table, rel.to_schema))
+
     out: list[dict[str, Any]] = []
     areas = [org.subject_area(area)] if area else org.subject_areas
     for sa in areas:
@@ -570,11 +655,13 @@ def _relationships_among(
             continue
         for rel in sa.relationships:
             if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
-                out.append(rel.model_dump(exclude_none=True))
+                d = rel.model_dump(exclude_none=True)
+                out.append(_full_edge(d) if _both_ends_requested(rel) else _lean_edge(d))
     # cross-area edges touching these tables
     for rel in org.cross_subject_area_relationships:
         if _table_alias(rel.from_table) in names or _table_alias(rel.to_table) in names:
-            out.append(rel.model_dump(exclude_none=True))
+            d = rel.model_dump(exclude_none=True)
+            out.append(_full_edge(d) if _both_ends_requested(rel) else _lean_edge(d))
     return out
 
 

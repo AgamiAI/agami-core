@@ -104,6 +104,18 @@ class DatasourceInfo(_Contract):
     # Absent must say "not asserted", which is the only thing absence can honestly mean here.
     model_present: bool | None = None
     is_active: bool = False
+    # The engine the MODEL declares (`storage_type`), and what that engine rejects with the rewrite
+    # for each (#325). They ride here rather than on every `get_datasource_schema` response because
+    # they describe the ENGINE, which does not vary with the scope being asked about (#405).
+    # Declared for the same reason as `prompt_examples` on the schema result: the client is told to
+    # follow the rules, so the field it reads them from belongs in the contract.
+    #
+    # Both are absent rather than null when they do not apply: `engine` when the model declares no
+    # connection or two that disagree, `dialect_rules` when the engine has no known gaps. Absence
+    # says "not asserted", which is the only honest reading — a null `engine` would otherwise be
+    # indistinguishable from an engine we failed to resolve.
+    engine: str | None = None
+    dialect_rules: str | None = None
 
 
 class ListDatasourcesResult(_Contract):
@@ -138,14 +150,18 @@ class SubjectAreaSummary(_Contract):
     table_count: int | None = None
 
 
-class CrossAreaRelationship(_Contract):
-    # "from" is a Python keyword — alias the wire key.
-    from_: str = Field(alias="from")
-    to: str
-    # The endpoint tables, which are what make one edge distinguishable from the eleven others
-    # between the same pair of areas.
-    from_table: str | None = None
-    to_table: str | None = None
+# The cross-area routing map: `{from_table: [to_table, …]}` — which table bridges to which, so a
+# caller knows what to ask `dataset_names` for next.
+#
+# An adjacency map rather than one object per declared edge. Edges reaching the same pair of
+# tables differ only by their join columns, and this tier carries no columns, so as a list they
+# serialized identically and a wide model spent most of the block repeating itself.
+#
+# Names are BARE. `dataset_names` strips every qualifier and resolves first-match, so a
+# schema-qualified node would look precise and select a different table; where one name is
+# declared under two schemas both edges land on one node. #258 is the fix, and this should
+# publish the qualified name once the resolver preserves it.
+CrossAreaMap = dict[str, list[str]]
 
 
 class DatasourceSchemaResult(_Contract):
@@ -155,7 +171,7 @@ class DatasourceSchemaResult(_Contract):
     requested_mode: str | None = None  # present when a scope was given and no downgrade applied
     # Pass 1 (index): subject areas + cross-area relationships.
     subject_areas: list[SubjectAreaSummary] | None = None
-    cross_area_relationships: list[CrossAreaRelationship] | None = None
+    cross_area_relationships: CrossAreaMap | None = None
     # The never-hide net: every metric the model declares, and the tables big enough to matter.
     metric_index: dict[str, Any] | None = None
     large_tables: dict[str, int] | None = None  # {table: estimated_row_count}
@@ -168,9 +184,16 @@ class DatasourceSchemaResult(_Contract):
     # `{"stored", "next"}` when the datasource has stored examples, absent when it has none (#301).
     # Declared for the same reason as `scope`: a client acts on it, so it belongs in the contract.
     prompt_examples: dict[str, Any] | None = None
-    # What this datasource's engine rejects and what to write instead, when the engine has known gaps
-    # (#325); absent otherwise. Declared because the client is told to follow it.
-    dialect_rules: str | None = None
+    # `{"engine", "rules_from"}` — the engine this datasource runs on, and where the rules that
+    # engine needs now live. The rules themselves moved to `list_datasources` (#405): they describe
+    # the ENGINE, so they never varied with the scope this response was built for, and the same
+    # ~1,750 chars rode every tier and every call of a multi-call question. Absent when the model
+    # declares no single engine. Declared because a client that arrived here without listing
+    # datasources acts on it.
+    dialect: dict[str, Any] | None = None
+    # One `{"name", "did_you_mean" | "hint"}` per `metric_names` entry that selected nothing; absent
+    # when every name resolved. Declared because the alternative was the silent drop it replaces.
+    unknown_metric_names: list[dict[str, Any]] | None = None
     # Pass 2 (dataset_names): per-table context + relationships/metrics from get_table_context.
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None

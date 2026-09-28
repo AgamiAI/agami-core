@@ -28,6 +28,7 @@ What each row asserts:
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -129,10 +130,15 @@ def _table_scope_detail(names: tuple[str, ...]) -> str:
 _TABLE_SCOPE_REMEDIATION = ("Add the table to the model (agami-connect / '/agami-model'), "
                             "or remove it from the query.")
 
-_SELECT_STAR_DETAIL = ("query uses SELECT * — every column must be named so it can be "
-                       "checked against the semantic model.")
+# Reworded (#387) to state what is true of a star rather than what we happen not to know: the old
+# sentence read as a claim that the columns were undeterminable, which a caller whose star sat over
+# a CTE naming its own columns reasonably read as a mistake about their query. The VERDICT is
+# unchanged — every star still refuses — so this table's star column is untouched.
+_SELECT_STAR_DETAIL = ("query uses SELECT * — a star returns columns the statement never "
+                       "names, so they cannot be checked against the semantic model.")
 
-_SELECT_STAR_REMEDIATION = "List the columns explicitly instead of '*'."
+_SELECT_STAR_REMEDIATION = ("List the columns explicitly instead of '*', including over a CTE "
+                            "or subquery that already names them.")
 
 
 def _column_scope_detail(names: tuple[str, ...]) -> str:
@@ -317,6 +323,30 @@ def _check(refusal, verdict: str, rule: str, detail: str, remediation: str) -> N
     assert refusal.remediation == remediation
 
 
+def _assert_listing_confined(remediation: str, sql: str, org) -> None:
+    """The one recorded exception to echo-only (#386): a column-scope remediation lists declared
+    columns — of the tables the statement reads, and no other. The static sentence it always
+    carried still ends it, byte-exact.
+
+    Byte-exact equality stood in for this before: it could not pass if the refusal had grown a
+    listing at all. Now it has one, so what is asserted is the boundary the listing must keep.
+    """
+    assert remediation.startswith("Declared on the table(s) this statement reads — "), remediation
+    assert remediation.endswith(_COLUMN_SCOPE_REMEDIATION), remediation
+    listing = remediation[: -len(_COLUMN_SCOPE_REMEDIATION)]
+    words = lambda text: set(re.findall(r"[a-z_][a-z0-9_]*", text.lower()))  # noqa: E731
+    read = words(sql)
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if t.name.lower() in read:
+                continue
+            assert t.name.lower() not in words(listing), (t.name, listing)
+            only_here = {c.name.lower() for c in t.columns} - {
+                c.name.lower() for s2 in org.subject_areas for t2 in s2.tables_defined
+                if t2.name.lower() in read for c in t2.columns}
+            assert not (only_here & words(listing)), (t.name, only_here & words(listing))
+
+
 @pytest.mark.parametrize(
     "fixture,sql,ts_verdict,ts_tables,star_verdict,cs_verdict,cs_columns",
     GOLDEN_VERDICTS, ids=_ids())
@@ -329,8 +359,11 @@ def test_gate_verdicts_match_the_pre_refactor_table(
            _table_scope_detail(ts_tables), _TABLE_SCOPE_REMEDIATION)
     _check(rt.check_no_select_star(sql), star_verdict, guardrail.RULE_SELECT_STAR,
            _SELECT_STAR_DETAIL, _SELECT_STAR_REMEDIATION)
-    _check(rt.check_column_scope(sql, org), cs_verdict, guardrail.RULE_COLUMN_SCOPE,
-           _column_scope_detail(cs_columns), _COLUMN_SCOPE_REMEDIATION)
+    refusal = rt.check_column_scope(sql, org)
+    _check(refusal, cs_verdict, guardrail.RULE_COLUMN_SCOPE,
+           _column_scope_detail(cs_columns), refusal.remediation if refusal else "")
+    if refusal is not None:
+        _assert_listing_confined(refusal.remediation, sql, org)
 
 
 @pytest.mark.parametrize(

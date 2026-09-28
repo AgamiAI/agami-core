@@ -29,7 +29,12 @@ from pathlib import Path
 RUFF = ["uvx", "ruff@0.15.19"]
 # The suite imports the agami-core library, so install it editable with the [model]
 # extra (pydantic/pyyaml/sqlglot). DB drivers are omitted on purpose — those tests skip without a DB.
-TEST_DEPS = ["--with", "pytest-cov", "--with", "pytest-xdist", "--with-editable", "packages/agami-core[model,server]"]
+# `build` is here for ONE test — `test_wheel_contents.py`, which builds a wheel and looks
+# inside it. That test is the suite's only cover on packaging, because every other test runs
+# against an editable install where the data directories resolve into the source tree
+# whatever the wheel contains (#122). Without this dependency it would skip, and a guard that
+# skips is the same as no guard.
+TEST_DEPS = ["--with", "pytest-cov", "--with", "pytest-xdist", "--with", "build", "--with-editable", "packages/agami-core[model,server]"]
 # One worker per core, as CI runs it — the suite is a long tail of short tests, not a few slow ones.
 PARALLEL = ["-n", "auto"]
 # `dev/` is here because it holds gate logic CI executes (changelog_gate.py), not just local
