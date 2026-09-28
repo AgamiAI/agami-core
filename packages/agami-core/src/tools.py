@@ -446,18 +446,25 @@ _call_misses: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 )
 
 
-def _note_miss(kind: str, name: Any, did_you_mean: Any = None, value: Any = None) -> None:
+def _note_miss(
+    kind: str, name: str, did_you_mean: list[str] | None = None, value: Any = None
+) -> None:
     """Publish one name the model lacked, beside the reply and never in it.
 
     Stored raw; `_bounded_missed` bounds it at recording, which is where every other caller-sent
     value on the row is bounded. `value` is the offending value of a wrong-shape argument, kept only
     when it is a string: `name` is then the parameter's key.
 
+    `did_you_mean` is None for a name that was never searched (one past `_SUGGESTED_MISSES`), and the
+    entry then has no such key: `[]` means "searched, and nothing was close", which it was not.
+
     Appended in place rather than re-set as a new list, since one call can miss thousands of names.
     The two handlers that note misses clear the list on entry, so a transport that runs every call in
     one context (the stdio server) never grows it past one call's worth.
     """
-    entry: dict[str, Any] = {"kind": kind, "name": name, "did_you_mean": list(did_you_mean or [])}
+    entry: dict[str, Any] = {"kind": kind, "name": name}
+    if did_you_mean is not None:
+        entry["did_you_mean"] = list(did_you_mean)
     if isinstance(value, str):
         entry["value"] = value
     misses = _call_misses.get()
@@ -1732,8 +1739,9 @@ class _ModelNames(NamedTuple):
             f"No table named {n!r} in {profile!r}. {self.miss_advice(n, guesses)}".rstrip()
             for n in names[:_SUGGESTED_MISSES]
         ]
-        for n in names:
-            _note_miss("table", n, guesses.get(n))
+        # Searched up to the cap, so a name there gets a list, empty when a hint stood in for it.
+        for i, n in enumerate(names):
+            _note_miss("table", n, guesses.get(n, []) if i < _SUGGESTED_MISSES else None)
         if len(names) > _SUGGESTED_MISSES:
             sentences.append(f"And {len(names) - _SUGGESTED_MISSES} more unknown table name(s).")
         if not any(guesses.values()) and not hints:
@@ -1901,7 +1909,7 @@ def _normalized_args(
 
     def refuse(key: str, remediation: str, **extra: Any) -> "tuple[dict[str, Any], str]":
         # The miss is the parameter's key; the value it was sent is kept when it is a string.
-        _note_miss("argument", key, extra.get("did_you_mean"), fixed.get(key))
+        _note_miss("argument", key, extra.get("did_you_mean") or [], fixed.get(key))
         error = {"kind": "invalid_argument", "remediation": remediation, **extra}
         return fixed, json.dumps({"error": error}, indent=2)
 
@@ -2154,7 +2162,8 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
         return json.dumps({"error": error}, indent=2)
     if known:
         guesses = _did_you_mean(profile, known)
-        # Only here: a name in the known list has a broken model, which is not the caller's miss.
+        # Only here. A known name has a broken model, and with nothing known there is no model at
+        # all: neither is the caller's miss.
         _note_miss("datasource", profile, guesses)
         if guesses:
             # The loader's own message ends "run agami-connect to introspect this database" —
@@ -2296,11 +2305,13 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             ]
             if len(misplaced) > _SUGGESTED_MISSES:
                 located.append(f"And {len(misplaced) - _SUGGESTED_MISSES} more.")
+            # A name the refusal does not show was never searched, so it is noted with no list.
             for t in misplaced:
+                searched = [] if t in shown else None
                 if names.area_of(t) is not None:
-                    _note_miss("misplaced_table", t)
+                    _note_miss("misplaced_table", t, searched)
                 else:
-                    _note_miss("table", t, guesses.get(t))
+                    _note_miss("table", t, guesses.get(t, searched))
             return json.dumps(
                 {
                     "error": {
@@ -2338,8 +2349,6 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             names.unknown_metric(n, metrics) if i < _SUGGESTED_MISSES else {"name": n}
             for i, n in enumerate(missed)
         ]
-        for entry in unknown_metrics:
-            _note_miss("metric", entry["name"], entry.get("did_you_mean"))
 
     # Read before the response is built, so the stored-example pointer is inside the JSON the size
     # budget below measures — every piece still on ONE DB connection (see _context_sources).
@@ -2381,9 +2390,13 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                     ctx["tables"][n] = names.unresolvable_entry(n)
             for n in unknown[:_SUGGESTED_MISSES]:
                 ctx["tables"][n] = names.unknown_table_entry(n)
-            # Every unknown name, past the suggestion cap too, with whatever its entry offered.
-            for n in unknown:
-                _note_miss("table", n, ctx["tables"][n].get("did_you_mean"))
+            # Every unknown name, past the suggestion cap too, with whatever its entry offered. Past
+            # the cap nothing was searched, so those are noted with no list.
+            for i, n in enumerate(unknown):
+                searched = (
+                    ctx["tables"][n].get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
+                )
+                _note_miss("table", n, searched)
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
@@ -2457,6 +2470,11 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # and shedding it would be the silent drop it exists to end.
     if unknown_metrics:
         result["unknown_metric_names"] = unknown_metrics
+        # Noted here, where the reply reports them, and not before: the table branch above can still
+        # refuse, and that refusal carries no metric names for the row to claim.
+        for i, entry in enumerate(unknown_metrics):
+            searched = entry.get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
+            _note_miss("metric", entry["name"], searched)
     # The boundary the never-hide guarantee is relative to. A guarantee stated against a scope is
     # only honest if the reader can see which scope they got.
     result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
@@ -3406,15 +3424,25 @@ _OWN_COLUMN_ARGUMENTS = frozenset(
 )
 
 #: A control character or line break in stored caller text could forge a line of a log or a report
-#: that reads it, so each is replaced with a space. The same set as `runtime._ECHO_CONTROL`, kept as
-#: a sibling here rather than importing another module's private name.
-_AUDIT_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+#: that reads it, so each is replaced with a space: the C0 and C1 controls, the Unicode line and
+#: paragraph separators, the bidi controls that reorder how a line displays, and a lone surrogate,
+#: which is not text at all. Wider than `runtime._ECHO_CONTROL`, which covers C0 and DEL only.
+_AUDIT_CONTROL = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+)
+
+#: What is stored for a value that cannot become text, with the cut flag set.
+_AUDIT_UNPRINTABLE = "<unprintable>"
 
 
 def _audit_text(raw: Any, cap: int) -> tuple[str, bool]:
     """`raw` as a stored string with control characters replaced and cut at `cap`, and whether it was
-    cut. Anything that is not a string is stored as its `str()`."""
-    text = raw if isinstance(raw, str) else str(raw)
+    cut. Anything that is not a string is stored as its `str()`, or as a placeholder, flagged, when
+    that `str()` raises: recording must not fail on a caller's odd object."""
+    try:
+        text = raw if isinstance(raw, str) else str(raw)
+    except Exception:
+        return _AUDIT_UNPRINTABLE, True
     return _AUDIT_CONTROL.sub(" ", text[:cap]), len(text) > cap
 
 
@@ -3427,7 +3455,14 @@ def _audit_value(raw: Any, depth: int = 0) -> tuple[Any, bool]:
     """
     # A non-finite float is not JSON, and `json.dumps` would write the invalid token `Infinity`.
     finite = isinstance(raw, float) and math.isfinite(raw)
-    if raw is None or isinstance(raw, (bool, int)) or finite:
+    if raw is None or isinstance(raw, bool) or finite:
+        return raw, False
+    if isinstance(raw, int):
+        # An int past Python's digit limit cannot be written as text, so `json.dumps` would raise.
+        try:
+            str(raw)
+        except ValueError:
+            return _AUDIT_UNPRINTABLE, True
         return raw, False
     if isinstance(raw, (dict, list, tuple)):
         if depth >= AUDIT_ARG_MAX_DEPTH:
@@ -3437,25 +3472,29 @@ def _audit_value(raw: Any, depth: int = 0) -> tuple[Any, bool]:
         bounded: dict[str, Any] = {}
         for key, item in items[:AUDIT_ARG_LIST_MAX_ITEMS]:
             key, key_cut = _audit_text(key, AUDIT_ARG_VALUE_MAX_CHARS)
+            # Two keys that bound to the same text keep only the later value, which is a cut too.
+            key_cut = key_cut or key in bounded
             bounded[key], item_cut = _audit_value(item, depth + 1)
             cut = cut or key_cut or item_cut
         return (bounded if isinstance(raw, dict) else list(bounded.values())), cut
     return _audit_text(raw, AUDIT_ARG_VALUE_MAX_CHARS)
 
 
-def _fitting(entries: list[Any], budget: int) -> int:
-    """How many of `entries`, from the front, serialize within `budget` characters.
+def _fitting(entries: list[Any], budget: int) -> list[Any]:
+    """The `entries`, in order, that serialize together within `budget` characters.
 
-    Each entry is measured once rather than the whole value re-serialized per drop, which a hostile
-    call could make slow. The measure over-counts by one separator, so the kept prefix always fits.
+    One that does not fit is skipped and the rest still tried, so a single oversized entry cannot
+    evict every entry after it. Each entry is measured once rather than the whole value
+    re-serialized per drop, which a hostile call could make slow. The measure over-counts by one
+    separator, so what is kept always fits.
     """
-    kept = 0
+    kept = []
     for entry in entries:
         # One separator per entry: `", "` between entries, or `": "` inside a key/value pair.
-        budget -= len(json.dumps(entry, default=str)) + 2
-        if budget < 0:
-            break
-        kept += 1
+        size = len(json.dumps(entry, default=str)) + 2
+        if size <= budget:
+            budget -= size
+            kept.append(entry)
     return kept
 
 
@@ -3469,14 +3508,14 @@ def _bounded_arguments(name: str, raw: dict[str, Any]) -> str | None:
     values, truncated = _audit_value({k: v for k, v in raw.items() if k not in own})
     if not values:
         return None
-    # Parameters are dropped from the end until the whole value fits the column cap, and a drop
-    # sets the flag. The worst case is the empty envelope, far below the cap. The cap is on the
-    # final string, `\uXXXX` escapes included.
-    pairs = list(values.items())
+    # A parameter that does not fit what is left of the column cap is dropped, and a drop sets the
+    # flag. The worst case is the empty envelope, far below the cap. The cap is on the final
+    # string, `\uXXXX` escapes included.
+    pairs = [list(p) for p in values.items()]
     budget = AUDIT_ARGUMENTS_MAX_CHARS - len(json.dumps({"values": {}, "truncated": False}))
-    kept = _fitting([list(p) for p in pairs], budget)
+    kept = _fitting(pairs, budget)
     return json.dumps(
-        {"values": dict(pairs[:kept]), "truncated": truncated or kept < len(pairs)}, default=str
+        {"values": dict(kept), "truncated": truncated or len(kept) < len(pairs)}, default=str
     )
 
 
@@ -3485,25 +3524,40 @@ def _bounded_missed(misses: list[dict[str, Any]] | None) -> str | None:
     suggestions it was offered, and never the reply's prose `hint`. None when nothing missed."""
     if not misses:
         return None
+    budget = AUDIT_MISSED_MAX_CHARS - len(json.dumps({"entries": [], "truncated": False}))
+    # No entry is smaller than this, so no more than `budget // smallest` can fit: past that many,
+    # building and scrubbing more is work for entries that would only be dropped.
+    smallest = len(json.dumps({"kind": "", "name": ""})) + 2
     entries = []
-    truncated = False
-    for miss in misses:
-        name, name_cut = _audit_text(str(miss["name"]).strip(), AUDIT_MISS_NAME_MAX_CHARS)
-        offered = miss["did_you_mean"]
-        entry: dict[str, Any] = {"kind": miss["kind"], "name": name}
+    truncated = len(misses) > budget // smallest
+    for miss in misses[: budget // smallest]:
+        # `record_tool_call` is public, so an entry may arrive in any shape. It is read defensively
+        # rather than trusted, since a failure to record fails the call on the served path.
+        miss = miss if isinstance(miss, dict) else {"name": miss}
+        kind, kind_cut = _audit_text(miss.get("kind", ""), AUDIT_MISS_NAME_MAX_CHARS)
+        raw_name = miss.get("name", "")
+        # Stripped before the cut, so padding never spends the name's own length.
+        raw_name = raw_name.strip() if isinstance(raw_name, str) else raw_name
+        name, name_cut = _audit_text(raw_name, AUDIT_MISS_NAME_MAX_CHARS)
+        entry: dict[str, Any] = {"kind": kind, "name": name}
+        truncated = truncated or kind_cut or name_cut
         if "value" in miss:
             entry["value"], value_cut = _audit_text(miss["value"], AUDIT_MISS_NAME_MAX_CHARS)
-            name_cut = name_cut or value_cut
-        entry["did_you_mean"] = [
-            _audit_text(s, AUDIT_MISS_NAME_MAX_CHARS)[0] for s in offered[:AUDIT_MISS_SUGGESTIONS]
-        ]
-        truncated = truncated or name_cut or len(offered) > AUDIT_MISS_SUGGESTIONS
+            truncated = truncated or value_cut
+        # Absent or None means never searched, and stays absent; a lone value is one suggestion.
+        offered = miss.get("did_you_mean")
+        if offered is not None:
+            offered = list(offered) if isinstance(offered, (list, tuple)) else [offered]
+            entry["did_you_mean"] = [
+                _audit_text(s, AUDIT_MISS_NAME_MAX_CHARS)[0]
+                for s in offered[:AUDIT_MISS_SUGGESTIONS]
+            ]
+            truncated = truncated or len(offered) > AUDIT_MISS_SUGGESTIONS
         entries.append(entry)
-    # Dropped from the end to fit, as `_bounded_arguments` does; `miss_count` keeps the true total.
-    budget = AUDIT_MISSED_MAX_CHARS - len(json.dumps({"entries": [], "truncated": False}))
+    # Dropped to fit, as `_bounded_arguments` does; `miss_count` keeps the true total.
     kept = _fitting(entries, budget)
     return json.dumps(
-        {"entries": entries[:kept], "truncated": truncated or kept < len(entries)}, default=str
+        {"entries": kept, "truncated": truncated or len(kept) < len(entries)}, default=str
     )
 
 
@@ -4290,7 +4344,8 @@ def record_tool_call(
         # Nothing to clear here: `raised` skips the body parse entirely (the `else` above), so a call
         # that threw has no sentences to begin with. Setting them to None again would be a line that
         # can never change anything.
-    result_chars = len(result_text) if result_text and not raised else None
+    # An empty reply is a size of 0; only a call that raised, or sent no text at all, has none.
+    result_chars = len(result_text) if result_text is not None and not raised else None
     rec: dict[str, Any] = {
         "ts": _now_iso(),
         "tool_name": name,
@@ -4342,7 +4397,7 @@ def record_tool_call(
         "miss_count": len(missed) if missed else None,
         # The size of the text the client received; a call that raised sent none.
         "result_chars": result_chars,
-        "result_tokens_est": math.ceil(result_chars / 4) if result_chars else None,
+        "result_tokens_est": math.ceil(result_chars / 4) if result_chars is not None else None,
     }
     if org_id is not None:
         # Set rather than left absent, so `_record_tool_call`'s `setdefault` keeps it instead of

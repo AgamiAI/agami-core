@@ -142,7 +142,8 @@ def _http(calls, *, executor=None, extra_tools=None) -> list[str]:
 def _rows(url: str) -> list[dict]:
     s = Store.connect(url)
     try:
-        return [dict(r) for r in s.query("SELECT * FROM tool_calls ORDER BY ts")]
+        # `ts` has one-second resolution, so calls in the same second fall back to insert order.
+        return [dict(r) for r in s.query("SELECT * FROM tool_calls ORDER BY ts, rowid")]
     finally:
         s.close()
 
@@ -243,6 +244,10 @@ def test_a_partial_miss_past_the_suggestion_cap_is_still_counted(served):
     row = _one(served)
     assert row["success"] == 1 and row["miss_count"] == len(unknown)
     assert [m["name"] for m in _missed(row)] == unknown
+    # Searched up to the cap, so each has a list, empty when nothing was close; never searched past it.
+    cap = tools._SUGGESTED_MISSES
+    assert all("did_you_mean" in m for m in _missed(row)[:cap])
+    assert not any("did_you_mean" in m for m in _missed(row)[cap:])
 
 
 def test_a_defined_but_unresolvable_table_is_not_a_miss(served, monkeypatch):
@@ -412,6 +417,34 @@ def test_an_invalid_argument_that_is_not_a_string_records_only_the_key(served, a
     assert _missed(_one(served)) == [{"kind": "argument", "name": key, "did_you_mean": []}]
 
 
+def test_a_refused_table_scope_past_the_cap_records_unsearched_names_bare(served):
+    unknown = [f"zz_unknown_{i:02d}" for i in range(tools._SUGGESTED_MISSES + 2)]
+    _http([("get_datasource_schema", {"datasource": PROFILE, "dataset_names": unknown})])
+
+    missed = _missed(_one(served))
+    assert [m["name"] for m in missed] == unknown
+    assert all(m["did_you_mean"] == [] for m in missed[: tools._SUGGESTED_MISSES])
+    assert not any("did_you_mean" in m for m in missed[tools._SUGGESTED_MISSES :])
+
+
+def test_misplaced_names_the_refusal_does_not_show_are_recorded_bare(served):
+    # Sorted, `users` falls past the cap, behind eleven unknown names.
+    unknown = [f"aa_{i:02d}" for i in range(tools._SUGGESTED_MISSES + 1)]
+    _http(
+        [
+            (
+                "get_datasource_schema",
+                {"datasource": PROFILE, "area": "sales", "dataset_names": [*unknown, "users"]},
+            )
+        ]
+    )
+
+    by_name = {m["name"]: m for m in _missed(_one(served))}
+    assert all("did_you_mean" in by_name[n] for n in unknown[: tools._SUGGESTED_MISSES])
+    assert by_name[unknown[-1]] == {"kind": "table", "name": unknown[-1]}
+    assert by_name["users"] == {"kind": "misplaced_table", "name": "users"}
+
+
 # --- SC4: metric misses --------------------------------------------------------------------------
 
 
@@ -426,12 +459,33 @@ def test_every_reported_unknown_metric_is_a_recorded_miss(served):
     reported = json.JSONDecoder().raw_decode(reply)[0]["unknown_metric_names"]
     row = _one(served)
     assert row["success"] == 1 and row["miss_count"] == len(reported) == len(names)
+    # Past the suggestion cap a name was never searched, so it is recorded with no `did_you_mean`
+    # at all: an empty list would say "searched, nothing close".
     assert _missed(row) == [
         {"kind": "metric", "name": r["name"], "did_you_mean": r.get("did_you_mean", [])[:3]}
-        for r in reported
+        if i < tools._SUGGESTED_MISSES
+        else {"kind": "metric", "name": r["name"]}
+        for i, r in enumerate(reported)
     ]
     # `headcount` exists outside the `sales` scope: reported with a hint, recorded as a miss.
     assert {"kind": "metric", "name": "headcount", "did_you_mean": []} in _missed(row)
+
+
+def test_a_table_refusal_records_no_metric_misses(served):
+    """The refusal carries no `unknown_metric_names`, so the row must not claim metric misses."""
+    (reply,) = _http(
+        [
+            (
+                "get_datasource_schema",
+                {"datasource": PROFILE, "dataset_names": ["zzzq"], "metric_names": ["order_cnt"]},
+            )
+        ]
+    )
+
+    assert "unknown_metric_names" not in json.JSONDecoder().raw_decode(reply)[0]
+    row = _one(served)
+    assert row["miss_count"] == 1
+    assert [(m["kind"], m["name"]) for m in _missed(row)] == [("table", "zzzq")]
 
 
 # --- SC5: the examples tool ----------------------------------------------------------------------
@@ -463,6 +517,36 @@ def test_misses_do_not_leak_into_the_next_tool(served):
     first, second = _rows(served)
     assert first["miss_count"] == 1
     assert (second["missed"], second["miss_count"]) == (None, None)
+
+
+def test_resetting_a_context_clears_misses_it_inherited():
+    """`copy_context()` copies what is current, so a miss published before the reset would be read
+    back as the next tool's. Set in a throwaway outer context so nothing reaches another test."""
+
+    def _inherit_then_reset():
+        tools._call_misses.set([{"kind": "area", "name": "sale", "did_you_mean": []}])
+        ctx = contextvars.copy_context()
+        ctx.run(tools.reset_typed_outcome)
+        return tools.typed_outcome_overrides(ctx)
+
+    assert "missed" not in contextvars.copy_context().run(_inherit_then_reset)
+
+
+@pytest.mark.parametrize(
+    "handler, missing, valid",
+    [
+        (tools.tool_get_datasource_schema, {"area": "sale"}, {}),
+        (tools.tool_get_prompt_examples, {"area": "peple"}, {"query": "orders"}),
+    ],
+)
+def test_each_handler_clears_the_last_calls_misses_on_entry(served, handler, missing, valid):
+    """The stdio server runs every call in one context and never resets it, so the handler must."""
+    ctx = contextvars.copy_context()
+    ctx.run(handler, {"datasource": PROFILE, **missing})
+    assert ctx.get(tools._call_misses)
+
+    ctx.run(handler, {"datasource": PROFILE, **valid})
+    assert not ctx.get(tools._call_misses)
 
 
 # --- SC6: every parameter the call was sent ------------------------------------------------------
@@ -574,10 +658,18 @@ def test_a_raised_call_records_no_size_even_with_text(served):
     assert (row["result_chars"], row["result_tokens_est"]) == (None, None)
 
 
-def test_an_empty_reply_records_no_size(served):
+def test_an_empty_reply_records_a_size_of_zero(served):
     _record("acme_tool", {}, result_text="")
 
-    assert _one(served)["result_chars"] is None
+    row = _one(served)
+    assert (row["result_chars"], row["result_tokens_est"]) == (0, 0)
+
+
+def test_no_reply_text_records_no_size(served):
+    _record("acme_tool", {}, result_text=None)
+
+    row = _one(served)
+    assert (row["result_chars"], row["result_tokens_est"]) == (None, None)
 
 
 # --- SC8: bounded against a hostile caller -------------------------------------------------------
@@ -689,6 +781,115 @@ def test_scalars_are_kept_and_a_non_finite_float_stays_valid_json(served):
     stored = _one(served)["arguments"]
     assert "Infinity" not in stored.replace('"inf"', "")
     assert json.loads(stored)["values"] == {"v": "inf", "b": True, "n": None, "f": 1.5}
+
+
+def test_one_oversized_parameter_does_not_evict_the_rest():
+    stored = tools._bounded_arguments("acme_tool", {"a": ["x" * 1000] * 50, "b": "keep"})
+
+    assert len(stored) <= tools.AUDIT_ARGUMENTS_MAX_CHARS
+    doc = json.loads(stored)
+    assert doc["truncated"] is True and doc["values"] == {"b": "keep"}
+
+
+def test_an_oversized_scope_keeps_the_query_on_the_row(served):
+    names = [f"{i:02d}" + "n" * 998 for i in range(50)]
+    _http(
+        [
+            (
+                "get_datasource_schema",
+                {"datasource": PROFILE, "dataset_names": names, "query": "revenue"},
+            )
+        ]
+    )
+
+    doc = _assert_clean(_one(served)["arguments"], tools.AUDIT_ARGUMENTS_MAX_CHARS)
+    assert doc["values"] == {"query": "revenue"}
+
+
+def test_keys_that_collapse_together_say_so(served):
+    _record("acme_tool", {"k\ney": 1, "k ey": 2})
+
+    doc = json.loads(_one(served)["arguments"])
+    assert doc["truncated"] is True and list(doc["values"]) == ["k ey"]
+
+
+class _Unprintable:
+    def __str__(self) -> str:
+        raise RuntimeError("no text for this one")
+
+
+def test_a_value_that_cannot_become_text_is_a_placeholder():
+    doc = json.loads(tools._bounded_arguments("acme_tool", {"v": _Unprintable(), "top_k": 3}))
+
+    assert doc["truncated"] is True
+    assert isinstance(doc["values"]["v"], str) and doc["values"]["top_k"] == 3
+
+
+def test_an_int_past_the_digit_limit_is_a_placeholder():
+    doc = json.loads(tools._bounded_arguments("acme_tool", {"n": 10**5000, "top_k": 3}))
+
+    assert doc["truncated"] is True
+    assert isinstance(doc["values"]["n"], str) and doc["values"]["top_k"] == 3
+
+
+# C1 controls, the line and paragraph separators, the bidi controls, and one lone surrogate.
+_UNICODE_CONTROLS = "\x85\x9b\u2028\u2029\u200e\u200f\u202a\u202e\u2066\u2069\ud800\udfff"
+
+
+def _has_unicode_control(value) -> bool:
+    return any(ch in _UNICODE_CONTROLS for ch in json.dumps(value, ensure_ascii=False))
+
+
+def test_unicode_controls_are_replaced_everywhere(served):
+    dirty = "a" + _UNICODE_CONTROLS + "b"
+    _record(
+        "acme_tool",
+        {"query": dirty, dirty: [dirty]},
+        missed=[{"kind": dirty, "name": dirty, "did_you_mean": [dirty], "value": dirty}],
+    )
+
+    row = _one(served)
+    arguments, missed = json.loads(row["arguments"]), json.loads(row["missed"])
+    assert not _has_unicode_control(arguments) and not _has_unicode_control(missed)
+    (entry,) = missed["entries"]
+    assert entry["kind"] == entry["name"] == "a" + " " * len(_UNICODE_CONTROLS) + "b"
+
+
+def test_a_malformed_missed_entry_is_stored_rather_than_raised(served):
+    _record(
+        "acme_tool",
+        {},
+        missed=[
+            {},
+            {"kind": "table", "name": "a", "did_you_mean": None},
+            {"kind": "table", "name": "b", "did_you_mean": "orders"},
+            {"kind": "table", "name": "c", "did_you_mean": 7},
+            {"kind": "table", "name": _Unprintable()},
+        ],
+    )
+
+    row = _one(served)
+    empty, none, text, number, unprintable = _missed(row)
+    assert empty == {"kind": "", "name": ""}
+    assert none == {"kind": "table", "name": "a"}
+    assert text["did_you_mean"] == ["orders"] and number["did_you_mean"] == ["7"]
+    assert isinstance(unprintable["name"], str)
+    assert row["miss_count"] == 5
+
+
+def test_building_missed_entries_stops_once_the_budget_is_spent(monkeypatch):
+    built = []
+    real = tools._audit_text
+
+    def _counting(raw, cap):
+        built.append(raw)
+        return real(raw, cap)
+
+    monkeypatch.setattr(tools, "_audit_text", _counting)
+    tools._bounded_missed([{"kind": "table", "name": f"t{i}"} for i in range(10_000)])
+
+    # Two texts per entry (kind and name); far fewer entries than were sent can ever fit.
+    assert len(built) < 2 * tools.AUDIT_MISSED_MAX_CHARS // 10
 
 
 # --- SC9: the migration ---------------------------------------------------------------------------
