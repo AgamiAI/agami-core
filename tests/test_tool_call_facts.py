@@ -969,5 +969,10 @@ def test_noting_a_miss_changes_no_reply(served, monkeypatch, handler, arguments)
 
     monkeypatch.setattr(tools, "_note_miss", lambda *a, **k: None)
     tools._ORG_CACHE.clear()
-    assert tools.typed_outcome_overrides(contextvars.copy_context()).get("missed") is None
-    assert handler(dict(args)) == with_noting
+    # A fresh, reset context, as the transport gives every call. Not the test's own context: other
+    # tests call handlers directly, and what they noted stays in the context this worker shares.
+    ctx_off = contextvars.copy_context()
+    ctx_off.run(tools.reset_typed_outcome)
+    without_noting = ctx_off.run(handler, dict(args))
+    assert "missed" not in tools.typed_outcome_overrides(ctx_off)
+    assert without_noting == with_noting
