@@ -3459,14 +3459,12 @@ def _fitting(entries: list[Any], budget: int) -> int:
     return kept
 
 
-def _bounded_arguments(name: str, raw: Any) -> str | None:
+def _bounded_arguments(name: str, raw: dict[str, Any]) -> str | None:
     """Every parameter a call was sent, bounded, except those with a column of their own (ACE-159).
 
     None when nothing is left, so a call sent only those, or nothing, stores NULL. No per-tool list
     of keys: a tool added later, or one a consumer registers, is covered as it stands.
     """
-    if not isinstance(raw, dict):
-        return None
     own = _OWN_COLUMN_ARGUMENTS | ({"example"} if name == "execute_sql" else set())
     values, truncated = _audit_value({k: v for k, v in raw.items() if k not in own})
     if not values:
@@ -4338,7 +4336,7 @@ def record_tool_call(
         "audit_id": audit_id if audit_id is not None else derived_audit_id,
         # What the call was sent, less what has its own column, and what missed (ACE-159). Bounded
         # here, like `basis`: a bound the caller applies is not a bound.
-        "arguments": _bounded_arguments(name, arguments),
+        "arguments": _bounded_arguments(name, args),
         "missed": _bounded_missed(missed),
         # The true total, even when `missed` had to be cut.
         "miss_count": len(missed) if missed else None,
