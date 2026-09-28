@@ -1,4 +1,4 @@
--- What each tool call was sent, which names missed, and how much it sent back (ACE-159).
+-- What each tool call was sent, which names missed, and how much it sent back.
 --
 -- The log could not say how often the AI gets a call wrong. A wrong name that did not sink the whole
 -- call was recorded as a plain success, most of what a call was sent was dropped, and the size of the

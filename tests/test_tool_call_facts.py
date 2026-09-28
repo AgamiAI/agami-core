@@ -1,4 +1,4 @@
-"""ACE-159: the activity log records what each tool call really did.
+"""The activity log records what each tool call really did.
 
 Four facts decide how often the AI gets a call wrong, and each was missing or false on `tool_calls`:
 the real failure kind of an `execute_sql` (it was the literal `failed`), the names that missed and

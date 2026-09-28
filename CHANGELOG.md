@@ -36,7 +36,7 @@ below corresponds to one such version.
 - **`get_prompt_examples` refuses an unknown `area`** with the same suggestions, instead of
   answering as if it were a real area with no examples. Omitting `area` still returns the top
   examples across every area.
-- **The activity log records more of what each tool call did (ACE-159).** Each tool call now
+- **The activity log records more of what each tool call did.** Each tool call now
   records the parameters it was sent, the names the model did not have and what was offered
   instead, how many names missed, and the size of the reply. A call that answered with one name
   missing is still a success, with a miss count above zero. Migration `027_tool_calls_facts.sql`
@@ -44,7 +44,7 @@ below corresponds to one such version.
 
 ### Fixed
 
-- **A failed `execute_sql` on the HTTP server records its real kind (ACE-159).** The activity log
+- **A failed `execute_sql` on the HTTP server records its real kind.** The activity log
   said `failed` for every failure. It now says which: `syntax`, `timeout`, `auth`, and so on.
 
 - **The read-only guard now speaks every dialect it serves (#395).** `execute_sql` advertises the

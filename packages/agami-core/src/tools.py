@@ -436,8 +436,8 @@ def resolve_profile(explicit: str | None = None) -> str:
 _resolved_datasource: ContextVar[str | None] = ContextVar("agami_resolved_datasource", default=None)
 
 
-# The names THIS call missed, and what the reply offered instead, published for the activity row
-# (ACE-159). A handler that answers with one table unknown still succeeds, so without this the row
+# The names THIS call missed, and what the reply offered instead, published for the activity
+# row. A handler that answers with one table unknown still succeeds, so without this the row
 # said only `success=1`. Published by the handler that found the miss, which already holds it as
 # data, rather than parsed back out of a reply that carries it as prose in mixed shapes. Read and
 # cleared exactly as `_resolved_datasource` is above, for the same copied-context reason.
@@ -3396,7 +3396,7 @@ def _bounded_client_model(raw: Any) -> str | None:
     return raw[:CLIENT_MODEL_MAX_CHARS] or None
 
 
-#: The bounds on what a call was sent and what missed (ACE-159). Both are caller-chosen text on the
+#: The bounds on what a call was sent and what missed. Both are caller-chosen text on the
 #: audit row, so both are bounded here rather than trusted to arrive small: a string value is cut at
 #: 1,000 characters, a list or object at 50 items, nesting at depth 4, and the whole serialized value
 #: at the column cap. Every cap sits well above an honest call, so a cut is a signal, not a trim.
@@ -3449,7 +3449,7 @@ def _audit_text(raw: Any, cap: int) -> tuple[str, bool]:
 def _audit_value(raw: Any, depth: int = 0) -> tuple[Any, bool]:
     """One argument value bounded for storage, and whether anything was cut.
 
-    Never raises: this runs on the served path's critical line (ACE-097), where a failure to record
+    Never raises: this runs on the served path's critical line, where a failure to record
     fails the call. So a value JSON cannot hold becomes its `str()` rather than an error, and a
     container past the depth cap becomes None with the cut flagged.
     """
@@ -3499,7 +3499,7 @@ def _fitting(entries: list[Any], budget: int) -> list[Any]:
 
 
 def _bounded_arguments(name: str, raw: dict[str, Any]) -> str | None:
-    """Every parameter a call was sent, bounded, except those with a column of their own (ACE-159).
+    """Every parameter a call was sent, bounded, except those with a column of their own.
 
     None when nothing is left, so a call sent only those, or nothing, stores NULL. No per-tool list
     of keys: a tool added later, or one a consumer registers, is covered as it stands.
@@ -3520,7 +3520,7 @@ def _bounded_arguments(name: str, raw: dict[str, Any]) -> str | None:
 
 
 def _bounded_missed(misses: list[dict[str, Any]] | None) -> str | None:
-    """The names a call missed, bounded (ACE-159): each name stripped and cut, at most three of the
+    """The names a call missed, bounded: each name stripped and cut, at most three of the
     suggestions it was offered, and never the reply's prose `hint`. None when nothing missed."""
     if not misses:
         return None
@@ -4122,7 +4122,7 @@ def reset_typed_outcome() -> None:
     # The same inheritance, for the resolved datasource: `list_datasources` after a schema call would
     # otherwise be recorded against the schema call's datasource.
     _resolved_datasource.set(None)
-    # And for the missed names (ACE-159): a schema call's misses would otherwise be the next tool's.
+    # And for the missed names: a schema call's misses would otherwise be the next tool's.
     _call_misses.set(None)
 
 
@@ -4151,7 +4151,7 @@ def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
     resolved = ctx.get(_resolved_datasource)
     if resolved:
         overrides["datasource"] = resolved
-    # The missed names ride independently too (ACE-159): a partial miss has no outcome to state.
+    # The missed names ride independently too: a partial miss has no outcome to state.
     misses = ctx.get(_call_misses)
     if misses:
         overrides["missed"] = misses
@@ -4165,7 +4165,7 @@ def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
         "success": success,
         # The rule the gate chose, straight off the `Refusal` — strictly more informative than the
         # status alone, and no longer a `json.loads` of our own output. A `failed` has a kind rather
-        # than a rule, and records it (ACE-159): the status alone said `failed` for a syntax error
+        # than a rule, and records it: the status alone said `failed` for a syntax error
         # and a timeout alike. The rule comes first, so `audit_unavailable`'s skip in
         # `_record_tool_call`, which reads the rule off `error_kind`, is unchanged.
         "error_kind": None if success else (rule or kind or status),
@@ -4231,7 +4231,7 @@ def record_tool_call(
       to be re-read later from a context that may no longer be the same one. The fallback when that
       read finds nothing is the deployment-wide org, and for an audit row that is the wrong direction
       to fail in.
-    - `missed` is the names the handler found the model lacked (ACE-159), each `{kind, name,
+    - `missed` is the names the handler found the model lacked, each `{kind, name,
       did_you_mean}`, bounded here. Like `datasource` it is an independent override, not one of the
       coherent trio: a partial miss is still a success.
     """
@@ -4389,7 +4389,7 @@ def record_tool_call(
         # The statement, where one ran. A plain override rather than one of the coherent trio: it is
         # an identity, so a stated value cannot contradict a derived one the way an outcome can.
         "audit_id": audit_id if audit_id is not None else derived_audit_id,
-        # What the call was sent, less what has its own column, and what missed (ACE-159). Bounded
+        # What the call was sent, less what has its own column, and what missed. Bounded
         # here, like `basis`: a bound the caller applies is not a bound.
         "arguments": _bounded_arguments(name, args),
         "missed": _bounded_missed(missed),

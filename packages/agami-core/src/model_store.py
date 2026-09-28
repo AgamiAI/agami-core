@@ -696,7 +696,7 @@ class DbActivitySink:
                 # above so an embedder on an older record shape writes NULLs.
                 getattr(record, "example_id", None),
                 getattr(record, "example_use", None),
-                # What the call was sent, what missed and the reply's size (027, ACE-159),
+                # What the call was sent, what missed and the reply's size (027),
                 # `getattr`-guarded like the columns above so an embedder on an older record shape
                 # writes NULLs.
                 getattr(record, "arguments", None),

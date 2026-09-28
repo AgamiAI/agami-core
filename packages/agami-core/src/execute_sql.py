@@ -1472,7 +1472,7 @@ def report_warehouse_query_id(query_id: str | None) -> None:
 #
 # `(status, rule, kind, row_count)`, not the whole Envelope: the transport needs to say whether the
 # call succeeded, which gate stopped it, what kind of failure it was, and how many rows came back.
-# The kind rides here rather than in a ContextVar of its own (ACE-159): without it the row said the
+# The kind rides here rather than in a ContextVar of its own: without it the row said the
 # literal `failed` for a syntax error, a timeout and an authentication failure alike. Putting a
 # contract object in here invites somebody to serialize it from the transport instead of from the
 # one place that owns the wire shape.
