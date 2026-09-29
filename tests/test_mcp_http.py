@@ -130,6 +130,24 @@ def test_unauthenticated_request_gets_401_challenge(base_url):
     assert f'resource_metadata="{BASE}/.well-known/oauth-protected-resource"' in www
 
 
+def test_a_token_for_another_audience_is_refused_at_mcp(base_url, monkeypatch):
+    # An access token is valid only for the resource it was minted for. One with no `aud`, or another
+    # resource's, gets the same challenge as no token at all, so the client knows to re-authorize.
+    import jwt
+
+    secret = "x" * 40  # a throwaway HS256 key for tests (>=32 bytes); obviously not a real secret
+    monkeypatch.setenv("AGAMI_SIGNING_SECRET", secret)
+    claims = {"sub": "admin", "iss": BASE, "exp": 9_999_999_999}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    c = TestClient(mcp_http.build_app(), base_url=BASE)
+    for aud in (None, f"{BASE}/other", "https://other.example.com/mcp"):
+        token = jwt.encode({**claims, **({"aud": aud} if aud else {})}, secret, "HS256")
+        r = c.post("/mcp", headers={"Authorization": f"Bearer {token}"}, json=body)
+        assert r.status_code == 401, aud
+        www = r.headers.get("www-authenticate", "")
+        assert f'resource_metadata="{BASE}/.well-known/oauth-protected-resource"' in www
+
+
 def test_non_bearer_and_empty_tokens_are_rejected(base_url):
     c = TestClient(mcp_http.build_app())
     body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}

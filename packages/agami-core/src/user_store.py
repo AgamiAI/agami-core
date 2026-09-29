@@ -31,7 +31,7 @@ ACTIVE_STATUS = "active"
 _ACTIVE = ACTIVE_STATUS
 
 # The OIDC provider keys a deploy may pin the admin to. Mirrors `oidc._PROVIDERS`, duplicated here on
-# purpose: `oidc` is the one egress module (httpx), and `user_store` must stay import-light + egress-free.
+# purpose: `oidc` is an egress module (httpx), and `user_store` must stay import-light + egress-free.
 _KNOWN_OIDC_PROVIDERS = ("google", "microsoft")
 
 # A throwaway argon2id hash that no password verifies against. `authenticate` verifies against it on

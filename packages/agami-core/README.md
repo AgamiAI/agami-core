@@ -64,7 +64,9 @@ python -m mcp_http                           # the networked HTTP MCP server (se
 The `[server]` extra adds a networked MCP transport: the **same `TOOLS` surface** as the stdio
 server, but over HTTP with OAuth and a small admin console. It's the self-host shape of the hosted
 product — deploy it to your own host and a whole team connects their own Claude to one URL,
-zero-egress by default (enabling OIDC/SSO adds one outbound call to your identity provider).
+with no customer data leaving your environment. Its outbound calls carry none: a sign-in by a client
+that identifies itself with a metadata-document URL fetches that public URL, and enabling OIDC/SSO adds
+a call to your identity provider.
 
 > 🧪 **Early access.** This team/server layer is usable today but newer than the local single-player
 > path — expect the occasional rough edge, and please report anything broken via a

@@ -39,8 +39,10 @@ PUBLIC_BASE_URL=https://your-host python -m mcp_http
 
 All serving state lives in Postgres — a fresh instance with only `AGAMI_DB_URL` serves identically,
 so the server survives restarts and stateless platforms. The serving path is **LLM-free and
-zero-egress by default**: the client is the brain, `execute_sql` runs SQL against your own database,
-and the other tools just read the model. Nothing leaves your environment.
+keeps your data in your environment**: the client is the brain, `execute_sql` runs SQL against your own
+database, and the other tools just read the model. The only outbound call it makes by default is at
+sign-in: a client that identifies itself with a metadata-document URL makes the server fetch that public
+URL, and the request carries no customer data.
 
 ## Configuration (environment variables)
 
@@ -70,6 +72,7 @@ single-provider login is **free**. Per-org (multi-tenant) SSO, SAML, and SCIM ar
 > runs under a cloud identity — scope it to a dedicated least-privilege one, not the platform default. See
 > [Runtime identity on serverless platforms](../deploy/README.md#runtime-identity-on-serverless-platforms).
 
-The serving path is **LLM-free and zero-egress by default**: the client is the brain, `execute_sql` runs SQL
-against your own database, and nothing leaves your environment. (The one exception is single sign-on, if you
-turn it on — the server calls Google/Microsoft to verify a login.)
+The serving path is **LLM-free and keeps your data in your environment**: the client is the brain, `execute_sql`
+runs SQL against your own database, and no customer data leaves. (Two outbound calls carry none: single sign-on,
+if you turn it on — the server calls Google/Microsoft to verify a login — and a sign-in by a client that
+identifies itself with a metadata-document URL, which makes the server fetch that public URL.)
