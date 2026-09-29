@@ -33,7 +33,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from pathlib import Path
@@ -140,13 +140,23 @@ _SHARED_INSTRUCTIONS = (
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
     "Columns: write the statement from the columns the schema returned for those tables, and "
-    "nothing else. A plausible name is not a declared one, and a column missing from the table's "
-    "own entry is out of scope however obvious it looks beside the ones that are there. A "
+    "nothing else. **Name every column you PROJECT — never a bare `*` or `t.*`**, in the outer "
+    "query, a subquery and a CTE body alike: a star returns columns the statement never names, so "
+    "nothing can check them against the model, and it is refused anywhere it stands as a "
+    "projection. Name them even where the same list appears a few lines above. `COUNT(*)` and "
+    "other aggregates over `*` are fine — there the star is inside the call and the projection is "
+    "the aggregate, so it is not affected by any of this. "
+    "A plausible name is not a declared one, and a column missing from the table's "
+    "own entry is out of scope however obvious it looks beside the ones that are there. The same "
+    "holds for area, table and metric names: copy them from a response, never from the user's "
+    "wording. A "
     "response sized down to `summary` or `index` carries no columns at all, so ask for the "
     "tables you are about to write (`dataset_names`) before concluding a column is missing.\n"
     "A scope refusal is a repair, not a dead end. `status:'refused'` on rule `column_scope` or "
     "`table_scope` is most often the same mistake as the database's `column_not_found` and takes "
-    "the same fix: re-read what that table declares, rewrite with declared names, and retry. "
+    "the same fix: re-read what that table declares, rewrite with declared names, and retry. A "
+    "`column_scope` refusal's `remediation` lists what the tables your statement reads DO "
+    "declare: use it to correct a misspelt name, never as a stand-in for the one refused. "
     "Read the refusal's `detail` first, because two cases are not that. A table name matching "
     "more than one schema is repaired by qualifying it (`schema.table`), not by renaming it. And "
     "a column can be absent from the model ON PURPOSE, which is how a model author makes one "
@@ -159,12 +169,15 @@ _SHARED_INSTRUCTIONS = (
     "fan the pair out per datasource rather than walking them one at a time.\n"
     "If a get_datasource_schema response carries `prompt_examples`, the datasource has stored "
     "examples: fetch them before writing SQL if you have not already.\n"
-    "Dialect: take it from the `database_type` list_datasources reports for that datasource, and "
-    "never assume one. A metric's `binding` already arrives resolved to that dialect, so copy it "
-    "rather than translating it — but the rest of the statement is yours to write in the right "
-    "one, and date arithmetic, string functions and casts are where a guess shows up. When a "
-    "get_datasource_schema response carries `dialect_rules`, follow them: they list what that "
-    "engine rejects and what to write instead.\n"
+    "Dialect: list_datasources reports it per datasource as `engine` (what the model declares) "
+    "and `database_type` (what the connection's DSN says). Take it from there and never assume "
+    "one; where they differ, `engine` is what the rules were chosen by. A metric's `binding` "
+    "already arrives resolved to that dialect, so copy it rather than translating it — but the "
+    "rest of the statement is yours to write in the right one, and date arithmetic, string "
+    "functions and casts are where a guess shows up. When list_datasources carries "
+    "`dialect_rules`, follow them: they list what that engine rejects and what to write instead. "
+    "A get_datasource_schema response names the engine and points back here rather than repeating "
+    "them, so fetch them once per datasource.\n"
     "The receipt is on EVERY status execute_sql returns, and execute_sql's own description defines "
     "its five sections — columns, tables, joins, aggregates, assumptions — field by field, "
     "including what each status value means. Read it there. What belongs here is what you DO with "
@@ -1127,7 +1140,12 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     store = Store.from_env()
     if store is not None:
         try:
-            from model_store import list_datasources, model_descriptions, model_table_counts
+            from model_store import (
+                list_datasources,
+                model_descriptions,
+                model_engines,
+                model_table_counts,
+            )
 
             org_id = _current_org_id()
             # Two grouped queries, not per-datasource. `description` is what makes this tool able to
@@ -1136,11 +1154,17 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             # get_datasource_schema on each candidate purely to choose, and that is the ~60 KB call.
             counts = model_table_counts(store, org_id=org_id)
             descriptions = model_descriptions(store, org_id=org_id)
+            # The engine the model declares, and what that engine rejects. Both ride HERE rather
+            # than on every `get_datasource_schema` response, where the rules were identical on
+            # all four tiers and re-sent on each call of a multi-call question (#405). This is the
+            # call that answers "which datasource, on what engine", so the dialect belongs with it.
+            engines = model_engines(store, org_id=org_id)
             out = [
                 {
                     "datasource": ds,
                     "database_type": _served_db_type(ds),
                     "table_count": counts.get(ds, 0),
+                    **_dialect_fields(engines.get(ds)),
                     # No `model_present` here. It was the literal `True`: this list is built FROM
                     # `datasource_model` rows, so the field could never be false, and reporting a
                     # constant as though a check ran implies a verification that did not happen.
@@ -1188,6 +1212,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                 "datasource": profile,
                 "database_type": _db_type_for(profile, creds),
                 "table_count": table_count,
+                **_dialect_fields(_local_engine(pdir)),
                 "model_present": (pdir / "datasource.yaml").exists(),
                 "is_active": profile == active,
             }
@@ -1201,6 +1226,83 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             indent=2,
         )
     return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+
+
+def _dialect_fields(engine: "str | None") -> dict[str, Any]:
+    """`engine` + `dialect_rules` for a listing entry, or `{}` when the model declares no engine.
+
+    The rules used to ride every `get_datasource_schema` response — identical on all four tiers,
+    and re-sent on each call of a multi-call question (#405). They describe the ENGINE, which does
+    not vary with the scope being asked about, so they belong on the call that answers "which
+    datasource, on what engine" and is made once.
+
+    `engine` is the model's own `storage_type`. It is emitted beside `database_type` rather than
+    replacing it: that field is derived from the DSN and reports the connection's scheme, which is
+    `postgres` for a Redshift warehouse reached the usual way (#401). Both are a client's answer to
+    "what dialect", and they can disagree — so the one the MODEL declares is the one the rules are
+    chosen by, and it is named.
+    """
+    if not engine:
+        return {}
+    from sql_dialect_rules import dialect_rules_for
+
+    rules = dialect_rules_for(engine)
+    return {"engine": engine, **({"dialect_rules": rules} if rules else {})}
+
+
+def _local_engine(profile_dir: Path) -> "str | None":
+    """The engine a local profile's model declares, read without building the whole model.
+
+    `list_datasources` is the cheap call — it reports a table count by globbing, not by loading —
+    so this reads the one key it needs rather than paying a full parse for a listing entry. Same
+    one-declared-engine-or-nothing rule as the served path (`model_store.model_engines`).
+
+    It reads all three connection forms `loader.load_datasource` accepts, and resolves them in the
+    loader's order — `ref` first, then inline `storage_type`, then a bare name standing for
+    `datasources/<name>/storage.yaml`. The order is only observable on a connection carrying both
+    keys, but a listing that disagreed with the model the next call loads would be worse than
+    useless, so it follows rather than approximates. The generator writes the pointer form, so
+    reading the inline key alone finds nothing on a real model.
+
+    Every read is best-effort: this is a listing, and a model too malformed to parse should cost
+    its own entry's `engine`, not the whole call. Three ways that can happen, all handled the same
+    way — unreadable bytes, YAML that does not parse (`yaml.YAMLError` is NOT a `ValueError`), and
+    YAML that parses to a scalar or a list, which has no `.get`.
+
+    PyYAML itself is optional: the base install declares no dependencies and YAML arrives with the
+    `[model]` extra, so a bare install reaching this must lose the engine field rather than the
+    tool. `list_datasources` is the one tool that has to answer on a stdlib-only install — it is
+    how an operator finds out what this deployment has.
+    """
+    try:
+        import yaml
+    except ImportError:  # no `[model]` extra: list the datasources, just without their engine
+        return None
+
+    def _read(path: Path) -> dict:
+        try:
+            doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError, yaml.YAMLError):
+            return {}
+        return doc if isinstance(doc, dict) else {}
+
+    def _declared(c: Any) -> "str | None":
+        if not isinstance(c, dict):  # a bare name: `storage_connections: [warehouse]`
+            return _read(profile_dir / "datasources" / str(c) / "storage.yaml").get("storage_type")
+        if c.get("ref"):
+            return _read(profile_dir / c["ref"]).get("storage_type")
+        if c.get("storage_type"):
+            return c["storage_type"]
+        return _read(
+            profile_dir / "datasources" / str(c.get("name")) / "storage.yaml"
+        ).get("storage_type")
+
+    doc = _read(profile_dir / "datasource.yaml")
+    engines = {_declared(c) for c in (doc.get("storage_connections") or [])}
+    # A connection that declares nothing is not a second opinion about the engine (see
+    # `model_engines`): dropping it keeps an engine we do know instead of manufacturing ambiguity.
+    engines.discard(None)
+    return engines.pop() if len(engines) == 1 else None
 
 
 def _served_db_type(datasource: str) -> str:
@@ -1424,6 +1526,38 @@ def _large_tables(org) -> dict[str, int]:
     return out
 
 
+def _cross_area_map(org, scope) -> dict[str, list[str]]:
+    """The cross-area edges as an adjacency map: `{from_table: [to_table, …]}`.
+
+    Several declared edges can reach the same pair of tables through different columns — nine
+    reference columns on one table all pointing at the user table, say. This tier carries no
+    columns, so as a list those edges were indistinguishable and the block repeated itself. A map
+    states each bridge once.
+
+    Only the bridges. A `{table: subject_area}` half was carried here briefly (#402): the
+    per-edge form it replaced repeated the two area names on every edge, but the routing answer
+    an agent acts on is a TABLE NAME — which is what `dataset_names` takes — and the one
+    parameter an area would serve is `area`, which the instructions tell clients to omit.
+    """
+    # Names are published BARE, which is the only form the next call can honour: `_resolve_scope`
+    # strips every qualifier from `dataset_names`, and the bare name then resolves first-match. A
+    # qualified node would look precise and select a different table — publishing `public.orders`
+    # and receiving `archive.orders` is worse than publishing an ambiguity the caller can see.
+    #
+    # So where one name is declared under two schemas, both edges land on one node here. That is a
+    # fiction only in the sense the whole path is one: `dataset_names` cannot tell those tables
+    # apart either. #258 is the fix — the served model has no schema column at all, so the
+    # qualifier is gone before this tool answers. When it lands, this block should publish the
+    # qualified name, and `models.table_key` is the comparison to do it with.
+    joins: dict[str, set[str]] = {}
+    for r in org.cross_subject_area_relationships:
+        if scope.level != "datasource" and scope.area not in (r.from_subject_area,
+                                                              r.to_subject_area):
+            continue
+        joins.setdefault(_bare_name(r.from_table), set()).add(_bare_name(r.to_table))
+    return {t: sorted(v) for t, v in sorted(joins.items())}
+
+
 def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
     """Full get_table_context for the named tables: `{"tables": {name: ctx}, "relationships": [...]}`.
 
@@ -1489,6 +1623,221 @@ def _bare_name(name: str) -> str:
     return bare_name(name or "")
 
 
+# Where to look when nothing close was found. Not "call without scope": an unscoped call on a wide
+# model lands on `mode=index`, which lists the areas and no table names at all.
+_LIST_TABLES_ADVICE = (
+    "Call get_datasource_schema with `area` to list that area's tables; without scope it lists "
+    "the areas."
+)
+
+# How many distinct missed names OF EACH KIND (tables, metrics) in one call get suggestions, so a
+# call runs at most twice this many searches. Each one scans every candidate name
+# in the model, and nothing bounds how many names a caller sends — on a wide model a thousand bad
+# names cost seconds of CPU that every other request on the process waits behind. Past the cap a
+# miss is still named, just without the search.
+_SUGGESTED_MISSES = 10
+
+
+def _did_you_mean(name: str, candidates: Iterable[str], n: int = 3) -> list[str]:
+    """`semantic_model.suggest.did_you_mean`, imported lazily as every `semantic_model` symbol is."""
+    from semantic_model.suggest import did_you_mean
+
+    return did_you_mean(name, candidates, n)
+
+
+class _ModelNames(NamedTuple):
+    """Every name a caller can pass, by kind — built only once a call has already missed.
+
+    A column index walks every column of every table, which a wide model makes the costliest thing
+    here; the success path never needs it, so nothing builds this until a name fails to resolve.
+    """
+
+    areas: list[str]
+    tables: dict[str, str]  # bare table name -> the area that defines it
+    columns: dict[str, list[str]]  # casefolded column name -> bare names of the tables holding it
+    # Keyed as `_all_metrics` keys them: a name two areas share is `name` for the first and
+    # `name (area)` for the rest, and that key is what `metric_names` selects by. The metric's own
+    # name rides beside the key because a key alone cannot tell `revenue (people)`, a collision,
+    # from a metric really named `revenue (net)`.
+    metric_keys: dict[str, "tuple[str, str | None]"]  # key -> (metric name, area or None)
+    folded_tables: frozenset[str]  # casefolded bare table names, for "is this a table at all"
+
+    @classmethod
+    def of(cls, org) -> "_ModelNames":
+        from semantic_model import loader as L
+
+        tables: dict[str, str] = {}
+        columns: dict[str, list[str]] = {}
+        for sa in org.subject_areas:
+            for t in sa.tables_defined:
+                bare = _bare_name(t.name)
+                tables.setdefault(bare, sa.name)
+                # Only the columns `get_datasource_schema` would show: a table read in its owning
+                # area exposes the column groups that area's TableRef names, and a hint naming a
+                # column outside them would disclose what the schema response deliberately hides.
+                exposed = L._exposed_groups_for(sa, t.name)
+                for c in L._visible_columns(t, exposed):
+                    columns.setdefault(c.name.casefold(), []).append(bare)
+        metric_keys = {k: (m.name, a) for k, (m, a) in _all_metrics(org).items()}
+        return cls(
+            [sa.name for sa in org.subject_areas],
+            tables,
+            columns,
+            metric_keys,
+            frozenset(t.casefold() for t in tables),
+        )
+
+    def area_of(self, table: str) -> "str | None":
+        """The area defining `table`, matched EXACTLY as the loader matches.
+
+        Folding case here once told a caller `'Orders' is in subject area 'sales'` — true of
+        `orders`, and a name that still resolved nowhere on retry. A case-only miss is a typo, and
+        `did_you_mean` is what answers it.
+        """
+        return self.tables.get(_bare_name(table))
+
+    def table_hint(self, name: str) -> "str | None":
+        """Why `name` is not a table, when it is a real name of another kind.
+
+        Only when no table answers to it in any case: a name can be an area AND a table
+        (`payments`), and there `Payments` is a case typo of the table — telling the caller it "is a
+        subject area, not a table" would be false.
+        """
+        folded = name.casefold()
+        if _bare_name(folded) in self.folded_tables:
+            return None
+        area = next((a for a in self.areas if a.casefold() == folded), None)
+        if area:
+            return f"{area!r} is a subject area, not a table: pass it as `area`."
+        holders = self.columns.get(_bare_name(name).casefold())
+        if holders:
+            listed = ", ".join(sorted(set(holders))[:5])
+            return f"{name!r} is a column, not a table. It is on: {listed}."
+        return None
+
+    def area_hint(self, name: str) -> "str | None":
+        """Why `name` is not an area, when it is a table."""
+        area = self.area_of(name)
+        if area:
+            return (
+                f"{name!r} is a table (in subject area {area!r}), not an area: pass it in "
+                f"`dataset_names`."
+            )
+        return None
+
+    def unknown_tables_error(self, names: list[str], profile: str) -> str:
+        """The refusal for a table scope in which no named table exists."""
+        # A name past the cap is left out rather than given `[]`: an empty list says "searched,
+        # nothing close", and these were not searched.
+        hints = {n: h for n in names if (h := self.table_hint(n))}
+        guesses = {n: self.table_guesses(n) for n in names[:_SUGGESTED_MISSES] if n not in hints}
+        # Named in prose only up to the cap too: past it the count is the caller's own number, and
+        # a statement of thousands of names is not thousands of sentences of refusal.
+        sentences = [
+            f"No table named {n!r} in {profile!r}. {self.miss_advice(n, guesses)}".rstrip()
+            for n in names[:_SUGGESTED_MISSES]
+        ]
+        if len(names) > _SUGGESTED_MISSES:
+            sentences.append(f"And {len(names) - _SUGGESTED_MISSES} more unknown table name(s).")
+        if not any(guesses.values()) and not hints:
+            sentences.append(_LIST_TABLES_ADVICE)
+        error: dict[str, Any] = {
+            "kind": "not_found",
+            "remediation": " ".join(sentences),
+            "did_you_mean": guesses,
+        }
+        if hints:
+            error["hints"] = hints
+        return json.dumps({"error": error}, indent=2)
+
+    def miss_advice(self, name: str, guesses: Mapping[str, list[str]]) -> str:
+        """What to try instead of `name`: its wrong-kind hint first, else its closest names.
+
+        The hint wins because it is exact — `sales` IS an area — where a fuzzy guess for a name of
+        the wrong kind is only ever a near-miss of something unrelated.
+        """
+        hint = self.table_hint(name)
+        if hint:
+            return hint
+        if guesses.get(name):
+            return f"Did you mean {', '.join(repr(g) for g in guesses[name])}?"
+        return ""
+
+    def unresolvable_entry(self, name: str) -> dict[str, Any]:
+        """A table the model defines that `dataset_names` still cannot address (#258).
+
+        Its own `name` carries its schema, the index keys it in full, and `dataset_names` arrives
+        bare — so neither spelling reaches it. The bare "not found in scope" left an agent that had
+        copied the name exactly with no next move; its area always lists it.
+        """
+        area = self.tables[_bare_name(name)]
+        return {
+            "error": "not found in scope",
+            "hint": f"{name!r} is defined in subject area {area!r} but cannot be selected by name "
+            f"yet: call with area={area!r} to get it.",
+        }
+
+    def unknown_table_entry(self, name: str) -> dict[str, Any]:
+        """The per-table miss beside tables that did resolve."""
+        entry: dict[str, Any] = {"error": "not found in scope"}
+        # The hint first, as in `miss_advice`: beside an exact "this is an area", a fuzzy guess is
+        # a near-miss of something unrelated.
+        hint = self.table_hint(name)
+        if hint:
+            entry["hint"] = hint
+        elif guesses := self.table_guesses(name):
+            entry["did_you_mean"] = guesses
+        return entry
+
+    def unknown_metric(
+        self, name: str, in_scope: Mapping[str, tuple[Any, "str | None"]]
+    ) -> dict[str, Any]:
+        """A `metric_names` entry that selected nothing — reported so it is not silently dropped.
+
+        A metric that exists outside the declared scope is SAID to, and left out: naming it here
+        must not widen the scope, and calling it unknown would send the agent inventing one.
+        """
+        entry: dict[str, Any] = {"name": name}
+        # A name two areas share selects only by its key, so the bare name can miss while the
+        # metric it names IS in scope — under `name (area)`. Point at that key, not elsewhere.
+        shared = [k for k, (m, _a) in in_scope.items() if m.name == name]
+        if shared:
+            entry["did_you_mean"] = shared
+            entry["hint"] = (
+                f"{name!r} is defined more than once, so each is keyed by where it is defined; "
+                f"pass the key of the one you mean."
+            )
+            return entry
+        outside = [
+            k
+            for k, (metric, _a) in self.metric_keys.items()
+            if k not in in_scope and (k == name or metric == name)
+        ]
+        if not outside:
+            guesses = _did_you_mean(name, in_scope)
+            if guesses:
+                entry["did_you_mean"] = guesses
+                return entry
+            # Nothing close in scope. An empty list would read as "no such metric", so look once
+            # outside it — as a hint, since a suggestion here would widen the declared scope.
+            outside = _did_you_mean(name, self.metric_keys)
+            if not outside:
+                entry["did_you_mean"] = []
+                return entry
+        where = "; ".join(
+            f"{k!r} in {'subject area ' + repr(a) if a else 'the cross-area metrics'}"
+            for k in outside
+            for a in [self.metric_keys[k][1]]
+        )
+        entry["hint"] = (
+            f"Outside this call's scope: {where}. Widen `area` or `dataset_names` to include it."
+        )
+        return entry
+
+    def table_guesses(self, name: str) -> list[str]:
+        return _did_you_mean(name, self.tables)
+
+
 class Scope(NamedTuple):
     """The scope the caller DECLARED, resolved once per request.
 
@@ -1528,6 +1877,103 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
     if area:
         return Scope("area", area, ())
     return Scope("datasource", None, ())
+
+
+# The mode ladder plus `auto`, from the one table that defines the ladder.
+_SCHEMA_MODES = ("auto", *_SCHEMA_MODE_DOWNGRADE)
+# Every key `_normalized_args` repairs; a tool passes the subset it actually takes.
+_SHAPED_KEYS = ("dataset_names", "metric_names", "area", "mode")
+
+
+def _normalized_args(
+    args: dict[str, Any], keys: "tuple[str, ...]" = _SHAPED_KEYS
+) -> "tuple[dict[str, Any], str | None]":
+    """`args` with the shape mistakes an agent makes repaired, or the refusal for one that isn't.
+
+    Neither transport validates arguments against the advertised schema, so these arrived as-is.
+    A lone string for a list was iterated letter by letter ("No table named 'o'"); a list for
+    `area` was dropped, silently answering the WHOLE datasource to a caller that believed it had
+    scoped to one area; an unknown `mode` quietly became `summary`. Where the intent is
+    unambiguous — one name where a list of one was meant — it is repaired; otherwise refused,
+    naming what is expected. Blank means "not given" for every key, as it always did for `mode`:
+    clients commonly fill an unset optional string with "".
+
+    Only `keys` are looked at, so a tool is never refused over an argument it does not take.
+    """
+    fixed = dict(args)
+
+    def refuse(remediation: str, **extra: Any) -> "tuple[dict[str, Any], str]":
+        error = {"kind": "invalid_argument", "remediation": remediation, **extra}
+        return fixed, json.dumps({"error": error}, indent=2)
+
+    for key in ("dataset_names", "metric_names"):
+        if key not in keys:
+            continue
+        value = fixed.get(key)
+        if isinstance(value, str):
+            fixed[key] = [value] if value.strip() else []
+        elif isinstance(value, tuple):
+            fixed[key] = list(value)  # an embedder's tuple; no JSON transport can send one
+        elif value is not None and not isinstance(value, list):
+            return refuse(f'`{key}` must be a list of names, e.g. ["name"].')
+    if "area" in keys:
+        area = fixed.get("area")
+        if isinstance(area, list):
+            if len(area) > 1 or (area and not isinstance(area[0], str)):
+                return refuse(
+                    "`area` takes ONE subject area name. To cover several, call once per area, "
+                    "or name their tables in `dataset_names`."
+                )
+            area = area[0] if area else None
+        elif area is not None and not isinstance(area, str):
+            return refuse("`area` must be a subject area name (a string).")
+        # Stored STRIPPED: the served examples query matches `area = ?` on the value it is given,
+        # so " sales " passed a stripped check and then matched no area — only the cross-area
+        # examples came back, the "real but empty" answer the check exists to prevent.
+        fixed["area"] = (area or "").strip() or None
+    if "mode" in keys:
+        mode = fixed.get("mode")
+        if isinstance(mode, str) and not mode.strip():
+            mode = None
+        if mode is not None:
+            folded = mode.strip().lower() if isinstance(mode, str) else ""
+            if folded not in _SCHEMA_MODES:
+                guesses = _did_you_mean(str(mode), _SCHEMA_MODES)
+                lead = f"Unknown `mode` {mode!r}."
+                if guesses:
+                    lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
+                return refuse(
+                    f"{lead} Valid modes: {', '.join(_SCHEMA_MODES)}; omit it for auto.",
+                    did_you_mean=guesses,
+                )
+            mode = folded
+        fixed["mode"] = mode
+    return fixed, None
+
+
+def _unknown_area_error(org, area: str, profile: str) -> str:
+    """The refusal for an `area` the model does not have, naming the ones it does.
+
+    Shared by `get_datasource_schema` and `get_prompt_examples`, which take the same parameter and
+    so owe the same answer to the same mistake.
+    """
+    names = _ModelNames.of(org)
+    known = ", ".join(sorted(names.areas))
+    guesses = _did_you_mean(area, names.areas)
+    hint = names.area_hint(area)
+    lead = f"No subject area named {area!r} in {profile!r}."
+    if hint:
+        lead += f" {hint}"
+    elif guesses:
+        lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
+    error: dict[str, Any] = {
+        "kind": "not_found",
+        "remediation": f"{lead} Known areas: {known}.",
+        "did_you_mean": guesses,
+    }
+    if hint:
+        error["hint"] = hint
+    return json.dumps({"error": error}, indent=2)
 
 
 def _scoped_metrics(
@@ -1613,37 +2059,34 @@ def _schema_payload(
         "datasource": profile,
         "organization": org.description or None,
         "mode": mode,
-        # One entry per declared cross-area edge, named by its ENDPOINT TABLES.
+        # The cross-area routing map: `{from_table: [to_table, …]}` — which table bridges to which,
+        # so the agent knows what to ask `dataset_names` for next.
         #
-        # This used to project `{from, to, for_questions_about}`, and `for_questions_about` has no
-        # writer anywhere — it is `setdefault`-ed empty and never filled, including in the sample
-        # model this product ships. So each entry was a bare pair of area names, and a model with
-        # a dozen distinct FK edges from `sales` to `people` (assigned_to, created_by,
-        # approved_by, …) emitted `sales → people` a dozen identical times. On a wide model
-        # that is a long list carrying a fraction of its length in distinct facts.
+        # This was one entry per declared edge, projected to `{from, to, from_table, to_table}`.
+        # An earlier revision projected `{from, to, for_questions_about}` and a model with a dozen
+        # distinct FK edges from `sales` to `people` (assigned_to, created_by, approved_by, …)
+        # emitted `sales → people` a dozen identical times; naming the endpoint tables fixed that
+        # for edges between DIFFERENT table pairs but not for the several that reach the SAME pair
+        # through different columns. Those still serialized identically, because the column is the
+        # only thing telling them apart and this tier does not carry columns. On a wide model the
+        # block ran 283 entries for 181 distinct facts.
         #
-        # The endpoints are what tell them apart, and they are the routing question this block
-        # answers — WHICH table bridges the areas, so the agent knows what to ask for next. The join
-        # mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately: a
-        # `dataset_names` call returns them in full on its own `relationships` block, so repeating
-        # every relationship object here would restate what the next call states better.
+        # An adjacency map states each fact once, and answers the same routing question — WHICH
+        # table bridges the areas, so the agent knows what to ask for next.
         #
-        # That last sentence was FALSE when this comment was written: `_table_contexts` resolved
-        # those relationships and discarded them, so the detail this tier defers to did not exist
-        # on any surface. ACE-107 made the deferral true by emitting them.
-        "cross_area_relationships": [
-            {
-                "from": r.from_subject_area,
-                "to": r.to_subject_area,
-                "from_table": r.from_table,
-                "to_table": r.to_table,
-            }
-            for r in org.cross_subject_area_relationships
-            if scope.level == "datasource" or scope.area in (r.from_subject_area, r.to_subject_area)
-        ],
+        # The join mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately:
+        # a `dataset_names` call returns them in full on its own `relationships` block, so
+        # repeating every relationship object here would restate what the next call states better.
+        "cross_area_relationships": _cross_area_map(org, scope),
         "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
         "large_tables": _large_tables(org),
     }
+    # Omitted outright when there is nothing to route, which the table tier already does with this
+    # key. It also keeps the old emptiness test working: the block was a list, so a client writing
+    # `if response["cross_area_relationships"]:` read False on a model with no cross-area edges —
+    # and an empty MAP is truthy, so leaving it in place would silently flip that branch.
+    if not result["cross_area_relationships"]:
+        del result["cross_area_relationships"]
     # At area scope the map is that one area. `subject_areas` is not emitted at all on the table
     # tier — that branch does not call this function.
     areas = [sa for sa in org.subject_areas if scope.level == "datasource" or sa.name == scope.area]
@@ -1681,6 +2124,44 @@ def _schema_payload(
         _metric_full(metrics[n][0], metrics[n][1], engine) for n in selected if n in metrics
     ]
     return result
+
+
+def _known_datasources() -> "list[str] | None":
+    """The datasources a caller could have meant: the served ones, else the on-disk models.
+
+    None when neither can answer, so a refusal says nothing rather than guess at the choices.
+    """
+    from execute_sql import _hosted  # local import: keeps the module import graph acyclic
+
+    if _hosted():
+        # None here means a configured store that could not be asked. The disk is not a stand-in
+        # for it: what sits in a served container's artifacts dir is not what the org serves, and
+        # `_choose_datasource_error` stays silent on the same failure for the same reason.
+        return _served_datasources(_current_org_id())
+    # A missing artifacts dir globs to nothing rather than raising.
+    return sorted(p.parent.name for p in resolve_artifacts_dir().glob("*/datasource.yaml"))
+
+
+def _unknown_datasource_error(profile: str, remediation: str) -> str:
+    """The refusal for a NAMED datasource with no model, naming the ones that have one."""
+    error: dict[str, Any] = {"kind": "not_found", "remediation": remediation}
+    known = _known_datasources()
+    if known and profile in known:
+        # The name is right and the model is broken — a dangling `ref`, a missing area directory.
+        # The loader's message names the file; a list of datasources would only hide it.
+        return json.dumps({"error": error}, indent=2)
+    if known:
+        guesses = _did_you_mean(profile, known)
+        if guesses:
+            # The loader's own message ends "run agami-connect to introspect this database" —
+            # advice for a missing model, and wrong for a typo of one that exists.
+            error["did_you_mean"] = guesses
+            error["remediation"] = (
+                f"No datasource named {profile!r}. Did you mean "
+                f"{', '.join(repr(g) for g in guesses)}? Known datasources: {', '.join(known)}."
+            )
+        error["datasources"] = known
+    return json.dumps({"error": error}, indent=2)
 
 
 def _choice_schema(choices: list[str]) -> dict:
@@ -1730,6 +2211,11 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     `metric_index` (name->description for every metric in scope) + `large_tables` are always
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
+    # A malformed argument is answered before anything is loaded: it is the same mistake on any
+    # datasource, and repairing it first means the checks below see the shape they expect.
+    args, malformed = _normalized_args(args)
+    if malformed is not None:
+        return malformed
     # With several datasources served, an omission is refused before it can resolve to a fallback
     # (#327); `_choose_datasource_error` names the choices. A client that can ask the person is
     # asked instead, and an accepted choice proceeds as though it had been named. A declined or
@@ -1796,7 +2282,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
             choose = _choose_datasource_error(_current_org_id())
             if choose is not None:
                 return choose
-        return json.dumps({"error": {"kind": "not_found", "remediation": str(e)}}, indent=2)
+        return _unknown_datasource_error(profile, str(e))
     except ImportError:
         return json.dumps(
             {
@@ -1813,52 +2299,66 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
 
     requested_mode = (args.get("mode") or "auto").lower()
     scope = _resolve_scope(args)
+    # Checked before the tables it would scope: with `area` misspelt every named table looks
+    # misplaced, and the caller fixed its tables before learning the area was the mistake.
+    if scope.area and not any(sa.name == scope.area for sa in org.subject_areas):
+        # Fail loudly. "Nothing in your scope is hidden" is vacuously true of a scope that does not
+        # exist, and an empty model reads to an agent as "this datasource has none" — after which
+        # it invents table names. Every neighbouring surface names the miss: `get_table_context`
+        # returns `{"error": "not found in scope"}` per table, `get_subject_area_bundle` raises.
+        return _unknown_area_error(org, scope.area, profile)
     if scope.level == "table" and scope.area:
         # `area` + `dataset_names` is a compound declaration: these tables, in that area. It
         # VALIDATES rather than overriding the per-table lookup — overriding is what returned
         # "not found in scope" for a table outside the area while its metrics stayed advertised.
         # A table that is not in the declared area makes the two halves contradict each other, and
         # answering anyway would echo a scope the response does not have.
-        misplaced = [
-            tbl
-            for tbl in scope.tables
-            if not any(
-                sa.name == scope.area
-                and (
-                    any(_bare_name(d.name) == tbl for d in sa.tables_defined)
-                    or any(_bare_name(getattr(r, "table", "")) == tbl for r in sa.tables)
-                )
-                for sa in org.subject_areas
-            )
-        ]
+        #
+        # The area's names are gathered once and each table looked up in them: rescanning the area
+        # per named table cost seconds on a wide area, for a list whose length nothing bounds.
+        in_area = {
+            _bare_name(n)
+            for sa in org.subject_areas
+            if sa.name == scope.area
+            for n in [
+                *(d.name for d in sa.tables_defined),
+                *(getattr(r, "table", "") for r in sa.tables),
+            ]
+        }
+        misplaced = list(dict.fromkeys(t for t in scope.tables if t not in in_area))
         if misplaced:
+            names = _ModelNames.of(org)
+            # A table in NO area is a typo, not a misplacement: "not in subject area X" is true of
+            # it and sends the agent looking in the wrong place.
+            if all(names.area_of(t) is None for t in misplaced):
+                return names.unknown_tables_error(misplaced, profile)
+            # Searched for exactly the names the refusal shows, so every one it names gets its
+            # suggestion and nothing past the cap is searched.
+            shown = sorted(misplaced)[:_SUGGESTED_MISSES]
+            guesses = {t: names.table_guesses(t) for t in shown if names.area_of(t) is None}
+            located = [
+                f"{t!r} is in subject area {a!r}."
+                if (a := names.area_of(t))
+                # A wrong-kind hint says what the name IS; "in no subject area" beside it read as
+                # a contradiction ("'sales' is in no subject area. 'sales' is a subject area").
+                else names.table_hint(t)
+                or f"{t!r} is in no subject area. {names.miss_advice(t, guesses)}".rstrip()
+                for t in shown
+            ]
+            if len(misplaced) > _SUGGESTED_MISSES:
+                located.append(f"And {len(misplaced) - _SUGGESTED_MISSES} more.")
             return json.dumps(
                 {
                     "error": {
                         "kind": "not_found",
-                        "remediation": f"Table(s) {', '.join(sorted(misplaced))} are not in subject area "
-                        f"{scope.area!r}. Drop `area` to scope by table alone, or name "
-                        f"tables from that area.",
+                        "remediation": f"Table(s) {', '.join(sorted(misplaced)[:_SUGGESTED_MISSES])}"
+                        f"{' and more' if len(misplaced) > _SUGGESTED_MISSES else ''} are not in subject area "
+                        f"{scope.area!r}. {' '.join(located)} Drop `area` to scope by table alone, "
+                        f"or name tables from that area.",
                     }
                 },
                 indent=2,
             )
-    if scope.area and not any(sa.name == scope.area for sa in org.subject_areas):
-        # Fail loudly. "Nothing in your scope is hidden" is vacuously true of a scope that does not
-        # exist, and an empty model reads to an agent as "this datasource has none" — after which
-        # it invents table names. Every neighbouring surface names the miss: `get_table_context`
-        # returns `{"error": "not found in scope"}` per table, `get_subject_area_bundle` raises.
-        known = ", ".join(sorted(sa.name for sa in org.subject_areas))
-        return json.dumps(
-            {
-                "error": {
-                    "kind": "not_found",
-                    "remediation": f"No subject area named {scope.area!r} in {profile!r}. "
-                    f"Known areas: {known}.",
-                }
-            },
-            indent=2,
-        )
     # Never-hide, within the scope the caller DECLARED. `metric_index` and the full `metrics`
     # block are both projected from this one set, so they cannot disagree about what is in scope.
     metrics = _scoped_metrics(org, _all_metrics(org), scope)
@@ -1871,6 +2371,19 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     explicit = [n for n in (args.get("metric_names") or []) if n in metrics]
     matched = list(dict.fromkeys(explicit + _match_metrics(args.get("query"), metrics)))
     selected = matched or list(metrics)
+    # A name that selected nothing used to vanish without a word, so the agent read the detail it
+    # got back as the metric it asked for.
+    missed = list(
+        dict.fromkeys(str(n) for n in (args.get("metric_names") or []) if n not in metrics)
+    )
+    unknown_metrics = None
+    names: _ModelNames | None = None  # built on the first miss, then shared by the table branch
+    if missed:
+        names = _ModelNames.of(org)
+        unknown_metrics = [
+            names.unknown_metric(n, metrics) if i < _SUGGESTED_MISSES else {"name": n}
+            for i, n in enumerate(missed)
+        ]
 
     # Read before the response is built, so the stored-example pointer is inside the JSON the size
     # budget below measures — every piece still on ONE DB connection (see _context_sources).
@@ -1880,17 +2393,38 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     # A pointer, never the examples (#301). Counted datasource-wide whatever `area` scoped this call:
     # an area-scoped count would hide exactly the other areas' examples an `area` filter drops.
     pointer = {"stored": example_count, "next": _EXAMPLES_REMINDER} if example_count else None
-    # What this engine rejects, handed over before the SQL is written (#325). Added beside the pointer
-    # on both branches below, so on the budgeted branch it is inside what the budget measures.
-    from sql_dialect_rules import dialect_rules_for
-
-    dialect_rules = dialect_rules_for(engine)
+    # A POINTER to what this engine rejects, never the rules themselves (#405). They describe the
+    # ENGINE, which does not vary with the scope being asked about — so the same ~1,750 chars rode
+    # every tier and were re-sent on each call of a multi-call question. `list_datasources` carries
+    # them now, and this says where, for a client that reached here without making that call.
+    #
+    # Same shape as the examples pointer beside it, and for the same reason: a block that is
+    # identical on every response is a thing to name, not to repeat.
+    dialect = {"engine": engine, "rules_from": "list_datasources"} if engine else None
 
     if scope.level == "table":
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
         # O(1) name→table index so this resolves each table by lookup, not a per-table rescan
         # (scalability-audit finding P12).
         ctx = _table_contexts(org, list(scope.tables), L, index=L.build_table_index(org))
+        # The loader's own verdict on each name, so "unknown" means exactly what it failed to find.
+        missing = [n for n, t in ctx["tables"].items() if isinstance(t, dict) and "error" in t]
+        if missing:
+            names = names or _ModelNames.of(org)
+            # Only a name the model does not define is a caller's mistake. One it DOES define but
+            # the loader could not resolve — a table whose own `name` carries its schema, which the
+            # index keys in full while `dataset_names` arrives bare (#258) — is not refused, since
+            # that would suggest the very name the caller already sent. It is told to use its area.
+            unknown = [n for n in missing if names.area_of(n) is None]
+            if unknown and len(unknown) == len(ctx["tables"]):
+                # Same rule as an unknown `area`: a scope that does not exist is refused, never
+                # answered as an empty model the agent would read as "this datasource has none".
+                return names.unknown_tables_error(unknown, profile)
+            for n in missing:
+                if names.area_of(n) is not None:
+                    ctx["tables"][n] = names.unresolvable_entry(n)
+            for n in unknown[:_SUGGESTED_MISSES]:
+                ctx["tables"][n] = names.unknown_table_entry(n)
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
@@ -1900,7 +2434,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
             # The two blocks this call used to compute and throw away. Without them the call whose
             # whole purpose is per-table detail returned columns and no way to join them — while
             # this tool's own description promised both. `relationships` ships as the loader
-            # produced it (join columns, `on`, cardinality, trust block); `metrics` is re-projected
+            # produced it — in full for an edge between two requested tables, as the join alone
+            # for one reaching a table the caller has no columns for; `metrics` is re-projected
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
             "relationships": ctx["relationships"],
@@ -1914,8 +2449,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
         # which carries only endpoints.
         if pointer:
             result["prompt_examples"] = pointer
-        if dialect_rules:
-            result["dialect_rules"] = dialect_rules
+        if dialect:
+            result["dialect"] = dialect
     else:
         # Sized by the areas IN SCOPE, not by the whole datasource. The ladder and the budget are
         # unchanged (both out of this spec's scope); what changes is the count fed to the selector,
@@ -1924,9 +2459,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
         in_scope_areas = sum(
             1 for sa in org.subject_areas if scope.level == "datasource" or sa.name == scope.area
         )
+        # `mode` was validated on entry, so this is always a rung of the ladder.
         mode = _auto_mode_for(in_scope_areas) if requested_mode == "auto" else requested_mode
-        if mode not in _SCHEMA_MODE_DOWNGRADE:
-            mode = "summary"
         # Only full mode assembles the per-table `tables` block (the sole index consumer), and the
         # loop only ever DOWNGRADES from full — so build the index iff we start at full, else a
         # wide model that starts in `mode="index"` (the case this optimizes) would pay a wasted
@@ -1937,8 +2471,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
             result = _schema_payload(org, profile, mode, matched, metrics, L, scope, index=index)
             if pointer:
                 result["prompt_examples"] = pointer
-            if dialect_rules:
-                result["dialect_rules"] = dialect_rules
+            if dialect:
+                result["dialect"] = dialect
             if len(json.dumps(result, default=str)) <= _SCHEMA_CHAR_BUDGET:
                 break
             nxt = _SCHEMA_MODE_DOWNGRADE[mode]
@@ -1960,6 +2494,10 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
                 "specific tables via `dataset_names` or focus metrics with `query`."
             )
 
+    # Outside the size budget above, like `scope` below: it is bounded by the caller's own list,
+    # and shedding it would be the silent drop it exists to end.
+    if unknown_metrics:
+        result["unknown_metric_names"] = unknown_metrics
     # The boundary the never-hide guarantee is relative to. A guarantee stated against a scope is
     # only honest if the reader can see which scope they got.
     result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
@@ -1997,6 +2535,31 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
     return "\n".join(parts)
 
 
+def _unknown_example_area(area: Any, profile: str) -> "str | None":
+    """The refusal for an `area` the datasource's model does not have, or None.
+
+    An unknown area used to answer as if it were real and empty: served, `area = ? OR area IS NULL`
+    returned only the cross-area examples; locally, the "no examples" note. Either reads to an
+    agent as "this area has none" — the wrong lesson, and a reason to write SQL without them.
+
+    Checked against the model, since that is what defines the areas; an area with no examples is
+    real and still answers empty. Where the model does not load, for any reason, the old behaviour
+    stands: there is nothing to say the name is wrong against.
+    """
+    if not (isinstance(area, str) and area.strip()):
+        return None
+    try:
+        org = get_cached_org(profile)
+    except Exception:
+        # Any load failure, not only a missing model: this tool never loaded the model before,
+        # and a check that only advises must not turn a broken model into a failed examples call.
+        # `get_datasource_schema` is where a broken model is reported.
+        return None
+    if any(sa.name == area.strip() for sa in org.subject_areas):
+        return None
+    return _unknown_area_error(org, area.strip(), profile)
+
+
 def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     """Ask Agami `get_prompt_examples`: the few-shot library.
 
@@ -2005,6 +2568,11 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
+    # The same shape repair and refusal as `get_datasource_schema`: an `area` sent as a list was
+    # dropped, and the caller got every area's examples while believing it had narrowed to one.
+    args, malformed = _normalized_args(args, keys=("area",))
+    if malformed is not None:
+        return malformed
     # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
     # examples from a guessed datasource would teach SQL for the wrong one.
     choices = _datasources_to_choose_from(args)
@@ -2013,6 +2581,9 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
         if choose is not None:
             return choose
     profile = _resolve_call_datasource(args)
+    unknown_area = _unknown_example_area(args.get("area"), profile)
+    if unknown_area is not None:
+        return unknown_area
 
     from store import Store
 
@@ -2058,13 +2629,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     # served query is `area = ? OR area IS NULL`, i.e. that area PLUS the cross-area bucket; on
     # disk the bucket has no directory to live in, so the named area alone is the whole of it.
     _area = args.get("area")
-    # `isinstance` rather than a bare truthiness test: `(x or "").strip()` raises on any TRUTHY
-    # non-string (`True`, `1`), and this handler is reachable outside a schema-validating
-    # transport — tests and embedders call it directly. Before `area` was honoured here the local
-    # path ignored it entirely and could not crash on it, so guarding is keeping a promise this
-    # function already made rather than hardening it. A non-string is treated as no scope, which
-    # is what the caller got before, rather than being refused: this path returns the curated
-    # library and has no vocabulary for an input error.
+    # Always a string or None here: `_normalized_args` repaired or refused every other shape.
     wanted = _area.strip() if isinstance(_area, str) else ""
     blocks: list[str] = []
     if ex_dir.is_dir():
@@ -4004,13 +4569,40 @@ def tool_description(name: str, description: str) -> str:
     return description.replace(_EXECUTE_SQL_LIMITS_AT_IMPORT, _execute_sql_limits_sentence())
 
 
+def tool_annotations(meta: dict[str, Any]) -> dict[str, bool] | None:
+    """The MCP tool annotations a registry entry advertises, in the spec's field names, or None for
+    an entry that declares none. Called by both MCP servers at list-tools time so the two transports
+    state the same hints.
+
+    `read_only: True` becomes `readOnlyHint` with `destructiveHint` off — the spec defaults that one
+    to ON, so leaving it implicit would contradict the read-only claim. The hints are what a client's
+    confirmation policy keys off: Gemini Enterprise assumes an un-annotated tool can mutate data and
+    asks the person before each call, so a reading tool without the hint costs a prompt per query,
+    per distinct argument set. Opt-in, and only by the literal `True`: an entry without the flag, or
+    with a config-sourced `"false"` string on it, advertises nothing and keeps whatever caution the
+    client applies by default, which is what a consumer tool that writes (feedback, say) must get.
+    Every core tool carries the flag because every one reads — the three model lookups by
+    construction, `execute_sql` by the guard, which admits one SELECT and nothing else."""
+    if meta.get("read_only") is not True:
+        return None
+    return {"readOnlyHint": True, "destructiveHint": False}
+
+
 TOOLS: dict[str, dict[str, Any]] = {
     "list_datasources": {
         "handler": tool_list_datasources,
+        # Advertised as the MCP `readOnlyHint`; see `tool_annotations` for why and for the bar a
+        # tool must clear to carry it.
+        "read_only": True,
         "description": (
             "List the datasources this deployment serves. Each entry carries `datasource`, "
-            "`database_type` and `table_count`, plus the `description` its model declares WHEN it "
+            "`database_type`, `engine` and `table_count`, plus the `description` its model declares WHEN it "
             "declares one — enough to route a question without pulling a schema per candidate. "
+            "`engine` is the dialect the MODEL declares and is what any `dialect_rules` here were "
+            "chosen by; `database_type` is derived from the connection's DSN and can differ (a "
+            "Redshift warehouse reached over a postgresql:// DSN reads as postgres). On an engine "
+            "with known gaps the entry also carries `dialect_rules` — what it rejects and what to "
+            "write instead — sent here once rather than on every schema call. "
             # `description` is conditional on the served path and absent on the local one, so it is
             # the one field here a client must not assume: the whole point of this tool is routing
             # without a schema call, and an agent that treats a missing key as an error re-adds the
@@ -4039,6 +4631,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "get_datasource_schema": {
         "handler": tool_get_datasource_schema,
+        "read_only": True,
         "description": (
             "Fetch the semantic model for a datasource, sized to fit context. Narrow it two "
             "ways: `area` to one subject area; `dataset_names=[...]` to those tables, which also "
@@ -4059,9 +4652,17 @@ TOOLS: dict[str, dict[str, Any]] = {
             "while you are writing the statement, rather than meeting them on the receipt "
             "afterwards. When the datasource has stored examples the response also carries "
             "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
-            "get_prompt_examples, which ranks them — no example is sent here. On an engine with "
-            "known gaps (Redshift today) it also carries `dialect_rules`: what that engine rejects "
-            "and what to write instead. Follow them when writing the SQL."
+            "get_prompt_examples, which ranks them — no example is sent here. The response names "
+            "the engine under `dialect` and points at list_datasources for its `dialect_rules` "
+            "(what that engine rejects, and what to write instead) rather than repeating them on "
+            "every call; fetch them once per datasource and follow them when writing the SQL. "
+            # Here and not only in the server instructions: a host may weight those below its own,
+            # and the moment a name is chosen is the moment this description is being read.
+            "A name the model lacks comes back with `did_you_mean` and sometimes a `hint`. "
+            "Retry with a suggestion only when it names the same thing the user asked for; "
+            "otherwise say the model does not carry it, since a name can be missing on purpose. "
+            "To see what exists, call with `area` for its tables (without scope lists only the "
+            "areas). Never retry with another guessed name."
         ),
         "inputSchema": {
             "type": "object",
@@ -4076,14 +4677,15 @@ TOOLS: dict[str, dict[str, Any]] = {
                 },
                 "mode": {
                     "type": "string",
-                    "enum": ["auto", "full", "summary", "index"],
+                    "enum": list(_SCHEMA_MODES),
                     "description": "Verbosity; default auto (sized by subject-area count + char budget).",
                 },
                 "area": {
                     "type": "string",
                     "description": (
                         "Scope to one subject area: its tables and metrics, plus the "
-                        "cross-area metrics."
+                        "cross-area metrics. A `subject_areas[].name` exactly as a previous "
+                        "response gave it."
                     ),
                 },
                 "dataset_names": {
@@ -4091,7 +4693,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": (
                         "Scope to these tables — full field-level detail, their joins, and the "
-                        "metrics that apply to them (no downgrade). Narrowest scope."
+                        "metrics that apply to them (no downgrade). Narrowest scope. Bare table "
+                        "names (no schema), exactly as listed; case-sensitive."
                     ),
                 },
                 "query": {
@@ -4105,7 +4708,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "Return full detail for these named metrics. Selects detail; does not scope."
+                        "Return full detail for these named metrics. Selects detail; does not "
+                        "scope. Keys of `metric_index`, copied exactly — a name two areas share "
+                        "is keyed `name (area)` or `name (cross-area)`."
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,
@@ -4118,6 +4723,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "get_prompt_examples": {
         "handler": tool_get_prompt_examples,
+        "read_only": True,
         "description": (
             "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
@@ -4153,7 +4759,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Narrow to one subject area. A served deployment returns that area "
                         "plus the cross-area examples; the local file path has no cross-area "
-                        "bucket on disk, so it returns that area alone."
+                        "bucket on disk, so it returns that area alone. Omit it for the top "
+                        "examples across ALL areas. A `subject_areas[].name` exactly as "
+                        "get_datasource_schema gave it; a misspelt one is refused, never widened."
                     ),
                 },
                 "top_k": {
@@ -4174,6 +4782,7 @@ TOOLS: dict[str, dict[str, Any]] = {
     },
     "execute_sql": {
         "handler": tool_execute_sql,
+        "read_only": True,
         "description": (
             "Execute a single read-only SELECT / WITH...SELECT against the datasource. "
             "Executed by execute_sql.py — locally on a skill install, on the server for a hosted "
@@ -4185,8 +4794,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "  {status:'refused', refusal:{reason, rule, detail, remediation}, receipt, audit_id} "
             "— OUR decision, so it always names a fix, and which fix depends on the rule. On "
             "`column_scope` and `table_scope` it is usually yours to make: the schema you already "
-            "hold says what that table declares, so rewrite with declared names and retry, and "
-            "relay the `remediation` when nothing declared can answer. On every other rule the "
+            "hold says what that table declares, and a `column_scope` `remediation` lists it for "
+            "the tables your statement reads, so rewrite with declared names and retry. When "
+            "nothing declared can answer, tell the user the model does not carry that column — "
+            "do not relay the list. On every other rule the "
             "`remediation` IS the fix: relay it, it says how to get an answer. "
             "SELECT-only is enforced, so DML/DDL/multi-statement arrive here, as "
             # "The row limit", with no owner and no number: the next sentence states the number that
@@ -4372,12 +4983,15 @@ def register(
     handler: Callable[[dict[str, Any]], str | NeedsInput],
     description: str,
     inputSchema: dict[str, Any],
+    read_only: bool = False,
 ) -> None:
     """Add a tool to the shared TOOLS registry — the supported consumer extension point.
 
     Raises on a duplicate name so a consumer can't silently shadow a core tool (e.g. execute_sql).
     Note create_app merges a consumer's extra tools over a *copy* of TOOLS; register() mutates the
     module global directly (the stdio path uses it), so its dup-guard is the safety net either way.
+    `read_only` is the tool's own claim that it never mutates data (see `tool_annotations`); the
+    default keeps a client's confirmation prompt for it.
 
     A handler may return `NeedsInput` to ask the person one question, and the type says so — a
     consumer checking its types could not otherwise return what the docs advertise. **Only behind
@@ -4386,4 +5000,11 @@ def register(
     that has no form to show and is answered as a crash, which is why the guard is the contract."""
     if name in TOOLS:
         raise ValueError(f"tool {name!r} is already registered")
-    TOOLS[name] = {"handler": handler, "description": description, "inputSchema": inputSchema}
+    if not isinstance(read_only, bool):
+        raise ValueError(f"tool {name!r} read_only must be a bool")
+    TOOLS[name] = {
+        "handler": handler,
+        "description": description,
+        "inputSchema": inputSchema,
+        "read_only": read_only,
+    }

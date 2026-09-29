@@ -177,8 +177,10 @@ A stdio MCP server has **no authentication**, and that is correct:
   `SELECT` / `WITH...SELECT`. The gate (`sql_guard`) also blocks multi-statement SQL
   (including comment- and quoted-identifier-hidden bypasses), data-modifying CTEs,
   transaction-control / session-state / prepared statements, row-level locks, and
-  dangerous server-side functions (`pg_read_file`, `lo_export`, `dblink`,
-  `copy_program`, `pg_sleep`, …). It runs at the shared executor so the stdio server,
+  dangerous server-side functions on every engine it dispatches to (`pg_read_file`,
+  `lo_export`, `dblink`, `copy_program`, `pg_sleep`, `pg_notify`, and their equivalents
+  elsewhere — `SLEEP`, `GET_LOCK`, `LOAD_FILE`, `SYSTEM$…`, `reflect`, `OPENROWSET`,
+  `EXTERNAL_QUERY`, `UTL_HTTP.*`, …). It runs at the shared executor so the stdio server,
   the hosted HTTP server, the skills, and cron are all guarded identically (see
   `shared/sql-generation-rules.md → Safety Rules`).
 - **It is stdio-only on purpose.** It never binds a network port. Doing so would

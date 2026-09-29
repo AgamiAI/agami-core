@@ -656,10 +656,11 @@ def cmd_set_units(args) -> int:
 
 
 def cmd_suggest_metrics(args) -> int:
-    """Infer a sensible per-table metric set (count + SUM of additive cols + AVG of averageable
-    cols, gated on aggregation class) and write them PROPOSED/unreviewed for bulk sign-off in the
-    explorer — instead of asking the user to pick ~4 upfront. Rule 1 keeps proposed metrics out of
-    any answer until approved, so a large suggested set can't degrade results."""
+    """Infer a sensible per-table metric set — flag rates, start→end durations, and a plain
+    COUNT/SUM/AVG only where it carries a unit or a caveat the aggregation class does not (#404) —
+    and write them PROPOSED/unreviewed for bulk sign-off in the explorer, instead of asking the
+    user to pick ~4 upfront. Rule 1 keeps proposed metrics out of any answer until approved, so a
+    large suggested set can't degrade results."""
     from . import build as B
     from . import curate
     from . import dialects as D
@@ -1498,11 +1499,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explicit table.column (or bare column) list — overrides money detection")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (count/sum/avg, gated on aggregation class) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates, durations, and a plain count/sum/avg only where it carries a unit or caveat) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
-                    help="cap measures per table (count always kept)")
+                    help="cap measures per table")
     sp.set_defaults(func=cmd_suggest_metrics)
 
     sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")

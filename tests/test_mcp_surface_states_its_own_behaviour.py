@@ -274,3 +274,48 @@ def test_the_surface_admits_it_cannot_save_a_correction(monkeypatch):
     for label, text in _instruction_variants(monkeypatch).items():
         assert "Corrections:" in text, f"{label}: the absence reads as an oversight"
         assert "not persisted" in text, f"{label}: does not say the correction is not saved"
+
+
+def test_the_star_ban_is_stated_before_a_client_meets_it():
+    """A rule the gate ENFORCES has to be stated where a client reads before writing SQL (#387).
+
+    This is the lesson #360 already paid for once: "only columns declared on the model's tables may
+    be queried" existed solely inside the refusal a statement received for breaking it, so an agent
+    learned it by being refused — five in a row on one deployment. The star ban was in the same
+    position. It is the strictest rule this surface has, it applies in places a caller does not
+    expect (a CTE body, a subquery, `t.*`), and a client that has never been told meets it for the
+    first time in the one situation where it is least able to reason about it.
+
+    Asserted against the rule the gate actually carries rather than a copy of the sentence: delete
+    `RULE_SELECT_STAR` and this test goes with it, which is the coupling that keeps the instruction
+    honest if the gate is ever relaxed.
+    """
+    import guardrail
+    import tools
+
+    assert hasattr(guardrail, "RULE_SELECT_STAR"), (
+        "no star rule to state — if the gate went, the instruction should go with it"
+    )
+    # **Both spellings of the instructions**, which is the hazard `test_hosted_instruction_truth`
+    # exists for: `SERVER_INSTRUCTIONS` is the back-compat LOCAL constant, and what a hosted
+    # deployment actually serves comes from `server_instructions()`. A rule added to one and not
+    # the other reaches half the surfaces, and the half it misses is the paid one.
+    for name, instructions in (
+        ("SERVER_INSTRUCTIONS", tools.SERVER_INSTRUCTIONS),
+        ("server_instructions()", tools.server_instructions()),
+    ):
+        assert "`*`" in instructions or "SELECT *" in instructions, (
+            f"{name}: the gate refuses every projected star and this text never mentions it, so a "
+            "client meets the rule for the first time as a refusal"
+        )
+        # The places a caller is least likely to expect it, which is where the refusal surprises.
+        for where in ("CTE", "subquery"):
+            assert where in instructions, f"{name}: the star ban does not say it reaches a {where}"
+        # **And the exemption, stated as loudly as the ban.** `COUNT(*)` is allowed — the star sits
+        # inside the call — and an instruction that reads as "never write a star" would steer a
+        # client off the commonest aggregate there is. Asserted because the first draft of this
+        # rule said "refused wherever it appears", which is false and would have done exactly that.
+        assert "COUNT(*)" in instructions, (
+            f"{name}: the ban does not say that an aggregate over a star is fine, so it reads as "
+            "wider than the gate actually is"
+        )

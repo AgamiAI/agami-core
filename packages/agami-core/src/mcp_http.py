@@ -65,6 +65,7 @@ from tools import (
     set_injected_executor,
     set_statement_limits_provider,
     thread_id_is_required,
+    tool_annotations,
     tool_description,
     typed_outcome_overrides,
 )
@@ -555,6 +556,11 @@ def build_server(
     if extra_instructions:
         instructions = f"{instructions}\n{extra_instructions}"
 
+    def _annotations(meta: dict) -> mt.ToolAnnotations | None:
+        # Spec-shaped dict from the registry (see `tools.tool_annotations`), typed here for the SDK.
+        hints = tool_annotations(meta)
+        return mt.ToolAnnotations(**hints) if hints else None
+
     def _described(names: list[str]) -> list:
         return [
             # `tool_description` states execute_sql's limits for THIS caller's organisation (#329).
@@ -563,7 +569,10 @@ def build_server(
             mt.Tool(
                 name=name,
                 description=tool_description(name, registry[name]["description"]),
+                # `input_schema` is SDK 2's name for the field the wire still calls `inputSchema`
+                # (the model aliases it), so the registry key is unchanged and so is what a client reads.
                 input_schema=registry[name]["inputSchema"],
+                annotations=_annotations(registry[name]),
             )
             for name in names
         ]
@@ -923,6 +932,11 @@ def create_app(
             )
         if not callable(meta["handler"]):
             raise ValueError(f"extra tool {tool_name!r} handler must be callable")
+        # A non-bool here is a config value that leaked in as a string; `tool_annotations` would
+        # already ignore it, but silently withholding the hint the consumer meant to set is a worse
+        # failure than refusing at construction.
+        if "read_only" in meta and not isinstance(meta["read_only"], bool):
+            raise ValueError(f"extra tool {tool_name!r} read_only must be a bool")
     # Merge the consumer's extra tools over a COPY of TOOLS — the module global is never mutated.
     registry = {**TOOLS, **(extra_tools or {})}
     session_manager = StreamableHTTPSessionManager(
