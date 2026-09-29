@@ -1470,11 +1470,13 @@ def report_warehouse_query_id(query_id: str | None) -> None:
 # reads the result out of that object afterwards. A plain "set here, read there" would silently
 # record nothing on the one surface that records tool calls at all.
 #
-# `(status, rule, row_count)`, not the whole Envelope: the transport needs to say whether the call
-# succeeded, which gate stopped it, and how many rows came back. Putting a contract object in here
-# invites somebody to serialize it from the transport instead of from the one place that owns the
-# wire shape.
-_last_outcome: ContextVar[tuple[str, str | None, int | None] | None] = ContextVar(
+# `(status, rule, kind, row_count)`, not the whole Envelope: the transport needs to say whether the
+# call succeeded, which gate stopped it, what kind of failure it was, and how many rows came back.
+# The kind rides here rather than in a ContextVar of its own: without it the row said the
+# literal `failed` for a syntax error, a timeout and an authentication failure alike. Putting a
+# contract object in here invites somebody to serialize it from the transport instead of from the
+# one place that owns the wire shape.
+_last_outcome: ContextVar[tuple[str, str | None, str | None, int | None] | None] = ContextVar(
     "_last_outcome", default=None
 )
 
