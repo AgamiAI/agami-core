@@ -70,6 +70,18 @@ def test_catalog_mode_builds_valid_model(tmp_path):
     rel = org.subject_areas[0].relationships[0]
     assert (rel.from_table, rel.to_table, rel.relationship) == ("orders", "customers", "many_to_one")
     assert rel.confidence == "confirmed"  # postgres FKs are enforced
+    assert not any("no declared foreign keys" in n for n in rep.notes)
+
+
+def test_no_catalog_fks_says_joins_are_inferred(tmp_path):
+    # An empty FK result falls back to guessing joins; the report must say so rather than stay silent.
+    runner = make_catalog_runner(tables=["customers", "orders"], columns={
+        "customers": [col("id", "integer", nullable=False)],
+        "orders": [col("id", "integer", nullable=False), col("customer_id", "integer")],
+    })
+    _, rep = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    assert rep.mode_per_capability["relationships"] == "probe"
+    assert any("no declared foreign keys were visible" in n for n in rep.notes)
 
 
 def test_exclude_columns_marks_them_rejected(tmp_path):

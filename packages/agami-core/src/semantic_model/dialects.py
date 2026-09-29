@@ -242,6 +242,46 @@ class Dialect:
 class PostgreSQL(Dialect):
     name = "PostgreSQL"
 
+    # Keys come from pg_constraint, not information_schema: Postgres shows a constraint in
+    # table_constraints only to the table's owner or a role holding a privilege other than SELECT,
+    # so the read-only role a deploy is told to use would see no keys at all and every grain and
+    # join would be guessed. pg_constraint is readable by any role. Each query also returns
+    # constraint_type, spelled as information_schema spells it, so a caller can tell the two apart.
+
+    def sql_primary_keys(self, schema: str, table: str) -> str:
+        return (
+            "SELECT a.attname AS column_name, 'PRIMARY KEY' AS constraint_type "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum "
+            "WHERE con.contype = 'p' "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "ORDER BY k.ord"
+        )
+
+    def sql_foreign_keys(self, schema: str) -> str:
+        # unnest(conkey, confkey) pairs the columns of a composite key in declaration order, and
+        # to_schema is the referenced table's own schema, which may differ from the constraint's.
+        return (
+            "SELECT c.relname AS from_table, fa.attname AS from_column, fn.nspname AS from_schema, "
+            "rc.relname AS to_table, ra.attname AS to_column, rn.nspname AS to_schema, "
+            "'FOREIGN KEY' AS constraint_type "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace fn ON fn.oid = c.relnamespace "
+            "JOIN pg_class rc ON rc.oid = con.confrelid "
+            "JOIN pg_namespace rn ON rn.oid = rc.relnamespace "
+            "JOIN LATERAL unnest(con.conkey, con.confkey) WITH ORDINALITY AS k(conkey, confkey, ord) ON TRUE "
+            "JOIN pg_attribute fa ON fa.attrelid = con.conrelid AND fa.attnum = k.conkey "
+            "JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.confkey "
+            "WHERE con.contype = 'f' "
+            f"AND fn.nspname = {self.quote_lit(schema)} "
+            "ORDER BY c.relname, con.conname, k.ord"
+        )
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT reltuples::bigint AS estimated_rows FROM pg_class c "
@@ -260,6 +300,11 @@ class Supabase(PostgreSQL):
 class Redshift(PostgreSQL):
     name = "Redshift"
     fk_enforced = False  # Redshift declares but does not enforce FKs
+
+    # Redshift has no LATERAL and no unnest(...) WITH ORDINALITY, so the pg_constraint queries
+    # PostgreSQL uses would fail there. It keeps the information_schema ones.
+    sql_primary_keys = Dialect.sql_primary_keys
+    sql_foreign_keys = Dialect.sql_foreign_keys
 
     def duration_days_expr(self, start: str, end: str) -> str:
         return f"DATEDIFF('day', {start}, {end})"

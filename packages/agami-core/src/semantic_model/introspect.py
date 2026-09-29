@@ -736,6 +736,11 @@ def _build_relationships(
     else:
         # probe: infer FKs from name+type match, confirm by value-overlap
         report.mode_per_capability["relationships"] = "probe"
+        # Said out loud because an empty catalog cannot tell "no FKs declared" from "FKs this role
+        # may not see" on every engine, and the inferred joins can bind the wrong parent.
+        report.notes.append(
+            "no declared foreign keys were visible in the catalog — relationships are inferred "
+            "from column names and values; review them before relying on them")
         rels.extend(_probe_relationships(dialect, runner, tables, grain_by_table, report))
 
     # Tier 2 — name-based reference promotion. A `<x>_id` column whose target table is

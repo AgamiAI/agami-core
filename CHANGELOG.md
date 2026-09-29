@@ -44,6 +44,16 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Introspecting Postgres as the read-only role now finds its keys (#175).** Postgres shows
+  constraints in `information_schema` only to a table's owner or a role with a privilege other than
+  SELECT, so the role `readonly-grants.md` creates saw no primary or foreign keys: every grain was
+  guessed and every join inferred from column names, which can bind the wrong parent. The PostgreSQL
+  dialect now reads `pg_constraint`, which any role can read. Re-run `/agami-connect` to pick the
+  keys up; the model gains `confirmed` joins and catalog grains where it had guesses. Redshift keeps
+  the `information_schema` queries, since it lacks the `LATERAL` and `unnest ... WITH ORDINALITY`
+  the new ones use. When no declared foreign keys are visible at all, the introspection report now
+  says the joins were inferred instead of staying silent.
+
 - **A failed `execute_sql` on the HTTP server records its real kind.** The activity log
   said `failed` for every failure. It now says which: `syntax`, `timeout`, `auth`, and so on.
 
