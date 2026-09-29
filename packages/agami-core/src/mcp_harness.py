@@ -39,6 +39,7 @@ from tools import (
     bootstrap_paths,
     server_instructions,
     server_version,
+    tool_annotations,
     tool_description,
 )
 
@@ -86,6 +87,8 @@ def _handle_tools_list(req_id: Any) -> None:
                 "name": name,
                 "description": tool_description(name, meta["description"]),
                 "inputSchema": meta["inputSchema"],
+                # Omitted, not null, for a tool that declares none — optional on the wire.
+                **({"annotations": hints} if (hints := tool_annotations(meta)) else {}),
             }
             for name, meta in TOOLS.items()
         ]

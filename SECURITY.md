@@ -45,9 +45,11 @@ database connection is opened:
   double-quoted identifiers;
 - data-modifying CTEs (`WITH ... DELETE/INSERT/UPDATE ... RETURNING`);
 - transaction-control, session-state, and prepared statements, and row-level locks;
-- dangerous server-side functions — file I/O (`pg_read_file`, `lo_export`), OS/command
-  execution (`copy_program`), remote SQL (`dblink*`), and resource-exhaustion (`pg_sleep`,
-  advisory locks).
+- dangerous server-side functions, on every engine it dispatches to — file I/O
+  (`pg_read_file`, `LOAD_FILE`, `OPENROWSET`), OS/command execution (`copy_program`,
+  `reflect`), remote SQL (`dblink*`, `OPENQUERY`, `EXTERNAL_QUERY`, `UTL_HTTP`),
+  notification (`pg_notify`), and resource-exhaustion (`pg_sleep`, `SLEEP`, `BENCHMARK`,
+  advisory locks, `GET_LOCK`, the Snowflake `SYSTEM$…` namespace).
 
 This is defense in depth at the application layer; you should still connect with a
 read-only database role. A guard bypass — SQL that mutates data or reaches a blocked
@@ -72,5 +74,27 @@ Everything in the list above (read-only, confinement to safe functions, and the 
 bounds) is unaffected by this setting, as is your database role. **A statement that the
 read-only or dangerous-function gate would refuse must never become executable because this
 setting is off; if you find one, that is a guard bypass and in scope for a report.**
+
+### What a refusal may name
+
+A refusal names back the identifiers the caller's own statement used, sanitized and capped.
+It never lists what the model declares, with one recorded exception (#386): a column-scope
+refusal lists the declared columns of the tables that statement reads (capped per table and in
+tables), with the closest listed name for each refused column. Without the list, an agent
+repaired a refused column by guessing again.
+
+A table's listed columns are exactly the ones `get_datasource_schema` shows the same caller for
+it: a subject area that exposes only some of a table's column groups (`expose_column_groups`)
+hides the rest here too. Every declared column is queryable by design: a column whose values must
+not be readable is left out of the model, and is then absent from the list too.
+
+Nothing else widens: no other table, and no declared name on any other refusal (the table-scope
+refusal's declared set would be the whole datasource). `tests/test_ace035_no_enumeration.py`
+enforces both halves.
+
+The residual, for integrators: if you narrow the tool surface per caller (`Adapters.tool_visibility`)
+so that a caller can run `execute_sql` but not call `get_datasource_schema`, that caller can learn
+the visible column names of any declared table it names in a statement, up to five tables and the
+first 40 columns of each per refusal.
 
 Thank you for helping keep agami-core and its users safe.
