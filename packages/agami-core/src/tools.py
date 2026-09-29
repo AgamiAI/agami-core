@@ -26,6 +26,7 @@ import functools
 import io
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -433,6 +434,44 @@ def resolve_profile(explicit: str | None = None) -> str:
 # for the same reason the typed outcome is: a set inside the worker's copied context is invisible to
 # the recorder otherwise. Cleared by `reset_typed_outcome`, so one tool's value never reaches the next.
 _resolved_datasource: ContextVar[str | None] = ContextVar("agami_resolved_datasource", default=None)
+
+
+# The names THIS call missed, and what the reply offered instead, published for the activity
+# row. A handler that answers with one table unknown still succeeds, so without this the row
+# said only `success=1`. Published by the handler that found the miss, which already holds it as
+# data, rather than parsed back out of a reply that carries it as prose in mixed shapes. Read and
+# cleared exactly as `_resolved_datasource` is above, for the same copied-context reason.
+_call_misses: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "agami_call_misses", default=None
+)
+
+
+def _note_miss(
+    kind: str, name: str, did_you_mean: list[str] | None = None, value: Any = None
+) -> None:
+    """Publish one name the model lacked, beside the reply and never in it.
+
+    Stored raw; `_bounded_missed` bounds it at recording, which is where every other caller-sent
+    value on the row is bounded. `value` is the offending value of a wrong-shape argument, kept only
+    when it is a string: `name` is then the parameter's key.
+
+    `did_you_mean` is None for a name that was never searched (one past `_SUGGESTED_MISSES`), and the
+    entry then has no such key: `[]` means "searched, and nothing was close", which it was not.
+
+    Appended in place rather than re-set as a new list, since one call can miss thousands of names.
+    The two handlers that note misses clear the list on entry, so a transport that runs every call in
+    one context (the stdio server) never grows it past one call's worth.
+    """
+    entry: dict[str, Any] = {"kind": kind, "name": name}
+    if did_you_mean is not None:
+        entry["did_you_mean"] = list(did_you_mean)
+    if isinstance(value, str):
+        entry["value"] = value
+    misses = _call_misses.get()
+    if misses is None:
+        misses = []
+        _call_misses.set(misses)
+    misses.append(entry)
 
 
 def _resolve_call_datasource(args: dict[str, Any]) -> str:
@@ -1700,6 +1739,9 @@ class _ModelNames(NamedTuple):
             f"No table named {n!r} in {profile!r}. {self.miss_advice(n, guesses)}".rstrip()
             for n in names[:_SUGGESTED_MISSES]
         ]
+        # Searched up to the cap, so a name there gets a list, empty when a hint stood in for it.
+        for i, n in enumerate(names):
+            _note_miss("table", n, guesses.get(n, []) if i < _SUGGESTED_MISSES else None)
         if len(names) > _SUGGESTED_MISSES:
             sentences.append(f"And {len(names) - _SUGGESTED_MISSES} more unknown table name(s).")
         if not any(guesses.values()) and not hints:
@@ -1865,7 +1907,9 @@ def _normalized_args(
     """
     fixed = dict(args)
 
-    def refuse(remediation: str, **extra: Any) -> "tuple[dict[str, Any], str]":
+    def refuse(key: str, remediation: str, **extra: Any) -> "tuple[dict[str, Any], str]":
+        # The miss is the parameter's key; the value it was sent is kept when it is a string.
+        _note_miss("argument", key, extra.get("did_you_mean") or [], fixed.get(key))
         error = {"kind": "invalid_argument", "remediation": remediation, **extra}
         return fixed, json.dumps({"error": error}, indent=2)
 
@@ -1878,18 +1922,19 @@ def _normalized_args(
         elif isinstance(value, tuple):
             fixed[key] = list(value)  # an embedder's tuple; no JSON transport can send one
         elif value is not None and not isinstance(value, list):
-            return refuse(f'`{key}` must be a list of names, e.g. ["name"].')
+            return refuse(key, f'`{key}` must be a list of names, e.g. ["name"].')
     if "area" in keys:
         area = fixed.get("area")
         if isinstance(area, list):
             if len(area) > 1 or (area and not isinstance(area[0], str)):
                 return refuse(
+                    "area",
                     "`area` takes ONE subject area name. To cover several, call once per area, "
-                    "or name their tables in `dataset_names`."
+                    "or name their tables in `dataset_names`.",
                 )
             area = area[0] if area else None
         elif area is not None and not isinstance(area, str):
-            return refuse("`area` must be a subject area name (a string).")
+            return refuse("area", "`area` must be a subject area name (a string).")
         # Stored STRIPPED: the served examples query matches `area = ?` on the value it is given,
         # so " sales " passed a stripped check and then matched no area — only the cross-area
         # examples came back, the "real but empty" answer the check exists to prevent.
@@ -1906,6 +1951,7 @@ def _normalized_args(
                 if guesses:
                     lead += f" Did you mean {', '.join(repr(g) for g in guesses)}?"
                 return refuse(
+                    "mode",
                     f"{lead} Valid modes: {', '.join(_SCHEMA_MODES)}; omit it for auto.",
                     did_you_mean=guesses,
                 )
@@ -1923,6 +1969,7 @@ def _unknown_area_error(org, area: str, profile: str) -> str:
     names = _ModelNames.of(org)
     known = ", ".join(sorted(names.areas))
     guesses = _did_you_mean(area, names.areas)
+    _note_miss("area", area, guesses)
     hint = names.area_hint(area)
     lead = f"No subject area named {area!r} in {profile!r}."
     if hint:
@@ -2115,6 +2162,9 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
         return json.dumps({"error": error}, indent=2)
     if known:
         guesses = _did_you_mean(profile, known)
+        # Only here. A known name has a broken model, and with nothing known there is no model at
+        # all: neither is the caller's miss.
+        _note_miss("datasource", profile, guesses)
         if guesses:
             # The loader's own message ends "run agami-connect to introspect this database" —
             # advice for a missing model, and wrong for a typo of one that exists.
@@ -2153,6 +2203,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `metric_index` (name->description for every metric in scope) + `large_tables` are always
     present. Plus datasource.md / USER_MEMORY.md domain context.
     """
+    # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
+    _call_misses.set(None)
     # A malformed argument is answered before anything is loaded: it is the same mistake on any
     # datasource, and repairing it first means the checks below see the shape they expect.
     args, malformed = _normalized_args(args)
@@ -2253,6 +2305,13 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             ]
             if len(misplaced) > _SUGGESTED_MISSES:
                 located.append(f"And {len(misplaced) - _SUGGESTED_MISSES} more.")
+            # A name the refusal does not show was never searched, so it is noted with no list.
+            for t in misplaced:
+                searched = [] if t in shown else None
+                if names.area_of(t) is not None:
+                    _note_miss("misplaced_table", t, searched)
+                else:
+                    _note_miss("table", t, guesses.get(t, searched))
             return json.dumps(
                 {
                     "error": {
@@ -2331,6 +2390,13 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                     ctx["tables"][n] = names.unresolvable_entry(n)
             for n in unknown[:_SUGGESTED_MISSES]:
                 ctx["tables"][n] = names.unknown_table_entry(n)
+            # Every unknown name, past the suggestion cap too, with whatever its entry offered. Past
+            # the cap nothing was searched, so those are noted with no list.
+            for i, n in enumerate(unknown):
+                searched = (
+                    ctx["tables"][n].get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
+                )
+                _note_miss("table", n, searched)
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
@@ -2404,6 +2470,11 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # and shedding it would be the silent drop it exists to end.
     if unknown_metrics:
         result["unknown_metric_names"] = unknown_metrics
+        # Noted here, where the reply reports them, and not before: the table branch above can still
+        # refuse, and that refusal carries no metric names for the row to claim.
+        for i, entry in enumerate(unknown_metrics):
+            searched = entry.get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
+            _note_miss("metric", entry["name"], searched)
     # The boundary the never-hide guarantee is relative to. A guarantee stated against a scope is
     # only honest if the reader can see which scope they got.
     result["scope"] = {"level": scope.level, "area": scope.area, "tables": list(scope.tables)}
@@ -2474,6 +2545,8 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     corrections) never floods the context. Local serving (files): returns the curated examples.yaml
     verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
     """
+    # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
+    _call_misses.set(None)
     # The same shape repair and refusal as `get_datasource_schema`: an `area` sent as a list was
     # dropped, and the caller got every area's examples while believing it had narrowed to one.
     args, malformed = _normalized_args(args, keys=("area",))
@@ -3145,7 +3218,12 @@ def _emit(
     from execute_sql import _last_outcome
 
     _last_outcome.set(
-        (env.status, env.refusal.rule if env.refusal is not None else None, row_count)
+        (
+            env.status,
+            env.refusal.rule if env.refusal is not None else None,
+            env.failure.kind if env.failure is not None else None,
+            row_count,
+        )
     )
     return json.dumps(body, indent=2, default=str)
 
@@ -3317,6 +3395,176 @@ def _bounded_client_model(raw: Any) -> str | None:
     if not isinstance(raw, str):
         return None
     return raw[:CLIENT_MODEL_MAX_CHARS] or None
+
+
+#: The bounds on what a call was sent and what missed. Both are caller-chosen text on the
+#: audit row, so both are bounded here rather than trusted to arrive small: a string value is cut at
+#: 1,000 characters, a list or object at 50 items, nesting at depth 4, and the whole serialized value
+#: at the column cap. Every cap sits well above an honest call, so a cut is a signal, not a trim.
+AUDIT_ARG_VALUE_MAX_CHARS = 1_000
+AUDIT_ARG_LIST_MAX_ITEMS = 50
+AUDIT_ARG_MAX_DEPTH = 4
+AUDIT_ARGUMENTS_MAX_CHARS = 8_000
+AUDIT_MISSED_MAX_CHARS = 4_000
+AUDIT_MISS_NAME_MAX_CHARS = 200
+AUDIT_MISS_SUGGESTIONS = 3
+
+#: The parameters with a column of their own, left out of `arguments` so nothing is stored twice.
+#: `example` is one only on `execute_sql`, the one tool whose gate checks it (see `_example_claim`).
+_OWN_COLUMN_ARGUMENTS = frozenset(
+    {
+        "datasource",
+        "sql",
+        "raw_query",
+        "user_question",
+        "thread_id",
+        "correlation_id",
+        "basis",
+        "client_model",
+    }
+)
+
+#: A control character or line break in stored caller text could forge a line of a log or a report
+#: that reads it, so each is replaced with a space: the C0 and C1 controls, the Unicode line and
+#: paragraph separators, the bidi controls that reorder how a line displays, and a lone surrogate,
+#: which is not text at all. Wider than `runtime._ECHO_CONTROL`, which covers C0 and DEL only.
+_AUDIT_CONTROL = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+)
+
+#: What is stored for a value that cannot become text, with the cut flag set.
+_AUDIT_UNPRINTABLE = "<unprintable>"
+
+
+def _audit_text(raw: Any, cap: int) -> tuple[str, bool]:
+    """`raw` as a stored string with control characters replaced and cut at `cap`, and whether it was
+    cut. Anything that is not a string is stored as its `str()`, or as a placeholder, flagged, when
+    that `str()` raises: recording must not fail on a caller's odd object."""
+    try:
+        text = raw if isinstance(raw, str) else str(raw)
+    except Exception:
+        return _AUDIT_UNPRINTABLE, True
+    return _AUDIT_CONTROL.sub(" ", text[:cap]), len(text) > cap
+
+
+def _audit_value(raw: Any, depth: int = 0) -> tuple[Any, bool]:
+    """One argument value bounded for storage, and whether anything was cut.
+
+    Never raises: this runs on the served path's critical line, where a failure to record
+    fails the call. So a value JSON cannot hold becomes its `str()` rather than an error, and a
+    container past the depth cap becomes None with the cut flagged.
+    """
+    # A non-finite float is not JSON, and `json.dumps` would write the invalid token `Infinity`.
+    finite = isinstance(raw, float) and math.isfinite(raw)
+    if raw is None or isinstance(raw, bool) or finite:
+        return raw, False
+    if isinstance(raw, int):
+        # An int past Python's digit limit cannot be written as text, so `json.dumps` would raise.
+        try:
+            str(raw)
+        except ValueError:
+            return _AUDIT_UNPRINTABLE, True
+        return raw, False
+    if isinstance(raw, (dict, list, tuple)):
+        if depth >= AUDIT_ARG_MAX_DEPTH:
+            return None, True
+        items = list(raw.items()) if isinstance(raw, dict) else list(enumerate(raw))
+        cut = len(items) > AUDIT_ARG_LIST_MAX_ITEMS
+        bounded: dict[str, Any] = {}
+        for key, item in items[:AUDIT_ARG_LIST_MAX_ITEMS]:
+            key, key_cut = _audit_text(key, AUDIT_ARG_VALUE_MAX_CHARS)
+            # Two keys that bound to the same text keep only the later value, which is a cut too.
+            key_cut = key_cut or key in bounded
+            bounded[key], item_cut = _audit_value(item, depth + 1)
+            cut = cut or key_cut or item_cut
+        return (bounded if isinstance(raw, dict) else list(bounded.values())), cut
+    return _audit_text(raw, AUDIT_ARG_VALUE_MAX_CHARS)
+
+
+def _fitting(entries: list[Any], budget: int) -> list[Any]:
+    """The `entries`, in order, that serialize together within `budget` characters.
+
+    One that does not fit is skipped and the rest still tried, so a single oversized entry cannot
+    evict every entry after it. Each entry is measured once rather than the whole value
+    re-serialized per drop, which a hostile call could make slow. The measure over-counts by one
+    separator, so what is kept always fits.
+    """
+    kept = []
+    for entry in entries:
+        # One separator per entry: `", "` between entries, or `": "` inside a key/value pair.
+        size = len(json.dumps(entry, default=str)) + 2
+        if size <= budget:
+            budget -= size
+            kept.append(entry)
+    return kept
+
+
+def _bounded_arguments(name: str, raw: dict[str, Any]) -> str | None:
+    """Every parameter a call was sent, bounded, except those with a column of their own.
+
+    None when nothing is left, so a call sent only those, or nothing, stores NULL. No per-tool list
+    of keys: a tool added later, or one a consumer registers, is covered as it stands.
+    """
+    own = _OWN_COLUMN_ARGUMENTS | ({"example"} if name == "execute_sql" else set())
+    values, truncated = _audit_value({k: v for k, v in raw.items() if k not in own})
+    if not values:
+        return None
+    # A parameter that does not fit what is left of the column cap is dropped, and a drop sets the
+    # flag. The worst case is the empty envelope, far below the cap. The cap is on the final
+    # string, `\uXXXX` escapes included.
+    pairs = [list(p) for p in values.items()]
+    budget = AUDIT_ARGUMENTS_MAX_CHARS - len(json.dumps({"values": {}, "truncated": False}))
+    kept = _fitting(pairs, budget)
+    return json.dumps(
+        {"values": dict(kept), "truncated": truncated or len(kept) < len(pairs)}, default=str
+    )
+
+
+def _bounded_missed(misses: list[dict[str, Any]] | None) -> str | None:
+    """The names a call missed, bounded: each name stripped and cut, at most three of the
+    suggestions it was offered, and never the reply's prose `hint`. None when nothing missed."""
+    if not misses:
+        return None
+    budget = AUDIT_MISSED_MAX_CHARS - len(json.dumps({"entries": [], "truncated": False}))
+    # No entry is smaller than this, so no more than `budget // smallest` can fit: past that many,
+    # building and scrubbing more is work for entries that would only be dropped.
+    smallest = len(json.dumps({"kind": "", "name": ""})) + 2
+    entries = []
+    truncated = len(misses) > budget // smallest
+    for miss in misses[: budget // smallest]:
+        # `record_tool_call` is public, so an entry may arrive in any shape. It is read defensively
+        # rather than trusted, since a failure to record fails the call on the served path.
+        miss = miss if isinstance(miss, dict) else {"name": miss}
+        kind, kind_cut = _audit_text(miss.get("kind", ""), AUDIT_MISS_NAME_MAX_CHARS)
+        raw_name = miss.get("name", "")
+        # Stripped before the cut, so padding never spends the name's own length.
+        raw_name = raw_name.strip() if isinstance(raw_name, str) else raw_name
+        name, name_cut = _audit_text(raw_name, AUDIT_MISS_NAME_MAX_CHARS)
+        entry: dict[str, Any] = {"kind": kind, "name": name}
+        truncated = truncated or kind_cut or name_cut
+        if "value" in miss:
+            entry["value"], value_cut = _audit_text(miss["value"], AUDIT_MISS_NAME_MAX_CHARS)
+            truncated = truncated or value_cut
+        # Absent or None means never searched, and stays absent; a lone value is one suggestion.
+        offered = miss.get("did_you_mean")
+        if offered is not None:
+            offered = list(offered) if isinstance(offered, (list, tuple)) else [offered]
+            bounded = [
+                _audit_text(s, AUDIT_MISS_NAME_MAX_CHARS) for s in offered[:AUDIT_MISS_SUGGESTIONS]
+            ]
+            entry["did_you_mean"] = [text for text, _cut in bounded]
+            # Each suggestion's own cut counts too: the flag reports every cut, not only the name's.
+            truncated = (
+                truncated
+                or len(offered) > AUDIT_MISS_SUGGESTIONS
+                or any(cut for _text, cut in bounded)
+            )
+        entries.append(entry)
+    # Dropped to fit, as `_bounded_arguments` does; `miss_count` keeps the true total.
+    kept = _fitting(entries, budget)
+    return json.dumps(
+        {"entries": kept, "truncated": truncated or len(kept) < len(entries)}, default=str
+    )
 
 
 def _bounded_audit_detail(detail: str) -> str:
@@ -3880,6 +4128,8 @@ def reset_typed_outcome() -> None:
     # The same inheritance, for the resolved datasource: `list_datasources` after a schema call would
     # otherwise be recorded against the schema call's datasource.
     _resolved_datasource.set(None)
+    # And for the missed names: a schema call's misses would otherwise be the next tool's.
+    _call_misses.set(None)
 
 
 def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
@@ -3907,18 +4157,24 @@ def typed_outcome_overrides(ctx: Any) -> dict[str, Any]:
     resolved = ctx.get(_resolved_datasource)
     if resolved:
         overrides["datasource"] = resolved
+    # The missed names ride independently too: a partial miss has no outcome to state.
+    misses = ctx.get(_call_misses)
+    if misses:
+        overrides["missed"] = misses
     outcome = ctx.get(_last_outcome)
     if outcome is None:
         return overrides
-    status, rule, row_count = outcome
+    status, rule, kind, row_count = outcome
     success = status == "ok"
     return {
         **overrides,
         "success": success,
         # The rule the gate chose, straight off the `Refusal` — strictly more informative than the
-        # status alone, and no longer a `json.loads` of our own output. `status` is the fallback for
-        # a `failed`, which has a kind rather than a rule.
-        "error_kind": None if success else (rule or status),
+        # status alone, and no longer a `json.loads` of our own output. A `failed` has a kind rather
+        # than a rule, and records it: the status alone said `failed` for a syntax error
+        # and a timeout alike. The rule comes first, so `audit_unavailable`'s skip in
+        # `_record_tool_call`, which reads the rule off `error_kind`, is unchanged.
+        "error_kind": None if success else (rule or kind or status),
         "row_count": row_count,
     }
 
@@ -3942,6 +4198,7 @@ def record_tool_call(
     org_id: str | None = None,
     datasource: str | None = None,
     error_detail: str | None = None,
+    missed: list[dict[str, Any]] | None = None,
 ) -> None:
     """Record one MCP tool call to the activity log (the transport calls this for **every** tool). The
     audit-grade fields are server-observed; `success`/`row_count`/`error_kind` are derived from the
@@ -3981,6 +4238,9 @@ def record_tool_call(
       to be re-read later from a context that may no longer be the same one. The fallback when that
       read finds nothing is the deployment-wide org, and for an audit row that is the wrong direction
       to fail in.
+    - `missed` is the names the handler found the model lacked, each `{kind, name,
+      did_you_mean}`, bounded here. Like `datasource` it is an independent override, not one of the
+      coherent trio: a partial miss is still a success.
 
     `error_detail` is why a call that RAISED crashed (027) — the text the HTTP transport no longer
     sends to the client. Kept only with `raised=True`: a call that returned has a body saying how it
@@ -4095,6 +4355,8 @@ def record_tool_call(
         # Nothing to clear here: `raised` skips the body parse entirely (the `else` above), so a call
         # that threw has no sentences to begin with. Setting them to None again would be a line that
         # can never change anything.
+    # An empty reply is a size of 0; only a call that raised, or sent no text at all, has none.
+    result_chars = len(result_text) if result_text is not None and not raised else None
     rec: dict[str, Any] = {
         "ts": _now_iso(),
         "tool_name": name,
@@ -4142,6 +4404,15 @@ def record_tool_call(
         "error_detail": (
             error_detail[:AUDIT_ERROR_DETAIL_MAX_CHARS] if raised and error_detail else None
         ),
+        # What the call was sent, less what has its own column, and what missed. Bounded
+        # here, like `basis`: a bound the caller applies is not a bound.
+        "arguments": _bounded_arguments(name, args),
+        "missed": _bounded_missed(missed),
+        # The true total, even when `missed` had to be cut.
+        "miss_count": len(missed) if missed else None,
+        # The size of the text the client received; a call that raised sent none.
+        "result_chars": result_chars,
+        "result_tokens_est": math.ceil(result_chars / 4) if result_chars is not None else None,
     }
     if org_id is not None:
         # Set rather than left absent, so `_record_tool_call`'s `setdefault` keeps it instead of
