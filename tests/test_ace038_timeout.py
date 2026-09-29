@@ -1376,7 +1376,7 @@ def _http_refusal(sql: str) -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.create_app()) as client:
+    with TestClient(mcp_http.create_app(), base_url=_BASE_URL) as client:
         assert tools._INJECTED_EXECUTOR is not None, (
             "create_app() no longer injects an executor, so this surface is now the fork path and "
             "the in-process path this test believes it covers is uncovered"
