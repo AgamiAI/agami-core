@@ -92,7 +92,7 @@
       "row_count": 0,
       "execution_ms": "<volatile>",
       "success": 0,
-      "error_kind": "failed",
+      "error_kind": "table_not_found",
       "source": "mcp_server",
       "user_question": null,
       "agent_query": null,

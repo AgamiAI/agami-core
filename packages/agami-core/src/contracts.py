@@ -392,4 +392,15 @@ class ToolCallRecord(_Contract):
     # that no longer reaches the client, and for the same reason. Bounded by the writer
     # (`tools.AUDIT_ERROR_DETAIL_MAX_CHARS`). NULL on every call that did not raise.
     error_detail: str | None = None
+
+    # What the call was sent, what missed, and how much it sent back (027). `arguments` and
+    # `missed` are bounded JSON envelopes serialized by the writer (`tools.AUDIT_ARGUMENTS_MAX_CHARS`,
+    # `tools.AUDIT_MISSED_MAX_CHARS`), each carrying a `truncated` flag. `miss_count` is the true
+    # total even when `missed` was cut, and NULL on a call with no misses. The two sizes describe the
+    # text the client received and are NULL when the handler raised.
+    arguments: str | None = None
+    missed: str | None = None
+    miss_count: int | None = None
+    result_chars: int | None = None
+    result_tokens_est: int | None = None
     org_id: str = "local"  # the tenant this call ran for; defaults to the single-tenant org
