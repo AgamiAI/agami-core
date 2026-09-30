@@ -675,6 +675,7 @@ def _build_relationships(
 
     rels: list[Relationship] = []
     overlap_probes = 0   # budget guard for declared-FK overlap confirmation (see FK_OVERLAP_PROBE_CAP)
+    outside_model = 0
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
         _fk_step = max(1, len(catalog_fks) // 10)   # ~10 heartbeat lines over the (slow) FK pass
@@ -683,6 +684,12 @@ def _build_relationships(
                 _progress(pp, f"relationships: declared FK {_fi}/{len(catalog_fks)}")
             ft, fc, tt, tc = fk.get("from_table"), fk.get("from_column"), fk.get("to_table"), fk.get("to_column")
             if not (ft and fc and tt and tc):
+                continue
+            # The catalog lists every FK in the schema, including ones to tables the prune step
+            # dropped or to a schema not introspected; a join to a table the model lacks is unusable.
+            if not (_in_model(ft, fk.get("from_schema"), tables_by_name)
+                    and _in_model(tt, fk.get("to_schema"), tables_by_name)):
+                outside_model += 1
                 continue
             # Schema each endpoint lives in: the dialect's FK query supplies it on schema-ful
             # DBs (Postgres/MySQL); otherwise resolve it from the table list (same-schema first).
@@ -733,6 +740,10 @@ def _build_relationships(
             report.notes.append(
                 f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
                 "remaining declared FKs left unreviewed for sign-off on /agami-model")
+        if outside_model:
+            report.notes.append(
+                f"skipped {outside_model} declared foreign key(s) to tables outside the model "
+                "(pruned, or in a schema not introspected)")
     else:
         # probe: infer FKs from name+type match, confirm by value-overlap
         report.mode_per_capability["relationships"] = "probe"
@@ -858,6 +869,13 @@ def _schema_of(
                 "edit the relationship if it should point elsewhere")
         return schemas[0]
     return None
+
+
+def _in_model(name: str, schema: Optional[str], tables_by_name: dict[str, list[Table]]) -> bool:
+    """Whether a declared FK endpoint is a table being modelled. When either side carries no schema
+    (SQLite, or a dialect whose FK query omits it) it matches on the bare name."""
+    return any(not schema or not t.schema_name or t.schema_name == schema
+               for t in tables_by_name.get(name, []))
 
 
 def _pick_target(cands: list[Table], prefer: Optional[str]) -> Optional[Table]:

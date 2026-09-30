@@ -52,7 +52,9 @@ below corresponds to one such version.
   keys up; the model gains `confirmed` joins and catalog grains where it had guesses. Redshift keeps
   the `information_schema` queries, since it lacks the `LATERAL` and `unnest ... WITH ORDINALITY`
   the new ones use. When no declared foreign keys are visible at all, the introspection report now
-  says the joins were inferred instead of staying silent.
+  says the joins were inferred instead of staying silent. A declared foreign key to a table outside
+  the model (pruned, or in a schema not introspected) is skipped, and the report counts it, rather
+  than becoming a join to a table the model does not have.
 
 - **A failed `execute_sql` on the HTTP server records its real kind.** The activity log
   said `failed` for every failure. It now says which: `syntax`, `timeout`, `auth`, and so on.
