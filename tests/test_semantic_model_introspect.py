@@ -70,6 +70,44 @@ def test_catalog_mode_builds_valid_model(tmp_path):
     rel = org.subject_areas[0].relationships[0]
     assert (rel.from_table, rel.to_table, rel.relationship) == ("orders", "customers", "many_to_one")
     assert rel.confidence == "confirmed"  # postgres FKs are enforced
+    assert not any("no declared foreign keys" in n for n in rep.notes)
+
+
+def test_no_catalog_fks_says_joins_are_inferred(tmp_path):
+    # An empty FK result falls back to guessing joins; the report must say so rather than stay silent.
+    runner = make_catalog_runner(tables=["customers", "orders"], columns={
+        "customers": [col("id", "integer", nullable=False)],
+        "orders": [col("id", "integer", nullable=False), col("customer_id", "integer")],
+    })
+    _, rep = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    assert rep.mode_per_capability["relationships"] == "probe"
+    assert any("no declared foreign keys were visible" in n for n in rep.notes)
+
+
+def test_declared_fks_to_tables_outside_the_model_are_skipped(tmp_path):
+    # The catalog lists every FK in the schema, so one to a pruned table or to a schema that was not
+    # introspected must not become a join to a table the model does not have.
+    runner = make_catalog_runner(
+        tables=["customers", "orders", "regions"],
+        columns={
+            "customers": [col("id", "integer", nullable=False), col("region_id", "integer")],
+            "orders": [col("id", "integer", nullable=False), col("customer_id", "integer")],
+            "regions": [col("id", "integer", nullable=False)],
+        },
+        fks=[
+            {"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id",
+             "from_schema": "public", "to_schema": "public"},
+            {"from_table": "customers", "from_column": "region_id", "to_table": "regions", "to_column": "id",
+             "from_schema": "public", "to_schema": "public"},
+            {"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id",
+             "from_schema": "public", "to_schema": "archive"},
+        ],
+    )
+    org, rep = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True,
+                            tables=["public.customers", "public.orders"])
+    rels = [r for a in org.subject_areas for r in a.relationships] + list(org.cross_subject_area_relationships)
+    assert [(r.from_table, r.to_table) for r in rels] == [("orders", "customers")]
+    assert any("skipped 2 declared foreign key(s) to tables outside the model" in n for n in rep.notes)
 
 
 def test_exclude_columns_marks_them_rejected(tmp_path):

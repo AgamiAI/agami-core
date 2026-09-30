@@ -101,6 +101,28 @@ def test_mysql_fk_uses_referenced_columns():
     assert "referenced_table_name" in d.sql_foreign_keys("s")
 
 
+@pytest.mark.parametrize("key", ["postgres", "supabase"])
+def test_postgres_keys_read_pg_constraint_not_information_schema(key):
+    # information_schema hides constraints from a SELECT-only role; pg_constraint does not.
+    d = D.get_dialect(key)
+    pk, fk = d.sql_primary_keys("s", "t"), d.sql_foreign_keys("s")
+    for sql in (pk, fk):
+        assert "pg_constraint" in sql and "information_schema" not in sql.lower()
+    assert "contype = 'p'" in pk and "column_name" in pk and "ORDER BY k.ord" in pk
+    assert "contype = 'f'" in fk
+    for alias in ("from_table", "from_column", "from_schema", "to_table", "to_column", "to_schema"):
+        assert f"AS {alias}" in fk
+    assert "nspname = 's'" in pk and "relname = 't'" in pk and "nspname = 's'" in fk
+
+
+def test_redshift_keeps_information_schema_keys():
+    # No LATERAL or unnest ... WITH ORDINALITY on Redshift, so it must not inherit the pg_constraint form.
+    d = D.get_dialect("redshift")
+    assert "information_schema.table_constraints" in d.sql_primary_keys("s", "t")
+    assert "information_schema.table_constraints" in d.sql_foreign_keys("s")
+    assert "pg_constraint" not in d.sql_primary_keys("s", "t") + d.sql_foreign_keys("s")
+
+
 def test_unenforced_fk_dialects_flagged():
     assert D.get_dialect("redshift").fk_enforced is False
     assert D.get_dialect("databricks").fk_enforced is False
