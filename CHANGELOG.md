@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-09-30
+
 ### Security
 
 - **A `column_scope` refusal lists what the tables it read DO declare (#386).** It said a column
