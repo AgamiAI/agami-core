@@ -70,6 +70,13 @@ from guardrail import (
 # swallowed here is logged at WARNING with its exception instead.
 _LOG = logging.getLogger(__name__)
 
+# Every tool reply is serialised compactly (#418). The reader is a model, which gets nothing from
+# indentation and pays for every character of it: pretty-printing was ~25% of a schema reply's JSON
+# and ~22% of an execute_sql result. Files written to disk and the CLI's own output stay
+# pretty-printed — people read those. `mcp_http` re-serialises each reply to stamp
+# `caller_identity`, so it uses this same constant; otherwise it would restore the whitespace.
+REPLY_SEPARATORS = (",", ":")
+
 # Secrets + per-user state live under <artifacts_dir>/local/. Re-resolved after bootstrap() in main().
 AGAMI_LOCAL = agami_paths.local_dir()
 CREDENTIALS_PATH = agami_paths.credentials_path()
@@ -342,7 +349,7 @@ def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> 
                     "remediation": "no datasources are deployed for this organization.",
                 }
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
     return json.dumps(
         {
@@ -355,7 +362,7 @@ def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> 
                 ),
             }
         },
-        indent=2,
+        separators=REPLY_SEPARATORS,
     )
 
 
@@ -1185,7 +1192,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             # would read as a real account (#253); the data tools refuse that omission already.
             listed = any(d["datasource"] == active for d in out)
             return json.dumps(
-                {"datasources": out, "active_datasource": active if listed else None}, indent=2
+                {"datasources": out, "active_datasource": active if listed else None}, separators=REPLY_SEPARATORS
             )
         return json.dumps(
             {
@@ -1193,7 +1200,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                 "note": "No models deployed to this server yet. Load one with the deploy's model "
                 "loader (model_deploy scans <artifacts_dir>/*/datasource.yaml).",
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
 
     # Local skill path: enumerate the credentials-file profiles + their on-disk models.
@@ -1225,9 +1232,9 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                 "datasources": [],
                 "note": "No profiles found in your credentials file. Run the agami-connect skill first.",
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
-    return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+    return json.dumps({"datasources": out, "active_datasource": active}, separators=REPLY_SEPARATORS)
 
 
 def _dialect_fields(engine: "str | None") -> dict[str, Any]:
@@ -1753,7 +1760,7 @@ class _ModelNames(NamedTuple):
         }
         if hints:
             error["hints"] = hints
-        return json.dumps({"error": error}, indent=2)
+        return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
     def miss_advice(self, name: str, guesses: Mapping[str, list[str]]) -> str:
         """What to try instead of `name`: its wrong-kind hint first, else its closest names.
@@ -1911,7 +1918,7 @@ def _normalized_args(
         # The miss is the parameter's key; the value it was sent is kept when it is a string.
         _note_miss("argument", key, extra.get("did_you_mean") or [], fixed.get(key))
         error = {"kind": "invalid_argument", "remediation": remediation, **extra}
-        return fixed, json.dumps({"error": error}, indent=2)
+        return fixed, json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
     for key in ("dataset_names", "metric_names"):
         if key not in keys:
@@ -1983,7 +1990,7 @@ def _unknown_area_error(org, area: str, profile: str) -> str:
     }
     if hint:
         error["hint"] = hint
-    return json.dumps({"error": error}, indent=2)
+    return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
 
 def _scoped_metrics(
@@ -2159,7 +2166,7 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
     if known and profile in known:
         # The name is right and the model is broken — a dangling `ref`, a missing area directory.
         # The loader's message names the file; a list of datasources would only hide it.
-        return json.dumps({"error": error}, indent=2)
+        return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
     if known:
         guesses = _did_you_mean(profile, known)
         # Only here. A known name has a broken model, and with nothing known there is no model at
@@ -2174,7 +2181,7 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
                 f"{', '.join(repr(g) for g in guesses)}? Known datasources: {', '.join(known)}."
             )
         error["datasources"] = known
-    return json.dumps({"error": error}, indent=2)
+    return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
 
 def tool_get_datasource_schema(args: dict[str, Any]) -> str:
@@ -2250,7 +2257,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                     "plugins/agami/scripts/semantic_model/requirements.txt",
                 }
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
 
     from semantic_model import loader as L
@@ -2322,7 +2329,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                         f"or name tables from that area.",
                     }
                 },
-                indent=2,
+                separators=REPLY_SEPARATORS,
             )
     # Never-hide, within the scope the caller DECLARED. `metric_index` and the full `metrics`
     # block are both projected from this one set, so they cannot disagree about what is in scope.
@@ -2481,7 +2488,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # What execute_sql must be sent back on a hosted deployment (#364).
     result["model_version"] = model_version
 
-    parts = [json.dumps(result, indent=2, default=str)]
+    parts = [json.dumps(result, separators=REPLY_SEPARATORS, default=str)]
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
     # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
     # Source (datasource.md / USER_MEMORY.md text) comes from the DB under the DB backend, files
@@ -2596,7 +2603,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 # and this is the same value get_datasource_schema reports (#364).
                 "model_version": model_version,
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
             default=str,
         )
 
@@ -2626,7 +2633,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 "note": f"No examples under {ex_dir}/<area>/examples.yaml. "
                 f"Corrections saved via agami-save-correction will appear here.",
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
     header = (
         f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
@@ -2968,7 +2975,7 @@ def _finalize_execution(
         "sql": sql,
         "execution_ms": execution_ms,
     }
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, separators=REPLY_SEPARATORS, default=str)
 
 
 def _envelope(
@@ -3225,7 +3232,7 @@ def _emit(
             row_count,
         )
     )
-    return json.dumps(body, indent=2, default=str)
+    return json.dumps(body, separators=REPLY_SEPARATORS, default=str)
 
 
 # The most of a caller's statement that reaches the audit store. Deliberately far below the guard's

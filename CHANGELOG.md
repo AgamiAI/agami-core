@@ -12,6 +12,21 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Tool replies are compact JSON (#418).** Every tool reply was serialised with `indent=2`. Its
+  reader is a model, which gets nothing from indentation and pays for every character of it. Measured
+  on a 76-table model: an overview reply drops from 59,168 to 50,941 characters, a one-table
+  `get_datasource_schema` reply from 73,558 to 62,148, and a 100-row `execute_sql` result from 18,010
+  to 14,030 — about 10% of everything an agent receives across a run of real-world questions. No field
+  changes, so nothing a client parses changes; only whitespace.
+
+  The hosted HTTP server re-serialises every reply to stamp `caller_identity`, so it uses the same
+  separators — otherwise it would have put the whitespace back on every hosted reply. Files written
+  to disk (snapshot and batch manifests, the discovery inventory) and the `sm` CLI's own output stay
+  pretty-printed: people read those. A test fails if `indent=` reappears in either module that builds
+  replies.
+
 ## [0.9.8] — 2026-09-30
 
 ### Security
