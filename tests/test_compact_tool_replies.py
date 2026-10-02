@@ -60,9 +60,9 @@ def test_list_datasources(local_model):
 @pytest.mark.parametrize(
     "args",
     [
-        {},  # the overview
-        {"dataset_names": ["x"]},  # a table-scoped call
-        {"area": "NoSuchArea"},  # an error reply
+        {},  # the overview — every successful tier leaves through the same dumps
+        {"dataset_names": ["x"]},  # an unknown table: the not-found reply
+        {"area": "NoSuchArea"},  # an unknown area: a different error builder
     ],
 )
 def test_get_datasource_schema(local_model, args):
@@ -123,8 +123,10 @@ def test_no_reply_builder_pretty_prints():
 
     Most of the 19 sites are error branches — a missing driver, a table named under the wrong area,
     an ambiguous datasource — that no test reaches cheaply, and a new branch would be added the same
-    way: by copying a neighbour. Every `json.dumps` in these two modules builds a reply, so any
-    `indent=` in them is a reply that would go out pretty-printed.
+    way: by copying a neighbour. Neither module has a legitimate use for indentation — the
+    `json.dumps` calls that are not replies write audit columns and a JSONL log, both compact — so
+    any `indent=` in them is most likely a reply going out pretty-printed. If one ever genuinely
+    needs it, move that write out of these modules rather than weaken this check.
     """
     from pathlib import Path
 
