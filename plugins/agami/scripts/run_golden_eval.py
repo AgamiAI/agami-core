@@ -93,6 +93,7 @@ try:
         GenerationContext,
         GoldenRunResult,
         McpServer,
+        pick_tables,
         run_golden_dataset,
     )
     from semantic_model.sql_dialect import DialectUnresolved, resolve_datasource_dialect
@@ -153,6 +154,17 @@ def _effort(args: argparse.Namespace) -> dict[str, str]:
     """
     return {"effort": args.effort} if args.effort else {}
 
+
+# The table pick, named for the same reason `GENERATOR` is: it spawns the operator's own client, so a
+# test substitutes the name and a substitution cannot go on passing while a real client runs.
+TABLE_PICKER = pick_tables
+
+#: How much table detail one question may carry, in characters of JSON. The schema tool does not
+#: bound a request that names its tables, and a pick of twenty wide tables would be a quarter of a
+#: million characters sent outside the cache on every question. This is the tool's own budget for
+#: an unnarrowed call, applied to the narrowed one: tables are kept in the order they were picked
+#: until the next would cross it.
+_TABLE_DETAIL_CHAR_BUDGET = 60_000
 
 # The tool-driven generator, named for the same reason `GENERATOR` is: a test substitutes the name,
 # never the class, so a substitution cannot go on passing while a real client runs behind it.
@@ -505,6 +517,9 @@ def _model_context(cached: dict, question: str) -> GenerationContext:
     changed = _what_the_question_changes(cached["fixed"], cached["profile"], question)
     if changed:
         sections.append(changed)
+    detail = _table_detail(cached, question)
+    if detail:
+        sections.append(detail)
     examples = _examples_text(cached["root"], cached["areas"], question, cached["top_k"])
     if examples:
         sections.append(
@@ -512,6 +527,108 @@ def _model_context(cached: dict, question: str) -> GenerationContext:
             + examples
         )
     return GenerationContext(fixed=cached["fixed"], per_question="\n\n".join(sections))
+
+
+def _table_names(document: dict) -> dict[str, str]:
+    """Every spelling of a table the model's description uses, mapped to the name the tool takes.
+
+    Both `table` and `schema.table`, because the description gives a table its schema beside its
+    name and a client asked to copy a name may copy either. Anything not in this map is not a table
+    of this model, which is the whole of the check a picked name gets.
+    """
+    names: dict[str, str] = {}
+    for area in document.get("subject_areas") or []:
+        for table in area.get("tables") or []:
+            name = table.get("name")
+            if not name:
+                continue
+            names[name] = name
+            if table.get("schema"):
+                names[f"{table['schema']}.{name}"] = name
+    return names
+
+
+def _table_detail(cached: dict, question: str) -> str:
+    """Full detail for the tables this question needs, when the model's description has none.
+
+    A model too large for the schema tool's budget is described as a summary: table names and
+    descriptions, and not one column. The tool says so (`truncated`) and asks for specific tables,
+    which is what a person's session then does. A generator with no tools cannot ask, so without
+    this it writes every statement from table names alone and has to guess each column — and a run
+    scored that way measures the missing description, not the model.
+
+    So the run asks first, the way the session would: the client names the tables the question
+    needs, and their columns, caveats and value rules are fetched from the same tool and sent with
+    the question. Nothing is fetched for a model that fits, so every run of one is unchanged.
+
+    What was fetched is recorded per question, because a wrong statement written from the wrong
+    tables is a different finding from one written from the right ones.
+    """
+    pick = cached.get("pick")
+    if not cached.get("truncated") or pick is None:
+        return ""
+    picked = pick(question)
+    known = cached["tables"]
+    wanted = list(dict.fromkeys(known[name] for name in picked or () if name in known))
+    if not wanted:
+        cached["table_detail"][question] = {
+            "status": "pick_failed" if picked is None else "no_known_table",
+            "tables": [],
+        }
+        return ""
+    document, _ = _split_payload(
+        tools.tool_get_datasource_schema({"datasource": cached["profile"], "dataset_names": wanted})
+    )
+    described = document.get("tables") or {}
+    kept: dict[str, Any] = {}
+    size = 0
+    for name in wanted:
+        table = described.get(name)
+        if not isinstance(table, dict) or not table.get("columns"):
+            continue
+        cost = len(json.dumps(table, default=str))
+        if kept and size + cost > _TABLE_DETAIL_CHAR_BUDGET:
+            break
+        kept[name] = table
+        size += cost
+    cached["table_detail"][question] = {"status": "ok" if kept else "no_detail", "tables": list(kept)}
+    if not kept:
+        return ""
+    # Only the joins between tables whose columns are here: an edge to a table the generator was
+    # not given is an invitation to guess that table's columns, which is the thing being fixed.
+    relationships = [
+        rel
+        for rel in document.get("relationships") or []
+        if isinstance(rel, dict) and rel.get("from_table") in kept and rel.get("to_table") in kept
+    ]
+    return (
+        "The tables this question needs, in full: their columns, caveats and value rules, and how "
+        "they join. The reference data names these tables without their columns, so write against "
+        "the columns listed here:\n"
+        + json.dumps({"tables": kept, "relationships": relationships}, indent=2, default=str)
+    )
+
+
+def _with_table_pick(cached: dict, args: argparse.Namespace) -> dict:
+    """`cached`, able to ask which tables a question needs when its description has no columns.
+
+    Wired here rather than in `_fetch_context` because the pick spawns the client, and the client's
+    timeout and reasoning level are the run's arguments. A model whose description came back whole
+    gets no pick at all, so it costs such a run nothing and changes nothing it sends.
+    """
+    # `.get`, here and wherever the flag is read: a context built by anything other than
+    # `_fetch_context` predates the flag, and one that does not say it was summarised was not.
+    if cached.get("truncated"):
+        org = tools.resolved_org_id()
+        cached["pick"] = lambda question: TABLE_PICKER(
+            question,
+            org,
+            args.profile,
+            fixed=cached["fixed"],
+            timeout_s=args.timeout_s,
+            **_effort(args),
+        )
+    return cached
 
 
 def _schema_text(bundles: list[dict]) -> str:
@@ -549,7 +666,15 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
     areas = _sm("areas", str(root))
     if not areas:
         raise SmFailed("this profile declares no subject areas")
+    schema = _schema_from_the_product(profile)
+    document, _ = _split_payload(schema)
     return {
+        # Whether the tool could not describe the model in full and sent a summary instead, and the
+        # tables that summary names. Together they decide whether a question's tables are picked
+        # and fetched (`_table_detail`), and what each question was given is kept for the record.
+        "truncated": bool(document.get("truncated")),
+        "tables": _table_names(document),
+        "table_detail": {},
         "root": root,
         # Every area, because the ranker reads one library at a time and the question decides which
         # one matters — not the order `sm areas` happens to return.
@@ -557,7 +682,7 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
         "top_k": top_k,
         "profile": profile,
         "fixed": _fixed_context(
-            _schema_from_the_product(profile),
+            schema,
             # Kept, though the schema now comes from the tool. F22 records that the first live runs
             # failed EVERY item because the generator was handed column names alone and guessed
             # 'Invoice' where the data holds a code the profile's own glossary defines. The tool's
@@ -1263,7 +1388,9 @@ def _generator_for(args: argparse.Namespace) -> tuple[Any, Optional[str]]:
         return MCP_GENERATOR(server, timeout_s=args.timeout_s, **_effort(args)), None
 
     try:
-        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
+        cached = _with_table_pick(
+            _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile), args
+        )
     except SmFailed as exc:
         return None, f"cannot build the model context for profile {args.profile!r} — {exc}"
     return (
@@ -1503,7 +1630,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             return _CANNOT_START
 
     try:
-        cached = _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile)
+        cached = _with_table_pick(
+            _fetch_context(agami_paths.profile_dir(args.profile), args.top_k, args.profile), args
+        )
     except SmFailed as exc:
         # Before the first item rather than during one: a run whose context could not be built has
         # no generator, and reporting that as every item erroring would read as a model regression.
@@ -1544,6 +1673,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     # On both, before either is written: a score measured at one reasoning level says nothing about
     # another, so a run that did not name its level could be compared against one it never matched.
     payload["effort"] = joined["effort"] = args.effort or "default"
+    # Also on both, for the same reason. A model the schema tool could only summarise is answered in
+    # two generations per question, from tables the client picked, and a score from that is not the
+    # score of a run that was handed every column. Each item carries the tables it was given, so a
+    # wrong statement can be read as a wrong pick or as a wrong statement from the right tables.
+    truncated = bool(cached.get("truncated"))
+    payload["schema_truncated"] = joined["schema_truncated"] = truncated
+    if truncated:
+        for item in (*payload["items"], *joined["items"]):
+            item["table_detail"] = cached["table_detail"].get(
+                item["question"], {"status": "not_asked", "tables": []}
+            )
     # Microseconds because a person sorts these by name and two runs a second apart must not land
     # on the same one — an overwritten run is a report that silently describes something else. One
     # stamp for the pair, so the JSON and the page beside it are visibly the same run.
@@ -1577,6 +1717,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     # log has one place to look. It is unprefixed because it is the thing to keep rather than the
     # thing to strip.
     print(_summary_line(result, payload["summary"]), file=sys.stderr)
+    if truncated:
+        print(
+            "This model is too large to describe in full, so each question's tables were picked "
+            "first and their columns fetched: two generations per question.",
+            file=sys.stderr,
+        )
     if not any(outcome.confirmed for outcome in result.outcomes):
         # A green run that verified nothing is the one most easily mistaken for evidence, so it
         # says so out loud. The exit code stays 0: the run worked, there was simply nothing in it
