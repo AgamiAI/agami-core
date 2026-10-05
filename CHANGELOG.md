@@ -23,8 +23,12 @@ below corresponds to one such version.
   full.
 
   When the description comes back truncated, the run now asks the generator first which tables the
-  question needs, checks those names against the model, fetches their columns, caveats and value
-  rules from the same tool, and sends them with the question, up to 60,000 characters per question.
+  question needs, checks those names against the model, and sends what the same tool answers for
+  those tables with the question: their columns, caveats and value rules, the joins they take part
+  in, and the metrics defined over them. Tables and metrics are each bounded at 60,000 characters
+  per question. The metrics matter most: a request by `query` matches metric names against the
+  question's words and usually returns one or none, while the table request returns every metric
+  defined over the table.
   The pick is a second spawn of the same client with every tool off, so the generator still has no
   tools. The `--ask` and `--ask-file` context paths get the same detail.
 

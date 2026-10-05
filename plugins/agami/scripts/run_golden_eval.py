@@ -166,6 +166,10 @@ TABLE_PICKER = pick_tables
 #: until the next would cross it.
 _TABLE_DETAIL_CHAR_BUDGET = 60_000
 
+#: The same bound for the metrics that come back with those tables, counted on their own so a wide
+#: table cannot crowd out the definitions a question about it needs.
+_METRIC_DETAIL_CHAR_BUDGET = 60_000
+
 # The tool-driven generator, named for the same reason `GENERATOR` is: a test substitutes the name,
 # never the class, so a substitution cannot go on passing while a real client runs behind it.
 MCP_GENERATOR = ClaudeMcpGenerator
@@ -558,8 +562,15 @@ def _table_detail(cached: dict, question: str) -> str:
     scored that way measures the missing description, not the model.
 
     So the run asks first, the way the session would: the client names the tables the question
-    needs, and their columns, caveats and value rules are fetched from the same tool and sent with
-    the question. Nothing is fetched for a model that fits, so every run of one is unchanged.
+    needs, and what the tool answers for those tables is sent with the question — their columns,
+    caveats and value rules, every join they take part in, and the metrics defined over them.
+    Nothing is fetched for a model that fits, so every run of one is unchanged.
+
+    The metrics are the part most easily left out and the one a question most often turns on. A
+    request by `query` matches metric names against the question's words and usually returns one
+    metric or none; the tool attaches a table's metrics to the table, so asking for the table is
+    what returns the definition a question about it needs. Without them the generator knows a
+    metric by its name and has to work the calculation out.
 
     What was fetched is recorded per question, because a wrong statement written from the wrong
     tables is a different finding from one written from the right ones.
@@ -594,18 +605,26 @@ def _table_detail(cached: dict, question: str) -> str:
     cached["table_detail"][question] = {"status": "ok" if kept else "no_detail", "tables": list(kept)}
     if not kept:
         return ""
-    # Only the joins between tables whose columns are here: an edge to a table the generator was
-    # not given is an invitation to guess that table's columns, which is the thing being fixed.
-    relationships = [
-        rel
-        for rel in document.get("relationships") or []
-        if isinstance(rel, dict) and rel.get("from_table") in kept and rel.get("to_table") in kept
-    ]
+    # Every join the tool returned, including one to a table that was not picked: a join names the
+    # real key on both sides, and a session that asked for these tables is shown all of them.
+    relationships = [rel for rel in document.get("relationships") or [] if isinstance(rel, dict)]
+    metrics: list[Any] = []
+    size = 0
+    for metric in document.get("metrics") or []:
+        size += len(json.dumps(metric, default=str))
+        if size > _METRIC_DETAIL_CHAR_BUDGET:
+            break
+        metrics.append(metric)
     return (
-        "The tables this question needs, in full: their columns, caveats and value rules, and how "
-        "they join. The reference data names these tables without their columns, so write against "
-        "the columns listed here:\n"
-        + json.dumps({"tables": kept, "relationships": relationships}, indent=2, default=str)
+        "The tables this question needs, in full: their columns, caveats and value rules, how they "
+        "join, and the metrics defined over them. The reference data names these tables without "
+        "their columns, so write against the columns listed here, and reuse a metric's `binding` "
+        "verbatim where the question asks for that metric:\n"
+        + json.dumps(
+            {"tables": kept, "relationships": relationships, "metrics": metrics},
+            indent=2,
+            default=str,
+        )
     )
 
 

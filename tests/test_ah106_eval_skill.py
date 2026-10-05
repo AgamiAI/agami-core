@@ -1053,6 +1053,10 @@ def _detail(**tables: list[str]) -> str:
                 {"from_table": "orders", "to_table": "customers"},
                 {"from_table": "orders", "to_table": "refunds"},
             ],
+            "metrics": [
+                {"name": "net revenue", "binding": "SUM(orders.total) - SUM(orders.refunded)"},
+                {"name": "repeat rate", "binding": "COUNT(DISTINCT orders.customer_ref)"},
+            ],
         }
     )
 
@@ -1091,12 +1095,37 @@ def test_a_summarised_model_gets_the_columns_of_the_tables_the_question_needs(mo
     # Only names the model has, in the tool's own spelling, are asked for.
     assert cached["asked"] == [{"datasource": PROFILE, "dataset_names": ["orders", "customers"]}]
     assert "customer_ref" in sent and "customer_key" in sent
-    # A join to a table whose columns were not sent is left out, so nothing invites a guess.
-    assert '"to_table": "customers"' in sent and "refunds" not in sent
+    # Every join the tool returned is sent, as a session that asked for these tables would see them.
+    assert '"to_table": "customers"' in sent and '"to_table": "refunds"' in sent
     assert cached["table_detail"]["How many orders per customer?"] == {
         "status": "ok",
         "tables": ["orders", "customers"],
     }
+
+
+def test_the_metrics_defined_over_the_picked_tables_are_sent_with_them(monkeypatch):
+    """The tool attaches a table's metrics to the table. A request by `query` matches metric names
+    against the question's words and usually finds one or none, so the table request is what carries
+    the definition — and a generator without it has to work the calculation out."""
+    cached = _truncated_context(
+        monkeypatch, lambda question: ("orders",), _detail(orders=["order_id", "total"])
+    )
+
+    sent = run_golden_eval._table_detail(cached, "What is net revenue?")
+
+    assert "SUM(orders.total) - SUM(orders.refunded)" in sent and "repeat rate" in sent
+    assert "reuse a metric's `binding` verbatim" in sent
+
+
+def test_metric_detail_stops_at_its_own_budget(monkeypatch):
+    monkeypatch.setattr(run_golden_eval, "_METRIC_DETAIL_CHAR_BUDGET", 90)
+    cached = _truncated_context(
+        monkeypatch, lambda question: ("orders",), _detail(orders=["order_id"])
+    )
+
+    sent = run_golden_eval._table_detail(cached, "q")
+
+    assert "net revenue" in sent and "repeat rate" not in sent
 
 
 def test_a_model_described_in_full_is_sent_nothing_more_and_asked_nothing(monkeypatch):
