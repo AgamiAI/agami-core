@@ -14,6 +14,29 @@ below corresponds to one such version.
 
 ### Changed
 
+- **The golden eval gives its generator the columns of the tables a question needs (#424).** A model
+  too large for the schema tool's budget is described as a summary: table names and descriptions, and
+  no columns. `get_datasource_schema` says so (`truncated`) and asks for specific tables, which a
+  person's session then requests. The golden run's generator has no tools, so it could not ask, and
+  wrote every statement from table names alone. Measured on a model of 55 tables and about 990
+  columns: the summary is 36,000 characters with no column in it, against 263,000 for every table in
+  full.
+
+  When the description comes back truncated, the run now asks the generator first which tables the
+  question needs, checks those names against the model, and sends what the same tool answers for
+  those tables with the question: their columns, caveats and value rules, the joins they take part
+  in, and the metrics defined over them. Tables and metrics are each bounded at 60,000 characters
+  per question. The metrics matter most: a request by `query` matches metric names against the
+  question's words and usually returns one or none, while the table request returns every metric
+  defined over the table.
+  The pick is a second spawn of the same client with every tool off, so the generator still has no
+  tools. The `--ask` and `--ask-file` context paths get the same detail.
+
+  **Reading a run:** the payload carries `schema_truncated`, and each item carries `table_detail` —
+  the tables it was given and whether the pick worked. A truncated model now costs two model calls
+  per question, and its score is not comparable with one measured before this change. A model that
+  is described in full is asked nothing more and sent nothing more, so its runs are unchanged.
+
 - **Tool replies are compact JSON (#418).** Every tool reply was serialised with `indent=2`. Its
   reader is a model, which gets nothing from indentation and pays for every character of it. Measured
   on a 76-table model: an overview reply drops from 59,168 to 50,941 characters, a one-table

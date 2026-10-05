@@ -1114,3 +1114,63 @@ def test_a_list_carrying_anything_but_statements_is_unreadable(monkeypatch, raw)
 
 def test_the_prompt_says_how_to_answer_with_several_queries():
     assert "put them in order in a list under sql; the last must be the statement whose result answers the question" in gr._QUESTION_PROMPT
+
+
+# --- the table pick: what a model too large to describe in full is asked first --------------------
+
+
+def _pick(spawn, monkeypatch, stdout: str = '{"tables": ["orders", "customers"]}', **spawned):
+    """`pick_tables` against a stand-in client that answers `stdout`."""
+    recorder = _RecordedSpawn(stdout=stdout, **spawned)
+    monkeypatch.setattr(gr.subprocess, "run", recorder)
+    picked = gr.pick_tables("How many orders?", "acme", "demo", fixed=SCHEMA, timeout_s=30.0)
+    return picked, recorder
+
+
+def test_the_pick_returns_the_tables_the_client_named_in_its_order(spawn, monkeypatch):
+    picked, _ = _pick(spawn, monkeypatch, '{"tables": ["orders", " customers ", "orders", 7, ""]}')
+    assert picked == ("orders", "customers")
+
+
+def test_the_pick_is_made_with_every_tool_switched_off_and_never_sees_the_answer_key(
+    spawn, monkeypatch
+):
+    """The pick is a second spawn of the same client, so it gets the same isolation as the first:
+    no tools, no MCP source, no settings, and nothing in its hands but the question and the
+    description."""
+    _, recorder = _pick(spawn, monkeypatch)
+    (args, _kwargs), = recorder.invocations
+    assert _flag_value(args, "--tools") == "" and "--strict-mcp-config" in args
+    assert _flag_value(args, "--setting-sources") == "" and "--mcp-config" not in args
+    given = recorder.everything_given()
+    assert "How many orders?" in given and SCHEMA in given
+    assert ANSWER_KEY not in given
+
+
+def test_the_pick_reads_the_same_fenced_description_and_is_told_to_write_no_statement(
+    spawn, monkeypatch
+):
+    _, recorder = _pick(spawn, monkeypatch)
+    (_, system), = recorder.system_prompts
+    assert gr._REFERENCE_OPEN in system and system.index(SCHEMA) < system.index(gr._REFERENCE_CLOSE)
+    rules = system[system.index(gr._REFERENCE_CLOSE):]
+    assert '{"tables"' in rules and "do not" in rules and "write the statement" in rules
+
+
+def test_a_pick_that_named_nothing_is_not_a_pick_that_failed(spawn, monkeypatch):
+    """An empty list is an answer; a client that did not answer is not. A caller records the two
+    differently, so they must not arrive as the same value."""
+    assert _pick(spawn, monkeypatch, '{"tables": []}')[0] == ()
+    assert _pick(spawn, monkeypatch, "I would use the orders table.")[0] is None
+    assert _pick(spawn, monkeypatch, '{"tables": "orders"}')[0] is None
+    assert _pick(spawn, monkeypatch, returncode=1)[0] is None
+    timed_out = subprocess.TimeoutExpired(cmd="claude", timeout=30.0)
+    assert _pick(spawn, monkeypatch, raises=timed_out)[0] is None
+
+
+def test_an_effort_level_reaches_the_pick(spawn, monkeypatch):
+    recorder = _RecordedSpawn(stdout='{"tables": ["orders"]}')
+    monkeypatch.setattr(gr.subprocess, "run", recorder)
+    gr.pick_tables("How many orders?", "acme", "demo", fixed=SCHEMA, timeout_s=30.0, effort="low")
+    (args, _), = recorder.invocations
+    assert _flag_value(args, "--effort") == "low"

@@ -1027,6 +1027,166 @@ def test_a_question_that_tips_the_detail_level_sends_its_whole_description(monke
     assert '"mode": "summary"' in sent and "names only" in sent and '"truncated": true' in sent
 
 
+def _summary(*tables: str) -> str:
+    """The schema tool's answer for a model too large to describe in full: names, and no columns."""
+    return _tool_response(
+        {
+            "mode": "summary",
+            "truncated": True,
+            "subject_areas": [
+                {"name": "sales", "tables": [{"name": t, "schema": "public"} for t in tables]}
+            ],
+        }
+    )
+
+
+def _detail(**tables: list[str]) -> str:
+    """The schema tool's answer for named tables: each with its columns, and the joins among them."""
+    return _tool_response(
+        {
+            "mode": "full",
+            "tables": {
+                name: {"name": name, "columns": [{"name": column} for column in columns]}
+                for name, columns in tables.items()
+            },
+            "relationships": [
+                {"from_table": "orders", "to_table": "customers"},
+                {"from_table": "orders", "to_table": "refunds"},
+            ],
+            "metrics": [
+                {"name": "net revenue", "binding": "SUM(orders.total) - SUM(orders.refunded)"},
+                {"name": "repeat rate", "binding": "COUNT(DISTINCT orders.customer_ref)"},
+            ],
+        }
+    )
+
+
+def _truncated_context(monkeypatch, pick, detail: str) -> dict:
+    """A run's cached context for a model that came back as a summary, with `pick` as its picker."""
+    asked: list[dict] = []
+
+    def tool(args: dict) -> str:
+        asked.append(args)
+        return detail
+
+    monkeypatch.setattr(run_golden_eval.tools, "tool_get_datasource_schema", tool)
+    document, _ = run_golden_eval._split_payload(_summary("orders", "customers", "refunds"))
+    return {
+        "profile": PROFILE,
+        "truncated": True,
+        "tables": run_golden_eval._table_names(document),
+        "table_detail": {},
+        "pick": pick,
+        "asked": asked,
+    }
+
+
+def test_a_summarised_model_gets_the_columns_of_the_tables_the_question_needs(monkeypatch):
+    """A model too large for the schema tool comes back with table names and no columns. Without
+    the detail of the tables a question needs, every column in the statement is a guess."""
+    cached = _truncated_context(
+        monkeypatch,
+        lambda question: ("public.orders", "customers", "not_a_table"),
+        _detail(orders=["order_id", "customer_ref"], customers=["customer_key"]),
+    )
+
+    sent = run_golden_eval._table_detail(cached, "How many orders per customer?")
+
+    # Only names the model has, in the tool's own spelling, are asked for.
+    assert cached["asked"] == [{"datasource": PROFILE, "dataset_names": ["orders", "customers"]}]
+    assert "customer_ref" in sent and "customer_key" in sent
+    # Every join the tool returned is sent, as a session that asked for these tables would see them.
+    assert '"to_table": "customers"' in sent and '"to_table": "refunds"' in sent
+    assert cached["table_detail"]["How many orders per customer?"] == {
+        "status": "ok",
+        "tables": ["orders", "customers"],
+    }
+
+
+def test_the_metrics_defined_over_the_picked_tables_are_sent_with_them(monkeypatch):
+    """The tool attaches a table's metrics to the table. A request by `query` matches metric names
+    against the question's words and usually finds one or none, so the table request is what carries
+    the definition — and a generator without it has to work the calculation out."""
+    cached = _truncated_context(
+        monkeypatch, lambda question: ("orders",), _detail(orders=["order_id", "total"])
+    )
+
+    sent = run_golden_eval._table_detail(cached, "What is net revenue?")
+
+    assert "SUM(orders.total) - SUM(orders.refunded)" in sent and "repeat rate" in sent
+    assert "reuse a metric's `binding` verbatim" in sent
+
+
+def test_metric_detail_stops_at_its_own_budget(monkeypatch):
+    monkeypatch.setattr(run_golden_eval, "_METRIC_DETAIL_CHAR_BUDGET", 90)
+    cached = _truncated_context(
+        monkeypatch, lambda question: ("orders",), _detail(orders=["order_id"])
+    )
+
+    sent = run_golden_eval._table_detail(cached, "q")
+
+    assert "net revenue" in sent and "repeat rate" not in sent
+
+
+def test_a_model_described_in_full_is_sent_nothing_more_and_asked_nothing(monkeypatch):
+    """Every run of a model that fits is unchanged: no pick, no second fetch, nothing recorded."""
+    cached = _truncated_context(monkeypatch, lambda question: ("orders",), _detail(orders=["id"]))
+    cached["truncated"] = False
+
+    assert run_golden_eval._table_detail(cached, "How many orders?") == ""
+    assert cached["asked"] == [] and cached["table_detail"] == {}
+
+
+def test_a_pick_that_failed_or_named_no_table_of_the_model_is_recorded_as_such(monkeypatch):
+    """A statement written without the detail is then a finding about the pick, and the record is
+    the only thing that says so."""
+    failed = _truncated_context(monkeypatch, lambda question: None, _detail(orders=["id"]))
+    assert run_golden_eval._table_detail(failed, "q") == ""
+    assert failed["table_detail"]["q"] == {"status": "pick_failed", "tables": []}
+
+    unknown = _truncated_context(monkeypatch, lambda question: ("nope",), _detail(orders=["id"]))
+    assert run_golden_eval._table_detail(unknown, "q") == ""
+    assert unknown["table_detail"]["q"] == {"status": "no_known_table", "tables": []}
+    assert failed["asked"] == [] and unknown["asked"] == []
+
+
+def test_table_detail_stops_at_its_budget_and_keeps_the_tables_picked_first(monkeypatch):
+    """The tool does not bound a request that names its tables, so the run does: the tables picked
+    first are kept, and the first is always sent however wide it is."""
+    monkeypatch.setattr(run_golden_eval, "_TABLE_DETAIL_CHAR_BUDGET", 200)
+    wide = [f"column_{n}" for n in range(40)]
+    cached = _truncated_context(
+        monkeypatch,
+        lambda question: ("orders", "customers", "refunds"),
+        _detail(orders=wide, customers=wide, refunds=wide),
+    )
+
+    sent = run_golden_eval._table_detail(cached, "q")
+
+    assert cached["table_detail"]["q"] == {"status": "ok", "tables": ["orders"]}
+    assert '"orders"' in sent and '"customers": {' not in sent
+
+
+def test_the_pick_is_wired_only_for_a_summarised_model_and_carries_the_runs_arguments(monkeypatch):
+    import argparse
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        run_golden_eval,
+        "TABLE_PICKER",
+        lambda question, org, datasource, **kwargs: calls.append((question, datasource, kwargs)) or (),
+    )
+    args = argparse.Namespace(profile=PROFILE, timeout_s=45.0, effort="low")
+
+    whole = run_golden_eval._with_table_pick({"truncated": False, "fixed": "f"}, args)
+    assert "pick" not in whole
+
+    summarised = run_golden_eval._with_table_pick({"truncated": True, "fixed": "f"}, args)
+    summarised["pick"]("How many orders?")
+    assert calls == [("How many orders?", PROFILE, {"fixed": "f", "timeout_s": 45.0, "effort": "low"})]
+
+
+
 def test_the_effort_level_reaches_the_generator_and_is_recorded_with_the_run(
     artifacts, monkeypatch, sm, capsys
 ):
