@@ -49,6 +49,14 @@ below corresponds to one such version.
   every metric beside its full `calculation`, including metrics imported from LookML, dbt or a
   metrics file, whose source description used to go into `calculation` alone.
 
+### Fixed
+
+- **`sm suggest-metrics` no longer undoes a rejection (#406).** It checked proposals against the
+  model as loaded for serving, which leaves rejected metrics out, and then wrote each proposal over
+  any file of the same name. So a re-run reset a metric a person had rejected to `unreviewed`. It
+  now checks against every metric file on disk, rejected ones included. It still proposes nothing
+  on a rejected table or column.
+
 ## [0.9.8] — 2026-09-30
 
 ### Security

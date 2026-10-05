@@ -676,12 +676,19 @@ def cmd_suggest_metrics(args) -> int:
                 _dcache[st] = D.get_dialect("postgresql")
         return _dcache[st]
 
+    # Every metric name on disk, rejected ones included. `org` drops rejected entries, which is
+    # right for choosing what to propose on (never a rejected table or column), but `write_items`
+    # overwrites a file of the same name — so checking against `org`'s metrics alone re-proposed a
+    # metric a person had rejected and reset it to unreviewed, undoing the rejection.
+    on_disk = {sa.name: {m.name for m in sa.metrics}
+               for sa in L.load_datasource(args.root, include_rejected=True).subject_areas}
+
     suggested = written = skipped_opaque = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
-        existing = {m.name for m in sa.metrics}
+        existing = set(on_disk.get(sa.name, ()))
         items: list[dict] = []
         for t in sa.tables_defined:
             # columns agami couldn't read yield no metric until described — count them so the

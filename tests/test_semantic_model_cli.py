@@ -127,6 +127,31 @@ def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path)
     assert not met.get("signed_off_by") and not met.get("description")
 
 
+def test_suggest_metrics_never_resurrects_a_rejected_metric(tmp_path):
+    """A rejected metric is invisible to the default load, and `write_items` overwrites a file of
+    the same name, so a re-run used to write the proposal over it — resetting a person's "no" to
+    unreviewed. The rejection must survive any number of re-runs."""
+    _model(tmp_path)
+    items = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"
+    spec = yaml.safe_load(items.read_text())
+    spec["columns"].append({"name": "is_gift", "type": "boolean", "description": "gift wrapped"})
+    items.write_text(yaml.safe_dump(spec))
+    mets = tmp_path / "subject_areas" / "s" / "metrics"
+    mets.mkdir()
+    rejected = {"name": "order_items_is_gift_rate", "calculation": "nobody asks for this",
+                "bindings": {"PostgreSQL": "AVG(CASE WHEN is_gift THEN 1.0 ELSE 0.0 END)"},
+                "source_tables": ["order_items"], "confidence": "proposed",
+                "review_state": "rejected"}
+    (mets / "order_items_is_gift_rate.yaml").write_text(yaml.safe_dump(rejected))
+
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+
+    assert rc == 0 and json.loads(out)["written"] == 0, out
+    on_disk = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())
+    assert on_disk["review_state"] == "rejected"
+    assert on_disk["calculation"] == "nobody asks for this"
+
+
 def test_describe_file_applies_tsv(tmp_path):
     _model(tmp_path)
     tsv = tmp_path / "desc.tsv"

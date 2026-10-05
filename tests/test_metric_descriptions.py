@@ -35,6 +35,8 @@ from store import Store  # noqa: E402
         ("incident_count", "Incident-count!", False),  # punctuation does not make it say more
         ("revenue", "The revenue", False),  # an article does not either
         ("incident_count", "Count of incident", False),  # nor the same words reordered
+        ("order count", "Count of orders.", False),  # nor a plural
+        ("gross_revenue", "Revenue", False),  # nor part of the name
         ("the", "The", False),  # a name made only of filler is still the name restated
     ],
 )

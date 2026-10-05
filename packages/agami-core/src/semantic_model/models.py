@@ -56,7 +56,10 @@ _LABEL_FILLER = frozenset({"the", "a", "an", "of"})
 
 
 def _label_words(text: str) -> frozenset[str]:
-    return frozenset(re.findall(r"[^\W_]+", text.lower())) - _LABEL_FILLER
+    # A naive plural fold, so "orders" and "order" are one word; applied to both sides alike, so a
+    # word it mangles ("class" → "clas") still matches itself.
+    words = re.findall(r"[^\W_]+", text.lower())
+    return frozenset(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words) - _LABEL_FILLER
 
 
 
@@ -590,10 +593,10 @@ class Metric(_Base):
         validator; its table's schema reply still returns it in full.
 
         Words are Unicode letters and digits (`[^\\W_]`, which still splits on `_`): an ASCII-only
-        pattern read a description written wholly in another script as empty. Compared as sets,
-        less a few filler words, so "The revenue" or "Count of incident" restates its name too."""
-        words = _label_words(self.description)
-        return bool(words) and words != _label_words(self.name)
+        pattern read a description written wholly in another script as empty. It has to add a word
+        the name does not have — filler and plural endings aside — so "The revenue", "Count of
+        incidents" for `incident_count`, and "Revenue" for `gross_revenue` all restate the name."""
+        return bool(_label_words(self.description) - _label_words(self.name))
 
 
 # ---------------------------------------------------------------------------
