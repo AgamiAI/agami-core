@@ -685,6 +685,7 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
         m["primary_table"] = t  # every suggested metric is single-table — anchor it there
     return out
 
+
 __all__ = [
     "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",

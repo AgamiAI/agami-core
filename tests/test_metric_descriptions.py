@@ -31,6 +31,8 @@ from store import Store  # noqa: E402
         ("incident_count", "Incident count.", False),  # the name in words
         ("incident_count", "Incidents opened in the period", True),
         ("revenue", "Revenue net of refunds", True),  # starts with the name, says more
+        ("sales_total", "売上合計", True),  # no Latin letters at all, and still a description
+        ("incident_count", "Incident-count!", False),  # punctuation does not make it say more
     ],
 )
 def test_described(name, description, described):

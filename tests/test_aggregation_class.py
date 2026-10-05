@@ -235,7 +235,6 @@ def test_the_cap_is_clamped_at_zero_not_floored_at_one(cap, expected):
     t = m.Table(name="orders", schema="public", storage_connection="c", grain=["id"],
                 description="o", columns=[
                     m.Column(name="id", type="integer", primary_key=True),
-                    m.Column(name="amount", type="decimal", aggregation="additive", unit="USD"),
                     m.Column(name="is_rush", type="boolean"),
                     m.Column(name="is_gift", type="boolean")])
     assert len(build.suggest_metrics(

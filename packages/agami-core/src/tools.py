@@ -2362,7 +2362,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # `query` ranks and `metric_names` selects WHICH in-scope metrics come back in full detail.
     # Resolved once, for every tier: they meant nothing on the table branch before, so the same
     # argument narrowed the detail block at area scope and was silently dropped one tier down.
-    # Neither narrows the SCOPE — `metric_index` still lists everything in it.
+    # Neither narrows the SCOPE — `metric_index` still lists every described metric in it, and
+    # counts the rest.
     explicit = [n for n in (args.get("metric_names") or []) if n in metrics]
     matched = list(dict.fromkeys(explicit + _match_metrics(args.get("query"), metrics)))
     selected = matched or list(metrics)
@@ -4908,7 +4909,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": (
                         "Return full detail for these named metrics. Selects detail; does not "
-                        "scope. Keys of `metric_index`, copied exactly — a name two areas share "
+                        "scope. Keys of `metric_index` or names from a `metrics` block, copied "
+                        "exactly — a name two areas share "
                         "is keyed `name (area)` or `name (cross-area)`."
                     ),
                 },

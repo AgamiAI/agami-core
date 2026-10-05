@@ -657,9 +657,9 @@ def cmd_set_units(args) -> int:
 
 def cmd_suggest_metrics(args) -> int:
     """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
-    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer, instead of asking the
-    user to pick ~4 upfront. Rule 1 keeps proposed metrics out of any answer until approved, so a
-    large suggested set can't degrade results."""
+    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer,
+    instead of asking the user to pick ~4 upfront. An unsigned metric is still used, and the answer
+    warns that it is unreviewed (Rule 1), so every proposal is worth a person's glance."""
     from . import build as B
     from . import curate
     from . import dialects as D

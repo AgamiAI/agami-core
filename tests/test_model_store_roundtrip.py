@@ -248,6 +248,9 @@ def _write_file_model(root):
         yaml.safe_dump(
             {
                 "name": "revenue",
+                # Described, or #406 leaves it out of metric_index and the parity check below
+                # compares two empty indexes.
+                "description": "Order amounts booked in the period",
                 "calculation": "sum of amount",
                 "confidence": "proposed",
                 "review_state": "unreviewed",
@@ -299,7 +302,9 @@ def test_file_model_seeds_to_db_and_tools_serve_from_it(tmp_path, monkeypatch):
     )[0]
     assert db_head["mode"] == file_head["mode"]
     assert db_head["subject_areas"] == file_head["subject_areas"]
-    assert db_head["metric_index"] == file_head["metric_index"]
+    assert db_head["metric_index"] == file_head["metric_index"] == {
+        "revenue": "Order amounts booked in the period"
+    }
 
 
 def test_memory_and_model_version_round_trip():
