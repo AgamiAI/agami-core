@@ -656,15 +656,13 @@ def cmd_set_units(args) -> int:
 
 
 def cmd_suggest_metrics(args) -> int:
-    """Infer a sensible per-table metric set — flag rates, start→end durations, and a plain
-    COUNT/SUM/AVG only where it carries a unit or a caveat the aggregation class does not (#404) —
-    and write them PROPOSED/unreviewed for bulk sign-off in the explorer, instead of asking the
+    """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
+    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer, instead of asking the
     user to pick ~4 upfront. Rule 1 keeps proposed metrics out of any answer until approved, so a
     large suggested set can't degrade results."""
     from . import build as B
     from . import curate
     from . import dialects as D
-    from . import introspect as INTRO
     org = L.load_datasource(args.root)
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
     default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
@@ -678,7 +676,7 @@ def cmd_suggest_metrics(args) -> int:
                 _dcache[st] = D.get_dialect("postgresql")
         return _dcache[st]
 
-    suggested = written = auto = skipped_opaque = 0
+    suggested = written = skipped_opaque = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
@@ -691,27 +689,25 @@ def cmd_suggest_metrics(args) -> int:
             skipped_opaque += sum(
                 1 for c in t.columns
                 if c.description_source == "ai_unknown" and not c.primary_key
-                and (c.type == "boolean" or c.aggregation in ("additive", "averageable")))
+                and (c.type == "boolean"
+                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))))
             st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table,
-                                         now=INTRO._NOW):
+            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
                 if met["name"] in existing:
                     continue
                 existing.add(met["name"])
                 items.append(met)
                 suggested += 1
-                if met.get("review_state") == "approved":
-                    auto += 1
         if items:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    note = ("basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & durations left "
-            "proposed — review & sign off in the explorer (/agami-model)")
+    note = ("flag rates & durations proposed — review & sign off in the explorer (/agami-model); "
+            "give each one you keep a one-line description")
     if skipped_opaque:
         note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
                  "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
-    _print_json({"suggested": suggested, "written": written, "auto_approved": auto,
+    _print_json({"suggested": suggested, "written": written,
                  "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
     return 0 if not errors else 1
 

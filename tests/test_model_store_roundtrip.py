@@ -399,8 +399,10 @@ def test_metric_name_collision_keeps_both_metrics(tmp_path, monkeypatch):
             "datasource": "acme",
             "version": 1,
             "subject_areas": [
-                {"name": "sales", "metrics": [{"name": "revenue", "calculation": "gross"}]},
-                {"name": "finance", "metrics": [{"name": "revenue", "calculation": "net"}]},
+                {"name": "sales", "metrics": [
+                    {"name": "revenue", "calculation": "gross", "description": "Gross sales"}]},
+                {"name": "finance", "metrics": [
+                    {"name": "revenue", "calculation": "net", "description": "Net of refunds"}]},
             ],
         },
     )

@@ -35,6 +35,7 @@ validator gives via `additionalProperties: false`.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
 
 from pydantic import (
@@ -569,6 +570,17 @@ class Metric(_Base):
                 "dimension(s) the metric can't be summed over (e.g. [\"time\"])"
             )
         return self
+
+    @property
+    def described(self) -> bool:
+        """True when `description` says something the metric's name does not (#406).
+
+        `description` is the one-line label `metric_index` shows and the metric search matches, so
+        an empty one — or the name in words, "Incident count" for `incident_count` — tells the agent
+        nothing the key did not. Such a metric is left out of `metric_index` and flagged by the
+        validator; its table's schema reply still returns it in full."""
+        words = re.findall(r"[a-z0-9]+", self.description.lower())
+        return bool(words) and words != re.findall(r"[a-z0-9]+", self.name.lower())
 
 
 # ---------------------------------------------------------------------------

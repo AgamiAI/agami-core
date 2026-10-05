@@ -1363,8 +1363,9 @@ _LARGE_TABLE_ROWS = 1_000_000  # tables at/above this surface in `large_tables` 
 # Metric ranking (lexical, no embeddings): exact/substring hits ("strong") are always kept; the
 # weak token-overlap tail needs >= this coverage and is capped at top-K. This only decides which
 # metrics get FULL detail inline — `get_datasource_schema` ALWAYS returns `metric_index` (every
-# metric's name + one-liner), so a metric that matches nothing is never hidden: the client sees it
-# exists and can pull it by name via `metric_names`. The stopwords carry no metric-identity signal,
+# described metric's name + one-liner, and a count of the undescribed rest, #406), so a metric that
+# matches nothing is not silently hidden: the client sees it exists and can pull it by name via
+# `metric_names`, or open its table. The stopwords carry no metric-identity signal,
 # so they're dropped from the weak token-overlap path only (exact/substring still match them).
 _METRIC_MATCH_TOP_K = 10
 _METRIC_MATCH_MIN_COVERAGE = 0.6
@@ -1426,7 +1427,8 @@ def _content_tokens(s: str | None) -> set[str]:
 def _all_metrics(org) -> dict[str, tuple[Any, str | None]]:
     """Map a unique key -> (metric, area) for every metric (subject-area + cross-area). The key is
     the metric name, disambiguated by area on a collision so two areas sharing a metric name are
-    BOTH kept (the never-hide contract: every metric must appear in metric_index)."""
+    BOTH kept (the never-hide contract: every metric is listed in metric_index or counted beside
+    it)."""
     out: dict[str, tuple[Any, str | None]] = {}
 
     def _add(m, area: str | None) -> None:
@@ -1465,6 +1467,12 @@ def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]
             cand_tokens: set[str] = set()
             for cn in cand_norms:
                 cand_tokens |= _content_tokens(cn)
+            # A metric with no description is matched on its `calculation` too, or only its name
+            # could find it — and it is no longer in `metric_index` to be found by eye (#406). The
+            # weak, capped path only: `calculation` runs to sentences, so a substring hit there
+            # would make a one-word query a strong, uncapped match for most of the catalogue.
+            if not m.described:
+                cand_tokens |= _content_tokens(m.calculation)
             if cand_tokens:
                 coverage = len(q_tokens & cand_tokens) / len(q_tokens)
                 if coverage >= _METRIC_MATCH_MIN_COVERAGE:
@@ -1477,6 +1485,20 @@ def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]
     strong_hits = [n for _, st, n in scored if st]
     result = list(dict.fromkeys(strong_hits + [n for _, _, n in scored]))
     return result[: max(_METRIC_MATCH_TOP_K, len(strong_hits))]
+
+
+def _metric_index_fields(metrics: dict[str, tuple[Any, str | None]]) -> dict[str, Any]:
+    """`metric_index` for the metrics in scope that are described, and a count of the rest.
+
+    An undescribed metric used to be listed with its own name as its description, which costs its
+    characters on every call and tells the agent nothing the key did not; on a wide model that was
+    most of the index (#406). It is counted instead of listed, so the agent still knows it exists:
+    its table's reply returns it in full, and `query` matches its `calculation`."""
+    index = {n: m.description for n, (m, _a) in metrics.items() if m.described}
+    out: dict[str, Any] = {"metric_index": index}
+    if len(index) < len(metrics):
+        out["metrics_without_description"] = len(metrics) - len(index)
+    return out
 
 
 def _engine_of(org) -> "str | None":
@@ -2065,7 +2087,8 @@ def _schema_payload(
     """Build the structured schema payload at the given verbosity, WITHIN `scope`.
 
     `metric_index` + `large_tables` are always present — the never-hide net, now stated relative to
-    the declared scope: every metric IN SCOPE is listed, whatever the verbosity. `metrics` carries
+    the declared scope: every described metric IN SCOPE is listed, and the rest counted, whatever
+    the verbosity (`_metric_index_fields`). `metrics` carries
     FULL detail for the matched set, or every in-scope metric in `full` with no query.
 
     Only the datasource and area tiers reach this function; the table tier builds its own payload
@@ -2095,7 +2118,7 @@ def _schema_payload(
         # a `dataset_names` call returns them in full on its own `relationships` block, so
         # repeating every relationship object here would restate what the next call states better.
         "cross_area_relationships": _cross_area_map(org, scope),
-        "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
+        **_metric_index_fields(metrics),
         "large_tables": _large_tables(org),
     }
     # Omitted outright when there is nothing to route, which the table tier already does with this
@@ -2207,8 +2230,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `mode="auto"` (default) picks verbosity by the IN-SCOPE subject-area count (full <=12, summary
     <=50, index 51+); a hard ~60K-char budget then downgrades one rung at a time
     (full→summary→index) even for an explicit `mode="full"`, setting `truncated=true`.
-    `metric_index` (name->description for every metric in scope) + `large_tables` are always
-    present. Plus datasource.md / USER_MEMORY.md domain context.
+    `metric_index` (name->description for every described metric in scope, the rest counted) +
+    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context.
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
     _call_misses.set(None)
@@ -2419,7 +2442,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
             "relationships": ctx["relationships"],
             "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine) for n in selected],
-            "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
+            **_metric_index_fields(metrics),
             "large_tables": _large_tables(org),
         }
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they
@@ -2458,8 +2481,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             if nxt is None:
                 # At the floor (index) and STILL over budget — the inline `metrics` (full detail
                 # for matched/all metrics) is the remaining bulk. Shed it; `metric_index` still
-                # lists every metric by name, so nothing is hidden — the client requests specifics
-                # via `metric_names`. Flag truncated so the overflow is never silent (C1/C3).
+                # lists every described metric and counts the rest, so nothing is hidden silently —
+                # the client requests specifics via `metric_names`, or by opening a table. Flag
+                # truncated so the overflow is never silent (C1/C3).
                 truncated = True
                 if result.get("metrics"):
                     result["metrics"] = []
@@ -4811,8 +4835,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "returns their joins and the metrics that apply to them — so that is the call to "
             "make before writing SQL. Give neither for the whole datasource. Cross-area metrics "
             "come back at every level. `query` and `metric_names` pick which metrics come back "
-            "in full detail; they do NOT narrow. `metric_index` lists every metric in the "
-            "current scope, and the response reports that scope. `mode=auto` (default) picks "
+            "in full detail; they do NOT narrow. `metric_index` lists every described metric in "
+            "the current scope, and the response reports that scope; "
+            "`metrics_without_description` counts the rest, which come back in full with their "
+            "tables and are matched by `query`. `mode=auto` (default) picks "
             "verbosity (full/summary/index) under a char budget. Plus datasource.md / "
             "USER_MEMORY.md context. Use metric `calculation`/`binding` VERBATIM (`binding` is "
             "already this deployment's dialect). "
