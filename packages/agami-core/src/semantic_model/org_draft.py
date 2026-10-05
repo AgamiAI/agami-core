@@ -48,7 +48,8 @@ def _strip_comments(text: str) -> str:
 
 
 def derived_context(org: "Datasource", *, with_curated_glossary: bool = True,
-                    with_area_list: bool = True) -> str:
+                    with_area_list: bool = True,
+                    glossary_tables: "frozenset[str] | None" = None) -> str:
     """The model-DERIVED factual context: shape + subject areas + conventions + glossary.
 
     Computed fresh from the structured model every time and NOT persisted into datasource.md
@@ -65,7 +66,10 @@ def derived_context(org: "Datasource", *, with_curated_glossary: bool = True,
     `get_datasource_schema` carries the areas as STRUCTURED `subject_areas` in the very same
     response, so rendering them again as prose repeats a block the reader already has. Counts and
     glossary still render — they are not duplicated anywhere. Both defaults are `True`, so every
-    other consumer is untouched."""
+    other consumer is untouched.
+
+    `glossary_tables` narrows the glossary to the entries that name one of those tables (see
+    `_key_terminology`); `None`, the default, keeps every entry."""
     areas = list(org.subject_areas)
     n_tables = sum(len(sa.tables_defined) for sa in areas)
     n_metrics = sum(len(sa.metrics) for sa in areas) + len(org.cross_subject_area_metrics)
@@ -105,18 +109,20 @@ def derived_context(org: "Datasource", *, with_curated_glossary: bool = True,
         lines.append(f"- Units / currency in use: {', '.join(units)}.")
         lines.append("")
 
-    _key_terminology(lines, org, areas, include_curated=with_curated_glossary)
+    _key_terminology(lines, org, areas, include_curated=with_curated_glossary,
+                     tables=glossary_tables)
     return "\n".join(lines).strip()
 
 
-def compose_context(human_md: str, org: "Datasource", *, with_area_list: bool = True) -> str:
+def compose_context(human_md: str, org: "Datasource", *, with_area_list: bool = True,
+                    glossary_tables: "frozenset[str] | None" = None) -> str:
     """Read-time assembly of the full org context: the human's narrative (HTML comments
     stripped) followed by the model-derived summary under its OWN heading. The two parts stay
     SEPARATE — the human's prose is never mixed with auto content, so nothing can be
     accidentally overwritten. Either part may be empty. Used by the MCP, the query skill, and
     the explorer's Datasource view."""
     human = _strip_comments(human_md)
-    derived = derived_context(org, with_area_list=with_area_list)
+    derived = derived_context(org, with_area_list=with_area_list, glossary_tables=glossary_tables)
     parts: list[str] = []
     if human:
         parts.append(human)
@@ -160,14 +166,15 @@ def _company_block(record: "OrgRecord", narrative: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _source_block(org: "Datasource", narrative: str, *, with_area_list: bool = True) -> str:
+def _source_block(org: "Datasource", narrative: str, *, with_area_list: bool = True,
+                  glossary_tables: "frozenset[str] | None" = None) -> str:
     """One datasource's context: its optional source-specific narrative + the model-derived summary,
     under a heading naming the datasource (so a federated answer keeps the vocabularies apart)."""
     seg = [f"## {org.datasource} — datasource context"]
     src = _strip_comments(narrative)
     if src:
         seg.append(src)
-    body = derived_context(org, with_area_list=with_area_list)
+    body = derived_context(org, with_area_list=with_area_list, glossary_tables=glossary_tables)
     if body:
         seg.append(body)
     return "\n\n".join(seg).strip()
@@ -180,6 +187,7 @@ def compose_org_context(
     company_narrative: str = "",
     source_narratives: "list[str] | None" = None,
     with_area_list: bool = True,
+    glossary_tables: "frozenset[str] | None" = None,
 ) -> str:
     """Two-level org context (F15 / ACE-069). Renders the shared COMPANY block ONCE from the ``OrgRecord``
     (name/description + the root ``organization.md`` narrative + display conventions + company glossary),
@@ -201,12 +209,14 @@ def compose_org_context(
     if org_record is None:
         # No record: fall back to the pre-F15 single-level assembly, one block per ontology.
         return "\n\n".join(
-            compose_context(narrs[i], org, with_area_list=with_area_list)
+            compose_context(narrs[i], org, with_area_list=with_area_list,
+                            glossary_tables=glossary_tables)
             for i, org in enumerate(ontologies)
         ).strip()
 
     parts = [_company_block(org_record, company_narrative)]
-    parts += [_source_block(org, narrs[i], with_area_list=with_area_list)
+    parts += [_source_block(org, narrs[i], with_area_list=with_area_list,
+                            glossary_tables=glossary_tables)
               for i, org in enumerate(ontologies)]
     return "\n\n".join(p for p in parts if p).strip()
 
@@ -253,19 +263,36 @@ _MAX_ENUM_COLS = 25
 
 
 def _key_terminology(lines: list[str], org: "Datasource", areas: list,
-                     include_curated: bool = True) -> None:
+                     include_curated: bool = True,
+                     tables: "frozenset[str] | None" = None) -> None:
     """Append the glossary: the curated `key_terminology` terms (only when `include_curated`)
     plus auto-derived enum legends from `choice_field` columns. Omitted entirely when there's
     nothing to show. The explorer passes include_curated=False — it edits the curated terms in
-    a dedicated panel, leaving only the derived enum legends here as read-only."""
+    a dedicated panel, leaving only the derived enum legends here as read-only.
+
+    `tables`, when given, keeps only what concerns those tables: a curated term whose name or
+    definition names one of them, and the legends of their own columns. `get_datasource_schema`
+    passes the tables in scope on its area and table tiers (#419) — the whole glossary on every
+    call was most of a reply, and a term that names none of the tables in hand rarely bears on
+    the statement being written. The overview still sends it all. Matching is on the table NAME
+    as written, so a term that means a table without naming it is left out; the line saying how
+    many were left out is what keeps that visible."""
     glossary = {str(k).strip(): str(v).strip()
                 for k, v in (getattr(org, "key_terminology", {}) or {}).items()
                 if str(k).strip() and str(v).strip()} if include_curated else {}
+    omitted = 0
+    if tables is not None:
+        named = re.compile(
+            r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(t) for t in sorted(tables)) + r")(?![A-Za-z0-9_])",
+            re.IGNORECASE) if tables else None
+        kept = {t: d for t, d in glossary.items() if named and named.search(f"{t} {d}")}
+        omitted = len(glossary) - len(kept)
+        glossary = kept
 
     enum_lines: list[str] = []
     for sa in areas:
         for t in sa.tables_defined:
-            if t.review_state == "rejected":
+            if t.review_state == "rejected" or (tables is not None and t.name not in tables):
                 continue
             for c in t.columns:
                 cf = getattr(c, "choice_field", None)
@@ -285,7 +312,7 @@ def _key_terminology(lines: list[str], org: "Datasource", areas: list,
 
     # Derived context, not a human prompt: if there's nothing structured to show, omit the
     # section entirely (the "add terms you know" nudge lives in the human starter file).
-    if not glossary and not enum_lines:
+    if not glossary and not enum_lines and not omitted:
         return
 
     if glossary:
@@ -299,5 +326,12 @@ def _key_terminology(lines: list[str], org: "Datasource", areas: list,
     elif enum_lines:
         lines.append("### Coded value legends")
         lines.append("")
+    elif omitted:
+        lines.append("### Key terminology")
+        lines.append("")
     lines.extend(enum_lines)
+    if omitted:
+        if glossary or enum_lines:
+            lines.append("")
+        lines.append(f"{_plural(omitted, 'more term')} name none of the tables in scope.")
     lines.append("")

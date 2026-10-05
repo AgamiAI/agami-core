@@ -14,6 +14,20 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Below the overview, a schema reply's domain context is cut to the tables in scope (#419).** The
+  `## Domain context` section rode every `get_datasource_schema` reply whole, and a question makes
+  several schema calls: in a run of real-world questions it was about a third of everything the
+  agent received. The overview (no `area`, no `dataset_names`) still carries all of it. An `area` or
+  `dataset_names` reply now keeps:
+  - the narrative (`datasource.md`) in full, because its rules change answers, and a conversation
+    can reach SQL without ever making the overview call;
+  - the glossary terms that name one of the tables in scope, and those tables' coded-value legends;
+  - a count of the terms left out, plus a line saying the overview has the full glossary.
+
+  It drops the subject-area listing. What is cut depends only on the call's own arguments, never on
+  a guess about what the client already holds. On a 76-table model, a one-table reply's context
+  drops from about 28,000 characters to 12,000–16,000.
+
 - **Tool replies are compact JSON (#418).** Every tool reply was serialised with `indent=2`. Its
   reader is a model, which gets nothing from indentation and pays for every character of it. Measured
   on a 76-table model: an overview reply drops from 59,168 to 50,941 characters, a one-table
