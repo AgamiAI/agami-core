@@ -161,3 +161,41 @@ def test_the_validator_warns_once_for_the_whole_model():
     assert len(found) == 1 and found[0].severity == "warning"
     assert found[0].message.startswith("7 metric(s)") and "and 2 more" in found[0].message
     assert "'ok'" not in found[0].message
+
+
+def test_a_description_in_another_script_is_searchable(tmp_path, monkeypatch):
+    """It counts as a description, so it is listed — and a question in the same script finds it."""
+    _seed(tmp_path, monkeypatch, [{**BACKLOG, "name": "sales_total", "description": "売上合計"}])
+    head = _schema(mode="index", query="売上合計")
+    assert head["metric_index"] == {"sales_total": "売上合計"}
+    assert [m["name"] for m in head["metrics"]] == ["sales_total"]
+
+
+def test_a_shared_name_carries_the_selector_that_picks_it(tmp_path, monkeypatch):
+    """Two areas share `backlog`; neither is described, so neither is in `metric_index`. The table
+    reply is the only place the agent reads them from, and the bare name would select the first."""
+    db_url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(db_url)
+    s.run_migrations()
+    area = lambda name: {  # noqa: E731
+        "name": name,
+        "tables_defined": [{"name": f"{name}_items", "schema": "public", "storage_connection": "w",
+                            "grain": ["id"], "description": "d",
+                            "columns": [{"name": "id", "type": "integer", "primary_key": True}]}],
+        "metrics": [{"name": "backlog", "calculation": f"open {name} items",
+                     "source_tables": [f"{name}_items"]}],
+    }
+    org = {"datasource": "acme", "version": 1,
+           "storage_connections": [{"name": "w", "storage_type": "PostgreSQL"}],
+           "subject_areas": [area("ops"), area("finance")]}
+    model_store.write_datasource(s, "main", Datasource.model_validate(org))
+    s.close()
+    monkeypatch.setenv("AGAMI_DB_URL", db_url)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "none"))
+
+    entries = _schema(mode="full")["metrics"]
+    selectors = {e["calculation"]: e.get("selector", e["name"]) for e in entries}
+    assert len(set(selectors.values())) == 2, entries
+    for calc, sel in selectors.items():
+        picked = _schema(mode="index", metric_names=[sel])["metrics"]
+        assert [p["calculation"] for p in picked] == [calc]

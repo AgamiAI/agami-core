@@ -1397,7 +1397,9 @@ _METRIC_MATCH_STOPWORDS = frozenset(
         "pct",
     }
 )
-_METRIC_WORD_RE = re.compile(r"[a-z0-9]+")
+# Unicode letters and digits, as `semantic_model.models._label_words` reads them: a description in
+# another script counts as one (#406), so it must also be searchable in that script.
+_METRIC_WORD_RE = re.compile(r"[^\W_]+")
 
 
 def _auto_mode_for(area_count: int) -> str:
@@ -1510,7 +1512,9 @@ def _engine_of(org) -> "str | None":
     return engines.pop() if len(engines) == 1 else None
 
 
-def _metric_full(m, area: str | None, engine: "str | None" = None) -> dict[str, Any]:
+def _metric_full(
+    m, area: str | None, engine: "str | None" = None, key: str | None = None
+) -> dict[str, Any]:
     """One metric in full, INCLUDING the binding for this deployment's engine.
 
     The server instructions and this tool's own description both tell the agent to reuse a metric's
@@ -1531,6 +1535,11 @@ def _metric_full(m, area: str | None, engine: "str | None" = None) -> dict[str, 
     declares, so shipping every dialect would multiply the largest block in the payload to no end.
     A metric declaring nothing for this engine simply has no `binding` key, which is a fact about
     the model's coverage and reads as one.
+
+    `selector` is the key `metric_names` takes, sent only when it differs from `name` — when two
+    areas share a metric name and `_all_metrics` disambiguated it. An undescribed metric is not in
+    `metric_index` (#406), so this entry is the only place its selector can be read from, and its
+    bare `name` would select the other metric.
     """
     out = {
         "name": m.name,
@@ -1540,6 +1549,8 @@ def _metric_full(m, area: str | None, engine: "str | None" = None) -> dict[str, 
         "other_names": list(m.other_names or []),
         "review_state": m.review_state,
     }
+    if key and key != m.name:
+        out["selector"] = key
     binding = (m.bindings or {}).get(engine) if engine else None
     if binding and binding.strip():
         out["binding"] = binding
@@ -2161,7 +2172,7 @@ def _schema_payload(
     selected = matched if matched else (list(metrics) if mode == "full" else [])
     engine = _engine_of(org)  # resolved once, not per metric
     result["metrics"] = [
-        _metric_full(metrics[n][0], metrics[n][1], engine) for n in selected if n in metrics
+        _metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected if n in metrics
     ]
     return result
 
@@ -2442,7 +2453,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
             "relationships": ctx["relationships"],
-            "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine) for n in selected],
+            "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected],
             **_metric_index_fields(metrics),
             "large_tables": _large_tables(org),
         }
@@ -4909,9 +4920,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": (
                         "Return full detail for these named metrics. Selects detail; does not "
-                        "scope. Keys of `metric_index` or names from a `metrics` block, copied "
-                        "exactly — a name two areas share "
-                        "is keyed `name (area)` or `name (cross-area)`."
+                        "scope. Keys of `metric_index`, or a `metrics` entry's `selector` (its "
+                        "`name` when it has none), copied exactly — a name two areas share is "
+                        "keyed `name (area)` or `name (cross-area)`."
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,
