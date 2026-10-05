@@ -70,6 +70,10 @@ def _model(root) -> None:
         _table("tickets", [{"name": "state", "type": "string",
                             "choice_field": {"O": "open", "C": "closed"}}]),
     ])
+    # `support` also uses `orders`, which `sales` defines: an area's scope is every table it holds.
+    sa = yaml.safe_load((root / "subject_areas" / "support" / "subject_area.yaml").read_text())
+    sa["tables"].append({"storage_connection": "w", "schema": "public", "table": "orders"})
+    (root / "subject_areas" / "support" / "subject_area.yaml").write_text(yaml.safe_dump(sa))
 
 
 # --- the glossary filter itself ---------------------------------------------------------------
@@ -155,6 +159,10 @@ def test_the_overview_carries_everything(served):
      ["Net revenue", "Archived order", "Escalation", "Fiscal year"]),
     # An area means every table in it: both `orders` and `orders_archive`.
     ({"area": "sales"}, ["Net revenue", "Archived order"], ["Backlog", "Escalation", "Fiscal year"]),
+    # `orders` is referenced from `support`, not defined there, and still counts.
+    ({"area": "support"}, ["Backlog", "Net revenue"], ["Archived order", "Escalation", "Fiscal year"]),
+    # An unknown name in a mixed list narrows nothing extra: `the` is in every definition.
+    ({"dataset_names": ["tickets", "the"]}, ["Backlog"], ["Net revenue", "Fiscal year"]),
 ])
 def test_a_scoped_reply_keeps_the_rules_and_its_own_terms(served, args, kept, dropped):
     context = served(**args)
@@ -164,3 +172,11 @@ def test_a_scoped_reply_keeps_the_rules_and_its_own_terms(served, args, kept, dr
     assert not any(f"**{t}**" in context for t in dropped)
     assert "### Subject areas" not in context
     assert "called without `area` or `dataset_names`" in context
+
+
+def test_one_term_left_out_reads_as_one(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    scope = frozenset({"orders", "orders_archive", "tickets", "escalated_tickets"})
+    assert "1 more term names none of the tables in scope." in org_draft.derived_context(
+        org, glossary_tables=scope)

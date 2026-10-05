@@ -2542,8 +2542,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # narrative (`datasource.md`): its rules change answers, and a conversation can reach SQL
     # without ever making the overview call, so it cannot depend on the client having seen it.
     # What is cut is decided by the arguments alone, never by a guess about what the client
-    # already holds: the subject-area listing, which only the overview needs, and the glossary
-    # entries that name none of the tables in scope. The pointer says where the rest is.
+    # already holds: the subject-area listing, which only the overview needs, and the datasource
+    # glossary entries that name none of the tables in scope. The company glossary stays whole:
+    # its terms are business vocabulary, not table names. The pointer says where the rest is.
     scoped = _scope_tables(org, scope)
     domain_context = _OD.compose_org_context(
         record,
@@ -2559,9 +2560,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         parts.append(f"\n## Domain context\n{domain_context}")
         if scoped is not None:
             parts.append(
-                "\nThis is the domain context for the tables in scope. The full glossary and the "
-                "subject-area list come with `get_datasource_schema` called without `area` or "
-                "`dataset_names`."
+                "\nThis is the domain context for the tables in scope. Glossary terms for other "
+                "tables and the subject-area list come with `get_datasource_schema` called "
+                "without `area` or `dataset_names`."
             )
     user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
@@ -2573,14 +2574,18 @@ def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
     """The tables a scoped reply's glossary is narrowed to, or None for the whole datasource.
 
     An area means every table it holds, defined there or referenced from another area — the same
-    set its reply can describe."""
+    set its reply can describe. A table tier keeps only the names the model has: a mixed list still
+    gets a reply, and an unknown name that happens to be a common word would otherwise match most
+    of the glossary. Names are bare, because that is how a glossary term writes a table."""
     if scope.level == "table":
-        return frozenset(scope.tables)
+        known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
+        return frozenset(t for t in scope.tables if t in known)
     if scope.level == "area":
         sa = org.subject_area(scope.area)
         if sa is None:
             return frozenset()
-        return frozenset(t.name for t in sa.tables_defined) | frozenset(r.table for r in sa.tables)
+        names = [t.name for t in sa.tables_defined] + [r.table for r in sa.tables]
+        return frozenset(n.rsplit(".", 1)[-1] for n in names)
     return None
 
 

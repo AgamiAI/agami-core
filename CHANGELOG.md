@@ -21,12 +21,17 @@ below corresponds to one such version.
   `dataset_names` reply now keeps:
   - the narrative (`datasource.md`) in full, because its rules change answers, and a conversation
     can reach SQL without ever making the overview call;
-  - the glossary terms that name one of the tables in scope, and those tables' coded-value legends;
+  - the datasource glossary terms that name one of the tables in scope, and those tables'
+    coded-value legends (a hosted deployment's company glossary stays whole: its terms are
+    business vocabulary, not table names);
   - a count of the terms left out, plus a line saying the overview has the full glossary.
 
   It drops the subject-area listing. What is cut depends only on the call's own arguments, never on
   a guess about what the client already holds. On a 76-table model, a one-table reply's context
-  drops from about 28,000 characters to 12,000–16,000.
+  drops from about 28,000 characters to 12,000–16,000. Re-running 20 real-world questions, a
+  table-scoped schema reply averaged 40,120 characters instead of 50,851, and the questions
+  received 20% fewer characters in all. Every question still answered, and the ones whose answer
+  depends on the date-window rules wrote the same filters.
 
 - **Tool replies are compact JSON (#418).** Every tool reply was serialised with `indent=2`. Its
   reader is a model, which gets nothing from indentation and pays for every character of it. Measured

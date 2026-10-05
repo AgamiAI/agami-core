@@ -292,7 +292,10 @@ def _key_terminology(lines: list[str], org: "Datasource", areas: list,
     enum_lines: list[str] = []
     for sa in areas:
         for t in sa.tables_defined:
-            if t.review_state == "rejected" or (tables is not None and t.name not in tables):
+            # Compared by bare name too: a table can be stored schema-qualified.
+            if t.review_state == "rejected" or (
+                    tables is not None and t.name not in tables
+                    and t.name.rsplit(".", 1)[-1] not in tables):
                 continue
             for c in t.columns:
                 cf = getattr(c, "choice_field", None)
@@ -333,5 +336,6 @@ def _key_terminology(lines: list[str], org: "Datasource", areas: list,
     if omitted:
         if glossary or enum_lines:
             lines.append("")
-        lines.append(f"{_plural(omitted, 'more term')} name none of the tables in scope.")
+        verb = "names" if omitted == 1 else "name"
+        lines.append(f"{_plural(omitted, 'more term')} {verb} none of the tables in scope.")
     lines.append("")
