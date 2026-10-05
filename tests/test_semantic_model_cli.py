@@ -107,12 +107,17 @@ def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path)
     # Unreadable: no rate until someone describes it, and the output says how many are waiting.
     spec["columns"].append({"name": "is_hazmat", "type": "boolean",
                             "description_source": "ai_unknown"})
+    # Half of a duration, so it counts too; a timestamp that pairs with nothing does not.
+    spec["columns"].append({"name": "delivered_at", "type": "timestamp",
+                            "description_source": "ai_unknown"})
+    spec["columns"].append({"name": "audited_on", "type": "timestamp",
+                            "description_source": "ai_unknown"})
     items.write_text(yaml.safe_dump(spec))
 
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     d = json.loads(out)
     assert rc == 0 and d["written"] == 1, d
-    assert d["skipped_opaque"] == 1, d
+    assert d["skipped_opaque"] == 2, d
     assert "auto_approved" not in d  # nothing is system-signed any more, so there is nothing to count
     mets = tmp_path / "subject_areas" / "s" / "metrics"
     assert sorted(f.name for f in mets.iterdir()) == ["order_items_is_gift_rate.yaml"]

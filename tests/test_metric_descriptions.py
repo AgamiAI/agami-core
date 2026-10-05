@@ -33,6 +33,9 @@ from store import Store  # noqa: E402
         ("revenue", "Revenue net of refunds", True),  # starts with the name, says more
         ("sales_total", "売上合計", True),  # no Latin letters at all, and still a description
         ("incident_count", "Incident-count!", False),  # punctuation does not make it say more
+        ("revenue", "The revenue", False),  # an article does not either
+        ("incident_count", "Count of incident", False),  # nor the same words reordered
+        ("the", "The", False),  # a name made only of filler is still the name restated
     ],
 )
 def test_described(name, description, described):

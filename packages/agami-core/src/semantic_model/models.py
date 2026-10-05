@@ -50,6 +50,15 @@ from pydantic import (
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+# Words that carry no meaning in a one-line label, so a description made of the name plus these
+# says nothing the name did not (`Metric.described`).
+_LABEL_FILLER = frozenset({"the", "a", "an", "of"})
+
+
+def _label_words(text: str) -> frozenset[str]:
+    return frozenset(re.findall(r"[^\W_]+", text.lower())) - _LABEL_FILLER
+
+
 
 def bare_name(qualified: str) -> str:
     """A table name without its schema/area prefix: ``sales.orders`` -> ``orders``.
@@ -580,10 +589,11 @@ class Metric(_Base):
         nothing the key did not. Such a metric is left out of `metric_index` and flagged by the
         validator; its table's schema reply still returns it in full.
 
-        Words are Unicode letters and digits (`[^\W_]`, which still splits on `_`): an ASCII-only
-        pattern read a description written wholly in another script as empty."""
-        words = re.findall(r"[^\W_]+", self.description.lower())
-        return bool(words) and words != re.findall(r"[^\W_]+", self.name.lower())
+        Words are Unicode letters and digits (`[^\\W_]`, which still splits on `_`): an ASCII-only
+        pattern read a description written wholly in another script as empty. Compared as sets,
+        less a few filler words, so "The revenue" or "Count of incident" restates its name too."""
+        words = _label_words(self.description)
+        return bool(words) and words != _label_words(self.name)
 
 
 # ---------------------------------------------------------------------------

@@ -686,11 +686,14 @@ def cmd_suggest_metrics(args) -> int:
         for t in sa.tables_defined:
             # columns agami couldn't read yield no metric until described — count them so the
             # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
+            # A flag would have been a rate; a start or end timestamp half of a duration.
             skipped_opaque += sum(
                 1 for c in t.columns
                 if c.description_source == "ai_unknown" and not c.primary_key
                 and (c.type == "boolean"
-                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))))
+                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))
+                     or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
+                                                    or B._END_NAME_RE.search(c.name)))))
             st = conn_type.get(t.storage_connection, default_type)
             for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
                 if met["name"] in existing:
@@ -1495,7 +1498,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explicit table.column (or bare column) list — overrides money detection")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates, durations, and a plain count/sum/avg only where it carries a unit or caveat) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
