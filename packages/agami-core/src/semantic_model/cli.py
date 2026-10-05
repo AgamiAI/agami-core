@@ -656,15 +656,13 @@ def cmd_set_units(args) -> int:
 
 
 def cmd_suggest_metrics(args) -> int:
-    """Infer a sensible per-table metric set — flag rates, start→end durations, and a plain
-    COUNT/SUM/AVG only where it carries a unit or a caveat the aggregation class does not (#404) —
-    and write them PROPOSED/unreviewed for bulk sign-off in the explorer, instead of asking the
-    user to pick ~4 upfront. Rule 1 keeps proposed metrics out of any answer until approved, so a
-    large suggested set can't degrade results."""
+    """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
+    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer,
+    instead of asking the user to pick ~4 upfront. An unsigned metric is still used, and the answer
+    warns that it is unreviewed (Rule 1), so every proposal is worth a person's glance."""
     from . import build as B
     from . import curate
     from . import dialects as D
-    from . import introspect as INTRO
     org = L.load_datasource(args.root)
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
     default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
@@ -678,40 +676,48 @@ def cmd_suggest_metrics(args) -> int:
                 _dcache[st] = D.get_dialect("postgresql")
         return _dcache[st]
 
-    suggested = written = auto = skipped_opaque = 0
+    # Every metric name on disk, rejected ones included. `org` drops rejected entries, which is
+    # right for choosing what to propose on (never a rejected table or column), but `write_items`
+    # overwrites a file of the same name — so checking against `org`'s metrics alone re-proposed a
+    # metric a person had rejected and reset it to unreviewed, undoing the rejection.
+    on_disk = {sa.name: {m.name for m in sa.metrics}
+               for sa in L.load_datasource(args.root, include_rejected=True).subject_areas}
+
+    suggested = written = skipped_opaque = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
-        existing = {m.name for m in sa.metrics}
+        existing = set(on_disk.get(sa.name, ()))
         items: list[dict] = []
         for t in sa.tables_defined:
             # columns agami couldn't read yield no metric until described — count them so the
             # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
+            # A flag would have been a rate; a start or end timestamp half of a duration.
             skipped_opaque += sum(
                 1 for c in t.columns
                 if c.description_source == "ai_unknown" and not c.primary_key
-                and (c.type == "boolean" or c.aggregation in ("additive", "averageable")))
+                and (c.type == "boolean"
+                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))
+                     or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
+                                                    or B._END_NAME_RE.search(c.name)))))
             st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table,
-                                         now=INTRO._NOW):
+            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
                 if met["name"] in existing:
                     continue
                 existing.add(met["name"])
                 items.append(met)
                 suggested += 1
-                if met.get("review_state") == "approved":
-                    auto += 1
         if items:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    note = ("basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & durations left "
-            "proposed — review & sign off in the explorer (/agami-model)")
+    note = ("flag rates & durations proposed — review & sign off in the explorer (/agami-model); "
+            "give each one you keep a one-line description")
     if skipped_opaque:
         note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
                  "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
-    _print_json({"suggested": suggested, "written": written, "auto_approved": auto,
+    _print_json({"suggested": suggested, "written": written,
                  "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
     return 0 if not errors else 1
 
@@ -1499,7 +1505,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explicit table.column (or bare column) list — overrides money detection")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates, durations, and a plain count/sum/avg only where it carries a unit or caveat) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",

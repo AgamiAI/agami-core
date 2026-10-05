@@ -1,5 +1,5 @@
 name: order count
-description: Count of orders.
+description: How many distinct orders were placed.
 other_names:
 - orders
 - number of orders

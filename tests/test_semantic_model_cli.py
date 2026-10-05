@@ -39,7 +39,8 @@ def _model(root: Path) -> None:
     (root / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
         "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
         "description": "o", "default_filters": ["{alias}.deleted_at IS NULL"],
-        # The caveat, not the filter, is what makes this table's COUNT(*) worth proposing (#404).
+        # A caveat, a default filter and (on order_items) a unit: each once kept a plain metric
+        # alive (#404), and suggest-metrics must propose none of them now (#406).
         "caveats": ["Soft-deleted orders are still rows"],
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "deleted_at", "type": "timestamp"},
@@ -49,9 +50,6 @@ def _model(root: Path) -> None:
         "description": "oi",
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "order_id", "type": "integer"}, {"name": "qty", "type": "integer"},
-                    # A unit is something SUM carries that the aggregation class does not, so this
-                    # one survives #404 — and it is the only metric here with no caveat prose, so
-                    # it is also the only one that still auto-approves.
                     {"name": "weight", "type": "decimal", "aggregation": "additive",
                      "unit": "kg"}]}))
     (root / "subject_areas" / "s" / "relationships.yaml").write_text(yaml.safe_dump({
@@ -101,33 +99,57 @@ def test_set_units_is_idempotent(tmp_path):
     assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] == 0
 
 
-def test_suggest_metrics_writes_and_auto_approves_trivial(tmp_path):
+def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path):
     _model(tmp_path)
+    items = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"
+    spec = yaml.safe_load(items.read_text())
+    spec["columns"].append({"name": "is_gift", "type": "boolean", "description": "gift wrapped"})
+    # Unreadable: no rate until someone describes it, and the output says how many are waiting.
+    spec["columns"].append({"name": "is_hazmat", "type": "boolean",
+                            "description_source": "ai_unknown"})
+    # Half of a duration, so it counts too; a timestamp that pairs with nothing does not.
+    spec["columns"].append({"name": "delivered_at", "type": "timestamp",
+                            "description_source": "ai_unknown"})
+    spec["columns"].append({"name": "audited_on", "type": "timestamp",
+                            "description_source": "ai_unknown"})
+    items.write_text(yaml.safe_dump(spec))
+
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     d = json.loads(out)
-    # Two survive #404, for the two different reasons, and only one of them auto-approves.
-    # `orders` carries a caveat its COUNT(*) has to respect; `order_items.weight` carries a unit.
-    # `order_items`' own COUNT(*) is one row per id with no caveat, so it would restate its name
-    # and is no longer proposed at all.
-    assert rc == 0 and d["written"] == 2, d
-    assert d["auto_approved"] == 1, d
+    assert rc == 0 and d["written"] == 1, d
+    assert d["skipped_opaque"] == 2, d
+    assert "auto_approved" not in d  # nothing is system-signed any more, so there is nothing to count
     mets = tmp_path / "subject_areas" / "s" / "metrics"
-    assert not (mets / "order_items_count.yaml").exists()
+    assert sorted(f.name for f in mets.iterdir()) == ["order_items_is_gift_rate.yaml"]
 
-    # A unit is not prose, so SUM(weight) is still judgment-free → system sign-off, no queue.
-    plain = yaml.safe_load((mets / "order_items_total_weight.yaml").read_text())
-    assert plain["confidence"] == "confirmed" and plain["review_state"] == "approved"
-    assert plain["signed_off_by"] == "agami_suggest" and plain["signed_off_role"] == "system"
-    assert plain.get("signed_off_at")
-    assert plain["bindings"] == {"PostgreSQL": "SUM(weight)"} and plain["unit"] == "kg"
-
-    # The caveat is unverified prose and is the whole reason this metric exists, so it waits for a
-    # person — and it arrives carrying the caveat, not just citing it.
-    met = yaml.safe_load((mets / "orders_count.yaml").read_text())
+    met = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())
     assert met["review_state"] == "unreviewed" and met["confidence"] == "proposed"
-    assert not met.get("signed_off_at")
-    assert met["calculation"].endswith("Soft-deleted orders are still rows.")
-    assert met["bindings"] == {"PostgreSQL": "COUNT(*)"}
+    assert not met.get("signed_off_by") and not met.get("description")
+
+
+def test_suggest_metrics_never_resurrects_a_rejected_metric(tmp_path):
+    """A rejected metric is invisible to the default load, and `write_items` overwrites a file of
+    the same name, so a re-run used to write the proposal over it — resetting a person's "no" to
+    unreviewed. The rejection must survive any number of re-runs."""
+    _model(tmp_path)
+    items = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"
+    spec = yaml.safe_load(items.read_text())
+    spec["columns"].append({"name": "is_gift", "type": "boolean", "description": "gift wrapped"})
+    items.write_text(yaml.safe_dump(spec))
+    mets = tmp_path / "subject_areas" / "s" / "metrics"
+    mets.mkdir()
+    rejected = {"name": "order_items_is_gift_rate", "calculation": "nobody asks for this",
+                "bindings": {"PostgreSQL": "AVG(CASE WHEN is_gift THEN 1.0 ELSE 0.0 END)"},
+                "source_tables": ["order_items"], "confidence": "proposed",
+                "review_state": "rejected"}
+    (mets / "order_items_is_gift_rate.yaml").write_text(yaml.safe_dump(rejected))
+
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+
+    assert rc == 0 and json.loads(out)["written"] == 0, out
+    on_disk = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())
+    assert on_disk["review_state"] == "rejected"
+    assert on_disk["calculation"] == "nobody asks for this"
 
 
 def test_describe_file_applies_tsv(tmp_path):

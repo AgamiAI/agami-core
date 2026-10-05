@@ -27,6 +27,36 @@ below corresponds to one such version.
   pretty-printed: people read those. A test fails if `indent=` reappears in either module that builds
   replies.
 
+- **`metric_index` lists only metrics with a description; the rest are counted (#406).** A metric
+  with no `description`, or one that only restates its name, was listed with its own name as its
+  description: characters on every `get_datasource_schema` call that told the agent nothing the key
+  did not. It is now counted in a new `metrics_without_description` field instead, and still comes
+  back in full when its table is opened. On a 76-table model with 22 of 175 metrics described, the
+  index drops from 12,257 to 2,220 characters on every schema reply. A `query` now also matches an
+  undescribed metric's `calculation`, through the capped word-overlap ranking only, so a question
+  can still find it. The validator warns once per model (`metric_undescribed`) with the count and
+  the first few names.
+
+  **Clients:** "every metric appears in `metric_index`" no longer holds. A client that looked a
+  metric up there by name should also check the full `metrics` block of a table-scoped reply.
+
+- **`sm suggest-metrics` no longer proposes plain `COUNT(*)` / `SUM(col)` / `AVG(col)` metrics
+  (#406).** #404 kept one when it carried a column `unit`, a caveat, or (for a row count) a grain
+  that is not one primary key. All of those already reach the agent on the table it opens, and the
+  formatter carries a column's unit through `SUM`/`AVG` by itself, so the metric added only a name.
+  The generator now proposes flag rates and start-to-end durations, all left for review, and its
+  output drops `auto_approved`. The agami-connect skill now writes a one-line `description` for
+  every metric beside its full `calculation`, including metrics imported from LookML, dbt or a
+  metrics file, whose source description used to go into `calculation` alone.
+
+### Fixed
+
+- **`sm suggest-metrics` no longer undoes a rejection (#406).** It checked proposals against the
+  model as loaded for serving, which leaves rejected metrics out, and then wrote each proposal over
+  any file of the same name. So a re-run reset a metric a person had rejected to `unreviewed`. It
+  now checks against every metric file on disk, rejected ones included. It still proposes nothing
+  on a rejected table or column.
+
 ## [0.9.8] — 2026-09-30
 
 ### Security

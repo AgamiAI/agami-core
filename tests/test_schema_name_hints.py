@@ -40,7 +40,7 @@ def _write_model(root: Path) -> None:
         return {
             "name": name,
             "calculation": f"the {name}",
-            "description": f"the {name}",
+            "description": f"How {name} is defined here",
             "bindings": {"PostgreSQL": f"SUM({name})"},
             "source_tables": source_tables,
             "confidence": "proposed",
@@ -275,7 +275,7 @@ def _add_metric(root: Path, area: str, name: str, source_tables: list[str]) -> N
             {
                 "name": name,
                 "calculation": f"the {name}",
-                "description": f"the {name}",
+                "description": f"How {name} is defined here",
                 "bindings": {"PostgreSQL": f"SUM({name})"},
                 "source_tables": source_tables,
                 "confidence": "proposed",

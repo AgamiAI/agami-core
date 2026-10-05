@@ -35,6 +35,7 @@ validator gives via `additionalProperties: false`.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Optional
 
 from pydantic import (
@@ -48,6 +49,18 @@ from pydantic import (
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+# Words that carry no meaning in a one-line label, so a description made of the name plus these
+# says nothing the name did not (`Metric.described`).
+_LABEL_FILLER = frozenset({"the", "a", "an", "of"})
+
+
+def _label_words(text: str) -> frozenset[str]:
+    # A naive plural fold, so "orders" and "order" are one word; applied to both sides alike, so a
+    # word it mangles ("class" → "clas") still matches itself.
+    words = re.findall(r"[^\W_]+", text.lower())
+    return frozenset(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words) - _LABEL_FILLER
+
 
 
 def bare_name(qualified: str) -> str:
@@ -569,6 +582,21 @@ class Metric(_Base):
                 "dimension(s) the metric can't be summed over (e.g. [\"time\"])"
             )
         return self
+
+    @property
+    def described(self) -> bool:
+        """True when `description` says something the metric's name does not (#406).
+
+        `description` is the one-line label `metric_index` shows and the metric search matches, so
+        an empty one — or the name in words, "Incident count" for `incident_count` — tells the agent
+        nothing the key did not. Such a metric is left out of `metric_index` and flagged by the
+        validator; its table's schema reply still returns it in full.
+
+        Words are Unicode letters and digits (`[^\\W_]`, which still splits on `_`): an ASCII-only
+        pattern read a description written wholly in another script as empty. It has to add a word
+        the name does not have — filler and plural endings aside — so "The revenue", "Count of
+        incidents" for `incident_count`, and "Revenue" for `gross_revenue` all restate the name."""
+        return bool(_label_words(self.description) - _label_words(self.name))
 
 
 # ---------------------------------------------------------------------------

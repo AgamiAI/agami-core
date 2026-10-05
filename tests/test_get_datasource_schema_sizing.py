@@ -80,7 +80,8 @@ def _write_model(
                             "bindings": {"PostgreSQL": f"SUM({mn})"},
                             "confidence": "proposed",
                             "review_state": "unreviewed",
-                            "description": mn.replace("_", " "),
+                            # Not the name in words: that is the noise #406 leaves out of the index.
+                            "description": f"Headline {mn.replace('_', ' ')} figure for the period",
                         }
                     )
                 )

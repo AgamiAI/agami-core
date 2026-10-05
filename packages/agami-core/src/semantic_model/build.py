@@ -622,54 +622,27 @@ _FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
 _TS_TYPES = {"timestamp", "date"}
 
 
-# A "trivial" measure is a single bare aggregate over ONE column (or COUNT(*)) — there's no
-# interpretive choice in it, so it's as trustworthy as the column's aggregation class (which is
-# already confirmed structure). These auto-approve with a system sign-off, like an enforced FK
-# join, instead of cluttering the review queue. Anything with a CASE (a flag RATE) or a
-# multi-column / function expression (a DURATION's start/end pairing) is NOT trivial — that
-# involves a heuristic the engine could get wrong, so it stays proposed for a human glance.
-_TRIVIAL_BINDING_RE = re.compile(
-    r"^\s*(COUNT\(\s*\*\s*\)|(?:SUM|AVG)\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\))\s*$", re.IGNORECASE)
-
-
-def _is_trivial_measure(binding_sql: str) -> bool:
-    """True for COUNT(*) / SUM(col) / AVG(col) — a single bare aggregate, no CASE/arithmetic/
-    function. These carry no judgment beyond the column's (already-confirmed) aggregation class."""
-    return bool(_TRIVIAL_BINDING_RE.match(binding_sql or ""))
-
-
-def _with_caveats(prose: str, caveats: list[str]) -> str:
-    """The caveat is the reason the metric was proposed, so it has to arrive with it.
-
-    `Metric` has no caveats field, and of its two prose fields `calculation` is the one that is
-    always populated and is what a question is matched against — so the caveat goes there. A metric
-    proposed *because* a caveat exists, that then ships without it, is the empty metric #404
-    removes wearing a better justification. Appended, not substituted, so the intent reads first.
-
-    `description` is left empty, as it already was for every generated metric. That has a cost
-    worth naming: `tools`' `metric_index` falls back to the metric's own NAME when `description` is
-    empty, so on the `mode="index"` tier a caveat-justified metric still shows name-as-description
-    and the caveat appears only once the table is in scope. Filling it is a separate change with
-    its own shape (#406) rather than a second prose field written from the first.
-    """
-    return prose if not caveats else prose + ". " + " ".join(
-        c if c.rstrip().endswith((".", "!", "?")) else c.rstrip() + "." for c in caveats)
-
-
-def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
-                    now: Optional[str] = None) -> list[dict]:
+def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
-      • count of rows, when `COUNT(*)` may not be counting things or a caveat rides on it;
-      • SUM of `additive` columns, AVG of `averageable` columns (gated on aggregation class —
-        never SUM an id, never AVG a status code — and on carrying a unit or a caveat, #404);
       • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
         pattern — fraction true);
       • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
         pattern — `AVG(end − start)` via the dialect's day-difference form).
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
-    bulk in the explorer. Capped at max_per_table. A mechanically trivial binding auto-approves
-    with a system sign-off UNLESS its prose carries a caveat — that caveat is unverified words, and
-    words are the part a person has to confirm.
+    bulk in the explorer. Capped at max_per_table. Each one pairs columns or picks a condition —
+    a choice the engine could get wrong — so none of them is auto-approved.
+
+    A plain COUNT(*) / SUM(col) / AVG(col) is never proposed. `runtime._check_aggregation_semantics`
+    enforces a column's `aggregation` class on every statement with or without a named metric, and
+    everything such a metric could carry beyond its name already reaches the agent on the table it
+    opens: the column's `unit` (which the formatter also carries through SUM/AVG), the table's and
+    column's `caveats`, and the table's `grain`. So `{t}_total_{c}` adds a name and nothing else;
+    proposed per table and per column it was most of a wide model's catalogue (137 of 175, #404),
+    every entry listed by its own name (#406). A curator can still add any plain metric by hand.
+
+    The generator writes `calculation` only. `description` — the one-line label the metric index
+    shows and search matches — says what the metric is FOR, which is judgement it cannot derive; the
+    agami-connect skill writes it (#406).
 
     Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
     propose a metric on a column we can't explain (its prose would just restate opaque SQL).
@@ -678,38 +651,6 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     t = table.name
     st = dialect.name
     out: list[dict] = []
-    # A plain aggregate over a column whose `aggregation` class already licenses it is not a
-    # metric — `runtime._check_aggregation_semantics` enforces that class on every statement,
-    # with or without a named metric, so `{t}_total_{c}` adds a name and nothing else. Proposed
-    # per table and per column it produced most of a wide model's catalogue: 137 of 175 served
-    # metrics whose whole binding was a bare COUNT(*)/SUM(col)/AVG(col) (#404).
-    #
-    # A plain aggregate is proposed only when the PROPOSAL carries something the class does not —
-    # and only something the generator actually writes onto the metric: a unit (the `unit` field),
-    # a caveat (appended to the `calculation` prose), or a grain that makes `COUNT(*)` count
-    # something other than things. A table `default_filters` deliberately does NOT license one:
-    # execute_sql does not apply default filters, and a bare `COUNT(*)` binding does not embed
-    # them, so a filtered table's plain count says exactly as little as any other. A curator can
-    # still add any plain metric by hand; this is only what the generator proposes unprompted.
-    #
-    # One primary key means one row per thing, so COUNT(*) counts things. A composite or absent
-    # grain means it may not, and THAT is worth naming. The two clauses agree on an INTROSPECTED
-    # model — `introspect` derives `primary_key` from `grain`, so they can differ only in order —
-    # and the grain clause is there for the curated case, where a column can be marked a key
-    # without being part of the declared grain.
-    pk_cols = [c.name for c in table.columns if c.primary_key]
-    counts_things = len(pk_cols) == 1 and list(table.grain or []) == pk_cols
-    t_caveats = list(table.caveats or [])
-    # Names whose prose carries a caveat, so the sign-off pass below can tell them from the
-    # genuinely judgment-free ones. Tracked by name rather than a key on the dict, which would
-    # have to be stripped again before `curate.write_items` validates it as a Metric.
-    caveated: set[str] = set()
-    if t_caveats or not counts_things:
-        out.append({"name": f"{t}_count",
-                    "calculation": _with_caveats(f"Number of {t} records", t_caveats),
-                    "bindings": {st: "COUNT(*)"}, "source_tables": [t]})
-        if t_caveats:
-            caveated.add(f"{t}_count")
     ts_cols: list[str] = []
     for c in table.columns:
         if c.primary_key:
@@ -725,29 +666,6 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                         "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
                         "source_tables": [t]})
             continue
-        # A plain SUM/AVG is proposed only when something beyond the aggregation class rides on
-        # the metric itself: a unit the formatter needs, or a caveat the aggregate must respect.
-        # Without one of those the class already says everything the metric would.
-        c_caveats = list(c.caveats or [])
-        worth_naming = bool(c_caveats) or bool(c.unit)
-        if c.aggregation == "additive" and worth_naming:
-            m = {"name": f"{t}_total_{c.name}",
-                 "calculation": _with_caveats(f"Total {c.name} across {t}", c_caveats),
-                 "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]}
-            if c.unit:  # SUM(col) carries the column's unit — USD column → USD total
-                m["unit"] = c.unit
-            out.append(m)
-            if c_caveats:
-                caveated.add(m["name"])
-        elif c.aggregation == "averageable" and worth_naming:
-            m = {"name": f"{t}_avg_{c.name}",
-                 "calculation": _with_caveats(f"Average {c.name} in {t}", c_caveats),
-                 "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]}
-            if c.unit:  # AVG(col) is in the same unit as the column
-                m["unit"] = c.unit
-            out.append(m)
-            if c_caveats:
-                caveated.add(m["name"])
         if c.type in _TS_TYPES:
             ts_cols.append(c.name)
     starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
@@ -758,32 +676,12 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
                     "calculation": f"Average days from {s} to {e} in {t}",
                     "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
                     "source_tables": [t], "unit": "days"})
-    # Clamped, not floored at 1: a row count is no longer unconditional so `0` can honestly mean
-    # none, but a negative cap must not fall through to Python's negative slice, where `-1` would
-    # quietly return every proposal except the last.
+    # Clamped, not floored at 1: `0` honestly means none, but a negative cap must not fall through
+    # to Python's negative slice, where `-1` would quietly return every proposal except the last.
     out = out[: max(0, max_per_table)]
     for m in out:
-        binding = next(iter(m.get("bindings", {}).values()), "")
-        # A caveat-carrying metric is NOT judgment-free, however trivial its binding. Before #404
-        # a plain aggregate was proposed for every eligible column and auto-approving it claimed
-        # only that `SUM(col)` is `SUM(col)`; now such a metric survives precisely because someone
-        # attached a caveat to the column or table, that caveat is the metric's whole justification,
-        # and it is carried as prose the engine did not verify. So it goes to the review queue for
-        # the same reason a rate or a duration does — the part a person has to confirm is words,
-        # not arithmetic.
-        if _is_trivial_measure(binding) and m["name"] not in caveated:
-            # mechanically sound (COUNT(*) / SUM(col) / AVG(col)) — auto-approve with a system
-            # sign-off so it skips the review queue, exactly like an enforced FK join.
-            m["confidence"] = "confirmed"
-            m["review_state"] = "approved"
-            m["signed_off_by"] = "agami_suggest"
-            m["signed_off_role"] = "system"
-            if now:
-                m["signed_off_at"] = now
-        else:
-            # a flag RATE or a DURATION pair — heuristic choice the engine could get wrong.
-            m["confidence"] = "proposed"
-            m["review_state"] = "unreviewed"
+        m["confidence"] = "proposed"
+        m["review_state"] = "unreviewed"
         m["primary_table"] = t  # every suggested metric is single-table — anchor it there
     return out
 
