@@ -283,7 +283,9 @@ def _key_terminology(lines: list[str], org: "Datasource", areas: list,
     omitted = 0
     if tables is not None:
         named = re.compile(
-            r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(t) for t in sorted(tables)) + r")(?![A-Za-z0-9_])",
+            # `\w` is Unicode-aware: an accented letter is part of a word, so `préorders` does not
+            # name `orders`.
+            r"(?<!\w)(" + "|".join(re.escape(t) for t in sorted(tables)) + r")(?!\w)",
             re.IGNORECASE) if tables else None
         kept = {t: d for t, d in glossary.items() if named and named.search(f"{t} {d}")}
         omitted = len(glossary) - len(kept)

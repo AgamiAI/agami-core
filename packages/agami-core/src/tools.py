@@ -2577,15 +2577,17 @@ def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
     set its reply can describe. A table tier keeps only the names the model has: a mixed list still
     gets a reply, and an unknown name that happens to be a common word would otherwise match most
     of the glossary. Names are bare, because that is how a glossary term writes a table."""
+    # Only tables the served model defines. A rejected definition is dropped by the loader while
+    # the `TableRef`s naming it are kept, so a reference alone does not mean the table is live.
+    known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
     if scope.level == "table":
-        known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
         return frozenset(t for t in scope.tables if t in known)
     if scope.level == "area":
         sa = org.subject_area(scope.area)
         if sa is None:
             return frozenset()
         names = [t.name for t in sa.tables_defined] + [r.table for r in sa.tables]
-        return frozenset(n.rsplit(".", 1)[-1] for n in names)
+        return frozenset(n.rsplit(".", 1)[-1] for n in names) & known
     return None
 
 

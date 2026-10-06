@@ -29,6 +29,10 @@ GLOSSARY = {
     "Archived order": "a row in orders_archive, never in the live table",
     # Ends in `tickets`, which must not be read as naming `tickets` either.
     "Escalation": "a row copied into escalated_tickets",
+    # Accented letters are word characters too: neither names `tickets`.
+    "Pre-ticket": "a row in prétickets or ticketsé, kept apart",
+    # Names a table that was rejected: the area still references it, but it is not served.
+    "Legacy queue": "rows still parked in legacy_queue",
     "Fiscal year": "starts on 1 April",
 }
 
@@ -69,6 +73,7 @@ def _model(root) -> None:
     _area(root, "support", [
         _table("tickets", [{"name": "state", "type": "string",
                             "choice_field": {"O": "open", "C": "closed"}}]),
+        {**_table("legacy_queue", []), "review_state": "rejected"},
     ])
     # `support` also uses `orders`, which `sales` defines: an area's scope is every table it holds.
     sa = yaml.safe_load((root / "subject_areas" / "support" / "subject_area.yaml").read_text())
@@ -92,7 +97,7 @@ def test_a_term_is_kept_only_when_it_names_a_table_in_scope(tmp_path):
     assert "**Net revenue**" in text  # names `orders`
     assert "**Archived order**" not in text  # names `orders_archive`, a different table
     assert "**Backlog**" not in text and "**Fiscal year**" not in text
-    assert "4 more terms name none of the tables in scope." in text
+    assert "6 more terms name none of the tables in scope." in text
     # Legends follow the same scope: this table's own coded columns, nobody else's.
     assert "**orders.status**" in text and "**tickets.state**" not in text
 
@@ -103,6 +108,7 @@ def test_the_match_ignores_case_but_not_word_boundaries(tmp_path):
     text = org_draft.derived_context(org, glossary_tables=frozenset({"TICKETS"}))
     assert "**Backlog**" in text
     assert "**Escalation**" not in text  # `escalated_tickets` is another table
+    assert "**Pre-ticket**" not in text  # `prétickets` and `ticketsé` are other tables
 
 
 def test_nothing_in_scope_still_says_what_was_left_out(tmp_path):
@@ -111,7 +117,7 @@ def test_nothing_in_scope_still_says_what_was_left_out(tmp_path):
     org = load_datasource(tmp_path)
     text = org_draft.derived_context(org, glossary_tables=frozenset())
     assert "### Key terminology" in text
-    assert "5 more terms name none of the tables in scope." in text
+    assert "7 more terms name none of the tables in scope." in text
 
 
 def test_the_filter_threads_through_both_composition_paths(tmp_path):
@@ -160,7 +166,9 @@ def test_the_overview_carries_everything(served):
     # An area means every table in it: both `orders` and `orders_archive`.
     ({"area": "sales"}, ["Net revenue", "Archived order"], ["Backlog", "Escalation", "Fiscal year"]),
     # `orders` is referenced from `support`, not defined there, and still counts.
-    ({"area": "support"}, ["Backlog", "Net revenue"], ["Archived order", "Escalation", "Fiscal year"]),
+    # ...and the rejected `legacy_queue` it also references does not.
+    ({"area": "support"}, ["Backlog", "Net revenue"],
+     ["Archived order", "Escalation", "Fiscal year", "Legacy queue"]),
     # An unknown name in a mixed list narrows nothing extra: `the` is in every definition.
     ({"dataset_names": ["tickets", "the"]}, ["Backlog"], ["Net revenue", "Fiscal year"]),
 ])
@@ -177,6 +185,7 @@ def test_a_scoped_reply_keeps_the_rules_and_its_own_terms(served, args, kept, dr
 def test_one_term_left_out_reads_as_one(tmp_path):
     _model(tmp_path)
     org = load_datasource(tmp_path)
-    scope = frozenset({"orders", "orders_archive", "tickets", "escalated_tickets"})
+    scope = frozenset({"orders", "orders_archive", "tickets", "escalated_tickets", "prétickets",
+                       "legacy_queue"})
     assert "1 more term names none of the tables in scope." in org_draft.derived_context(
         org, glossary_tables=scope)
