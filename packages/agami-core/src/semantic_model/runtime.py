@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import functools
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -1917,7 +1917,9 @@ def pre_flight_check(sql: str, org: Datasource,
 def _aggregate_reports(tree, org: Datasource,
                        ctx: "GuardContext | None" = None,
                        *, visible: Optional[set[str]] = None,
-                       tidx: Optional[dict[str, tuple]] = None) -> list[AggregateReport]:
+                       tidx: Optional[dict[str, tuple]] = None,
+                       join_statuses: "tuple[list[tuple[str, str, str]], int] | None" = None,
+                       ) -> list[AggregateReport]:
     """The analysis half, on an already-parsed tree: one report per aggregate the statement outputs.
 
     This was `_collect_findings`, which returned the flat finding list this is now a projection of.
@@ -1961,7 +1963,46 @@ def _aggregate_reports(tree, org: Datasource,
                 sel, org, ctx=ctx,
                 scope="main" + suffixes.get(id(sel), ""), visible=visible, tidx=tidx,
             ))
-    return reports
+    if join_statuses is None and reports:
+        # The pre-flight path (`sm prepare`) holds no joins section, so it settles the joins here —
+        # the same ladder the receipt runs — rather than claim numbers clean it never weighed.
+        sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
+        declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
+                    if sites else [])
+        join_statuses = ([(js.scope, _join_site_status(js, declared)[0],
+                           f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                          for js in sites], written - len(sites))
+    return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
+
+
+_UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat rows: "
+
+
+def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
+                         dropped: int) -> list[AggregateReport]:
+    """`not_multiplied` is a positive claim that no join repeated the rows behind a number, and the
+    fan detector can only make it about joins whose cardinality it knows. A join no declaration
+    settled — `undetermined` or `undeclared` — or one past the cap, is a join it never weighed, so a
+    number it could reach says it could not tell, naming the joins: the rule `_multiplication_status`
+    states per aggregate.
+
+    Only joins that can feed the number count: its own query branch, or a CTE (which any branch may
+    read). A join in another UNION arm, or inside a `WHERE ... IN (subquery)`, can't repeat its rows."""
+    out = []
+    for r in reports:
+        if r.status != NOT_MULTIPLIED:
+            out.append(r)
+            continue
+        unweighed = [label for scope, status, label in joins
+                     if status in (UNDETERMINED, UNDECLARED)
+                     and (scope == r.scope or scope.startswith("cte:"))]
+        if not unweighed and not dropped:
+            out.append(r)
+            continue
+        why = _UNWEIGHED_REASON + (
+            ", ".join(unweighed) if unweighed else f"{dropped} join(s) past the receipt's cap")
+        out.append(replace(r, status=UNDETERMINED, reason=why))
+    return out
 
 
 # The risks that are statements about the ROWS an aggregate was computed from, and therefore the
@@ -2888,7 +2929,12 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     detector. Neither names anything from the model, so a marker discloses nothing that the items
     beside it do not already.
     """
-    unsettled = sum(1 for r in reports if r.status == UNDETERMINED)
+    # Two different gaps behind `undetermined`: reads this layer could not resolve, and a join behind
+    # the number that no declaration settled (`_downgrade_unweighed`). Counted apart so neither
+    # clause misdescribes the other's aggregates.
+    unweighed = sum(1 for r in reports if r.status == UNDETERMINED
+                    and (r.reason or "").startswith(_UNWEIGHED_REASON))
+    unsettled = sum(1 for r in reports if r.status == UNDETERMINED) - unweighed
     # Which aggregates the walk did not reach, split by WHERE they sit, because the two are
     # different gaps to a reader: one is a clause of this statement we do not read, the other is a
     # query scope we do not enter.
@@ -2906,6 +2952,8 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     return " ".join(clause for clause in (
         (f"{unsettled} of the listed aggregate(s) could not be resolved to the tables they read, "
          "so whether a join multiplies them is not established." if unsettled else ""),
+        (f"{unweighed} of the listed aggregate(s) sit behind a join whose cardinality isn't "
+         "established, so whether it multiplies them is not established." if unweighed else ""),
         ("An aggregate in HAVING or ORDER BY is not reported: only the SELECT list is read."
          if in_filter_or_sort else ""),
         ("An aggregate inside a CTE or a subquery is not reported: only the SELECT lists that "
@@ -2972,6 +3020,95 @@ def _joins_marker(items: list[dict[str, Any]], dropped: int) -> Optional[str]:
          "model declares them is not established." if unsettled else ""),
         (f"{dropped} further join(s) are not listed." if dropped else ""),
     ) if clause) or None
+
+
+def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Optional[Relationship]]":
+    """One written join's status against the model's declarations, and the relationship it matched.
+    The ladder the receipt's joins section reports, shared with the aggregate analysis so a number
+    behind a join this ladder could not settle is never called clean (`_downgrade_unweighed`)."""
+    match: Optional[Relationship] = None
+    if not js.right_declarable:
+        # An endpoint the STATEMENT bound — a CTE name, a derived table, a `VALUES` list, a CTE
+        # shadowing a declared table — cannot be what any declaration is about, so this is
+        # settled rather than open: there is nothing here for a better analysis to establish
+        # later. The RIGHT endpoint is asked first because it is the one always established —
+        # it comes off `join.this`, the join's own right input — so a structural impossibility
+        # there outranks everything below however little the ON said.
+        status = UNDECLARABLE
+    elif not js.pinned:
+        # The ON did not reduce to a pair of endpoints. Unlike the branch above this is a fact
+        # about the ANALYSIS, so it stays open and `_joins_marker` counts it: reporting it
+        # `undeclarable` would claim the model cannot declare a join it may well declare, and
+        # would let the marker reach null with something genuinely unestablished under it.
+        status = UNDETERMINED
+    elif not js.left_declarable:
+        # And only NOW is the left endpoint worth asking about, because only now is it one the
+        # analysis established. Until the ON pins, `left` holds the FROM fallback, which is a
+        # LABEL — the address a reader needs to find the join in their own SQL — and reading a
+        # settled status off it made the FROM decide the question: the same unreadable ON came
+        # back `undetermined` over `FROM orders` and `undeclarable` over `FROM (SELECT …) d`,
+        # the second under a null marker, and the FROM relation need not be party to the join at
+        # all.
+        status = UNDECLARABLE
+    elif js.predicate is None and js.node.args.get("kind") == "CROSS":
+        # It wrote no predicate, which is a fact about the statement and not a gap in the
+        # analysis: there is nothing here for a declaration to match.
+        #
+        # `kind` is the ONLY thing separating this settled status from the open one two branches
+        # down, where the comma join lands. The battery is what pins that distinction: the
+        # sqlglot pin is an open `>=`, and a future version that normalized `FROM a, b` to a
+        # `CROSS` kind would move every comma join from `undetermined` to a settled claim that
+        # the model does not declare it — silently, since both shapes already report a null
+        # predicate. `test_the_comma_join_is_undetermined_and_reports_no_predicate` fails first.
+        status = UNDECLARED
+    elif not js.pairs:
+        # Two shapes reach here and both leave the question open. The comma join
+        # (`FROM a, b WHERE a.id = b.id`) wrote its predicate into the WHERE, and attributing a
+        # WHERE conjunct to a join is an implication check ACE-099 ruled out. The other is an ON
+        # nothing in reduced to a pair of columns — a join on an expression, or on an
+        # unqualified column this layer will not guess the table of. Neither is evidence that
+        # the model does not declare the join, which is what `undeclared` would assert.
+        status = UNDETERMINED
+    else:
+        # The written pairs against the declared ones, DECLARED-AS-A-SUBSET: extra conjuncts an
+        # author added — the as-of and soft-delete shapes — do not weaken the match, which is the
+        # stance ACE-099 shipped for declared filters, so a reader comparing `tables` and `joins`
+        # sees one rule and not two. First match in `_cardinality_index`'s own list order, so the
+        # same statement names the same relationship on every run (REQ-022).
+        #
+        # The two sides are reduced ASYMMETRICALLY and that is the whole design. The WRITTEN side
+        # is lossy on purpose — a conjunct the SQL author added beyond the declared join is not a
+        # reason to withhold the match. The DECLARED side may not be: a declaration reduced to a
+        # subset of itself would match a statement that never wrote the rest of it. So
+        # `_declared_pairs` returns None rather than a partial reduction, which is what makes
+        # `pairs is not None` here a filter and not a formality.
+        written = js.pairs | js.fixed
+        match = next((rel for rel, pairs in declared_pairs
+                      if pairs is not None and pairs <= written), None)
+        same_tables = {_tkey(js.endpoints[0]), _tkey(js.endpoints[1])}
+        if match is not None:
+            status = DECLARED
+        elif any(_rel_tables(rel) == same_tables and (
+                    pairs is None
+                    # The declared columns were written but not its fixed-value condition, which
+                    # may sit in a WHERE this layer does not attribute to the join: not evidence
+                    # the model lacks the join, so it stays open rather than `undeclared`.
+                    or {p for p in pairs if not _is_fixed_value(p)} <= js.pairs)
+                 for rel, pairs in declared_pairs):
+            # Nothing matched, and a declaration between THESE TWO TABLES is one we could not
+            # read — an `on:` that will not parse, one carrying a bind marker, one that did not
+            # reduce whole. `undeclared` would tell the reader "the model does not declare this
+            # join" on the strength of our own failure to read the model, and send a model
+            # author off to add an edge they already have. It is our gap, so it stays open and
+            # the marker counts it.
+            #
+            # Scoped to declarations touching BOTH endpoints, because an unreadable edge
+            # elsewhere in the model says nothing about this join and would otherwise make every
+            # join in every statement unanswerable.
+            status = UNDETERMINED
+        else:
+            status = UNDECLARED
+    return status, match
 
 
 def assemble_receipt(
@@ -3079,82 +3216,7 @@ def assemble_receipt(
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
     for js in join_sites:
-        match: Optional[Relationship] = None
-        if not js.right_declarable:
-            # An endpoint the STATEMENT bound — a CTE name, a derived table, a `VALUES` list, a CTE
-            # shadowing a declared table — cannot be what any declaration is about, so this is
-            # settled rather than open: there is nothing here for a better analysis to establish
-            # later. The RIGHT endpoint is asked first because it is the one always established —
-            # it comes off `join.this`, the join's own right input — so a structural impossibility
-            # there outranks everything below however little the ON said.
-            status = UNDECLARABLE
-        elif not js.pinned:
-            # The ON did not reduce to a pair of endpoints. Unlike the branch above this is a fact
-            # about the ANALYSIS, so it stays open and `_joins_marker` counts it: reporting it
-            # `undeclarable` would claim the model cannot declare a join it may well declare, and
-            # would let the marker reach null with something genuinely unestablished under it.
-            status = UNDETERMINED
-        elif not js.left_declarable:
-            # And only NOW is the left endpoint worth asking about, because only now is it one the
-            # analysis established. Until the ON pins, `left` holds the FROM fallback, which is a
-            # LABEL — the address a reader needs to find the join in their own SQL — and reading a
-            # settled status off it made the FROM decide the question: the same unreadable ON came
-            # back `undetermined` over `FROM orders` and `undeclarable` over `FROM (SELECT …) d`,
-            # the second under a null marker, and the FROM relation need not be party to the join at
-            # all.
-            status = UNDECLARABLE
-        elif js.predicate is None and js.node.args.get("kind") == "CROSS":
-            # It wrote no predicate, which is a fact about the statement and not a gap in the
-            # analysis: there is nothing here for a declaration to match.
-            #
-            # `kind` is the ONLY thing separating this settled status from the open one two branches
-            # down, where the comma join lands. The battery is what pins that distinction: the
-            # sqlglot pin is an open `>=`, and a future version that normalized `FROM a, b` to a
-            # `CROSS` kind would move every comma join from `undetermined` to a settled claim that
-            # the model does not declare it — silently, since both shapes already report a null
-            # predicate. `test_the_comma_join_is_undetermined_and_reports_no_predicate` fails first.
-            status = UNDECLARED
-        elif not js.pairs:
-            # Two shapes reach here and both leave the question open. The comma join
-            # (`FROM a, b WHERE a.id = b.id`) wrote its predicate into the WHERE, and attributing a
-            # WHERE conjunct to a join is an implication check ACE-099 ruled out. The other is an ON
-            # nothing in reduced to a pair of columns — a join on an expression, or on an
-            # unqualified column this layer will not guess the table of. Neither is evidence that
-            # the model does not declare the join, which is what `undeclared` would assert.
-            status = UNDETERMINED
-        else:
-            # The written pairs against the declared ones, DECLARED-AS-A-SUBSET: extra conjuncts an
-            # author added — the as-of and soft-delete shapes — do not weaken the match, which is the
-            # stance ACE-099 shipped for declared filters, so a reader comparing `tables` and `joins`
-            # sees one rule and not two. First match in `_cardinality_index`'s own list order, so the
-            # same statement names the same relationship on every run (REQ-022).
-            #
-            # The two sides are reduced ASYMMETRICALLY and that is the whole design. The WRITTEN side
-            # is lossy on purpose — a conjunct the SQL author added beyond the declared join is not a
-            # reason to withhold the match. The DECLARED side may not be: a declaration reduced to a
-            # subset of itself would match a statement that never wrote the rest of it. So
-            # `_declared_pairs` returns None rather than a partial reduction, which is what makes
-            # `pairs is not None` here a filter and not a formality.
-            match = next((rel for rel, pairs in declared_pairs
-                          if pairs is not None and pairs <= js.pairs), None)
-            if match is not None:
-                status = DECLARED
-            elif any(pairs is None and _rel_tables(rel) == {_tkey(js.endpoints[0]),
-                                                           _tkey(js.endpoints[1])}
-                     for rel, pairs in declared_pairs):
-                # Nothing matched, and a declaration between THESE TWO TABLES is one we could not
-                # read — an `on:` that will not parse, one carrying a bind marker, one that did not
-                # reduce whole. `undeclared` would tell the reader "the model does not declare this
-                # join" on the strength of our own failure to read the model, and send a model
-                # author off to add an edge they already have. It is our gap, so it stays open and
-                # the marker counts it.
-                #
-                # Scoped to declarations touching BOTH endpoints, because an unreadable edge
-                # elsewhere in the model says nothing about this join and would otherwise make every
-                # join in every statement unanswerable.
-                status = UNDETERMINED
-            else:
-                status = UNDECLARED
+        status, match = _join_site_status(js, declared_pairs)
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
         # per-relationship build had — it printed a signed-off trail beside a join written on the
@@ -3532,7 +3594,10 @@ def assemble_receipt(
     # shared one from — so without the second argument the analysis rebuilt it once per output arm.
     # `visible` is the one the joins section above already computed off this same `tidx` and these
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
-    reports = _aggregate_reports(tree, org, ctx=None, visible=visible, tidx=tidx)
+    reports = _aggregate_reports(
+        tree, org, ctx=None, visible=visible, tidx=tidx,
+        join_statuses=([(it["scope"], it["status"], it["from_to"]) for it in join_items], dropped_joins),
+    )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
         r.as_dict() for r in reports[:_RECEIPT_MAX_REFS]
@@ -4210,6 +4275,9 @@ class _JoinSite(NamedTuple):
     # model does not declare this", because a predicate we could not read is not a predicate the
     # model failed to declare.
     pairs: frozenset[frozenset[tuple[str, str]]]
+    # This join's fixed-value conditions on its own right-hand alias (`_fixed_value_pairs`); the
+    # declared-join match reads `pairs | fixed`, everything else reads `pairs` alone.
+    fixed: frozenset[frozenset[tuple[str, str]]] = frozenset()
 
 
 def _predicate_pairs(pred: "exp.Expression",
@@ -4252,6 +4320,51 @@ def _predicate_pairs(pred: "exp.Expression",
             (_tkey(_bare(scope_map.get(rhs.table, rhs.table))), rhs.name.lower()),
         }))
     return frozenset(pairs)
+
+
+def _fixed_value_pairs(pred: "exp.Expression", scope_map: dict[str, str],
+                       aliases: "set[str] | None") -> frozenset[frozenset[tuple[str, str]]]:
+    """A predicate's fixed-value conditions (`dim.current_flag = 'Y'`), each as a pair whose two ends
+    are the same table: the column and the value. They belong to a declared join's identity, so a
+    declared `... AND current_flag = 'Y'` matches only a join that wrote it too.
+
+    `aliases` binds them to the join they belong to: a written ON counts a condition only on its own
+    right-hand alias, because a filter on another instance of the same table (`d.current_flag`
+    written in `d2`'s ON) says nothing about `d2`'s rows. None — the declared side — takes any
+    qualifier, since a declaration names its tables directly. Kept out of `_predicate_pairs`, whose
+    consumers read every pair as two joined columns."""
+    out: set[frozenset[tuple[str, str]]] = set()
+    for conj in _and_conjuncts(pred):
+        if not isinstance(conj, exp.EQ):
+            continue
+        col, val = conj.this, conj.expression
+        if isinstance(val, exp.Column) and not isinstance(col, exp.Column):
+            col, val = val, col
+        if not (isinstance(col, exp.Column) and col.table and _literal_key(val) is not None):
+            continue
+        if aliases is not None and col.table not in aliases:
+            continue
+        table = _tkey(_bare(scope_map.get(col.table, col.table)))
+        out.add(frozenset({(table, col.name.lower()), (table, _literal_key(val))}))
+    return frozenset(out)
+
+
+def _literal_key(node: "exp.Expression") -> "str | None":
+    """A literal's comparable spelling, or None for anything that isn't one. The `=` prefix can't
+    open a column name, so a value never collides with a column of the same table."""
+    if isinstance(node, exp.Literal):
+        return ("='" + node.this + "'") if node.is_string else ("=" + node.this)
+    if isinstance(node, exp.Boolean):
+        return "=" + str(node.this).lower()
+    return None
+
+
+def _is_fixed_value(pair: "frozenset[tuple[str, str]]") -> bool:
+    """Whether a reduced pair is a fixed-value condition — told by the value's `=` marker, not by its
+    tables collapsing to one, which a self-join's pair does too."""
+    return any(column.startswith("=") for _table, column in pair)
+
+
 
 
 def _declared_pairs(rel: Relationship,
@@ -4306,16 +4419,22 @@ def _reduced_on(text: str, dialect: "str | None") -> "frozenset[frozenset[tuple[
     if predicate is None:
         return None
     # And refused whenever the reduction lost anything, which is the general form of the bind-marker
-    # guard above rather than a second rule. `_predicate_pairs` keeps equalities between two
-    # qualified columns and drops the rest, so `orders.region_id = regions.id AND regions.name =
-    # 'EU'` reduces to the unrestricted half of itself — and that half matches a statement that
-    # wrote no restriction at all, under the whole declared predicate printed beside it. Every
-    # top-level conjunct has to survive or none of them counts. `IS NULL`, an inequality and a
-    # function call are the same case as the bind marker in three other spellings.
-    reduced = [_predicate_pairs(conj, {}) for conj in _and_conjuncts(predicate)]
+    # guard above rather than a second rule. A conjunct survives as a column-to-column equality or a
+    # fixed-value equality (`regions.name = 'EU'`, kept whole by `_fixed_value_pairs` so only a
+    # statement that wrote it matches); anything else would leave an unrestricted half that matches a
+    # statement which wrote no restriction at all. Every top-level conjunct has to survive or none of
+    # them counts. `IS NULL`, an inequality and a function call are the same case as the bind marker
+    # in three other spellings.
+    reduced = [_predicate_pairs(conj, {}) | _fixed_value_pairs(conj, {}, None)
+               for conj in _and_conjuncts(predicate)]
     if not reduced or not all(reduced):
         return None
-    return frozenset().union(*reduced)
+    pairs = frozenset().union(*reduced)
+    # At least one column pair: it is what pins the declaration to its two tables. A declaration of
+    # fixed values alone would match any join that writes the filter, between any tables at all.
+    if all(_is_fixed_value(pair) for pair in pairs):
+        return None
+    return pairs
 
 
 def _join_condition(join: "exp.Join") -> "str | None":
@@ -4457,6 +4576,8 @@ def _join_sites(node: "exp.Expression", visible: set[str],
             pinned=pinned,
             # Resolved through THIS join's own enclosing scope, which is the map already in hand.
             pairs=_predicate_pairs(on, scope_map) if on is not None else frozenset(),
+            fixed=(_fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+                   if on is not None else frozenset()),
         ))
     return sites, written
 
@@ -4946,10 +5067,13 @@ def _written_join_pairs(
         names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue
+        # This join's fixed-value conditions on its own alias travel with its key, so a declared
+        # condition join compares whole here too (see `_fixed_value_pairs`).
+        fixed = _fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
         for pair in _predicate_pairs(on, scope_map):
             tables = frozenset(table for table, _column in pair)
             if len(tables) == 2:
-                out.setdefault(tables, set()).add(pair)
+                out.setdefault(tables, set()).update({pair, *fixed})
     return {tables: frozenset(pairs) for tables, pairs in out.items()}
 
 
