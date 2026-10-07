@@ -29,7 +29,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import loader as L
 from . import runtime as RT
@@ -41,7 +41,7 @@ def _print_json(obj) -> None:
     sys.stdout.write("\n")
 
 
-def _read_json_file(path: str):
+def _read_json_file(path: str) -> Any:
     """Read a command's JSON input, or stop with a JSON error naming the RESOLVED path. A traceback
     on stdout (a relative path that didn't resolve where the caller thought, a half-written file)
     read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked."""
@@ -752,7 +752,10 @@ def cmd_describe_file(args) -> int:
     curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
     generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
     from . import curate
-    text = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    if args.file and not Path(args.file).expanduser().exists():
+        _print_json({"error": f"file not found: {Path(args.file).expanduser().resolve()}"})
+        return 2
+    text = Path(args.file).expanduser().read_text(encoding="utf-8") if args.file else sys.stdin.read()
     ops = []
     for ln in text.splitlines():
         if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
@@ -771,7 +774,9 @@ def cmd_describe_file(args) -> int:
         _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
         return 0
     res = curate.apply(args.root, ops)
-    _print_json({"described": len(res.applied), "errors": res.errors})
+    # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
+    # over a generated one — so the skill can say so instead of counting it as described.
+    _print_json({"described": len(res.applied), "skipped": res.skipped, "errors": res.errors})
     return 0 if res.validated else 1
 
 

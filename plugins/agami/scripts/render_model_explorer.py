@@ -33,6 +33,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import _interp  # noqa: F401 — re-exec under agami's configured interpreter if PyYAML is missing
 
@@ -273,7 +274,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     return out
 
 
-def _join_key(r) -> str:
+def _join_key(r: Any) -> str:
     """A key that tells joins between the SAME two tables apart — one per date or person role. The
     table pair alone gave every date role's join the same key, so approving one approved (and overwrote) all."""
     if r.from_column and r.to_column:

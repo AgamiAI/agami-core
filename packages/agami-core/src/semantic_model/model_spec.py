@@ -41,6 +41,7 @@ from .models import CrossSubjectAreaRelationship, Metric, Relationship, SubjectA
 
 _AREA_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _CARDINALITIES = ("many_to_one", "one_to_many", "one_to_one")
+_JOIN_TYPES = ("LEFT", "INNER", "RIGHT", "FULL", "CROSS")
 _RULES_START = "<!-- model-spec:rules -->"
 _RULES_END = "<!-- /model-spec:rules -->"
 _CROSS_FILE = "cross_subject_area_relationships.yaml"
@@ -126,22 +127,36 @@ def _check_spec(
                 c = _low(j.get(side))
                 if not c:
                     errs.append(f"{where}: needs {side} (or an `on` condition)")
-                elif (
-                    t in tables
-                    and tables[t].get_column(c) is None
-                    and not any(_low(x.name) == c for x in tables[t].columns)
-                ):
+                elif t in tables and not any(_low(x.name) == c for x in tables[t].columns):
                     errs.append(f"{where}: column {t}.{c} does not exist in the introspected table")
         card = _low(j.get("cardinality")) or "many_to_one"
         if card not in _CARDINALITIES:
             errs.append(f"{where}: cardinality {card!r} is not one of {', '.join(_CARDINALITIES)}")
+        jt = str(j.get("join_type") or "LEFT").strip().upper()
+        if jt not in _JOIN_TYPES:
+            errs.append(f"{where}: join type {jt!r} is not one of {', '.join(_JOIN_TYPES)}")
 
+    members = _area_members(spec)
     for i, m in enumerate(spec.get("metrics", []), 1):
-        name = m.get("name") or f"metric {i}"
+        name = str(m.get("name") or "").strip()
+        label = name or f"metric {i}"
+        area = _low(m.get("area"))
+        if not name:
+            errs.append(f"metric {i}: needs a name")
         if not str(m.get("calculation") or "").strip():
-            errs.append(f"metric {name!r}: needs a calculation")
-        if _low(m.get("area")) not in known:
-            errs.append(f"metric {name!r}: subject area {_low(m.get('area'))!r} is not declared")
+            errs.append(f"metric {label!r}: needs a calculation")
+        if area not in known:
+            errs.append(f"metric {label!r}: subject area {area!r} is not declared")
+        # A source the metric's area can't see would load as a metric no question can reach.
+        for t in m.get("source_tables") or []:
+            if _low(t) not in members.get(area, set()):
+                errs.append(
+                    f"metric {label!r}: source table {_low(t)!r} isn't in subject area {area!r}"
+                )
+
+    month = spec.get("fiscal_year_start_month")
+    if month not in (None, "") and (not str(month).isdigit() or not 1 <= int(month) <= 12):
+        errs.append(f"fiscal_year_start_month must be a whole number from 1 to 12, not {month!r}")
 
     # One line, not one per row: the count is what a person acts on. A dry run reports it instead of
     # refusing, because the dry run is what a skill shows BEFORE asking who signs off.
@@ -202,6 +217,43 @@ def _grain_of(row: dict) -> list[str]:
     return [_low(x) for x in g if _low(x)]
 
 
+def _canonical_tables(spec: dict, tables: dict, by_bare: dict) -> tuple[dict, list[str]]:
+    """The spec with every table name rewritten to the key `apply_spec` indexes tables by, and an
+    error for each bare name two schemas share. A name the model doesn't have is left as written for
+    `_check_spec` to report."""
+    errs: list[str] = []
+
+    def key(name: Any, schema: Any = None) -> str:
+        n = _low(name)
+        if schema and "." not in n:
+            n = f"{_low(schema)}.{n}"
+        if n in tables:
+            return n
+        if "." in n:
+            sch, bare = n.rsplit(".", 1)
+            if bare in tables and _low(tables[bare].schema_name) in ("", sch):
+                return bare
+            return n
+        if len(by_bare.get(n, [])) > 1:
+            schemas = sorted(_low(t.schema_name) for t in by_bare[n])
+            msg = f"table {n!r} exists in schemas {', '.join(schemas)} — name it as schema.table"
+            if msg not in errs:
+                errs.append(msg)
+        return n
+
+    out = json.loads(json.dumps(spec))
+    for row in out.get("tables", []):
+        row["table"] = key(row.get("table"), row.get("schema"))
+    for j in out.get("joins", []):
+        j["from_table"], j["to_table"] = key(j.get("from_table")), key(j.get("to_table"))
+    for m in out.get("metrics", []):
+        m["source_tables"] = [key(t) for t in m.get("source_tables") or []]
+    for section in ("sensitive_columns", "columns"):
+        for row in out.get(section, []):
+            row["table"] = key(row.get("table"))
+    return out, errs
+
+
 def _truthy(v: Any) -> bool:
     return _low(v) in ("true", "yes", "y", "1", "approved", "x")
 
@@ -252,7 +304,9 @@ def _metric(
     m: dict, storage_type: str, signer: Optional[str], role: Optional[str], now: str
 ) -> Metric:
     approved = _truthy(m.get("approved"))
-    name = re.sub(r"[^a-z0-9]+", "_", _low(m.get("name"))).strip("_")
+    from .build import item_file_stem  # one naming rule for every writer of metric files
+
+    name = item_file_stem(str(m.get("name") or ""))
     src = [_low(t) for t in (m.get("source_tables") or []) if _low(t)]
     return Metric(
         name=name,
@@ -270,10 +324,18 @@ def _metric(
     )
 
 
-def _write_rules(root: Path, rules: list[dict], dry_run: bool) -> int:
+def _write_rules(root: Path, rules: list[dict]) -> int:
     """Carry the spec's rules into datasource.md, between markers, so a re-apply replaces them and any
-    narrative the person wrote outside the markers stays put."""
+    narrative the person wrote outside the markers stays put. No rules removes the block: a rule
+    deleted from the workbook must stop shaping answers."""
+    path = root / "datasource.md"
+    prior = path.read_text(encoding="utf-8") if path.exists() else ""
     if not rules:
+        if _RULES_START in prior and _RULES_END in prior:
+            head, rest = prior.split(_RULES_START, 1)
+            path.write_text(
+                head.rstrip() + "\n" + rest.split(_RULES_END, 1)[1].lstrip("\n"), encoding="utf-8"
+            )
         return 0
     lines = [_RULES_START, "## Rules", ""]
     lines += [
@@ -282,16 +344,12 @@ def _write_rules(root: Path, rules: list[dict], dry_run: bool) -> int:
     ]
     lines += ["", _RULES_END]
     block = "\n".join(lines)
-    path = root / "datasource.md"
-    prior = path.read_text(encoding="utf-8") if path.exists() else ""
     if _RULES_START in prior and _RULES_END in prior:
         head, rest = prior.split(_RULES_START, 1)
         new = head + block + rest.split(_RULES_END, 1)[1]
     else:
         new = (prior.rstrip() + "\n\n" if prior.strip() else "") + block + "\n"
-    if not dry_run:
-        path.write_text(new, encoding="utf-8")
-        path.chmod(0o644)
+    path.write_text(new, encoding="utf-8")
     return len(rules)
 
 
@@ -308,15 +366,26 @@ def apply_spec(
     root = Path(root)
     res = SpecResult(dry_run=dry_run)
     org = loader.load_datasource(root, include_rejected=True)
+    # Tables are keyed by bare name, or by `schema.name` where two schemas share a name — so a spec
+    # can say which one it means, and a bare name that could mean either is an error, not a guess.
+    defined = [t for sa in org.subject_areas for t in sa.tables_defined]
+    by_bare: dict[str, list] = {}
+    for t in defined:
+        by_bare.setdefault(_low(t.name), []).append(t)
     tables: dict[str, Any] = {}
+    for bare, ts in by_bare.items():
+        for t in ts:
+            tables[bare if len(ts) == 1 else f"{_low(t.schema_name)}.{bare}"] = t
+    key_of = {(_low(t.schema_name), _low(t.name)): k for k, t in tables.items()}
     ref_of: dict[str, TableRef] = {}
     for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            tables[_low(t.name)] = t
         for r in sa.tables:
-            ref_of.setdefault(_low(r.table), r)
+            k = key_of.get((_low(r.schema_name), _low(r.table)))
+            if k:
+                ref_of.setdefault(k, r)
 
-    res.errors = _check_spec(spec, tables, signer, dry_run)
+    spec, ambiguous = _canonical_tables(spec, tables, by_bare)
+    res.errors = ambiguous + _check_spec(spec, tables, signer, dry_run)
     if res.errors:
         return res
 
@@ -496,7 +565,7 @@ def apply_spec(
         # The spec's cross-area joins go into datasource.yaml; the old file would keep the replaced ones.
         (root / _CROSS_FILE).unlink(missing_ok=True)
         build.write_tree(org, root)
-        _write_rules(root, spec.get("rules", []), dry_run=False)
+        _write_rules(root, spec.get("rules", []))
         reread = validator.validate(loader.load_datasource(root, include_rejected=True))
         if reread.errors:
             raise RuntimeError("; ".join(reread.errors))
@@ -530,12 +599,4 @@ def apply_spec(
     return res
 
 
-def load_spec(path: str | Path) -> dict:
-    with open(path, encoding="utf-8") as fh:
-        spec = json.load(fh)
-    if not isinstance(spec, dict):
-        raise ValueError("a model spec is a JSON object with subject_areas, tables and joins")
-    return spec
-
-
-__all__ = ["apply_spec", "load_spec", "SpecResult"]
+__all__ = ["apply_spec", "SpecResult"]

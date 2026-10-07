@@ -584,15 +584,15 @@ If the user instead asks to skip pruning ("just introspect everything"), proceed
 
 ### 1.6s — With a model spec: the spec IS the kept set
 
-When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 prune page — the spec already names every table to model:
+When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 prune page — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
 
 ```bash
 "$PY" "$AGAMI_PLUGIN_ROOT/scripts/model_spec_workbook.py" parse --file "<workbook.xlsx>" \
-  --out "<artifacts_dir>/<profile>/.introspect/spec.json" \
-  --tables-out "<artifacts_dir>/<profile>/.introspect/spec-tables.txt"
+  --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" \
+  --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
 ```
 
-It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt`.
+It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. Once a first batch has written a model, the query guard can scope the next batch's catalog reads to the model's own tables and refuse them, and every table in that batch is then dropped as "no readable columns". One call reads every table before any model exists.
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
@@ -643,7 +643,7 @@ Introspection proposed areas by name and joins only where the catalog or `*_id` 
 1. **Dry run** and show the result:
    ```bash
    bash "$AGAMI_PLUGIN_ROOT/scripts/sm" apply-spec "<artifacts_dir>/<profile>" \
-     --file "<artifacts_dir>/<profile>/.introspect/spec.json" --dry-run
+     --file "<artifacts_dir>/local/model-spec/<profile>/spec.json" --dry-run
    ```
    `errors` lists every problem at once (a table the build didn't find, an area a table names that the spec doesn't declare, a join column that doesn't exist) — show them all and stop; the person fixes the workbook and you re-run 1.6s.
 
@@ -654,7 +654,7 @@ Introspection proposed areas by name and joins only where the catalog or `*_id` 
 
 Surface any `notes` too — in particular a metric flagged as a plain aggregate: ask once whether to drop it and put its name in the column description instead (re-run 1.6s after they edit the workbook), or keep it.
 
-**After a spec, the model's structure is the person's, not yours.** Through the rest of the run: don't propose, add or re-infer joins; don't re-split subject areas (Phase 3 shows the spec's areas, it doesn't propose new ones); don't add metrics the spec didn't name (2c — the spec's metrics are already in); carry its rules as written (they are in `datasource.md` already). Enrichment still describes tables and the columns the spec's Columns sheet left out — the spec's own descriptions are `human` and a generated one is refused over them.
+**After a spec, the model's structure is the person's, not yours.** Through the rest of the run: don't propose, add or re-infer joins; don't re-split subject areas (Phase 3 shows the spec's areas, it doesn't propose new ones); don't add metrics the spec didn't name (2c — the spec's metrics are already in); carry its rules as written (they are in `datasource.md` already). Enrichment still describes tables and the columns the spec's Columns sheet left out — the spec's own descriptions are `human` and a generated one is refused over them. **Run 2b (entities) as usual:** entities are the model's vocabulary (the business nouns questions are routed by), not structure, and a spec doesn't declare them.
 
 ---
 
@@ -926,7 +926,8 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 - **Shapes:** a count, a top-N, a time-bucketed trend, a breakdown, a recency filter. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset.
 - **Spread:** across the whole set, touch each major table/family, exercise **every approved metric at least once**, use the key **entities** by their real names/synonyms, and cover **representative joins** — intra-area *and* cross-schema.
-- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** Read the model's `cross_subject_area_relationships` (the cross-schema / cross-area joins). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
+- **Get every join from the model through `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --tables <t1> <t2> …`** — it returns the joins touching those tables exactly as a question will be answered (area and cross-area alike), each with its role label and full condition (a `current_flag = 'Y'` included), so a seed writes the join the model declares. Never read the model's YAML to find joins.
+- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** The cross-schema / cross-area joins are in that same output (and in `cross_subject_area_relationships`). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
 - **Count scales with the model:** a single-schema DB is fine at ~10–12; a multi-schema one wants ~2–3 per subject area **plus** the 2–4 cross-schema seeds — don't undersample a 5-schema DB at a flat 12.
 
 Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metric`. **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.

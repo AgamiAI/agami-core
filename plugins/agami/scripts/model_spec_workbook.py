@@ -37,10 +37,9 @@ SHEETS: dict[str, dict[str, tuple[str, ...]]] = {
         "schema": ("schema",),
         "owner": ("owned by", "owner"),
         "also_in": ("also listed in", "also in", "listed in"),
-        "grain": ("grain", "unique key", "key"),
+        "grain": ("grain", "unique key"),
     },
     "joins": {
-        "area": ("subject area", "area"),
         "from_table": ("from table",),
         "from_column": ("from column",),
         "to_table": ("to table",),
@@ -87,12 +86,14 @@ def _find_sheet(names: list[str], want: str) -> Optional[str]:
 
 def _read(
     path: str, sheet: str, fields: dict[str, tuple[str, ...]]
-) -> tuple[list[dict], list[str]]:
-    _, rows = _xlsx.read_sheet(path, sheet)
-    rows = [r for r in rows if any((c or "").strip() for c in r)]
+) -> tuple[list[tuple[int, dict]], list[str]]:
+    """Each non-blank row after the header as (Excel row number, values) — the number a person finds
+    the row by — and which fields the header provided."""
+    _, raw = _xlsx.read_sheet(path, sheet)
+    rows = [(n, r) for n, r in enumerate(raw, 1) if any((c or "").strip() for c in r)]
     if not rows:
         return [], []
-    header = [_norm(h) for h in rows[0]]
+    header = [_norm(h) for h in rows[0][1]]
     col: dict[str, int] = {}
     for f, aliases in fields.items():
         for a in aliases:
@@ -100,12 +101,12 @@ def _read(
                 col[f] = header.index(_norm(a))
                 break
     out = []
-    for r in rows[1:]:
+    for n, r in rows[1:]:
         item = {}
         for f, i in col.items():
             v = (r[i] if i < len(r) else "").strip()
             item[f] = [x.strip() for x in re.split(r"[,\n]", v) if x.strip()] if f in LISTS else v
-        out.append(item)
+        out.append((n, item))
     return out, sorted(col)
 
 
@@ -130,10 +131,30 @@ def parse(path: str) -> tuple[dict, list[str], list[str]]:
                 )
         key = want.replace(" ", "_")
         req = REQUIRED.get(want, ())
-        spec[key] = [i for i in items if all(i.get(f) for f in req) or not req]
+        # A row missing a required value is an error, never a silent skip: a Tables sheet whose rows
+        # all dropped out would leave an empty allowlist, and introspect reads an empty allowlist as
+        # "everything".
+        if all(f in found for f in req):
+            for n, item in items:
+                missing = [f for f in req if not item.get(f)]
+                if missing:
+                    errors.append(f"sheet {sheet!r} row {n}: no value for {', '.join(missing)}")
+        spec[key] = [item for _n, item in items if all(item.get(f) for f in req)]
+        if want == "tables" and not spec[key]:
+            errors.append(f"sheet {sheet!r} lists no tables")
     settings = {_norm(s.get("setting", "")): s.get("value", "") for s in spec.pop("settings", [])}
-    if settings.get("fiscal year start month"):
-        spec["fiscal_year_start_month"] = int(float(settings["fiscal year start month"]))
+    month = str(settings.get("fiscal year start month", "")).strip()
+    if month:
+        try:
+            m = float(month)
+        except ValueError:
+            m = 0.0
+        if m != int(m) or not 1 <= int(m) <= 12:
+            errors.append(
+                f"setting 'Fiscal year start month' must be a whole number from 1 to 12, not {month!r}"
+            )
+        else:
+            spec["fiscal_year_start_month"] = int(m)
     default_schema = settings.get("schema", "")
     allow = []
     for t in spec.get("tables", []):

@@ -30,8 +30,16 @@ below corresponds to one such version.
   pastes straight in), and a Metrics row that is a plain aggregate of one column is flagged on the
   dry run: its name belongs in that column's description, the rule `suggest-metrics` already follows.
   An optional Grain column on the Tables sheet states the column(s) that make a row unique — what the
-  engine can't probe on a large table and the fan-out check relies on. `model_spec_workbook.py` counts what it read, so a run reports the workbook's numbers
+  engine can't probe on a large table and the fan-out check relies on. The workbook is checked before
+  anything is built: a row missing a required value is reported by its row number (an empty Tables
+  sheet would otherwise have meant "introspect everything"), and join types, metric names and source
+  tables, the fiscal month, and table names two schemas share (write `schema.table`) are validated.
+  agami-connect introspects the spec's tables in one call, then still proposes entities. `model_spec_workbook.py` counts what it read, so a run reports the workbook's numbers
   instead of estimating them. Format: [`shared/model-spec-format.md`](plugins/agami/shared/model-spec-format.md).
+- **The model explorer's PII tab clears or marks a whole list at once.** A model with dozens of flagged
+  columns had to be cleared one click at a time. Each list now has "Clear all N shown" / "Mark all N
+  shown", which acts on whatever the search has narrowed it to (search `email`, clear those). Like
+  every explorer change it only queues edits until the footer submits; clearing asks first, with the count.
 
 ### Fixed
 
@@ -50,41 +58,37 @@ below corresponds to one such version.
   name and `sm add` / `curate` a slug, so rewriting a model after `sm add` duplicated items and broke
   lookup by name.
 - **A missing or unreadable input file is a JSON error naming the resolved path**, for `curate
-  --ops-file`, `add`, `add-example`, `set-terminology`, `seed-examples` and `apply-spec` — not a
+  --ops-file`, `add`, `add-example`, `set-terminology`, `seed-examples`, `describe-file` and `apply-spec` — not a
   traceback a skill read as "nothing to apply".
 - **Warehouse key columns aren't offered a currency.** `invoice_key` and `payment_key`
   matched the money words in their names; `key`, `sk`, `fk` and `nbr` now rule a column out.
-- **agami-serve honours `AGAMI_PYTHON`**, as `sm` does, before the configured interpreter.
+- **The plugin run from a checkout uses that checkout's agami-core.** `sm` compares versions only in a
+  released plugin folder, so from a checkout (`claude --plugin-dir`) a released agami-core installed
+  earlier satisfied it and the checkout's own code never ran. It now reinstalls from the checkout when
+  the importable package isn't it.
 - **`execute_sql --batch` reports where each result landed.** A relative `out` resolves from the current
   directory (now documented), and the manifest records the absolute path.
 - **agami-connect's documented commands work as written**: the examples-validation page needs `--title`
   and `--profile`, and the pre-seed recount is `review-items --scope preseed`.
-
 - **agami-serve uses the Python agami-connect already proved, and won't write a Desktop entry that
   can't connect.** It searched the usual install locations and could pick an interpreter without the
-  database driver: Claude Desktop then started the server and every query failed. The interpreter
-  recorded in `local/.config` now goes first, and after installing, the chosen one must import both the
-  driver and agami-core or nothing is written.
+  database driver: Claude Desktop then started the server and every query failed. `AGAMI_PYTHON` and
+  then the interpreter recorded in `local/.config` now go first, as in `sm`, and after installing, the
+  chosen one must import both the driver and agami-core or nothing is written.
 - **A value list is built only from rows that represent the column.** The sample is the first rows a
   table returns, so `current_flag: N` could be recorded for a column that is mostly `Y`, and the SQL
   writer would filter on it. A list now needs at least two distinct values, and is built only when the
   sample is the whole table or the catalog says the table is small; on a large table or a view with no
   estimate, no list is better than a wrong one.
-
-- **The model explorer's PII tab clears or marks a whole list at once.** A model with dozens of flagged
-  columns had to be cleared one click at a time. Each list now has "Clear all N shown" / "Mark all N
-  shown", which acts on whatever the search has narrowed it to (search `email`, clear those). Like
-  every explorer change it only queues edits until the footer submits.
-
 - **A generated description no longer replaces one a person wrote or a data dictionary supplied.**
   Enrichment's `source: ai` edits overwrote any column description, including `human` and `metadata`
   ones; such an edit is now skipped with its reason. A person can still change either.
-
 - **Redshift late-binding views introspect with their columns.** A view created `WITH NO SCHEMA
   BINDING` is listed in `information_schema.tables` but its columns are not in
   `information_schema.columns`, so a schema of such views came out as tables with no columns (and,
   without an allowlist, nothing at all). Redshift now reads columns from `svv_columns`, which lists
-  them for tables, views and late-binding views alike.
+  them for tables, views and late-binding views alike. A column read that fails (a dropped connection)
+  is retried once instead of the table being dropped as having no columns.
 - **`add_relationships` accepts a join written as an `on:` condition, and a failure part-way restores
   every file.** Labelling the result read `from_column`, which an `on:` join doesn't have, so the call
   crashed — after earlier areas' files were already written, leaving the model half-updated. The label

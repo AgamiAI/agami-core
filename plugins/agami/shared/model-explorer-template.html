@@ -1551,7 +1551,10 @@
           'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive — or search to narrow the list and clear them all at once.',
           { label: 'Clear all ' + fl.length + ' shown',
             title: 'Queue clearing the PII flag on every column listed here (search narrows it). Nothing applies until you submit.',
-            run: () => setSensitiveMany(fl, false) }));
+            run: () => {
+              // Clearing a privacy flag lets raw values be returned, so the count is confirmed first.
+              if (window.confirm('Clear the PII flag on ' + fl.length + ' column(s)? Their raw values will be returned in answers once you submit.')) setSensitiveMany(fl, false);
+            } }));
         if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
         fl.forEach(r => sec.appendChild(piiRowCard(r)));
       }

@@ -477,7 +477,7 @@ def test_workbook_to_applied_model_end_to_end(tmp_path):
         == 0
     )
     assert tables.read_text().splitlines()[0] == "sales_data.sales_f"
-    res = model_spec.apply_spec(model, model_spec.load_spec(out), signer="you@example.com")
+    res = model_spec.apply_spec(model, json.loads(out.read_text()), signer="you@example.com")
     assert res.applied, res.errors
     org = loader.load_datasource(model)
     assert org.fiscal_year_start_month == 9
@@ -863,3 +863,91 @@ def test_a_failed_apply_restores_the_model_and_its_version(tmp_path, monkeypatch
     assert not res.applied and "previous model was restored" in res.errors[0]
     assert _model_files(tmp_path) == before
     assert snapshot.newest_version(tmp_path) == version
+
+
+# --- Copilot review: validation before anything is built --------------------------------------------
+
+
+def test_workbook_reports_incomplete_rows_and_refuses_an_empty_tables_sheet(tmp_path):
+    mw = _workbook_module()
+    path = _xlsx(
+        tmp_path / "w.xlsx",
+        {
+            "Subject areas": [["Subject area"], ["orders"]],
+            "Tables": [["Table", "Owned by"], ["sales_f", ""]],
+            "Joins": [["From table", "To table"], ["sales_f", "sales_f"]],
+            "Settings": [["Setting", "Value"], ["Fiscal year start month", "13"]],
+        },
+    )
+    _, allow, errors = mw.parse(path)
+    assert "sheet 'Tables' row 2: no value for owner" in errors
+    assert "sheet 'Tables' lists no tables" in errors
+    assert any("whole number from 1 to 12" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (
+            lambda s: s["joins"][0].update(join_type="left outer"),
+            "join type 'LEFT OUTER' is not one of",
+        ),
+        (
+            lambda s: s["metrics"][0].update(source_tables=["sales_fact"]),
+            "source table 'sales_fact' isn't in subject area",
+        ),
+        (lambda s: s["metrics"][0].update(name=""), "metric 1: needs a name"),
+        (
+            lambda s: s.update(fiscal_year_start_month=13),
+            "fiscal_year_start_month must be a whole number",
+        ),
+    ],
+)
+def test_spec_problems_are_reported_not_raised(tmp_path, mutate, message):
+    _introspected(tmp_path)
+    spec = _spec()
+    mutate(spec)
+    res = model_spec.apply_spec(tmp_path, spec, signer="you@example.com", dry_run=True)
+    assert any(message in e for e in res.errors), res.errors
+
+
+def test_an_empty_rules_sheet_removes_the_previous_rules(tmp_path):
+    _introspected(tmp_path)
+    assert model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com").applied
+    assert model_spec.apply_spec(tmp_path, _spec(rules=[]), signer="you@example.com").applied
+    md = (tmp_path / "datasource.md").read_text()
+    assert "## Rules" not in md and "A demo shop." in md
+
+
+def test_a_table_name_two_schemas_share_must_be_qualified(tmp_path):
+    _introspected(tmp_path)
+    # a second schema with its own date_d
+    (tmp_path / "subject_areas" / "misc" / "tables" / "date_d_other.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "date_d",
+                "schema": "archive",
+                "storage_connection": "c",
+                "columns": [{"name": "date_key", "type": "integer"}],
+            }
+        )
+    )
+    sa = yaml.safe_load((tmp_path / "subject_areas" / "misc" / "subject_area.yaml").read_text())
+    sa["tables"].append({"storage_connection": "c", "schema": "archive", "table": "date_d"})
+    (tmp_path / "subject_areas" / "misc" / "subject_area.yaml").write_text(yaml.safe_dump(sa))
+    bare = model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com", dry_run=True)
+    assert any("'date_d' exists in schemas archive, sales_data" in e for e in bare.errors)
+    spec = _spec()
+    spec["tables"][2]["table"] = "sales_data.date_d"
+    for j in spec["joins"]:
+        if j["to_table"] == "date_d":
+            j["to_table"] = "sales_data.date_d"
+    res = model_spec.apply_spec(tmp_path, spec, signer="you@example.com")
+    assert res.applied, res.errors
+    t = [
+        t
+        for sa in loader.load_datasource(tmp_path).subject_areas
+        for t in sa.tables_defined
+        if t.name == "date_d"
+    ]
+    assert [x.schema_name for x in t] == ["sales_data"]
