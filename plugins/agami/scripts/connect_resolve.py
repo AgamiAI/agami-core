@@ -44,6 +44,7 @@ import argparse
 import configparser
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -68,6 +69,22 @@ _DRIVER_MOD = {
 # TIMESTAMP WITH TIME ZONE values into Python — without it a timestamptz query fails at runtime.
 _DRIVER_EXTRA = {"duckdb": ["pytz"]}
 _MODEL_DEPS = ("pydantic", "sqlglot", "yaml")
+
+# The output lands in the agent's transcript, so a secret's VALUE never goes in it: the skill only
+# needs to know a field is set. A connection URL carries its password inline, so it is masked too.
+_SECRET_FIELD_RE = re.compile(r"pass|pwd|token|secret|private_key|api_key|credential", re.I)
+_URL_PASSWORD_RE = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
+_REDACTED = "<set, hidden>"
+
+
+def _redact(fields: dict) -> dict:
+    out = {}
+    for key, value in fields.items():
+        if _SECRET_FIELD_RE.search(key):
+            out[key] = _REDACTED if value else value
+        else:
+            out[key] = _URL_PASSWORD_RE.sub(rf"\g<1>{_REDACTED}@", value)
+    return out
 _NATIVE_TOOLS = ("psql", "mysql", "snowsql", "sqlite3", "duckdb", "bq")
 
 
@@ -194,7 +211,7 @@ def main(argv=None) -> int:
             cp.read(creds_path)
             if cp.has_section(profile):
                 creds["present"] = True
-                creds["fields"] = dict(cp.items(profile))
+                creds["fields"] = _redact(dict(cp.items(profile)))
                 creds["type"] = creds["fields"].get("type")
         except Exception as e:
             anomalies.append({"kind": "credentials_unparseable", "where": str(creds_path), "detail": str(e)})

@@ -342,6 +342,7 @@ def _rel_item(area: Optional[str], rel) -> dict:
             "area": area, "name": f"{rel.from_table}->{rel.to_table}", "title": join,
             # which join between these two tables: a curate op carries these to name it exactly
             "from_column": rel.from_column, "to_column": rel.to_column, "on": rel.on,
+            "from_schema": rel.from_schema, "to_schema": rel.to_schema,
             "subtitle": rel.relationship, "cardinality": rel.relationship,
             "source_signal": rel.description or join,
             "signals": [{"ok": True, "text": rel.description or f"{rel.relationship} · {join}"}],
@@ -677,7 +678,8 @@ def _apply_one(root: Path, op: dict, signer, role,
             if len(hits) > 1:
                 raise ValueError(
                     f"{len(hits)} joins match {name}; name the one you mean with from_column and "
-                    "to_column, or its `on` condition — the table pair alone would pick one at random")
+                    "to_column, or its `on` condition, and from_schema / to_schema when the table "
+                    "names repeat across schemas — the table pair alone would pick one at random")
             _snapshot(backups, path)
             _set_trust(hits[0], op, new_state, signer, role)
             _dump(path, doc if isinstance(doc, dict) else {key: rels})
@@ -688,12 +690,17 @@ def _apply_one(root: Path, op: dict, signer, role,
 
 
 def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
-    """The joins an op means: same two tables, narrowed by whichever of from_column / to_column / `on`
-    the op names (`on` compared with whitespace collapsed, so a re-wrapped condition still matches)."""
+    """The joins an op means: same two tables, narrowed by whichever of from_schema / to_schema /
+    from_column / to_column / `on` the op names (`on` compared with whitespace collapsed, so a re-wrapped condition still matches)."""
     def norm(text) -> str:
         return " ".join(str(text or "").split()).lower()
 
     out = [r for r in rels if isinstance(r, dict) and r.get("from_table") == frm and r.get("to_table") == to]
+    # The schemas tell apart same-named tables in two schemas (sales.orders vs archive.orders); a join
+    # written before schemas were recorded has none, and still matches.
+    for fld in ("from_schema", "to_schema"):
+        if op.get(fld):
+            out = [r for r in out if not r.get(fld) or str(r[fld]).lower() == str(op[fld]).lower()]
     for fld in ("from_column", "to_column"):
         if op.get(fld):
             out = [r for r in out if (r.get(fld) or "").lower() == str(op[fld]).lower()]
@@ -970,7 +977,13 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
             res.skipped.append({"item": q or "?", "reason": "question and sql are required"})
             continue
         if q in by_q:
-            existing[by_q[q]] = ex
+            old = existing[by_q[q]]
+            # The same SQL is a re-save (a sign-off, a tag), not a correction: keep the fields it
+            # didn't restate, or re-saving a confirmed example to sign it would strip its status.
+            same_sql = " ".join(str(old.get("sql", "")).split()) == " ".join(str(sql).split())
+            # A rejection is not carried over: re-adding a rejected question un-rejects it.
+            kept = {k: v for k, v in old.items() if not (k == "status" and v == "rejected")}
+            existing[by_q[q]] = {**kept, **ex} if same_sql else ex
             res.applied.append(f"example (replaced) {area}/{q[:50]}")
         else:
             by_q[q] = len(existing)

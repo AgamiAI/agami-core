@@ -276,11 +276,14 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
 
 def _join_key(r: Any) -> str:
     """A key that tells joins between the SAME two tables apart — one per date or person role. The
-    table pair alone gave every date role's join the same key, so approving one approved (and overwrote) all."""
+    table pair alone gave every date role's join the same key, so approving one approved (and overwrote) all.
+    Each table carries its schema when it has one, so sales.orders and archive.orders stay apart."""
+    ft = f"{r.from_schema}:{r.from_table}" if r.from_schema else r.from_table
+    tt = f"{r.to_schema}:{r.to_table}" if r.to_schema else r.to_table
     if r.from_column and r.to_column:
-        return f"{r.from_table}.{r.from_column}->{r.to_table}.{r.to_column}"
+        return f"{ft}.{r.from_column}->{tt}.{r.to_column}"
     digest = hashlib.sha1(" ".join((r.on or "").split()).encode("utf-8")).hexdigest()[:8]
-    return f"{r.from_table}->{r.to_table}#{digest}"
+    return f"{ft}->{tt}#{digest}"
 
 
 def main() -> int:

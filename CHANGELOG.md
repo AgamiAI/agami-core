@@ -33,7 +33,9 @@ below corresponds to one such version.
   engine can't probe on a large table and the fan-out check relies on. The workbook is checked before
   anything is built: a row missing a required value is reported by its row number (an empty Tables
   sheet would otherwise have meant "introspect everything"), and join types, metric names and source
-  tables, the fiscal month, and table names two schemas share (write `schema.table`) are validated.
+  tables, the fiscal month, and table names two schemas share (write `schema.table`) are validated;
+  two such tables can't share one area. Re-applying keeps the metrics the spec doesn't redefine,
+  matched by area and name.
   agami-connect introspects the spec's tables in one call, then still proposes entities. `model_spec_workbook.py` counts what it read, so a run reports the workbook's numbers
   instead of estimating them. Format: [`shared/model-spec-format.md`](plugins/agami/shared/model-spec-format.md).
 - **The model explorer's PII tab clears or marks a whole list at once.** A model with dozens of flagged
@@ -41,19 +43,35 @@ below corresponds to one such version.
   shown", which acts on whatever the search has narrowed it to (search `email`, clear those). Like
   every explorer change it only queues edits until the footer submits; clearing asks first, with the count.
 
+### Security
+
+- **agami-connect's environment check no longer prints the database password.** It echoed the whole
+  credentials profile into its output, so a password, token or a connection URL's inline password
+  landed in the agent's transcript on every run. Secret fields now show only that they are set, and
+  a URL keeps its host and user with the password masked. Nothing read the values; the skill only
+  checks which fields are present. If you ran agami-connect before this release, consider rotating
+  the database password it used.
+
 ### Fixed
+
+- **Signing off an example no longer strips it.** `sm add-example` replaced an example whose question
+  already existed, so re-saving it with a signer, as agami-connect does to record a validation, dropped
+  its `confirmed` status and scope tags. A re-save with the same SQL now keeps the fields it doesn't
+  restate; different SQL is still a correction and replaces the example.
 
 - **Approving a join approves that join, not the first one between its two tables.** Two tables are
   often joined several ways (one per date or person role), but the explorer keyed those joins by the
   table pair — every date role's join shared one key, so approving one approved, and overwrote, them all —
   and `curate` signed off the first match. Each join now has its own key in the explorer, its approval
-  and edits carry the join's columns or condition, and a `curate` op that still matches more than one
+  and edits carry the join's columns or condition (and both tables' schemas, so `sales.orders` and
+  `archive.orders` stay apart), and a `curate` op that still matches more than one
   join is refused with a reason instead of guessed. `approve-queue` names each join the same way, and
   a cross-area join is found wherever it is stored (`add_relationships` writes them to their own file,
   which approvals never looked in).
 - **The validator warns about a join that won't be served.** An area's joins are served only among
   the tables it defines, so a join to a table the area merely lists validated cleanly and then vanished
-  when a question was answered. It now warns, naming the table and the fix (a cross-area join).
+  when a question was answered. It now warns, naming the table and the fix (a cross-area join). An
+  endpoint with a schema is compared by schema too, so owning `sales.orders` doesn't cover `archive.orders`.
 - **Metric and entity files are named the same way by every writer.** `write_tree` used the display
   name and `sm add` / `curate` a slug, so rewriting a model after `sm add` duplicated items and broke
   lookup by name.

@@ -137,6 +137,20 @@ def _check_spec(
             errs.append(f"{where}: join type {jt!r} is not one of {', '.join(_JOIN_TYPES)}")
 
     members = _area_members(spec)
+    # An area's tables are written and looked up by bare name, so sales.date_d and archive.date_d in
+    # one area would overwrite each other's file and answer to the same name. Give each its own area.
+    for a, names in sorted(members.items()):
+        by_bare: dict[str, list[str]] = {}
+        for t in sorted(names):
+            if t in tables:
+                by_bare.setdefault(_low(tables[t].name), []).append(t)
+        for bare, same in sorted(by_bare.items()):
+            if len(same) > 1:
+                errs.append(
+                    f"subject area {a!r} would hold {', '.join(same)}: two tables named {bare!r} "
+                    "can't share an area — put them in different areas"
+                )
+
     for i, m in enumerate(spec.get("metrics", []), 1):
         name = str(m.get("name") or "").strip()
         label = name or f"metric {i}"
@@ -461,13 +475,16 @@ def apply_spec(
 
     # Metrics the spec doesn't redefine stay where they were (enrichment and `sm add` put them there,
     # some signed off); only an area the spec drops takes its metrics with it, and that is reported.
+    # Keyed by area: a metric file lives in its area, so orders.sales_amount redefines only itself,
+    # not a same-named metric in another area.
     spec_metric_files = {
-        build.item_file_stem(str(m.get("name") or "")) for m in spec.get("metrics", [])
+        (_low(m.get("area")), build.item_file_stem(str(m.get("name") or "")))
+        for m in spec.get("metrics", [])
     }
     metrics_kept, metrics_dropped = 0, []
     for name, prev in old_areas.items():
         for mm in prev.metrics:
-            if build.item_file_stem(mm.name) in spec_metric_files:
+            if (name, build.item_file_stem(mm.name)) in spec_metric_files:
                 continue
             if name in by_name:
                 by_name[name].metrics.append(mm)

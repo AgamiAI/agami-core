@@ -845,6 +845,135 @@ def test_reapplying_keeps_metrics_the_spec_does_not_redefine(tmp_path):
     assert names == {"sales_amount", "repeat_rate"}
 
 
+def test_a_metric_redefined_in_one_area_keeps_its_namesake_in_another(tmp_path):
+    from semantic_model import curate
+
+    _introspected(tmp_path)
+    assert model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com").applied
+    assert curate.write_items(
+        tmp_path,
+        "regions",
+        "metric",
+        [
+            {
+                "name": "sales_amount",
+                "calculation": "Sales by the region's manager.",
+                "bindings": {"PostgreSQL": "SUM(amount)"},
+                "source_tables": ["sales_f"],
+            }
+        ],
+    ).validated
+    res = model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com")
+    assert res.applied and res.counts["metrics_kept"] == 1, res.errors
+    where = {
+        (sa.name, m.name)
+        for sa in loader.load_datasource(tmp_path).subject_areas
+        for m in sa.metrics
+    }
+    assert where == {("orders", "sales_amount"), ("regions", "sales_amount")}
+
+
+# --- same-named tables in two schemas -------------------------------------------------------------
+
+
+def _table(name: str, schema: str, cols: list[str]):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        name=name, schema_name=schema, columns=[SimpleNamespace(name=c) for c in cols]
+    )
+
+
+def test_two_same_named_tables_cannot_share_an_area():
+    # both would be written to tables/date_d.yaml and answer to one name; refuse, don't overwrite
+    tables = {
+        "sales_f": _table("sales_f", "sales_data", ["sale_date_key"]),
+        "sales_data.date_d": _table("date_d", "sales_data", ["date_key"]),
+        "archive.date_d": _table("date_d", "archive", ["date_key"]),
+    }
+    spec = {
+        "subject_areas": [{"name": "orders"}, {"name": "history"}],
+        "tables": [
+            {"table": "sales_f", "owner": "orders"},
+            {"table": "sales_data.date_d", "owner": "orders"},
+            {"table": "archive.date_d", "owner": "history", "also_in": ["orders"]},
+        ],
+    }
+    errs = model_spec._check_spec(spec, tables, None)
+    assert any("two tables named 'date_d' can't share an area" in e for e in errs), errs
+    spec["tables"][2]["also_in"] = []
+    assert model_spec._check_spec(spec, tables, None) == []
+
+
+def _two_schema_joins():
+    base = {
+        "from_table": "orders",
+        "from_column": "customer_id",
+        "to_table": "customers",
+        "to_column": "id",
+    }
+    return [
+        {**base, "from_schema": "sales", "to_schema": "sales"},
+        {**base, "from_schema": "archive", "to_schema": "archive"},
+    ]
+
+
+def test_a_join_approval_tells_schemas_apart():
+    from semantic_model import curate
+
+    rels = _two_schema_joins()
+    op = {"from_column": "customer_id", "to_column": "id"}
+    assert len(curate._matching_joins(rels, "orders", "customers", op)) == 2
+    (hit,) = curate._matching_joins(
+        rels, "orders", "customers", {**op, "from_schema": "ARCHIVE", "to_schema": "archive"}
+    )
+    assert hit["from_schema"] == "archive"
+    # a join written before schemas were recorded still matches an op that names one
+    legacy = [{k: v for k, v in rels[0].items() if not k.endswith("schema")}]
+    assert curate._matching_joins(legacy, "orders", "customers", {"from_schema": "sales"})
+
+
+def test_explorer_keys_and_approve_ops_carry_the_schemas(tmp_path):
+    from types import SimpleNamespace
+
+    import render_model_explorer as rme
+
+    keys = {rme._join_key(SimpleNamespace(on=None, **r)) for r in _two_schema_joins()}
+    assert len(keys) == 2
+    from semantic_model import curate
+
+    item = curate._rel_item(
+        "s",
+        SimpleNamespace(
+            on=None, relationship="many_to_one", description="", **_two_schema_joins()[1]
+        ),
+    )
+    assert (item["from_schema"], item["to_schema"]) == ("archive", "archive")
+
+
+def test_validator_compares_a_join_endpoint_by_schema(tmp_path):
+    # the area owns sales_data.region_mgr_d; a join to archive.region_mgr_d is not served from it
+    from semantic_model.models import Relationship
+
+    _introspected(tmp_path)
+    org = loader.load_datasource(tmp_path, include_rejected=True)
+    misc = next(sa for sa in org.subject_areas if sa.name == "misc")
+    for schema in ("archive", "sales_data"):
+        misc.relationships.append(
+            Relationship(
+                from_table="customer_d",
+                from_column="region",
+                from_schema="sales_data",
+                to_table="region_mgr_d",
+                to_column="region",
+                to_schema=schema,
+                relationship="many_to_one",
+            )
+        )
+    served = [w for w in validator.validate(org).warnings if "won't be served" in w]
+    assert len(served) == 1 and "region_mgr_d" in served[0]
+
+
 def test_a_failed_apply_restores_the_model_and_its_version(tmp_path, monkeypatch):
     from semantic_model import curate, snapshot
 

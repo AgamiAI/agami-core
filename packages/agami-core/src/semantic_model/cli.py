@@ -568,7 +568,8 @@ def cmd_approve_queue(args) -> int:
     kinds = set(args.kind) if args.kind else None
     ops = [{"op": "approve", "kind": it["kind"], "area": it["area"],
             "name": it["name"], "at": _utc_now_iso(),
-            **{k: it[k] for k in ("from_column", "to_column", "on") if it.get(k)}}
+            **{k: it[k] for k in ("from_schema", "to_schema", "from_column", "to_column", "on")
+               if it.get(k)}}
            for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
            if kinds is None or it["kind"] in kinds]
     if args.dry_run:
@@ -752,10 +753,18 @@ def cmd_describe_file(args) -> int:
     curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
     generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
     from . import curate
-    if args.file and not Path(args.file).expanduser().exists():
-        _print_json({"error": f"file not found: {Path(args.file).expanduser().resolve()}"})
-        return 2
-    text = Path(args.file).expanduser().read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    if args.file:
+        p = Path(args.file).expanduser()
+        try:
+            text = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _print_json({"error": f"file not found: {p.resolve()}"})
+            return 2
+        except (OSError, ValueError) as exc:  # a directory, no permission, not UTF-8
+            _print_json({"error": f"could not read {p.resolve()}: {exc}"})
+            return 2
+    else:
+        text = sys.stdin.read()
     ops = []
     for ln in text.splitlines():
         if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:

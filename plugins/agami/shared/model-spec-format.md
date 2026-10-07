@@ -34,6 +34,8 @@ source, a percentage — is for people and is ignored, so keep your working note
 | Grain | optional: the column(s) that make a row unique, comma-separated (`customer_key`). The engine can't probe this on a large table, and the check that a join doesn't repeat rows relies on it — state it for every dimension whose key you know. A column that doesn't exist is an error |
 
 The tables listed here are the model. An introspected table the sheet doesn't name is dropped.
+When two schemas have a table of the same name, write it as `schema.table` everywhere in the workbook,
+and keep the two in different areas: one area can't hold two tables with the same name.
 
 ### Joins (required)
 

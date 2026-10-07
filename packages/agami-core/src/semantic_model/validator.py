@@ -60,6 +60,7 @@ from .models import (
     SubjectArea,
     Table,
     bare_name,
+    table_key,
 )
 
 # Sizing thresholds (design doc: warn at 25, error at 30).
@@ -193,9 +194,22 @@ def _check_relationship_served(
     """Warn when an area's join names a table the area doesn't OWN. The loader serves an area's joins
     among its own tables only, so such a join validates here and then disappears when a question is
     answered — a whole dimension silently unjoinable. A table the area only lists belongs
-    to another area, and the join between them is a cross-area join."""
-    owned = {bare_name(n) for n in defined}
-    missing = [t for t in (rel.from_table, rel.to_table) if bare_name(t) not in owned]
+    to another area, and the join between them is a cross-area join. An endpoint with a schema must
+    match the owned table's schema too (the area may own sales.orders and only list archive.orders);
+    a schema-less endpoint or table (SQLite, legacy) compares by bare name."""
+    owned = {table_key(t.name, t.schema_name) for t in defined.values()}
+    owned_bare = {bare for _sch, bare in owned}
+
+    def served(name: str, schema: Optional[str]) -> bool:
+        sch, bare = table_key(name, schema)
+        if not sch:
+            return bare in owned_bare
+        return (sch, bare) in owned or ("", bare) in owned
+
+    missing = [
+        t for t, s in ((rel.from_table, rel.from_schema), (rel.to_table, rel.to_schema))
+        if not served(t, s)
+    ]
     if missing:
         res.warn(
             "relationship_not_served",

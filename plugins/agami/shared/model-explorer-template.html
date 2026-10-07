@@ -2878,6 +2878,8 @@
         if (r.from_column) id.from_column = r.from_column;
         if (r.to_column) id.to_column = r.to_column;
         if (r.on) id.on = r.on;
+        if (r.from_schema) id.from_schema = r.from_schema;
+        if (r.to_schema) id.to_schema = r.to_schema;
         return { ...o, ...id };
       };
       const opList = [];

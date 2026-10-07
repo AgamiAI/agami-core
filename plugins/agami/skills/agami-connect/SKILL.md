@@ -975,7 +975,7 @@ Reply: approve N · reject N · edit N · done (when you're through).
 ```
 
 **Processing the batch:** the dashboard emits `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all` — apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the dashboard's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back (the per-area seed numbers no longer collide):
-- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), stamp it via `sm add-example` (re-write the same example with `--signer`/`--role`).
+- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written). The sign-off is recorded in `curation_log.jsonl`, not on the example: an example carries no signer field, so don't look for one there.
 - **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). It flags the example `status: rejected` — kept in `examples.yaml` for audit, dropped from the runtime ranker. **Do NOT hand-delete or hand-rewrite the YAML** (there's a command now); map `N` → the example's question from the items you rendered.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
 
