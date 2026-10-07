@@ -28,7 +28,7 @@ below corresponds to one such version.
   join was reported `not_multiplied` — a positive claim made without the check. It is now
   `undetermined`, and its reason names the joins, in the receipt and in `sm prepare`'s pre-flight
   alike. Only joins that can feed the number count: its own branch or a CTE, not another UNION arm or a
-  `WHERE … IN` subquery.
+  `WHERE … IN` subquery (a join past the receipt's cap, which is never read, downgrades every number).
 
 ## [0.9.9] — 2026-10-07
 

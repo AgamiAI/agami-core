@@ -1987,7 +1987,10 @@ def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, 
     states per aggregate.
 
     Only joins that can feed the number count: its own query branch, or a CTE (which any branch may
-    read). A join in another UNION arm, or inside a `WHERE ... IN (subquery)`, can't repeat its rows."""
+    read). A join in another UNION arm, or inside a `WHERE ... IN (subquery)`, can't repeat its rows.
+    The one exception is a join past the receipt's cap: it is never read — that is what the cap is
+    for, since a caller can write any number of joins — so its branch is unknown, and every number is
+    downgraded rather than one cleared that the uncounted join might feed."""
     out = []
     for r in reports:
         if r.status != NOT_MULTIPLIED:
