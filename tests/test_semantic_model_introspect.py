@@ -966,3 +966,10 @@ def test_a_value_list_is_built_only_from_a_representative_sample(
         est_rows=est_rows,
     )
     assert (col.choice_field == {"Closed": "", "Open": ""}) is expect_list
+
+
+def test_an_unknown_row_estimate_is_not_a_small_table():
+    # a view or a never-analyzed table reports -1 rows; a full sample of it covers nothing
+    full = [{}] * I.SAMPLE_ROWS
+    assert not I._sample_covers_values(full, -1)
+    assert I._sample_covers_values(full, I.SAMPLE_ROWS)

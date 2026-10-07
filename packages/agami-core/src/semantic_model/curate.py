@@ -667,24 +667,27 @@ def _apply_one(root: Path, op: dict, signer, role,
             places.append((_area_dir(root, area) / "relationships.yaml", "relationships"))
         places += [(root / "datasource.yaml", "cross_subject_area_relationships"),
                    (root / "cross_subject_area_relationships.yaml", "edges")]
+        # Count matches across every place before choosing: a join in the area and one between areas
+        # can share a table pair, and stopping at the first place with one match would pick one.
+        found = []
         for path, key in places:
             if not path.exists():
                 continue
             doc = _load(path) or {}
             rels = doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
-            hits = _matching_joins(rels, frm, to, op)
-            if not hits:
-                continue
-            if len(hits) > 1:
-                raise ValueError(
-                    f"{len(hits)} joins match {name}; name the one you mean with from_column and "
-                    "to_column, or its `on` condition, and from_schema / to_schema when the table "
-                    "names repeat across schemas — the table pair alone would pick one at random")
-            _snapshot(backups, path)
-            _set_trust(hits[0], op, new_state, signer, role)
-            _dump(path, doc if isinstance(doc, dict) else {key: rels})
-            return path
-        raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
+            found += [(path, key, doc, rels, hit) for hit in _matching_joins(rels, frm, to, op)]
+        if not found:
+            raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
+        if len(found) > 1:
+            raise ValueError(
+                f"{len(found)} joins match {name}; name the one you mean with from_column and "
+                "to_column, or its `on` condition, and from_schema / to_schema when the table "
+                "names repeat across schemas — the table pair alone would pick one at random")
+        path, key, doc, rels, hit = found[0]
+        _snapshot(backups, path)
+        _set_trust(hit, op, new_state, signer, role)
+        _dump(path, doc if isinstance(doc, dict) else {key: rels})
+        return path
 
     raise ValueError(f"unknown kind {kind!r}")
 

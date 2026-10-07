@@ -180,11 +180,13 @@ def _names_a_label(header: str) -> bool:
 
 
 def _as_label(value) -> str:
-    """The value as written, minus a float's `.0` a driver may add to a whole number."""
+    """The value as written, minus a float's `.0` a driver may add to a whole number. A string is
+    shown exactly as stored: "001.0" is a code, not a number."""
     if value is None:
         return ""
-    s = str(value)
-    return s[:-2] if s.endswith(".0") and s[:-2].lstrip("-").isdigit() else s
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:

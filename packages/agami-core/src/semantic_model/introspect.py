@@ -1081,7 +1081,8 @@ _CHOICE_FULL_TABLE_MAX_ROWS = SAMPLE_ROWS * 20
 def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
     if len(sample) < SAMPLE_ROWS:
         return True  # the engine returned every row
-    return est_rows is not None and est_rows <= _CHOICE_FULL_TABLE_MAX_ROWS
+    # a negative estimate (a view or a table never analyzed reports -1) is unknown, not small
+    return est_rows is not None and 0 <= est_rows <= _CHOICE_FULL_TABLE_MAX_ROWS
 
 
 def _enrich_from_sample(

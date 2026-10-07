@@ -122,6 +122,13 @@ def _check_spec(
             if t not in seen:
                 errs.append(f"{where}: table {t!r} is not in the spec's tables section")
         has_on = bool(str(j.get("on") or "").strip())
+        # Both forms on one row is ambiguous: building the `on` join would drop the columns, and an
+        # `on` holding only the extra filter would join every row to every row.
+        if has_on and (_low(j.get("from_column")) or _low(j.get("to_column"))):
+            errs.append(
+                f"{where}: give either from_column/to_column or an `on` condition, not both — "
+                "put the column equality inside `on` if it also needs a filter"
+            )
         if not has_on:
             for side, t in (("from_column", ft), ("to_column", tt)):
                 c = _low(j.get(side))
@@ -137,6 +144,21 @@ def _check_spec(
             errs.append(f"{where}: join type {jt!r} is not one of {', '.join(_JOIN_TYPES)}")
 
     members = _area_members(spec)
+    # Two metrics whose names make the same file name (`Sales Amount`, `sales-amount`) would overwrite
+    # each other in their area.
+    from .build import item_file_stem
+
+    stems: dict[tuple[str, str], list[str]] = {}
+    for m in spec.get("metrics", []):
+        name = str(m.get("name") or "").strip()
+        if name:
+            stems.setdefault((_low(m.get("area")), item_file_stem(name)), []).append(name)
+    for (area, _stem), names in sorted(stems.items()):
+        if len(names) > 1:
+            errs.append(
+                f"metrics {', '.join(repr(n) for n in names)} in subject area {area!r} have the same "
+                "name once spaces and punctuation are ignored — rename one"
+            )
     # An area's tables are written and looked up by bare name, so sales.date_d and archive.date_d in
     # one area would overwrite each other's file and answer to the same name. Give each its own area.
     for a, names in sorted(members.items()):
@@ -303,7 +325,7 @@ def _relationship(
         from_schema=tables[ft].schema_name,
         to_schema=tables[tt].schema_name,
         on=on,
-        join_type=(str(j.get("join_type") or "LEFT").upper()),
+        join_type=(str(j.get("join_type") or "LEFT").strip().upper()),
         relationship=_low(j.get("cardinality")) or "many_to_one",
         description=desc,
         confidence="confirmed" if approved else "proposed",

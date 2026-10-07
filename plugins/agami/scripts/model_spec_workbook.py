@@ -158,7 +158,8 @@ def parse(path: str) -> tuple[dict, list[str], list[str]]:
     default_schema = settings.get("schema", "")
     allow = []
     for t in spec.get("tables", []):
-        schema = t.get("schema") or default_schema
+        # an already-qualified name (sales.date_d) keeps its own schema rather than gaining another
+        schema = "" if "." in t["table"] else (t.get("schema") or default_schema)
         allow.append(f"{schema}.{t['table']}" if schema else t["table"])
     return spec, allow, errors
 

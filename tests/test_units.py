@@ -219,3 +219,10 @@ def test_year_period_and_id_columns_are_not_grouped():
     assert row2 == "| 2025 | 2025-11 | 7654321 | 4 | 2,500.5 | 10002 |"
     # a unit still wins: a currency column named like a label is formatted as money
     assert "$1,000.00" in units.format_table(["fee_code"], [[1000]], units={"fee_code": "USD"})
+
+
+def test_a_label_string_is_shown_exactly_as_stored():
+    # only a float's driver-added ".0" is dropped; a textual code that ends in ".0" is data
+    assert units._as_label(2025.0) == "2025"
+    assert units._as_label("001.0") == "001.0"
+    assert units._as_label(2025.5) == "2025.5"

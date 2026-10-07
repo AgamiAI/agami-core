@@ -1080,3 +1080,81 @@ def test_a_table_name_two_schemas_share_must_be_qualified(tmp_path):
         if t.name == "date_d"
     ]
     assert [x.schema_name for x in t] == ["sales_data"]
+
+
+# --- third review round ---------------------------------------------------------------------------
+
+
+def test_a_join_with_both_columns_and_a_condition_is_refused(tmp_path):
+    _introspected(tmp_path)
+    spec = _spec()
+    spec["joins"][0]["on"] = "customer_d.current_flag = 'Y'"
+    res = model_spec.apply_spec(tmp_path, spec, dry_run=True)
+    assert any("not both" in e for e in res.errors), res.errors
+
+
+def test_two_metrics_with_the_same_file_name_are_refused(tmp_path):
+    _introspected(tmp_path)
+    spec = _spec()
+    spec["metrics"].append({**spec["metrics"][0], "name": "sales-amount"})
+    res = model_spec.apply_spec(tmp_path, spec, dry_run=True)
+    assert any("same name once spaces and punctuation are ignored" in e for e in res.errors)
+
+
+def test_a_padded_join_type_is_accepted(tmp_path):
+    _introspected(tmp_path)
+    spec = _spec()
+    spec["joins"][0]["join_type"] = " left "
+    assert model_spec.apply_spec(tmp_path, spec, signer="you@example.com").applied
+
+
+def test_reapplying_keeps_the_glossary(tmp_path):
+    from semantic_model import curate
+
+    _introspected(tmp_path)
+    assert model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com").applied
+    assert curate.set_key_terminology(tmp_path, {"AOV": "Average order value."}).validated
+    assert model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com").applied
+    assert loader.load_datasource(tmp_path).key_terminology == {"AOV": "Average order value."}
+
+
+def test_a_join_matched_in_two_places_is_refused(tmp_path):
+    # the same join in the area and between areas: approving must not pick whichever file came first
+    from semantic_model import curate
+
+    root = _unapproved(tmp_path)
+    join = {
+        "from_table": "sales_f",
+        "from_column": "ship_to_customer_key",
+        "to_table": "customer_d",
+        "to_column": "customer_key",
+        "relationship": "many_to_one",
+        "from_subject_area": "orders",
+        "to_subject_area": "regions",
+    }
+    (root / "cross_subject_area_relationships.yaml").write_text(yaml.safe_dump({"edges": [join]}))
+    op = {
+        "op": "approve",
+        "kind": "relationship",
+        "area": "orders",
+        "name": "sales_f->customer_d",
+        "from_column": "ship_to_customer_key",
+        "at": "2026-01-01T00:00:00Z",
+    }
+    res = curate.apply(root, [op], signer="you@example.com", role="owner")
+    assert not res.applied and "2 joins match" in res.skipped[0]["reason"]
+
+
+def test_workbook_keeps_a_qualified_table_name_as_written(tmp_path):
+    mw = _workbook_module()
+    path = _xlsx(
+        tmp_path / "q.xlsx",
+        {
+            "Subject areas": [["Subject area"], ["orders"]],
+            "Tables": [["Table", "Owned by", "Schema"], ["archive.date_d", "orders", "sales"]],
+            "Joins": [["From table", "To table"], ["archive.date_d", "archive.date_d"]],
+            "Settings": [["Setting", "Value"], ["Schema", "sales"]],
+        },
+    )
+    _spec_out, allow, errors = mw.parse(path)
+    assert not errors and allow == ["archive.date_d"]

@@ -34,8 +34,9 @@ below corresponds to one such version.
   anything is built: a row missing a required value is reported by its row number (an empty Tables
   sheet would otherwise have meant "introspect everything"), and join types, metric names and source
   tables, the fiscal month, and table names two schemas share (write `schema.table`) are validated;
-  two such tables can't share one area. Re-applying keeps the metrics the spec doesn't redefine,
-  matched by area and name.
+  two such tables can't share one area, a join gives either a column pair or a condition (not both),
+  and two metrics in one area can't share a name once punctuation is ignored. Re-applying keeps the
+  metrics the spec doesn't redefine, matched by area and name, and the glossary.
   agami-connect introspects the spec's tables in one call, then still proposes entities. `model_spec_workbook.py` counts what it read, so a run reports the workbook's numbers
   instead of estimating them. Format: [`shared/model-spec-format.md`](plugins/agami/shared/model-spec-format.md).
 - **The model explorer's PII tab clears or marks a whole list at once.** A model with dozens of flagged
@@ -54,6 +55,9 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Rewriting `datasource.yaml` keeps the glossary and the cross-area entities and metrics stored in
+  it.** `write_tree` wrote only the fields it built, so a re-introspect or a spec re-apply dropped
+  terminology added with `sm set-terminology`. They are carried over like the description.
 - **Signing off an example no longer strips it.** `sm add-example` replaced an example whose question
   already existed, so re-saving it with a signer, as agami-connect does to record a validation, dropped
   its `confirmed` status and scope tags. A re-save with the same SQL now keeps the fields it doesn't
