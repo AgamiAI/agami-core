@@ -194,3 +194,32 @@ def test_read_version_prefers_cache_dir_name(monkeypatch, tmp_path):
     fake.mkdir(parents=True)
     monkeypatch.setattr(sd, "SCRIPT_DIR", fake)
     assert sd.read_version() == "0.3.9"
+
+
+def test_find_interpreter_prefers_the_one_agami_connect_configured(monkeypatch, tmp_path):
+    # agami-connect records the interpreter it ran queries with; it is the proven one, so it goes first
+    configured = tmp_path / "python3"
+    configured.write_text("")
+    monkeypatch.setattr(sd, "_load_config", lambda: {"tool_paths": {"python3": str(configured)}})
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: True)
+    assert sd.find_interpreter("psycopg2", None) == str(configured.resolve())
+
+
+def test_main_refuses_to_write_an_entry_whose_python_cannot_import_the_driver(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    cfg = tmp_path / "claude_desktop_config.json"
+    monkeypatch.setattr(sys, "argv", ["setup_desktop_mcp.py", "--profile", "p", "--config", str(cfg)])
+    monkeypatch.setattr(sd, "find_interpreter", lambda module, forced: "/x/python3")
+    monkeypatch.setattr(sd, "ensure_package_installed", lambda python, dry_run: None)
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: mod != "psycopg2")
+    assert sd.main() == 2
+    assert not cfg.exists()
+
+
+def test_find_interpreter_honours_agami_python_first(monkeypatch, tmp_path):
+    env_py, configured = tmp_path / "env-python3", tmp_path / "cfg-python3"
+    env_py.write_text(""); configured.write_text("")
+    monkeypatch.setenv("AGAMI_PYTHON", str(env_py))
+    monkeypatch.setattr(sd, "_load_config", lambda: {"tool_paths": {"python3": str(configured)}})
+    monkeypatch.setattr(sd, "_interpreter_can_import", lambda py, mod: True)
+    assert sd.find_interpreter("psycopg2", None) == str(env_py.resolve())

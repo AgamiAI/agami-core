@@ -29,7 +29,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import loader as L
 from . import runtime as RT
@@ -39,6 +39,21 @@ from . import validator as V
 def _print_json(obj) -> None:
     json.dump(obj, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
+
+
+def _read_json_file(path: str) -> Any:
+    """Read a command's JSON input, or stop with a JSON error naming the RESOLVED path. A traceback
+    on stdout (a relative path that didn't resolve where the caller thought, a half-written file)
+    read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked."""
+    p = Path(path).expanduser()
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        _print_json({"error": f"file not found: {p.resolve()}"})
+    except (OSError, ValueError) as exc:
+        _print_json({"error": f"could not read JSON from {p.resolve()}: {exc}"})
+    raise SystemExit(2)
 
 
 def _utc_now_iso() -> str:
@@ -510,8 +525,7 @@ def cmd_set_terminology(args) -> int:
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
     default (layers over a human's edits); --replace overwrites. Validated + committed."""
     from . import curate
-    with open(args.file, encoding="utf-8") as fh:
-        terms = json.load(fh)
+    terms = _read_json_file(args.file)
     if isinstance(terms, dict) and "key_terminology" in terms:
         terms = terms["key_terminology"]
     res = curate.set_key_terminology(args.root, terms, merge=not args.replace)
@@ -533,8 +547,7 @@ def cmd_set_description(args) -> int:
 
 def cmd_curate(args) -> int:
     from . import curate
-    with open(args.ops_file, encoding="utf-8") as fh:
-        ops = json.load(fh)
+    ops = _read_json_file(args.ops_file)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
     _stamp_approve_ops(ops)
@@ -554,7 +567,9 @@ def cmd_approve_queue(args) -> int:
     queue = curate.review_queue(org)
     kinds = set(args.kind) if args.kind else None
     ops = [{"op": "approve", "kind": it["kind"], "area": it["area"],
-            "name": it["name"], "at": _utc_now_iso()}
+            "name": it["name"], "at": _utc_now_iso(),
+            **{k: it[k] for k in ("from_schema", "to_schema", "from_column", "to_column", "on")
+               if it.get(k)}}
            for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
            if kinds is None or it["kind"] in kinds]
     if args.dry_run:
@@ -567,8 +582,7 @@ def cmd_approve_queue(args) -> int:
 
 def cmd_add(args) -> int:
     from . import curate
-    with open(args.file, encoding="utf-8") as fh:
-        items = json.load(fh)
+    items = _read_json_file(args.file)
     if isinstance(items, dict):
         items = items.get(args.kind + "s", items.get("items", []))
     res = curate.write_items(args.root, args.area, args.kind, items,
@@ -577,10 +591,21 @@ def cmd_add(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_apply_spec(args) -> int:
+    from . import model_spec
+    spec = _read_json_file(args.file)
+    if not isinstance(spec, dict):
+        _print_json({"error": "a model spec is a JSON object with subject_areas, tables and joins"})
+        return 2
+    res = model_spec.apply_spec(args.root, spec,
+                                signer=args.signer, role=args.role, dry_run=args.dry_run)
+    _print_json(res.as_dict())
+    return 0 if not res.errors else 1
+
+
 def cmd_add_example(args) -> int:
     from . import curate
-    with open(args.file, encoding="utf-8") as fh:
-        items = json.load(fh)
+    items = _read_json_file(args.file)
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
     res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
@@ -728,7 +753,18 @@ def cmd_describe_file(args) -> int:
     curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
     generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
     from . import curate
-    text = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    if args.file:
+        p = Path(args.file).expanduser()
+        try:
+            text = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _print_json({"error": f"file not found: {p.resolve()}"})
+            return 2
+        except (OSError, ValueError) as exc:  # a directory, no permission, not UTF-8
+            _print_json({"error": f"could not read {p.resolve()}: {exc}"})
+            return 2
+    else:
+        text = sys.stdin.read()
     ops = []
     for ln in text.splitlines():
         if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
@@ -747,7 +783,9 @@ def cmd_describe_file(args) -> int:
         _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
         return 0
     res = curate.apply(args.root, ops)
-    _print_json({"described": len(res.applied), "errors": res.errors})
+    # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
+    # over a generated one — so the skill can say so instead of counting it as described.
+    _print_json({"described": len(res.applied), "skipped": res.skipped, "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -861,8 +899,7 @@ def cmd_seed_examples(args) -> int:
         if block is not None:
             _print_json(block)
             return 2
-    with open(args.file, encoding="utf-8") as fh:
-        cands = json.load(fh)
+    cands = _read_json_file(args.file)
     if isinstance(cands, dict):
         cands = cands.get("examples", cands.get("items", []))
     runner = make_execute_sql_runner(args.profile)
@@ -1468,6 +1505,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", dest="dry_run",
                     help="print the approve ops that would be applied, without applying them")
     sp.set_defaults(func=cmd_approve_queue)
+
+    sp = sub.add_parser("apply-spec",
+                        help="apply a model spec (subject areas, table ownership, joins, metrics, "
+                             "sensitive columns, rules) over the introspected model as one validated, "
+                             "revertable step")
+    sp.add_argument("root")
+    sp.add_argument("--file", required=True, help="the spec as JSON (model_spec_workbook.py makes it from the template)")
+    sp.add_argument("--signer", default=None, help="who signs off the joins and metrics the spec marks approved")
+    sp.add_argument("--role", default=None)
+    sp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="check the spec and report what would change, without writing")
+    sp.set_defaults(func=cmd_apply_spec)
 
     sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
     sp.add_argument("root")

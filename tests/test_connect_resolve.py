@@ -175,3 +175,26 @@ def test_duckdb_driver_requires_pytz(monkeypatch):
     assert scored[no_pytz]["has_driver"] is False   # duckdb present, pytz missing → not ready
     assert scored[full]["has_driver"] is True
     assert res["python3"] == full                    # the pytz-equipped interpreter is chosen
+
+
+def test_secret_values_never_reach_the_output(tmp_path, monkeypatch, capsys):
+    # The output lands in the agent's transcript: a field's presence is reported, never a secret's value,
+    # and a connection URL keeps its host/user but not the password written inline.
+    local = tmp_path / "local"
+    local.mkdir()
+    creds = local / "credentials"
+    creds.write_text(
+        "[p]\ntype = redshift\nhost = your-cluster.example.com\nuser = demo\n"
+        "password = hunter2-pw\ntoken = tok-xyz\nprivate_key_passphrase = pp-abc\n"
+        "url = postgresql://demo:url-pw-123@your-cluster.example.com:5439/db?sslmode=require\n",
+        encoding="utf-8",
+    )
+    os.chmod(creds, 0o600)
+    data, _ = _run(monkeypatch, tmp_path, AGAMI_PROFILE="p")
+    fields = data["credentials"]["fields"]
+    raw = json.dumps(data)
+    for secret in ("hunter2-pw", "tok-xyz", "pp-abc", "url-pw-123"):
+        assert secret not in raw
+    assert fields["password"] == fields["token"] == CR._REDACTED
+    assert fields["url"].startswith("postgresql://demo:") and "your-cluster.example.com:5439" in fields["url"]
+    assert fields["host"] == "your-cluster.example.com" and data["credentials"]["type"] == "redshift"

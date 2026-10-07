@@ -409,7 +409,7 @@ def _large_runner(sql):
     if "information_schema.tables" in s and "table_type" in s:
         return [{"schema_name": "public", "table_name": "events", "table_type": "BASE TABLE"},
                 {"schema_name": "public", "table_name": "wide_mart", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'events'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "created_at", "data_type": "timestamp", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
@@ -464,7 +464,7 @@ def _no_pk_runner(table, est_rows, *, seen):
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             return [{"schema_name": "public", "table_name": table, "table_type": "BASE TABLE"}]
-        if "information_schema.columns" in s:
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             return cols
         if "PRIMARY KEY" in s:
             return []  # no catalog PK → without the guard this would fall into the scan probe
@@ -555,7 +555,7 @@ def _xschema_fk_runner(sql):
         if "'sales'" in s:
             return [{"schema_name": "sales", "table_name": "invoices", "table_type": "BASE TABLE"}]
         return [{"schema_name": "billing", "table_name": "customers", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'invoices'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -601,7 +601,7 @@ def _collision_probe_runner(sql):
             return [{"schema_name": "s1", "table_name": "orders", "table_type": "BASE TABLE"},
                     {"schema_name": "s1", "table_name": "customers", "table_type": "BASE TABLE"}]
         return [{"schema_name": "s2", "table_name": "customers", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'orders'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -655,7 +655,7 @@ def _collision_schemas_runner(sql):
                     {"schema_name": "billing", "table_name": "invoices", "table_type": "BASE TABLE"}]
         return [{"schema_name": "crm", "table_name": "products", "table_type": "BASE TABLE"},
                 {"schema_name": "crm", "table_name": "accounts", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'invoices'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "product_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -708,7 +708,7 @@ def _redshift_fk_runner(overlap_matches: bool):
         if "information_schema.tables" in s and "table_type" in s:
             return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"},
                     {"schema_name": "public", "table_name": "customers", "table_type": "BASE TABLE"}]
-        if "information_schema.columns" in s:
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             if "'orders'" in s:
                 return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                         {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -772,7 +772,7 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
             rows = [{"schema_name": "public", "table_name": "parent", "table_type": "BASE TABLE"}]
             rows += [{"schema_name": "public", "table_name": f"child{i}", "table_type": "BASE TABLE"} for i in range(N)]
             return rows
-        if "information_schema.columns" in s:
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             if "'parent'" in s:
                 return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""}]
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
@@ -827,7 +827,7 @@ def test_introspect_fails_fast_on_bogus_allowlist(tmp_path):
 
 def _append_runner(sql):
     s = " ".join(sql.split())
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'orders'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "total", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": "2"}]
@@ -878,3 +878,98 @@ def test_introspect_append_relisting_table_no_duplicate(tmp_path):
     org = L.load_datasource(tmp_path / "shop")
     names = [t.name for sa in org.subject_areas for t in sa.tables_defined]
     assert sorted(names) == ["customers", "order_items", "orders"]   # each table exactly once
+
+
+def test_a_failed_column_read_is_retried_once():
+    # A dropped connection on one catalog read must not cost the table its columns.
+    from semantic_model import dialects as D
+
+    calls = {"n": 0}
+
+    def flaky(sql: str):
+        if "svv_columns" in sql:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection reset")
+            return [{"column_name": "id", "data_type": "integer", "numeric_scale": None}]
+        raise AssertionError("fell through to the probe")
+
+    cols, mode = I._columns(D.get_dialect("redshift"), flaky, "s", "t")
+    assert mode == "catalog" and [c.name for c in cols] == ["id"] and calls["n"] == 2
+
+
+def test_an_empty_column_read_is_not_retried():
+    # [] means the catalog answered and listed nothing; only a FAILED read (None) is retried.
+    from semantic_model import dialects as D
+
+    seen: list[str] = []
+
+    def empty(sql: str):
+        seen.append(sql)
+        return []
+
+    I._columns(D.get_dialect("redshift"), empty, "s", "t")
+    assert sum("svv_columns" in s for s in seen) == 1
+
+
+def test_one_value_seen_in_a_sample_is_not_a_value_list():
+    # a sample of the first rows can show a single value of a column that holds several
+    assert I._maybe_choice(["N"] * 50) is None
+    assert I._maybe_choice(["N"] * 30 + ["Y"] * 20) == {"N": "", "Y": ""}
+
+
+def test_warehouse_keys_are_not_money():
+    from semantic_model import build as B_
+
+    for key in (
+        "invoice_key",
+        "payment_key",
+        "payment_method_type_key",
+        "invoice_sk",
+        "credit_fk",
+        "deposit_account_key",
+        "invoice_nbr",
+    ):
+        assert not B_.detect_money_column(key), key
+    assert B_.detect_money_column("invoice_amount") and B_.detect_money_column("credit_amt")
+
+
+def _status_col():
+    return m.Column(name="status", type="string", description="")
+
+
+def _rows(n):
+    return [{"status": "Open" if i % 3 else "Closed"} for i in range(n)]
+
+
+@pytest.mark.parametrize(
+    "sample_rows, est_rows, expect_list",
+    [
+        (120, None, True),  # the sample is the whole table
+        (I.SAMPLE_ROWS, 5_000, True),  # first rows of a small table, per the catalog
+        (I.SAMPLE_ROWS, None, False),  # a view or no estimate: the first rows could be any corner
+        (I.SAMPLE_ROWS, 15_000_000, False),  # a big table: an incomplete list would mislead
+    ],
+)
+def test_a_value_list_is_built_only_from_a_representative_sample(
+    sample_rows, est_rows, expect_list
+):
+    from semantic_model import dialects as D
+
+    col = _status_col()
+    I._enrich_from_sample(
+        D.get_dialect("postgres"),
+        lambda sql: _rows(sample_rows),
+        "s",
+        "t",
+        [col],
+        est_rows=est_rows,
+    )
+    assert (col.choice_field == {"Closed": "", "Open": ""}) is expect_list
+
+
+def test_an_unknown_row_estimate_is_not_a_small_table():
+    # a view or a never-analyzed table reports -1 rows; a full sample of it covers nothing
+    full = [{}] * I.SAMPLE_ROWS
+    assert not I._sample_covers_values(full, -1)
+    assert I._sample_covers_values(full, I.SAMPLE_ROWS)

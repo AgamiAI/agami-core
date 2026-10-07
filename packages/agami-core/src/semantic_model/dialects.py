@@ -306,6 +306,30 @@ class Redshift(PostgreSQL):
     sql_primary_keys = Dialect.sql_primary_keys
     sql_foreign_keys = Dialect.sql_foreign_keys
 
+    # Columns come from svv_columns, not information_schema.columns. A late-binding view (CREATE
+    # VIEW ... WITH NO SCHEMA BINDING) is listed in information_schema.tables but its columns are not
+    # in information_schema.columns, so a schema built from such views introspected as tables with no
+    # columns. svv_columns lists the columns of tables, views and late-binding views alike, under the
+    # same field names.
+    def sql_columns(self, schema: str, table: str) -> str:
+        return (
+            "SELECT column_name, data_type, is_nullable, ordinal_position, "
+            "numeric_scale FROM svv_columns "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} ORDER BY ordinal_position"
+        )
+
+    def sql_columns_bulk(self, schemas: list[str]) -> Optional[str]:
+        if not schemas:
+            return None
+        inlist = ", ".join(self.quote_lit(s) for s in schemas)
+        return (
+            "SELECT table_schema, table_name, column_name, data_type, "
+            "numeric_scale, ordinal_position FROM svv_columns "
+            f"WHERE table_schema IN ({inlist}) "
+            "ORDER BY table_schema, table_name, ordinal_position"
+        )
+
     def duration_days_expr(self, start: str, end: str) -> str:
         return f"DATEDIFF('day', {start}, {end})"
 

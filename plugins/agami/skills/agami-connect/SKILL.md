@@ -521,10 +521,13 @@ Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Se
 > • **A metrics / KPI list** — a spreadsheet, CSV, or doc of your metrics and how each is defined (e.g. "Approval rate = approved ÷ applications"). I'll turn each into a reusable metric so answers match your numbers.
 > • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
 > • **A published product schema** — if this DB is a well-known product (ServiceNow, Salesforce, Jira, NetSuite, SAP, HubSpot, Workday…), I can look up its official table/column reference online so the standard fields get correct descriptions automatically.
+> • **A model spec workbook** — agami's template (`shared/model-spec-template.xlsx`) filled in with your subject areas, which area owns each table, the joins, metrics, sensitive columns and rules. The model is built **exactly** as it says — the way to model a warehouse whose joins aren't declared (a star schema of views, keys named for their role).
 
-Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Skip — nothing to share`. (Multi-select — combine as needed.)
+Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Model spec workbook — I'll attach it` / `Skip — nothing to share`. (Multi-select — combine as needed.)
 
-**If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
+**A model spec workbook is recognised by its sheets, whatever the user called it:** an `.xlsx` with `Subject areas`, `Tables` and `Joins` sheets is one, even if they picked "Doc". Take the [model-spec path](#18--apply-a-model-spec-only-when-one-was-attached) for it — **never `Read` it as a doc**: the parser reads every row, and a doc read is trimmed and paraphrased.
+
+**If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). Any other `.xlsx`/`.docx` → ask for PDF, proceed without if not.
 
 **If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user wants the standard fields grounded in the authoritative reference, not your training memory.
 
@@ -579,6 +582,18 @@ It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything},
 
 If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
 
+### 1.6s — With a model spec: the spec IS the kept set
+
+When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 prune page — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
+
+```bash
+"$PY" "$AGAMI_PLUGIN_ROOT/scripts/model_spec_workbook.py" parse --file "<workbook.xlsx>" \
+  --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" \
+  --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
+```
+
+It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. Once a first batch has written a model, the query guard can scope the next batch's catalog reads to the model's own tables and refuse them, and every table in that batch is then dropped as "no readable columns". One call reads every table before any model exists.
+
 ### 1.7 — Run the introspection engine (on the kept tables)
 
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. From `plugins/agami/scripts/`:
@@ -620,6 +635,26 @@ The validator gates the write — **if it fails, the model is not persisted.** S
 Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe> mode); <R> relationships, <D> deep tables, <S> sensitive columns flagged.`
 
 **Backstop reconciliation — if `<N>` is fewer than the catalog held, say what's NOT in the model and why** (the 1.3 guard should have covered this up front; repeat it here so it can't slip). E.g. *"Modeled 52 of 70 tables — left out `public` (17, separate Salesforce dataset) and `pg_auto_copy` (1, system). Say the word if you want any of them."* A user who picked "all" should never have to diff the catalog themselves to notice a schema is missing.
+
+### 1.8 — Apply a model spec (ONLY when one was attached)
+
+Introspection proposed areas by name and joins only where the catalog or `*_id` names showed them. The spec replaces both, in one validated step that writes nothing unless the whole result validates and restores the previous model if anything fails:
+
+1. **Dry run** and show the result:
+   ```bash
+   bash "$AGAMI_PLUGIN_ROOT/scripts/sm" apply-spec "<artifacts_dir>/<profile>" \
+     --file "<artifacts_dir>/local/model-spec/<profile>/spec.json" --dry-run
+   ```
+   `errors` lists every problem at once (a table the build didn't find, an area a table names that the spec doesn't declare, a join column that doesn't exist) — show them all and stop; the person fixes the workbook and you re-run 1.6s.
+
+   **A table "not in the introspected model" that IS in the database** means its columns couldn't be read during the build (introspect's notes say `dropped … no readable columns`; a dropped connection is the usual cause). A second introspect into the same profile can't add it — once a model exists, its queries are scoped to the model's own tables — so move the partial model aside and rebuild once: `mv "<artifacts_dir>/<profile>" "<artifacts_dir>/<profile>.partial-<timestamp>"` (never delete it), then re-run 1.7 with the same `--tables-file`. If the same tables are missing again, stop and name them: the connecting role probably can't read them.
+2. **If the spec approves anything** (`joins_approved` > 0, or a metric marked approved), ask ONE question: *"The spec marks <n> joins and <m> metrics approved. Sign them off as you (<email>)?"* — `Yes` → pass `--signer <email> --role owner`; `No` → re-run without `--signer` after the person clears the Approved column. Never sign off in someone's name without asking.
+3. **Apply**: the same command without `--dry-run`. Each join lands where the runtime serves it — in the area that owns both its tables, else as a cross-area join between the two owners — so the counts are `joins` = area joins + `cross_area_joins`.
+4. Surface the counts from the JSON, verbatim: *"Applied the spec: <A> subject areas (<per-area owns / lists>), <J> joins (<approved> approved, <with condition> with a condition, <cross> between areas), <M> metrics, <S> sensitive columns, <R> rules; dropped <D> introspected tables the spec doesn't name; replaced <I> joins introspection had guessed."*
+
+Surface any `notes` too — in particular a metric flagged as a plain aggregate: ask once whether to drop it and put its name in the column description instead (re-run 1.6s after they edit the workbook), or keep it.
+
+**After a spec, the model's structure is the person's, not yours.** Through the rest of the run: don't propose, add or re-infer joins; don't re-split subject areas (Phase 3 shows the spec's areas, it doesn't propose new ones); don't add metrics the spec didn't name (2c — the spec's metrics are already in); carry its rules as written (they are in `datasource.md` already). Enrichment still describes tables and the columns the spec's Columns sheet left out — the spec's own descriptions are `human` and a generated one is refused over them. **Run 2b (entities) as usual:** entities are the model's vocabulary (the business nouns questions are routed by), not structure, and a spec doesn't declare them.
 
 ---
 
@@ -877,7 +912,7 @@ Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns a
 
 > **This gate OPENS the explorer; it is not a choice.** When either count is > 0 you open `/agami-model preseed` and end the turn. A high count is a reason to open it, not to skip it (bulk-approve the *Looks right* pile, eyeball PII + the cross-schema joins there). The "continue anyway" option exists **only** at the 4b return gate — after the user has been in the explorer at least once.
 
-**4b — return gate:** when they're back, **recount the sign-offs** (`--scope preseed`). If **0** → Phase 5 (the seed command runs clean). If **> 0** (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **PII left un-excluded does NOT block seeds** — keeping a sensitive column queryable is the user's call; only unreviewed *sign-offs* gate the seeds.
+**4b — return gate:** when they're back, **recount the sign-offs** with `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0** (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **PII left un-excluded does NOT block seeds** — keeping a sensitive column queryable is the user's call; only unreviewed *sign-offs* gate the seeds.
 
 On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip silently.
 
@@ -891,7 +926,8 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 - **Shapes:** a count, a top-N, a time-bucketed trend, a breakdown, a recency filter. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset.
 - **Spread:** across the whole set, touch each major table/family, exercise **every approved metric at least once**, use the key **entities** by their real names/synonyms, and cover **representative joins** — intra-area *and* cross-schema.
-- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** Read the model's `cross_subject_area_relationships` (the cross-schema / cross-area joins). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
+- **Get every join from the model through `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --tables <t1> <t2> …`** — it returns the joins touching those tables exactly as a question will be answered (area and cross-area alike), each with its role label and full condition (a `current_flag = 'Y'` included), so a seed writes the join the model declares. Never read the model's YAML to find joins.
+- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** The cross-schema / cross-area joins are in that same output (and in `cross_subject_area_relationships`). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
 - **Count scales with the model:** a single-schema DB is fine at ~10–12; a multi-schema one wants ~2–3 per subject area **plus** the 2–4 cross-schema seeds — don't undersample a 5-schema DB at a flat 12.
 
 Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metric`. **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.
@@ -922,6 +958,7 @@ Then render the examples-validation dashboard (per-profile subdir) from those it
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
+  --title "Seed examples · <profile>" --profile <profile> \
   --items-file /tmp/agami-examples-items.json \
   --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
 ```
@@ -938,7 +975,7 @@ Reply: approve N · reject N · edit N · done (when you're through).
 ```
 
 **Processing the batch:** the dashboard emits `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all` — apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the dashboard's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back (the per-area seed numbers no longer collide):
-- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), stamp it via `sm add-example` (re-write the same example with `--signer`/`--role`).
+- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written). The sign-off is recorded in `curation_log.jsonl`, not on the example: an example carries no signer field, so don't look for one there.
 - **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). It flags the example `status: rejected` — kept in `examples.yaml` for audit, dropped from the runtime ranker. **Do NOT hand-delete or hand-rewrite the YAML** (there's a command now); map `N` → the example's question from the items you rendered.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
 

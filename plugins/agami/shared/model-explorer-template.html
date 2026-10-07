@@ -1435,11 +1435,21 @@
       if (e && e.fields && ('sensitive' in e.fields)) return !!e.fields.sensitive;
       return !!field.sensitive;
     }
-    function setSensitive(field, table, val) {
+    function queueSensitive(field, table, val) {
       const q = field.qname; const orig = !!field.sensitive;
       const cur = edits[q] || { kind: 'table', area: table.area, name: table.name, column: field.name, fields: {} };
       if (val === orig) delete cur.fields.sensitive; else cur.fields.sensitive = val;
       if (Object.keys(cur.fields).length) edits[q] = cur; else delete edits[q];
+    }
+    function setSensitive(field, table, val) {
+      queueSensitive(field, table, val);
+      renderAll();
+    }
+    // Bulk: queue the same flag on every row the list is showing (search narrows it), then render
+    // once. Still only queued edits — nothing applies until the footer submits, and each row's own
+    // toggle undoes it.
+    function setSensitiveMany(rows, val) {
+      rows.forEach(r => queueSensitive(r.f, r.ctx, val));
       renderAll();
     }
     function piiToggleBtn(field, table) {
@@ -1485,9 +1495,15 @@
       }));
       return { flagged, suspected };
     }
-    function piiSubhead(label, n, hint) {
+    function piiSubhead(label, n, hint, bulk) {
       const w = el('div', { style: 'margin:14px 0 4px;' });
-      w.appendChild(el('div', { class: 'kind-subhead', html: label + ' <span class="subtab-count">' + n + '</span>' }));
+      const head = el('div', { class: 'kind-subhead', style: 'display:flex;align-items:center;gap:10px;',
+        html: label + ' <span class="subtab-count">' + n + '</span>' });
+      if (bulk && n) {
+        head.appendChild(el('button', { type: 'button', class: 'btn-pii pii-bulk', style: 'margin-left:auto;',
+          title: bulk.title, onclick: (ev) => { ev.stopPropagation(); bulk.run(); } }, bulk.label));
+      }
+      w.appendChild(head);
       if (hint) w.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 6px;', text: hint }));
       return w;
     }
@@ -1532,13 +1548,22 @@
       const sec = el('div', { class: 'schema-section' });
       if (piiSubTab !== 'suspected') {
         sec.appendChild(piiSubhead('Flagged as PII', fl.length,
-          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive.'));
+          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive — or search to narrow the list and clear them all at once.',
+          { label: 'Clear all ' + fl.length + ' shown',
+            title: 'Queue clearing the PII flag on every column listed here (search narrows it). Nothing applies until you submit.',
+            run: () => {
+              // Clearing a privacy flag lets raw values be returned, so the count is confirmed first.
+              if (window.confirm('Clear the PII flag on ' + fl.length + ' column(s)? Their raw values will be returned in answers once you submit.')) setSensitiveMany(fl, false);
+            } }));
         if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
         fl.forEach(r => sec.appendChild(piiRowCard(r)));
       }
       if (piiSubTab !== 'flagged') {
         sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
-          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.'));
+          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.',
+          { label: 'Mark all ' + su.length + ' shown',
+            title: 'Queue marking every column listed here as PII (search narrows it). Nothing applies until you submit.',
+            run: () => setSensitiveMany(su, true) }));
         if (!su.length) sec.appendChild(el('div', { class: 'empty-state', text: 'None suspected.' }));
         su.forEach(r => sec.appendChild(piiRowCard(r)));
       }
@@ -2841,19 +2866,35 @@
       // Drop approve ops on entries that became moot (a table they depend on is now excluded) —
       // approving a join to an excluded table is pointless; the runtime drops it anyway.
       const _byq = {}; reviewAll().forEach(it => { _byq[it.qname] = it; });
+      // Two tables can be joined several ways (one per date or person role), so a join op names WHICH
+      // join by its columns or condition — the table pair alone would sign off whichever came first.
+      const _joinByq = {};
+      [...(manifest.relationships || []), ...(manifest.cross_relationships || [])]
+        .forEach(r => { _joinByq[r.qname] = r; });
+      const withJoinIdentity = (qname, o) => {
+        const r = o.kind === 'relationship' ? _joinByq[qname] : null;
+        if (!r) return o;
+        const id = {};
+        if (r.from_column) id.from_column = r.from_column;
+        if (r.to_column) id.to_column = r.to_column;
+        if (r.on) id.on = r.on;
+        if (r.from_schema) id.from_schema = r.from_schema;
+        if (r.to_schema) id.to_schema = r.to_schema;
+        return { ...o, ...id };
+      };
       const opList = [];
       Object.entries(ops).forEach(([qname, o]) => {
         if (o.op === 'approve') {
           const it = _byq[qname];
           if (it && mootReason(it)) return;  // skip moot approval
-          opList.push(_approveAt ? { ...o, at: _approveAt } : o);
-        } else opList.push(o);
+          opList.push(withJoinIdentity(qname, _approveAt ? { ...o, at: _approveAt } : o));
+        } else opList.push(withJoinIdentity(qname, o));
       });
-      Object.values(edits).forEach(e => {
+      Object.entries(edits).forEach(([qname, e]) => {
         Object.keys(e.fields).forEach(field => {
           const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
           if (e.column) op.column = e.column;
-          opList.push(op);
+          opList.push(withJoinIdentity(qname, op));
         });
       });
       if (opList.length) { lines.push('curate-ops:'); lines.push(JSON.stringify(opList)); }

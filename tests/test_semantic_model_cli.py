@@ -168,6 +168,13 @@ def test_describe_file_applies_tsv(tmp_path):
     assert total["description_source"] == "ai_unvalidated"   # source:ai → earns trust via use
 
 
+def test_describe_file_reports_an_unreadable_path_as_json(tmp_path):
+    # a directory (or no permission) is a JSON error, not a traceback a skill reads as "nothing applied"
+    _model(tmp_path)
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tmp_path)])
+    assert rc == 2 and "could not read" in json.loads(out)["error"]
+
+
 def test_prepare_does_not_apply_default_filters(tmp_path):
     """ACE-042: `sm prepare` hands back the caller's statement. The model declares
     `{alias}.deleted_at IS NULL` on `orders` and it neither reaches the SQL nor comes back as an
@@ -300,6 +307,34 @@ def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
     ex = list_prompt_examples(tmp_path, "sales")
     assert len(ex) == 2  # dedup by question — not 3
     assert next(e for e in ex if e["question"] == "revenue")["sql"] == "SELECT SUM(amount) FROM orders"
+
+
+def test_re_saving_an_example_with_the_same_sql_keeps_what_it_did_not_restate(tmp_path):
+    # Signing off re-saves an example with only question + sql; that must not strip its status or
+    # tags. A different SQL is a correction and still replaces the whole example.
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    sql = "SELECT SUM(total) FROM orders"
+    curate.add_examples(tmp_path, "s", [{"question": "revenue", "sql": sql, "tables": ["orders"],
+                                         "status": "confirmed"}])
+    curate.add_examples(tmp_path, "s", [{"question": "revenue", "sql": f"  {sql}\n"}],
+                        signer="you@example.com", role="owner")
+    (ex,) = list_prompt_examples(tmp_path, "s")
+    assert ex["status"] == "confirmed" and ex["tables"] == ["orders"]
+    curate.add_examples(tmp_path, "s", [{"question": "revenue", "sql": "SELECT SUM(net) FROM orders"}])
+    (ex,) = list_prompt_examples(tmp_path, "s")
+    assert "status" not in ex and "tables" not in ex
+
+
+def test_re_adding_a_rejected_example_with_the_same_sql_un_rejects_it(tmp_path):
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    sql = "SELECT COUNT(*) FROM orders"
+    curate.add_examples(tmp_path, "s", [{"question": "orders", "sql": sql, "tables": ["orders"]}])
+    curate.remove_examples(tmp_path, "s", ["orders"])
+    curate.add_examples(tmp_path, "s", [{"question": "orders", "sql": sql}])
+    (ex,) = list_prompt_examples(tmp_path, "s")
+    assert ex.get("status") != "rejected" and ex["tables"] == ["orders"]
 
 
 def test_curate_edit_op_sets_enrichment_fields(tmp_path):

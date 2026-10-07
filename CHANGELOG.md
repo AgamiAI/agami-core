@@ -12,6 +12,47 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A model spec workbook builds the model exactly as its owners describe it.** A warehouse whose
+  joins are not declared — a star schema of views, keys named for their role (`ship_to_customer_key`
+  joins the customer table), dimensions shared by several facts — introspected as disconnected tables
+  grouped by name prefix, and a person had no way to say otherwise short of editing YAML. Now they fill
+  in [`shared/model-spec-template.xlsx`](plugins/agami/shared/model-spec-template.xlsx): subject areas,
+  which area owns each table and which others list it, the joins (a plain column pair, or a full
+  condition such as a `current_flag = 'Y'` filter, each with a role), metrics, sensitive columns and
+  rules. agami-connect recognises the workbook, introspects exactly its tables, and applies it with
+  the new `sm apply-spec` as one validated step: every problem is reported at once on a dry run,
+  nothing is written unless the whole model validates, and a failure restores the previous model.
+  Each join is placed where questions find it (in the area owning both tables, else between the two
+  owning areas), and what the spec marks approved is signed off as the person running it, after
+  asking. An optional Columns sheet carries the person's own column descriptions (a data dictionary
+  pastes straight in), and a Metrics row that is a plain aggregate of one column is flagged on the
+  dry run: its name belongs in that column's description, the rule `suggest-metrics` already follows.
+  An optional Grain column on the Tables sheet states the column(s) that make a row unique — what the
+  engine can't probe on a large table and the fan-out check relies on. The workbook is checked before
+  anything is built: a row missing a required value is reported by its row number (an empty Tables
+  sheet would otherwise have meant "introspect everything"), and join types, metric names and source
+  tables, the fiscal month, and table names two schemas share (write `schema.table`) are validated;
+  two such tables can't share one area, a join gives either a column pair or a condition (not both),
+  and two metrics in one area can't share a name once punctuation is ignored. Re-applying keeps the
+  metrics the spec doesn't redefine, matched by area and name, and the glossary.
+  agami-connect introspects the spec's tables in one call, then still proposes entities. `model_spec_workbook.py` counts what it read, so a run reports the workbook's numbers
+  instead of estimating them. Format: [`shared/model-spec-format.md`](plugins/agami/shared/model-spec-format.md).
+- **The model explorer's PII tab clears or marks a whole list at once.** A model with dozens of flagged
+  columns had to be cleared one click at a time. Each list now has "Clear all N shown" / "Mark all N
+  shown", which acts on whatever the search has narrowed it to (search `email`, clear those). Like
+  every explorer change it only queues edits until the footer submits; clearing asks first, with the count.
+
+### Security
+
+- **agami-connect's environment check no longer prints the database password.** It echoed the whole
+  credentials profile into its output, so a password, token or a connection URL's inline password
+  landed in the agent's transcript on every run. Secret fields now show only that they are set, and
+  a URL keeps its host and user with the password masked. Nothing read the values; the skill only
+  checks which fields are present. If you ran agami-connect before this release, consider rotating
+  the database password it used.
+
 ### Fixed
 
 - **A join declared with a fixed-value condition matches a statement that wrote it.** A versioned
@@ -29,6 +70,70 @@ below corresponds to one such version.
   `undetermined`, and its reason names the joins, in the receipt and in `sm prepare`'s pre-flight
   alike. Only joins that can feed the number count: its own branch or a CTE, not another UNION arm or a
   `WHERE … IN` subquery (a join past the receipt's cap, which is never read, downgrades every number).
+- **Rewriting `datasource.yaml` keeps the glossary and the cross-area entities and metrics stored in
+  it.** `write_tree` wrote only the fields it built, so a re-introspect or a spec re-apply dropped
+  terminology added with `sm set-terminology`. They are carried over like the description.
+- **Signing off an example no longer strips it.** `sm add-example` replaced an example whose question
+  already existed, so re-saving it with a signer, as agami-connect does to record a validation, dropped
+  its `confirmed` status and scope tags. A re-save with the same SQL now keeps the fields it doesn't
+  restate; different SQL is still a correction and replaces the example.
+
+- **Approving a join approves that join, not the first one between its two tables.** Two tables are
+  often joined several ways (one per date or person role), but the explorer keyed those joins by the
+  table pair — every date role's join shared one key, so approving one approved, and overwrote, them all —
+  and `curate` signed off the first match. Each join now has its own key in the explorer, its approval
+  and edits carry the join's columns or condition (and both tables' schemas, so `sales.orders` and
+  `archive.orders` stay apart), and a `curate` op that still matches more than one
+  join is refused with a reason instead of guessed. `approve-queue` names each join the same way, and
+  a cross-area join is found wherever it is stored (`add_relationships` writes them to their own file,
+  which approvals never looked in).
+- **The validator warns about a join that won't be served.** An area's joins are served only among
+  the tables it defines, so a join to a table the area merely lists validated cleanly and then vanished
+  when a question was answered. It now warns, naming the table and the fix (a cross-area join). An
+  endpoint with a schema is compared by schema too, so owning `sales.orders` doesn't cover `archive.orders`.
+- **Metric and entity files are named the same way by every writer.** `write_tree` used the display
+  name and `sm add` / `curate` a slug, so rewriting a model after `sm add` duplicated items and broke
+  lookup by name.
+- **A missing or unreadable input file is a JSON error naming the resolved path**, for `curate
+  --ops-file`, `add`, `add-example`, `set-terminology`, `seed-examples`, `describe-file` and `apply-spec` — not a
+  traceback a skill read as "nothing to apply".
+- **Warehouse key columns aren't offered a currency.** `invoice_key` and `payment_key`
+  matched the money words in their names; `key`, `sk`, `fk` and `nbr` now rule a column out.
+- **The plugin run from a checkout uses that checkout's agami-core.** `sm` compares versions only in a
+  released plugin folder, so from a checkout (`claude --plugin-dir`) a released agami-core installed
+  earlier satisfied it and the checkout's own code never ran. It now reinstalls from the checkout when
+  the importable package isn't it.
+- **`execute_sql --batch` reports where each result landed.** A relative `out` resolves from the current
+  directory (now documented), and the manifest records the absolute path.
+- **agami-connect's documented commands work as written**: the examples-validation page needs `--title`
+  and `--profile`, and the pre-seed recount is `review-items --scope preseed`.
+- **agami-serve uses the Python agami-connect already proved, and won't write a Desktop entry that
+  can't connect.** It searched the usual install locations and could pick an interpreter without the
+  database driver: Claude Desktop then started the server and every query failed. `AGAMI_PYTHON` and
+  then the interpreter recorded in `local/.config` now go first, as in `sm`, and after installing, the
+  chosen one must import both the driver and agami-core or nothing is written.
+- **A year, period or identifier in a result isn't printed as a quantity.** The result formatter
+  grouped every unit-less number, so a fiscal year came out as `2,024` and an id as `1,234,567`. A
+  column named like a label (`year`, `fiscal_year`, `quarter`, `month`, `period`, `*_id`, `*_key`,
+  `*_code`, `*_number`, `zip`) now shows the value as written; a column with a unit is unaffected.
+- **A value list is built only from rows that represent the column.** The sample is the first rows a
+  table returns, so `current_flag: N` could be recorded for a column that is mostly `Y`, and the SQL
+  writer would filter on it. A list now needs at least two distinct values, and is built only when the
+  sample is the whole table or the catalog says the table is small; on a large table or a view with no
+  estimate, no list is better than a wrong one.
+- **A generated description no longer replaces one a person wrote or a data dictionary supplied.**
+  Enrichment's `source: ai` edits overwrote any column description, including `human` and `metadata`
+  ones; such an edit is now skipped with its reason. A person can still change either.
+- **Redshift late-binding views introspect with their columns.** A view created `WITH NO SCHEMA
+  BINDING` is listed in `information_schema.tables` but its columns are not in
+  `information_schema.columns`, so a schema of such views came out as tables with no columns (and,
+  without an allowlist, nothing at all). Redshift now reads columns from `svv_columns`, which lists
+  them for tables, views and late-binding views alike. A column read that fails (a dropped connection)
+  is retried once instead of the table being dropped as having no columns.
+- **`add_relationships` accepts a join written as an `on:` condition, and a failure part-way restores
+  every file.** Labelling the result read `from_column`, which an `on:` join doesn't have, so the call
+  crashed — after earlier areas' files were already written, leaving the model half-updated. The label
+  now names the tables, and any error during the batch restores every file it touched.
 
 ## [0.9.9] — 2026-10-07
 
