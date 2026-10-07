@@ -2242,7 +2242,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     <=50, index 51+); a hard ~60K-char budget then downgrades one rung at a time
     (full→summary→index) even for an explicit `mode="full"`, setting `truncated=true`.
     `metric_index` (name->description for every described metric in scope, the rest counted) +
-    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context.
+    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context: whole on
+    the overview, cut to the tables in scope on the `area` and table tiers (#419).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
     _call_misses.set(None)
@@ -2535,24 +2536,59 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # narrative + derived summary. All the text is read on ONE DB connection (see _context_sources). No
     # record ⇒ compose_org_context degrades to the single-level output, so a deployment without a record
     # is unaffected.
+    # Below the overview, the domain context is cut to what the call in hand needs (#419). It used
+    # to be the same ~25K characters on every tier, a third of everything a run of real questions
+    # received, and a question makes several schema calls. What stays on every tier is the
+    # narrative (`datasource.md`): its rules change answers, and a conversation can reach SQL
+    # without ever making the overview call, so it cannot depend on the client having seen it.
+    # What is cut is decided by the arguments alone, never by a guess about what the client
+    # already holds: the subject-area listing, which only the overview needs, and the datasource
+    # glossary entries that name none of the tables in scope. The company glossary stays whole:
+    # its terms are business vocabulary, not table names. The pointer says where the rest is.
+    scoped = _scope_tables(org, scope)
     domain_context = _OD.compose_org_context(
         record,
         [org],
         company_narrative=company_md,
         source_narratives=[org_md_raw],
-        # Suppressed only where the JSON above actually carries the areas. The justification is
-        # "the reader already has this block", so it has to be conditioned on the reader having
-        # it: the table tier emits no `subject_areas`, and dropping the prose there too would
-        # remove the listing from both surfaces at once. The narrative, glossary, coded-value
-        # legends and counts always render — they can change an answer and are duplicated nowhere.
-        with_area_list="subject_areas" not in result,
+        # Only the overview lists the areas, and there only when its JSON does not already carry
+        # them as `subject_areas`. Counts, the narrative and the glossary are duplicated nowhere.
+        with_area_list=scoped is None and "subject_areas" not in result,
+        glossary_tables=scoped,
     )
     if domain_context:
         parts.append(f"\n## Domain context\n{domain_context}")
+        if scoped is not None:
+            parts.append(
+                "\nThis is the domain context for the tables in scope. Glossary terms for other "
+                "tables and the subject-area list come with `get_datasource_schema` called "
+                "without `area` or `dataset_names`."
+            )
     user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     return "\n".join(parts)
+
+
+def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
+    """The tables a scoped reply's glossary is narrowed to, or None for the whole datasource.
+
+    An area means every table it holds, defined there or referenced from another area — the same
+    set its reply can describe. A table tier keeps only the names the model has: a mixed list still
+    gets a reply, and an unknown name that happens to be a common word would otherwise match most
+    of the glossary. Names are bare, because that is how a glossary term writes a table."""
+    # Only tables the served model defines. A rejected definition is dropped by the loader while
+    # the `TableRef`s naming it are kept, so a reference alone does not mean the table is live.
+    known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
+    if scope.level == "table":
+        return frozenset(t for t in scope.tables if t in known)
+    if scope.level == "area":
+        sa = org.subject_area(scope.area)
+        if sa is None:
+            return frozenset()
+        names = [t.name for t in sa.tables_defined] + [r.table for r in sa.tables]
+        return frozenset(n.rsplit(".", 1)[-1] for n in names) & known
+    return None
 
 
 def _unknown_example_area(area: Any, profile: str) -> "str | None":
@@ -4852,7 +4888,8 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`metrics_without_description` counts the rest, which come back in full with their "
             "tables and are matched by `query`. `mode=auto` (default) picks "
             "verbosity (full/summary/index) under a char budget. Plus datasource.md / "
-            "USER_MEMORY.md context. Use metric `calculation`/`binding` VERBATIM (`binding` is "
+            "USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
+            "scoped calls carry the terms for their tables. Use metric `calculation`/`binding` VERBATIM (`binding` is "
             "already this deployment's dialect). "
             # These four ride in the table context on every call and were described nowhere, so a
             # declared filter was first met on the receipt — after the statement it belonged in had
