@@ -1158,3 +1158,22 @@ def test_workbook_keeps_a_qualified_table_name_as_written(tmp_path):
     )
     _spec_out, allow, errors = mw.parse(path)
     assert not errors and allow == ["archive.date_d"]
+
+
+def test_the_same_join_written_twice_is_refused(tmp_path):
+    _introspected(tmp_path)
+    spec = _spec()
+    spec["joins"].append({**spec["joins"][0], "role": "Customer again"})
+    res = model_spec.apply_spec(tmp_path, spec, dry_run=True)
+    assert any("join 6 repeats join 1" in e for e in res.errors), res.errors
+
+
+def test_a_join_missing_a_table_is_skipped_not_a_crash(tmp_path):
+    from semantic_model import curate
+
+    _introspected(tmp_path)
+    assert model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com").applied
+    res = curate.add_relationships(
+        tmp_path, intra={"orders": [{"from_column": "customer_key", "to_table": "customer_d"}]}
+    )
+    assert not res.applied and res.skipped and "?" in str(res.skipped[0])

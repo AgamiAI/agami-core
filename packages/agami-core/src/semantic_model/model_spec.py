@@ -115,6 +115,23 @@ def _check_spec(
     if not seen:
         errs.append("the spec lists no tables")
 
+    # The same join written twice (a role label aside) would be two copies no approval could tell
+    # apart: every op naming it would match both and be refused as ambiguous.
+    seen_joins: dict[tuple, int] = {}
+    for i, j in enumerate(spec.get("joins", []), 1):
+        ident = (
+            _low(j.get("from_table")),
+            _low(j.get("to_table")),
+            _low(j.get("from_column")),
+            _low(j.get("to_column")),
+            " ".join(str(j.get("on") or "").split()).lower(),
+        )
+        if ident in seen_joins:
+            errs.append(
+                f"join {i} repeats join {seen_joins[ident]} — the same tables and columns or condition"
+            )
+        seen_joins.setdefault(ident, i)
+
     for i, j in enumerate(spec.get("joins", []), 1):
         where = f"join {i} ({_low(j.get('from_table'))} -> {_low(j.get('to_table'))})"
         ft, tt = _low(j.get("from_table")), _low(j.get("to_table"))

@@ -876,10 +876,12 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
 
 
 def _rel_label(r: dict) -> str:
-    # An `on:`-form join has no from/to column; label it by its tables so it reads in the log.
+    # An `on:`-form join has no from/to column; label it by its tables so it reads in the log. It also
+    # labels the invalid ones being skipped, so a missing endpoint reads "?" rather than raising.
+    ft, tt = r.get("from_table") or "?", r.get("to_table") or "?"
     if r.get("from_column"):
-        return f"{r['from_table']}.{r['from_column']}→{r['to_table']}"
-    return f"{r['from_table']}→{r['to_table']} (on)"
+        return f"{ft}.{r['from_column']}→{tt}"
+    return f"{ft}→{tt} (on)"
 
 
 def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]] = None,
