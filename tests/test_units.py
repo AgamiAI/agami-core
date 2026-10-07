@@ -207,3 +207,15 @@ def test_unit_round_trips_on_column_and_surfaces_in_context(tmp_path):
     ctx = get_table_context(org, ["orders"], area="s")
     amount = next(c for c in ctx["tables"]["orders"]["columns"] if c["name"] == "amount")
     assert amount["unit"] == "INR"
+
+
+def test_year_period_and_id_columns_are_not_grouped():
+    out = units.format_table(
+        ["fiscal_year", "Month", "order_id", "quarter", "amount", "region_code"],
+        [[2024, "2025-10", 1234567, 3, 1234567, 10001], [2025.0, "2025-11", 7654321, 4, 2500.5, 10002]],
+    )
+    row1, row2 = out.splitlines()[2:]
+    assert row1 == "| 2024 | 2025-10 | 1234567 | 3 | 1,234,567 | 10001 |"
+    assert row2 == "| 2025 | 2025-11 | 7654321 | 4 | 2,500.5 | 10002 |"
+    # a unit still wins: a currency column named like a label is formatted as money
+    assert "$1,000.00" in units.format_table(["fee_code"], [[1000]], units={"fee_code": "USD"})

@@ -75,6 +75,10 @@ below corresponds to one such version.
   database driver: Claude Desktop then started the server and every query failed. `AGAMI_PYTHON` and
   then the interpreter recorded in `local/.config` now go first, as in `sm`, and after installing, the
   chosen one must import both the driver and agami-core or nothing is written.
+- **A year, period or identifier in a result isn't printed as a quantity.** The result formatter
+  grouped every unit-less number, so a fiscal year came out as `2,024` and an id as `1,234,567`. A
+  column named like a label (`year`, `fiscal_year`, `quarter`, `month`, `period`, `*_id`, `*_key`,
+  `*_code`, `*_number`, `zip`) now shows the value as written; a column with a unit is unaffected.
 - **A value list is built only from rows that represent the column.** The sample is the first rows a
   table returns, so `current_flag: N` could be recorded for a column that is mostly `Y`, and the SQL
   writer would filter on it. A list now needs at least two distinct values, and is built only when the

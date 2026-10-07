@@ -10,6 +10,7 @@ identically everywhere.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from typing import Optional
 
 # ISO code -> symbol. Extend freely; unknown codes fall back to the bare code.
@@ -166,6 +167,26 @@ def format_cell(value, unit: Optional[str]) -> str:
     return s
 
 
+# A number in a column NAMED like a year, a period or an identifier is a label, not a quantity:
+# `2024` grouped as `2,024`, or an id as `1,234,567`, misreads it. Matched on the header's words.
+_LABEL_COLUMN_RE = re.compile(
+    r"(^|_)(year|years|yr|fy|fiscal_year|quarter|qtr|month|period|week|day_of_week|"
+    r"id|key|code|nbr|number|num|no|zip|zipcode|postal_code)$"
+)
+
+
+def _names_a_label(header: str) -> bool:
+    return bool(_LABEL_COLUMN_RE.search(re.sub(r"[^a-z0-9]+", "_", header.lower()).strip("_")))
+
+
+def _as_label(value) -> str:
+    """The value as written, minus a float's `.0` a driver may add to a whole number."""
+    if value is None:
+        return ""
+    s = str(value)
+    return s[:-2] if s.endswith(".0") and s[:-2].lstrip("-").isdigit() else s
+
+
 def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
     """Render a GitHub-flavoured markdown table with every numeric cell formatted
     deterministically and in full (exact value, thousands/lakh grouping, currency
@@ -181,7 +202,13 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
         h = cols[i] if i < len(cols) else ""
         return units.get(h) or units.get(f"#{i}")
 
-    fmt_rows = [[format_cell(c, _unit_for(i)) for i, c in enumerate(r)] for r in rows]
+    def _fmt(i: int, c) -> str:
+        u = _unit_for(i)
+        if not u and _names_a_label(cols[i] if i < len(cols) else ""):
+            return _as_label(c)
+        return format_cell(c, u)
+
+    fmt_rows = [[_fmt(i, c) for i, c in enumerate(r)] for r in rows]
     head = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body = "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |" for r in fmt_rows)
