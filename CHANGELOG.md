@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-10-07
+
 ### Changed
 
 - **Below the overview, a schema reply's domain context is cut to the tables in scope (#419).** The
