@@ -55,6 +55,21 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A join declared with a fixed-value condition matches a statement that wrote it.** A versioned
+  dimension joined to its current row (`on: f.key = d.key AND d.current_flag = 'Y'`) could never be
+  matched: the receipt treated any declared `on:` with a literal conjunct as unreadable, so every
+  current-version join came back `undetermined` however exactly it was written. The fixed-value
+  conjunct now counts toward the match, and a statement must write it too — one that leaves the filter
+  out (or uses another value) is still not credited with the declared join, which is what the old
+  refusal guarded, and a filter written on another alias of the same table doesn't count. Such a join
+  stays `undetermined` rather than `undeclared`, since the filter may sit in a WHERE; the join-probe
+  grader reads it the same way instead of calling it a wrong key.
+- **A total behind a join no declaration settles is no longer called clean.** The fan-out check
+  only weighs joins it can match to a declaration, so a total behind an `undetermined` or `undeclared`
+  join was reported `not_multiplied` — a positive claim made without the check. It is now
+  `undetermined`, and its reason names the joins, in the receipt and in `sm prepare`'s pre-flight
+  alike. Only joins that can feed the number count: its own branch or a CTE, not another UNION arm or a
+  `WHERE … IN` subquery (a join past the receipt's cap, which is never read, downgrades every number).
 - **Rewriting `datasource.yaml` keeps the glossary and the cross-area entities and metrics stored in
   it.** `write_tree` wrote only the fields it built, so a re-introspect or a spec re-apply dropped
   terminology added with `sm set-terminology`. They are carried over like the description.
