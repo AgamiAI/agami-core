@@ -183,7 +183,27 @@ def _validate_area(
     _check_entity_mappings(sa, ares, defined)
     for rel in sa.relationships:
         _check_relationship(rel, sa, org, ares, cross=False, defined=defined)
+        _check_relationship_served(rel, sa, ares, defined)
     return ares.findings
+
+
+def _check_relationship_served(
+    rel: Relationship, sa: SubjectArea, res: ValidationResult, defined: dict[str, Table]
+) -> None:
+    """Warn when an area's join names a table the area doesn't OWN. The loader serves an area's joins
+    among its own tables only, so such a join validates here and then disappears when a question is
+    answered — a whole dimension silently unjoinable. A table the area only lists belongs
+    to another area, and the join between them is a cross-area join."""
+    owned = {bare_name(n) for n in defined}
+    missing = [t for t in (rel.from_table, rel.to_table) if bare_name(t) not in owned]
+    if missing:
+        res.warn(
+            "relationship_not_served",
+            f"subject area {sa.name!r}: relationship {rel.from_table}->{rel.to_table} won't be served — "
+            f"{', '.join(missing)} is not defined in this area (listing it isn't enough). Make it a "
+            "cross-area relationship between the two owning areas.",
+            locator=f"{sa.name}.relationships[{rel.from_table}->{rel.to_table}]",
+        )
 
 
 def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> ValidationResult:

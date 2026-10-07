@@ -70,10 +70,11 @@ _MONEY_RE = re.compile(
     r"budget|invoice|mrr|arr|gmv|ltv|aov|paid|due|owed|credit|debit)s?(_|$)",
     re.IGNORECASE,
 )
-# Tokens that flip a money-ish name back to NON-money (it's a rate / count / id / score / …).
+# Tokens that flip a money-ish name back to NON-money (it's a rate / count / id / key / score / …).
+# Keys matter in warehouses: `invoice_key` and `payment_key` name join keys, not money.
 _MONEY_NEGATIVE_RE = re.compile(
-    r"(^|_)(rate|pct|percent|percentage|ratio|count|cnt|qty|quantity|num|number|id|"
-    r"flag|year|age|day|month|score|rank|code|status)s?(_|$)",
+    r"(^|_)(rate|pct|percent|percentage|ratio|count|cnt|qty|quantity|num|number|nbr|id|"
+    r"key|sk|fk|flag|year|age|day|month|score|rank|code|status)s?(_|$)",
     re.IGNORECASE,
 )
 
@@ -537,6 +538,14 @@ def _previous_description(out: Path) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def item_file_stem(name: str) -> str:
+    """The file name (without .yaml) an entity or metric is stored under. One rule for every writer:
+    `write_tree` used the display name (`Net Sales.yaml`) while `sm add` and `curate`
+    used this slug, so rewriting a tree after `sm add` duplicated every item and broke lookup by name."""
+    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return s or "unnamed"
+
+
 def write_tree(
     org: Datasource,
     out: Path,
@@ -593,9 +602,9 @@ def write_tree(
         for t in sa.tables_defined:
             write(f"{base}/tables/{t.name}.yaml", _dump(_model_dump(t)))
         for e in sa.entities:
-            write(f"{base}/entities/{e.name}.yaml", _dump(_model_dump(e)))
+            write(f"{base}/entities/{item_file_stem(e.name)}.yaml", _dump(_model_dump(e)))
         for mm in sa.metrics:
-            write(f"{base}/metrics/{mm.name}.yaml", _dump(_model_dump(mm)))
+            write(f"{base}/metrics/{item_file_stem(mm.name)}.yaml", _dump(_model_dump(mm)))
         if sa.relationships:
             write(f"{base}/relationships.yaml",
                   _dump({"relationships": [_model_dump(r) for r in sa.relationships]}))

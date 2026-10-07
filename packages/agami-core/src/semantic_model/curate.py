@@ -340,6 +340,8 @@ def _rel_item(area: Optional[str], rel) -> dict:
     origin = "fk" if getattr(rel, "signed_off_role", None) == "system" else "introspect_heuristic"
     return {"kind": "relationship", "entity_type": "join", "rule": 2, "rule_1": False,
             "area": area, "name": f"{rel.from_table}->{rel.to_table}", "title": join,
+            # which join between these two tables: a curate op carries these to name it exactly
+            "from_column": rel.from_column, "to_column": rel.to_column, "on": rel.on,
             "subtitle": rel.relationship, "cardinality": rel.relationship,
             "source_signal": rel.description or join,
             "signals": [{"ok": True, "text": rel.description or f"{rel.relationship} · {join}"}],
@@ -657,30 +659,47 @@ def _apply_one(root: Path, op: dict, signer, role,
 
     if kind == "relationship":
         frm, _, to = name.partition("->")
-        path = _area_dir(root, area) / "relationships.yaml"
-        if path.exists():
+        # Where joins live: the area's relationships.yaml, then the org-level cross-area joins — in
+        # datasource.yaml or in their own file, which is where add_relationships writes them.
+        places: list[tuple[Path, str]] = []
+        if area:
+            places.append((_area_dir(root, area) / "relationships.yaml", "relationships"))
+        places += [(root / "datasource.yaml", "cross_subject_area_relationships"),
+                   (root / "cross_subject_area_relationships.yaml", "edges")]
+        for path, key in places:
+            if not path.exists():
+                continue
             doc = _load(path) or {}
-            rels = doc.get("relationships", doc if isinstance(doc, list) else [])
-            hit = next((r for r in rels if r.get("from_table") == frm and r.get("to_table") == to), None)
-            if hit is not None:
-                _snapshot(backups, path)
-                _set_trust(hit, op, new_state, signer, role)
-                _dump(path, {"relationships": rels})
-                return path
-        # Cross-area (cross-schema / cross-datasource) join — it lives at the org level, not
-        # in an area's relationships.yaml. Fall back to datasource.yaml's cross_subject_area_relationships.
-        dsp = root / "datasource.yaml"
-        _snapshot(backups, dsp)
-        odoc = _load(dsp) or {}
-        crels = odoc.get("cross_subject_area_relationships", [])
-        chit = next((r for r in crels if r.get("from_table") == frm and r.get("to_table") == to), None)
-        if chit is None:
-            raise ValueError(f"relationship {name} not found in {path} or org cross-area relationships")
-        _set_trust(chit, op, new_state, signer, role)
-        _dump(dsp, odoc)
-        return dsp
+            rels = doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
+            hits = _matching_joins(rels, frm, to, op)
+            if not hits:
+                continue
+            if len(hits) > 1:
+                raise ValueError(
+                    f"{len(hits)} joins match {name}; name the one you mean with from_column and "
+                    "to_column, or its `on` condition — the table pair alone would pick one at random")
+            _snapshot(backups, path)
+            _set_trust(hits[0], op, new_state, signer, role)
+            _dump(path, doc if isinstance(doc, dict) else {key: rels})
+            return path
+        raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
+    """The joins an op means: same two tables, narrowed by whichever of from_column / to_column / `on`
+    the op names (`on` compared with whitespace collapsed, so a re-wrapped condition still matches)."""
+    def norm(text) -> str:
+        return " ".join(str(text or "").split()).lower()
+
+    out = [r for r in rels if isinstance(r, dict) and r.get("from_table") == frm and r.get("to_table") == to]
+    for fld in ("from_column", "to_column"):
+        if op.get(fld):
+            out = [r for r in out if (r.get(fld) or "").lower() == str(op[fld]).lower()]
+    if op.get("on"):
+        out = [r for r in out if norm(r.get("on")) == norm(op["on"])]
+    return out
 
 
 def _reconcile_expose_groups(root: Path, area: str, table: str,
@@ -719,6 +738,13 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         fld, val = op.get("field"), op.get("value")
         if not fld:
             raise ValueError("edit op needs field")
+        # A generated description never replaces one a person wrote or the database's own dictionary
+        # supplied — enrichment describes what is undescribed. A person can still overwrite either.
+        if (fld == "description" and desc_source and op.get("source") == "ai"
+                and doc.get("description_source") in ("human", "metadata")
+                and (doc.get("description") or "").strip()):
+            raise ValueError(f"kept the existing {doc['description_source']} description "
+                             "(a generated description doesn't replace it)")
         doc[fld] = val
         # Description provenance (advisory; see DescriptionSource in models.py). ONLY tables
         # and columns carry `description_source`; relationships / metrics / entities have a
@@ -774,8 +800,9 @@ _KINDS = {"metric": ("metrics", Metric), "entity": ("entities", Entity)}
 
 
 def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    return s or "unnamed"
+    from .build import item_file_stem  # one naming rule for every writer of entity/metric files
+
+    return item_file_stem(name)
 
 
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
@@ -838,6 +865,13 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     return res
 
 
+def _rel_label(r: dict) -> str:
+    # An `on:`-form join has no from/to column; label it by its tables so it reads in the log.
+    if r.get("from_column"):
+        return f"{r['from_table']}.{r['from_column']}→{r['to_table']}"
+    return f"{r['from_table']}→{r['to_table']} (on)"
+
+
 def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]] = None,
                       cross: Optional[list[dict]] = None,
                       signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
@@ -851,37 +885,45 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
     intra, cross = intra or {}, cross or []
     backups: list[tuple[Path, Optional[str]]] = []
 
-    for area, rels in intra.items():
-        if not rels:
-            continue
-        path = _area_dir(root, area) / "relationships.yaml"
-        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-        doc = _load(path) if path.exists() else None
-        lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
-        for r in rels:
-            try:
-                Relationship(**r)
-            except Exception as e:
-                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
+    # One batch: an error part-way through (after an earlier area's file is written) must restore
+    # every file already touched, not leave the model half-updated.
+    try:
+        for area, rels in intra.items():
+            if not rels:
                 continue
-            lst.append(r)
-            res.applied.append(f"rel {area}/{r['from_table']}.{r['from_column']}→{r['to_table']}")
-        _dump(path, {"relationships": lst})
+            path = _area_dir(root, area) / "relationships.yaml"
+            backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+            doc = _load(path) if path.exists() else None
+            lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
+            for r in rels:
+                try:
+                    Relationship(**r)
+                except Exception as e:
+                    res.skipped.append({"item": _rel_label(r), "reason": str(e)})
+                    continue
+                lst.append(r)
+                res.applied.append(f"rel {area}/{_rel_label(r)}")
+            _dump(path, {"relationships": lst})
 
-    if cross:
-        path = root / "cross_subject_area_relationships.yaml"
-        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-        doc = _load(path) if path.exists() else None
-        edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
-        for r in cross:
-            try:
-                CrossSubjectAreaRelationship(**r)
-            except Exception as e:
-                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
-                continue
-            edges.append(r)
-            res.applied.append(f"xrel {r['from_table']}.{r['from_column']}→{r['to_table']}")
-        _dump(path, {"edges": edges})
+        if cross:
+            path = root / "cross_subject_area_relationships.yaml"
+            backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+            doc = _load(path) if path.exists() else None
+            edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
+            for r in cross:
+                try:
+                    CrossSubjectAreaRelationship(**r)
+                except Exception as e:
+                    res.skipped.append({"item": _rel_label(r), "reason": str(e)})
+                    continue
+                edges.append(r)
+                res.applied.append(f"xrel {_rel_label(r)}")
+            _dump(path, {"edges": edges})
+    except Exception as e:
+        _restore(backups)
+        res.applied = []
+        res.errors.append(f"adding relationships failed and every file was restored: {e}")
+        return res
 
     if not res.applied:
         return res

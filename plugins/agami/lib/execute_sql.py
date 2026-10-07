@@ -3274,7 +3274,9 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
     try:
         for n, item in enumerate(plan, 1):
             ident = str(item.get("id") or n)
-            out = Path(os.path.expanduser(str(item["out"])))
+            # Relative paths resolve from the current directory, not the plan's folder; the manifest
+            # records the absolute path so a caller sees where each result actually landed.
+            out = Path(os.path.expanduser(str(item["out"]))).resolve()
             out.parent.mkdir(parents=True, exist_ok=True)
             try:
                 sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")

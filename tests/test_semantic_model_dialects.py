@@ -123,6 +123,20 @@ def test_redshift_keeps_information_schema_keys():
     assert "pg_constraint" not in d.sql_primary_keys("s", "t") + d.sql_foreign_keys("s")
 
 
+def test_redshift_reads_columns_from_svv_columns():
+    # A late-binding view's columns are absent from information_schema.columns, so a schema of such
+    # views introspected as columnless tables. svv_columns lists them, under the same field names.
+    d = D.get_dialect("redshift")
+    one, bulk = d.sql_columns("s", "t"), d.sql_columns_bulk(["s"])
+    for sql in (one, bulk):
+        assert "FROM svv_columns" in sql and "information_schema.columns" not in sql
+    assert "table_schema = 's'" in one and "table_name = 't'" in one
+    assert "table_schema IN ('s')" in bulk
+    assert d.sql_columns_bulk([]) is None
+    # PostgreSQL itself keeps the standard catalog.
+    assert "information_schema.columns" in D.get_dialect("postgres").sql_columns("s", "t")
+
+
 def test_unenforced_fk_dialects_flagged():
     assert D.get_dialect("redshift").fk_enforced is False
     assert D.get_dialect("databricks").fk_enforced is False

@@ -145,7 +145,13 @@ def find_interpreter(module: str | None, forced: str | None) -> str | None:
     if forced:
         candidates = [forced]
     else:
+        configured = _load_config().get("tool_paths", {}).get("python3") or ""
         candidates = [
+            # The same order `sm` resolves in: an explicit AGAMI_PYTHON, then the interpreter
+            # agami-connect resolved and has been running queries with — the one already proven to
+            # reach this database.
+            os.environ.get("AGAMI_PYTHON", ""),
+            configured,
             sys.executable,
             shutil.which("python3") or "",
             shutil.which("python") or "",   # Windows usually exposes `python`, not `python3`
@@ -319,6 +325,19 @@ def main() -> int:
         print(f"\nERROR: couldn't install agami-core into {python}:\n  {e}", file=sys.stderr)
         return 2
     if not args.dry_run:
+        # Re-check what the server will actually need, after the install: writing a Desktop entry for
+        # an interpreter that can't import the driver or agami-core gives a server that starts and then
+        # fails every query, which is far harder to diagnose than a refusal here.
+        missing = [m for m in (module, "semantic_model.cli") if m and not _interpreter_can_import(python, m)]
+        if missing:
+            print(
+                f"\nERROR: {python} can't import {', '.join(missing)} — Claude Desktop's server would start "
+                "and then fail every query, so nothing was written.\n"
+                "  Re-run with --python /abs/path/to/the/python3 that agami-connect used "
+                "(tool_paths.python3 in local/.config).",
+                file=sys.stderr,
+            )
+            return 2
         print("• agami-core     : present in the interpreter")
 
     version = read_version()
