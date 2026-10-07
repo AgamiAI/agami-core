@@ -5123,7 +5123,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "an `omitted` or `undetermined` one is a real gap between what the org means by that "
             "table and what the answer counted.\n"
             "`receipt.aggregates.items` — one entry per aggregate the statement computes, each "
-            "`{aggregate, scope, status, joins, findings}` with status multiplied / "
+            "`{aggregate, scope, status, joins, findings, reason}` with status multiplied / "
             "not_multiplied / undetermined, and `scope` the same arm label the `tables` entries "
             "carry. A `multiplied` one means a join multiplied the rows behind THAT number and "
             "`joins` names the join — say which number and which join, and say that whether it is "
