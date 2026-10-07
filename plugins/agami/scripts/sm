@@ -116,9 +116,18 @@ _imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot
 # (CONTRIBUTING → "Files to touch on a release"), so the plugin's own version is exactly the library its
 # skills were written against — no second constant to drift out of sync with the first.
 _version_ok() {
-  # Only meaningful in a versioned cache dir. A dev checkout's $VER is a directory name, not a version,
-  # and its editable install already tracks the source.
-  case "$VER" in [0-9]*) ;; *) return 0 ;; esac
+  # Only meaningful in a versioned cache dir. A dev checkout's $VER is a directory name, not a version:
+  # there the question is whether the importable package IS this checkout. A released agami-core
+  # installed before the checkout was used satisfies the import, so the checkout's own code never ran
+  # (`--plugin-dir` rehearsals introspected with the old release). Not this checkout → reinstall from it.
+  case "$VER" in
+    [0-9]*) ;;
+    *) [ -z "$DEV_PKG_DIR" ] && return 0
+       ( cd / && "$PY" -c 'import os, sys, semantic_model as m
+sys.exit(0 if os.path.realpath(m.__file__).startswith(os.path.realpath(sys.argv[1]) + os.sep) else 1)' \
+         "$DEV_PKG_DIR/src" ) 2>/dev/null
+       return ;;
+  esac
   ( cd / && "$PY" - "$VER" <<'PY'
 import re, sys
 try:
@@ -152,7 +161,10 @@ ensure_pkg() {
   local up=""
   if _imports_ok; then
     up="--upgrade"
-    echo "agami: agami-core in $PY is older than this plugin ($VER); upgrading …" >&2
+    case "$VER" in
+      [0-9]*) echo "agami: agami-core in $PY is older than this plugin ($VER); upgrading …" >&2 ;;
+      *) echo "agami: agami-core in $PY isn't this checkout; installing it from $DEV_PKG_DIR …" >&2 ;;
+    esac
   else
     echo "agami: installing agami-core (semantic model) into $PY …" >&2
   fi
