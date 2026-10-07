@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.10] — 2026-10-07
+
 ### Added
 
 - **A model spec workbook builds the model exactly as its owners describe it.** A warehouse whose
