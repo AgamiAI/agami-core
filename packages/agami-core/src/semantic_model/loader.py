@@ -138,18 +138,29 @@ def _drop_joins_on_unserved_columns(org: Datasource) -> None:
     dropped from its table above; a join on it, or a grain that lists it, would still offer the agent
     a condition the database rejects. Both stay on disk (`include_rejected=True`) for a person to
     decide. A join written as a full `on` condition, or on a table not in the model, is left alone."""
-    served: dict[str, set[str]] = {}
+    # Keyed by (schema, table): `sales.orders` and `archive.orders` are different tables. A join with
+    # no schema falls back to the bare name, but only when exactly one table has it.
+    served: dict[tuple, set[str]] = {}
+    by_bare: dict[str, list[set[str]]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            served[t.name.lower()] = {c.name.lower() for c in t.columns}
-            t.grain = [g for g in t.grain if g.lower() in served[t.name.lower()]]
+            cols = {c.name.lower() for c in t.columns}
+            served[((t.schema_name or "").lower(), t.name.lower())] = cols
+            by_bare.setdefault(t.name.lower(), []).append(cols)
+            t.grain = [g for g in t.grain if g.lower() in cols]
 
-    def live(table: str, column: Optional[str]) -> bool:
-        cols = served.get(bare_name(table).lower())
-        return column is None or cols is None or column.lower() in cols
+    def live(schema: Optional[str], table: str, column: Optional[str]) -> bool:
+        if column is None:
+            return True
+        name = bare_name(table).lower()
+        cols = served.get(((schema or "").lower(), name))
+        if cols is None and not schema:
+            only = by_bare.get(name, [])
+            cols = only[0] if len(only) == 1 else None
+        return cols is None or column.lower() in cols
 
     def keep(r) -> bool:
-        return live(r.from_table, r.from_column) and live(r.to_table, r.to_column)
+        return live(r.from_schema, r.from_table, r.from_column) and live(r.to_schema, r.to_table, r.to_column)
 
     for sa in org.subject_areas:
         sa.relationships = [r for r in sa.relationships if keep(r)]

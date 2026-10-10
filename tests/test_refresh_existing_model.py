@@ -411,3 +411,25 @@ def test_the_refresh_report_names_tables_with_their_schema(shop):
     _sql(shop, "ALTER TABLE customers ADD COLUMN region TEXT")
     out = _introspect(shop, "--tables", "main.customers", "--append", "--dry-run").stdout
     assert "changed main.customers: added region" in out
+
+
+def test_joins_on_same_named_tables_in_two_schemas_are_judged_separately(tmp_path):
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    def orders(schema: str, review: str) -> m.Table:
+        return m.Table(name="orders", schema=schema, columns=[
+            m.Column(name="id", type="integer"), m.Column(name="customer_id", type="integer", review_state=review)])
+
+    def join(schema: str) -> m.Relationship:
+        return m.Relationship(from_table="orders", from_column="customer_id", to_table="customers",
+                              to_column="id", from_schema=schema, to_schema=schema, relationship="many_to_one")
+
+    sales, archive = orders("sales", "approved"), orders("archive", "approved")
+    archive.columns = [c for c in archive.columns if c.name != "customer_id"]   # what the loader leaves when stale
+    org = m.Datasource(datasource="d", version=1, subject_areas=[
+        m.SubjectArea(name="s", tables_defined=[sales], relationships=[join("sales")]),
+        m.SubjectArea(name="a", tables_defined=[archive], relationships=[join("archive")])])
+    L._drop_joins_on_unserved_columns(org)
+    assert [r.from_schema for r in org.subject_areas[0].relationships] == ["sales"]   # live: kept
+    assert org.subject_areas[1].relationships == []                                  # stale: hidden

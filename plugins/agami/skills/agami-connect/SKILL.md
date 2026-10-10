@@ -830,7 +830,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveat
 
 ### 2e — Reintrospect merge
 
-**Refreshing an existing model is the engine's job, not yours — never rebuild it and merge enrichment back by hand.** When the user says the database changed ("new columns were added", "reload the schema", "refresh `<table>`"), run introspection with `--append` on the existing profile, naming only the tables that changed when they say which (`--tables schema.table …`), else the tables already in the model:
+**Refreshing an existing model is the engine's job, not yours — never rebuild it and merge enrichment back by hand.** When the user says the database changed ("new columns were added", "reload the schema", "refresh `<table>`"), run introspection with `--append` on the existing profile, naming only the tables that changed when they say which (`--tables schema.table …`). When they don't say, first find out whether the database has **new tables**: `--tables` is an allowlist, so passing only the model's own tables can never turn one up. Run `sm discover` for the model's schemas, compare its table list with the tables already in the model, and if there are new ones ask (multi-select) which to include; then pass the model's tables plus the chosen ones:
 
 1. **Preview first:** the same command with `--dry-run`. The report lists `new tables:` and `changed <table>: added …; dropped …; retyped …` and writes nothing. Show that list to the user in plain words and ask before writing. If it lists nothing, say the model already matches the database and stop.
 2. **Then write:** the same command without `--dry-run`, then validate.

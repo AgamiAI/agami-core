@@ -352,8 +352,9 @@ def introspect(
     else:
         prev_for_areas = prev
     if prev_for_areas is None:
-        _regroup_columns_with_references(
-            built if prev is None else [t for t in built if (t.schema_name, t.name) in fresh_keys], rels)
+        # Every table, as a one-shot build would: a later batch's join can reveal an FK column in a
+        # table an earlier batch built, and nobody has curated the grouping yet.
+        _regroup_columns_with_references(built, rels)
         # 4. propose subject areas + cross-area edges
         areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
         report.notes.extend(notes)
