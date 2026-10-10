@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.12] — 2026-10-10
+
 ### Fixed
 
 - **Refreshing a model after the database changed works, and keeps what people curated.** Asking
