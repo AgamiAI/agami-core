@@ -389,6 +389,12 @@ class ToolCallRecord(_Contract):
     # every other tool and on a call that sent neither.
     example_id: str | None = None
     example_use: str | None = None
+    # Why the call crashed (027, ACE-152): the exception the transport caught, as
+    # `<type>: <message>`. Operator-only, like `QueryExecutionRecord.error_detail` — it is the text
+    # that no longer reaches the client, and for the same reason. Bounded by the writer
+    # (`tools.AUDIT_ERROR_DETAIL_MAX_CHARS`). NULL on every call that did not raise.
+    error_detail: str | None = None
+
     # What the call was sent, what missed, and how much it sent back (027). `arguments` and
     # `missed` are bounded JSON envelopes serialized by the writer (`tools.AUDIT_ARGUMENTS_MAX_CHARS`,
     # `tools.AUDIT_MISSED_MAX_CHARS`), each carrying a `truncated` flag. `miss_count` is the true

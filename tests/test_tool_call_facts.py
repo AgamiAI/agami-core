@@ -99,7 +99,12 @@ def _http(calls, *, executor=None, extra_tools=None) -> list[str]:
         "Accept": "application/json, text/event-stream",
     }
     texts = []
-    with TestClient(mcp_http.create_app(extra_tools=extra_tools)) as client:
+    # `base_url` is the configured public host, not Starlette's `testserver`: `/mcp` checks the Host
+    # header against it (ACE-152) and answers 421 to anything else, so an in-process caller has to
+    # arrive as a real client would.
+    with TestClient(
+        mcp_http.create_app(extra_tools=extra_tools), base_url="https://your-host.example.com"
+    ) as client:
         if executor == "fork":
             tools.set_injected_executor(None)
         elif executor is not None:

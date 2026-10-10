@@ -37,8 +37,10 @@ model = [
 # The HTTP MCP transport (mcp_http): the official MCP SDK + an ASGI server. Kept out of the base
 # install so the local executor/skill stay stdlib-lean — only a hosted deployment installs it.
 server = [
-  "mcp>=1.7,<2",        # floored: 1.7 is the first release with mcp.types.ToolAnnotations (tools/list
-                        #   advertises it); capped: 2.0 dropped Server.list_tools, which build_server() registers on
+  "mcp>=2.2,<3",        # the `<2` cap this replaces was there because 2.0 dropped `Server.list_tools`,
+                        #   which `build_server()` registered on; this spec moves to SDK 2's handlers, so
+                        #   the cap goes. `mcp.types.ToolAnnotations` (floored at 1.7 before) is still here.
+  "jsonschema>=4.20",   # build_server validates tool arguments itself; SDK 2's low-level Server does not
   "anyio>=4",           # async_offload.run_blocking offloads blocking work off the loop (ACE-048)
   "uvicorn>=0.30",
   "psycopg2-binary>=2.9",
