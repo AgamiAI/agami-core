@@ -929,8 +929,10 @@ def cmd_seed_validate(args) -> int:
     script = str(Path(__file__).resolve().parent.parent / "execute_sql.py")
     # the safety pass inside execute_sql.py finds the model via AGAMI_ARTIFACTS_DIR —
     # point it at the profile dir's parent so the right model loads (fan/chasm + filters).
-    # PYTHONUTF8: the child's streams are decoded as UTF-8 below, from its very first byte.
-    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent), "PYTHONUTF8": "1"}
+    # The child's streams are decoded as UTF-8 below, from its very first byte. PYTHONIOENCODING too,
+    # because an inherited one takes precedence over UTF-8 mode for the standard streams.
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent),
+           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     cap = max(0, args.preview)
     # Load the model once so result numbers are formatted by the SAME units.py the query
     # path uses (currency symbol + grouping). The validation preview must MATCH the real

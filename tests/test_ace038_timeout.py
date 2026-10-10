@@ -1307,8 +1307,10 @@ def test_the_supervisor_bound_is_derived_from_the_statement_budget(warehouse, mo
     # the child reaches the budget this side resolved (an organisation's own limit, when it has one).
     # They may differ from `os.environ` only in SPELLING an unset or unusable value as the number it
     # resolves to — asserted by value, so a child handed any other budget still fails here.
-    # PYTHONUTF8 (#362) is not a budget input either: it fixes the encoding of the child's streams.
-    assert differing <= {"AGAMI_GOVERNANCE_ENFORCED", "AGAMI_SQL_MAX_ROWS", "AGAMI_SQL_TIMEOUT_S", "PYTHONUTF8"}, differing
+    # PYTHONUTF8 and PYTHONIOENCODING (#362) are not budget inputs either: they fix the encoding of
+    # the child's streams.
+    assert differing <= {"AGAMI_GOVERNANCE_ENFORCED", "AGAMI_SQL_MAX_ROWS", "AGAMI_SQL_TIMEOUT_S",
+                         "PYTHONUTF8", "PYTHONIOENCODING"}, differing
     assert child_env["AGAMI_SQL_TIMEOUT_S"] == "300"
     assert child_env["AGAMI_SQL_MAX_ROWS"] == str(execute_sql._row_cap_from_env())
 

@@ -18,7 +18,8 @@ below corresponds to one such version.
   step writes CSV, whose rows end `\r\n`; a piped stdout on Windows turned the `\n` in that into
   `\r\n` again, so the local MCP server and `sm seed-validate` read an empty row between each pair —
   a 10-row answer reported 21 rows, and a preview showed half its rows. The stream now writes UTF-8
-  and leaves the rows as csv wrote them, and every caller decodes it as UTF-8. The CSV itself is
+  and leaves the rows as csv wrote them, and every caller decodes it as UTF-8 (each Python child runs with `PYTHONUTF8=1` and
+  `PYTHONIOENCODING=utf-8`). The CSV itself is
   byte-for-byte unchanged on every platform (#362).
 - **Windows: text is read and written as UTF-8 everywhere, and a test keeps it that way.** 54 reads
   and writes, the six credentials-file reads among them, used the ANSI code page: a template with an

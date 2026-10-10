@@ -115,8 +115,10 @@ def _mode(call: ast.Call, position: int) -> object:
 
 
 def _needs_encoding(call: ast.Call) -> bool:
-    """A call that decodes or encodes text at the platform default unless it names an encoding."""
-    if any(kw.arg == "encoding" for kw in call.keywords):
+    """A call that decodes or encodes text at the platform default unless it names an encoding.
+    `encoding=None` names none: it is the platform default spelled out."""
+    if any(kw.arg == "encoding" and not (isinstance(kw.value, ast.Constant) and kw.value.value is None)
+           for kw in call.keywords):
         return False
     func = call.func
     name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
@@ -159,6 +161,7 @@ def test_scan_catches_each_shape_it_claims_to():
     sources = [
         'open(p)', 'open(p, "w")', 'p.open()', 'p.read_text()', 'p.write_text(s)',
         'cfg.read(path)', 'subprocess.run(cmd, text=True)', 'os.fdopen(fd, "w")',
+        'open(p, encoding=None)', 'subprocess.run(cmd, text=True, encoding=None)',
     ]
     clean = [
         'open(p, "rb")', 'p.open("wb")', 'open(p, encoding="utf-8")', 'fh.read()', 'os.open(p, 0)',

@@ -172,7 +172,7 @@ def make_execute_sql_runner(profile: str, python: Optional[str] = None) -> Runne
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(
             [exe, script, "--profile", profile, "--sql", sql],
-            capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"},
+            capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"execute_sql exit {proc.returncode}")

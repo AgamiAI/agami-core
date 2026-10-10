@@ -3845,9 +3845,11 @@ def _pass_child_env() -> dict[str, str]:
 
     return {
         **os.environ,
-        # UTF-8 mode from the first byte the child writes, including a traceback raised before its
-        # `main` can switch its streams: the parent decodes both streams as UTF-8.
+        # UTF-8 from the first byte the child writes, including a traceback raised before its `main`
+        # can switch its streams: the parent decodes both streams as UTF-8. PYTHONIOENCODING too,
+        # because an inherited one takes precedence over UTF-8 mode for the standard streams.
         "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
         "AGAMI_GOVERNANCE_ENFORCED": "false" if _model_pass_disabled() else "true",
         "AGAMI_SQL_MAX_ROWS": str(_resolve_row_cap()),
         "AGAMI_SQL_TIMEOUT_S": str(_resolve_timeout_s()),

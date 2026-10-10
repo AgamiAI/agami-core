@@ -260,8 +260,9 @@ def build_server_entry(python: str, profile: str, version: str) -> dict:
     return {
         "command": python,
         "args": ["-m", "mcp_harness"],
-        # PYTHONUTF8: on Windows the server would otherwise read and write text in the ANSI code page.
-        "env": {"AGAMI_PROFILE": profile, "AGAMI_VERSION": version, "PYTHONUTF8": "1"},
+        # On Windows the server would otherwise read and write text in the ANSI code page.
+        # PYTHONIOENCODING as well: a user-level one takes precedence over UTF-8 mode for stdio.
+        "env": {"AGAMI_PROFILE": profile, "AGAMI_VERSION": version, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
     }
 
 
