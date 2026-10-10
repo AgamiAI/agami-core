@@ -82,7 +82,7 @@ def render(manifest: dict) -> str:
     # the <script> block holding `const MANIFEST = …`.
     manifest_json = json.dumps(manifest, separators=(",", ":")).replace("</", "<\\/")
     now = datetime.datetime.now(datetime.timezone.utc)
-    generated_at = now.strftime("%-d %b %Y, %H:%M UTC")
+    generated_at = f"{now.day} {now:%b %Y, %H:%M} UTC"  # not %-d: glibc-only, Windows raises
     title = f"Prune tables · {manifest.get('profile', '')}"
     return (
         template

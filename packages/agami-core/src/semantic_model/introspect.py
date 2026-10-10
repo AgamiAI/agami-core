@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
 import subprocess
 import sys
@@ -171,7 +172,7 @@ def make_execute_sql_runner(profile: str, python: Optional[str] = None) -> Runne
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(
             [exe, script, "--profile", profile, "--sql", sql],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1"},
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or f"execute_sql exit {proc.returncode}")
@@ -1167,6 +1168,18 @@ def _maybe_choice(values: list) -> Optional[dict[str, str]]:
     return {d: "" for d in distinct}  # labels filled in by LLM enrichment
 
 
+def _free_path(path: Path) -> Path:
+    """`path`, or the first `path.N` that does not exist yet. A second re-onboarding finds the first
+    one's backup already there; moving onto it raises (a file on Windows, a non-empty directory
+    everywhere), and replacing it would lose the older model."""
+    n = 1
+    candidate = path
+    while candidate.exists():
+        candidate = path.with_name(f"{path.name}.{n}")
+        n += 1
+    return candidate
+
+
 def _backup_legacy_model(profile_root: Path) -> None:
     """Move any legacy (v1) model artifacts at the profile root into .legacy_backup/ before
     writing the new tree, so re-onboarding never silently clobbers the old model."""
@@ -1177,14 +1190,14 @@ def _backup_legacy_model(profile_root: Path) -> None:
         src = profile_root / name
         if src.exists():
             backup.mkdir(parents=True, exist_ok=True)
-            src.rename(backup / name)
+            src.rename(_free_path(backup / name))
             moved = True
     # per-schema legacy dirs contain a _schema.yaml; move those too
     if profile_root.exists():
         for child in list(profile_root.iterdir()):
             if child.is_dir() and (child / "_schema.yaml").exists():
                 backup.mkdir(parents=True, exist_ok=True)
-                child.rename(backup / child.name)
+                child.rename(_free_path(backup / child.name))
                 moved = True
     return None
 

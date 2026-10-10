@@ -86,10 +86,10 @@ def render(
     for i, it in enumerate(items):
         _validate_item(it, i)
 
-    template = TEMPLATE_PATH.read_text()
-    logo_dark_svg = LOGO_DARK_PATH.read_text()
-    logo_light_svg = LOGO_LIGHT_PATH.read_text()
-    theme_css = (SHARED_DIR / "theme.css").read_text()
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    logo_dark_svg = LOGO_DARK_PATH.read_text(encoding="utf-8")
+    logo_light_svg = LOGO_LIGHT_PATH.read_text(encoding="utf-8")
+    theme_css = (SHARED_DIR / "theme.css").read_text(encoding="utf-8")
 
     total_rows = sum(int(it.get("row_count") or 0) for it in items)
 
@@ -122,7 +122,7 @@ def main() -> int:
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
-    with open(os.path.expanduser(args.items_file)) as f:
+    with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
         items = json.load(f)
     if not isinstance(items, list):
         sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
@@ -134,7 +134,7 @@ def main() -> int:
         title=args.title,
         profile=args.profile,
         items=items,
-    ))
+    ), encoding="utf-8")
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
@@ -143,7 +143,7 @@ def main() -> int:
     items_path = os.path.expanduser(args.items_file)
     try:
         tmp_path = items_path + ".tmp"
-        with open(tmp_path, "w") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(items, f)
         os.replace(tmp_path, items_path)
     except OSError as e:

@@ -104,7 +104,7 @@ def test_build_server_entry_shape():
     entry = sd.build_server_entry("/py", "main", "1.2.3")
     assert entry["command"] == "/py"
     assert entry["args"] == ["-m", "mcp_harness"]
-    assert entry["env"] == {"AGAMI_PROFILE": "main", "AGAMI_VERSION": "1.2.3"}
+    assert entry["env"] == {"AGAMI_PROFILE": "main", "AGAMI_VERSION": "1.2.3", "PYTHONUTF8": "1"}
 
 
 # --- platform config paths --------------------------------------------------

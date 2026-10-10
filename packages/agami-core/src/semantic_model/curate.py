@@ -803,7 +803,7 @@ def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signe
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 _KINDS = {"metric": ("metrics", Metric), "entity": ("entities", Entity)}

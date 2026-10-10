@@ -63,11 +63,34 @@ def _uncommented(text: str) -> str:
     return "\n".join(out)
 
 
+_BOMS = ((b"\xff\xfe", "utf-16"), (b"\xfe\xff", "utf-16"), (b"\xef\xbb\xbf", "utf-8-sig"))
+
+
+def _normalize_to_utf8(path: Path) -> bool:
+    """Rewrite `path` as plain UTF-8 if Notepad or PowerShell saved it with a byte-order mark
+    (PowerShell's default is UTF-16). Everything downstream reads the credentials file as UTF-8,
+    and the first profile is MOVED into place, so a template left as it is would become a
+    credentials file nothing can read. False if the bytes are not text in any of these."""
+    raw = path.read_bytes()
+    encoding = next((enc for bom, enc in _BOMS if raw.startswith(bom)), "utf-8")
+    try:
+        text = raw.decode(encoding)
+    except UnicodeDecodeError:
+        return False
+    if encoding != "utf-8":
+        # Bytes, so Windows does not turn the file's own "\r\n" into "\r\r\n"; and via a temporary file,
+        # so a failed write cannot cost the user the secrets they typed.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(text.encode("utf-8"))
+        os.replace(tmp, path)
+    return True
+
+
 def _sections(path: Path) -> list[str]:
     """Profile names ([section] headers) in an INI credentials file. strict=False so an
     already-imperfect existing file (e.g. a pre-existing duplicate) doesn't crash the read."""
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), strict=False)
-    cfg.read(path, encoding="utf-8")
+    cfg.read(path, encoding="utf-8-sig")
     return cfg.sections()
 
 
@@ -93,6 +116,8 @@ def promote(agami_dir: Path) -> tuple[str, int]:
     if not example.exists():
         return "NOTHING", 1
 
+    if not _normalize_to_utf8(example):
+        return "ERROR credentials.example is not UTF-8 text; save it as UTF-8 and run this again", 4
     text = example.read_text(encoding="utf-8")
     placeholders = sorted({m.group(0) for m in _PLACEHOLDER_RE.finditer(_uncommented(text))})
     if placeholders:

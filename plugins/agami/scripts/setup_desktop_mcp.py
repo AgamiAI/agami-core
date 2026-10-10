@@ -82,7 +82,7 @@ DRIVER_PIP = {
 def _load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text())
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
     return {}
@@ -106,7 +106,7 @@ def db_type_for_profile(profile: str) -> str | None:
         return None
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     try:
-        cfg.read(CREDENTIALS_PATH)
+        cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
     except configparser.Error:
         return None
     if profile not in cfg:
@@ -180,12 +180,44 @@ def find_interpreter(module: str | None, forced: str | None) -> str | None:
     return None
 
 
+def _store_build_config_dir() -> Path | None:
+    """The config folder of Claude Desktop installed from the Microsoft Store, if it is installed.
+
+    A Store (MSIX) app's writes to %APPDATA% are redirected into its package's own LocalCache, and
+    it reads its config from there, so a file written to %APPDATA%\\Claude is one it never sees. It
+    wins over that path when both exist: a machine with the Store build is running the Store build."""
+    local = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    found = sorted(Path(local).glob("Packages/Claude_*/LocalCache/Roaming/Claude"))
+    return found[0] if found else None
+
+
+def restart_hint(cfg_path: Path, server_name: str) -> str:
+    """How to restart Claude Desktop, and where its log for this server is, on this platform."""
+    if sys.platform == "darwin":
+        quit_how = "fully quit the Claude Desktop app (Cmd+Q)"
+        logs = Path("~/Library/Logs/Claude")
+    elif sys.platform.startswith("win"):
+        quit_how = "fully quit Claude Desktop (right-click its icon in the system tray → Quit)"
+        logs = cfg_path.parent / "logs"
+    else:
+        quit_how = "fully quit the Claude Desktop app"
+        logs = cfg_path.parent / "logs"
+    return (
+        f"\nNext: {quit_how} and reopen it,\n"
+        "then ask: \"What datasources does agami see?\"\n"
+        f"Logs (if it doesn't appear): {logs / f'mcp-server-{server_name}.log'}"
+    )
+
+
 def desktop_config_path(override: str | None) -> Path:
     if override:
         return Path(override).expanduser()
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
     if sys.platform.startswith("win"):
+        store = _store_build_config_dir()
+        if store is not None:
+            return store / "claude_desktop_config.json"
         appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(appdata) / "Claude" / "claude_desktop_config.json"
     # Linux / other
@@ -228,7 +260,8 @@ def build_server_entry(python: str, profile: str, version: str) -> dict:
     return {
         "command": python,
         "args": ["-m", "mcp_harness"],
-        "env": {"AGAMI_PROFILE": profile, "AGAMI_VERSION": version},
+        # PYTHONUTF8: on Windows the server would otherwise read and write text in the ANSI code page.
+        "env": {"AGAMI_PROFILE": profile, "AGAMI_VERSION": version, "PYTHONUTF8": "1"},
     }
 
 
@@ -241,7 +274,7 @@ def read_version() -> str:
     if re.match(r"^\d+\.\d+", ver):
         return ver
     try:
-        text = (_DEV_PKG_DIR / "pyproject.toml").read_text()
+        text = (_DEV_PKG_DIR / "pyproject.toml").read_text(encoding="utf-8")
         m = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"', text)
         if m:
             return m.group(1)
@@ -255,7 +288,14 @@ def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bo
     existing: dict = {}
     if cfg_path.exists():
         try:
-            existing = json.loads(cfg_path.read_text())
+            # utf-8-sig: Notepad may have added a byte-order mark, which is not invalid JSON's fault.
+            existing = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+        except UnicodeDecodeError:
+            # Not ours to rewrite: it holds every other MCP server the user has.
+            raise SystemExit(
+                f"ERROR: {cfg_path} is not UTF-8 text, so it was left as it is. "
+                "Save it as UTF-8, then re-run."
+            )
         except ValueError as e:
             raise SystemExit(
                 f"ERROR: {cfg_path} exists but is not valid JSON ({e}). "
@@ -266,6 +306,14 @@ def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bo
 
     new = dict(existing)
     servers = dict(new.get("mcpServers") or {})
+    was = ((servers.get(server_name) or {}).get("env") or {}).get("AGAMI_PROFILE")
+    now = (entry.get("env") or {}).get("AGAMI_PROFILE")
+    if was and now and was != now:
+        print(
+            f"! '{server_name}' served profile '{was}'; it will serve '{now}' instead. To keep both, "
+            f"re-run with --server-name {server_name}-{now}.",
+            file=sys.stderr,
+        )
     servers[server_name] = entry
     new["mcpServers"] = servers
 
@@ -279,9 +327,9 @@ def merge_into_config(cfg_path: Path, server_name: str, entry: dict, dry_run: bo
         shutil.copy2(cfg_path, backup)
 
     tmp = cfg_path.with_suffix(cfg_path.suffix + ".tmp")
-    tmp.write_text(json.dumps(new, indent=2) + "\n")
+    tmp.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
     # validate round-trip before swapping in
-    json.loads(tmp.read_text())
+    json.loads(tmp.read_text(encoding="utf-8"))
     os.replace(tmp, cfg_path)
     return new, backup
 
@@ -356,11 +404,7 @@ def main() -> int:
     if backup:
         print(f"\n✓ backed up previous config → {backup}")
     print(f"✓ wrote {args.server_name} into {cfg_path}")
-    print(
-        "\nNext: fully quit the Claude Desktop app (Cmd+Q on macOS) and reopen it,\n"
-        "then ask: \"What datasources does agami see?\"\n"
-        f"Logs (if it doesn't appear): ~/Library/Logs/Claude/mcp-server-{args.server_name}.log"
-    )
+    print(restart_hint(cfg_path, args.server_name))
     return 0
 
 

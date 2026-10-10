@@ -189,12 +189,11 @@ def _as_label(value) -> str:
     return str(value)
 
 
-def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
-    """Render a GitHub-flavoured markdown table with every numeric cell formatted
-    deterministically and in full (exact value, thousands/lakh grouping, currency
-    symbol) — never abbreviated. `units` maps a header to its unit (currency code or
-    label). The query skill and the MCP both call this so the numbers a user verifies
-    are identical regardless of which LLM renders the surrounding answer."""
+def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = None) -> list[list[str]]:
+    """Every cell formatted the way an answer shows it: a unit'd column with its symbol and
+    grouping, a column named like a year or an id as a label, any other number grouped.
+    `format_table` renders these, and `sm seed-validate`'s preview shows them, so a value
+    looks the same in the preview someone validates as in the answer they later get."""
     units = units or {}
     cols = [str(h) for h in headers]
 
@@ -210,7 +209,17 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
             return _as_label(c)
         return format_cell(c, u)
 
-    fmt_rows = [[_fmt(i, c) for i, c in enumerate(r)] for r in rows]
+    return [[_fmt(i, c) for i, c in enumerate(r)] for r in rows]
+
+
+def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
+    """Render a GitHub-flavoured markdown table with every numeric cell formatted
+    deterministically and in full (exact value, thousands/lakh grouping, currency
+    symbol) — never abbreviated. `units` maps a header to its unit (currency code or
+    label). The query skill and the MCP both call this so the numbers a user verifies
+    are identical regardless of which LLM renders the surrounding answer."""
+    cols = [str(h) for h in headers]
+    fmt_rows = format_rows(headers, rows, units)
     head = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body = "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |" for r in fmt_rows)
@@ -218,4 +227,4 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
 
 
 __all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol", "is_date_format",
-           "format_value", "format_date", "format_cell", "format_table"]
+           "format_value", "format_date", "format_cell", "format_rows", "format_table"]

@@ -611,7 +611,7 @@ def test_seed_validate_runs_through_safety_and_shapes_items(tmp_path, monkeypatc
 
     calls = []
 
-    def fake_run(cmd, capture_output, text, env):
+    def fake_run(cmd, capture_output, text, env, encoding=None):
         calls.append((cmd, env))
         sql = cmd[cmd.index("--sql") + 1]
 
@@ -657,7 +657,7 @@ def test_seed_validate_formats_numbers_with_model_units(tmp_path, monkeypatch):
     _model(tmp_path)
     curate.add_examples(tmp_path, "s", [{"question": "total billed?", "sql": "SELECT SUM(total) AS total FROM orders"}])
 
-    def fake_run(cmd, capture_output, text, env):
+    def fake_run(cmd, capture_output, text, env, encoding=None):
         class R:
             pass
         r = R()

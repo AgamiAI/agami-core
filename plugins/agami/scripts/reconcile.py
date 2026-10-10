@@ -181,7 +181,7 @@ def parse_csv(path: str) -> list[dict]:
     if not p.exists():
         raise FileNotFoundError(f"CSV not found: {p}")
 
-    with p.open(newline="") as f:
+    with p.open(newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         all_rows = [r for r in reader if r and any(c.strip() for c in r)]
 

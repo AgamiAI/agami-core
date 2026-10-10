@@ -11,7 +11,7 @@
 # Interpreter resolution order:
 #   $AGAMI_PYTHON               (explicit override)
 #   <artifacts_dir>/local/.config tool_paths.python3   (agami's configured interpreter)
-#   python3 / python on PATH
+#   python3 / python on PATH (never the Windows Store stub)
 #
 # Deps: if pydantic/sqlglot/pyyaml aren't importable, install them once into that
 # interpreter (user site first, then plain) and tell the user. Idempotent.
@@ -43,33 +43,49 @@ GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 # didn't — so `sm discover` never depends on the caller remembering to export it.
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+# On Windows, `python3` (and often `python`) on PATH may be the Microsoft Store's App Execution Alias:
+# a stub under ...\WindowsApps\ that runs nothing and exits non-zero. A Python installed FROM the Store
+# has its aliases in the same folder, so the path cannot tell them apart; running it can.
+path_python() {
+  local c p
+  for c in python3 python; do
+    while IFS= read -r p; do
+      case "$p" in
+        *[Ww]indows[Aa]pps*) "$p" -c 'import sys' >/dev/null 2>&1 </dev/null || continue ;;
+      esac
+      echo "$p"; return
+    done < <(type -ap "$c" 2>/dev/null)
+  done
+}
+
+# The configured interpreter, read in plain shell: it is how a machine whose only `python3` is that stub
+# finds the real one, so reading it must not need a Python. `.config` is JSON the skills write, and
+# `python3` is a key only under `tool_paths`; JSON escapes a Windows path's backslashes, which Git
+# Bash accepts as forward slashes. The skills write the file as raw UTF-8; a path stored with a
+# `\uXXXX` escape would fail the -x check below and fall back to PATH.
+config_python() {
+  local art ptr="$HOME/.config/agami/path" cfg
+  art="${AGAMI_ARTIFACTS_DIR:-}"
+  if [ -z "$art" ] && [ -f "$ptr" ]; then
+    art="$(head -n 1 "$ptr" | tr -d '\r')"
+    art="${art#"${art%%[![:space:]]*}"}"; art="${art%"${art##*[![:space:]]}"}"  # trim, as .strip() did
+  fi
+  art="${art:-$HOME/agami-artifacts}"
+  case "$art" in "~"*) art="$HOME${art#\~}" ;; esac
+  cfg="$art/local/.config"
+  [ -f "$cfg" ] || cfg="$HOME/.agami/.config"  # legacy location, during the transition
+  [ -f "$cfg" ] || return 0
+  tr -d '\r\n' < "$cfg" \
+    | grep -o '"python3"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
+    | sed -e 's/.*:[[:space:]]*"//' -e 's/"$//' -e 's#\\\\#/#g' || true
+}
+
 resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
-  # configured interpreter from <artifacts_dir>/local/.config (best-effort), with a
-  # legacy ~/.agami/.config fallback during the transition
   local cfg
-  cfg="$(python3 - <<'PY' 2>/dev/null || true
-import json, os, pathlib
-art = os.environ.get("AGAMI_ARTIFACTS_DIR")
-if not art:
-    ptr = pathlib.Path("~/.config/agami/path").expanduser()
-    try:
-        art = ptr.read_text().strip() if ptr.exists() else ""
-    except OSError:
-        art = ""
-art = art or str(pathlib.Path("~/agami-artifacts").expanduser())
-p = pathlib.Path(os.path.expanduser(art)) / "local" / ".config"
-if not p.exists():
-    legacy = pathlib.Path("~/.agami/.config").expanduser()
-    p = legacy if legacy.exists() else p
-try:
-    print(json.loads(p.read_text()).get("tool_paths", {}).get("python3") or "")
-except Exception:
-    print("")
-PY
-)"
+  cfg="$(config_python)"
   if [ -n "$cfg" ] && [ -x "$cfg" ]; then echo "$cfg"; return; fi
-  command -v python3 || command -v python || true
+  path_python
 }
 
 PY="$(resolve_python)"
@@ -197,4 +213,4 @@ ensure_pkg
 # portable guarantee.
 export PYTHONSAFEPATH=1
 cd /
-exec "$PY" -m semantic_model.cli "$@"
+exec "$PY" -X utf8 -m semantic_model.cli "$@"

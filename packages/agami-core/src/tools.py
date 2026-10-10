@@ -262,7 +262,7 @@ def bootstrap_paths() -> None:
 def _load_config() -> dict[str, Any]:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text())
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
     return {}
@@ -503,7 +503,7 @@ def _credentials_sections() -> dict[str, dict[str, str]]:
 
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     try:
-        cfg.read(CREDENTIALS_PATH)
+        cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
     except configparser.Error:
         return {}
     out: dict[str, dict[str, str]] = {}
@@ -3845,6 +3845,9 @@ def _pass_child_env() -> dict[str, str]:
 
     return {
         **os.environ,
+        # UTF-8 mode from the first byte the child writes, including a traceback raised before its
+        # `main` can switch its streams: the parent decodes both streams as UTF-8.
+        "PYTHONUTF8": "1",
         "AGAMI_GOVERNANCE_ENFORCED": "false" if _model_pass_disabled() else "true",
         "AGAMI_SQL_MAX_ROWS": str(_resolve_row_cap()),
         "AGAMI_SQL_TIMEOUT_S": str(_resolve_timeout_s()),
@@ -4009,6 +4012,7 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=supervisor_timeout_s,
             env=_pass_child_env(),
         )

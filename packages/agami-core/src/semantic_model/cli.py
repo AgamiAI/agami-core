@@ -263,7 +263,7 @@ def cmd_prepare(args) -> int:
     the receipt is and not here."""
     sql = args.sql
     if args.sql_file:
-        sql = Path(args.sql_file).read_text()
+        sql = Path(args.sql_file).read_text(encoding="utf-8")
     org = L.load_datasource(args.root)
     pf = RT.pre_flight_check(sql, org)
     _print_json({
@@ -291,7 +291,7 @@ def cmd_receipt(args) -> int:
     from . import snapshot as SN
     sql = args.sql
     if args.sql_file:
-        sql = Path(args.sql_file).read_text()
+        sql = Path(args.sql_file).read_text(encoding="utf-8")
     org = L.load_datasource(args.root)
     receipt = RT.assemble_receipt(
         org, sql,
@@ -440,7 +440,7 @@ def cmd_filter_values_judge(args) -> int:
         _print_json({"error": "no_results_dir", "detail": f"{results} is not a directory"})
         return 2
     try:
-        plan = json.loads(Path(args.plan).read_text())
+        plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
         out = probes.filter_values_judge(plan, results)
     except (OSError, ValueError) as exc:
         _print_json({"error": "bad_plan", "detail": str(exc)})
@@ -796,7 +796,7 @@ def cmd_format_table(args) -> int:
     import csv as _csv
 
     from . import units
-    text = Path(args.csv_file).read_text() if args.csv_file else sys.stdin.read()
+    text = Path(args.csv_file).read_text(encoding="utf-8") if args.csv_file else sys.stdin.read()
     reader = list(_csv.reader(io.StringIO(text)))
     if not reader:
         print("")
@@ -929,7 +929,8 @@ def cmd_seed_validate(args) -> int:
     script = str(Path(__file__).resolve().parent.parent / "execute_sql.py")
     # the safety pass inside execute_sql.py finds the model via AGAMI_ARTIFACTS_DIR —
     # point it at the profile dir's parent so the right model loads (fan/chasm + filters).
-    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent)}
+    # PYTHONUTF8: the child's streams are decoded as UTF-8 below, from its very first byte.
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent), "PYTHONUTF8": "1"}
     cap = max(0, args.preview)
     # Load the model once so result numbers are formatted by the SAME units.py the query
     # path uses (currency symbol + grouping). The validation preview must MATCH the real
@@ -950,7 +951,7 @@ def cmd_seed_validate(args) -> int:
             continue
         proc = subprocess.run(
             [exe, script, "--profile", args.profile, "--area", args.area, "--sql", sql],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, encoding="utf-8", env=env,
         )
         if proc.returncode != 0:
             # A SQL error or a scope refusal — surface it; never fake a result. NOT a fan or chasm
@@ -971,13 +972,7 @@ def cmd_seed_validate(args) -> int:
                     except Exception:
                         unit_map = {}
                 if data:
-                    # match a column's unit by name OR positional key (#ci) — like
-                    # units.format_table — so a dialect that re-cases result headers (e.g.
-                    # Snowflake returns TOTAL_OUTSTANDING for alias `total_outstanding`)
-                    # still resolves the unit and shows the currency symbol.
-                    data = [[units.format_cell(c, unit_map.get(h) or unit_map.get(f"#{ci}"))
-                             for ci, (h, c) in enumerate(zip(headers, row))]
-                            for row in data]
+                    data = units.format_rows(headers, data, unit_map)
                 item["row_headers"] = headers
                 item["row_count"] = len(data)
                 item["row_preview"] = data[:cap]
@@ -1652,7 +1647,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _utf8_stdio() -> None:
+    """Write stdout and stderr as UTF-8 whatever the platform. A piped stream on Windows uses the
+    ANSI code page, so the help text's arrows and a currency symbol such as ₹ raise instead of
+    printing, and every caller of `sm` already decodes UTF-8. A replaced stream (a test's capture)
+    may have no `reconfigure`, and needs none."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main(argv=None) -> int:
+    _utf8_stdio()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
