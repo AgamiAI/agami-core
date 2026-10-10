@@ -308,12 +308,12 @@ def introspect(
             if old is None:
                 merged.append(t)
                 fresh_keys.add((t.schema_name, t.name))
-                report.new_tables.append(t.name)
+                report.new_tables.append(_qualified(t))
                 continue
             m, change = _merge_table(old, t)
             merged.append(m)
             if change:
-                report.changes[t.name] = change
+                report.changes[_qualified(m)] = change
         built = merged
         batch_keys = {(t.schema_name, t.name) for t in built}
         for key, t in existing.items():
@@ -323,7 +323,7 @@ def introspect(
         for sa in prev.subject_areas:
             prev_rels.extend(sa.relationships)
         prev_rels.extend(prev.cross_subject_area_relationships)
-        skip_keys = {(r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) for r in prev_rels}
+        skip_keys = {_rel_key(r) for r in prev_rels}
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
             f"{len(built)} total")
@@ -337,7 +337,7 @@ def introspect(
     if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = list(prev_rels) + [
             r for r in rels
-            if (r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) not in skip_keys]
+            if _rel_key(r) not in skip_keys]
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
@@ -393,6 +393,20 @@ def introspect(
     return org, report
 
 
+def _rel_key(r: Relationship) -> tuple:
+    """A join's identity for de-duplicating an append: both ends WITH their schemas, so a join on
+    `crm.products` isn't taken for the same join on `billing.products`."""
+    def low(v: Optional[str]) -> str:
+        return (v or "").lower()
+    return (low(r.from_schema), low(r.from_table), low(r.from_column),
+            low(r.to_schema), low(r.to_table), low(r.to_column))
+
+
+def _qualified(t: Table) -> str:
+    """How a refresh report names a table: `schema.table`, so two same-named tables stay apart."""
+    return f"{t.schema_name}.{t.name}" if t.schema_name else t.name
+
+
 def _existing_table(existing: dict[tuple, Table], fresh: Table) -> Optional[Table]:
     """The model's table `fresh` is a new reading of: by (schema, name), or — for a bare name such as
     `--tables customers` against a stored `main.customers` — by name alone when exactly one matches."""
@@ -445,9 +459,15 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
     groups = {k: list(v) for k, v in old.column_groups.items()}
     if groups:  # a deep table puts every column in a group, the new ones too
         for f in added:
+            # Prefer a group the table already has: an area that exposes only some groups would not
+            # show a column put in a group it has never heard of.
             group = next((k for k, v in fresh.column_groups.items() if f.name in v), "misc")
+            if group not in groups:
+                group = "misc" if "misc" in groups else group
             groups.setdefault(group, []).append(f.name)
-    merged = old.model_copy(update={"columns": cols, "column_groups": groups, "grain": old.grain or fresh.grain})
+    gone = {n.lower() for n in change["dropped"]}
+    grain = [g for g in old.grain if g.lower() not in gone] or fresh.grain
+    merged = old.model_copy(update={"columns": cols, "column_groups": groups, "grain": grain})
     return merged, {k: v for k, v in change.items() if v}
 
 

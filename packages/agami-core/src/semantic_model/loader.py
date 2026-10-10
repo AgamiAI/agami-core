@@ -126,7 +126,34 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         cross_subject_area_metrics=_load_cross_metrics(root, ds_doc),
         key_terminology=ds_doc.get("key_terminology", {}) or {},
     )
+    if not include_rejected:
+        _drop_joins_on_unserved_columns(org)
     return org
+
+
+def _drop_joins_on_unserved_columns(org: Datasource) -> None:
+    """Leave out of the runtime view any join, or grain column, naming a column it doesn't serve.
+
+    A column excluded by a curator, or one a refresh found the database no longer has (`stale`), is
+    dropped from its table above; a join on it, or a grain that lists it, would still offer the agent
+    a condition the database rejects. Both stay on disk (`include_rejected=True`) for a person to
+    decide. A join written as a full `on` condition, or on a table not in the model, is left alone."""
+    served: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            served[t.name.lower()] = {c.name.lower() for c in t.columns}
+            t.grain = [g for g in t.grain if g.lower() in served[t.name.lower()]]
+
+    def live(table: str, column: Optional[str]) -> bool:
+        cols = served.get(bare_name(table).lower())
+        return column is None or cols is None or column.lower() in cols
+
+    def keep(r) -> bool:
+        return live(r.from_table, r.from_column) and live(r.to_table, r.to_column)
+
+    for sa in org.subject_areas:
+        sa.relationships = [r for r in sa.relationships if keep(r)]
+    org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if keep(r)]
 
 
 def load_org_id(root: str | Path) -> str | None:

@@ -322,7 +322,7 @@ def test_a_bare_name_refresh_updates_the_table_instead_of_adding_it_again(shop):
     _sql(shop, "ALTER TABLE customers ADD COLUMN region TEXT")
     done = _introspect(shop, "--tables", "customers", "--append")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "new tables" not in done.stdout and "changed customers: added region" in done.stdout
+    assert "new tables" not in done.stdout and "changed main.customers: added region" in done.stdout
     assert "region" in _columns(shop, "customers")
 
 
@@ -354,3 +354,60 @@ def test_a_profile_git_ignores_is_not_treated_as_inside_that_repository(tmp_path
     (home / ".gitignore").write_text("agami-artifacts/\n", encoding="utf-8")
     committed, note = curate._git_commit(root, "x")
     assert committed is False and "git init" in note
+
+
+# --- Copilot's review: schema-qualified report and joins, joins and grain on unserved columns -----
+
+
+def test_the_join_dedup_keeps_schemas_apart():
+    from semantic_model import models as m
+
+    a = m.Relationship(from_table="products", from_column="cat_id", to_table="cats", to_column="id",
+                       from_schema="billing", to_schema="billing", relationship="many_to_one")
+    b = a.model_copy(update={"from_schema": "crm", "to_schema": "crm"})
+    assert I._rel_key(a) != I._rel_key(b)
+
+
+def test_a_dropped_grain_column_leaves_the_grain():
+    from semantic_model import models as m
+
+    old = m.Table(name="t", grain=["k"], columns=[m.Column(name="k", type="integer"), m.Column(name="v", type="string")])
+    fresh = m.Table(name="t", grain=["v"], columns=[m.Column(name="v", type="string")])
+    merged, _ = I._merge_table(old, fresh)
+    assert merged.grain == ["v"]
+
+
+def test_a_new_column_goes_in_a_group_the_table_already_has():
+    from semantic_model import models as m
+
+    old = m.Table(name="t", columns=[m.Column(name="a", type="string")], column_groups={"misc": ["a"]})
+    fresh = m.Table(name="t", columns=[m.Column(name="a", type="string"), m.Column(name="b", type="string")],
+                    column_groups={"identity": ["a", "b"]})
+    merged, _ = I._merge_table(old, fresh)
+    assert merged.column_groups == {"misc": ["a", "b"]}
+
+
+def test_a_join_on_a_column_that_is_not_served_is_not_offered(shop):
+    from semantic_model import loader as L
+
+    assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
+    org = L.load_datasource(shop["root"])
+    assert any(r.from_column == "customer_id" for sa in org.subject_areas for r in sa.relationships)
+    path = _table_files(shop["root"])["orders"]
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    for c in doc["columns"]:
+        if c["name"] == "customer_id":
+            c["review_state"] = "stale"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    served = L.load_datasource(shop["root"])
+    assert not any(r.from_column == "customer_id" for sa in served.subject_areas for r in sa.relationships)
+    kept = L.load_datasource(shop["root"], include_rejected=True)
+    assert any(r.from_column == "customer_id" for sa in kept.subject_areas for r in sa.relationships)
+
+
+def test_the_refresh_report_names_tables_with_their_schema(shop):
+    assert _introspect(shop, "--tables", "main.customers").returncode == 0
+    _sql(shop, "ALTER TABLE customers ADD COLUMN region TEXT")
+    out = _introspect(shop, "--tables", "main.customers", "--append", "--dry-run").stdout
+    assert "changed main.customers: added region" in out
