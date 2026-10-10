@@ -863,3 +863,51 @@ def test_a_metric_is_judged_on_its_sql_not_its_prose(tmp_path):
     build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=[sa], storage_connections=[
         m.StorageConnection(name="c", storage_type="SQLite", storage_config={})]), tmp_path / "shop")
     assert [mm.name for mm in L.load_datasource(tmp_path / "shop").subject_areas[0].metrics] == ["Revenue"]
+
+
+def test_each_areas_copy_of_a_table_is_refreshed_on_its_own(tmp_path):
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    from catalog_helpers import col, make_catalog_runner
+
+    def orders(desc: str, review: str) -> m.Table:
+        return m.Table(name="orders", schema="public", storage_connection="c", review_state=review, grain=["id"],
+                       columns=[m.Column(name="id", type="integer", primary_key=True, description=desc)])
+
+    served, excluded = orders("Served copy, curated.", "approved"), orders("Excluded copy.", "rejected")
+    areas = [m.SubjectArea(name=n, description="Curated.", tables_defined=[t], tables=[build.make_table_ref("c", t)])
+             for n, t in (("sales", served), ("archive", excluded))]
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=areas, storage_connections=[
+        m.StorageConnection(name="c", storage_type="PostgreSQL", storage_config={})]), tmp_path / "shop")
+    runner = make_catalog_runner(tables=["orders"], columns={"orders": [col("id", "integer", nullable=False), col("region", "varchar")]})
+
+    I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, tables=["public.orders"], append=True)
+    on_disk = {sa.name: sa.tables_defined[0] for sa in L.load_datasource(tmp_path / "shop", include_rejected=True).subject_areas}
+    assert on_disk["sales"].columns[0].description == "Served copy, curated."
+    assert on_disk["archive"].columns[0].description == "Excluded copy."
+    assert on_disk["archive"].review_state == "rejected"                   # never re-exposed
+    assert {c.name for c in on_disk["sales"].columns} == {c.name for c in on_disk["archive"].columns} == {"id", "region"}
+    served_view = {sa.name: [t.name for t in sa.tables_defined] for sa in L.load_datasource(tmp_path / "shop").subject_areas}
+    assert served_view == {"sales": ["orders"], "archive": []}
+
+
+def test_cross_area_entities_on_a_hidden_column_are_not_served(tmp_path):
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    t = m.Table(name="customers", schema="main", storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True), m.Column(name="region", type="string", review_state="stale")])
+    sa = m.SubjectArea(name="shop", description="Curated.", tables_defined=[t], tables=[build.make_table_ref("c", t)])
+    org = m.Datasource(datasource="shop", version=1, subject_areas=[sa], storage_connections=[
+        m.StorageConnection(name="c", storage_type="SQLite", storage_config={})])
+    build.write_tree(org, tmp_path / "shop")
+    (tmp_path / "shop" / "cross_subject_area_entities.yaml").write_text(yaml.safe_dump({"entities": [
+        {"name": "Region", "maps_to": [{"table": "customers", "column": "region"}]},
+        {"name": "Customer", "maps_to": [{"table": "customers", "column": "id"}]}]}), encoding="utf-8")
+    assert len(L.load_datasource(tmp_path / "shop", include_rejected=True).cross_subject_area_entities) == 2
+    assert [e.name for e in L.load_datasource(tmp_path / "shop").cross_subject_area_entities] == ["Customer"]

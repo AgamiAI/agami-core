@@ -188,6 +188,18 @@ class _Hidden:
             cols - self.served.get(k, set()) for k, cols in self.on_disk.items())
 
 
+def _entities_served(entities: list, end_hidden) -> list:
+    """Entities with mappings to hidden columns or tables removed; one left with none is dropped."""
+    kept = []
+    for e in entities:
+        mapped = [mp for mp in e.maps_to if not end_hidden(None, mp.table, mp.column)]
+        if e.maps_to and not mapped:
+            continue   # every column it named is hidden: nothing left to resolve it to
+        e.maps_to = mapped
+        kept.append(e)
+    return kept
+
+
 def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     """Leave out of the runtime view whatever names a table or column on disk that it doesn't serve.
 
@@ -235,15 +247,9 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
                                for c in _columns_referenced(f.replace("{alias}", alias), t.name))]
         sa.tables = [r for r in sa.tables if not hidden.table_hidden(r.schema_name, r.table)]
         sa.relationships = [r for r in sa.relationships if join_ok(r)]
-        kept_entities = []
-        for e in sa.entities:
-            mapped = [mp for mp in e.maps_to if not end_hidden(None, mp.table, mp.column)]
-            if e.maps_to and not mapped:
-                continue   # every column it named is hidden: nothing left to resolve it to
-            e.maps_to = mapped
-            kept_entities.append(e)
-        sa.entities = kept_entities
+        sa.entities = _entities_served(sa.entities, end_hidden)
         sa.metrics = [mm for mm in sa.metrics if metric_ok(mm)]
+    org.cross_subject_area_entities = _entities_served(org.cross_subject_area_entities, end_hidden)
     org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
     org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
 

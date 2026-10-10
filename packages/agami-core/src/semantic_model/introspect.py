@@ -303,7 +303,15 @@ def introspect(
     if refreshing:
         from .loader import load_datasource
         prev = load_datasource(out, include_rejected=True)
-        existing = {(t.schema_name, t.name): t for sa in prev.subject_areas for t in sa.tables_defined}
+        # Two areas may each define the same table (one serving it, one excluding its copy), so every
+        # area's copy is merged on its own and written back to its own area. `existing` holds one copy
+        # per table — a served one when there is — for matching, joins and grain.
+        copies: dict[tuple, list[tuple[str, Table]]] = {}
+        for sa in prev.subject_areas:
+            for t in sa.tables_defined:
+                copies.setdefault((t.schema_name, t.name), []).append((sa.name, t))
+        existing = {k: next((t for _, t in cs if t.review_state != "rejected"), cs[0][1]) for k, cs in copies.items()}
+        per_area: dict[tuple, Table] = {}   # (area, (schema, table)) -> that area's merged copy
         merged: list[Table] = []
         retyped: set[tuple] = set()   # (table, column) whose type changed: joins on them need review
         for t in built:
@@ -317,6 +325,8 @@ def introspect(
                 continue
             m, change = _merge_table(old, t)
             merged.append(m)
+            for area, copy in copies[(old.schema_name, old.name)]:
+                per_area[(area, (old.schema_name, old.name))] = m if copy is old else _merge_table(copy, t)[0]
             retyped.update((m.name.lower(), r.split(":")[0].lower()) for r in change.get("retyped", []))
             if change:
                 report.changes[_qualified(m)] = change
@@ -337,6 +347,9 @@ def introspect(
             if old.review_state not in ("stale", "rejected"):
                 existing[key] = old.model_copy(update={"review_state": "stale"})
                 report.changes[_qualified(old)] = {"table": ["no longer in the database"]}
+            for area, copy in copies[key]:
+                if copy.review_state not in ("stale", "rejected"):
+                    per_area[(area, key)] = copy.model_copy(update={"review_state": "stale"})
         # A new table carries the model's own connection name, not the one this run generated (they
         # differ once a model's connection was renamed); entity resolution reads the table's field.
         model_conn = prev.storage_connections[0].name if prev.storage_connections else conn_name
@@ -416,7 +429,7 @@ def introspect(
     else:
         # Regroup only the tables this run created: an existing table's column groups are curation.
         _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels)
-        org = _refresh_existing(prev, built, rels[len(prev_rels):], fresh_keys, profile, report)
+        org = _refresh_existing(prev, built, rels[len(prev_rels):], fresh_keys, profile, report, per_area)
 
     # 5. write (backing up any legacy model at the profile root). An append onto an existing model is
     # validated first: writing an invalid merge would replace a curated model with a broken one.
@@ -649,6 +662,7 @@ def _refresh_existing(
     fresh_keys: set[tuple],
     profile: str,
     report: IntrospectReport,
+    per_area: Optional[dict[tuple, Table]] = None,
 ) -> Datasource:
     """The existing model with `built`'s merged tables in place, new tables placed, new joins added.
 
@@ -660,7 +674,8 @@ def _refresh_existing(
     areas = []
     conn_name = prev.storage_connections[0].name  # the model's own, whatever this run would call it
     for sa in prev.subject_areas:
-        tables = [by_key.get((t.schema_name, t.name), t) for t in sa.tables_defined]
+        tables = [(per_area or {}).get((sa.name, (t.schema_name, t.name)), by_key.get((t.schema_name, t.name), t))
+                  for t in sa.tables_defined]
         areas.append(sa.model_copy(update={"tables_defined": tables}))
     names = {a.name: i for i, a in enumerate(areas)}
 
