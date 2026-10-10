@@ -306,6 +306,7 @@ def introspect(
         for t in built:
             old = _existing_table(existing, t)
             if old is None:
+                _refuse_ambiguous(existing, t)
                 merged.append(t)
                 fresh_keys.add((t.schema_name, t.name))
                 report.new_tables.append(_qualified(t))
@@ -408,6 +409,17 @@ def _qualified(t: Table) -> str:
     return f"{t.schema_name}.{t.name}" if t.schema_name else t.name
 
 
+def _refuse_ambiguous(existing: dict[tuple, Table], fresh: Table) -> None:
+    """Stop when a bare name matches several tables in the model: never guess which one is meant,
+    and never add a third, unqualified copy of it."""
+    if fresh.schema_name is not None:
+        return
+    same = sorted(f"{s}.{n}" for (s, n) in existing if n.lower() == fresh.name.lower())
+    if len(same) > 1:
+        raise RuntimeError(f"{fresh.name!r} matches {len(same)} tables in the model ({', '.join(same)}); "
+                           "name the one to refresh as schema.table")
+
+
 def _existing_table(existing: dict[tuple, Table], fresh: Table) -> Optional[Table]:
     """The model's table `fresh` is a new reading of: by (schema, name), or — for a bare name such as
     `--tables customers` against a stored `main.customers` — by name alone when exactly one matches."""
@@ -460,12 +472,12 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
     groups = {k: list(v) for k, v in old.column_groups.items()}
     if groups:  # a deep table puts every column in a group, the new ones too
         for f in added:
-            # Prefer a group the table already has: an area that exposes only some groups would not
-            # show a column put in a group it has never heard of.
+            # Always a group the table already has: an area exposes groups by name, so a column put in
+            # a group none of them lists would never be served.
             group = next((k for k, v in fresh.column_groups.items() if f.name in v), "misc")
             if group not in groups:
-                group = "misc" if "misc" in groups else group
-            groups.setdefault(group, []).append(f.name)
+                group = "misc" if "misc" in groups else next(iter(groups))
+            groups[group].append(f.name)
     gone = {n.lower() for n in change["dropped"]}
     grain = [g for g in old.grain if g.lower() not in gone] or fresh.grain
     merged = old.model_copy(update={"columns": cols, "column_groups": groups, "grain": grain})

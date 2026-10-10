@@ -188,7 +188,7 @@ def test_merge_table_puts_a_new_column_of_a_deep_table_in_a_group():
     merged, change = I._merge_table(old, fresh)
     assert [c.name for c in merged.columns] == ["a", "b"]
     assert merged.columns[0].type == "integer"
-    assert merged.column_groups == {"core": ["a"], "misc": ["b"]}
+    assert merged.column_groups == {"core": ["a", "b"]}   # an existing group, never an unexposed new one
     assert change == {"added": ["b"], "retyped": ["a: string -> integer"]}
 
 
@@ -433,3 +433,13 @@ def test_joins_on_same_named_tables_in_two_schemas_are_judged_separately(tmp_pat
     L._drop_joins_on_unserved_columns(org)
     assert [r.from_schema for r in org.subject_areas[0].relationships] == ["sales"]   # live: kept
     assert org.subject_areas[1].relationships == []                                  # stale: hidden
+
+
+def test_a_bare_name_matching_two_stored_tables_is_refused_not_added():
+    from semantic_model import models as m
+
+    existing = {("a", "t"): m.Table(name="t", schema="a"), ("b", "t"): m.Table(name="t", schema="b")}
+    with pytest.raises(RuntimeError, match=r"matches 2 tables in the model \(a.t, b.t\)"):
+        I._refuse_ambiguous(existing, m.Table(name="t"))
+    I._refuse_ambiguous(existing, m.Table(name="t", schema="a"))   # qualified: fine
+    I._refuse_ambiguous({("a", "t"): m.Table(name="t", schema="a")}, m.Table(name="t"))   # unique: fine
