@@ -54,6 +54,8 @@ class SpecResult:
     errors: list[str] = field(default_factory=list)
     counts: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    committed: bool = False
+    commit_note: str = ""   # why nothing was committed (not in git, or inside a larger repository)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -62,6 +64,8 @@ class SpecResult:
             "errors": self.errors,
             "counts": self.counts,
             "notes": self.notes,
+            "committed": self.committed,
+            **({"commit_note": self.commit_note} if self.commit_note else {}),
         }
 
 
@@ -650,7 +654,7 @@ def apply_spec(
         signer,
         role,
     )
-    curate._git_commit(root, "apply model spec")  # best-effort; its note is not part of this result
+    res.committed, res.commit_note = curate._git_commit(root, "apply model spec")
     res.applied = True
     return res
 

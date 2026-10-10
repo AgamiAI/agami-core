@@ -911,3 +911,63 @@ def test_cross_area_entities_on_a_hidden_column_are_not_served(tmp_path):
         {"name": "Customer", "maps_to": [{"table": "customers", "column": "id"}]}]}), encoding="utf-8")
     assert len(L.load_datasource(tmp_path / "shop", include_rejected=True).cross_subject_area_entities) == 2
     assert [e.name for e in L.load_datasource(tmp_path / "shop").cross_subject_area_entities] == ["Customer"]
+
+
+# --- review of a1c3149: schema-aware retype, ambiguity, join curation, derived metrics, spec note --
+
+
+def test_a_retype_in_one_schema_leaves_the_other_schemas_join_alone():
+    retyped = {("sales", "orders", "customer_id"): "sales.orders"}
+    assert I._retyped_end(retyped, "sales", "orders", "customer_id") == "sales.orders"
+    assert I._retyped_end(retyped, "archive", "orders", "customer_id") is None
+    assert I._retyped_end(retyped, None, "sales.orders", "customer_id") == "sales.orders"
+    assert I._retyped_end(retyped, None, "orders", "customer_id") == "sales.orders"   # no schema stated
+
+
+def test_join_curation_survives_a_re_proposal_of_areas(tmp_path):
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from semantic_model import loader as L
+
+    from catalog_helpers import col, make_catalog_runner
+
+    names = [f"{fam}_{i}" for fam in ("hr", "inv") for i in range(13)]
+    cols = {n: [col("id", "integer", nullable=False), col("hr_0_id", "integer")] for n in names}
+    runner = make_catalog_runner(tables=names, columns=cols,
+                                 fks=[{"from_table": "inv_0", "from_column": "hr_0_id", "to_table": "hr_0", "to_column": "id"}])
+    I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, tables=[f"public.{n}" for n in names[:13]] + ["public.inv_0"], append=True)
+    root = tmp_path / "shop"
+    rel_file = next(root.glob("subject_areas/*/relationships.yaml"), None) or root / "cross_subject_area_relationships.yaml"
+    doc = yaml.safe_load(rel_file.read_text(encoding="utf-8"))
+    rels = doc if isinstance(doc, list) else doc.get("relationships", doc.get("cross_subject_area_relationships", []))
+    rels[0]["description"] = "Curated: who owns the invoice."
+    rel_file.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, tables=[f"public.{n}" for n in names[13:]], append=True)
+    org = L.load_datasource(root, include_rejected=True)
+    every = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    assert any(r.description == "Curated: who owns the invoice." for r in every)
+
+
+def test_a_derived_metric_on_a_hidden_base_is_not_served(tmp_path):
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    t = m.Table(name="orders", schema="main", storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True), m.Column(name="total", type="decimal", review_state="stale")])
+    sa = m.SubjectArea(name="s", description="Curated.", tables_defined=[t], tables=[build.make_table_ref("c", t)], metrics=[
+        m.Metric(name="revenue", calculation="SUM(total)", bindings={"SQLite": "SUM(total)"}, source_tables=["orders"]),
+        m.Metric(name="order count", calculation="COUNT(id)", bindings={"SQLite": "COUNT(id)"}, source_tables=["orders"]),
+        m.Metric(name="aov", calculation="revenue per order", bindings={"SQLite": "{revenue} / {order count}"},
+                 source_tables=["orders"])])
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=[sa], storage_connections=[
+        m.StorageConnection(name="c", storage_type="SQLite", storage_config={})]), tmp_path / "shop")
+    assert [mm.name for mm in L.load_datasource(tmp_path / "shop").subject_areas[0].metrics] == ["order count"]
+
+
+def test_apply_spec_reports_why_nothing_was_committed():
+    from semantic_model import model_spec
+
+    res = model_spec.SpecResult(applied=True, committed=False, commit_note="inside the git repository at /x")
+    assert res.as_dict()["committed"] is False and res.as_dict()["commit_note"].startswith("inside")

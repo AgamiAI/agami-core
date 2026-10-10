@@ -252,6 +252,32 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     org.cross_subject_area_entities = _entities_served(org.cross_subject_area_entities, end_hidden)
     org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
     org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
+    _drop_metrics_on_removed_bases(org)
+
+
+def _drop_metrics_on_removed_bases(org: Datasource) -> None:
+    """A derived metric built on a metric that was just left out would fail to expand; leave it out
+    too, repeating until every served metric's bases are served. Bases are read the way expansion
+    reads them — `base_metrics` and `{…}` placeholders, looked up in `metric_index`."""
+    from . import derived as D
+
+    def bases(mm) -> list[str]:
+        refs = list(mm.base_metrics or [])
+        for b in (mm.bindings or {}).values():
+            refs += D.binding_refs(b)
+        return refs
+
+    while True:
+        idx = D.metric_index(org)
+        changed = False
+        for holder in [*org.subject_areas, org]:
+            attr = "metrics" if holder is not org else "cross_subject_area_metrics"
+            kept = [mm for mm in getattr(holder, attr) if all(b in idx for b in bases(mm))]
+            if len(kept) != len(getattr(holder, attr)):
+                setattr(holder, attr, kept)
+                changed = True
+        if not changed:
+            return
 
 
 def load_org_id(root: str | Path) -> str | None:

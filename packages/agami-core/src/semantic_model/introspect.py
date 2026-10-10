@@ -313,7 +313,7 @@ def introspect(
         existing = {k: next((t for _, t in cs if t.review_state != "rejected"), cs[0][1]) for k, cs in copies.items()}
         per_area: dict[tuple, Table] = {}   # (area, (schema, table)) -> that area's merged copy
         merged: list[Table] = []
-        retyped: set[tuple] = set()   # (table, column) whose type changed: joins on them need review
+        retyped: dict[tuple, str] = {}   # (schema, table, column) whose type changed -> schema.table
         for t in built:
             _refuse_sql_table(existing, t)
             old = _existing_table(existing, t)
@@ -327,7 +327,8 @@ def introspect(
             merged.append(m)
             for area, copy in copies[(old.schema_name, old.name)]:
                 per_area[(area, (old.schema_name, old.name))] = m if copy is old else _merge_table(copy, t)[0]
-            retyped.update((m.name.lower(), r.split(":")[0].lower()) for r in change.get("retyped", []))
+            for r in change.get("retyped", []):
+                retyped[((m.schema_name or "").lower(), m.name.lower(), r.split(":")[0].lower())] = _qualified(m)
             if change:
                 report.changes[_qualified(m)] = change
         # A table the database no longer has: named in this run but unreadable, or — on a catalog-mode
@@ -336,6 +337,8 @@ def introspect(
         gone_keys = set()
         for t in unreadable:
             old = _existing_table(existing, t)
+            if old is None:
+                _refuse_ambiguous(existing, t)   # never treat an ambiguous name as merely unreadable
             if old is not None:
                 gone_keys.add((old.schema_name, old.name))
         if tables is None:
@@ -368,12 +371,11 @@ def introspect(
         # Joins on a column whose type changed go back to review: a confirmed join on mismatched
         # types is refused by the validator, which would make the refresh impossible to write.
         for r in prev_rels:
-            ends = {(bare_name(r.from_table).lower(), (r.from_column or "").lower()),
-                    (bare_name(r.to_table).lower(), (r.to_column or "").lower())}
-            if ends & retyped and r.confidence == "confirmed":
+            hit = _retyped_end(retyped, r.from_schema, r.from_table, r.from_column) \
+                or _retyped_end(retyped, r.to_schema, r.to_table, r.to_column)
+            if hit and r.confidence == "confirmed":
                 r.confidence, r.review_state = "proposed", "unreviewed"
-                q = _qualified(next(t for t in merged if t.name.lower() == next(iter(ends & retyped))[0]))
-                report.changes.setdefault(q, {}).setdefault("joins to review", []).append(
+                report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(
                     f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -446,6 +448,20 @@ def introspect(
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
     return org, report
+
+
+def _retyped_end(retyped: dict[tuple, str], schema: Optional[str], table: str, column: Optional[str]) -> Optional[str]:
+    """The retyped table (as `schema.table`) a join end names, or None. Schemas must agree where the
+    join states one, so a change to `sales.orders.customer_id` leaves `archive.orders`' join alone."""
+    if not column:
+        return None
+    if not schema and "." in table:
+        schema, table = table.rsplit(".", 1)
+    t, c = bare_name(table).lower(), column.lower()
+    for (s, rt, rc), q in retyped.items():
+        if rt == t and rc == c and (not schema or not s or s == schema.lower()):
+            return q
+    return None
 
 
 def _same_join(a: Relationship, b: Relationship) -> bool:
