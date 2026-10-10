@@ -43,17 +43,23 @@ GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 # didn't — so `sm discover` never depends on the caller remembering to export it.
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-# On Windows, `python3` (and often `python`) on PATH may be the Microsoft Store's App Execution Alias:
-# a stub under ...\WindowsApps\ that runs nothing and exits non-zero. A Python installed FROM the Store
-# has its aliases in the same folder, so the path cannot tell them apart; running it can.
+# On Windows, `python3` (and often `python`) may be the Microsoft Store's App Execution Alias: a stub
+# under ...\WindowsApps\ that runs nothing, and may even exit 0 after opening the Store. A Python
+# installed FROM the Store has its aliases in the same folder, so neither the path nor the exit status
+# can tell them apart; only Python output can. Other paths are taken as found, as before.
+usable_python() {
+  case "$1" in
+    *[Ww]indows[Aa]pps*)
+      [ "$("$1" -c 'print("agami-python-ok")' 2>/dev/null </dev/null | tr -d '\r')" = "agami-python-ok" ] ;;
+    *) [ -x "$1" ] ;;
+  esac
+}
+
 path_python() {
   local c p
   for c in python3 python; do
     while IFS= read -r p; do
-      case "$p" in
-        *[Ww]indows[Aa]pps*) "$p" -c 'import sys' >/dev/null 2>&1 </dev/null || continue ;;
-      esac
-      echo "$p"; return
+      usable_python "$p" && { echo "$p"; return; }
     done < <(type -ap "$c" 2>/dev/null)
   done
 }
@@ -62,7 +68,7 @@ path_python() {
 # finds the real one, so reading it must not need a Python. `.config` is JSON the skills write, and
 # `python3` is a key only under `tool_paths`; JSON escapes a Windows path's backslashes, which Git
 # Bash accepts as forward slashes. The skills write the file as raw UTF-8; a path stored with a
-# `\uXXXX` escape would fail the -x check below and fall back to PATH.
+# `\uXXXX` escape would fail the check below and fall back to PATH.
 config_python() {
   local art ptr="$HOME/.config/agami/path" cfg
   art="${AGAMI_ARTIFACTS_DIR:-}"
@@ -84,7 +90,7 @@ resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
   local cfg
   cfg="$(config_python)"
-  if [ -n "$cfg" ] && [ -x "$cfg" ]; then echo "$cfg"; return; fi
+  if [ -n "$cfg" ] && usable_python "$cfg"; then echo "$cfg"; return; fi
   path_python
 }
 

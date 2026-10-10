@@ -125,8 +125,11 @@ If you'd rather edit by hand, mind these two gotchas — both silently produce
    on each update (the code is installed, not referenced by a moving path).
 
 Edit `claude_desktop_config.json` (Settings → Developer → Edit Config). Its path is
-`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS and
-`%APPDATA%\Claude\claude_desktop_config.json` on Windows. `mcpServers` is a
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS. On Windows it is
+`%APPDATA%\Claude\claude_desktop_config.json` for the installer build, and
+`%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude_desktop_config.json` for the
+Microsoft Store build — which reads only its own copy, so editing the `%APPDATA%` one does nothing
+there. Settings → Developer → Edit Config opens the right one either way. `mcpServers` is a
 **top-level** key (a sibling of `preferences`, not nested inside it):
 
 ```json
@@ -144,8 +147,8 @@ Edit `claude_desktop_config.json` (Settings → Developer → Edit Config). Its 
 **Fully quit** the app — Cmd+Q on macOS; quit from the system tray on Windows (not
 just closing the window) — then reopen. It spawns the server as a child process
 over stdin/stdout — **there is no URL and no port.** Logs:
-`~/Library/Logs/Claude/mcp-server-agami.log` on macOS,
-`%APPDATA%\Claude\logs\mcp-server-agami.log` on Windows.
+`~/Library/Logs/Claude/mcp-server-agami.log` on macOS; on Windows, `logs\mcp-server-agami.log` in
+the same folder as the config file above.
 
 > **Containment — confirmed working (verified 2026-06 on the macOS app).** A
 > custom stdio MCP server runs with your full user access: it reads `<artifacts_dir>/local`
@@ -156,8 +159,10 @@ over stdin/stdout — **there is no URL and no port.** Logs:
 > reports missing-credentials/`not_found` — fall back to **Claude Code** (the CLI),
 > where it always runs with full local access.
 
-> **Windows status.** The wiring is cross-platform: the helper writes
-> `%APPDATA%\Claude\claude_desktop_config.json`, detects `python`/`python3`, and
+> **Windows status.** The wiring is cross-platform: the helper writes the config the
+> installed build reads (the Store build's own copy when it is installed, else
+> `%APPDATA%\Claude\claude_desktop_config.json`), sets `PYTHONUTF8=1` for the server,
+> detects `python`/`python3`, and
 > the server is pure stdlib. `execute_sql.py` skips the POSIX `chmod 600`
 > credentials check on Windows (NTFS has no Unix mode bits; the file is guarded by
 > your user profile's ACL instead). This path is validated on macOS but **not yet

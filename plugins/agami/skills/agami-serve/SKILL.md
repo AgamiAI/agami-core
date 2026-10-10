@@ -56,10 +56,12 @@ which does an editable install automatically when run from a dev checkout — no
 - **Driver missing (exit code 3).** The helper couldn't find a Python that can
   import the DB driver. Relay its suggested `pip install ...` line, offer to run
   it, then re-run the helper. Example: `python3 -m pip install psycopg2-binary`.
-- **Wrote successfully.** Tell the user, in one or two lines:
-  1. **Fully quit** the Claude Desktop app (Cmd+Q on macOS — not just close the window), then reopen it.
+- **Wrote successfully.** Relay the helper's closing `Next:` lines, in one or two lines of your
+  own. They are written for the user's platform (how to fully quit the app, which differs between
+  macOS and Windows, and where this server's log is), so pass them on rather than restating them:
+  1. **Fully quit** the Claude Desktop app as the helper says (not just close the window), then reopen it.
   2. In Claude Desktop, ask *"What datasources does agami see?"* — it should call `list_datasources` and return their profiles.
-  3. If it doesn't appear, the log is at `~/Library/Logs/Claude/mcp-server-agami.log`.
+  3. If it doesn't appear, the log is at the path the helper printed.
 
 ## Phase 3: Orient them (one short paragraph)
 

@@ -172,17 +172,19 @@ def test_scan_catches_each_shape_it_claims_to():
 
 # --- sm's interpreter ---------------------------------------------------------------------------
 
-# Passes sm's import and version checks, and records the interpreter it ran as.
+# Passes sm's import and version checks, answers its probe as a real Python, and records each call.
 _SHIM = """#!/bin/sh
 echo "$0 $*" >> "$SM_SHIM_LOG"
+case "$2" in *agami-python-ok*) echo agami-python-ok ;; esac
 exit 0
 """
 
 
-# The App Execution Alias with no Store Python behind it: runs nothing, exits 9009.
+# The App Execution Alias with no Store Python behind it: runs nothing, and (as reported) can still
+# exit 0, so only the missing output gives it away.
 _STUB = """#!/bin/sh
 echo "$0 $*" >> "$SM_SHIM_LOG"
-exit 9009
+exit 0
 """
 
 
@@ -226,7 +228,7 @@ def test_sm_skips_the_store_stub_on_path(tmp_path):
 
     ran = _run_sm(tmp_path, [stub.parent, real.parent])
     # Probed once, found to run nothing, and never used for anything else.
-    assert [line for line in ran.splitlines() if line.startswith(str(stub))] == [f"{stub} -c import sys"]
+    assert [line for line in ran.splitlines() if line.startswith(str(stub))] == [f'{stub} -c print("agami-python-ok")']
     assert f"{real} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
 
 
@@ -391,3 +393,15 @@ def test_sm_uses_a_python_installed_from_the_store(tmp_path):
 
     ran = _run_sm(tmp_path, [store.parent])
     assert f"{store} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shims; the case simulated is the Windows one")
+def test_sm_does_not_trust_a_configured_store_stub(tmp_path):
+    stub = _exe(tmp_path / "WindowsApps" / "python3", _STUB)
+    real = _exe(tmp_path / "bin" / "python3", _SHIM)
+    config = tmp_path / "home" / "agami-artifacts" / "local" / ".config"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"tool_paths": {"python3": str(stub)}}), encoding="utf-8")
+
+    ran = _run_sm(tmp_path, [real.parent])
+    assert f"{real} -X utf8 -m semantic_model.cli areas {tmp_path}" in ran
