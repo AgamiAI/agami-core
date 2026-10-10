@@ -126,7 +126,7 @@ joins, so describe them instead: fill in the
 each table, the joins (including condition joins such as `current_flag = 'Y'`), metrics, sensitive
 columns and rules — and attach it when `/agami-connect` asks for context. It's checked as a whole
 before anything is written, and the model is built exactly as it describes. Format:
-[model-spec-format.md](plugins/agami/shared/model-spec-format.md).
+[model-spec-format.md](plugins/agami/shared/model-spec-format.md) *(early: the format may still change)*.
 
 ## Databases supported
 
@@ -324,7 +324,7 @@ by environment variables, and **LLM-free + zero-egress by default**. Self-hostin
 - [Credentials](docs/credentials.md) — every dialect, the connection-method picker
 - [The trust layer](docs/trust-layer.md) — confidence, sign-off, receipts, snapshots
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
-- [Model spec workbook](plugins/agami/shared/model-spec-format.md) — build the model from a filled-in spreadsheet ([template](plugins/agami/shared/model-spec-template.xlsx))
+- [Model spec workbook](plugins/agami/shared/model-spec-format.md) *(early)* — build the model from a filled-in spreadsheet ([template](plugins/agami/shared/model-spec-template.xlsx))
 - [Golden datasets](plugins/agami/shared/golden-dataset-shape.md) — the question bank `/agami-eval` scores against
 - [Security](SECURITY.md) — the read-only guarantee per dialect, and what a refusal may name
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
