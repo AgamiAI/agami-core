@@ -597,9 +597,13 @@ def test_a_table_the_database_dropped_is_kept_stale_and_not_served(shop):
 
     assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
     _sql(shop, "DROP TABLE orders")
-    for args in (["--tables", "customers", "orders"], ["--tables", "orders"], []):
+    for args in (["--tables", "customers", "orders"], ["--tables", "orders"]):
         done = _introspect(shop, *args, "--append")
         assert done.returncode == 0, (args, done.stdout + done.stderr)   # never "bad allowlist"
+        assert "couldn't read main.orders — left unchanged" in done.stdout or "couldn't read orders" in done.stdout
+    # Reading nothing isn't proof: the table is still served until the catalog confirms it's gone.
+    assert "orders" in {t.name for sa in L.load_datasource(shop["root"]).subject_areas for t in sa.tables_defined}
+    assert _introspect(shop, "--append").returncode == 0                  # the catalog listing confirms it
     served = {t.name for sa in L.load_datasource(shop["root"]).subject_areas for t in sa.tables_defined}
     kept = {t.name: t.review_state for sa in L.load_datasource(shop["root"], include_rejected=True).subject_areas
             for t in sa.tables_defined}
@@ -742,7 +746,7 @@ def test_a_dropped_tables_joins_and_references_are_not_served(shop):
 
     assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
     _sql(shop, "DROP TABLE orders")
-    assert _introspect(shop, "--tables", "customers", "orders", "--append").returncode == 0
+    assert _introspect(shop, "--append").returncode == 0
     served = L.load_datasource(shop["root"])
     assert not any("orders" in (r.from_table, r.to_table) for sa in served.subject_areas for r in sa.relationships)
     assert not any(r.table == "orders" for sa in served.subject_areas for r in sa.tables)
@@ -971,3 +975,18 @@ def test_apply_spec_reports_why_nothing_was_committed():
 
     res = model_spec.SpecResult(applied=True, committed=False, commit_note="inside the git repository at /x")
     assert res.as_dict()["committed"] is False and res.as_dict()["commit_note"].startswith("inside")
+
+
+
+def test_a_table_that_reads_nothing_is_not_taken_for_dropped(shop, monkeypatch):
+    # A failed read (outage, revoked permission) returns no columns; it must never hide the table.
+    from semantic_model import loader as L
+
+    assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
+    real = I._columns
+    monkeypatch.setattr(I, "_columns", lambda d, r, s, t, *a, **k: ([], "probe") if t == "orders" else real(d, r, s, t, *a, **k))
+    _, report = I.introspect("shop", "sqlite", runner=I.make_execute_sql_runner("shop", building_the_model=True),
+                             artifacts_dir=shop["art"], tables=["customers", "orders"], append=True)
+    assert any("left unchanged" in n for n in report.notes)
+    served = {t.name: t.review_state for sa in L.load_datasource(shop["root"]).subject_areas for t in sa.tables_defined}
+    assert served.get("orders") == "approved"

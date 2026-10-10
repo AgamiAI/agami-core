@@ -331,20 +331,33 @@ def introspect(
                 retyped[((m.schema_name or "").lower(), m.name.lower(), r.split(":")[0].lower())] = _qualified(m)
             if change:
                 report.changes[_qualified(m)] = change
-        # A table the database no longer has: named in this run but unreadable, or — on a catalog-mode
-        # refresh — missing from a schema that was read. Kept on disk, marked stale, not served.
+        # A table the database no longer has. Only a successful catalog listing that leaves it out is
+        # evidence of that: a named table that merely READ nothing may be a failed read (a network
+        # blip, a revoked permission — `_columns` returns no columns for both), and marking it stale
+        # would hide it and everything built on it. Such a table is left exactly as it was.
         read_schemas = {s for s, _ in pairs}
         gone_keys = set()
         for t in unreadable:
             old = _existing_table(existing, t)
             if old is None:
                 _refuse_ambiguous(existing, t)   # never treat an ambiguous name as merely unreadable
-            if old is not None:
-                gone_keys.add((old.schema_name, old.name))
+            else:
+                report.notes.append(
+                    f"couldn't read {_qualified(old)} — left unchanged. If the database dropped it, "
+                    "refresh without --tables so the catalog listing can confirm it")
         if tables is None:
-            seen = {(t.schema_name, t.name) for t in merged}
-            gone_keys |= {k for k, t in existing.items()
-                          if k not in seen and t.source_type != "sql" and t.schema_name in read_schemas}
+            # Listed by the catalog (a stored table with no schema matches any listed schema) — the
+            # listing, not a read, decides; a table in a schema this run didn't list is never touched.
+            listed = {(sch, tbl.lower()) for sch, tbl in pairs}
+
+            def gone(t: Table) -> bool:
+                if t.source_type == "sql":
+                    return False
+                if t.schema_name is None:
+                    return bool(read_schemas) and not any(tbl == t.name.lower() for _, tbl in listed)
+                return t.schema_name in read_schemas and (t.schema_name, t.name.lower()) not in listed
+
+            gone_keys |= {k for k, t in existing.items() if gone(t)}
         for key in gone_keys:
             old = existing[key]
             if old.review_state not in ("stale", "rejected"):
