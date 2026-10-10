@@ -22,7 +22,9 @@ Locators address an entry uniquely: {kind, area, name, [column]} where kind ∈
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -804,8 +806,14 @@ def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signe
 # ---------------------------------------------------------------------------
 
 
+# Set by a git hook or a caller, these point git at ANOTHER repository whatever `-C` says, and a
+# commit would land there with its whole working tree (#436).
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args],
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
+    return subprocess.run(["git", "-C", str(root), *args], env=env,
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -1122,6 +1130,8 @@ def _git_commit(root: Path, msg: str) -> tuple[bool, str]:
         if r.returncode == 0:
             return True, ""
         return False, "git could not commit here (is git's user.name/user.email set?); the change is written"
+    if shutil.which("git") is None:
+        return False, "git isn't installed here, so the change is written but not versioned"
     top = _repository_top(root)
     if top is None:
         return False, ("this model isn't in git, so the change is written but has no history; "

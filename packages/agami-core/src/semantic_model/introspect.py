@@ -264,14 +264,16 @@ def introspect(
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
     # a garbage table. Drop them with a clear note; if that leaves nothing, raise rather than
     # write an empty model.
-    empty = [t.name for t in built if not t.columns]
+    refreshing = append and (out / "datasource.yaml").exists()
+    unreadable = [t for t in built if not t.columns]   # on a refresh: possibly dropped by the database
+    empty = [t.name for t in unreadable]
     if empty:
         built = [t for t in built if t.columns]
         grain_by_table = {t.name: set(t.grain) for t in built}
         report.notes.append(
             f"dropped {len(empty)} table(s) with no readable columns (not found / bad allowlist): "
             + ", ".join(empty[:8]) + (" …" if len(empty) > 8 else ""))
-    if not built:
+    if not built and not refreshing:
         raise RuntimeError(
             "no allowlisted table could be described — every name yielded zero columns. "
             "Check the --tables list (a shell-quoting issue can mis-join all names into one); "
@@ -298,12 +300,14 @@ def introspect(
     prev_rels: list[Relationship] = []
     skip_keys: set = set()
     fresh_keys: set[tuple] = set()   # (schema, name): a bare name can exist in two schemas
-    if append and (out / "datasource.yaml").exists():
+    if refreshing:
         from .loader import load_datasource
         prev = load_datasource(out, include_rejected=True)
         existing = {(t.schema_name, t.name): t for sa in prev.subject_areas for t in sa.tables_defined}
         merged: list[Table] = []
+        retyped: set[tuple] = set()   # (table, column) whose type changed: joins on them need review
         for t in built:
+            _refuse_sql_table(existing, t)
             old = _existing_table(existing, t)
             if old is None:
                 _refuse_ambiguous(existing, t)
@@ -313,8 +317,32 @@ def introspect(
                 continue
             m, change = _merge_table(old, t)
             merged.append(m)
+            retyped.update((m.name.lower(), r.split(":")[0].lower()) for r in change.get("retyped", []))
             if change:
                 report.changes[_qualified(m)] = change
+        # A table the database no longer has: named in this run but unreadable, or — on a catalog-mode
+        # refresh — missing from a schema that was read. Kept on disk, marked stale, not served.
+        read_schemas = {s for s, _ in pairs}
+        gone_keys = set()
+        for t in unreadable:
+            old = _existing_table(existing, t)
+            if old is not None:
+                gone_keys.add((old.schema_name, old.name))
+        if tables is None:
+            seen = {(t.schema_name, t.name) for t in merged}
+            gone_keys |= {k for k, t in existing.items()
+                          if k not in seen and t.source_type != "sql" and t.schema_name in read_schemas}
+        for key in gone_keys:
+            old = existing[key]
+            if old.review_state not in ("stale", "rejected"):
+                existing[key] = old.model_copy(update={"review_state": "stale"})
+                report.changes[_qualified(old)] = {"table": ["no longer in the database"]}
+        # A new table carries the model's own connection name, not the one this run generated (they
+        # differ once a model's connection was renamed); entity resolution reads the table's field.
+        model_conn = prev.storage_connections[0].name if prev.storage_connections else conn_name
+        merged = [t if (t.schema_name, t.name) not in fresh_keys else t.model_copy(update={"storage_connection": model_conn})
+                  for t in merged]
+        conn_name = model_conn
         built = merged
         batch_keys = {(t.schema_name, t.name) for t in built}
         for key, t in existing.items():
@@ -324,7 +352,16 @@ def introspect(
         for sa in prev.subject_areas:
             prev_rels.extend(sa.relationships)
         prev_rels.extend(prev.cross_subject_area_relationships)
-        skip_keys = {_rel_key(r) for r in prev_rels}
+        # Joins on a column whose type changed go back to review: a confirmed join on mismatched
+        # types is refused by the validator, which would make the refresh impossible to write.
+        for r in prev_rels:
+            ends = {(bare_name(r.from_table).lower(), (r.from_column or "").lower()),
+                    (bare_name(r.to_table).lower(), (r.to_column or "").lower())}
+            if ends & retyped and r.confidence == "confirmed":
+                r.confidence, r.review_state = "proposed", "unreviewed"
+                q = _qualified(next(t for t in merged if t.name.lower() == next(iter(ends & retyped))[0]))
+                report.changes.setdefault(q, {}).setdefault("joins to review", []).append(
+                    f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
             f"{len(built)} total")
@@ -338,7 +375,7 @@ def introspect(
     if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = list(prev_rels) + [
             r for r in rels
-            if _rel_key(r) not in skip_keys]
+            if not any(_same_join(r, p) for p in prev_rels)]
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
@@ -346,7 +383,7 @@ def introspect(
     # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
     # group under `references` instead of scattering through `misc` — references live on the
     # Relationship, not on the column, so the initial per-table grouping couldn't see them.
-    if prev is not None and _areas_untouched(prev):
+    if prev is not None and _areas_untouched(prev, out):
         # A batched first build: the areas so far are only the engine's proposal for earlier batches,
         # so propose again over the union, exactly as a one-shot build would.
         prev_for_areas: Optional[Datasource] = None
@@ -386,27 +423,61 @@ def introspect(
     if prev is not None and not dry_run:
         from . import validator as V
         if not V.validate(org).ok:
-            report.notes.append("not written: the merged model doesn't validate; the existing model is unchanged")
+            report.notes.insert(0, "NOT WRITTEN: the merged model doesn't validate; the existing model is unchanged")
             dry_run = True
+            report.dry_run = True
     if out == artifacts_dir / profile and not dry_run:
         _backup_legacy_model(out)
+    if prev is not None and prev_for_areas is None and not dry_run:
+        _remove_moved_table_files(org, out)
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
     return org, report
 
 
-def _rel_key(r: Relationship) -> tuple:
-    """A join's identity for de-duplicating an append: both ends WITH their schemas, so a join on
-    `crm.products` isn't taken for the same join on `billing.products`."""
+def _same_join(a: Relationship, b: Relationship) -> bool:
+    """Whether two joins are the same edge, for de-duplicating an append. Both ends' tables (bare,
+    whatever `schema.table` spelling was stored) and columns must match; schemas must agree where
+    both joins state one — so `crm.products` isn't taken for `billing.products` — while a join
+    stored without a schema (curation may omit it) still matches the catalog's copy of itself."""
     def low(v: Optional[str]) -> str:
         return (v or "").lower()
-    return (low(r.from_schema), low(r.from_table), low(r.from_column),
-            low(r.to_schema), low(r.to_table), low(r.to_column))
+
+    def same_schema(x: Optional[str], y: Optional[str]) -> bool:
+        return not x or not y or x.lower() == y.lower()
+
+    return (low(bare_name(a.from_table)) == low(bare_name(b.from_table))
+            and low(a.from_column) == low(b.from_column)
+            and low(bare_name(a.to_table)) == low(bare_name(b.to_table))
+            and low(a.to_column) == low(b.to_column)
+            and same_schema(a.from_schema, b.from_schema) and same_schema(a.to_schema, b.to_schema))
 
 
 def _qualified(t: Table) -> str:
     """How a refresh report names a table: `schema.table`, so two same-named tables stay apart."""
     return f"{t.schema_name}.{t.name}" if t.schema_name else t.name
+
+
+def _remove_moved_table_files(org: Datasource, out: Path) -> None:
+    """After areas are re-proposed, delete each area folder's table files for tables it no longer
+    defines. `write_tree` writes the new files but never removes old ones, and the loader reads every
+    file in a listed area's folder, so a table that moved would be defined in two areas."""
+    for sa in org.subject_areas:
+        tdir = out / "subject_areas" / sa.name / "tables"
+        keep = {f"{t.name}.yaml" for t in sa.tables_defined}   # write_tree's own file name
+        for f in tdir.glob("*.yaml") if tdir.exists() else []:
+            if f.name not in keep:
+                f.unlink()
+
+
+def _refuse_sql_table(existing: dict[tuple, Table], fresh: Table) -> None:
+    """Stop when the database now has a table or view named like a SQL-defined table in the model.
+    Merging the two would mark the SQL table's computed columns stale and retype the rest."""
+    for t in existing.values():
+        if t.source_type == "sql" and t.name.lower() == fresh.name.lower():
+            raise RuntimeError(
+                f"the model's {t.name!r} is defined by SQL, and the database now has a table or view "
+                "with the same name; rename one of them, or leave it out of this refresh")
 
 
 def _refuse_ambiguous(existing: dict[tuple, Table], fresh: Table) -> None:
@@ -430,16 +501,36 @@ def _existing_table(existing: dict[tuple, Table], fresh: Table) -> Optional[Tabl
     return same[0] if len(same) == 1 and (fresh.schema_name is None or same[0].schema_name is None) else None
 
 
-_AUTO_AREA = "Auto-proposed subject area covering"
+def _refs(refs: list) -> list:
+    """Table references as a comparable set: the loader reads table files in name order, while an
+    area's reference list keeps the order it was written in, so order alone says nothing."""
+    return sorted((repr(sorted(r.model_dump().items())) for r in refs))
 
 
-def _areas_untouched(prev: Datasource) -> bool:
-    """Whether every area is still exactly the engine's proposal: nobody described one or gave it an
-    entity or metric. Then a later batch of a first build may re-propose them; otherwise they're kept."""
-    return all(
-        sa.description.startswith(_AUTO_AREA) and not sa.entities and not sa.metrics
-        for sa in prev.subject_areas
-    ) and not prev.cross_subject_area_entities and not prev.cross_subject_area_metrics
+def _areas_untouched(prev: Datasource, root: Path) -> bool:
+    """Whether every area is EXACTLY what the engine generates for its tables, field for field.
+
+    Only then is it safe for a later batch of a first build to re-propose the areas over the union
+    (a one-shot build would have). Any difference — a description someone wrote (even one starting
+    like the generated text), a default time window, an entity or metric, a table reference or its
+    exposed column groups changed or added — means a person or a spec shaped it, and it is kept."""
+    if prev.cross_subject_area_entities or prev.cross_subject_area_metrics or not prev.storage_connections:
+        return False
+    # Saved examples live under their area's name, and any curation leaves a log or a description:
+    # a batched first build has none of these until it finishes, so their presence means "curated".
+    if (root / "curation_log.jsonl").exists() or any((root / "prompt_examples").rglob("*.yaml")):
+        return False
+    if any(t.description or any(c.description for c in t.columns)
+           for sa in prev.subject_areas for t in sa.tables_defined):
+        return False
+    conn = prev.storage_connections[0].name
+    for sa in prev.subject_areas:
+        generated = build.make_area(sa.name, sa.tables_defined, [], conn)
+        if (sa.description != generated.description or sa.default_time_window is not None
+                or sa.entities or sa.metrics
+                or _refs(sa.tables) != _refs(generated.tables)):
+            return False
+    return True
 
 
 def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]:
@@ -464,7 +555,7 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
                 c = c.model_copy(update={"review_state": "approved"})
             if f.type != c.type:
                 change["retyped"].append(f"{c.name}: {c.type} -> {f.type}")
-                c = c.model_copy(update={"type": f.type})
+                c = _retyped(c, f, change)
         cols.append(c)
     added = [f for f in fresh.columns if f.name.lower() not in old_names]
     cols.extend(added)
@@ -478,10 +569,77 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
             if group not in groups:
                 group = "misc" if "misc" in groups else next(iter(groups))
             groups[group].append(f.name)
-    gone = {n.lower() for n in change["dropped"]}
-    grain = [g for g in old.grain if g.lower() not in gone] or fresh.grain
-    merged = old.model_copy(update={"columns": cols, "column_groups": groups, "grain": grain})
+    cols, grain = _merged_key(old, fresh, cols, change)
+    restored_table = old.review_state == "stale"
+    if restored_table:
+        change.setdefault("table", []).append("back in the database")
+    update = {"columns": cols, "column_groups": groups, "grain": grain,
+              "performance_hints": _merged_hints(old.performance_hints, fresh.performance_hints)}
+    if restored_table:
+        update["review_state"] = "approved"
+    if not groups and len(cols) >= build.DEEP_TABLE_COLUMN_THRESHOLD:
+        # It became deep: a deep table must group every column, the stale ones included.
+        live = [c for c in cols if c.review_state != "stale"]
+        groups = build.derive_column_groups(live) if live else {}
+        stale = [c.name for c in cols if c.review_state == "stale"]
+        if stale:
+            groups.setdefault("misc", []).extend(stale)
+        update["column_groups"] = groups
+        update["column_group_descriptions"] = {**build.column_group_descriptions(groups), **old.column_group_descriptions}
+    merged = old.model_copy(update=update)
     return merged, {k: v for k, v in change.items() if v}
+
+
+def _retyped(c: Column, f: Column, change: dict) -> Column:
+    """Column `c` at the database's new type, with what was derived from the old type re-derived.
+
+    The date encoding and timezone come from the new reading. The aggregation class follows only
+    when the engine set it (it still equals the class the old type implies). A value list whose
+    keys no longer fit is replaced by the new reading's, or cleared, and reported."""
+    update: dict = {"type": f.type, "date_format": f.date_format, "timezone": f.timezone}
+    if c.aggregation == build.classify_aggregation(c.name, c.type, is_key=c.primary_key):
+        update["aggregation"] = f.aggregation
+    if c.choice_field and c.choice_field != f.choice_field:
+        update["choice_field"] = f.choice_field
+        change.setdefault("values reset", []).append(c.name)
+    return c.model_copy(update=update)
+
+
+def _merged_hints(old, fresh):
+    """Row-count hints from the new reading (a table grows); a curated filter list is kept."""
+    if fresh is None:
+        return old
+    if old is None:
+        return fresh
+    return fresh.model_copy(update={
+        "recommended_filters": old.recommended_filters or fresh.recommended_filters,
+        "indexes": fresh.indexes or old.indexes,
+    })
+
+
+def _merged_key(old: Table, fresh: Table, cols: list[Column], change: dict) -> tuple[list[Column], list[str]]:
+    """The primary key and grain after a refresh.
+
+    The database owns the key: when it reports one (`fresh.grain`, from the catalog or a uniqueness
+    probe), every column's `primary_key` follows it. When it reports none — the probe is skipped on a
+    very large table — nothing is known to have changed, and the old flags stay.
+
+    The grain was the engine's when it equals the old key (introspection writes the key as the
+    grain), and then it follows the new key too. Otherwise a person or a model spec stated it; it is
+    kept, minus any column the database dropped, falling back to the new key if nothing is left."""
+    gone = {n.lower() for n in change["dropped"]}
+    old_key = sorted(c.name for c in old.columns if c.primary_key)
+    new_key = sorted(fresh.grain)
+    if new_key and [k.lower() for k in new_key] != [k.lower() for k in old_key]:
+        change["key"] = [f"{', '.join(old_key) or '(none)'} -> {', '.join(new_key)}"]
+        key = {k.lower() for k in new_key}
+        cols = [c if c.primary_key == (c.name.lower() in key) else c.model_copy(update={"primary_key": c.name.lower() in key})
+                for c in cols]
+    engine_grain = sorted(g.lower() for g in old.grain) == sorted(k.lower() for k in old_key)
+    if engine_grain and new_key:
+        return cols, list(fresh.grain)
+    kept = [g for g in old.grain if g.lower() not in gone]
+    return cols, kept or list(fresh.grain)
 
 
 def _refresh_existing(
@@ -509,11 +667,16 @@ def _refresh_existing(
     def holds(i: int, t: Table) -> bool:   # one area can't hold two tables with the same bare name
         return any(x.name.lower() == t.name.lower() for x in areas[i].tables_defined)
 
+    from .validator import SIZING_ERROR
+
+    def room(i: int) -> bool:   # the validator refuses an area of more than SIZING_ERROR tables
+        return len(areas[i].tables) < SIZING_ERROR
+
     for t in (t for t in built if (t.schema_name, t.name) in fresh_keys):
         key = build._area_key(t.schema_name) if t.schema_name else profile.lower()
-        if key in names and not holds(names[key], t):
+        if key in names and not holds(names[key], t) and room(names[key]):
             i = names[key]
-        elif len(areas) == 1 and not holds(0, t):
+        elif len(areas) == 1 and not holds(0, t) and room(0):
             i = 0
         else:
             while key in names:

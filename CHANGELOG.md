@@ -30,15 +30,29 @@ below corresponds to one such version.
     entities, metrics and existing joins are left as they are once anyone has curated them; a new
     table joins the area named for its schema, never one already holding a table of the same name.
     A bare `--tables customers` refreshes the stored `main.customers` instead of adding it twice. A
-    merge that doesn't validate isn't written. `--dry-run` previews the change as
-    `changed <table>: added …; dropped …`, and agami-connect shows that before writing. A first
-    build in `--append` batches still ends with the same subject areas as a one-shot build.
+    merge that doesn't validate isn't written, and the report says so first. `--dry-run` previews
+    the change as `changed <table>: added …; dropped …; retyped …; key …`, and agami-connect shows
+    that before writing. A first build in `--append` batches still ends with the same subject areas
+    as a one-shot build.
+  - **What a refresh does with each kind of database change.** A changed primary key moves the key
+    flags, and the grain when the engine had set it (a grain a person or a model spec stated is
+    kept). A changed type re-derives its date encoding, timezone and (engine-set) aggregation,
+    resets a value list that no longer fits, and sends confirmed joins on that column back to
+    review. A table that crosses the deep-table size gets column groups. A table the database
+    dropped is kept, marked `stale`, and no longer served; it is restored if it comes back. Row
+    counts are refreshed. A new table never pushes an area past 30 tables, never shares an area
+    with a same-named table, and carries the model's own connection. A SQL-defined table is never
+    merged with a database table of the same name; the refresh stops and says why.
+  - **What the agent sees leaves out anything naming a column or table that isn't served** —
+    excluded by a curator or stale after a refresh: joins, grain columns, table references, default
+    filters, entity mappings and metrics on it. They stay on disk. This also closes the same gap
+    for columns and tables curators excluded before.
   - **Curation never noticed a model kept inside a team's git repository (#436).** It looked for
     git only in the model's own folder, so it said `committed: false` with no reason. It still
     commits when that folder is its own repository. Inside a larger one it never commits (that
     would stage unrelated files on whatever branch is checked out), and every result now carries a
     `commit_note` saying why nothing was committed and which folder changed. A folder that
-    repository ignores counts as not in git. Rollback never depended
+    repository ignores counts as not in git, and an exported `GIT_DIR` can't send the commit elsewhere. Rollback never depended
     on git, and agami-model's skill no longer says it did.
 
 ## [0.9.11] — 2026-10-10

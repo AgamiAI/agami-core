@@ -359,13 +359,15 @@ def test_a_profile_git_ignores_is_not_treated_as_inside_that_repository(tmp_path
 # --- Copilot's review: schema-qualified report and joins, joins and grain on unserved columns -----
 
 
-def test_the_join_dedup_keeps_schemas_apart():
+def test_the_join_dedup_keeps_schemas_apart_and_matches_a_schemaless_copy():
     from semantic_model import models as m
 
     a = m.Relationship(from_table="products", from_column="cat_id", to_table="cats", to_column="id",
                        from_schema="billing", to_schema="billing", relationship="many_to_one")
-    b = a.model_copy(update={"from_schema": "crm", "to_schema": "crm"})
-    assert I._rel_key(a) != I._rel_key(b)
+    assert not I._same_join(a, a.model_copy(update={"from_schema": "crm", "to_schema": "crm"}))
+    # Stored with no schema, or as schema.table: still the same edge as the catalog's copy.
+    assert I._same_join(a, a.model_copy(update={"from_schema": None, "to_schema": None}))
+    assert I._same_join(a, a.model_copy(update={"from_table": "billing.products"}))
 
 
 def test_a_dropped_grain_column_leaves_the_grain():
@@ -430,7 +432,9 @@ def test_joins_on_same_named_tables_in_two_schemas_are_judged_separately(tmp_pat
     org = m.Datasource(datasource="d", version=1, subject_areas=[
         m.SubjectArea(name="s", tables_defined=[sales], relationships=[join("sales")]),
         m.SubjectArea(name="a", tables_defined=[archive], relationships=[join("archive")])])
-    L._drop_joins_on_unserved_columns(org)
+    hidden = L._Hidden(served={("sales", "orders"): {"id", "customer_id"}, ("archive", "orders"): {"id"}},
+                       on_disk={("archive", "orders"): {"customer_id"}})
+    L._drop_uses_of_unserved(org, hidden)
     assert [r.from_schema for r in org.subject_areas[0].relationships] == ["sales"]   # live: kept
     assert org.subject_areas[1].relationships == []                                  # stale: hidden
 
@@ -443,3 +447,419 @@ def test_a_bare_name_matching_two_stored_tables_is_refused_not_added():
         I._refuse_ambiguous(existing, m.Table(name="t"))
     I._refuse_ambiguous(existing, m.Table(name="t", schema="a"))   # qualified: fine
     I._refuse_ambiguous({("a", "t"): m.Table(name="t", schema="a")}, m.Table(name="t"))   # unique: fine
+
+
+# --- the full merge rules: key and grain, area provenance, the model's connection ------------------
+
+
+def _cols(*names: str, key: tuple = ()) -> list:
+    from semantic_model import models as m
+    return [m.Column(name=n, type="integer", primary_key=n in key) for n in names]
+
+
+def test_a_key_the_database_moved_moves_the_flags_and_an_engine_grain():
+    from semantic_model import models as m
+
+    old = m.Table(name="t", grain=["id"], columns=_cols("id", "external_id", key=("id",)))
+    fresh = m.Table(name="t", grain=["external_id"], columns=_cols("id", "external_id", key=("external_id",)))
+    merged, change = I._merge_table(old, fresh)
+    assert {c.name: c.primary_key for c in merged.columns} == {"id": False, "external_id": True}
+    assert merged.grain == ["external_id"]
+    assert change["key"] == ["id -> external_id"]
+
+
+def test_a_grain_a_person_or_spec_stated_is_kept_when_the_key_moves():
+    from semantic_model import models as m
+
+    old = m.Table(name="t", grain=["order_id", "line_no"],      # stated, not the key
+                  columns=_cols("id", "order_id", "line_no", key=("id",)))
+    fresh = m.Table(name="t", grain=["uid"], columns=_cols("uid", "order_id", "line_no", key=("uid",)))
+    merged, change = I._merge_table(old, fresh)
+    assert merged.grain == ["order_id", "line_no"]
+    assert [c.name for c in merged.columns if c.primary_key] == ["uid"]
+
+
+def test_no_key_reported_leaves_the_key_and_grain_alone():
+    from semantic_model import models as m
+
+    old = m.Table(name="t", grain=["id"], columns=_cols("id", "v", key=("id",)))
+    fresh = m.Table(name="t", grain=[], columns=_cols("id", "v"))      # the probe was skipped
+    merged, change = I._merge_table(old, fresh)
+    assert merged.grain == ["id"] and [c.name for c in merged.columns if c.primary_key] == ["id"]
+    assert "key" not in change
+
+
+def test_only_an_area_exactly_as_generated_counts_as_untouched(tmp_path):
+    from semantic_model import build
+    from semantic_model import models as m
+
+    t = m.Table(name="orders", schema="public", columns=_cols("id"), storage_connection="c")
+    generated = build.make_area("shop", [t], [], "c")
+
+    def model(sa) -> object:
+        return m.Datasource(datasource="shop", version=1, subject_areas=[sa],
+                            storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL", storage_config={})])
+
+    assert I._areas_untouched(model(generated), tmp_path)
+    for change in ({"description": generated.description + " Curated."},
+                   {"description": "Auto-proposed subject area covering: what we sell."},
+                   {"default_time_window": "last 90 days"},
+                   {"tables": [generated.tables[0].model_copy(update={"expose_column_groups": ["core"]})]}):
+        assert not I._areas_untouched(model(generated.model_copy(update=change)), tmp_path), change
+
+
+def test_a_new_table_takes_the_models_own_connection(tmp_path):
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+    from semantic_model import validator as V
+
+    from catalog_helpers import col, make_catalog_runner
+
+    customers = m.Table(name="customers", schema="public", storage_connection="c",
+                        columns=[m.Column(name="id", type="integer", primary_key=True)], grain=["id"])
+    org = m.Datasource(datasource="shop", version=1,
+                       storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL", storage_config={})],
+                       subject_areas=[m.SubjectArea(name="sales", description="Curated.", tables_defined=[customers],
+                                                    tables=[build.make_table_ref("c", customers)])])
+    build.write_tree(org, tmp_path / "shop")
+    runner = make_catalog_runner(tables=["customers", "orders"], columns={
+        "customers": [col("id", "integer", nullable=False)], "orders": [col("id", "integer", nullable=False)]})
+
+    I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path,
+                 tables=["public.customers", "public.orders"], append=True)
+    out = L.load_datasource(tmp_path / "shop", include_rejected=True)
+    orders = next(t for sa in out.subject_areas for t in sa.tables_defined if t.name == "orders")
+    assert orders.storage_connection == "c"
+    assert {r.storage_connection for sa in out.subject_areas for r in sa.tables} == {"c"}
+    assert V.validate(out).ok
+
+
+# --- field-ownership review: every database change a refresh must survive ------------------------
+
+
+def test_a_table_that_becomes_deep_gets_column_groups_and_is_written(shop):
+    from semantic_model import loader as L
+
+    cols = ", ".join(f"c{i} TEXT" for i in range(27))
+    _sql(shop, f"CREATE TABLE wide(id INTEGER PRIMARY KEY, {cols})")          # 28 columns: not deep
+    assert _introspect(shop, "--tables", "wide").returncode == 0
+    for i in range(27, 30):
+        _sql(shop, f"ALTER TABLE wide ADD COLUMN c{i} TEXT")                  # now 31: deep
+    done = _introspect(shop, "--tables", "wide", "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    wide = next(t for sa in L.load_datasource(shop["root"], include_rejected=True).subject_areas
+                for t in sa.tables_defined if t.name == "wide")
+    assert wide.column_groups and {c for g in wide.column_groups.values() for c in g} == {c.name for c in wide.columns}
+
+
+def test_a_join_column_that_changes_type_sends_the_join_back_to_review(shop):
+    from semantic_model import loader as L
+
+    assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
+    _sql(shop, "ALTER TABLE orders RENAME TO o_old")
+    _sql(shop, "CREATE TABLE orders(id INTEGER PRIMARY KEY, customer_id TEXT REFERENCES customers(id), total REAL)")
+    _sql(shop, "DROP TABLE o_old")
+    done = _introspect(shop, "--tables", "orders", "--append")
+    assert done.returncode == 0, done.stdout + done.stderr           # not blocked by a type mismatch
+    joins = [r for sa in L.load_datasource(shop["root"], include_rejected=True).subject_areas
+             for r in sa.relationships if r.from_column == "customer_id"]
+    assert joins and all(r.review_state == "unreviewed" for r in joins)
+    assert "joins to review" in done.stdout
+
+
+def test_a_retype_re_derives_what_the_old_type_implied():
+    from semantic_model import models as m
+
+    old = m.Column(name="created_at", type="integer", date_format="epoch_s", timezone="UTC",
+                   aggregation="additive", choice_field={"1": "one"})
+    fresh = m.Column(name="created_at", type="timestamp", aggregation="dimension")
+    change: dict = {}
+    c = I._retyped(old, fresh, change)
+    assert (c.type, c.date_format, c.timezone, c.choice_field) == ("timestamp", None, None, None)
+    assert change == {"values reset": ["created_at"]}
+    curated = I._retyped(old.model_copy(update={"aggregation": "averageable"}), fresh, {})
+    assert curated.aggregation == "averageable"        # a person's class is kept
+
+
+def test_a_sql_defined_table_is_never_merged_with_a_database_table():
+    from semantic_model import models as m
+
+    existing = {(None, "big_orders"): m.Table(name="big_orders", source_type="sql", sql="SELECT 1")}
+    with pytest.raises(RuntimeError, match="defined by SQL"):
+        I._refuse_sql_table(existing, m.Table(name="big_orders", schema="main"))
+
+
+def test_a_table_the_database_dropped_is_kept_stale_and_not_served(shop):
+    from semantic_model import loader as L
+
+    assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
+    _sql(shop, "DROP TABLE orders")
+    for args in (["--tables", "customers", "orders"], ["--tables", "orders"], []):
+        done = _introspect(shop, *args, "--append")
+        assert done.returncode == 0, (args, done.stdout + done.stderr)   # never "bad allowlist"
+    served = {t.name for sa in L.load_datasource(shop["root"]).subject_areas for t in sa.tables_defined}
+    kept = {t.name: t.review_state for sa in L.load_datasource(shop["root"], include_rejected=True).subject_areas
+            for t in sa.tables_defined}
+    assert "orders" not in served and kept["orders"] == "stale"
+
+
+def test_a_filter_on_a_dropped_column_is_not_served(shop):
+    from semantic_model import loader as L
+    from semantic_model import validator as V
+
+    assert _introspect(shop, "--tables", "customers").returncode == 0
+    path = _table_files(shop["root"])["customers"]
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    doc["default_filters"] = ["{alias}.legacy_code <> 'x'"]
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    _sql(shop, "ALTER TABLE customers DROP COLUMN legacy_code")
+    assert _introspect(shop, "--tables", "customers", "--append").returncode == 0
+    served = L.load_datasource(shop["root"])
+    assert served.subject_areas[0].tables_defined[0].default_filters == []
+    assert V.validate(served).ok                                            # the runtime view is sound
+    on_disk = L.load_datasource(shop["root"], include_rejected=True)
+    assert on_disk.subject_areas[0].tables_defined[0].default_filters == ["{alias}.legacy_code <> 'x'"]
+
+
+def test_entities_and_metrics_on_a_hidden_column_are_not_served(tmp_path):
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    t = m.Table(name="customers", schema="main", storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True),
+        m.Column(name="region", type="string", review_state="stale"), m.Column(name="spend", type="decimal")])
+    sa = m.SubjectArea(
+        name="shop", description="Curated.", tables_defined=[t], tables=[build.make_table_ref("c", t)],
+        entities=[m.Entity(name="Region", maps_to=[m.EntityMapping(table="customers", column="region")]),
+                  m.Entity(name="Customer", maps_to=[m.EntityMapping(table="customers", column="id")])],
+        metrics=[m.Metric(name="Regions", calculation="COUNT(DISTINCT region)", source_tables=["customers"]),
+                 m.Metric(name="Spend", calculation="SUM(spend)", source_tables=["customers"])])
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=[sa], storage_connections=[
+        m.StorageConnection(name="c", storage_type="SQLite", storage_config={})]), tmp_path / "shop")
+    served = L.load_datasource(tmp_path / "shop").subject_areas[0]
+    assert [e.name for e in served.entities] == ["Customer"]
+    assert [mm.name for mm in served.metrics] == ["Spend"]
+    on_disk = L.load_datasource(tmp_path / "shop", include_rejected=True).subject_areas[0]
+    assert len(on_disk.entities) == 2 and len(on_disk.metrics) == 2
+
+
+def test_row_count_hints_follow_the_table_and_curated_filters_stay():
+    from semantic_model import models as m
+
+    old = m.PerformanceHints(estimated_row_count=1, recommended_filters=["created_at"])
+    fresh = m.PerformanceHints(estimated_row_count=5000, estimated_row_count_at="now")
+    merged = I._merged_hints(old, fresh)
+    assert (merged.estimated_row_count, merged.estimated_row_count_at, merged.recommended_filters) == (5000, "now", ["created_at"])
+
+
+# --- areas, write path and loader review --------------------------------------------------------
+
+
+def test_a_new_table_never_pushes_an_area_past_the_size_limit():
+    from semantic_model import models as m
+    from semantic_model.validator import SIZING_ERROR
+
+    tables = [m.Table(name=f"t{i}", schema="main", columns=_cols("id")) for i in range(SIZING_ERROR)]
+    new = m.Table(name="extra", schema="main", columns=_cols("id"))
+    report = I.IntrospectReport(profile="shop", db_type="sqlite", out_dir="", dry_run=True)
+    org = I._refresh_existing(_model(_area("main", tables)), [*tables, new], [], {("main", "extra")}, "shop", report)
+    assert all(len(sa.tables) <= SIZING_ERROR for sa in org.subject_areas)
+    assert any("extra" in {t.name for t in sa.tables_defined} for sa in org.subject_areas[1:])
+
+
+@pytest.mark.parametrize("evidence", ["examples", "log", "table description", "column description"])
+def test_curation_outside_the_areas_also_keeps_them(tmp_path, evidence):
+    from semantic_model import build
+    from semantic_model import models as m
+
+    t = m.Table(name="orders", schema="public", columns=_cols("id"), storage_connection="c")
+    if evidence == "table description":
+        t = t.model_copy(update={"description": "Every order placed."})
+    if evidence == "column description":
+        t = t.model_copy(update={"columns": [m.Column(name="id", type="integer", description="The order's key.")]})
+    root = tmp_path / "shop"
+    (root / "prompt_examples" / "shop").mkdir(parents=True)
+    if evidence == "examples":
+        (root / "prompt_examples" / "shop" / "examples.yaml").write_text("examples: []\n", encoding="utf-8")
+    if evidence == "log":
+        (root / "curation_log.jsonl").write_text("{}\n", encoding="utf-8")
+    org = m.Datasource(datasource="shop", version=1, subject_areas=[build.make_area("shop", [t], [], "c")],
+                       storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL", storage_config={})])
+    assert not I._areas_untouched(org, root)
+
+
+def test_a_valid_metric_on_one_schema_survives_a_stale_column_in_another(tmp_path):
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    def orders(schema: str, review: str) -> m.Table:
+        return m.Table(name="orders", schema=schema, storage_connection="c", columns=[
+            m.Column(name="id", type="integer", primary_key=True),
+            m.Column(name="amount", type="decimal", review_state=review)])
+
+    sales, archive = orders("sales", "approved"), orders("archive", "stale")
+    areas = [m.SubjectArea(name=n, description="Curated.", tables_defined=[t], tables=[build.make_table_ref("c", t)],
+                           metrics=[m.Metric(name=f"{n} revenue", calculation="SUM(amount)", source_tables=[f"{n}.orders"])])
+             for n, t in (("sales", sales), ("archive", archive))]
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=areas, storage_connections=[
+        m.StorageConnection(name="c", storage_type="PostgreSQL", storage_config={})]), tmp_path / "shop")
+    served = {sa.name: [mm.name for mm in sa.metrics] for sa in L.load_datasource(tmp_path / "shop").subject_areas}
+    assert served == {"sales": ["sales revenue"], "archive": []}
+
+
+def test_re_proposed_areas_leave_no_table_defined_twice(tmp_path):
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from semantic_model import loader as L
+
+    from catalog_helpers import col, make_catalog_runner
+
+    def runner_for(schema: str, tables: list[str]):
+        return make_catalog_runner(tables=tables, schema=schema, columns={t: [col("id", "integer", nullable=False)] for t in tables})
+
+    pub, ana = runner_for("public", ["customers", "orders"]), runner_for("analytics", ["daily", "weekly"])
+
+    def runner(sql: str) -> list[dict]:   # two schemas: answer from whichever the statement names
+        return ana(sql) if "analytics" in sql else pub(sql)
+
+    I.introspect("analytics", "postgres", runner=runner, artifacts_dir=tmp_path,
+                 tables=["public.customers", "public.orders"], append=True)
+    I.introspect("analytics", "postgres", runner=runner, artifacts_dir=tmp_path,
+                 tables=["analytics.daily", "analytics.weekly"], append=True)
+    org = L.load_datasource(tmp_path / "analytics", include_rejected=True)
+    defined = [(t.schema_name, t.name) for sa in org.subject_areas for t in sa.tables_defined]
+    assert len(defined) == len(set(defined)) == 4
+
+
+def test_a_dropped_tables_joins_and_references_are_not_served(shop):
+    from semantic_model import loader as L
+    from semantic_model import validator as V
+
+    assert _introspect(shop, "--tables", "customers", "orders").returncode == 0
+    _sql(shop, "DROP TABLE orders")
+    assert _introspect(shop, "--tables", "customers", "orders", "--append").returncode == 0
+    served = L.load_datasource(shop["root"])
+    assert not any("orders" in (r.from_table, r.to_table) for sa in served.subject_areas for r in sa.relationships)
+    assert not any(r.table == "orders" for sa in served.subject_areas for r in sa.tables)
+    assert V.validate(served).ok
+
+
+def test_an_exported_git_dir_cannot_redirect_the_commit(tmp_path, git_identity, monkeypatch):
+    outer, root = tmp_path / "outer", tmp_path / "shop"
+    outer.mkdir()
+    root.mkdir()
+    _git(outer, "init", "-q")
+    (outer / "secret.txt").write_text("not the model's\n", encoding="utf-8")
+    _git(root, "init", "-q")
+    (root / "datasource.yaml").write_text("datasource: shop\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+    assert curate._git_commit(root, "x") == (True, "")
+    assert _git(outer, "rev-parse", "--verify", "HEAD").returncode != 0      # nothing landed outside
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_WORK_TREE")
+    assert "datasource.yaml" in _git(root, "show", "--name-only", "HEAD").stdout
+
+
+def test_a_merge_that_does_not_validate_says_so_first_and_writes_nothing(shop, monkeypatch):
+    from semantic_model import validator as V
+
+    assert _introspect(shop, "--tables", "customers").returncode == 0
+    before = {p: p.read_bytes() for p in shop["root"].rglob("*.yaml")}
+
+    class _Bad:
+        ok, errors, warnings = False, ["x"], []
+
+    monkeypatch.setattr(V, "validate", lambda *a, **k: _Bad())
+    _, report = I.introspect("shop", "sqlite", runner=I.make_execute_sql_runner("shop", building_the_model=True),
+                             artifacts_dir=shop["art"], tables=["customers"], append=True)
+    assert report.notes[0].startswith("NOT WRITTEN") and report.dry_run is True
+    assert {p: p.read_bytes() for p in shop["root"].rglob("*.yaml")} == before
+
+
+
+# --- the runtime filter hides only on positive evidence, across every area's copy ---------------
+
+
+def _sample_copy(tmp_path):
+    import shutil
+    src = REPO_ROOT / "plugins" / "agami" / "samples" / "store" / "model"
+    dst = tmp_path / "model"
+    shutil.copytree(src, dst)
+    return dst
+
+
+def _view(root, filtered: bool, monkeypatch):
+    from semantic_model import loader as L
+    if not filtered:
+        monkeypatch.setattr(L, "_drop_uses_of_unserved", lambda org, hidden: None)
+    org = L.load_datasource(root)
+    monkeypatch.undo()
+    return org.model_dump()
+
+
+def test_the_filter_changes_nothing_on_a_model_with_nothing_hidden(tmp_path, monkeypatch):
+    root = _sample_copy(tmp_path)
+    assert _view(root, True, monkeypatch) == _view(root, False, monkeypatch)
+
+
+def test_an_unlisted_join_or_grain_column_is_not_evidence_of_anything(tmp_path, monkeypatch):
+    # A join or grain column a table doesn't list is allowed; only an excluded/stale one is hidden.
+    root = _sample_copy(tmp_path)
+    path = next(root.glob("subject_areas/*/tables/order_items.yaml"))
+    doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+    listed = [c["name"] for c in doc["columns"]]
+    doc["columns"] = doc["columns"][:1]        # stop listing every other column
+    path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    assert len(listed) > 1
+    assert _view(root, True, monkeypatch) == _view(root, False, monkeypatch)
+
+
+def test_one_areas_excluded_copy_does_not_hide_anothers_served_one(tmp_path):
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    def invoices(review: str) -> m.Table:
+        return m.Table(name="invoices", schema="main", storage_connection="c", review_state=review,
+                       columns=[m.Column(name="id", type="integer", primary_key=True),
+                                m.Column(name="subscription_id", type="integer")])
+
+    subs = m.Table(name="subscriptions", schema="main", storage_connection="c",
+                   columns=[m.Column(name="id", type="integer", primary_key=True)])
+    join = m.Relationship(from_table="invoices", from_column="subscription_id", to_table="subscriptions",
+                          to_column="id", from_schema="main", to_schema="main", relationship="many_to_one")
+    a = m.SubjectArea(name="billing", description="Curated.", tables_defined=[invoices("approved"), subs],
+                      tables=[build.make_table_ref("c", invoices("approved")), build.make_table_ref("c", subs)],
+                      relationships=[join],
+                      metrics=[m.Metric(name="Invoices", calculation="Count of invoices", bindings={"sqlite": "COUNT(subscription_id)"},
+                                        source_tables=["invoices"])])
+    b = m.SubjectArea(name="other", description="Curated.", tables_defined=[invoices("rejected")],
+                      tables=[build.make_table_ref("c", invoices("rejected"))])
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=[a, b], storage_connections=[
+        m.StorageConnection(name="c", storage_type="SQLite", storage_config={})]), tmp_path / "shop")
+    billing = next(sa for sa in L.load_datasource(tmp_path / "shop").subject_areas if sa.name == "billing")
+    assert [r.from_column for r in billing.relationships] == ["subscription_id"]
+    assert {r.table for r in billing.tables} == {"invoices", "subscriptions"}
+    assert [mm.name for mm in billing.metrics] == ["Invoices"]
+
+
+def test_a_metric_is_judged_on_its_sql_not_its_prose(tmp_path):
+    from semantic_model import build
+    from semantic_model import loader as L
+    from semantic_model import models as m
+
+    t = m.Table(name="orders", schema="main", storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True), m.Column(name="total", type="decimal", review_state="stale"),
+        m.Column(name="amount", type="decimal")])
+    sa = m.SubjectArea(name="s", description="Curated.", tables_defined=[t], tables=[build.make_table_ref("c", t)],
+                       metrics=[m.Metric(name="Revenue", calculation="The total of every paid order",
+                                         bindings={"sqlite": "SUM(amount)"}, source_tables=["orders"])])
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=[sa], storage_connections=[
+        m.StorageConnection(name="c", storage_type="SQLite", storage_config={})]), tmp_path / "shop")
+    assert [mm.name for mm in L.load_datasource(tmp_path / "shop").subject_areas[0].metrics] == ["Revenue"]
