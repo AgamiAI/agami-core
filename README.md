@@ -239,7 +239,7 @@ typing the slash command.
 | `/agami-save-correction`                      | Records a correction and routes it to the right home (SQL example, column metadata, display preference, business concept, or a new metric), showing its classification before writing. Attribution surfaces on future answers it influences.                                                                                                                                   |
 | `/agami-reconcile`                            | Point it at numbers you already trust — a dashboard **screenshot** (Metabase / Power BI / Tableau / Looker), a CSV, or a pasted table — and it asks each question through agami and shows a side-by-side diff with tolerances. Hand it **SQL you trust** and it grades that query part by part against the model instead of taking it as the answer. Matching rows can be kept as golden questions. |
 | `/agami-eval`                                 | Run a **golden dataset** through the agent loop — every question regenerated, executed and scored against its confirmed answer key — and see, failures first, what stopped matching. It's your model's regression suite: it says whether the questions your team already agreed still get the agreed answer. |
-| `/agami-save-golden`                          | Fill the golden dataset `/agami-eval` runs. **Import** a question bank — a CSV, one sheet of an Excel workbook, or a pasted table (rows with a statement import as confirmed, bare questions as unconfirmed) — or **save** one answer you just accepted, with the statement and its result as the receipt. A browsable explorer page queues changes that may weaken a claim but never grant one. Append-only: a write that would change an existing item stops for a yes. |
+| `/agami-save-golden`                          | Fill the golden dataset `/agami-eval` runs. **Import** a question bank — a CSV, one sheet of an Excel workbook, or a pasted table (rows with a statement import as confirmed, bare questions as unconfirmed) — or **save** one answer you just accepted, with the statement that produced it (the result you reviewed is recorded as accepted, not stored). A browsable explorer page queues changes that may weaken a claim but never grant one. Append-only: a write that would change an existing item stops for a yes. |
 | `/agami-serve`                                | Use agami from the **Claude Desktop** app (including the Microsoft Store build): wires up the optional local MCP server (same tools as the hosted connector, backed by your local model + execution — stdio, read-only, no network), using an interpreter it has checked can load your database driver. See [docs/mcp-server.md](docs/mcp-server.md). |
 | `/agami-deploy` *(early access — in testing)* | **Deploy a shared team server.** Writes a ready-to-run Docker bundle (the published image + HTTPS + OAuth + an admin console) so a team can stand up one governed server their Claude connects to. Business users query it over a URL — no local setup. Newer than the local path — we're validating it with early users ([details + how to give feedback](deploy/README.md)). |
 
@@ -313,8 +313,9 @@ read-only (`readOnlyHint`), so clients stop asking to confirm each call. The sch
 `model_version`, and `execute_sql` refuses a statement written against an older one (`stale_model`),
 so a resumed conversation can't query a model that changed under it. When a datasource has curated
 examples, `execute_sql` also takes the closest example's id and whether the statement `followed` it
-or it was only `shown_only` — the honest answer when none fits. Every call and every refusal lands
-in the activity log the admin console shows, grouped into conversations.
+or it was only `shown_only` — the honest answer when none fits. Calls and refusals are recorded in
+the activity log the admin console shows, grouped into conversations; if that log can't be written,
+the query is refused rather than run unrecorded.
 
 It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
 by environment variables, and **LLM-free + zero-egress by default**. Self-hosting this for people
