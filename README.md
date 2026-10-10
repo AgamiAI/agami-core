@@ -216,8 +216,8 @@ on a server it runs when `AGAMI_GOVERNANCE_ENFORCED` is on, which is **off by
 default**, and every answer says when it didn't run. Details: [SECURITY.md](SECURITY.md).
 - **Snapshot-pinned.** The model is YAML under `~/agami-artifacts/<profile>/`
 (or wherever you point `AGAMI_ARTIFACTS_DIR`). Make that profile folder a git
-repository and every curation step commits there, and a change that fails
-validation rolls back. Every answer records the model snapshot
+repository and each curation step tries to commit there (it carries on if git
+can't commit, e.g. no identity set); a change that fails validation is never written. Every answer records the model snapshot
 hash, so old answers reproduce exactly and schema drift flips affected entries to
 `stale` instead of silently changing the number.
 
@@ -309,13 +309,13 @@ using the bundle? The [manual install + environment-variable reference](docs/sel
 that.) Admins sign in with a password; teammates get per-user access to `/mcp`.
 
 The served tools are built to be called by an agent you don't control. All four are advertised
-read-only (`readOnlyHint`), so clients stop asking to confirm each call. The schema reply carries a
+read-only (`readOnlyHint`), so a client that honours the hint can skip confirming each call. The schema reply carries a
 `model_version`, and `execute_sql` refuses a statement written against an older one (`stale_model`),
 so a resumed conversation can't query a model that changed under it. When a datasource has curated
 examples, `execute_sql` also takes the closest example's id and whether the statement `followed` it
 or it was only `shown_only` — the honest answer when none fits. Calls and refusals are recorded in
-the activity log the admin console shows, grouped into conversations; if that log can't be written,
-the query is refused rather than run unrecorded.
+the activity log the admin console shows, grouped into conversations; if the log can't be reached
+the query is refused, and if a write fails the result is withheld.
 
 It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
 by environment variables, and **LLM-free + zero-egress by default**. Self-hosting this for people
