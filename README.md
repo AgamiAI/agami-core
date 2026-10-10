@@ -124,8 +124,9 @@ Connection details for each database: [docs/credentials.md](docs/credentials.md)
 joins, so describe them instead: fill in the
 [model spec workbook](plugins/agami/shared/model-spec-template.xlsx) — subject areas, which area owns
 each table, the joins (including condition joins such as `current_flag = 'Y'`), metrics, sensitive
-columns and rules — and attach it when `/agami-connect` asks for context. It's checked as a whole
-before anything is written, and the model is built exactly as it describes. Format:
+columns and rules — and attach it when `/agami-connect` asks for context. After introspection reads
+the listed tables, a dry run checks the whole workbook against them, and the spec replaces the
+introspected model only if it all validates — built exactly as it describes. Format:
 [model-spec-format.md](plugins/agami/shared/model-spec-format.md) *(early: the format may still change)*.
 
 ## Databases supported
@@ -206,12 +207,13 @@ date, data freshness, and the model snapshot hash. A warning banner appears if
 any unreviewed entry was used, and a total behind a join the model can't vouch
 for is reported as *undetermined* rather than clean. Nothing is silently trusted.
 - **Read-only, enforced where the SQL runs — not in the prompt.** Every statement
-passes one executor that refuses writes and side-effecting functions on every
-dialect (`SLEEP`, `pg_read_file`, Snowflake `SYSTEM$…`, `OPENROWSET`, `UTL_HTTP`,
-`load_extension`, …), confines it to the tables and columns the model declares
-(schema-qualified, so `staging.orders` isn't `sales.orders`), and refuses a
-projected `SELECT *` so every returned column is one the model can check.
-Details: [SECURITY.md](SECURITY.md).
+passes one executor that always refuses writes and side-effecting functions on
+every dialect (`SLEEP`, `pg_read_file`, Snowflake `SYSTEM$…`, `OPENROWSET`,
+`UTL_HTTP`, `load_extension`, …). A second pass confines it to the tables and
+columns the model declares (schema-qualified, so `staging.orders` isn't
+`sales.orders`) and refuses a projected `SELECT *`. That pass always runs locally;
+on a server it runs when `AGAMI_GOVERNANCE_ENFORCED` is on, which is **off by
+default**, and every answer says when it didn't run. Details: [SECURITY.md](SECURITY.md).
 - **Snapshot-pinned.** The model is YAML under `~/agami-artifacts/<profile>/`
 (or wherever you point `AGAMI_ARTIFACTS_DIR`). Make that profile folder a git
 repository and every curation step commits there, and a change that fails
@@ -310,7 +312,8 @@ The served tools are built to be called by an agent you don't control. All four 
 read-only (`readOnlyHint`), so clients stop asking to confirm each call. The schema reply carries a
 `model_version`, and `execute_sql` refuses a statement written against an older one (`stale_model`),
 so a resumed conversation can't query a model that changed under it. When a datasource has curated
-examples, `execute_sql` asks which one the statement followed. Every call and every refusal lands
+examples, `execute_sql` also takes the closest example's id and whether the statement `followed` it
+or it was only `shown_only` — the honest answer when none fits. Every call and every refusal lands
 in the activity log the admin console shows, grouped into conversations.
 
 It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
