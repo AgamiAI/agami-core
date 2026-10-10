@@ -77,6 +77,12 @@ _URL_PASSWORD_RE = re.compile(r"(://[^:/@\s]*:)[^@\s]*@")
 _REDACTED = "<set, hidden>"
 
 
+def _mode_is_private(mode: int, posix: bool = os.name == "posix") -> bool:
+    """No group or other access. POSIX only, as execute_sql's own check is: NTFS reports 0o666 for
+    every file and `chmod` cannot change that, so on Windows the warning could never clear."""
+    return not posix or not (mode & (stat.S_IRWXG | stat.S_IRWXO))
+
+
 def _redact(fields: dict) -> dict:
     out = {}
     for key, value in fields.items():
@@ -148,8 +154,8 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
         score = (1 if has_deps else 0) + (1 if (has_driver or not want_driver) else 0)
         # canonical path
         try:
-            canon = subprocess.run([py, "-c", "import sys;print(sys.executable)"],
-                                   capture_output=True, text=True, timeout=10).stdout.strip() or py
+            canon = subprocess.run([py, "-X", "utf8", "-c", "import sys;print(sys.executable)"],
+                                   capture_output=True, text=True, encoding="utf-8", timeout=10).stdout.strip() or py
         except Exception:
             canon = py
         entry = {"python3": canon, "has_model_deps": has_deps, "has_driver": has_driver, "score": score}
@@ -202,13 +208,13 @@ def main(argv=None) -> int:
     example_present = (creds_path.parent / "credentials.example").exists()
     if creds_path.exists():
         mode = creds_path.stat().st_mode
-        creds["chmod_ok"] = not (mode & (stat.S_IRWXG | stat.S_IRWXO))
+        creds["chmod_ok"] = _mode_is_private(mode)
         if not creds["chmod_ok"]:
             anomalies.append({"kind": "credentials_world_readable", "where": str(creds_path),
                               "detail": f"mode {oct(mode & 0o777)}; run chmod 600"})
         cp = configparser.ConfigParser()
         try:
-            cp.read(creds_path)
+            cp.read(creds_path, encoding="utf-8-sig")
             if cp.has_section(profile):
                 creds["present"] = True
                 creds["fields"] = _redact(dict(cp.items(profile)))

@@ -518,7 +518,7 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--out", required=True)
     args = p.parse_args(argv)
 
-    with open(os.path.expanduser(args.items_file)) as f:
+    with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
         run = json.load(f)
     if not isinstance(run, dict):
         sys.stderr.write(f"--items-file must contain a JSON object, got {type(run).__name__}\n")

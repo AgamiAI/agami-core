@@ -22,7 +22,7 @@ def _configured_interpreter() -> str:
     if env:
         return env
     try:
-        cfg = json.loads(_config_path().read_text())
+        cfg = json.loads(_config_path().read_text(encoding="utf-8"))
         return (cfg.get("tool_paths") or {}).get("python3") or ""
     except Exception:
         return ""
@@ -37,7 +37,7 @@ def _config_path() -> pathlib.Path:
         ptr = pathlib.Path("~/.config/agami/path").expanduser()
         try:
             if ptr.exists():
-                art = ptr.read_text().strip()
+                art = ptr.read_text(encoding="utf-8").strip()
         except OSError:
             pass
     art = art or str(pathlib.Path("~/agami-artifacts").expanduser())

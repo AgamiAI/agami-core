@@ -365,9 +365,14 @@ def make_table_ref(conn: str, table: Table) -> TableRef:
     )
 
 
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
 def _area_key(schema: str) -> str:
-    """A filesystem-safe area name from a schema name."""
-    return re.sub(r"[^a-z0-9_]+", "_", schema.lower()).strip("_") or "misc"
+    """A filesystem-safe area name from a schema name. Windows reserves its device names at every
+    path level, so a schema called `con` or `aux` gets a suffix rather than a directory nobody can open."""
+    key = re.sub(r"[^a-z0-9_]+", "_", schema.lower()).strip("_") or "misc"
+    return f"{key}_" if key in _WINDOWS_RESERVED else key
 
 
 def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:

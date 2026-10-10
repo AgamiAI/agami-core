@@ -157,7 +157,7 @@ def _resolve_default_profile() -> str:
     if CONFIG_PATH.exists():
         try:
             import json as _json
-            cfg = _json.loads(CONFIG_PATH.read_text())
+            cfg = _json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             active = cfg.get("active_profile")
             if isinstance(active, str) and active:
                 return active
@@ -563,7 +563,7 @@ def _load_credentials(profile: str, org_id: str = "local") -> dict[str, str]:
     # value), which then gets fed to Snowflake/Postgres/MySQL as a junk
     # hostname/account and the connection hangs or fails confusingly.
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
-    cfg.read(CREDENTIALS_PATH)
+    cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
     if profile not in cfg:
         # **Name the other profiles only on the single-user path.** This message is returned by the
         # tool, so it reaches the model and from there whoever asked the question. On a deployment
@@ -1957,6 +1957,23 @@ def _collect_cursor(cur: Any) -> ExecResult:
     return ExecResult(columns=columns, rows=[tuple(r) for r in fetched[:cap]], truncated=truncated)
 
 
+def _utf8_stdout() -> None:
+    """Make stdout the wire `_emit_result_csv` assumes: UTF-8 bytes, rows exactly as csv wrote them;
+    and stderr UTF-8 too, because every caller decodes both streams as UTF-8 and a database's error
+    text, written to stderr, can carry any character.
+
+    On Windows a piped stdout encodes in the ANSI code page, so a value outside it raises, and it
+    turns every "\n" into "\r\n" — including the one inside csv's own "\r\n" terminator, so each
+    row arrives as "\r\r\n" and a universal-newline reader sees a blank row after every real one.
+    The terminator stays: it is the cross-platform wire format, pinned byte for byte by
+    `test_ah012_executor_seam`. Only the stream changes. A replaced stream (a test's capture) may
+    have no `reconfigure`, and needs none."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", newline="")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
+
 def _emit_result_csv(result: ExecResult) -> None:
     """Serialize an ``ExecResult`` to stdout as CSV — the subprocess/CLI wire: header row then data
     rows. This is the *single, final* text serialization for the fork path; the in-process path
@@ -3148,6 +3165,7 @@ def main() -> int:
     # One-shot migration of a legacy <artifacts_dir>/local into <artifacts_dir>/local/, then re-resolve
     # the paths (the migration can set the artifacts-dir pointer to a custom location).
     global CREDENTIALS_PATH, CONFIG_PATH
+    _utf8_stdout()
     agami_paths.bootstrap()
     CREDENTIALS_PATH = agami_paths.credentials_path()
     CONFIG_PATH = agami_paths.config_path()
@@ -3200,7 +3218,7 @@ def main() -> int:
                           manifest_path=Path(os.path.expanduser(args.manifest)) if args.manifest else None)
 
     if args.sql_file:
-        sql = Path(os.path.expanduser(args.sql_file)).read_text()
+        sql = Path(os.path.expanduser(args.sql_file)).read_text(encoding="utf-8")
     else:
         sql = args.sql
 
@@ -3282,7 +3300,7 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
                 sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")
             except OSError as exc:
                 run = {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"the statement file could not be read: {exc.strerror or exc}"}
-                out.write_text("")
+                out.write_text("", encoding="utf-8")
             else:
                 env = execute_guarded(sql, profile, item.get("area") or default_area, executor=BUILTIN_EXECUTOR,
                                       no_safety=no_safety)
@@ -3295,11 +3313,11 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
                                 writer.writerow(row)
                     run = {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None, "rows": len(env.data.rows)}
                 elif env.status == "refused":
-                    out.write_text("")
+                    out.write_text("", encoding="utf-8")
                     run = {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
                            "detail": getattr(env.refusal, "reason", None)}
                 else:
-                    out.write_text("")
+                    out.write_text("", encoding="utf-8")
                     run = {"status": "failed", "exit": FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT),
                            "kind": env.failure.kind, "rule": None, "detail": env.failure.message}
             _batch_run_json_path(out).write_text(json.dumps(run), encoding="utf-8")

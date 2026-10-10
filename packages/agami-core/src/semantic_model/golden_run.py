@@ -1206,6 +1206,7 @@ def _spawn(
                 # something with no reader and one way to leak.
                 stderr=subprocess.DEVNULL,
                 text=True,
+                encoding="utf-8",
                 timeout=timeout_s,
                 env=_child_env(),
                 cwd=workdir,

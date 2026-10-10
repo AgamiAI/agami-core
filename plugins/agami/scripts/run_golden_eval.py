@@ -225,6 +225,7 @@ def _tools_came_up(server: "McpServer") -> Optional[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
             timeout=60,
             env={**os.environ, **(server.env or {})},
             check=False,
@@ -317,6 +318,7 @@ def _sm(*args: str, json_out: bool = True) -> Any:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if completed.returncode != 0:

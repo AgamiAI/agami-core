@@ -12,6 +12,42 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **On Windows, a query's result no longer arrives with a blank row after every real one.** The query
+  step writes CSV, whose rows end `\r\n`; a piped stdout on Windows turned the `\n` in that into
+  `\r\n` again, so the local MCP server and `sm seed-validate` read an empty row between each pair —
+  a 10-row answer reported 21 rows, and a preview showed half its rows. The stream now writes UTF-8
+  and leaves the rows as csv wrote them, and every caller decodes it as UTF-8 (each Python child runs with `PYTHONUTF8=1` and
+  `PYTHONIOENCODING=utf-8`). The CSV itself is
+  byte-for-byte unchanged on every platform (#362).
+- **Windows: text is read and written as UTF-8 everywhere, and a test keeps it that way.** 54 reads
+  and writes, the six credentials-file reads among them, used the ANSI code page: a template with an
+  arrow stopped three dashboards rendering, and a non-ASCII password failed to authenticate.
+  `tests/test_windows_text_io.py` now fails on any text read, write or child process that names no
+  encoding, across the package, the plugin's scripts and the vendored `lib/`. `sm`'s CLI writes UTF-8
+  too, so `sm --help` and an amount in rupees print instead of raising, and the query step's error
+  text reaches its caller intact (#362).
+- **`sm` finds the interpreter agami-connect configured, even when `python3` is the Microsoft Store
+  stub.** It read `.config` by running `python3` — the stub, on the machines that need the configured
+  one most — and then picked the stub. It now reads the path in plain shell, and never takes a
+  `WindowsApps` stub from PATH (#362).
+- **Windows:** the model explorer and prune pages render (`%-d` is glibc-only); a credentials
+  template saved by Notepad or PowerShell with a byte-order mark is promoted as UTF-8 rather than
+  crashing; a credentials file is no longer reported world-readable, which NTFS reports for every file;
+  re-running agami-connect no longer fails moving onto an earlier legacy backup; and a schema named
+  `con`, `aux` or another reserved device name gets a usable area folder — on every platform, so a
+  model moves between machines; an existing area with such a name becomes `aux_` on the next
+  introspection (#362).
+- **Claude Desktop from the Microsoft Store gets its MCP entry.** `setup_desktop_mcp.py` wrote to
+  `%APPDATA%\Claude`, which the Store build never reads; it now writes to the package's own folder
+  when that exists, sets `PYTHONUTF8=1` for the server, prints this platform's restart steps and log
+  path, says so when it repoints an entry at another profile, and leaves a config that is not UTF-8
+  untouched instead of calling it invalid JSON (#362).
+- **`sm seed-validate`'s preview shows a year as `2022`, not `2,022`.** It formatted each cell alone
+  and skipped the label rule answers use; both now share `units.format_rows` (#362).
+- **agami-connect no longer needs `TodoWrite`** to show its progress checklist (#362).
+
 ## [0.9.10] — 2026-10-07
 
 ### Added

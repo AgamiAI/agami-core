@@ -28,7 +28,7 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ## Progress tracking — set up a todo list at the very start
 
-This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to call `TodoWrite`** with the skill's major phases, so the user can watch progress. Validated as a strong UX signal — it makes the wait feel intentional rather than opaque.
+This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to show the skill's major phases as a checklist**, so the user can watch progress: with `TodoWrite` where the client has it, otherwise as a short numbered list in your first message, updated as each phase finishes. Validated as a strong UX signal — it makes the wait feel intentional rather than opaque.
 
 Seed (one task per major phase, in order):
 
