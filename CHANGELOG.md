@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.11] — 2026-10-10
+
 ### Fixed
 
 - **On Windows, a query's result no longer arrives with a blank row after every real one.** The query
