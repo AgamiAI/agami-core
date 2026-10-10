@@ -650,7 +650,7 @@ def apply_spec(
         signer,
         role,
     )
-    curate._git_commit(root, "apply model spec")
+    curate._git_commit(root, "apply model spec")  # best-effort; its note is not part of this result
     res.applied = True
     return res
 

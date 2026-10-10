@@ -141,6 +141,9 @@ class IntrospectReport:
     sensitive_columns: int = 0
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
+    # On a refresh of an existing model: what changed structurally, per table. Empty on a first build.
+    changes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    new_tables: list[str] = field(default_factory=list)
 
     def render(self) -> str:
         lines = [
@@ -150,6 +153,9 @@ class IntrospectReport:
             f"schemas: {self.schemas}",
             f"tables: {self.table_count}   relationships: {self.relationship_count}",
             f"subject_areas ({len(self.subject_areas)}): {', '.join(self.subject_areas)}",
+            *([f"new tables: {', '.join(self.new_tables)}"] if self.new_tables else []),
+            *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
+              for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
             f"sensitive columns: {self.sensitive_columns}",
             "## notes",
@@ -165,13 +171,24 @@ class IntrospectReport:
 # ---------------------------------------------------------------------------
 
 
-def make_execute_sql_runner(profile: str, python: Optional[str] = None) -> Runner:
+def make_execute_sql_runner(
+    profile: str, python: Optional[str] = None, *, building_the_model: bool = False
+) -> Runner:
+    """A runner that sends each statement through `execute_sql.py`, and returns its rows.
+
+    `building_the_model` is for the reads that MAKE the model: the catalog, and probing a table the
+    model doesn't list yet. Those skip the semantic-model pass, which confines a statement to the
+    tables an existing model declares, so once any model exists it refuses every one of them (#428):
+    a second batch, a re-introspection and a new schema all came back with no readable columns. The
+    always-on gate still runs, so these reads stay read-only. Everything that answers or validates
+    against the model (seed examples, enrichment) keeps the default and is confined as before."""
     exe = python or sys.executable
     script = str(SCRIPT_DIR / "execute_sql.py")
+    unscoped = ["--no-safety"] if building_the_model else []
 
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(
-            [exe, script, "--profile", profile, "--sql", sql],
+            [exe, script, "--profile", profile, "--sql", sql, *unscoped],
             capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
         if proc.returncode != 0:
@@ -272,27 +289,44 @@ def introspect(
                         or f"{t.name}.{c.name}" in ex):
                     c.review_state = "rejected"
 
-    # 2c. APPEND (batched introspection): fold the EXISTING model's tables back in — loaded from
-    # disk, never re-queried — so each batch call builds only its own tables but writes the full
-    # union. Lets the skill introspect ~10 tables per quick foreground call (natural progress, no
-    # background monitor) and still end with a complete model. Safe during onboarding (no hand-
-    # edits to lose); the relationship pass below rebuilds across the union, prior edges kept.
+    # 2c. APPEND onto an existing model: a later onboarding batch, or a refresh after the database
+    # changed. The existing model is the starting point, not something to rebuild: its tables are
+    # folded back in from disk (never re-queried), and a batch table it already has is MERGED — new
+    # columns added, dropped ones marked stale, changed types updated — so its descriptions, flags and
+    # sign-offs survive (#437). Runs on a dry run too, which is how a refresh is previewed.
+    prev: Optional[Datasource] = None
     prev_rels: list[Relationship] = []
     skip_keys: set = set()
-    if append and not dry_run and (out / "datasource.yaml").exists():
+    fresh_keys: set[tuple] = set()   # (schema, name): a bare name can exist in two schemas
+    if append and (out / "datasource.yaml").exists():
         from .loader import load_datasource
         prev = load_datasource(out, include_rejected=True)
-        batch_names = {t.name for t in built}
-        for sa in prev.subject_areas:
-            for t in sa.tables_defined:
-                if t.name not in batch_names:        # keep prior tables (don't re-query)
-                    built.append(t)
-                    grain_by_table.setdefault(t.name, set(t.grain))
+        existing = {(t.schema_name, t.name): t for sa in prev.subject_areas for t in sa.tables_defined}
+        merged: list[Table] = []
+        for t in built:
+            old = _existing_table(existing, t)
+            if old is None:
+                merged.append(t)
+                fresh_keys.add((t.schema_name, t.name))
+                report.new_tables.append(t.name)
+                continue
+            m, change = _merge_table(old, t)
+            merged.append(m)
+            if change:
+                report.changes[t.name] = change
+        built = merged
+        batch_keys = {(t.schema_name, t.name) for t in built}
+        for key, t in existing.items():
+            if key not in batch_keys:        # keep prior tables (don't re-query)
+                built.append(t)
+        grain_by_table = {t.name: set(t.grain) for t in built}
         for sa in prev.subject_areas:
             prev_rels.extend(sa.relationships)
         prev_rels.extend(prev.cross_subject_area_relationships)
         skip_keys = {(r.from_table.lower(), r.from_column.lower(), r.to_table.lower()) for r in prev_rels}
-        report.notes.append(f"append: merged {len(batch_names)} new table(s) into {len(built)} total")
+        report.notes.append(
+            f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
+            f"{len(built)} total")
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap). Use the FULL built set's
     # (schema, table) pairs so an --append batch builds relationships across the whole union, not
@@ -311,33 +345,167 @@ def introspect(
     # 3b. now that joins are known, re-derive deep-table column_groups so FK (reference) columns
     # group under `references` instead of scattering through `misc` — references live on the
     # Relationship, not on the column, so the initial per-table grouping couldn't see them.
-    _regroup_columns_with_references(built, rels)
+    if prev is not None and _areas_untouched(prev):
+        # A batched first build: the areas so far are only the engine's proposal for earlier batches,
+        # so propose again over the union, exactly as a one-shot build would.
+        prev_for_areas: Optional[Datasource] = None
+    else:
+        prev_for_areas = prev
+    if prev_for_areas is None:
+        _regroup_columns_with_references(
+            built if prev is None else [t for t in built if (t.schema_name, t.name) in fresh_keys], rels)
+        # 4. propose subject areas + cross-area edges
+        areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
+        report.notes.extend(notes)
+        report.subject_areas = [a.name for a in areas]
+        cross = build.extract_cross_area_relationships(areas, rels)
 
-    # 4. propose subject areas + cross-area edges
-    areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
-    report.notes.extend(notes)
-    report.subject_areas = [a.name for a in areas]
-    cross = build.extract_cross_area_relationships(areas, rels)
+        storage = StorageConnection(
+            name=conn_name,
+            storage_type=dialect.name,
+            storage_config={"profile": profile, "credentials_ref": "<artifacts_dir>/local/credentials"},
+        )
+        org = Datasource(
+            datasource=profile,
+            version=1,
+            storage_connections=[storage],
+            subject_areas=areas,
+            cross_subject_area_relationships=cross,
+        )
+        if prev is not None:   # keep what the datasource already carries (description, ids, …)
+            org = prev.model_copy(update={"subject_areas": areas, "cross_subject_area_relationships": cross})
+    else:
+        # Regroup only the tables this run created: an existing table's column groups are curation.
+        _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels)
+        org = _refresh_existing(prev, built, rels[len(prev_rels):], fresh_keys, profile, report)
 
-    storage = StorageConnection(
-        name=conn_name,
-        storage_type=dialect.name,
-        storage_config={"profile": profile, "credentials_ref": "<artifacts_dir>/local/credentials"},
-    )
-    org = Datasource(
-        datasource=profile,
-        version=1,
-        storage_connections=[storage],
-        subject_areas=areas,
-        cross_subject_area_relationships=cross,
-    )
-
-    # 5. write (backing up any legacy model at the profile root)
+    # 5. write (backing up any legacy model at the profile root). An append onto an existing model is
+    # validated first: writing an invalid merge would replace a curated model with a broken one.
+    if prev is not None and not dry_run:
+        from . import validator as V
+        if not V.validate(org).ok:
+            report.notes.append("not written: the merged model doesn't validate; the existing model is unchanged")
+            dry_run = True
     if out == artifacts_dir / profile and not dry_run:
         _backup_legacy_model(out)
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
     return org, report
+
+
+def _existing_table(existing: dict[tuple, Table], fresh: Table) -> Optional[Table]:
+    """The model's table `fresh` is a new reading of: by (schema, name), or — for a bare name such as
+    `--tables customers` against a stored `main.customers` — by name alone when exactly one matches."""
+    hit = existing.get((fresh.schema_name, fresh.name))
+    if hit is not None:
+        return hit
+    same = [t for (s, n), t in existing.items() if n.lower() == fresh.name.lower()]
+    return same[0] if len(same) == 1 and (fresh.schema_name is None or same[0].schema_name is None) else None
+
+
+_AUTO_AREA = "Auto-proposed subject area covering"
+
+
+def _areas_untouched(prev: Datasource) -> bool:
+    """Whether every area is still exactly the engine's proposal: nobody described one or gave it an
+    entity or metric. Then a later batch of a first build may re-propose them; otherwise they're kept."""
+    return all(
+        sa.description.startswith(_AUTO_AREA) and not sa.entities and not sa.metrics
+        for sa in prev.subject_areas
+    ) and not prev.cross_subject_area_entities and not prev.cross_subject_area_metrics
+
+
+def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]:
+    """`old` with the structure `fresh` read from the database, and the curation kept.
+
+    A column the database still has keeps every field but its type; a new one arrives as
+    introspection built it; one the database no longer has stays, marked `stale`, so a description or
+    sign-off is never silently lost and a person decides. Returns the merged table and what changed."""
+    fresh_by = {c.name.lower(): c for c in fresh.columns}
+    old_names = {c.name.lower() for c in old.columns}
+    cols: list[Column] = []
+    change: dict[str, list[str]] = {"added": [], "dropped": [], "retyped": []}
+    for c in old.columns:
+        f = fresh_by.get(c.name.lower())
+        if f is None:
+            if c.review_state not in ("stale", "rejected"):
+                change["dropped"].append(c.name)
+                c = c.model_copy(update={"review_state": "stale"})
+        else:
+            if c.review_state == "stale":   # the database has it again
+                change.setdefault("restored", []).append(c.name)
+                c = c.model_copy(update={"review_state": "approved"})
+            if f.type != c.type:
+                change["retyped"].append(f"{c.name}: {c.type} -> {f.type}")
+                c = c.model_copy(update={"type": f.type})
+        cols.append(c)
+    added = [f for f in fresh.columns if f.name.lower() not in old_names]
+    cols.extend(added)
+    change["added"] = [f.name for f in added]
+    groups = {k: list(v) for k, v in old.column_groups.items()}
+    if groups:  # a deep table puts every column in a group, the new ones too
+        for f in added:
+            group = next((k for k, v in fresh.column_groups.items() if f.name in v), "misc")
+            groups.setdefault(group, []).append(f.name)
+    merged = old.model_copy(update={"columns": cols, "column_groups": groups, "grain": old.grain or fresh.grain})
+    return merged, {k: v for k, v in change.items() if v}
+
+
+def _refresh_existing(
+    prev: Datasource,
+    built: list[Table],
+    new_rels: list[Relationship],
+    fresh_keys: set[tuple],
+    profile: str,
+    report: IntrospectReport,
+) -> Datasource:
+    """The existing model with `built`'s merged tables in place, new tables placed, new joins added.
+
+    Subject areas, their descriptions, entities and metrics, and every existing join stay as they are:
+    re-proposing areas would undo the ones a person (or a model spec) defined (#437). A new table goes
+    in the area named for its schema when there is one, else the only area, else a new area named
+    for its schema, which the person can move in the model explorer."""
+    by_key = {(t.schema_name, t.name): t for t in built}
+    areas = []
+    conn_name = prev.storage_connections[0].name  # the model's own, whatever this run would call it
+    for sa in prev.subject_areas:
+        tables = [by_key.get((t.schema_name, t.name), t) for t in sa.tables_defined]
+        areas.append(sa.model_copy(update={"tables_defined": tables}))
+    names = {a.name: i for i, a in enumerate(areas)}
+
+    def holds(i: int, t: Table) -> bool:   # one area can't hold two tables with the same bare name
+        return any(x.name.lower() == t.name.lower() for x in areas[i].tables_defined)
+
+    for t in (t for t in built if (t.schema_name, t.name) in fresh_keys):
+        key = build._area_key(t.schema_name) if t.schema_name else profile.lower()
+        if key in names and not holds(names[key], t):
+            i = names[key]
+        elif len(areas) == 1 and not holds(0, t):
+            i = 0
+        else:
+            while key in names:
+                key = f"{key}_"
+            areas.append(build.make_area(key, [], [], conn_name))
+            i = names[key] = len(areas) - 1
+            report.notes.append(f"new subject area {key!r} for new tables — move them in /agami-model if they belong elsewhere")
+        a = areas[i]
+        areas[i] = a.model_copy(update={
+            "tables_defined": [*a.tables_defined, t],
+            "tables": [*a.tables, build.make_table_ref(conn_name, t)],
+        })
+    # New joins only: one inside an area goes there, one between two areas becomes a cross-area join.
+    intra: set[int] = set()
+    for i, a in enumerate(areas):
+        keys = {(t.schema_name, t.name) for t in a.tables_defined}
+        bare = {t.name for t in a.tables_defined}
+        mine = [r for r in new_rels if build._rel_in_area(r, keys, bare)]
+        if mine:
+            areas[i] = a.model_copy(update={"relationships": [*a.relationships, *mine]})
+            intra.update(id(r) for r in mine)
+    between = [r for r in new_rels if id(r) not in intra]
+    cross = [*prev.cross_subject_area_relationships, *build.extract_cross_area_relationships(areas, between)]
+    report.subject_areas = [a.name for a in areas]
+    return prev.model_copy(update={"subject_areas": areas, "cross_subject_area_relationships": cross})
 
 
 def discover_inventory(

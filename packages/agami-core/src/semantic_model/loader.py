@@ -212,8 +212,10 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectA
             if not include_rejected:
                 if _rejected(t):
                     continue  # whole table excluded by the curator
-                # drop per-column exclusions
-                t.columns = [c for c in t.columns if not _rejected(c)]
+                # drop per-column exclusions, and columns a refresh found the database no longer has
+                # (`stale`, #437): kept on disk for a person to decide, never served, since a query
+                # naming one would pass the model's checks and then fail at the database.
+                t.columns = [c for c in t.columns if not _rejected(c) and c.review_state != "stale"]
                 # ...and prune those dropped columns out of column_groups, else a group still
                 # naming an excluded column fails the column_group_missing_column check on load
                 # (excluding a deep table's column would otherwise break the whole model).
