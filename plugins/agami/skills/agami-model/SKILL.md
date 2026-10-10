@@ -150,7 +150,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
-`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`.
+`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table).
 
 **Success** (`validated: true`):
 - Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*
@@ -214,8 +214,8 @@ Then end the turn. The skill is one-shot per invocation — re-enter via the sla
 | User types `include tables: schema.table` for a table that's already unreviewed | Same — idempotent flip; entry stays unreviewed; curator name recorded. |
 | User types `exclude columns: schema.table.col` and the column doesn't exist | The applier returns it in `skipped[]` with reason "field not found on dataset". Surface the skip; continue with the rest. |
 | User types `exclude tables: schema.table.col` (3 segments — looks like a column) | The grammar is positional; agami treats the `exclude tables:` prefix as authoritative. The applier will fail to find a table with that 3-segment name and return `skipped` with reason "table yaml not found". Surface clearly. |
-| Validator fails on a partially-applied batch | The applier reverts ALL YAML changes via `git checkout -- .` before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
-| User has the profile dir but no `.git/` (legacy from before Phase 3e) | The applier skips the git commit + revert steps silently. Curation log still gets appended. The user loses revert-on-validator-fail safety — surface a one-liner suggesting `git init` in the profile dir. |
+| Validator fails on a partially-applied batch | The applier restores every file it touched from its own backups (no git needed) before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
+| `committed: false` with a `commit_note` | Nothing went wrong — the change is written and validated; it just wasn't committed. Pass the note on in one line, in your own words: the model isn't in git (suggest `git init` in its folder), or it's inside a larger repository (agami never commits there — tell them which folder changed so they commit it themselves). |
 | The model has 5000+ fields | The renderer handles it (JSON manifest is ~hundreds of KB at the high end). Client-side search is instant up to the millions of DOM nodes mark. If it gets sluggish, file an issue. |
 
 ---

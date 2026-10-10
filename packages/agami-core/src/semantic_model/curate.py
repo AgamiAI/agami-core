@@ -22,7 +22,9 @@ Locators address an entry uniquely: {kind, area, name, [column]} where kind ∈
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -393,10 +395,13 @@ class ApplyResult:
     errors: list[str] = field(default_factory=list)
     validated: bool = False
     committed: bool = False
+    # Why nothing was committed, in a sentence the skill can pass on; empty when it was.
+    commit_note: str = ""
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
-                "validated": self.validated, "committed": self.committed}
+                "validated": self.validated, "committed": self.committed,
+                **({"commit_note": self.commit_note} if self.commit_note else {})}
 
 
 def _area_dir(root: Path, area: str) -> Path:
@@ -455,7 +460,7 @@ def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) ->
         dsp.write_text(prior, encoding="utf-8")
         return res
     res.applied = [f"key_terminology: {len(merged)} term(s)"]
-    res.committed = _git_commit(root, f"terminology: {len(merged)} term(s)")
+    res.committed, res.commit_note = _git_commit(root, f"terminology: {len(merged)} term(s)")
     return res
 
 
@@ -492,7 +497,7 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
         dsp.write_text(prior, encoding="utf-8")
         return res
     res.applied = ["description"]
-    res.committed = _git_commit(root, "datasource description")
+    res.committed, res.commit_note = _git_commit(root, "datasource description")
     return res
 
 
@@ -534,7 +539,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
 
     if res.applied:
         _append_curation_log(root, ops, signer, role)
-        res.committed = _git_commit(root, f"curation: {len(res.applied)} change(s)")
+        res.committed, res.commit_note = _git_commit(root, f"curation: {len(res.applied)} change(s)")
     return res
 
 
@@ -801,8 +806,14 @@ def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signe
 # ---------------------------------------------------------------------------
 
 
+# Set by a git hook or a caller, these point git at ANOTHER repository whatever `-C` says, and a
+# commit would land there with its whole working tree (#436).
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args],
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
+    return subprocess.run(["git", "-C", str(root), *args], env=env,
                           capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
@@ -871,7 +882,7 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     _append_curation_log(
         root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
                for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
     return res
 
 
@@ -954,7 +965,7 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
         return res
     _append_curation_log(
         root, [{"op": "add", "kind": "relationship", "name": a} for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
+    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
     return res
 
 
@@ -1002,7 +1013,7 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     res.validated = True    # examples aren't model-validated; the skill EXPLAIN-checks the SQL
     _append_curation_log(root, [{"op": "add", "kind": "example", "area": area,
                                  "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
+    res.committed, res.commit_note = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
     return res
 
 
@@ -1035,7 +1046,7 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
     res.validated = True
     _append_curation_log(root, [{"op": "reject", "kind": "example", "area": area,
                                  "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"examples: rejected {len(res.applied)} in {area}")
+    res.committed, res.commit_note = _git_commit(root, f"examples: rejected {len(res.applied)} in {area}")
     return res
 
 
@@ -1082,21 +1093,51 @@ def _restore(backups: list[tuple[Path, Optional[str]]]) -> None:
             pass
 
 
-def _git_commit(root: Path, msg: str) -> bool:
-    # Model-write finalization point for every curation path (apply / write_items /
-    # terminology / examples / metadata relationships). Stamp the model_version
-    # snapshot here FIRST — unconditionally, before the git check — so it happens
-    # whether or not the artifacts dir is a git repo (it usually isn't).
+def _repository_top(root: Path) -> Optional[Path]:
+    """The git repository `root` sits in, found the way git finds it (searching upwards), or None.
+    A folder that repository ignores (an artifacts folder under a dotfiles repo at `~`) isn't in it."""
+    try:
+        r = _git(root, "rev-parse", "--show-toplevel")
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        if _git(root, "check-ignore", "-q", ".").returncode == 0:
+            return None
+    except Exception:
+        return None
+    return Path(r.stdout.strip())
+
+
+def _git_commit(root: Path, msg: str) -> tuple[bool, str]:
+    """Commit the model's change when the profile folder is its own repository; else say why not.
+
+    Model-write finalization point for every curation path (apply / write_items / terminology /
+    examples / metadata relationships). The model_version snapshot is stamped FIRST, unconditionally,
+    so it happens whether or not anything is committed.
+
+    A profile folder inside a LARGER repository — the usual home of a deployed model, checked in with
+    the team's other files — is never committed to (#436): `git add -A` there stages the whole working
+    tree, the commit lands on whatever branch is checked out under whoever's identity git has, and the
+    message is agami's, not the team's. The note says which folder changed so the person commits it.
+    Rollback never depended on git: a change that fails validation is restored from its backups."""
     from . import snapshot
     snapshot.write_snapshot(root)
-    if not (root / ".git").exists():
-        return False
-    try:
-        _git(root, "add", "-A")
-        r = _git(root, "commit", "-m", msg)
-        return r.returncode == 0
-    except Exception:
-        return False
+    if (root / ".git").exists():
+        try:
+            _git(root, "add", "-A")
+            r = _git(root, "commit", "-m", msg)
+        except Exception:
+            return False, "git could not commit here; the change is written but not committed"
+        if r.returncode == 0:
+            return True, ""
+        return False, "git could not commit here (is git's user.name/user.email set?); the change is written"
+    if shutil.which("git") is None:
+        return False, "git isn't installed here, so the change is written but not versioned"
+    top = _repository_top(root)
+    if top is None:
+        return False, ("this model isn't in git, so the change is written but has no history; "
+                       "`git init` its folder to keep one")
+    return False, (f"this model is inside the git repository at {top}; agami doesn't commit there — "
+                   f"review and commit the changes under {root} yourself")
 
 
 def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:

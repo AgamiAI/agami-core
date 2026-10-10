@@ -12,6 +12,49 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Refreshing a model after the database changed works, and keeps what people curated.** Asking
+  agami-connect to pick up new columns failed three ways:
+  - **It couldn't read the database's column list once a model existed (#428).** The reads that
+    build the model went through the check that confines a query to the model's own tables, so
+    every table in a second batch or a refresh came back with "no readable columns". Those reads now
+    skip that check; the always-on read-only gate still applies, and seed examples and enrichment
+    stay confined. That check also now finds the model in a folder chosen through the saved pointer,
+    where before it found none and stayed off.
+  - **Re-reading a table threw away its curation (#437).** It was rebuilt from scratch, and the
+    subject areas were re-proposed. Now an existing table keeps every description, sensitivity
+    flag, caveat and sign-off. A new column is added; one the database dropped is kept on disk,
+    marked `stale` and no longer offered to the agent (a query naming it would fail at the
+    database), and restored if the database has it again; a changed type is updated. Subject areas,
+    entities, metrics and existing joins are left as they are once anyone has curated them; a new
+    table joins the area named for its schema, never one already holding a table of the same name.
+    A bare `--tables customers` refreshes the stored `main.customers` instead of adding it twice. A
+    merge that doesn't validate isn't written, and the report says so first. `--dry-run` previews
+    the change as `changed <table>: added …; dropped …; retyped …; key …`, and agami-connect shows
+    that before writing. A first build in `--append` batches still ends with the same subject areas
+    as a one-shot build.
+  - **What a refresh does with each kind of database change.** A changed primary key moves the key
+    flags, and the grain when the engine had set it (a grain a person or a model spec stated is
+    kept). A changed type re-derives its date encoding, timezone and (engine-set) aggregation,
+    resets a value list that no longer fits, and sends confirmed joins on that column back to
+    review. A table that crosses the deep-table size gets column groups. A table the database
+    dropped is kept, marked `stale`, and no longer served; it is restored if it comes back. Row
+    counts are refreshed. A new table never pushes an area past 30 tables, never shares an area
+    with a same-named table, and carries the model's own connection. A SQL-defined table is never
+    merged with a database table of the same name; the refresh stops and says why.
+  - **What the agent sees leaves out anything naming a column or table that isn't served** —
+    excluded by a curator or stale after a refresh: joins, grain columns, table references, default
+    filters, entity mappings and metrics on it. They stay on disk. This also closes the same gap
+    for columns and tables curators excluded before.
+  - **Curation never noticed a model kept inside a team's git repository (#436).** It looked for
+    git only in the model's own folder, so it said `committed: false` with no reason. It still
+    commits when that folder is its own repository. Inside a larger one it never commits (that
+    would stage unrelated files on whatever branch is checked out), and every result now carries a
+    `commit_note` saying why nothing was committed and which folder changed. A folder that
+    repository ignores counts as not in git, and an exported `GIT_DIR` can't send the commit elsewhere. Rollback never depended
+    on git, and agami-model's skill no longer says it did.
+
 ## [0.9.11] — 2026-10-10
 
 ### Fixed

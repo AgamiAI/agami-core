@@ -530,8 +530,13 @@ def cmd_set_terminology(args) -> int:
         terms = terms["key_terminology"]
     res = curate.set_key_terminology(args.root, terms, merge=not args.replace)
     _print_json({"applied": res.applied, "validated": res.validated,
-                 "committed": res.committed, "errors": res.errors})
+                 "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
+
+
+def _commit_note(res) -> dict:
+    """`commit_note` only when there is one, the same shape `ApplyResult.as_dict` gives."""
+    return {"commit_note": res.commit_note} if res.commit_note else {}
 
 
 def cmd_set_description(args) -> int:
@@ -541,7 +546,7 @@ def cmd_set_description(args) -> int:
     from . import curate
     res = curate.set_datasource_description(args.root, args.description)
     _print_json({"applied": res.applied, "validated": res.validated,
-                 "committed": res.committed, "errors": res.errors})
+                 "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -621,7 +626,7 @@ def cmd_remove_example(args) -> int:
     res = curate.remove_examples(args.root, args.area, args.question,
                                  signer=args.signer, role=args.role)
     _print_json({"rejected": res.applied, "skipped": res.skipped,
-                 "validated": res.validated, "committed": res.committed})
+                 "validated": res.validated, "committed": res.committed, **_commit_note(res)})
     return 0 if (res.applied or not res.skipped) else 1
 
 
@@ -906,7 +911,7 @@ def cmd_seed_examples(args) -> int:
     passing, rejected = curate.validate_seeds(cands, runner)
     res = curate.add_examples(args.root, args.area, passing) if passing else curate.ApplyResult()
     _print_json({"added": res.applied, "written": res.validated,
-                 "committed": res.committed, "rejected": rejected})
+                 "committed": res.committed, **_commit_note(res), "rejected": rejected})
     return 0
 
 
@@ -1008,7 +1013,7 @@ def cmd_introspect(args) -> int:
                      if ln.strip() and not ln.lstrip().startswith("#")]
         tables = (tables or []) + _normalize_table_list(from_file)
 
-    runner = INTRO.make_execute_sql_runner(args.profile)
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(
@@ -1288,7 +1293,7 @@ def cmd_discover(args) -> int:
     the full build on only the kept tables. No grain/FK/row-count probes here."""
     from . import introspect as INTRO
 
-    runner = INTRO.make_execute_sql_runner(args.profile)
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
     inventory = INTRO.discover_inventory(
         args.profile,
         args.db_type,

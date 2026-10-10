@@ -2149,7 +2149,10 @@ def _disk_model_root(profile: str) -> Path | None:
     supported path would not have enforced (a false positive that breaks a working install) or stay
     silent where it would have (the hole ACE-071 closes).
     """
-    root = Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
+    # The same folder credentials and `sm` use — env var, then the saved pointer, then the default.
+    # Reading only the env var and the default missed a folder chosen through the pointer, so the
+    # model pass found no model there and stayed off while the model itself was in use (#428).
+    root = agami_paths.artifacts_dir() / profile
     return root if (root / "datasource.yaml").exists() else None
 
 

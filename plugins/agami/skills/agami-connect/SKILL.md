@@ -426,7 +426,7 @@ Introspection can take a while against cloud DBs. Tell the user **before** the f
 ### 1.1 — Existing-model check
 
 If `<artifacts_dir>/<profile>/datasource.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. Offer (AskUserQuestion, no `(Recommended)` — these are equal-weight choices), capped at 4:
-- **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path).
+- **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path; 2e: preview, then write).
 - **Open model explorer** — browse + curate the existing model and review/sign off the trust layer (`/agami-model`).
 - **Onboard another database** — set up a **different** database (a different connection), leaving `<profile>` untouched. On this choice, **first ask whether it's the same company or a different one** (see 1.1a), then start a fresh onboarding: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `<artifacts_dir>/local/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
 - **Try the sample database** — explore agami's bundled **`agami-example`** sample (retail + subscriptions, no connection needed), leaving `<profile>` untouched. Routes to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection). This MUST be a real selectable option here (not a prose aside) — a returning user with an onboarded profile has no other visible path to the sample, since plain `/agami-connect` resolves their active profile and lands on this menu.
@@ -592,7 +592,7 @@ When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.
   --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
 ```
 
-It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. Once a first batch has written a model, the query guard can scope the next batch's catalog reads to the model's own tables and refuse them, and every table in that batch is then dropped as "no readable columns". One call reads every table before any model exists.
+It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
@@ -830,7 +830,12 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveat
 
 ### 2e — Reintrospect merge
 
-On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-edits**: descriptions, entities, metrics, caveats, value_transforms, and trust sign-offs (`confidence`/`review_state`/`signed_off_*`) carry over for tables/columns that still exist. Only structure the DB unambiguously reports (table list, columns, types, PK, FK) is refreshed. Mark entries `stale` only when their underlying column/table changed.
+**Refreshing an existing model is the engine's job, not yours — never rebuild it and merge enrichment back by hand.** When the user says the database changed ("new columns were added", "reload the schema", "refresh `<table>`"), run introspection with `--append` on the existing profile, naming only the tables that changed when they say which (`--tables schema.table …`). When they don't say, first find out whether the database has **new tables**: `--tables` is an allowlist, so passing only the model's own tables can never turn one up. Run `sm discover` for the model's schemas, compare its table list with the tables already in the model, and if there are new ones ask (multi-select) which to include; then pass the model's tables plus the chosen ones:
+
+1. **Preview first:** the same command with `--dry-run`. The report lists `new tables:` and `changed <table>: added …; dropped …; retyped …` and writes nothing. Show that list to the user in plain words and ask before writing. If it lists nothing, say the model already matches the database and stop.
+2. **Then write:** the same command without `--dry-run`, then validate.
+
+What the engine guarantees, so you don't re-do it: an existing table keeps every description, flag, caveat and sign-off; a new column arrives with no enrichment; a column the database dropped is kept and marked `stale` (never deleted — the person decides); a changed type is updated in place. Subject areas, their descriptions, entities, metrics and existing joins are untouched — except a confirmed join on a column whose type changed, which goes back to review (`joins to review` in the preview: tell the user they need re-approving in `/agami-model`); a new table goes in the area named for its schema (or the only area), and you tell the user where it went. Afterwards, describe **only the new columns** (2b's skip-already-described rule does this), using the model spec's Columns sheet when one was attached. Never `rm`, move aside or rebuild the profile to refresh it.
 
 ### 2f — Seed the narrative if the user didn't write one
 

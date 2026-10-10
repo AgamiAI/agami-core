@@ -34,7 +34,7 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -106,12 +106,13 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
 
     # subject areas — each referenced by directory name
     subject_areas: list[SubjectArea] = []
+    hidden = _Hidden()   # what is on disk but not served, by (schema, table)
     for sa_ref in ds_doc.get("subject_areas", []) or []:
         sa_dir = root / (sa_ref if isinstance(sa_ref, str) else sa_ref.get("path", ""))
         if not sa_dir.exists():
             # also accept a bare name under subject_areas/
             sa_dir = root / "subject_areas" / str(sa_ref)
-        subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected))
+        subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected, hidden=hidden))
 
     org = Datasource(
         org_id=ds_doc.get("org_id"),  # F14: minted uuid4 (None for pre-F14 files)
@@ -126,7 +127,157 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         cross_subject_area_metrics=_load_cross_metrics(root, ds_doc),
         key_terminology=ds_doc.get("key_terminology", {}) or {},
     )
+    if not include_rejected:
+        _drop_uses_of_unserved(org, hidden)
     return org
+
+
+def _key(schema: Optional[str], table: str) -> tuple[str, str]:
+    from .models import table_key
+
+    return table_key(table, schema)
+
+
+@dataclass
+class _Hidden:
+    """What a runtime load leaves out, by (schema, table) — `sales.orders` and `archive.orders` differ.
+
+    Filled per area copy of a table and merged: two areas may each define the same table, so a
+    column (or table) is hidden only when NO copy serves it, and only on positive evidence — it is
+    on disk and excluded or stale. A column that simply isn't listed is not evidence of anything."""
+    served: dict = field(default_factory=dict)     # table -> columns some copy serves
+    on_disk: dict = field(default_factory=dict)    # table -> columns some copy excluded or found stale
+    dropped: set = field(default_factory=set)      # tables some copy excluded or found stale whole
+
+    def keep(self, schema: Optional[str], name: str, kept: list, all_cols: list) -> None:
+        k = _key(schema, name)
+        self.served.setdefault(k, set()).update(c.name.lower() for c in kept)
+        self.on_disk.setdefault(k, set()).update(c.name.lower() for c in all_cols if c not in kept)
+
+    def drop(self, schema: Optional[str], name: str) -> None:
+        self.dropped.add(_key(schema, name))
+
+    def _resolve(self, schema: Optional[str], table: str) -> Optional[tuple[str, str]]:
+        """The table a reference means — by its schema when given (a stored table without one also
+        matches, as the validator reads it), else by bare name when exactly one table has it."""
+        known = set(self.served) | self.dropped
+        k = _key(schema, table)
+        if k[0]:
+            if k in known:
+                return k
+            k = ("", k[1])
+            return k if k in known else None
+        same = [x for x in known if x[1] == k[1]]
+        return same[0] if len(same) == 1 else None
+
+    def table_hidden(self, schema: Optional[str], table: str) -> bool:
+        k = self._resolve(schema, table)
+        return k is not None and k in self.dropped and k not in self.served
+
+    def column_hidden(self, schema: Optional[str], table: str, column: Optional[str]) -> bool:
+        if column is None:
+            return False
+        k = self._resolve(schema, table)
+        if k is None:
+            return False   # not a table of this model, or ambiguous: not ours to judge
+        c = column.lower()
+        return c in self.on_disk.get(k, set()) and c not in self.served.get(k, set())
+
+    def any_hidden(self) -> bool:
+        return any(self.table_hidden(None, n) or self.table_hidden(s, n) for s, n in self.dropped) or any(
+            cols - self.served.get(k, set()) for k, cols in self.on_disk.items())
+
+
+def _entities_served(entities: list, end_hidden) -> list:
+    """Entities with mappings to hidden columns or tables removed; one left with none is dropped."""
+    kept = []
+    for e in entities:
+        mapped = [mp for mp in e.maps_to if not end_hidden(None, mp.table, mp.column)]
+        if e.maps_to and not mapped:
+            continue   # every column it named is hidden: nothing left to resolve it to
+        e.maps_to = mapped
+        kept.append(e)
+    return kept
+
+
+def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
+    """Leave out of the runtime view whatever names a table or column on disk that it doesn't serve.
+
+    A column excluded by a curator or found stale by a refresh is dropped from its table above, and a
+    table excluded or stale is dropped whole; anything still naming one would offer the agent SQL the
+    model's checks or the database refuse: a join (or a grain column) on it, a reference to the table,
+    a default filter, an entity mapping, a metric whose SQL reads it. All stay on disk
+    (`include_rejected=True`) for a person to decide. Only positive evidence hides anything: a name
+    this model doesn't have, can't tell apart, or never listed is left alone for the validator."""
+    if not hidden.any_hidden():
+        return   # the common case: nothing is excluded or stale, so nothing changes
+    from .validator import _binding_column_refs, _columns_referenced
+
+    def end_hidden(schema, table, column) -> bool:
+        return hidden.table_hidden(schema, table) or hidden.column_hidden(schema, table, column)
+
+    def join_ok(r) -> bool:
+        return not (end_hidden(r.from_schema, r.from_table, r.from_column)
+                    or end_hidden(r.to_schema, r.to_table, r.to_column))
+
+    def metric_ok(met) -> bool:
+        tables = list(met.source_tables or ([met.primary_table] if met.primary_table else []))
+        if any(hidden.table_hidden(None, tn) for tn in tables):
+            return False
+        # The metric's SQL: its per-dialect bindings when it has them — `calculation` is then often
+        # prose ("the total of every paid order"), whose words must not match a column — else the
+        # calculation itself, which is where a model spec writes the SQL.
+        refs: set[str] = set()
+        for sql in (met.bindings or {}).values() or [met.calculation]:
+            refs |= _binding_column_refs(sql or "")
+        # Unqualified refs: hidden only if a source table hides it and no source table serves it.
+        return not any(
+            any(hidden.column_hidden(None, tn, ref) for tn in tables)
+            and not any(ref in hidden.served.get(hidden._resolve(None, tn) or ("", ""), set()) for tn in tables)
+            for ref in refs)
+
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            t.grain = [g for g in t.grain if not hidden.column_hidden(t.schema_name, t.name, g)]
+            if t.default_filters:
+                alias = bare_name(t.name)
+                t.default_filters = [
+                    f for f in t.default_filters
+                    if not any(hidden.column_hidden(t.schema_name, t.name, c)
+                               for c in _columns_referenced(f.replace("{alias}", alias), t.name))]
+        sa.tables = [r for r in sa.tables if not hidden.table_hidden(r.schema_name, r.table)]
+        sa.relationships = [r for r in sa.relationships if join_ok(r)]
+        sa.entities = _entities_served(sa.entities, end_hidden)
+        sa.metrics = [mm for mm in sa.metrics if metric_ok(mm)]
+    org.cross_subject_area_entities = _entities_served(org.cross_subject_area_entities, end_hidden)
+    org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
+    org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
+    _drop_metrics_on_removed_bases(org)
+
+
+def _drop_metrics_on_removed_bases(org: Datasource) -> None:
+    """A derived metric built on a metric that was just left out would fail to expand; leave it out
+    too, repeating until every served metric's bases are served. Bases are read the way expansion
+    reads them — `base_metrics` and `{…}` placeholders, looked up in `metric_index`."""
+    from . import derived as D
+
+    def bases(mm) -> list[str]:
+        refs = list(mm.base_metrics or [])
+        for b in (mm.bindings or {}).values():
+            refs += D.binding_refs(b)
+        return refs
+
+    while True:
+        idx = D.metric_index(org)
+        changed = False
+        for holder in [*org.subject_areas, org]:
+            attr = "metrics" if holder is not org else "cross_subject_area_metrics"
+            kept = [mm for mm in getattr(holder, attr) if all(b in idx for b in bases(mm))]
+            if len(kept) != len(getattr(holder, attr)):
+                setattr(holder, attr, kept)
+                changed = True
+        if not changed:
+            return
 
 
 def load_org_id(root: str | Path) -> str | None:
@@ -201,7 +352,8 @@ def _reconcile_table_ref_exposes(refs: "list[TableRef]", tables_defined: "list[T
             r.expose_column_groups = kept
 
 
-def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectArea:
+def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
+                       hidden: Optional["_Hidden"] = None) -> SubjectArea:
     sa_doc: dict[str, Any] = _read_yaml(sa_dir / "subject_area.yaml") or {}
 
     tables_defined: list[Table] = []
@@ -210,10 +362,17 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False) -> SubjectA
         for tf in sorted(tdir.glob("*.yaml")):
             t = Table(**(_read_yaml(tf) or {}))
             if not include_rejected:
-                if _rejected(t):
-                    continue  # whole table excluded by the curator
-                # drop per-column exclusions
-                t.columns = [c for c in t.columns if not _rejected(c)]
+                if _rejected(t) or t.review_state == "stale":
+                    if hidden is not None:
+                        hidden.drop(t.schema_name, t.name)
+                    continue  # whole table excluded by the curator, or no longer in the database
+                # drop per-column exclusions, and columns a refresh found the database no longer has
+                # (`stale`, #437): kept on disk for a person to decide, never served, since a query
+                # naming one would pass the model's checks and then fail at the database.
+                kept = [c for c in t.columns if not _rejected(c) and c.review_state != "stale"]
+                if hidden is not None:
+                    hidden.keep(t.schema_name, t.name, kept, t.columns)
+                t.columns = kept
                 # ...and prune those dropped columns out of column_groups, else a group still
                 # naming an excluded column fails the column_group_missing_column check on load
                 # (excluding a deep table's column would otherwise break the whole model).
