@@ -72,16 +72,17 @@ The parse reads the question bank straight from the file, and there is still **o
 - **A `.csv` path** — use it as given.
 - **A `.xlsx` path** — use it as given. Do not open it with the Read tool (it cannot read a workbook) and do not guess at its contents; the parse reads it. A workbook often holds several sheets — a cover page, a schema reference, the questions — and **which sheet holds the questions is the user's call, not yours**. Run the parse without `--sheet` first: a workbook with more than one sheet stops with exit `2` and lists every sheet. Show the list, suggest the one whose name reads like the question bank, and re-run with `--sheet "<name>"` once they confirm.
 - **A `.xls` path** (Excel's older binary format) — it cannot be read. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke.
-- **A table pasted into chat** — write it out as a CSV with the **Write tool** and then parse that file. One parser, one code path, and the file is also the thing the user can fix and re-run. Per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md): **never a heredoc, never `python3 -c`, never a shell variable** — quoting mangles the commas and quotes that are the whole point of a CSV. Write it to `/tmp/agami-golden-pasted-<ts>.csv` and tell the user where it went.
+- **A table pasted into chat** — write it out as a CSV with the **Write tool** and then parse that file. One parser, one code path, and the file is also the thing the user can fix and re-run. Per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md): **never a heredoc, never `python3 -c`, never a shell variable** — quoting mangles the commas and quotes that are the whole point of a CSV. Write it to `<artifacts_dir>/local/tmp/agami-golden-pasted-<ts>.csv` and tell the user where it went.
 
 The table needs a header row with a **question column** — `question`, `query`, `nl question`, `prompt` or `ask` (case, underscores and hyphens all fold). It does not have to be the first row: a title or a note above the table is fine, and the parse takes the first row within the top 20 that names a question column. Optional columns: `id`, `expected` / `expected value` / `answer`, `sql` / `statement`, `tags`. A header the contract does not know is left alone — matching is exact, never fuzzy, so an analyst's note column costs nothing. The same exactness means a column is only picked up under one of those names — but a column it can't read that *looks* like a field (a header with `sql`, `statement`, `question`, `prompt`, `id`, `answer` or `tag` in it, for a field the sheet hasn't already supplied) is never dropped silently. The parse lists it under `unrecognized`, and Phase 2c asks about it. Nobody has to rename anything: `--column sql="Warehouse SQL"` reads that column as the statement.
 
 ### 2b — Parse (this writes nothing)
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" parse \
+mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py parse \
   --file <path-to-csv-or-xlsx> [--sheet "<sheet name>"] [--column <field>="<header>"] \
-  > /tmp/agami-golden-parse-<ts>.json
+  > "<artifacts_dir>/local/tmp/agami-golden-parse-<ts>.json"
 ```
 
 Then `Read` the file. `parse` is inert **by construction** — it has no write in it at all, which is what makes "the rows are confirmed before anything is written" a fact about the software rather than a promise about how you behave.
@@ -116,10 +117,10 @@ Then ask, plainly, naming both counts when they differ: *"Import these `<N>` que
 Pass the **same parse payload** to `--rows` — the file you just showed them, not a re-derivation of it:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" import \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py import \
   --profile <profile> --dataset <dataset> \
-  --rows /tmp/agami-golden-parse-<ts>.json \
-  > /tmp/agami-golden-import-<ts>.json
+  --rows "<artifacts_dir>/local/tmp/agami-golden-parse-<ts>.json" \
+  > "<artifacts_dir>/local/tmp/agami-golden-import-<ts>.json"
 ```
 
 `--description "<prose>"` sets the dataset's description, and is worth passing on a new dataset. A row whose sheet carried a statement is written `sql_confirmed: true`, with `confirmed_by.method` naming the sheet as the source; a row with no statement is written `sql_confirmed: false`, since there is no answer yet for anyone to have confirmed.
@@ -158,10 +159,10 @@ Write the item with the **Write tool** as JSON — the same rule as any JSON fil
 `match`, `bounds` and `must_filter` all reach the written item exactly as sent — which is why a replacement has to repeat whatever the existing item carried (Phase 4).
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
-  --item /tmp/agami-golden-item-<ts>.json \
-  > /tmp/agami-golden-save-<ts>.json
+  --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" \
+  > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
 **A statement that departs from this profile's own examples stops here too**, with exit `1` and a `needs_confirmation_convention` payload. The library of curated examples is where a team's conventions live — which of two equally correct date columns they answer with, how they phrase a join — and it is what agami reads when it answers the question for real. An answer key that contradicts it will fail every future run and blame the model.
@@ -185,7 +186,7 @@ The explorer page (`/agami-eval`, or rendered directly) shows a profile's datase
 **Render the page:**
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_golden_datasets.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_golden_datasets.py \
   --profile <profile> \
   --out "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html"
 ```
@@ -195,9 +196,9 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/render_golden_datasets.py" \
 **When the user pastes the block back**, parse it before you read it:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_golden_feedback.py" \
-  --block-file /tmp/agami-golden-block-<ts>.txt \
-  > /tmp/agami-golden-ops-<ts>.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_golden_feedback.py \
+  --block-file "<artifacts_dir>/local/tmp/agami-golden-block-<ts>.txt" \
+  > "<artifacts_dir>/local/tmp/agami-golden-ops-<ts>.json"
 ```
 
 **Read `needs_judgment` first.** If it is `confirmation_cannot_be_granted`, the block tried to set an answer key from the page. Nothing in it applies — not the offending op and not its neighbours. Tell the user what it names and stop; confirming an item means running it and accepting the result through the save door above, never editing a page. `anomalies` is the softer list: ops that were dropped and the rest carried on.
@@ -205,10 +206,10 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_golden_feedback.py" \
 **Then apply, one dataset at a time.** The block's `profile:` line names its target — use that, not the active profile, or a page rendered for one model applies to another:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" apply \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py apply \
   --profile <the block's own profile> --dataset <stem> \
-  --ops /tmp/agami-golden-ops-<ts>.json \
-  > /tmp/agami-golden-apply-<ts>.json
+  --ops "<artifacts_dir>/local/tmp/agami-golden-ops-<ts>.json" \
+  > "<artifacts_dir>/local/tmp/agami-golden-apply-<ts>.json"
 ```
 
 Exit codes are Phase 4's, unchanged. On `1` the payload carries `needs_confirmation` for the edits **and `needs_confirmation_removals` for the deletions** — the latter has a `before` and no `after`, because the whole of what somebody is agreeing to is what disappears. **Render the removals' questions and answer keys, not their ids.** An id is a slug; nobody can decide from it.
@@ -242,10 +243,10 @@ On a `needs_confirmation` payload — a list of `{id, before, after}` — **rend
 Then ask, and only after an explicit yes re-run the **same command with `--confirm-replace` appended**:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
-  --item /tmp/agami-golden-item-<ts>.json --confirm-replace \
-  > /tmp/agami-golden-save-<ts>.json
+  --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" --confirm-replace \
+  > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
 **Never pass `--confirm-replace` pre-emptively.** Not on the first attempt, not because a re-import "is probably the same sheet", not to save a round trip. The flag means one thing — a person saw the before and the after and said yes — and passing it before that has happened makes the stop decorative. If the user says no, say the file is untouched and stop; it is byte-identical, not merely equivalent.

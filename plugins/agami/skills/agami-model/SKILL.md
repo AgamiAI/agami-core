@@ -35,7 +35,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
   - **A pasted feedback block names its own target.** When applying a block from the dashboard's "Generate feedback for Claude", its first line is `profile: <name>` — that dashboard was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one dashboard's approvals to whatever happens to be the active profile (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named profile, target it directly — don't fall back to `active_profile` or hunt with `find`.
 - **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
-- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
+- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
 
 **Scope / initial tab.** Look at `$ARGUMENTS`:
 - `review`, `preseed`, or `rule1` → the user wants the sign-off queue: render with `--initial-tab review` so the dashboard opens on the Review tab. (`preseed`/`rule1` come from `/agami-connect`'s Phase 4 gate — the Review tab already groups Rule 1 metrics under "Needs your eyes", so no separate scope filter is needed; the user signs those off there.)
@@ -59,7 +59,7 @@ ts=$(date -u +%Y%m%d-%H%M%S)
 # Per-profile subdir so multi-profile users can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
 out="<artifacts_dir>/local/model/$profile/$ts.html"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
   ${initial_tab:+--initial-tab "$initial_tab"} \
@@ -91,14 +91,10 @@ You can also type commands directly:
   done
 ```
 
-**Auto-open with the standard multi-command fallback chain:**
+**Auto-open it** (macOS, Linux and Windows alike; on failure it prints the path to open by hand):
 
 ```bash
-( command -v open    >/dev/null 2>&1 && open "$out" ) || \
-( command -v xdg-open >/dev/null 2>&1 && xdg-open "$out" ) || \
-( command -v start    >/dev/null 2>&1 && start "$out" ) || \
-( command -v cmd      >/dev/null 2>&1 && cmd /c start "" "$out" ) || \
-echo "agami: couldn't auto-open the explorer — open manually: $out"
+bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "$out"
 ```
 
 End the turn. Wait for the user.
@@ -146,7 +142,7 @@ It prints `{data, anomalies, needs_judgment}`:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
-  --ops-file /tmp/agami-model-ops.json \
+  --ops-file "<artifacts_dir>/local/tmp/agami-model-ops.json" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
@@ -173,7 +169,7 @@ Every successful apply produces a new explorer file at a new timestamp.
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
 new_out="<artifacts_dir>/local/model/$profile/$new_ts.html"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
   --profile "$profile" --artifacts-dir "$artifacts_dir" --out "$new_out"
 ```
 

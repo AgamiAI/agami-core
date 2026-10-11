@@ -12,6 +12,22 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The skills' own commands work on Windows (#362).** Claude follows the skill instructions to the
+  letter, and three of their habits broke under Git Bash, which is what Claude Code uses on Windows:
+  - **Bare `python3`,** often the Microsoft Store stub there, which runs nothing. Every plugin
+    script and Python check now runs through the new `scripts/py`, which finds the interpreter
+    agami-connect configured exactly as `sm` does. The two now share one resolver (`_python.sh`).
+    It runs in UTF-8 mode, and the `$PY` bootstrap no longer needs a Python to find the right one.
+  - **Scratch files in `/tmp`,** which Claude's file tools and Git Bash place in different
+    folders on Windows. They now go in `<artifacts_dir>/local/tmp/`, git-ignored with the rest of
+    `local/`, which `sm` and `py` create.
+  - **The `open || xdg-open || start` chain,** which could never reach Windows' `start`. Charts,
+    the model explorer and links now open through `scripts/open_in_browser`.
+  - The credentials permission check is skipped on Windows, where NTFS has no Unix modes and the
+    check refused every install. `tests/test_skills_cross_platform.py` keeps all three habits out.
+
 ## [0.9.12] — 2026-10-10
 
 ### Fixed

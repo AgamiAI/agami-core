@@ -39,7 +39,7 @@ Same checks as agami-query / agami-connect:
 3. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`. This skill needs an introspected model to generate questions against.
 4. **Input — accept any of four shapes, or a mix; the user needn't know which.** Detect what they gave:
    - **A screenshot / image** of a dashboard (Metabase, Power BI, Tableau, Looker, a spreadsheet) — the common case. Go to Phase 1's **vision branch**.
-   - **A CSV** — a path in `$ARGUMENTS`, or pasted inline (write inline CSV to `/tmp/agami-reconcile-<ts>.csv`). Go to Phase 1's **CSV branch**. A third column holding SQL is the statement behind each tile: Phase 1n reads it as a statement, never as part of the label.
+   - **A CSV** — a path in `$ARGUMENTS`, or pasted inline (write inline CSV to `<artifacts_dir>/local/tmp/agami-reconcile-<ts>.csv`). Go to Phase 1's **CSV branch**. A third column holding SQL is the statement behind each tile: Phase 1n reads it as a statement, never as part of the label.
    - **Numbers pasted inline** as a list/table — treat as inline CSV.
    - **SQL the person trusts** — one or more statements, pasted or in a `.sql` file, alone or beside the question each answers. Go to Phase 1's **statement branch**. The statement is evidence, never the answer: Phase 1.5 grades every part of it before it is compared with anything.
    - **A list of questions** with no answers — one per line. Go to Phase 1's **questions branch**.
@@ -71,14 +71,15 @@ Whatever the input shape, the goal is the same normalized rows JSON. **Number pa
 ### Vision branch — a dashboard screenshot
 
 1. **Read the image** and extract every labeled number you can see — KPI tiles, table cells, chart value labels — as `(label, raw_value)` pairs. Keep the label the user would recognize ("Total Revenue", "Active Users — Apr"), and the value **exactly as shown, verbatim** (`$4.2M`, `₹2.16Cr`, `42%`, `1,234`) — don't convert it; the normalizer does that.
-2. **Write the pairs as a 2-column CSV** (Write tool — never a heredoc/`python3 -c`) to `/tmp/agami-reconcile-<ts>.csv`, then run the SAME normalizer as the CSV branch (below) so value parsing stays deterministic.
+2. **Write the pairs as a 2-column CSV** (Write tool — never a heredoc/`python3 -c`) to `<artifacts_dir>/local/tmp/agami-reconcile-<ts>.csv`, then run the SAME normalizer as the CSV branch (below) so value parsing stays deterministic.
 3. **Confirm before reconciling — vision can misread.** Show the extracted pairs as a small table and ask the user to fix any misread label/number: *"I read these N numbers off your screenshot — correct anything I got wrong, then I'll reconcile."* This confirm step is **mandatory**: a wrong expected-value isn't a model bug but it reads like one. If a tile is ambiguous or partly cut off, say so and skip it rather than guess.
 
 ### CSV branch — a CSV path or inline-pasted CSV
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file "<csv_path>" \
-  --source "<the person's own words for where this came from>" > /tmp/agami-reconcile-rows-<ts>.json
+mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py intake --file "<csv_path>" \
+  --source "<the person's own words for where this came from>" > "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json"
 ```
 
 The helper (used by **both** branches) handles:
@@ -91,19 +92,20 @@ Read the JSON. Each row is `{label, expected_value, raw_value}`. Discard rows wh
 
 ### Statement branch — SQL the person trusts
 
-If the SQL was pasted, write it to `/tmp/agami-reconcile-<ts>.sql` with the Write tool (several statements separated by `;`); if it came as `question,sql` pairs, write those as a CSV. Take a file path as given. A statement that arrives without a question needs one before agami can be asked the same thing: derive the question the statement answers, show it, and let the person correct the wording. **Do not run the statement here.** It is evidence, and Phase 1.5 is where its parts are graded.
+If the SQL was pasted, write it to `<artifacts_dir>/local/tmp/agami-reconcile-<ts>.sql` with the Write tool (several statements separated by `;`); if it came as `question,sql` pairs, write those as a CSV. Take a file path as given. A statement that arrives without a question needs one before agami can be asked the same thing: derive the question the statement answers, show it, and let the person correct the wording. **Do not run the statement here.** It is evidence, and Phase 1.5 is where its parts are graded.
 
 ### Questions branch — a list of questions and no answers
 
-Write the lines to `/tmp/agami-reconcile-<ts>.txt` with the Write tool, one question per line. These rows carry no expected value: Phase 2 asks agami each question, and until the person grades the answers there is nothing to compare against. Say so up front: *"No answers to compare with, so I'll ask agami each one, check the query behind each answer, and you decide from there."*
+Write the lines to `<artifacts_dir>/local/tmp/agami-reconcile-<ts>.txt` with the Write tool, one question per line. These rows carry no expected value: Phase 2 asks agami each question, and until the person grades the answers there is nothing to compare against. Say so up front: *"No answers to compare with, so I'll ask agami each one, check the query behind each answer, and you decide from there."*
 
 ### 1n — Normalize every input into evidence rows
 
 A filled template in `<artifacts_dir>/local/reconcile/inbox/` is one of the files here, passed with its own `--file`.
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" intake --file <path> [--file <path> ...] \
-  --source "<the person's own words for where this came from>" > /tmp/agami-reconcile-rows-<ts>.json
+mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py intake --file <path> [--file <path> ...] \
+  --source "<the person's own words for where this came from>" > "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json"
 ```
 
 `parse` stays the number-only reader; `intake` reads everything `parse` reads and the other shapes too, so a run with any SQL or questions in it goes through `intake` for all of its files, the vision CSV included. One row per thing to check, `{label, question, statement, expected, raw_value, provenance}`, with any of the three evidence fields missing. Several files merge by label under a case-and-whitespace fold, so the SQL behind a tile joins the tile's row. Exit `2` is a file that could not be opened; exit `4` is an input with no question, statement or number anywhere. The shapes, the detection rules and the row are in [`shared/evidence-row.md`](../../shared/evidence-row.md).
@@ -113,8 +115,8 @@ Create the run directory `<artifacts_dir>/local/reconcile/<ts>/`, and `rows/<n>/
 **Show what was read before anything runs, and hand off**, the way `agami-connect` shows the prune page before it introspects. The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. The person fixes a question we read wrong or unticks a row, generates the block, and pastes it back. It is the same design language and the same paste-back grammar as the report page.
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_intake.py" --title "What we read · <profile>" \
-  --profile <profile> --run <ts> --intake-file /tmp/agami-reconcile-rows-<ts>.json \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_reconcile_intake.py --title "What we read · <profile>" \
+  --profile <profile> --run <ts> --intake-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" \
   --out "<artifacts_dir>/local/reconcile/<ts>/intake.html"
 ```
 
@@ -124,11 +126,11 @@ Then say it in two lines and **end the turn**:
 **On re-entry** (the block arrives, `profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`), never hand-edit the rows: pipe the block to the parser, which applies it to the rows file and says what it did:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_intake.py" --block-file /tmp/agami-reconcile-intake-<ts>.txt \
-  --rows-file /tmp/agami-reconcile-rows-<ts>.json --run <ts> --out "<artifacts_dir>/local/reconcile/<ts>/intake.json"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_reconcile_intake.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-intake-<ts>.txt" \
+  --rows-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" --run <ts> --out "<artifacts_dir>/local/reconcile/<ts>/intake.json"
 ```
 
-`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `/tmp` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: ask for the block again. If the person answers in chat instead ("looks right, go ahead"), run with the rows as read: Phase 2's first `next-chunk --rows-file` call copies them into the run directory unchanged. A per-row "is this the question?" in chat is never asked.
+`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `<artifacts_dir>/local/tmp/` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: ask for the block again. If the person answers in chat instead ("looks right, go ahead"), run with the rows as read: Phase 2's first `next-chunk --rows-file` call copies them into the run directory unchanged. A per-row "is this the question?" in chat is never asked.
 
 ---
 
@@ -152,7 +154,7 @@ Every step that reaches the database runs inside that script, and every statemen
 
 After the script, three steps are yours. 1.5g is a judgment made by reading, and no script makes it.
 
-- **1.5e — The ledger, run once.** `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n>` writes `ledger.json`: one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`, and the weakest grade as the row's `ledger_verdict`; a part may also be `noted`, a fact the run states and never judges, which never decides the verdict. **Run it once per row, in Phase 2e, after the comparison**, with `--with-claims` when agami's statement exists too and without it when agami's run failed. The files this phase wrote are what it reads, so nothing is lost by waiting, and a ledger written here and again later is the same ledger twice. A part reaches `model_gap` only by measurement; the statement asserting something is never the evidence for it.
+- **1.5e — The ledger, run once.** `bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py ledger --row-dir rows/<n>` writes `ledger.json`: one grade per part, `confirmed`, `model_gap`, `query_defect` or `unresolved`, and the weakest grade as the row's `ledger_verdict`; a part may also be `noted`, a fact the run states and never judges, which never decides the verdict. **Run it once per row, in Phase 2e, after the comparison**, with `--with-claims` when agami's statement exists too and without it when agami's run failed. The files this phase wrote are what it reads, so nothing is lost by waiting, and a ledger written here and again later is the same ledger twice. A part reaches `model_gap` only by measurement; the statement asserting something is never the evidence for it.
 - **1.5f — Its result is the expected value.** For a row that came with no number, `expected` is the single cell `statement.csv` returned (its text folded to a number by `reconcile.py diff`, which reads `$4.2M` and `47,238,221.00` alike), or the table's shape when it returned several rows. For a row that came with a tile number too, run `reconcile.py diff` between the tile and the statement's own result: a disagreement means the statement is not the tile's statement, or the data moved; flag the row in Phase 3b.5 and keep the tile's number as `expected`.
 - **1.5g — Does the statement answer the question?** For every statement row, write `question_fit.json`; when the row carries a question, read the two side by side first, before anything is compared. Doubtful when the grain differs (a count of items for a question about orders), the measure differs (revenue for a question about a count), a filter is present the question never asked for or absent when it did, or the time window differs. Write `question_fit.json` in the row directory: `{"fit": "plausible" | "doubtful" | "no_question", "reason": "<one sentence, or null>"}`, with `no_question` only for a statement that came alone: against a row that carries a question it is a contradiction, and the findings verb refuses to keep such a row. This is a judgment made by reading, the one part of the ledger that is; it can withhold a row from the keep-offer and never proves anything about the semantic model. A doubtful row grades `match_unverified` at best, shows in Phase 3b.5 with the reason, and the person settles it by rewording the question or the statement and re-running that row. Phase 3e keeps a `match` row as a worked example, which teaches the AI a question-to-SQL pairing, and a sound statement paired with the wrong question is the most harmful thing that step could keep.
 
@@ -163,15 +165,15 @@ After the script, three steps are yours. 1.5g is a judgment made by reading, and
 **Work five rows at a time.** `rows.jsonl` is the run's checkpoint: Phase 2d appends one record per finished row, and the next rows to run are read from it, never chosen by hand:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" next-chunk --run-dir "<artifacts_dir>/local/reconcile/<ts>" \
-  --rows-file /tmp/agami-reconcile-rows-<ts>.json    # seeds the run's intake.json once; later calls need only --run-dir
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py next-chunk --run-dir "<artifacts_dir>/local/reconcile/<ts>" \
+  --rows-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json"    # seeds the run's intake.json once; later calls need only --run-dir
 ```
 
 Exit `0` hands back `chunk`, the next five rows not yet in `rows.jsonl`, with `finished`, `remaining`, `chunk_index` of `chunks_total`, and `progress`, the counts by status over the rows done so far, read from the checkpoint and never tallied by hand. Take the five through Phase 1.5 (statement rows) and 2a to 2f below; each lands in `rows.jsonl` as it finishes. When the chunk is done: build the report items for every row finished so far and render the report page (3a.5), so the person can already read the first rows, say one progress line, and **end the turn**:
 
 > Rows 6 to 10 of 50 done. So far: `<progress as colored words, in 3a's wording>`. Page: `<artifacts_dir>/local/reconcile/<ts>/report.html`. Say **continue** for the next five, or **continue all** to run the rest without stopping.
 
-`continue` calls `next-chunk` again. `continue all` runs chunk after chunk, a progress line per chunk and no stop, until exit `4`. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day is `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" resume --reconcile-dir "<artifacts_dir>/local/reconcile"`, which names the newest run directory that still has rows remaining (exit `4` when none does), then `next-chunk` on it. Exit `2` is a refusal and stderr says which: a run directory or rows file that is not there, a rows file that is not a list of row objects, or a checkpoint line that cannot be read. When it names a `rows.jsonl` line, fix or remove that line before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
+`continue` calls `next-chunk` again. `continue all` runs chunk after chunk, a progress line per chunk and no stop, until exit `4`. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day is `bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py resume --reconcile-dir "<artifacts_dir>/local/reconcile"`, which names the newest run directory that still has rows remaining (exit `4` when none does), then `next-chunk` on it. Exit `2` is a refusal and stderr says which: a run directory or rows file that is not there, a rows file that is not a list of row objects, or a checkpoint line that cannot be read. When it names a `rows.jsonl` line, fix or remove that line before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
 
 For each row in the chunk:
 
@@ -193,8 +195,8 @@ The semantic model + examples library are loaded; let the LLM pick the right sub
 **Agami's answer comes from a cold client, never from this session.** This session holds your statement, the ledger's grades and the fit reasoning; anything it wrote would not be what a person gets from agami. Ask the way the golden run asks, once per chunk, with the five rows `next-chunk` handed back:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/run_golden_eval.py" --profile <profile> --via mcp \
-  --ask-file /tmp/agami-reconcile-chunk-<ts>.json --out-dir "<artifacts_dir>/local/reconcile/<ts>/rows" --parallel 4
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" run_golden_eval.py --profile <profile> --via mcp \
+  --ask-file "<artifacts_dir>/local/tmp/agami-reconcile-chunk-<ts>.json" --out-dir "<artifacts_dir>/local/reconcile/<ts>/rows" --parallel 4
 ```
 
 `--ask-file` takes `next-chunk`'s output as it is (its `chunk`), and spawns the operator's own client per question, several at a time. `--via mcp` is what makes the answer a person's answer: each client is served agami's own MCP tools and nothing else, so it calls `get_datasource_schema` and `get_prompt_examples` itself, scoping them as it sees fit, and runs its own statement. That is the point of asking this way. A run that pre-fetched one schema into the prompt would never exercise the things that decide whether a real question succeeds, and could pass on a semantic model nobody could query.
@@ -232,7 +234,7 @@ Only for rows that carry a question and neither a statement nor an expected valu
 ### 2c — Diff
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" diff \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py diff \
   --expected "<expected_value>" \
   --actual "<actual_value_from_query>" \
   --tolerance 0.01 > rows/<n>/diff.json
@@ -278,7 +280,7 @@ Per row:
 The keys from `provenance` down are appended after `error` and every earlier key keeps its meaning; a reader that only knows the older shape keeps working. `status` gains three values beside the three it had. Their rules, applied by code and never by feel:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|none> --ledger-verdict <verdict|none>
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py status --match <true|false|none> --ledger-verdict <verdict|none>
 ```
 
 | Status | When |
@@ -297,7 +299,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" status --match <true|false|non
 **Build the record with the verb, never by hand:**
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" record --run-dir "<artifacts_dir>/local/reconcile/<ts>" --row <n> [--tolerance 0.01] [--report-path <path>]
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py record --run-dir "<artifacts_dir>/local/reconcile/<ts>" --row <n> [--tolerance 0.01] [--report-path <path>]
 ```
 
 It reads the row directory (`intake.json` for the label, the question, your statement and the number you gave; `agami-answer.json`, `agami-run.json` and `actual.csv` for agami's side; `statement.csv`, `diff.json` or `comparison.json`, `claims.json` and `ledger.json`) and appends the record above to `rows.jsonl`, replacing an earlier record for the same row. Exit `2` names the file it needs and cannot find: fix the run, never type the record. A question-only row is recorded `ungraded` rather than refused or written as `error`: nothing failed, and it waits for a person on the report page. Its `expected` stays empty on purpose, and the verb takes no argument that could fill it: a value the run supplied would be agami's own answer coming back as its own answer key. The keys are additive — a reader that only knows the older shape keeps working.
@@ -318,7 +320,7 @@ When the row carries both statements, name where they differ before anyone reads
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" claims "$ROOT" --sql-file rows/<n>/agami.sql --against-sql-file rows/<n>/statement.sql > rows/<n>/claims.json
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" ledger --row-dir rows/<n> --with-claims
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py ledger --row-dir rows/<n> --with-claims
 ```
 
 **This is the row's one ledger run.** Every file Phase 1.5 wrote is still there, so the grades are the same ones 1.5 would have produced, plus the two claim parts and, for a table that matched, a `value_pair` part for each column of yours that matched a differently named column only through one repeated value. When agami's own run failed and there is no statement to compare against, run it here without `--with-claims`. Never run it twice.
@@ -330,7 +332,7 @@ The eight claims (tables, what is selected, filter predicates, date window, grou
 `reconcile.py record` has written every row record to `<artifacts_dir>/local/reconcile/<ts>/rows.jsonl`; then:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" findings --run-dir "<artifacts_dir>/local/reconcile/<ts>"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py findings --run-dir "<artifacts_dir>/local/reconcile/<ts>"
 ```
 
 It writes `findings.json` (one entry per place the semantic model was shown to be missing or wrong, with every row that showed it), `query_defects.json` (the parts of the person's statements the data proved wrong, listed apart so nothing about the semantic model is proposed from them), and `ledger.json`. Question text and SQL only, never result rows beyond the one recorded cell. This is reconcile's own record for the person; nothing reads it but them.
@@ -382,16 +384,16 @@ Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap
 1. **Build the report items file with the verb, never by hand.** The renderer runs `reconcile.py report-items --run-dir` itself from the run directory: one item per row of `rows.jsonl`, from each row's ledger, its comparison, its claims and the two receipts, every item carrying `diff` (one row per check, `{key, state, yours, agami, note, yours_hi?, agami_hi?}`, the check named first and the two sides as values with the differing tokens marked), `result` (`data`: matches, partly, differs or could_not_compare; `query`: same, different or not_comparable; the plain-word `label`; `unchecked`, the checks on your query that could not run; `differs_in`), `fix` (your query, the semantic model, the examples, the question, agami again, or nothing), `fix_words`, `prefill`, `sentence` and `change`. You hand it words only: a words file `{"<row>": {"sentence": "…", "change": ["…"]}}` with one entry per row whose sentence or change you rewrote in the plain words of `shared/plain-language.md`. You rewrite only `sentence` and `change`, and never touch `diff`, `result`, `fix` or any other field; a words file carrying another key is refused. (`report-items --run-dir` on its own prints the items for reading.)
 2. **Render from the run directory, check it, and point at it:**
    ```bash
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/render_reconcile_report.py" --title "Reconcile · <profile>" \
+   bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_reconcile_report.py --title "Reconcile · <profile>" \
      --profile <profile> --run-dir "<artifacts_dir>/local/reconcile/<ts>" \
-     --words-file /tmp/agami-reconcile-words-<ts>.json \
+     --words-file "<artifacts_dir>/local/tmp/agami-reconcile-words-<ts>.json" \
      --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"
+   bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"
    ```
    The renderer writes `<run_dir>/report-items.json` beside the page (for the parser and for reading), stamps the page with the digest of the items it rendered, and prints three lines: the counts by result and by fix as words, the page's path, and the next step. `check-run` exits `0` only when every row in the checkpoint has its files and the page's stamp is the digest of the current items; on `4`, fix what it names and render again. **Say the three lines the renderer printed**, the counts as colored words (match, differs, a mistake on your side, could not check): the 3a summary, the report's path, and one line of next steps. The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from the items, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's. **Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool**; the only files this session writes by hand in Phases 2 and 3 are the words file and the chunk file.
 3. **Read the decisions back** when the block arrives (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), handing the parser the run directory the page was rendered from. It reads which rows may be kept from `rows.jsonl` and each row's `ledger.json`, never from anything typed, and refuses a block whose `reconcile-run` is not this run:
    ```bash
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/parse_reconcile_report.py" --block-file /tmp/agami-reconcile-decisions-<ts>.txt --run-dir "<artifacts_dir>/local/reconcile/<ts>"
+   bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_reconcile_report.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt" --run-dir "<artifacts_dir>/local/reconcile/<ts>"
    ```
    A `needs_judgment` means the block did not parse, came from another run, or carries a decision that could not be applied as written (a keep the run does not allow, words beside a keep, a misspelt decision): ask for it again, apply nothing. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`example`** takes a statement and its question to `/agami-save-correction` as a prompt example, with the words as its note, so agami writes the query that way next time (the same door 3e's keep uses for an example, without 3e's split). **Which statement, on which row:** the person's when they supplied one; on a question-only row there is none, and the person choosing `example` there is saying agami's own query is right, so agami's is what gets sent; **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
 
@@ -534,7 +536,7 @@ So the offer edits the **question**, with the person's answer to "which window?"
 
 #### What gets written, per row kept as a test
 
-Write the item with the **Write tool** — never a heredoc, never `python3 -c`, per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) — to `/tmp/agami-golden-item-<ts>.json`:
+Write the item with the **Write tool** — never a heredoc, never `python3 -c`, per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md) — to `<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json`:
 
 ```json
 {
@@ -553,7 +555,7 @@ Write the item with the **Write tool** — never a heredoc, never `python3 -c`, 
 - **`bounds` comes from the helper, never from arithmetic written in prose:**
 
   ```bash
-  python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" band \
+  bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py band \
     --value "<the row's actual>" --tolerance <the run's tolerance>
   ```
 
@@ -562,10 +564,10 @@ Write the item with the **Write tool** — never a heredoc, never `python3 -c`, 
 Then call the save door. It is the only writer of a golden dataset anywhere in the plugin, and this skill does not become a second one:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
   --profile <profile> --dataset <stem> \
-  --item /tmp/agami-golden-item-<ts>.json \
-  > /tmp/agami-golden-save-<ts>.json
+  --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" \
+  > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
 `<stem>` is the dataset's **filename stem** — one plain name (`reconciled`), never a path and never `reconciled.yaml`. Ask which dataset once, for the whole batch.
@@ -576,7 +578,7 @@ python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
 
 #### What gets written, per row kept as an example
 
-Write the pair with the **Write tool** to `/tmp/agami-reconciled-example-<ts>.json` — a JSON **array**, one entry per row going to the examples:
+Write the pair with the **Write tool** to `<artifacts_dir>/local/tmp/agami-reconciled-example-<ts>.json` — a JSON **array**, one entry per row going to the examples:
 
 ```json
 [{"question": "What was total revenue in Q3 2025?", "sql": "<the row's `sql`, verbatim>",
@@ -587,7 +589,7 @@ Write the pair with the **Write tool** to `/tmp/agami-reconciled-example-<ts>.js
 Then the packaged writer, which dedups by question and creates the library if it is absent:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file /tmp/agami-reconciled-example-<ts>.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-reconciled-example-<ts>.json"
 ```
 
 `<area>` is the subject area whose tables the statement reads — the same choice `agami-save-correction` makes, and the same writer. **Do not hand-edit `examples.yaml`**, and do not invent a second way in.
@@ -638,7 +640,7 @@ End the turn. The user typically:
 1. **No automatic question generation for ambiguous labels.** If the label is too short or too vague (e.g., `Total`, `Number`, `Value`), surface to the user: *"Row 5's label is just 'Total' — too ambiguous to translate to a question. Skipping. Add more context to the CSV (e.g., `Total Revenue Q3` instead of `Total`) and re-run."* Don't guess.
 2. **Receipt is non-optional.** Every per-row run MUST produce a chart-template HTML report with the trust receipt — that's what the drill-down link points at, and it's what makes mismatches actionable. If the underlying query path can't produce a receipt (legacy pre-trust-layer model), refuse with: *"This profile pre-dates the trust-layer launch. Re-run `/agami-connect` to enable receipts, then retry."*
 3. **Don't write to the semantic model from this skill.** Reconcile reads + diffs; it never mutates a metric, a join, a column or any other part of the semantic model. If a definitional disagreement surfaces and the user wants to update the metric, route them through `/agami-save-correction`. **The writes this skill can make are Phase 3e's, and neither is a semantic-model write:** a golden dataset is the answer key that *tests* the semantic model, and the prompt-example library is what the AI *reads* before it writes SQL. Neither is the semantic model's own definitions, and this skill still never touches a metric, a join, a column or a default filter. Both writes go through the packaged writers — `golden_author.py save` and `sm add-example`, those doors and nothing else, never a hand-edited YAML — and both need the person's yes in front of them. A row reaches either one by exactly two routes: this run scored it as agreeing, or it scored a mismatch that the person has explicitly resolved in agami's favour. **No row goes to both**, which is the whole reason Phase 3e splits the batch rather than duplicating it. The skill now also writes a findings file under `<artifacts_dir>/local/reconcile/<ts>/`: findings for a person to read, in the ignored half of the artifacts, never a metric, a join, a column or a default filter. A `query_defect` in the person's statement never becomes a finding about the semantic model at all.
-4. **CSV stays local.** Don't upload, don't summarize-and-send. The reconcile run produces local artifacts (the per-query chart HTML, and `/tmp/agami-reconcile-results-*.jsonl`, which now carries the statement behind every row as well as its numbers) and nothing leaves the machine. A promoted row stays local too: the save door writes into the profile's own `golden_datasets/` directory on this machine.
+4. **CSV stays local.** Don't upload, don't summarize-and-send. The reconcile run produces local artifacts (the per-query chart HTML, and `<artifacts_dir>/local/tmp/agami-reconcile-results-*.jsonl`, which now carries the statement behind every row as well as its numbers) and nothing leaves the machine. A promoted row stays local too: the save door writes into the profile's own `golden_datasets/` directory on this machine.
 
 ---
 
@@ -650,7 +652,7 @@ End the turn. The user typically:
 | CSV has 0 parseable rows | Refuse: "No rows with parseable numeric values. Common cause: the value column has formatting like `$1,234.56 (USD)` — try simplifying to `1234.56`." |
 | Every row errors out | Surface a meta-error: "All <N> rows errored — likely a model-coverage problem (the questions don't map to your schema). Run `/agami-connect reintrospect` if your schema changed; check the model has the relevant tables." |
 | Single mismatch but huge delta (> 100%) | Note in the interpretation: "The delta is large enough to suggest a unit mismatch (cents vs dollars, count vs percentage) rather than a definition gap. Check `agami.unit` on the relevant field." |
-| User pastes inline CSV instead of a path | Accept it. Write to `/tmp/agami-reconcile-pasted-<ts>.csv` and proceed. |
+| User pastes inline CSV instead of a path | Accept it. Write to `<artifacts_dir>/local/tmp/agami-reconcile-pasted-<ts>.csv` and proceed. |
 | `record`, `report-items`, `render_reconcile_report.py` or `check-run` fails | Stop. Show its error, fix the run directory it names, run it again. Never write a row record, the items file or the page with the Write tool: a page built by hand is a page nobody can check. |
 | Screenshot is blurry / a value is cut off / can't read a tile | Don't guess the number. Extract what's legible, and tell the user which tiles you skipped: "Couldn't read 'Pipeline value' clearly — re-snip it or type that one in." |
 | User says "reconcile my dashboard" but attaches nothing | Ask for the screenshot (or CSV / pasted numbers / the SQL they trust / a list of questions) per Phase 0.4 — don't proceed without something to check. |

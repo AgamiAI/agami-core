@@ -64,7 +64,7 @@ def test_four_shapes_are_detected_and_never_asked_for():
     phase_1 = _between(SKILL, "## Phase 1:", "## Phase 1.5:")
     for heading in ("### Statement branch", "### Questions branch", "### 1n — Normalize"):
         assert heading in phase_1, heading
-    assert 'reconcile.py" intake --file' in phase_1
+    assert 'reconcile.py intake --file' in phase_1
     assert "**Do not run the statement here.**" in phase_1
 
 
@@ -131,7 +131,7 @@ def test_phase_1_5_runs_the_statement_the_way_agami_runs_its_own():
     for ref in ("shared/statement-check.md", "shared/part-ledger.md", "shared/sql-generation-rules.md",
                 "shared/db_error_classifier.md"):
         assert ref in PHASE_1_5, ref
-    assert 'reconcile.py" ledger --row-dir' in PHASE_1_5
+    assert 'reconcile.py ledger --row-dir' in PHASE_1_5
     assert "A part reaches `model_gap` only by measurement" in PHASE_1_5
 
 
@@ -151,7 +151,7 @@ def test_the_row_record_gains_its_keys_after_error_and_its_two_statuses():
                 "ledger", "ledger_verdict", "comparison", "claims", "finding_keys"):
         assert RECORD.index(f'"{key}":') > error_at, key
     # The rules are applied by code, and the record says so.
-    assert 'reconcile.py" status --match' in RECORD
+    assert 'reconcile.py status --match' in RECORD
     for status in ("`match_unverified`", "`expected_doubtful`"):
         assert status in RECORD
 
@@ -165,7 +165,7 @@ def test_compare_and_findings_sit_between_the_record_and_present():
     assert 'sm" claims' in compare and "--with-claims" in compare
     assert "they never say who is right" in compare
     findings = _between(SKILL, "### 2f — Write the findings", "## Phase 3: Present")
-    assert 'reconcile.py" findings --run-dir' in findings
+    assert 'reconcile.py findings --run-dir' in findings
     assert "findings.json" in findings and "query_defects.json" in findings
     assert "never result rows beyond the one recorded cell" in findings
 
@@ -363,8 +363,8 @@ def test_the_run_works_five_rows_at_a_time_and_resumes_from_its_checkpoint():
 
 def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_through_intake():
     story = _between(SKILL, "### 3a.5", "### 3b")
-    assert 'render_reconcile_report.py" --title "Reconcile · <profile>"' in story
-    assert '--run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story and "--words-file /tmp/agami-reconcile-words-<ts>.json" in story
+    assert 'render_reconcile_report.py --title "Reconcile · <profile>"' in story
+    assert '--run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story and "--words-file \"<artifacts_dir>/local/tmp/agami-reconcile-words-<ts>.json\"" in story
     assert 'check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story
     assert "--items-file" not in story and "/tmp/agami-reconcile-report-items" not in story
     assert "Say the three lines the renderer printed" in story
@@ -382,7 +382,7 @@ def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_t
     sheet = SKILL[SKILL.index("## Error handling cheat sheet"):]
     assert "`record`, `report-items`, `render_reconcile_report.py` or `check-run` fails" in sheet
     csv_branch = _between(SKILL, "### CSV branch", "### ")
-    assert "reconcile.py\" intake --file" in csv_branch and "parse --csv" not in csv_branch
+    assert "reconcile.py intake --file" in csv_branch and "parse --csv" not in csv_branch
     phase_2 = _between(SKILL, "## Phase 2: Generate questions + execute", "### 2a")
     assert 'resume --reconcile-dir' in phase_2 and "Exit `2` is a refusal and stderr says which" in phase_2
 
@@ -412,7 +412,7 @@ def test_the_example_decision_has_a_route():
 
 def test_agamis_answer_comes_from_a_cold_client_never_from_the_session():
     phase_2b = _between(SKILL, "### 2b", "### 2.5")
-    assert "--ask-file /tmp/agami-reconcile-chunk-<ts>.json" in phase_2b and "--parallel 4" in phase_2b and "--out rows/<n>/agami-answer.json" in phase_2b
+    assert "--ask-file \"<artifacts_dir>/local/tmp/agami-reconcile-chunk-<ts>.json\"" in phase_2b and "--parallel 4" in phase_2b and "--out rows/<n>/agami-answer.json" in phase_2b
     # The client fetches its own context now (`--via mcp`), which is the point of asking that way:
     # a run that pasted one schema into the prompt would never exercise what decides whether a real
     # question succeeds. What stays pinned is that the session is never the one answering.

@@ -213,7 +213,7 @@ def test_the_promotion_writes_through_the_save_door_and_nothing_else():
     """One writer. The item is built with the Write tool and handed to the save door with the flags
     that door actually takes; `id` is omitted so the door derives it from the question, which is
     what makes a promotion land ON an already-imported question rather than beside it."""
-    assert 'python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save' in OFFER
+    assert 'bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save' in OFFER
     for flag in ("--profile", "--dataset", "--item"):
         assert flag in OFFER
     assert "never a heredoc, never `python3 -c`" in OFFER
@@ -230,7 +230,7 @@ def test_the_band_comes_from_the_band_verb_and_not_from_prose_arithmetic():
     """A band computed in prose is a band nobody can reproduce, and this one is the thing a later
     run is scored against. `match: bounded` with no band is refused outright, so the two travel
     together."""
-    assert 'python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py" band' in OFFER
+    assert 'bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py band' in OFFER
     assert "--value" in OFFER and "--tolerance" in OFFER
     assert "never from arithmetic written in prose" in OFFER
     assert '"match": "bounded"' in OFFER

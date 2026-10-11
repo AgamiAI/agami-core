@@ -1,0 +1,6 @@
+# The plugin's shell scripts run under bash on every OS, Git Bash included. Checked out with CRLF
+# (Git for Windows' default core.autocrlf=true), bash fails on the first line: `$'\r': command not found`.
+plugins/agami/scripts/sm text eol=lf
+plugins/agami/scripts/py text eol=lf
+plugins/agami/scripts/open_in_browser text eol=lf
+plugins/agami/scripts/*.sh text eol=lf
