@@ -81,6 +81,7 @@ Read `<artifacts_dir>/local/credentials`. If the file (or the active profile's s
 
 Resolve `<profile>`: `AGAMI_PROFILE` → `active_profile` in `<artifacts_dir>/local/.config` → `"main"`.
 Resolve `<artifacts_dir>` per [`shared/file-layout.md`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `$HOME/agami-artifacts`.
+Then create the scratch folder every later step writes to: `mkdir -p "<artifacts_dir>/local/tmp"` (Claude's Write tool and a `>` redirect both need it to exist).
 
 The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`datasource.yaml` + `subject_areas/<area>/…`). There is no legacy-layout fallback — the model is the only format.
 

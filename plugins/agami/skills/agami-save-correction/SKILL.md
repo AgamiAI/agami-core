@@ -43,6 +43,8 @@ Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` 
 
 Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `<artifacts_dir>/local/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / model / datasource.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
 
+Then create the scratch folder every later step writes to: `mkdir -p "<artifacts_dir>/local/tmp"` (Claude's Write tool and a `>` redirect both need it to exist).
+
 For v1.0 / v1.1 fallback paths (`<artifacts_dir>/local/<profile>.yaml`, `<artifacts_dir>/local/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
 
 ### 1b — find the most recent query

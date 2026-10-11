@@ -22,7 +22,7 @@ DOCS = sorted([*PLUGIN.glob("skills/*/SKILL.md"), *PLUGIN.glob("shared/*.md")])
 
 # Telling Claude to RUN python3: a plugin script, `-c`, or `-m`. Prose that forbids `python3 -c`, and
 # the `tool_paths.python3` setting name, are not commands.
-_RUNS_PYTHON3 = re.compile(r'(?<![\w.])python3 (?:"\$AGAMI_PLUGIN_ROOT|-[cm] )')
+_RUNS_PYTHON3 = re.compile(r'(?<![\w.])python3 (?:"\$AGAMI_PLUGIN_ROOT|-[cm] |"?[\w./$-]*\.py\b)')
 _FORBIDS = re.compile(r"never[^.\n]{0,60}python3 -c|python3 -c`\)|`python3 -c` —|no `python3 -c`|forbidden", re.I)
 
 
@@ -54,6 +54,7 @@ def test_no_skill_inlines_the_open_chain():
 def test_the_scan_catches_what_it_claims_to():
     assert _RUNS_PYTHON3.search('python3 "$AGAMI_PLUGIN_ROOT/scripts/x.py"')
     assert _RUNS_PYTHON3.search("`python3 -c 'import yaml'`")
+    assert _RUNS_PYTHON3.search("python3 execute_sql.py [-h] [--profile PROFILE]")
     assert not _RUNS_PYTHON3.search("tool_paths.python3 = $PY")
     assert _FORBIDS.search("(Write tool — never a heredoc/`python3 -c`)")
 

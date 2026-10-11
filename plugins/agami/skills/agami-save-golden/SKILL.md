@@ -46,6 +46,7 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 
 1. **Plan-mode check** — Phase −1 above. Do it first; a refusal halfway through a parse is a confusing partial state.
 2. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`. A dataset belongs to a profile, and a profile with no model has nothing to be scored against.
+   Then, before any door below, create the scratch folder every later step writes to: `mkdir -p "<artifacts_dir>/local/tmp"` (Claude's Write tool and a `>` redirect both need it to exist).
 3. **See what exists** — `ls <artifacts_dir>/<profile>/golden_datasets/`. It writes nothing, and it is how you find out whether this is a new dataset or an existing one you are appending to. A missing directory is ordinary: the first write creates it.
 4. **Which dataset** — the one named in `$ARGUMENTS`, the only one that exists, or ask with `AskUserQuestion` listing what is there plus "a new one". The name is the **filename stem** (`orders` → `orders.yaml`); the file never declares its own name and the writer never puts one in. A stem is **one plain name** — letters, digits, dots, dashes and underscores, nothing else. `--profile` is held to the same rule. Both are joined straight into the path the writer truncates and rewrites, so anything with a separator or a `..` in it is refused with exit `2` before a single byte is read; never "helpfully" pass a path where a name is asked for.
 
