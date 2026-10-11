@@ -78,6 +78,8 @@ command working there too:
   very first command writes there with `>`, it starts with `mkdir -p "<artifacts_dir>/local/tmp"`, since
   the shell opens that file before the script runs. Inside a JSON file, write such a path with forward
   slashes (`C:/Users/…`), never backslashes: `\U` is not a valid JSON escape.
+- **Strip `\r` from Python output you capture into a variable:** `x="$(… py … | tr -d '\r')"`. Windows
+  Python ends its lines with `\r\n`; `$(…)` drops only the `\n`, and a path ending in `\r` names no file.
 - **Open a page with `open_in_browser`:** `bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "<path or URL>"`,
   never `open` / `xdg-open` / `start` directly.
 

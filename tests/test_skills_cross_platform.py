@@ -110,8 +110,10 @@ def test_the_shell_scripts_keep_unix_line_endings_on_every_checkout():
 
 def test_windows_opens_without_cmd_re_parsing_the_target():
     # cmd.exe would split a URL at `&`; rundll32's handler takes it whole.
-    text = (PLUGIN / "scripts" / "open_in_browser").read_text(encoding="utf-8")
-    assert 'rundll32.exe url.dll,FileProtocolHandler "$win"' in text and "cmd //c start" not in text
+    code = "\n".join(line for line in (PLUGIN / "scripts" / "open_in_browser").read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert 'rundll32.exe url.dll,FileProtocolHandler "$win"' in code
+    assert "cmd /c start" not in code and "cmd //c start" not in code
 
 
 
@@ -121,3 +123,23 @@ def test_no_artifacts_folder_is_created_before_one_was_chosen(tmp_path):
     env = {"HOME": str(tmp_path / "home"), "PATH": f"{real.parent}:/usr/bin:/bin"}
     subprocess.run(["bash", str(PLUGIN / "scripts" / "py"), "-c", "pass"], env=env, capture_output=True, check=False)
     assert not (tmp_path / "home" / "agami-artifacts").exists()
+
+
+
+def test_every_plugin_script_runs_through_py():
+    # A script run by its own name hits its `#!/usr/bin/env python3` shebang, which is the Store stub on
+    # Windows — and the plugin's scripts folder isn't on PATH anyway.
+    found = _offending(re.compile(r'^\s*[a-z_]+\.py\b|(?:^|[|;&(]\s*)"?\$AGAMI_PLUGIN_ROOT/scripts/[a-z_]+\.py"?'))
+    assert not found, "Run plugin scripts as `bash \"$AGAMI_PLUGIN_ROOT/scripts/py\" <name>.py`:\n" + "\n".join(found)
+
+
+def test_captured_python_output_strips_the_carriage_return():
+    pattern = re.compile(r'\$\((?:bash "\$AGAMI_PLUGIN_ROOT/scripts/py"|"\$PY")')
+    found = []
+    for doc in DOCS:
+        text = doc.read_text(encoding="utf-8")
+        for m in pattern.finditer(text):
+            end = text.find(")", text.find("\n", m.end()) if text[m.end():m.end() + 400].count("\\\n") else m.end())
+            if "tr -d '\\r'" not in text[m.start():m.start() + 600]:
+                found.append(f"{doc.relative_to(REPO_ROOT)}: {text[m.start():m.start() + 80]}")
+    assert not found, "Pipe captured Python output through tr -d '\\r':\n" + "\n".join(found)

@@ -576,7 +576,7 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 
 **On re-entry — the user pastes an `AGAMI PRUNE …` block.** Don't hand-parse it — pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
 ```bash
-parse_prune_block.py --block-file <pasted> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_prune_block.py --block-file <pasted> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
 ```
 It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
 

@@ -278,7 +278,7 @@ Cross-database queries need DuckDB. Install it with `brew install duckdb`
 
 ```bash
 init_file=$(bash "$AGAMI_PLUGIN_ROOT/scripts/py" build_duckdb_attach.py \
-  --profiles "$P1" "$P2")
+  --profiles "$P1" "$P2" | tr -d '\r')   # Windows Python ends lines \r\n
 # init_file is the path of a chmod-600 file in <artifacts_dir>/local/.duckdb_init_*.sql.
 # Credentials are inside that file, NOT on the command line.
 ```

@@ -199,7 +199,7 @@ Used when neither the native CLI nor DuckDB is available, but Python with the ri
 **Always invoke it with `$PY` — the interpreter recorded in `<artifacts_dir>/local/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
 
 ```bash
-PY="$(bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import sys; print(sys.executable)')"
+PY="$(bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import sys; print(sys.executable)' | tr -d '\r')"   # Windows Python ends lines \r\n
 ```
 
 (`py` resolves it the way the `sm` wrapper does — `$AGAMI_PYTHON`, then `.config`'s `tool_paths.python3`, then `python3`/`python` on PATH, never the Windows Store stub — with no Python needed to find it. Same interpreter the introspection engine uses. Keeping them identical means the driver is present wherever a DB connection is opened.)

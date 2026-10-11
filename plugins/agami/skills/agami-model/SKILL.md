@@ -106,7 +106,7 @@ End the turn. Wait for the user.
 The user pastes the dashboard's "Generate feedback" block. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
-parse_model_feedback.py --block-file <pasted>
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_model_feedback.py --block-file <pasted>
 ```
 
 It prints `{data, anomalies, needs_judgment}`:
