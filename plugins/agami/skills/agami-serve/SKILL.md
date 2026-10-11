@@ -42,10 +42,10 @@ Show the plan first with `--dry-run`, then do it for real:
 
 ```bash
 # 1. Preview (writes nothing)
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py" --dry-run
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_desktop_mcp.py --dry-run
 
 # 2. Apply
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_desktop_mcp.py
 ```
 
 Pass `--profile <name>` if the user named one. (Installation goes through `sm install`,
@@ -55,7 +55,7 @@ which does an editable install automatically when run from a dev checkout — no
 
 - **Driver missing (exit code 3).** The helper couldn't find a Python that can
   import the DB driver. Relay its suggested `pip install ...` line, offer to run
-  it, then re-run the helper. Example: `python3 -m pip install psycopg2-binary`.
+  it, then re-run the helper. Example: `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -m pip install psycopg2-binary`.
 - **Wrote successfully.** Relay the helper's closing `Next:` lines, in one or two lines of your
   own. They are written for the user's platform (how to fully quit the app, which differs between
   macOS and Windows, and where this server's log is), so pass them on rather than restating them:

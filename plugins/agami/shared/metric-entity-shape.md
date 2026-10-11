@@ -146,7 +146,7 @@ Build a JSON array and apply it ONCE with the packaged command — never
 hand-author each YAML, never write a throwaway loop script:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file /tmp/agami-metrics.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-metrics.json"
 ```
 
 It validates each item against the schema, writes

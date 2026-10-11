@@ -62,3 +62,26 @@ and JSON `null` / `true` / `false` are not valid Python — pasting a review-ite
 (which has `null` fields) into `python3 -c` is what produces
 `NameError: name 'null' is not defined`. The Write tool writes the bytes literally, so
 quotes and `null` survive. Keep ops minimal (the locator + action), not whole items.
+
+## Commands that work on macOS, Linux and Windows
+
+The skills run in Claude Code's Bash tool, which is Git Bash on Windows. Three habits keep every
+command working there too:
+
+- **Run Python through `py`, never bare `python3`:** `bash "$AGAMI_PLUGIN_ROOT/scripts/py" <script>.py …`
+  (a plugin script by name) or `… py -c '…'`. On Windows `python3` is often the Microsoft Store stub,
+  which runs nothing; `py` finds the interpreter agami-connect configured, exactly as `sm` does.
+  Where a step already resolved `$PY` (agami-connect's `connect_resolve.py`), `"$PY"` is fine.
+- **Scratch files go in `<artifacts_dir>/local/tmp/`, never `/tmp`.** On Windows, Claude's Write and
+  Read tools and Git Bash disagree about where `/tmp` is, so a file written by one isn't found by the
+  other. `sm` and `py` create the folder; it is git-ignored with the rest of `local/`. When a skill's
+  very first command writes there with `>`, it starts with `mkdir -p "<artifacts_dir>/local/tmp"`, since
+  the shell opens that file before the script runs. Inside a JSON file, write such a path with forward
+  slashes (`C:/Users/…`), never backslashes: `\U` is not a valid JSON escape.
+- **Strip `\r` from Python output you capture into a variable:** `x="$(… py … | tr -d '\r')"`. Windows
+  Python ends its lines with `\r\n`; `$(…)` drops only the `\n`, and a path ending in `\r` names no file.
+- **Open a page with `open_in_browser`:** `bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "<path or URL>"`,
+  never `open` / `xdg-open` / `start` directly.
+
+`chmod` is harmless on Windows (it does nothing; NTFS protects the file through your user profile), so
+the steps that lock a file down need no change.

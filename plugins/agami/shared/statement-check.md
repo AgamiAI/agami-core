@@ -112,7 +112,7 @@ one's.
    `no_question` for a statement that came alone. This is the one step here that judges by reading;
    the ledger turns a doubtful fit into an open part, and a missing file into one too.
 
-Then, once per row and after the comparison, `python3 "$AGAMI_PLUGIN_ROOT/scripts/reconcile.py"
+Then, once per row and after the comparison, `bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py
 ledger --row-dir . --with-claims` grades what was found, or without `--with-claims` when agami's own
 statement is missing. One run: every file above is still there, so waiting loses nothing, and the same
 ledger written twice is a step somebody will skip or double.
