@@ -111,7 +111,8 @@ def test_every_output_aggregate_is_one_item_saying_one_of_three_things(org):
     items = _items(org, "SELECT SUM(o.total), COUNT(o.id) FROM orders o")
     assert [i["aggregate"] for i in items] == ["SUM(o.total)", "COUNT(o.id)"], items
     for item in items:
-        assert set(item) == {"aggregate", "scope", "status", "joins", "findings", "reason"}, item
+        assert set(item) == {"aggregate", "scope", "status", "result_affected", "joins", "findings",
+                             "reason"}, item
         assert item["status"] in (rt.MULTIPLIED, rt.NOT_MULTIPLIED, rt.UNDETERMINED), item
         assert item["scope"] == "main", item
 

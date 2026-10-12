@@ -177,9 +177,9 @@ _SHARED_INSTRUCTIONS = (
     "fan the pair out per datasource rather than walking them one at a time.\n"
     "If a get_datasource_schema response carries `prompt_examples`, the datasource has stored "
     "examples: fetch them before writing SQL if you have not already.\n"
-    "Dialect: list_datasources reports it per datasource as `engine` (what the model declares) "
-    "and `database_type` (what the connection's DSN says). Take it from there and never assume "
-    "one; where they differ, `engine` is what the rules were chosen by. A metric's `binding` "
+    "Dialect: list_datasources reports it per datasource as `engine` (the engine the model "
+    "declares) and `database_type` (the same engine as a lowercase label). Take it from there "
+    "and never assume one. A metric's `binding` "
     "already arrives resolved to that dialect, so copy it rather than translating it — but the "
     "rest of the statement is yours to write in the right one, and date arithmetic, string "
     "functions and casts are where a guess shows up. When list_datasources carries "
@@ -197,8 +197,9 @@ _SHARED_INSTRUCTIONS = (
     "empty `items` with that marker set means NOT CHECKED while an empty `items` with a null "
     "marker means checked and clean. Reporting only `items` turns 'not checked' back into "
     "'nothing wrong', which is the one reading the receipt exists to prevent. (d) An `omitted` "
-    "filter (`receipt.tables.items[].filters`), a `multiplied` aggregate and an `unmatched` output "
-    "column are each a real gap between what the org means and what the answer counted — name the "
+    "filter (`receipt.tables.items[].filters`), a `multiplied` aggregate whose "
+    "`result_affected` is true and an `unmatched` output column are each a real gap between what "
+    "the org means and what the answer counted — name the "
     "number affected and why, and re-run when the question wanted the other reading.\n"
     "Caller identity: when a tool result includes `caller_identity`, that is the verified asker — "
     "resolve any self-referential term in the question ('my', 'me', 'I', 'mine') against it, never "
@@ -1171,7 +1172,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             out = [
                 {
                     "datasource": ds,
-                    "database_type": _served_db_type(ds),
+                    "database_type": _declared_db_type(engines.get(ds)),
                     "table_count": counts.get(ds, 0),
                     **_dialect_fields(engines.get(ds)),
                     # No `model_present` here. It was the literal `True`: this list is built FROM
@@ -1209,6 +1210,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     out = []
     for profile in sorted(creds.keys()):
         pdir = artifacts / profile
+        engine = _local_engine(pdir)
         table_count = 0
         if pdir.is_dir():
             table_count = (
@@ -1219,9 +1221,11 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
         out.append(
             {
                 "datasource": profile,
-                "database_type": _db_type_for(profile, creds),
+                # The credentials only speak when no model declares a single engine: a profile not
+                # introspected yet, or a model whose connections name none or several.
+                "database_type": _declared_db_type(engine) or _db_type_for(profile, creds),
                 "table_count": table_count,
-                **_dialect_fields(_local_engine(pdir)),
+                **_dialect_fields(engine),
                 "model_present": (pdir / "datasource.yaml").exists(),
                 "is_active": profile == active,
             }
@@ -1245,11 +1249,9 @@ def _dialect_fields(engine: "str | None") -> dict[str, Any]:
     not vary with the scope being asked about, so they belong on the call that answers "which
     datasource, on what engine" and is made once.
 
-    `engine` is the model's own `storage_type`. It is emitted beside `database_type` rather than
-    replacing it: that field is derived from the DSN and reports the connection's scheme, which is
-    `postgres` for a Redshift warehouse reached the usual way (#401). Both are a client's answer to
-    "what dialect", and they can disagree — so the one the MODEL declares is the one the rules are
-    chosen by, and it is named.
+    `engine` is the model's own `storage_type`, and `database_type` is the same engine as a lowercase
+    label (#420). Both are kept because clients read both; they no longer disagree, since neither is
+    taken from the connection's DSN.
     """
     if not engine:
         return {}
@@ -1314,14 +1316,35 @@ def _local_engine(profile_dir: Path) -> "str | None":
     return engines.pop() if len(engines) == 1 else None
 
 
-def _served_db_type(datasource: str) -> str:
-    """Best-effort database-type label for a served datasource. The store holds the model, not the
-    warehouse credentials, so derive the type from the `DATASOURCE_URL[__<datasource>]` scheme the
-    executor already resolves. Display-only ("" when no DSN is set — the model still serves)."""
-    from execute_sql import _env_datasource_dsn  # sibling module; no import cycle
+# The `database_type` label for each engine a model can declare, in the vocabulary `_db_type_for`
+# already reports, so one listing reads the same whichever path produced it. Written out rather than
+# lowercased (`PostgreSQL` is `postgres`), and not `sql_dialect._SQLGLOT_DIALECT`, whose names are
+# sqlglot's: it calls SQL Server `tsql`, and this label is `sqlserver`.
+_ENGINE_DB_TYPE: dict[str, str] = {
+    "PostgreSQL": "postgres",
+    "MySQL": "mysql",
+    "Snowflake": "snowflake",
+    "BigQuery": "bigquery",
+    "Redshift": "redshift",
+    "SQLite": "sqlite",
+    "DuckDB": "duckdb",
+    "SQLServer": "sqlserver",
+    "Databricks": "databricks",
+    "Trino": "trino",
+    "Oracle": "oracle",
+}
 
-    dsn = _env_datasource_dsn(datasource)
-    return _db_type_for(datasource, {datasource: {"url": dsn}}) if dsn else ""
+
+def _declared_db_type(engine: "str | None") -> str:
+    """`database_type` from the engine the MODEL declares, or "" when it declares no single one.
+
+    It used to come from the connection's DSN scheme (#420), and that was wrong three ways: a
+    Redshift warehouse is usually reached over a `postgresql://` DSN, so it read as `postgres`; the
+    lookup ignored the tenant, so a per-tenant DSN was never found and the field came back empty;
+    and a per-user warehouse login has no DSN to read at all. The model declares its engine on every
+    connection, and `engine_mismatch` already refuses a query whose credentials point elsewhere, so
+    the declaration is the one source this field needs."""
+    return _ENGINE_DB_TYPE.get(engine or "", "")
 
 
 def _read_text(path: Path) -> str | None:
@@ -4850,8 +4873,8 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`database_type`, `engine` and `table_count`, plus the `description` its model declares WHEN it "
             "declares one — enough to route a question without pulling a schema per candidate. "
             "`engine` is the dialect the MODEL declares and is what any `dialect_rules` here were "
-            "chosen by; `database_type` is derived from the connection's DSN and can differ (a "
-            "Redshift warehouse reached over a postgresql:// DSN reads as postgres). On an engine "
+            "chosen by; `database_type` is the same engine as a lowercase label (`postgres`, "
+            "`redshift`, …). On an engine "
             "with known gaps the entry also carries `dialect_rules` — what it rejects and what to "
             "write instead — sent here once rather than on every schema call. "
             # `description` is conditional on the served path and absent on the local one, so it is
@@ -5129,12 +5152,19 @@ TOOLS: dict[str, dict[str, Any]] = {
             "an `omitted` or `undetermined` one is a real gap between what the org means by that "
             "table and what the answer counted.\n"
             "`receipt.aggregates.items` — one entry per aggregate the statement computes, each "
-            "`{aggregate, scope, status, joins, findings, reason}` with status multiplied / "
-            "not_multiplied / undetermined, and `scope` the same arm label the `tables` entries "
-            "carry. A `multiplied` one means a join multiplied the rows behind THAT number and "
-            "`joins` names the join — say which number and which join, and say that whether it is "
-            "wrong depends on what they asked for, because the same total is right for line-item "
-            "exposure and wrong for order revenue. `undetermined` means the check could not "
+            "`{aggregate, scope, status, result_affected, joins, findings, reason}` with status "
+            "multiplied / not_multiplied / undetermined, and `scope` the same arm label the "
+            "`tables` entries carry. A `multiplied` one means a join multiplied the rows behind "
+            "THAT number and `joins` names the join. `result_affected` says whether the duplication "
+            "can have changed the value: false when nothing multiplied or every multiplying finding "
+            "is `fan_out_invariant` (a MIN, MAX, boolean fold or DISTINCT aggregate under a fan), "
+            "so "
+            "do not warn about the duplication; true when any finding is a fan or chasm trap (a "
+            "MIN or MAX under a chasm reads true) — say which number and which join, and that "
+            "whether it is wrong depends on what they asked for, because the same total is right "
+            "for line-item exposure and wrong for order revenue; null when undetermined, including "
+            "an immune aggregate that also reads a subquery or CTE. `undetermined` means the check "
+            "could not "
             "resolve what the aggregate reads (a `COUNT(*)`, an unqualified column, a CTE the walk "
             "does not enter) or a join behind it has no declaration settling its cardinality, so "
             "do NOT report it as clean. Its sibling `findings` is a different "
