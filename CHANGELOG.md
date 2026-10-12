@@ -32,6 +32,8 @@ below corresponds to one such version.
   `result_affected: false`, so neither the agent nor the receipt panel flags a correct number. It
   is `true` whenever a fan or chasm trap is found (a `MAX` under a chasm included), and `null`
   when undetermined, including an immune aggregate that also reads a subquery or CTE.
+  `/agami-reconcile`'s part ledger now follows it, so that `null` case stays unresolved there
+  instead of being confirmed.
 - **A chasm-trap finding names the same shared table on every run (#202).** When two tables
   qualified, which one was named depended on Python's set order and could differ between processes.
 - **The skills' own commands work on Windows (#362).** Claude follows the skill instructions to the
