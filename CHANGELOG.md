@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.13] — 2026-10-12
+
 ### Fixed
 
 - **`list_datasources` reports the database type the model declares (#420).** `database_type` was
