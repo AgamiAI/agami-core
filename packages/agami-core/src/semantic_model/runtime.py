@@ -887,12 +887,43 @@ class AggregateReport:
     # on the other two statuses. One word for four different causes sent a reader to the join when
     # the aggregate simply named no column.
     reason: Optional[str] = None
+    # Whether every read of the aggregate resolved to a table the analysis could see behind. Not
+    # emitted: `reason` already says why on an `undetermined` report. Kept because a multiplication
+    # outranks an unresolved read in `status`, so a `multiplied` report can still have reads the
+    # analysis did not see, and those decide `result_affected` below.
+    resolved: bool = True
+
+    @property
+    def result_affected(self) -> Optional[bool]:
+        """Whether the duplication `status` reports can have changed THIS value (#450).
+
+        `status` describes the rows and stays `multiplied` for a `MAX` over a fan, because the rows
+        really were duplicated and `not_multiplied` would be a false claim. What a reader needs to
+        act on is the other fact: a minimum, a maximum, a boolean fold or a DISTINCT aggregate
+        cannot move under duplication. False when every multiplying finding is `fan_out_invariant`
+        (or nothing multiplied), True when any fan or chasm trap is, None when undetermined.
+
+        Derived rather than stored, so a report downgraded to `undetermined` after it was built
+        cannot keep a stale answer. It covers this aggregate at its own scope only: a value read
+        from a subquery or CTE resolves to no table, so it is never `False`. That holds even when a
+        fan on a table it DID resolve makes `status` `multiplied`: the unresolved part may already
+        be inflated, so the answer is None.
+
+        The chasm check does not grade immunity, so a `MIN` or `MAX` under a chasm reads True. That
+        is the conservative side; finer grading is #200 / #204 / #339 / #429."""
+        if self.status == UNDETERMINED:
+            return None
+        risks = {f.risk for f in self.findings if f.risk in _MULTIPLYING_RISKS}
+        if not risks <= {"fan_out_invariant"}:
+            return True
+        return False if self.resolved else None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "aggregate": self.aggregate,
             "scope": self.scope,
             "status": self.status,
+            "result_affected": self.result_affected,
             "joins": self.joins,
             "findings": [f.as_dict() for f in self.findings],
             "reason": self.reason,
@@ -1853,6 +1884,19 @@ def _cardinality_index(org: Datasource) -> list[Relationship]:
     return rels
 
 
+def _folded_rel(rel: Relationship) -> Relationship:
+    """A COPY of `rel` with its two table names in `_tkey` spelling, for the detectors' comparisons.
+
+    Copied because the relationship belongs to the model, which every other analysis in the receipt
+    still reads as declared. An edge already in that spelling is returned as is, because this runs
+    per SELECT and per set-operation arm and the common, lowercase model would otherwise pay a copy
+    of every edge each time."""
+    folded_from, folded_to = _tkey(rel.from_table), _tkey(rel.to_table)
+    if folded_from == rel.from_table and folded_to == rel.to_table:
+        return rel
+    return rel.model_copy(update={"from_table": folded_from, "to_table": folded_to})
+
+
 def _one_side_facing_many(rels: list[Relationship], table: str, others: set[str]) -> list[Relationship]:
     """Relationships where `table` is the ONE side and a joined `other` is the MANY side."""
     hits = []
@@ -2070,6 +2114,20 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
         # in the battery and across every arm of a set operation; appending a statement-derived
         # edge to it would leak this query's CTE into the next one's analysis.
         rels = rels + cte_rels
+    # Every table-name comparison below is a plain string comparison, and a statement and a model
+    # can spell one table two ways: `FROM ORDERS` against a model that says `orders`, or a model
+    # introspected from an engine that hands names back uppercase against a statement written in
+    # lowercase. Compared as written, the fan detector found no edge and the receipt reported a
+    # multiplied SUM as `not_multiplied` (#201). Folded ONCE, on both sides, with the same `_tkey`
+    # the scope gate and the table index use, so no fan/chasm comparison can disagree with another.
+    #
+    # The aggregation-class and semi-additivity checks keep the names AS WRITTEN: they look columns
+    # up in `_column_index` and metrics in `_semi_additive_columns`, both keyed by the model's own
+    # spelling, so a folded name finds nothing on a model whose tables are uppercase and their
+    # findings would quietly disappear.
+    written_scope = tables_in_scope
+    tables_in_scope = {alias: _tkey(t) for alias, t in tables_in_scope.items()}
+    rels = [_folded_rel(r) for r in rels]
     table_set = set(tables_in_scope.values())
     # Only the edges the statement's own joins could have traversed count below (ACE-133). The fan
     # and chasm detectors match a declared edge to a join by TABLE PAIR, and a model can declare two
@@ -2176,7 +2234,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # Returned as (site index, finding) rather than as bare findings: these are the two checks that
     # already knew which aggregate they were about, and re-deriving that from the finding text
     # afterwards would be inventing an answer the check had in hand.
-    for i, finding in _check_aggregation_semantics(tree, sites, org, tables_in_scope, ctx=ctx):
+    for i, finding in _check_aggregation_semantics(tree, sites, org, written_scope, ctx=ctx):
         attached[i].append(finding)
 
     reports: list[AggregateReport] = []
@@ -2193,6 +2251,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
             )),
             findings=findings,
             reason=site.unresolved_because if status == UNDETERMINED else None,
+            resolved=site.resolved,
         ))
     return reports
 
@@ -5007,7 +5066,10 @@ def _shared_dimension(
     over-reporting is a receipt that says more than it had to, the other polarity says something
     false (see `INFLATED_SHAPES`).
     """
-    for dim in table_set:
+    # SORTED, for the reason the fan loop sorts `agg_sources` (#202): when two dimensions both
+    # qualify, iterating a set picked one by hash order, so the same statement named a different
+    # shared dimension in two processes.
+    for dim in sorted(table_set):
         if dim in agg_sources:
             continue
         many_sources = sorted(s for s in agg_sources if _many_side_facing_one(rels, s, dim))

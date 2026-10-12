@@ -505,3 +505,54 @@ def test_a_served_listing_carries_the_engine_and_its_dialect_rules(tmp_path, mon
 
     assert entry["engine"] == "Redshift"
     assert entry["dialect_rules"] == sql_dialect_rules.dialect_rules_for("Redshift")
+
+
+# ---------------------------------------------------------------------------
+# `database_type` on the served listing (#420). It came from the connection's DSN, which ignored
+# the tenant, read a Redshift warehouse behind a postgresql:// DSN as `postgres`, and had nothing to
+# read at all under a per-user warehouse login. It now comes from the engine the model declares.
+# ---------------------------------------------------------------------------
+
+
+def _serve_one(tmp_path, monkeypatch, *engines, dsn=None):
+    db_url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(db_url)
+    s.run_migrations()
+    model_store.write_datasource(
+        s, "main", Datasource.model_validate(_with_engines("main", *engines)[1]))
+    s.commit()
+    s.close()
+    for var in ("DATASOURCE_URL", "DATASOURCE_URL__MAIN"):
+        monkeypatch.delenv(var, raising=False)
+    if dsn:
+        monkeypatch.setenv("DATASOURCE_URL__MAIN", dsn)
+    monkeypatch.setenv("AGAMI_DB_URL", db_url)
+    tools.resolved_org_id.cache_clear()
+    return json.loads(tools.tool_list_datasources({}))["datasources"][0]
+
+
+def test_served_database_type_is_the_declared_engine_with_no_dsn_set(tmp_path, monkeypatch):
+    """The per-tenant and per-user shapes: no unscoped DSN for the listing to find."""
+    assert _serve_one(tmp_path, monkeypatch, "Redshift")["database_type"] == "redshift"
+
+
+def test_a_postgres_scheme_dsn_does_not_relabel_a_redshift_model(tmp_path, monkeypatch):
+    """Redshift is usually reached over postgresql://; the field used to report the scheme."""
+    entry = _serve_one(tmp_path, monkeypatch, "Redshift", dsn="postgresql://u:p@host:5439/db")
+    assert entry["database_type"] == "redshift" and entry["engine"] == "Redshift"
+
+
+def test_a_model_naming_two_engines_reports_no_database_type(tmp_path, monkeypatch):
+    """No single dialect, so no label: guessing one is worse than saying nothing."""
+    entry = _serve_one(tmp_path, monkeypatch, "Redshift", "Snowflake")
+    assert entry["database_type"] == "" and "engine" not in entry
+
+
+def test_every_declarable_engine_has_a_database_type_label():
+    from typing import get_args
+
+    from semantic_model.models import StorageType
+
+    assert set(get_args(StorageType)) == set(tools._ENGINE_DB_TYPE)
+    assert tools._ENGINE_DB_TYPE["PostgreSQL"] == "postgres"
+    assert tools._ENGINE_DB_TYPE["SQLServer"] == "sqlserver"

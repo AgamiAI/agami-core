@@ -14,6 +14,28 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`list_datasources` reports the database type the model declares (#420).** `database_type` was
+  read from the connection string, which went wrong three ways: it never looked for a tenant's own
+  connection setting, so on a multi-tenant server it was usually empty; a Redshift warehouse
+  reached over a `postgresql://` connection read as `postgres`, steering the agent to SQL Redshift
+  rejects; and a per-user warehouse login has no connection string to read. On a served deployment
+  it now always matches `engine`, and is empty only when the model declares no single engine. A
+  local profile still falls back to its credentials when no model declares a single engine.
+- **Receipts no longer clear a fan-out written in capitals (#201).** `FROM ORDERS JOIN ORDER_ITEMS`
+  against a model that says `orders` and `order_items` matched no declared join, and the receipt
+  reported the inflated total as `not_multiplied`. The fan and chasm checks now compare table
+  names case-insensitively on both sides, as the table scope check already did, so a model whose
+  names are stored in capitals is covered too. Their findings name the tables in lowercase.
+- **Receipts say when a fan-out cannot change the number (#450).** Each aggregate now carries
+  `result_affected`. A `MIN`, `MAX`, boolean fold or `DISTINCT` aggregate over a join that repeats
+  rows keeps `status: multiplied`, because the rows really were repeated, and now says
+  `result_affected: false`, so neither the agent nor the receipt panel flags a correct number. It
+  is `true` whenever a fan or chasm trap is found (a `MAX` under a chasm included), and `null`
+  when undetermined, including an immune aggregate that also reads a subquery or CTE.
+  `/agami-reconcile`'s part ledger now follows it, so that `null` case stays unresolved there
+  instead of being confirmed.
+- **A chasm-trap finding names the same shared table on every run (#202).** When two tables
+  qualified, which one was named depended on Python's set order and could differ between processes.
 - **The skills' own commands work on Windows (#362).** Claude follows the skill instructions to the
   letter, and three of their habits broke under Git Bash, which is what Claude Code uses on Windows:
   - **Bare `python3`,** often the Microsoft Store stub there, which runs nothing. Every plugin
