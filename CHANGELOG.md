@@ -22,7 +22,8 @@ below corresponds to one such version.
   give no usable figure, the model build now counts the rows instead, with a read-only query under
   the normal statement time limit. If the count fails or times out, the size is unknown (a
   Postgres `-1` is no longer stored as a size). MySQL and BigQuery are left out until introspection reads carry their own byte and
-  server-side time limits (#459). Refresh a model built from views to pick the counts up.
+  server-side time limits (#459). The counts share a 10-minute budget per build; tables past it stay
+  unsized and the build report says how many. Refresh a model built from views to pick the counts up.
 
 ## [0.9.13] — 2026-10-12
 

@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -253,12 +254,17 @@ def introspect(
     built: list[Table] = []
     grain_by_table: dict[str, set[str]] = {}
     _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
+    budget = _CountBudget(_COUNT_BUDGET_S)
     for i, (schema, table) in enumerate(pairs, 1):
-        t = _build_table(dialect, runner, schema, table, conn_name, report)
+        t = _build_table(dialect, runner, schema, table, conn_name, report, budget)
         built.append(t)
         grain_by_table[t.name] = set(t.grain)
         if i % _step == 0 or i == len(pairs):
             _progress(pp, f"columns+grain {i}/{len(pairs)}")
+    if budget.skipped:
+        report.notes.append(
+            f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
+            "in total (catalog statistics, or a refresh after ANALYZE, will size them)")
 
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
@@ -900,7 +906,7 @@ def _discover_tables(
 
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
-    conn_name: str, report: IntrospectReport,
+    conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
     cols, mode = _columns(dialect, runner, schema, table)
@@ -908,7 +914,7 @@ def _build_table(
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
     # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
-    est_rows = _estimate_rows(dialect, runner, schema, table)
+    est_rows = _estimate_rows(dialect, runner, schema, table, budget)
 
     # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
     grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows)
@@ -1015,8 +1021,21 @@ def _probe_columns(
     return cols
 
 
+# The fallback counts run one table after another, each under the per-statement limit, so a catalog
+# of hundreds of views could spend hours on them. One budget per run bounds the total; tables past
+# it stay unknown, exactly as before the fallback existed.
+_COUNT_BUDGET_S = 600.0
+
+
+@dataclass
+class _CountBudget:
+    seconds_left: float
+    skipped: int = 0
+
+
 def _estimate_rows(
-    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
+    budget: Optional[_CountBudget] = None,
 ) -> Optional[int]:
     """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan — and,
     when the catalog has no usable figure, an exact count instead (#451).
@@ -1038,7 +1057,15 @@ def _estimate_rows(
     if count_q and count_q != q:
         # A distinct count was tried, so its answer replaces the catalog's: when it fails, the size
         # is unknown, never the catalog's 0 (an unanalysed table with rows would read as empty).
-        return _rows_from(_try(runner, count_q))
+        if budget is not None and budget.seconds_left <= 0:
+            budget.skipped += 1
+            return None
+        started = time.monotonic()
+        try:
+            return _rows_from(_try(runner, count_q))
+        finally:
+            if budget is not None:
+                budget.seconds_left -= time.monotonic() - started
     # The estimate query was itself the exact count (no catalog statistics on this engine).
     return est if est is not None and est >= 0 else None
 
