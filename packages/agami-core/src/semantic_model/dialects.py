@@ -226,6 +226,11 @@ class Dialect:
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         # Fallback: an exact COUNT(*). Dialects with cheap estimates override.
+        return self.sql_row_count(schema, table)
+
+    def sql_row_count(self, schema: str, table: str) -> Optional[str]:
+        """An exact count, for when the catalog keeps no usable estimate (a view, or a table the
+        engine has never analysed). Read-only, and bounded like every other introspection read."""
         return f"SELECT COUNT(*) AS estimated_rows FROM {self.qualified(schema, table)}"
 
     # --- type mapping ---
@@ -343,6 +348,12 @@ class Redshift(PostgreSQL):
 
 class MySQL(Dialect):
     name = "MySQL"
+
+    def sql_row_count(self, schema: str, table: str) -> Optional[str]:
+        # No exact-count fallback here until introspection reads carry this engine's own bound
+        # (#459): a count is billed by bytes scanned on BigQuery and keeps running server-side
+        # after a client timeout on MySQL. A view stays unsized, as it was before.
+        return None
     _SYS_SCHEMAS = ("information_schema", "mysql", "performance_schema", "sys")
 
     def quote_ident(self, name: str) -> str:
@@ -448,6 +459,12 @@ class SQLServer(Dialect):
 
 class BigQuery(Dialect):
     name = "BigQuery"
+
+    def sql_row_count(self, schema: str, table: str) -> Optional[str]:
+        # No exact-count fallback here until introspection reads carry this engine's own bound
+        # (#459): a count is billed by bytes scanned on BigQuery and keeps running server-side
+        # after a client timeout on MySQL. A view stays unsized, as it was before.
+        return None
 
     def __init__(self, region: str = "region-us"):
         self.region = region
@@ -572,8 +589,6 @@ class SQLite(Dialect):
             f"FROM pragma_foreign_key_list({self.quote_lit(table)})"
         )
 
-    def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
-        return f"SELECT COUNT(*) AS estimated_rows FROM {self.quote_ident(table)}"
 
 
 # ---------------------------------------------------------------------------
