@@ -226,6 +226,11 @@ class Dialect:
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         # Fallback: an exact COUNT(*). Dialects with cheap estimates override.
+        return self.sql_row_count(schema, table)
+
+    def sql_row_count(self, schema: str, table: str) -> Optional[str]:
+        """An exact count, for when the catalog keeps no usable estimate (a view, or a table the
+        engine has never analysed). Read-only, and bounded like every other introspection read."""
         return f"SELECT COUNT(*) AS estimated_rows FROM {self.qualified(schema, table)}"
 
     # --- type mapping ---
@@ -572,8 +577,6 @@ class SQLite(Dialect):
             f"FROM pragma_foreign_key_list({self.quote_lit(table)})"
         )
 
-    def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
-        return f"SELECT COUNT(*) AS estimated_rows FROM {self.quote_ident(table)}"
 
 
 # ---------------------------------------------------------------------------

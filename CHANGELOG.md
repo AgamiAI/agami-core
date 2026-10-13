@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Views and never-analysed tables get a row count, so large ones are flagged (#451).** The model
+  sizes each table from the database's statistics, and a view has none: Redshift's `svv_table_info`
+  lists only tables, and Postgres reports a view or an unanalysed table as `0` or `-1`, depending on the version. A fact
+  view with millions of rows therefore never reached `large_tables` or got its date columns as
+  `recommended_filters`, so nothing warned about a query scanning all of it. When the statistics
+  give no usable figure, the model build now counts the rows instead, with a read-only query under
+  the normal statement time limit. If the count fails or times out, the size is unknown (a
+  Postgres `-1` is no longer stored as a size). Refresh a model built from views to pick the counts up.
+
 ## [0.9.13] — 2026-10-12
 
 ### Fixed

@@ -1018,16 +1018,35 @@ def _probe_columns(
 def _estimate_rows(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
 ) -> Optional[int]:
-    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan.
-    None when the dialect has no estimate query or the stat is missing/unparseable."""
+    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan — and,
+    when the catalog has no usable figure, an exact count instead (#451).
+
+    A view has no statistics on any engine: Redshift's `svv_table_info` lists only tables, and
+    Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. Read as-is,
+    a fact view with millions of rows came back unknown (or as empty), so it never reached `large_tables` and
+    never got the `recommended_filters` the scan-risk check names. The count is a read-only query,
+    bounded by the same statement limit as every introspection read; if it is refused or runs out of
+    time the size stays unknown, as before. None also when the dialect deliberately offers no
+    estimate query at all."""
     q = dialect.sql_row_estimate(schema, table)
     if not q:
         return None
-    est = _try(runner, q)
-    if not est or est[0].get("estimated_rows") in (None, ""):
+    est = _rows_from(_try(runner, q))
+    if est is not None and est > 0:
+        return est
+    count_q = dialect.sql_row_count(schema, table)
+    if count_q and count_q != q:
+        counted = _rows_from(_try(runner, count_q))
+        if counted is not None:
+            return counted
+    return est if est is not None and est >= 0 else None
+
+
+def _rows_from(rows: Optional[list[dict]]) -> Optional[int]:
+    if not rows or rows[0].get("estimated_rows") in (None, ""):
         return None
     try:
-        return int(float(est[0]["estimated_rows"]))
+        return int(float(rows[0]["estimated_rows"]))
     except (ValueError, TypeError):
         return None
 
