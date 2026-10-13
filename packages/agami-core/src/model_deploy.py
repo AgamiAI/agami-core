@@ -94,7 +94,7 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
             continue
         examples.extend({**ex, "area": ex.get("area") or sa.name} for ex in area_examples if isinstance(ex, dict))
     datasource_md = profile_dir / "datasource.md"
-    datasource_text = datasource_md.read_text() if datasource_md.exists() else None
+    datasource_text = datasource_md.read_text(encoding="utf-8") if datasource_md.exists() else None
     # The hash of the tree being deployed, not the newest snapshot's name: a model edited without a new
     # snapshot would otherwise deploy under the previous version, and one never snapshotted under the
     # constant "deployed", so a client pinning the version could never see it change (#364).
@@ -119,7 +119,7 @@ def _deploy_user_memory(store: Store, artifacts_dir: Path, org_id: str | None = 
     f = artifacts_dir / "USER_MEMORY.md"
     if f.exists():
         org_id = org_id if org_id is not None else _default_org()
-        model_store.write_memory(store, "", user=f.read_text(), org_id=org_id)  # global user row
+        model_store.write_memory(store, "", user=f.read_text(encoding="utf-8"), org_id=org_id)  # global user row
         store.commit()
 
 
@@ -142,7 +142,7 @@ def _deploy_org_record(store: Store, artifacts_dir: Path, org_id: str | None = N
         # (datasource='' sentinel, like USER_MEMORY.md) so the served two-level context can read it.
         narrative = OR.narrative_path(artifacts_dir)
         if narrative.exists():
-            model_store.write_memory(store, "", datasource_doc=narrative.read_text(), org_id=org_id)
+            model_store.write_memory(store, "", datasource_doc=narrative.read_text(encoding="utf-8"), org_id=org_id)
 
 
 def deploy_models(store: Store, artifacts_dir: Path, org_id: str | None = None) -> list[str]:

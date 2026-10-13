@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import _interp  # noqa: F401 — re-exec under agami's configured interpreter if PyYAML is missing
 
@@ -158,7 +160,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
 
         for r in sa.relationships:
             rels_out.append({
-                "qname": f"{sa.name}.{r.from_table}->{r.to_table}",
+                "qname": f"{sa.name}.{_join_key(r)}",
                 "from_table": r.from_table, "from_column": r.from_column,
                 "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
                 "from_schema": r.from_schema, "to_schema": r.to_schema,
@@ -200,7 +202,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
         fa = getattr(r, "from_subject_area", "")
         ta = getattr(r, "to_subject_area", "")
         cross_out.append({
-            "qname": f"{fa}.{r.from_table}->{ta}.{r.to_table}",
+            "qname": f"{fa}~{ta}.{_join_key(r)}",
             "from_subject_area": fa, "to_subject_area": ta,
             "from_table": r.from_table, "from_column": r.from_column,
             "to_table": r.to_table, "to_column": r.to_column, "on": r.on,
@@ -243,10 +245,10 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
 
 
 def render(*, title: str, profile: str, manifest: dict) -> str:
-    template = TEMPLATE_PATH.read_text()
-    logo_dark = LOGO_DARK_PATH.read_text() if LOGO_DARK_PATH.exists() else ""
-    logo_light = LOGO_LIGHT_PATH.read_text() if LOGO_LIGHT_PATH.exists() else ""
-    theme_css = (SHARED_DIR / "theme.css").read_text()
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    logo_dark = LOGO_DARK_PATH.read_text(encoding="utf-8") if LOGO_DARK_PATH.exists() else ""
+    logo_light = LOGO_LIGHT_PATH.read_text(encoding="utf-8") if LOGO_LIGHT_PATH.exists() else ""
+    theme_css = (SHARED_DIR / "theme.css").read_text(encoding="utf-8")
 
     # The manifest embeds arbitrary model text (descriptions, datasource.md, SQL).
     # Escape `</` so a `</script>` in that text can't terminate the <script> block that
@@ -257,7 +259,7 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     # Human-readable generation timestamp (e.g. "10 Jun 2026, 13:57 UTC") — the
     # explorer shows this verbatim, so format it here rather than re-parsing ISO in JS.
     now = datetime.datetime.now(datetime.timezone.utc)
-    generated_at = now.strftime("%-d %b %Y, %H:%M UTC")
+    generated_at = f"{now.day} {now:%b %Y, %H:%M} UTC"  # not %-d: glibc-only, Windows raises
 
     out = (
         template
@@ -270,6 +272,18 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
         .replace("{{THEME_CSS}}", theme_css)
     )
     return out
+
+
+def _join_key(r: Any) -> str:
+    """A key that tells joins between the SAME two tables apart — one per date or person role. The
+    table pair alone gave every date role's join the same key, so approving one approved (and overwrote) all.
+    Each table carries its schema when it has one, so sales.orders and archive.orders stay apart."""
+    ft = f"{r.from_schema}:{r.from_table}" if r.from_schema else r.from_table
+    tt = f"{r.to_schema}:{r.to_table}" if r.to_schema else r.to_table
+    if r.from_column and r.to_column:
+        return f"{ft}.{r.from_column}->{tt}.{r.to_column}"
+    digest = hashlib.sha1(" ".join((r.on or "").split()).encode("utf-8")).hexdigest()[:8]
+    return f"{ft}->{tt}#{digest}"
 
 
 def main() -> int:
@@ -321,12 +335,12 @@ def main() -> int:
     title = args.title or f"Model explorer · {args.profile}"
     out_path = Path(os.path.expanduser(args.out)).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(title=title, profile=args.profile, manifest=manifest))
+    out_path.write_text(render(title=title, profile=args.profile, manifest=manifest), encoding="utf-8")
 
     if args.manifest_out:
         mpath = Path(os.path.expanduser(args.manifest_out)).resolve()
         mpath.parent.mkdir(parents=True, exist_ok=True)
-        mpath.write_text(json.dumps(manifest, indent=2))
+        mpath.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
     t = manifest["totals"]
 

@@ -181,7 +181,7 @@ def parse_csv(path: str) -> list[dict]:
     if not p.exists():
         raise FileNotFoundError(f"CSV not found: {p}")
 
-    with p.open(newline="") as f:
+    with p.open(newline="", encoding="utf-8") as f:
         reader = csv.reader(f)
         all_rows = [r for r in reader if r and any(c.strip() for c in r)]
 
@@ -950,9 +950,21 @@ def _grade_aggregates(prepare: dict | None, join_rows: list[dict], probes: dict 
                                    f"{by_part[weak[0]]['verdict']}, so the fan-out check has no "
                                    "cardinality to reason from"))
         elif agg.get("status") == "multiplied":
-            if risks and risks <= {"fan_out_invariant"}:
+            # The receipt's own answer when it carries one (#450). An aggregate the duplication
+            # cannot move is `null`, not `false`, when it also reads a subquery or CTE the check
+            # could not see into, and clearing that here would undo the point of the field. An older
+            # receipt has no field, and the rule it implied is kept for it.
+            affected = (agg["result_affected"] if "result_affected" in agg
+                        else not (risks and risks <= {"fan_out_invariant"}))
+            if affected is False:
                 rows.append(_part(f"fan_out:{text}", CONFIRMED, depends_on=deps,
                                   note="a join multiplies the rows, but this aggregate cannot move"))
+            elif affected is None:
+                rows.append(_part(f"fan_out:{text}", UNRESOLVED, depends_on=deps,
+                                  note="a join multiplies the rows; this aggregate cannot move under "
+                                       "that duplication, but it also reads something the check "
+                                       "could not resolve, so whether its value is inflated is not "
+                                       "established"))
             else:
                 named = sorted(risks - {"fan_out_invariant"}) or ["multiplied"]
                 rows.append(_part(f"fan_out:{text}", QUERY_DEFECT, depends_on=deps,

@@ -94,7 +94,7 @@
       // "multiplied" (and `joins` names the join that did it), "not_multiplied", or
       // "undetermined". `findings` is the other axis — aggregation class and semi-additivity,
       // which are about what the number MEANS rather than how many rows went into it.
-      "aggregates": {"items": [{"aggregate":"SUM(o.total)","scope":"main","status":"multiplied","reason":null,
+      "aggregates": {"items": [{"aggregate":"SUM(o.total)","scope":"main","status":"multiplied","result_affected":true,"reason":null,
                                 "joins":["orders (1) <- order_items (N)"],
                                 "findings":[{"risk":"fan_trap","reason":"...",
                                              "triggering_joins":["..."],
@@ -1687,7 +1687,12 @@
           if (a.scope && a.scope !== 'main') {
             li.appendChild(document.createTextNode(' ' + a.scope));
           }
-          const said = AGG_BADGE[a.status] || ['stale', a.status || 'unknown'];
+          // A multiplication the value cannot feel (a MIN, MAX, boolean fold or DISTINCT aggregate)
+          // is not the amber state: the rows were repeated, but `result_affected` says this number
+          // is unchanged by it, and an amber badge beside a correct number is a false alarm (#450).
+          const said = (a.status === 'multiplied' && a.result_affected === false)
+            ? ['approved', 'rows repeated by a join; value unaffected']
+            : (AGG_BADGE[a.status] || ['stale', a.status || 'unknown']);
           li.appendChild(el('span', { class: 'conf-badge ' + said[0], text: said[1] }));
           if (a.joins && a.joins.length) {
             li.appendChild(el('div', { class: 'receipt-meta', text: a.joins.join(', ') }));

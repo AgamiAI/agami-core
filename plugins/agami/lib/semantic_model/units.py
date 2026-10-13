@@ -10,6 +10,7 @@ identically everywhere.
 from __future__ import annotations
 
 import datetime as _dt
+import re
 from typing import Optional
 
 # ISO code -> symbol. Extend freely; unknown codes fall back to the bare code.
@@ -166,12 +167,33 @@ def format_cell(value, unit: Optional[str]) -> str:
     return s
 
 
-def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
-    """Render a GitHub-flavoured markdown table with every numeric cell formatted
-    deterministically and in full (exact value, thousands/lakh grouping, currency
-    symbol) — never abbreviated. `units` maps a header to its unit (currency code or
-    label). The query skill and the MCP both call this so the numbers a user verifies
-    are identical regardless of which LLM renders the surrounding answer."""
+# A number in a column NAMED like a year, a period or an identifier is a label, not a quantity:
+# `2024` grouped as `2,024`, or an id as `1,234,567`, misreads it. Matched on the header's words.
+_LABEL_COLUMN_RE = re.compile(
+    r"(^|_)(year|years|yr|fy|fiscal_year|quarter|qtr|month|period|week|day_of_week|"
+    r"id|key|code|nbr|number|num|no|zip|zipcode|postal_code)$"
+)
+
+
+def _names_a_label(header: str) -> bool:
+    return bool(_LABEL_COLUMN_RE.search(re.sub(r"[^a-z0-9]+", "_", header.lower()).strip("_")))
+
+
+def _as_label(value) -> str:
+    """The value as written, minus a float's `.0` a driver may add to a whole number. A string is
+    shown exactly as stored: "001.0" is a code, not a number."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = None) -> list[list[str]]:
+    """Every cell formatted the way an answer shows it: a unit'd column with its symbol and
+    grouping, a column named like a year or an id as a label, any other number grouped.
+    `format_table` renders these, and `sm seed-validate`'s preview shows them, so a value
+    looks the same in the preview someone validates as in the answer they later get."""
     units = units or {}
     cols = [str(h) for h in headers]
 
@@ -181,7 +203,23 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
         h = cols[i] if i < len(cols) else ""
         return units.get(h) or units.get(f"#{i}")
 
-    fmt_rows = [[format_cell(c, _unit_for(i)) for i, c in enumerate(r)] for r in rows]
+    def _fmt(i: int, c) -> str:
+        u = _unit_for(i)
+        if not u and _names_a_label(cols[i] if i < len(cols) else ""):
+            return _as_label(c)
+        return format_cell(c, u)
+
+    return [[_fmt(i, c) for i, c in enumerate(r)] for r in rows]
+
+
+def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
+    """Render a GitHub-flavoured markdown table with every numeric cell formatted
+    deterministically and in full (exact value, thousands/lakh grouping, currency
+    symbol) — never abbreviated. `units` maps a header to its unit (currency code or
+    label). The query skill and the MCP both call this so the numbers a user verifies
+    are identical regardless of which LLM renders the surrounding answer."""
+    cols = [str(h) for h in headers]
+    fmt_rows = format_rows(headers, rows, units)
     head = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body = "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |" for r in fmt_rows)
@@ -189,4 +227,4 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
 
 
 __all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol", "is_date_format",
-           "format_value", "format_date", "format_cell", "format_table"]
+           "format_value", "format_date", "format_cell", "format_rows", "format_table"]

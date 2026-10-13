@@ -172,8 +172,10 @@ class DatasourceSchemaResult(_Contract):
     # Pass 1 (index): subject areas + cross-area relationships.
     subject_areas: list[SubjectAreaSummary] | None = None
     cross_area_relationships: CrossAreaMap | None = None
-    # The never-hide net: every metric the model declares, and the tables big enough to matter.
+    # The never-hide net: every described metric in scope, a count of the undescribed rest (#406),
+    # and the tables big enough to matter.
     metric_index: dict[str, Any] | None = None
+    metrics_without_description: int | None = None
     large_tables: dict[str, int] | None = None  # {table: estimated_row_count}
     note: str | None = None
     truncated: bool | None = None

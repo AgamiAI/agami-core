@@ -29,7 +29,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import loader as L
 from . import runtime as RT
@@ -39,6 +39,21 @@ from . import validator as V
 def _print_json(obj) -> None:
     json.dump(obj, sys.stdout, indent=2, default=str)
     sys.stdout.write("\n")
+
+
+def _read_json_file(path: str) -> Any:
+    """Read a command's JSON input, or stop with a JSON error naming the RESOLVED path. A traceback
+    on stdout (a relative path that didn't resolve where the caller thought, a half-written file)
+    read as "nothing to apply" to a skill parsing the output, so it went on as if the call had worked."""
+    p = Path(path).expanduser()
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        _print_json({"error": f"file not found: {p.resolve()}"})
+    except (OSError, ValueError) as exc:
+        _print_json({"error": f"could not read JSON from {p.resolve()}: {exc}"})
+    raise SystemExit(2)
 
 
 def _utc_now_iso() -> str:
@@ -248,7 +263,7 @@ def cmd_prepare(args) -> int:
     the receipt is and not here."""
     sql = args.sql
     if args.sql_file:
-        sql = Path(args.sql_file).read_text()
+        sql = Path(args.sql_file).read_text(encoding="utf-8")
     org = L.load_datasource(args.root)
     pf = RT.pre_flight_check(sql, org)
     _print_json({
@@ -276,7 +291,7 @@ def cmd_receipt(args) -> int:
     from . import snapshot as SN
     sql = args.sql
     if args.sql_file:
-        sql = Path(args.sql_file).read_text()
+        sql = Path(args.sql_file).read_text(encoding="utf-8")
     org = L.load_datasource(args.root)
     receipt = RT.assemble_receipt(
         org, sql,
@@ -425,7 +440,7 @@ def cmd_filter_values_judge(args) -> int:
         _print_json({"error": "no_results_dir", "detail": f"{results} is not a directory"})
         return 2
     try:
-        plan = json.loads(Path(args.plan).read_text())
+        plan = json.loads(Path(args.plan).read_text(encoding="utf-8"))
         out = probes.filter_values_judge(plan, results)
     except (OSError, ValueError) as exc:
         _print_json({"error": "bad_plan", "detail": str(exc)})
@@ -510,14 +525,18 @@ def cmd_set_terminology(args) -> int:
     `key_terminology` — the decoded-abbreviation legend enrichment produces. Merges by
     default (layers over a human's edits); --replace overwrites. Validated + committed."""
     from . import curate
-    with open(args.file, encoding="utf-8") as fh:
-        terms = json.load(fh)
+    terms = _read_json_file(args.file)
     if isinstance(terms, dict) and "key_terminology" in terms:
         terms = terms["key_terminology"]
     res = curate.set_key_terminology(args.root, terms, merge=not args.replace)
     _print_json({"applied": res.applied, "validated": res.validated,
-                 "committed": res.committed, "errors": res.errors})
+                 "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
+
+
+def _commit_note(res) -> dict:
+    """`commit_note` only when there is one, the same shape `ApplyResult.as_dict` gives."""
+    return {"commit_note": res.commit_note} if res.commit_note else {}
 
 
 def cmd_set_description(args) -> int:
@@ -527,14 +546,13 @@ def cmd_set_description(args) -> int:
     from . import curate
     res = curate.set_datasource_description(args.root, args.description)
     _print_json({"applied": res.applied, "validated": res.validated,
-                 "committed": res.committed, "errors": res.errors})
+                 "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
 
 
 def cmd_curate(args) -> int:
     from . import curate
-    with open(args.ops_file, encoding="utf-8") as fh:
-        ops = json.load(fh)
+    ops = _read_json_file(args.ops_file)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
     _stamp_approve_ops(ops)
@@ -554,7 +572,9 @@ def cmd_approve_queue(args) -> int:
     queue = curate.review_queue(org)
     kinds = set(args.kind) if args.kind else None
     ops = [{"op": "approve", "kind": it["kind"], "area": it["area"],
-            "name": it["name"], "at": _utc_now_iso()}
+            "name": it["name"], "at": _utc_now_iso(),
+            **{k: it[k] for k in ("from_schema", "to_schema", "from_column", "to_column", "on")
+               if it.get(k)}}
            for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
            if kinds is None or it["kind"] in kinds]
     if args.dry_run:
@@ -567,8 +587,7 @@ def cmd_approve_queue(args) -> int:
 
 def cmd_add(args) -> int:
     from . import curate
-    with open(args.file, encoding="utf-8") as fh:
-        items = json.load(fh)
+    items = _read_json_file(args.file)
     if isinstance(items, dict):
         items = items.get(args.kind + "s", items.get("items", []))
     res = curate.write_items(args.root, args.area, args.kind, items,
@@ -577,10 +596,21 @@ def cmd_add(args) -> int:
     return 0 if res.validated else 1
 
 
+def cmd_apply_spec(args) -> int:
+    from . import model_spec
+    spec = _read_json_file(args.file)
+    if not isinstance(spec, dict):
+        _print_json({"error": "a model spec is a JSON object with subject_areas, tables and joins"})
+        return 2
+    res = model_spec.apply_spec(args.root, spec,
+                                signer=args.signer, role=args.role, dry_run=args.dry_run)
+    _print_json(res.as_dict())
+    return 0 if not res.errors else 1
+
+
 def cmd_add_example(args) -> int:
     from . import curate
-    with open(args.file, encoding="utf-8") as fh:
-        items = json.load(fh)
+    items = _read_json_file(args.file)
     if isinstance(items, dict):
         items = items.get("examples", items.get("items", []))
     res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
@@ -596,7 +626,7 @@ def cmd_remove_example(args) -> int:
     res = curate.remove_examples(args.root, args.area, args.question,
                                  signer=args.signer, role=args.role)
     _print_json({"rejected": res.applied, "skipped": res.skipped,
-                 "validated": res.validated, "committed": res.committed})
+                 "validated": res.validated, "committed": res.committed, **_commit_note(res)})
     return 0 if (res.applied or not res.skipped) else 1
 
 
@@ -656,15 +686,13 @@ def cmd_set_units(args) -> int:
 
 
 def cmd_suggest_metrics(args) -> int:
-    """Infer a sensible per-table metric set — flag rates, start→end durations, and a plain
-    COUNT/SUM/AVG only where it carries a unit or a caveat the aggregation class does not (#404) —
-    and write them PROPOSED/unreviewed for bulk sign-off in the explorer, instead of asking the
-    user to pick ~4 upfront. Rule 1 keeps proposed metrics out of any answer until approved, so a
-    large suggested set can't degrade results."""
+    """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
+    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer,
+    instead of asking the user to pick ~4 upfront. An unsigned metric is still used, and the answer
+    warns that it is unreviewed (Rule 1), so every proposal is worth a person's glance."""
     from . import build as B
     from . import curate
     from . import dialects as D
-    from . import introspect as INTRO
     org = L.load_datasource(args.root)
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
     default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
@@ -678,40 +706,48 @@ def cmd_suggest_metrics(args) -> int:
                 _dcache[st] = D.get_dialect("postgresql")
         return _dcache[st]
 
-    suggested = written = auto = skipped_opaque = 0
+    # Every metric name on disk, rejected ones included. `org` drops rejected entries, which is
+    # right for choosing what to propose on (never a rejected table or column), but `write_items`
+    # overwrites a file of the same name — so checking against `org`'s metrics alone re-proposed a
+    # metric a person had rejected and reset it to unreviewed, undoing the rejection.
+    on_disk = {sa.name: {m.name for m in sa.metrics}
+               for sa in L.load_datasource(args.root, include_rejected=True).subject_areas}
+
+    suggested = written = skipped_opaque = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
-        existing = {m.name for m in sa.metrics}
+        existing = set(on_disk.get(sa.name, ()))
         items: list[dict] = []
         for t in sa.tables_defined:
             # columns agami couldn't read yield no metric until described — count them so the
             # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
+            # A flag would have been a rate; a start or end timestamp half of a duration.
             skipped_opaque += sum(
                 1 for c in t.columns
                 if c.description_source == "ai_unknown" and not c.primary_key
-                and (c.type == "boolean" or c.aggregation in ("additive", "averageable")))
+                and (c.type == "boolean"
+                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))
+                     or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
+                                                    or B._END_NAME_RE.search(c.name)))))
             st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table,
-                                         now=INTRO._NOW):
+            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
                 if met["name"] in existing:
                     continue
                 existing.add(met["name"])
                 items.append(met)
                 suggested += 1
-                if met.get("review_state") == "approved":
-                    auto += 1
         if items:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    note = ("basic COUNT/SUM/AVG auto-approved (system-signed); flag rates & durations left "
-            "proposed — review & sign off in the explorer (/agami-model)")
+    note = ("flag rates & durations proposed — review & sign off in the explorer (/agami-model); "
+            "give each one you keep a one-line description")
     if skipped_opaque:
         note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
                  "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
-    _print_json({"suggested": suggested, "written": written, "auto_approved": auto,
+    _print_json({"suggested": suggested, "written": written,
                  "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
     return 0 if not errors else 1
 
@@ -722,7 +758,18 @@ def cmd_describe_file(args) -> int:
     curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
     generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
     from . import curate
-    text = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
+    if args.file:
+        p = Path(args.file).expanduser()
+        try:
+            text = p.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            _print_json({"error": f"file not found: {p.resolve()}"})
+            return 2
+        except (OSError, ValueError) as exc:  # a directory, no permission, not UTF-8
+            _print_json({"error": f"could not read {p.resolve()}: {exc}"})
+            return 2
+    else:
+        text = sys.stdin.read()
     ops = []
     for ln in text.splitlines():
         if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
@@ -741,7 +788,9 @@ def cmd_describe_file(args) -> int:
         _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
         return 0
     res = curate.apply(args.root, ops)
-    _print_json({"described": len(res.applied), "errors": res.errors})
+    # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
+    # over a generated one — so the skill can say so instead of counting it as described.
+    _print_json({"described": len(res.applied), "skipped": res.skipped, "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -752,7 +801,7 @@ def cmd_format_table(args) -> int:
     import csv as _csv
 
     from . import units
-    text = Path(args.csv_file).read_text() if args.csv_file else sys.stdin.read()
+    text = Path(args.csv_file).read_text(encoding="utf-8") if args.csv_file else sys.stdin.read()
     reader = list(_csv.reader(io.StringIO(text)))
     if not reader:
         print("")
@@ -855,15 +904,14 @@ def cmd_seed_examples(args) -> int:
         if block is not None:
             _print_json(block)
             return 2
-    with open(args.file, encoding="utf-8") as fh:
-        cands = json.load(fh)
+    cands = _read_json_file(args.file)
     if isinstance(cands, dict):
         cands = cands.get("examples", cands.get("items", []))
     runner = make_execute_sql_runner(args.profile)
     passing, rejected = curate.validate_seeds(cands, runner)
     res = curate.add_examples(args.root, args.area, passing) if passing else curate.ApplyResult()
     _print_json({"added": res.applied, "written": res.validated,
-                 "committed": res.committed, "rejected": rejected})
+                 "committed": res.committed, **_commit_note(res), "rejected": rejected})
     return 0
 
 
@@ -886,7 +934,10 @@ def cmd_seed_validate(args) -> int:
     script = str(Path(__file__).resolve().parent.parent / "execute_sql.py")
     # the safety pass inside execute_sql.py finds the model via AGAMI_ARTIFACTS_DIR —
     # point it at the profile dir's parent so the right model loads (fan/chasm + filters).
-    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent)}
+    # The child's streams are decoded as UTF-8 below, from its very first byte. PYTHONIOENCODING too,
+    # because an inherited one takes precedence over UTF-8 mode for the standard streams.
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(Path(args.root).resolve().parent),
+           "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     cap = max(0, args.preview)
     # Load the model once so result numbers are formatted by the SAME units.py the query
     # path uses (currency symbol + grouping). The validation preview must MATCH the real
@@ -907,7 +958,7 @@ def cmd_seed_validate(args) -> int:
             continue
         proc = subprocess.run(
             [exe, script, "--profile", args.profile, "--area", args.area, "--sql", sql],
-            capture_output=True, text=True, env=env,
+            capture_output=True, text=True, encoding="utf-8", env=env,
         )
         if proc.returncode != 0:
             # A SQL error or a scope refusal — surface it; never fake a result. NOT a fan or chasm
@@ -928,13 +979,7 @@ def cmd_seed_validate(args) -> int:
                     except Exception:
                         unit_map = {}
                 if data:
-                    # match a column's unit by name OR positional key (#ci) — like
-                    # units.format_table — so a dialect that re-cases result headers (e.g.
-                    # Snowflake returns TOTAL_OUTSTANDING for alias `total_outstanding`)
-                    # still resolves the unit and shows the currency symbol.
-                    data = [[units.format_cell(c, unit_map.get(h) or unit_map.get(f"#{ci}"))
-                             for ci, (h, c) in enumerate(zip(headers, row))]
-                            for row in data]
+                    data = units.format_rows(headers, data, unit_map)
                 item["row_headers"] = headers
                 item["row_count"] = len(data)
                 item["row_preview"] = data[:cap]
@@ -968,7 +1013,7 @@ def cmd_introspect(args) -> int:
                      if ln.strip() and not ln.lstrip().startswith("#")]
         tables = (tables or []) + _normalize_table_list(from_file)
 
-    runner = INTRO.make_execute_sql_runner(args.profile)
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(
@@ -1248,7 +1293,7 @@ def cmd_discover(args) -> int:
     the full build on only the kept tables. No grain/FK/row-count probes here."""
     from . import introspect as INTRO
 
-    runner = INTRO.make_execute_sql_runner(args.profile)
+    runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
     inventory = INTRO.discover_inventory(
         args.profile,
         args.db_type,
@@ -1463,6 +1508,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="print the approve ops that would be applied, without applying them")
     sp.set_defaults(func=cmd_approve_queue)
 
+    sp = sub.add_parser("apply-spec",
+                        help="apply a model spec (subject areas, table ownership, joins, metrics, "
+                             "sensitive columns, rules) over the introspected model as one validated, "
+                             "revertable step")
+    sp.add_argument("root")
+    sp.add_argument("--file", required=True, help="the spec as JSON (model_spec_workbook.py makes it from the template)")
+    sp.add_argument("--signer", default=None, help="who signs off the joins and metrics the spec marks approved")
+    sp.add_argument("--role", default=None)
+    sp.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="check the spec and report what would change, without writing")
+    sp.set_defaults(func=cmd_apply_spec)
+
     sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
     sp.add_argument("root")
     sp.add_argument("--kind", required=True, choices=["metric", "entity"])
@@ -1499,7 +1556,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explicit table.column (or bare column) list — overrides money detection")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates, durations, and a plain count/sum/avg only where it carries a unit or caveat) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
@@ -1597,7 +1654,18 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _utf8_stdio() -> None:
+    """Write stdout and stderr as UTF-8 whatever the platform. A piped stream on Windows uses the
+    ANSI code page, so the help text's arrows and a currency symbol such as ₹ raise instead of
+    printing, and every caller of `sm` already decodes UTF-8. A replaced stream (a test's capture)
+    may have no `reconfigure`, and needs none."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main(argv=None) -> int:
+    _utf8_stdio()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

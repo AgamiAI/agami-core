@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import functools
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -887,12 +887,43 @@ class AggregateReport:
     # on the other two statuses. One word for four different causes sent a reader to the join when
     # the aggregate simply named no column.
     reason: Optional[str] = None
+    # Whether every read of the aggregate resolved to a table the analysis could see behind. Not
+    # emitted: `reason` already says why on an `undetermined` report. Kept because a multiplication
+    # outranks an unresolved read in `status`, so a `multiplied` report can still have reads the
+    # analysis did not see, and those decide `result_affected` below.
+    resolved: bool = True
+
+    @property
+    def result_affected(self) -> Optional[bool]:
+        """Whether the duplication `status` reports can have changed THIS value (#450).
+
+        `status` describes the rows and stays `multiplied` for a `MAX` over a fan, because the rows
+        really were duplicated and `not_multiplied` would be a false claim. What a reader needs to
+        act on is the other fact: a minimum, a maximum, a boolean fold or a DISTINCT aggregate
+        cannot move under duplication. False when every multiplying finding is `fan_out_invariant`
+        (or nothing multiplied), True when any fan or chasm trap is, None when undetermined.
+
+        Derived rather than stored, so a report downgraded to `undetermined` after it was built
+        cannot keep a stale answer. It covers this aggregate at its own scope only: a value read
+        from a subquery or CTE resolves to no table, so it is never `False`. That holds even when a
+        fan on a table it DID resolve makes `status` `multiplied`: the unresolved part may already
+        be inflated, so the answer is None.
+
+        The chasm check does not grade immunity, so a `MIN` or `MAX` under a chasm reads True. That
+        is the conservative side; finer grading is #200 / #204 / #339 / #429."""
+        if self.status == UNDETERMINED:
+            return None
+        risks = {f.risk for f in self.findings if f.risk in _MULTIPLYING_RISKS}
+        if not risks <= {"fan_out_invariant"}:
+            return True
+        return False if self.resolved else None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "aggregate": self.aggregate,
             "scope": self.scope,
             "status": self.status,
+            "result_affected": self.result_affected,
             "joins": self.joins,
             "findings": [f.as_dict() for f in self.findings],
             "reason": self.reason,
@@ -1853,6 +1884,19 @@ def _cardinality_index(org: Datasource) -> list[Relationship]:
     return rels
 
 
+def _folded_rel(rel: Relationship) -> Relationship:
+    """A COPY of `rel` with its two table names in `_tkey` spelling, for the detectors' comparisons.
+
+    Copied because the relationship belongs to the model, which every other analysis in the receipt
+    still reads as declared. An edge already in that spelling is returned as is, because this runs
+    per SELECT and per set-operation arm and the common, lowercase model would otherwise pay a copy
+    of every edge each time."""
+    folded_from, folded_to = _tkey(rel.from_table), _tkey(rel.to_table)
+    if folded_from == rel.from_table and folded_to == rel.to_table:
+        return rel
+    return rel.model_copy(update={"from_table": folded_from, "to_table": folded_to})
+
+
 def _one_side_facing_many(rels: list[Relationship], table: str, others: set[str]) -> list[Relationship]:
     """Relationships where `table` is the ONE side and a joined `other` is the MANY side."""
     hits = []
@@ -1917,7 +1961,9 @@ def pre_flight_check(sql: str, org: Datasource,
 def _aggregate_reports(tree, org: Datasource,
                        ctx: "GuardContext | None" = None,
                        *, visible: Optional[set[str]] = None,
-                       tidx: Optional[dict[str, tuple]] = None) -> list[AggregateReport]:
+                       tidx: Optional[dict[str, tuple]] = None,
+                       join_statuses: "tuple[list[tuple[str, str, str]], int] | None" = None,
+                       ) -> list[AggregateReport]:
     """The analysis half, on an already-parsed tree: one report per aggregate the statement outputs.
 
     This was `_collect_findings`, which returned the flat finding list this is now a projection of.
@@ -1961,7 +2007,49 @@ def _aggregate_reports(tree, org: Datasource,
                 sel, org, ctx=ctx,
                 scope="main" + suffixes.get(id(sel), ""), visible=visible, tidx=tidx,
             ))
-    return reports
+    if join_statuses is None and reports:
+        # The pre-flight path (`sm prepare`) holds no joins section, so it settles the joins here —
+        # the same ladder the receipt runs — rather than claim numbers clean it never weighed.
+        sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
+        declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
+                    if sites else [])
+        join_statuses = ([(js.scope, _join_site_status(js, declared)[0],
+                           f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                          for js in sites], written - len(sites))
+    return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
+
+
+_UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat rows: "
+
+
+def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
+                         dropped: int) -> list[AggregateReport]:
+    """`not_multiplied` is a positive claim that no join repeated the rows behind a number, and the
+    fan detector can only make it about joins whose cardinality it knows. A join no declaration
+    settled — `undetermined` or `undeclared` — or one past the cap, is a join it never weighed, so a
+    number it could reach says it could not tell, naming the joins: the rule `_multiplication_status`
+    states per aggregate.
+
+    Only joins that can feed the number count: its own query branch, or a CTE (which any branch may
+    read). A join in another UNION arm, or inside a `WHERE ... IN (subquery)`, can't repeat its rows.
+    The one exception is a join past the receipt's cap: it is never read — that is what the cap is
+    for, since a caller can write any number of joins — so its branch is unknown, and every number is
+    downgraded rather than one cleared that the uncounted join might feed."""
+    out = []
+    for r in reports:
+        if r.status != NOT_MULTIPLIED:
+            out.append(r)
+            continue
+        unweighed = [label for scope, status, label in joins
+                     if status in (UNDETERMINED, UNDECLARED)
+                     and (scope == r.scope or scope.startswith("cte:"))]
+        if not unweighed and not dropped:
+            out.append(r)
+            continue
+        why = _UNWEIGHED_REASON + (
+            ", ".join(unweighed) if unweighed else f"{dropped} join(s) past the receipt's cap")
+        out.append(replace(r, status=UNDETERMINED, reason=why))
+    return out
 
 
 # The risks that are statements about the ROWS an aggregate was computed from, and therefore the
@@ -2026,7 +2114,27 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
         # in the battery and across every arm of a set operation; appending a statement-derived
         # edge to it would leak this query's CTE into the next one's analysis.
         rels = rels + cte_rels
+    # Every table-name comparison below is a plain string comparison, and a statement and a model
+    # can spell one table two ways: `FROM ORDERS` against a model that says `orders`, or a model
+    # introspected from an engine that hands names back uppercase against a statement written in
+    # lowercase. Compared as written, the fan detector found no edge and the receipt reported a
+    # multiplied SUM as `not_multiplied` (#201). Folded ONCE, on both sides, with the same `_tkey`
+    # the scope gate and the table index use, so no fan/chasm comparison can disagree with another.
+    # The aggregation-class and semi-additivity checks keep the map AS WRITTEN. Their lookups match
+    # across case themselves (#453), exact name first, so a model declaring both `ORDERS` and
+    # `orders` still finds the one the statement named; a folded name would lose that.
+    written_scope = tables_in_scope
+    tables_in_scope = {alias: _tkey(t) for alias, t in tables_in_scope.items()}
+    rels = [_folded_rel(r) for r in rels]
     table_set = set(tables_in_scope.values())
+
+    def shown(table: str) -> str:
+        # Findings name a table as the model declares it, not in the folded spelling the
+        # comparisons above use (#453): `ORDERS`, not `orders`, on a model that says `ORDERS`. A name
+        # the model does not declare (a CTE, a derived table) is shown as it reached here.
+        hit = tidx.get(table)
+        return _echo_name(hit[0].name if hit else table)
+
     # Only the edges the statement's own joins could have traversed count below (ACE-133). The fan
     # and chasm detectors match a declared edge to a join by TABLE PAIR, and a model can declare two
     # edges between one pair: a subclass view joined to its base table on the key the model declares
@@ -2054,8 +2162,8 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 # a PAIR of tables into a report on each aggregate the cross-product inflates —
                 # the pair is not the unit a caller reads, the number is.
                 many_sources = {s for s in agg_sources if _many_side_facing_one(rels, s, shared)}
-                srcs = [_echo_name(s) for s in sorted(agg_sources)]
-                shared_echo = _echo_name(shared)
+                srcs = [shown(s) for s in sorted(agg_sources)]
+                shared_echo = shown(shared)
                 reason = (
                     f"chasm trap: independent measures from {srcs} both join shared "
                     f"dimension {shared_echo!r}; cross-product inflates both aggregates."
@@ -2084,7 +2192,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 _bare(r.from_table) if _bare(r.to_table) == measure_table else _bare(r.to_table)
                 for r in fan_rels
             }
-            measure = _echo_name(measure_table)
+            measure = shown(measure_table)
             for i, site in enumerate(sites):
                 if measure_table not in site.sources:
                     continue
@@ -2098,7 +2206,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 inflating = [mt for mt in sorted(many_tables) if mt not in site.value_sources]
                 if not inflating:
                     continue
-                many = [_echo_name(mt) for mt in inflating]
+                many = [shown(mt) for mt in inflating]
                 # Two sentences about ONE fan, picked per aggregate. The edge is the same edge and
                 # the duplication is the same duplication; what differs is whether the number moved
                 # with it. The second states that and stops there — it names no fix, because under
@@ -2132,7 +2240,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # Returned as (site index, finding) rather than as bare findings: these are the two checks that
     # already knew which aggregate they were about, and re-deriving that from the finding text
     # afterwards would be inventing an answer the check had in hand.
-    for i, finding in _check_aggregation_semantics(tree, sites, org, tables_in_scope, ctx=ctx):
+    for i, finding in _check_aggregation_semantics(tree, sites, org, written_scope, ctx=ctx):
         attached[i].append(finding)
 
     reports: list[AggregateReport] = []
@@ -2149,6 +2257,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
             )),
             findings=findings,
             reason=site.unresolved_because if status == UNDETERMINED else None,
+            resolved=site.resolved,
         ))
     return reports
 
@@ -2576,17 +2685,62 @@ def _column_index(org: Datasource) -> dict[str, dict[str, Column]]:
     return idx
 
 
+def _ci_get(mapping: dict[str, Any], name: Optional[str], *, quoted: bool = False) -> Any:
+    """`mapping[name]`, matching the key the way SQL matches an identifier: exactly, else (for an
+    unquoted name) case-insensitively and only when that finds exactly one key. Two keys differing
+    only in case are ambiguous, and a guess would attach a finding to the wrong column; a quoted name
+    is case-sensitive, so it never falls back."""
+    if not name:
+        return None
+    if name in mapping:
+        return mapping[name]
+    if quoted:
+        return None
+    hits = [k for k in mapping if _tkey(k) == _tkey(name)]
+    return mapping[hits[0]] if len(hits) == 1 else None
+
+
+def _is_quoted(col: "exp.Column") -> bool:
+    ident = col.args.get("this")
+    return isinstance(ident, exp.Identifier) and bool(ident.args.get("quoted"))
+
+
+def _semi_metric(semi: dict[tuple[str, str], "Metric"], table: str, col: "exp.Column") -> Optional["Metric"]:
+    """The semi-additive metric summing `table.col`, matched like `_ci_get`: the declared pair
+    exactly, else (unquoted column) the one pair equal ignoring case. A quoted `"Balance"` beside a
+    declared `balance` is a different column and does not match (#453)."""
+    if (table, col.name) in semi:
+        return semi[(table, col.name)]
+    hits = [key for key in semi
+            if _tkey(key[0]) == _tkey(table)
+            and (key[1] == col.name if _is_quoted(col) else _tkey(key[1]) == _tkey(col.name))]
+    return semi[hits[0]] if len(hits) == 1 else None
+
+
 def _lookup_column(col: "exp.Column", scope: dict[str, str],
                    colidx: dict[str, dict[str, Column]]) -> Optional[Column]:
-    t = _resolve_col_table(col, scope)
-    if t and col.name in colidx.get(t, {}):
-        return colidx[t][col.name]
-    # bare column, ambiguous table: only safe if exactly one in-scope table defines it
-    if not t:
-        owners = [tt for tt, cols in colidx.items()
-                  if tt in set(scope.values()) and col.name in cols]
+    """The model's Column a statement column reads, for the aggregation-class and semi-additivity
+    checks. Table and column names match case-insensitively (#453): a model introspected from an
+    engine that stores names uppercase, read by a statement written in lowercase or the reverse, is
+    the same table and column, and an exact match made those checks go quiet."""
+    t = _resolve_ci(col, scope)
+    found = _ci_get(_ci_get(colidx, t) or {}, col.name, quoted=_is_quoted(col)) if t else None
+    if found is not None:
+        return found
+    # bare column, ambiguous table: only safe if exactly one in-scope table defines it. Exact table
+    # names first, so a model declaring two tables that differ only in case keeps the answer the
+    # exact match always gave; case-insensitively only when nothing matched exactly. A QUALIFIED
+    # column that `_resolve_ci` left unresolved (an ambiguous qualifier) is not a bare column, and
+    # attributing it to whichever table owns the name would be the guess it declined to make.
+    if not t and not col.table:
+        in_scope = set(scope.values())
+        owners = [cols for tt, cols in colidx.items() if tt in in_scope and col.name in cols]
+        if not owners:
+            folded = {_tkey(v) for v in in_scope}
+            owners = [cols for tt, cols in colidx.items()
+                      if _tkey(tt) in folded and _ci_get(cols, col.name, quoted=_is_quoted(col)) is not None]
         if len(owners) == 1:
-            return colidx[owners[0]][col.name]
+            return _ci_get(owners[0], col.name, quoted=_is_quoted(col))
     return None
 
 
@@ -2718,8 +2872,8 @@ def _check_aggregation_semantics(
             # match on (table, column) — resolve the summed column's table from the
             # query; skip when it can't be pinned down (don't mis-fire on a bare column
             # that happens to share a name with a semi-additive measure elsewhere).
-            ctable = _resolve_col_table(col, scope)
-            mm = semi.get((ctable, col.name)) if ctable else None
+            ctable = _resolve_ci(col, scope)
+            mm = _semi_metric(semi, ctable, col) if ctable else None
             if mm is not None:
                 cname = _echo_name(col.name)
                 found.append((i, Finding(
@@ -2888,7 +3042,12 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     detector. Neither names anything from the model, so a marker discloses nothing that the items
     beside it do not already.
     """
-    unsettled = sum(1 for r in reports if r.status == UNDETERMINED)
+    # Two different gaps behind `undetermined`: reads this layer could not resolve, and a join behind
+    # the number that no declaration settled (`_downgrade_unweighed`). Counted apart so neither
+    # clause misdescribes the other's aggregates.
+    unweighed = sum(1 for r in reports if r.status == UNDETERMINED
+                    and (r.reason or "").startswith(_UNWEIGHED_REASON))
+    unsettled = sum(1 for r in reports if r.status == UNDETERMINED) - unweighed
     # Which aggregates the walk did not reach, split by WHERE they sit, because the two are
     # different gaps to a reader: one is a clause of this statement we do not read, the other is a
     # query scope we do not enter.
@@ -2906,6 +3065,8 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     return " ".join(clause for clause in (
         (f"{unsettled} of the listed aggregate(s) could not be resolved to the tables they read, "
          "so whether a join multiplies them is not established." if unsettled else ""),
+        (f"{unweighed} of the listed aggregate(s) sit behind a join whose cardinality isn't "
+         "established, so whether it multiplies them is not established." if unweighed else ""),
         ("An aggregate in HAVING or ORDER BY is not reported: only the SELECT list is read."
          if in_filter_or_sort else ""),
         ("An aggregate inside a CTE or a subquery is not reported: only the SELECT lists that "
@@ -2972,6 +3133,95 @@ def _joins_marker(items: list[dict[str, Any]], dropped: int) -> Optional[str]:
          "model declares them is not established." if unsettled else ""),
         (f"{dropped} further join(s) are not listed." if dropped else ""),
     ) if clause) or None
+
+
+def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Optional[Relationship]]":
+    """One written join's status against the model's declarations, and the relationship it matched.
+    The ladder the receipt's joins section reports, shared with the aggregate analysis so a number
+    behind a join this ladder could not settle is never called clean (`_downgrade_unweighed`)."""
+    match: Optional[Relationship] = None
+    if not js.right_declarable:
+        # An endpoint the STATEMENT bound — a CTE name, a derived table, a `VALUES` list, a CTE
+        # shadowing a declared table — cannot be what any declaration is about, so this is
+        # settled rather than open: there is nothing here for a better analysis to establish
+        # later. The RIGHT endpoint is asked first because it is the one always established —
+        # it comes off `join.this`, the join's own right input — so a structural impossibility
+        # there outranks everything below however little the ON said.
+        status = UNDECLARABLE
+    elif not js.pinned:
+        # The ON did not reduce to a pair of endpoints. Unlike the branch above this is a fact
+        # about the ANALYSIS, so it stays open and `_joins_marker` counts it: reporting it
+        # `undeclarable` would claim the model cannot declare a join it may well declare, and
+        # would let the marker reach null with something genuinely unestablished under it.
+        status = UNDETERMINED
+    elif not js.left_declarable:
+        # And only NOW is the left endpoint worth asking about, because only now is it one the
+        # analysis established. Until the ON pins, `left` holds the FROM fallback, which is a
+        # LABEL — the address a reader needs to find the join in their own SQL — and reading a
+        # settled status off it made the FROM decide the question: the same unreadable ON came
+        # back `undetermined` over `FROM orders` and `undeclarable` over `FROM (SELECT …) d`,
+        # the second under a null marker, and the FROM relation need not be party to the join at
+        # all.
+        status = UNDECLARABLE
+    elif js.predicate is None and js.node.args.get("kind") == "CROSS":
+        # It wrote no predicate, which is a fact about the statement and not a gap in the
+        # analysis: there is nothing here for a declaration to match.
+        #
+        # `kind` is the ONLY thing separating this settled status from the open one two branches
+        # down, where the comma join lands. The battery is what pins that distinction: the
+        # sqlglot pin is an open `>=`, and a future version that normalized `FROM a, b` to a
+        # `CROSS` kind would move every comma join from `undetermined` to a settled claim that
+        # the model does not declare it — silently, since both shapes already report a null
+        # predicate. `test_the_comma_join_is_undetermined_and_reports_no_predicate` fails first.
+        status = UNDECLARED
+    elif not js.pairs:
+        # Two shapes reach here and both leave the question open. The comma join
+        # (`FROM a, b WHERE a.id = b.id`) wrote its predicate into the WHERE, and attributing a
+        # WHERE conjunct to a join is an implication check ACE-099 ruled out. The other is an ON
+        # nothing in reduced to a pair of columns — a join on an expression, or on an
+        # unqualified column this layer will not guess the table of. Neither is evidence that
+        # the model does not declare the join, which is what `undeclared` would assert.
+        status = UNDETERMINED
+    else:
+        # The written pairs against the declared ones, DECLARED-AS-A-SUBSET: extra conjuncts an
+        # author added — the as-of and soft-delete shapes — do not weaken the match, which is the
+        # stance ACE-099 shipped for declared filters, so a reader comparing `tables` and `joins`
+        # sees one rule and not two. First match in `_cardinality_index`'s own list order, so the
+        # same statement names the same relationship on every run (REQ-022).
+        #
+        # The two sides are reduced ASYMMETRICALLY and that is the whole design. The WRITTEN side
+        # is lossy on purpose — a conjunct the SQL author added beyond the declared join is not a
+        # reason to withhold the match. The DECLARED side may not be: a declaration reduced to a
+        # subset of itself would match a statement that never wrote the rest of it. So
+        # `_declared_pairs` returns None rather than a partial reduction, which is what makes
+        # `pairs is not None` here a filter and not a formality.
+        written = js.pairs | js.fixed
+        match = next((rel for rel, pairs in declared_pairs
+                      if pairs is not None and pairs <= written), None)
+        same_tables = {_tkey(js.endpoints[0]), _tkey(js.endpoints[1])}
+        if match is not None:
+            status = DECLARED
+        elif any(_rel_tables(rel) == same_tables and (
+                    pairs is None
+                    # The declared columns were written but not its fixed-value condition, which
+                    # may sit in a WHERE this layer does not attribute to the join: not evidence
+                    # the model lacks the join, so it stays open rather than `undeclared`.
+                    or {p for p in pairs if not _is_fixed_value(p)} <= js.pairs)
+                 for rel, pairs in declared_pairs):
+            # Nothing matched, and a declaration between THESE TWO TABLES is one we could not
+            # read — an `on:` that will not parse, one carrying a bind marker, one that did not
+            # reduce whole. `undeclared` would tell the reader "the model does not declare this
+            # join" on the strength of our own failure to read the model, and send a model
+            # author off to add an edge they already have. It is our gap, so it stays open and
+            # the marker counts it.
+            #
+            # Scoped to declarations touching BOTH endpoints, because an unreadable edge
+            # elsewhere in the model says nothing about this join and would otherwise make every
+            # join in every statement unanswerable.
+            status = UNDETERMINED
+        else:
+            status = UNDECLARED
+    return status, match
 
 
 def assemble_receipt(
@@ -3079,82 +3329,7 @@ def assemble_receipt(
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
     for js in join_sites:
-        match: Optional[Relationship] = None
-        if not js.right_declarable:
-            # An endpoint the STATEMENT bound — a CTE name, a derived table, a `VALUES` list, a CTE
-            # shadowing a declared table — cannot be what any declaration is about, so this is
-            # settled rather than open: there is nothing here for a better analysis to establish
-            # later. The RIGHT endpoint is asked first because it is the one always established —
-            # it comes off `join.this`, the join's own right input — so a structural impossibility
-            # there outranks everything below however little the ON said.
-            status = UNDECLARABLE
-        elif not js.pinned:
-            # The ON did not reduce to a pair of endpoints. Unlike the branch above this is a fact
-            # about the ANALYSIS, so it stays open and `_joins_marker` counts it: reporting it
-            # `undeclarable` would claim the model cannot declare a join it may well declare, and
-            # would let the marker reach null with something genuinely unestablished under it.
-            status = UNDETERMINED
-        elif not js.left_declarable:
-            # And only NOW is the left endpoint worth asking about, because only now is it one the
-            # analysis established. Until the ON pins, `left` holds the FROM fallback, which is a
-            # LABEL — the address a reader needs to find the join in their own SQL — and reading a
-            # settled status off it made the FROM decide the question: the same unreadable ON came
-            # back `undetermined` over `FROM orders` and `undeclarable` over `FROM (SELECT …) d`,
-            # the second under a null marker, and the FROM relation need not be party to the join at
-            # all.
-            status = UNDECLARABLE
-        elif js.predicate is None and js.node.args.get("kind") == "CROSS":
-            # It wrote no predicate, which is a fact about the statement and not a gap in the
-            # analysis: there is nothing here for a declaration to match.
-            #
-            # `kind` is the ONLY thing separating this settled status from the open one two branches
-            # down, where the comma join lands. The battery is what pins that distinction: the
-            # sqlglot pin is an open `>=`, and a future version that normalized `FROM a, b` to a
-            # `CROSS` kind would move every comma join from `undetermined` to a settled claim that
-            # the model does not declare it — silently, since both shapes already report a null
-            # predicate. `test_the_comma_join_is_undetermined_and_reports_no_predicate` fails first.
-            status = UNDECLARED
-        elif not js.pairs:
-            # Two shapes reach here and both leave the question open. The comma join
-            # (`FROM a, b WHERE a.id = b.id`) wrote its predicate into the WHERE, and attributing a
-            # WHERE conjunct to a join is an implication check ACE-099 ruled out. The other is an ON
-            # nothing in reduced to a pair of columns — a join on an expression, or on an
-            # unqualified column this layer will not guess the table of. Neither is evidence that
-            # the model does not declare the join, which is what `undeclared` would assert.
-            status = UNDETERMINED
-        else:
-            # The written pairs against the declared ones, DECLARED-AS-A-SUBSET: extra conjuncts an
-            # author added — the as-of and soft-delete shapes — do not weaken the match, which is the
-            # stance ACE-099 shipped for declared filters, so a reader comparing `tables` and `joins`
-            # sees one rule and not two. First match in `_cardinality_index`'s own list order, so the
-            # same statement names the same relationship on every run (REQ-022).
-            #
-            # The two sides are reduced ASYMMETRICALLY and that is the whole design. The WRITTEN side
-            # is lossy on purpose — a conjunct the SQL author added beyond the declared join is not a
-            # reason to withhold the match. The DECLARED side may not be: a declaration reduced to a
-            # subset of itself would match a statement that never wrote the rest of it. So
-            # `_declared_pairs` returns None rather than a partial reduction, which is what makes
-            # `pairs is not None` here a filter and not a formality.
-            match = next((rel for rel, pairs in declared_pairs
-                          if pairs is not None and pairs <= js.pairs), None)
-            if match is not None:
-                status = DECLARED
-            elif any(pairs is None and _rel_tables(rel) == {_tkey(js.endpoints[0]),
-                                                           _tkey(js.endpoints[1])}
-                     for rel, pairs in declared_pairs):
-                # Nothing matched, and a declaration between THESE TWO TABLES is one we could not
-                # read — an `on:` that will not parse, one carrying a bind marker, one that did not
-                # reduce whole. `undeclared` would tell the reader "the model does not declare this
-                # join" on the strength of our own failure to read the model, and send a model
-                # author off to add an edge they already have. It is our gap, so it stays open and
-                # the marker counts it.
-                #
-                # Scoped to declarations touching BOTH endpoints, because an unreadable edge
-                # elsewhere in the model says nothing about this join and would otherwise make every
-                # join in every statement unanswerable.
-                status = UNDETERMINED
-            else:
-                status = UNDECLARED
+        status, match = _join_site_status(js, declared_pairs)
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
         # per-relationship build had — it printed a signed-off trail beside a join written on the
@@ -3532,7 +3707,10 @@ def assemble_receipt(
     # shared one from — so without the second argument the analysis rebuilt it once per output arm.
     # `visible` is the one the joins section above already computed off this same `tidx` and these
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
-    reports = _aggregate_reports(tree, org, ctx=None, visible=visible, tidx=tidx)
+    reports = _aggregate_reports(
+        tree, org, ctx=None, visible=visible, tidx=tidx,
+        join_statuses=([(it["scope"], it["status"], it["from_to"]) for it in join_items], dropped_joins),
+    )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
         r.as_dict() for r in reports[:_RECEIPT_MAX_REFS]
@@ -4210,6 +4388,9 @@ class _JoinSite(NamedTuple):
     # model does not declare this", because a predicate we could not read is not a predicate the
     # model failed to declare.
     pairs: frozenset[frozenset[tuple[str, str]]]
+    # This join's fixed-value conditions on its own right-hand alias (`_fixed_value_pairs`); the
+    # declared-join match reads `pairs | fixed`, everything else reads `pairs` alone.
+    fixed: frozenset[frozenset[tuple[str, str]]] = frozenset()
 
 
 def _predicate_pairs(pred: "exp.Expression",
@@ -4252,6 +4433,51 @@ def _predicate_pairs(pred: "exp.Expression",
             (_tkey(_bare(scope_map.get(rhs.table, rhs.table))), rhs.name.lower()),
         }))
     return frozenset(pairs)
+
+
+def _fixed_value_pairs(pred: "exp.Expression", scope_map: dict[str, str],
+                       aliases: "set[str] | None") -> frozenset[frozenset[tuple[str, str]]]:
+    """A predicate's fixed-value conditions (`dim.current_flag = 'Y'`), each as a pair whose two ends
+    are the same table: the column and the value. They belong to a declared join's identity, so a
+    declared `... AND current_flag = 'Y'` matches only a join that wrote it too.
+
+    `aliases` binds them to the join they belong to: a written ON counts a condition only on its own
+    right-hand alias, because a filter on another instance of the same table (`d.current_flag`
+    written in `d2`'s ON) says nothing about `d2`'s rows. None — the declared side — takes any
+    qualifier, since a declaration names its tables directly. Kept out of `_predicate_pairs`, whose
+    consumers read every pair as two joined columns."""
+    out: set[frozenset[tuple[str, str]]] = set()
+    for conj in _and_conjuncts(pred):
+        if not isinstance(conj, exp.EQ):
+            continue
+        col, val = conj.this, conj.expression
+        if isinstance(val, exp.Column) and not isinstance(col, exp.Column):
+            col, val = val, col
+        if not (isinstance(col, exp.Column) and col.table and _literal_key(val) is not None):
+            continue
+        if aliases is not None and col.table not in aliases:
+            continue
+        table = _tkey(_bare(scope_map.get(col.table, col.table)))
+        out.add(frozenset({(table, col.name.lower()), (table, _literal_key(val))}))
+    return frozenset(out)
+
+
+def _literal_key(node: "exp.Expression") -> "str | None":
+    """A literal's comparable spelling, or None for anything that isn't one. The `=` prefix can't
+    open a column name, so a value never collides with a column of the same table."""
+    if isinstance(node, exp.Literal):
+        return ("='" + node.this + "'") if node.is_string else ("=" + node.this)
+    if isinstance(node, exp.Boolean):
+        return "=" + str(node.this).lower()
+    return None
+
+
+def _is_fixed_value(pair: "frozenset[tuple[str, str]]") -> bool:
+    """Whether a reduced pair is a fixed-value condition — told by the value's `=` marker, not by its
+    tables collapsing to one, which a self-join's pair does too."""
+    return any(column.startswith("=") for _table, column in pair)
+
+
 
 
 def _declared_pairs(rel: Relationship,
@@ -4306,16 +4532,22 @@ def _reduced_on(text: str, dialect: "str | None") -> "frozenset[frozenset[tuple[
     if predicate is None:
         return None
     # And refused whenever the reduction lost anything, which is the general form of the bind-marker
-    # guard above rather than a second rule. `_predicate_pairs` keeps equalities between two
-    # qualified columns and drops the rest, so `orders.region_id = regions.id AND regions.name =
-    # 'EU'` reduces to the unrestricted half of itself — and that half matches a statement that
-    # wrote no restriction at all, under the whole declared predicate printed beside it. Every
-    # top-level conjunct has to survive or none of them counts. `IS NULL`, an inequality and a
-    # function call are the same case as the bind marker in three other spellings.
-    reduced = [_predicate_pairs(conj, {}) for conj in _and_conjuncts(predicate)]
+    # guard above rather than a second rule. A conjunct survives as a column-to-column equality or a
+    # fixed-value equality (`regions.name = 'EU'`, kept whole by `_fixed_value_pairs` so only a
+    # statement that wrote it matches); anything else would leave an unrestricted half that matches a
+    # statement which wrote no restriction at all. Every top-level conjunct has to survive or none of
+    # them counts. `IS NULL`, an inequality and a function call are the same case as the bind marker
+    # in three other spellings.
+    reduced = [_predicate_pairs(conj, {}) | _fixed_value_pairs(conj, {}, None)
+               for conj in _and_conjuncts(predicate)]
     if not reduced or not all(reduced):
         return None
-    return frozenset().union(*reduced)
+    pairs = frozenset().union(*reduced)
+    # At least one column pair: it is what pins the declaration to its two tables. A declaration of
+    # fixed values alone would match any join that writes the filter, between any tables at all.
+    if all(_is_fixed_value(pair) for pair in pairs):
+        return None
+    return pairs
 
 
 def _join_condition(join: "exp.Join") -> "str | None":
@@ -4457,6 +4689,8 @@ def _join_sites(node: "exp.Expression", visible: set[str],
             pinned=pinned,
             # Resolved through THIS join's own enclosing scope, which is the map already in hand.
             pairs=_predicate_pairs(on, scope_map) if on is not None else frozenset(),
+            fixed=(_fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+                   if on is not None else frozenset()),
         ))
     return sites, written
 
@@ -4500,7 +4734,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
     the aggregate's identity one line before the receipt wanted it: the section could name the
     measure TABLE and never the number. Same walk, same resolution, one more thing kept.
 
-    **`resolved` is what stops the report from over-claiming.** `_resolve_col_table` returns None
+    **`resolved` is what stops the report from over-claiming.** `_resolve_folded` returns None
     for an unqualified column with two or more tables in scope, and `COUNT(*)` has no column at all,
     so neither contributes a source table and no fan around either is visible to the detector. As a
     finding list that was silence. As a per-aggregate report it would be `not_multiplied`, a
@@ -4550,7 +4784,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
         cols = list(agg.find_all(exp.Column))
-        resolved = [_resolve_col_table(col, scope_map) for col in cols]
+        resolved = [_resolve_folded(col, scope_map) for col in cols]
         why = _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
@@ -4807,7 +5041,7 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
         current, folding = stack.pop()
         reading, operands = _value_operands(current)
         if reading == _VALUE_COLUMN:
-            table = _resolve_col_table(current, scope_map)
+            table = _resolve_folded(current, scope_map)
             computed[id(current)] = frozenset([table]) if table else frozenset()
             continue
         if reading == _VALUE_UNKNOWN or not operands:
@@ -4852,6 +5086,39 @@ def _output_aggregates(node: "exp.Expression") -> list["exp.AggFunc"]:
 # fact about the statement.
 
 
+def _resolve_ci(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
+    """`_resolve_col_table`, with the qualifier matched to its alias or table the way SQL matches an
+    unquoted identifier: `SUM(O.rate) FROM orders o` reads `orders` (#453). The one resolver for the
+    fan/chasm analysis and the aggregation-class and semi-additivity checks, so those cannot
+    disagree about which table a column belongs to.
+
+    `_resolve_col_table` itself is left exact: the receipt's sensitive-projection fact also calls it
+    and compares its answer with the model's names as declared. Making that fact case-insensitive is
+    its own change, with its own tests."""
+    if col.table:
+        qualifier = col.args.get("table")
+        if isinstance(qualifier, exp.Identifier) and qualifier.args.get("quoted"):
+            # A quoted qualifier is case-sensitive: only its exact alias or table.
+            return scope.get(col.table, col.table)
+        # Unquoted: any alias or table equal ignoring case, but only ONE. `FROM orders AS o JOIN
+        # order_items AS "O"` puts both `o` and `O` in scope, and which one an unquoted `O` binds to
+        # depends on the engine's folding; the scope map no longer knows which alias was quoted, so
+        # two candidates leave the column unresolved, which the report calls undetermined rather
+        # than guessing a table and possibly calling an inflated number clean.
+        hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+        if len(hits) == 1:
+            return scope[hits[0]]
+        return None if hits else col.table
+    return _resolve_col_table(col, scope)
+
+
+def _resolve_folded(col: "exp.Column", scope_map: dict[str, str]) -> Optional[str]:
+    """`_resolve_ci` in the folded spelling the fan/chasm detectors compare (#201), so a qualifier that
+    matches nothing in the statement still meets the folded relationships."""
+    table = _resolve_ci(col, scope_map)
+    return _tkey(table) if table else table
+
+
 def _resolve_col_table(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
     if col.table:
         return scope.get(col.table, col.table)
@@ -4883,7 +5150,10 @@ def _shared_dimension(
     over-reporting is a receipt that says more than it had to, the other polarity says something
     false (see `INFLATED_SHAPES`).
     """
-    for dim in table_set:
+    # SORTED, for the reason the fan loop sorts `agg_sources` (#202): when two dimensions both
+    # qualify, iterating a set picked one by hash order, so the same statement named a different
+    # shared dimension in two processes.
+    for dim in sorted(table_set):
         if dim in agg_sources:
             continue
         many_sources = sorted(s for s in agg_sources if _many_side_facing_one(rels, s, dim))
@@ -4946,10 +5216,13 @@ def _written_join_pairs(
         names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue
+        # This join's fixed-value conditions on its own alias travel with its key, so a declared
+        # condition join compares whole here too (see `_fixed_value_pairs`).
+        fixed = _fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
         for pair in _predicate_pairs(on, scope_map):
             tables = frozenset(table for table, _column in pair)
             if len(tables) == 2:
-                out.setdefault(tables, set()).add(pair)
+                out.setdefault(tables, set()).update({pair, *fixed})
     return {tables: frozenset(pairs) for tables, pairs in out.items()}
 
 

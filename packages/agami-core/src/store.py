@@ -339,7 +339,7 @@ class Store:
                     mid = f"{namespace}:{path.name}" if namespace else path.name
                     if mid in applied:
                         continue
-                    self._run_script(path.read_text())
+                    self._run_script(path.read_text(encoding="utf-8"))
                     self.execute(
                         "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
                         (mid, _now_iso()),

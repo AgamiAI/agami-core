@@ -195,10 +195,10 @@ def render(
         for sec in sections
     ]
 
-    template = TEMPLATE_PATH.read_text()
-    logo_dark_svg = LOGO_DARK_PATH.read_text()
-    logo_light_svg = LOGO_LIGHT_PATH.read_text()
-    theme_css = (SHARED_DIR / "theme.css").read_text()
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    logo_dark_svg = LOGO_DARK_PATH.read_text(encoding="utf-8")
+    logo_light_svg = LOGO_LIGHT_PATH.read_text(encoding="utf-8")
+    theme_css = (SHARED_DIR / "theme.css").read_text(encoding="utf-8")
 
     # JSON embeds carry user/model text (SQL, insights, descriptions). Escape `</` so a
     # `</script>` can't terminate the <script> block (JS unescapes `<\/` → `</`). The
@@ -244,7 +244,7 @@ def main() -> int:
     args = p.parse_args()
 
     if args.sections_file:
-        with open(os.path.expanduser(args.sections_file)) as f:
+        with open(os.path.expanduser(args.sections_file), encoding="utf-8") as f:
             sections = json.load(f)
         if not isinstance(sections, list):
             sys.stderr.write(f"--sections-file must contain a JSON array, got {type(sections).__name__}\n")
@@ -254,7 +254,7 @@ def main() -> int:
 
     receipt = None
     if args.receipt_file:
-        with open(os.path.expanduser(args.receipt_file)) as f:
+        with open(os.path.expanduser(args.receipt_file), encoding="utf-8") as f:
             receipt = json.load(f)
         if not isinstance(receipt, dict):
             sys.stderr.write(f"--receipt-file must contain a JSON object, got {type(receipt).__name__}\n")
@@ -262,7 +262,7 @@ def main() -> int:
 
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(title=args.title, summary=args.summary, sections=sections, receipt=receipt))
+    out_path.write_text(render(title=args.title, summary=args.summary, sections=sections, receipt=receipt), encoding="utf-8")
     print(f"Wrote {out_path} ({len(sections)} section{'s' if len(sections) != 1 else ''}"
           f"{', with trust receipt' if receipt else ''})")
     return 0

@@ -283,3 +283,42 @@ def test_validate_seeds_probe_is_star_free(tmp_path):
     assert not rejected, rejected
     assert len(passing) == 1 and passing[0]["source"] == "seed"
     assert seen_probes and not _STAR_PROJECTION.search(seen_probes[0])  # wrapper is star-free
+
+
+# --- add_relationships: on-form joins and an all-or-nothing batch -----------------------------------
+
+_ON_JOIN = {"from_table": "orders", "to_table": "customers", "relationship": "many_to_one",
+            "on": "orders.customer_id = customers.id AND customers.id > 0",
+            "confidence": "proposed", "review_state": "unreviewed"}
+
+
+def test_add_relationships_accepts_an_on_form_join(tmp_path):
+    _write_model(tmp_path, git=False)
+    res = curate.add_relationships(tmp_path, intra={"sales": [_ON_JOIN]})
+    assert not res.errors and res.applied == ["rel sales/orders→customers (on)"]
+    rels = loader.load_datasource(tmp_path).subject_areas[0].relationships
+    assert any(r.on and r.from_column is None for r in rels)
+
+
+def test_add_relationships_restores_every_file_when_the_batch_fails_part_way(tmp_path):
+    _write_model(tmp_path, git=False)
+    before = (tmp_path / "subject_areas" / "sales" / "relationships.yaml").read_text()
+    # the second area has no directory, so writing its file fails after `sales` was already written
+    res = curate.add_relationships(tmp_path, intra={"sales": [_ON_JOIN], "missing_area": [_ON_JOIN]})
+    assert res.errors and not res.applied
+    assert (tmp_path / "subject_areas" / "sales" / "relationships.yaml").read_text() == before
+
+
+def test_a_generated_description_never_replaces_a_human_one(tmp_path):
+    _write_model(tmp_path, git=False)
+    human = {"op": "edit", "kind": "table", "name": "orders", "column": "customer_id",
+             "field": "description", "value": "Who placed the order"}
+    assert curate.apply(tmp_path, [human]).applied
+    ai = {**human, "value": "Customer identifier", "source": "ai"}
+    res = curate.apply(tmp_path, [ai])
+    assert not res.applied and "kept the existing human description" in res.skipped[0]["reason"]
+    col = next(c for c in loader.load_datasource(tmp_path).subject_areas[0].defined_table("orders").columns
+               if c.name == "customer_id")
+    assert col.description == "Who placed the order" and col.description_source == "human"
+    # a person can still change it
+    assert curate.apply(tmp_path, [{**human, "value": "Ordering customer"}]).applied

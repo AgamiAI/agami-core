@@ -43,6 +43,8 @@ Resolve `<profile>` in this order: `AGAMI_PROFILE` env var → `active_profile` 
 
 Resolve `<artifacts_dir>` per [`shared/file-layout.md → Configuring artifacts_dir`](../../shared/file-layout.md#configuring-artifacts_dir): `AGAMI_ARTIFACTS_DIR` env var → `<artifacts_dir>/local/.config.artifacts_dir` → default `$HOME/agami-artifacts`. All examples / model / datasource.md paths in this skill resolve under `<artifacts_dir>/<profile>/`. USER_MEMORY.md is at `<artifacts_dir>/USER_MEMORY.md` (top-level, cross-database).
 
+Then create the scratch folder every later step writes to: `mkdir -p "<artifacts_dir>/local/tmp"` (Claude's Write tool and a `>` redirect both need it to exist).
+
 For v1.0 / v1.1 fallback paths (`<artifacts_dir>/local/<profile>.yaml`, `<artifacts_dir>/local/<profile>-examples.yaml`, `<artifacts_dir>/<profile>/`), only read; never write. Migration is agami-connect's job — this skill assumes the user has already migrated by the time they're saving corrections.
 
 ### 1b — find the most recent query
@@ -82,7 +84,7 @@ Examples live per subject area at `<artifacts_dir>/<profile>/prompt_examples/<ar
 **Use the packaged writer — don't Read/Edit the YAML by hand or grep the source for its schema.** It creates the file if absent, appends, and **dedups by `question`** (a same-question correction replaces the earlier answer). One entry in a JSON array:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file /tmp/agami-correction-example.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-correction-example.json"
 ```
 ```json
 [{"question": "<original NL question from query_log.jsonl>", "sql": "<corrected SQL>",
@@ -317,8 +319,8 @@ The user's bullet should be self-contained — anyone reading USER_MEMORY.md sho
 
 - **A term's meaning** (the common case) — "gold tier" = lifetime spend > $10k, "MRR" = monthly recurring revenue, or an acronym → its expansion. This goes to the **structured glossary**, NOT a prose file — `set-terminology` merges it onto `key_terminology` (validated, committed), and it then surfaces in the derived domain context on every query automatically (no file to re-render, nothing for a human to clobber):
   ```bash
-  printf '{"gold tier": "lifetime spend > $10k"}' > /tmp/agami-term.json
-  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-term.json
+  printf '{"gold tier": "lifetime spend > $10k"}' > "<artifacts_dir>/local/tmp/agami-term.json"
+  bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file "<artifacts_dir>/local/tmp/agami-term.json"
   ```
   The key is the term; the value is a **self-contained** definition (understandable without the original conversation). It merges by default — existing terms are never lost. **Never** hand-append `- "term" = definition` lines to datasource.md; that's the old prose home and is wrong now.
 - **A higher-level narrative** — what the data represents, who the users are, what's *not* in this database. Append a sentence/paragraph to `<artifacts_dir>/<profile>/datasource.md` under `# About this database` (create it with the starter if missing — `cli org-draft "$ROOT" > "$ROOT/datasource.md"`). This file is the human narrative **only** — no `term = definition` lines, no model facts.
@@ -356,7 +358,7 @@ Always include the validator step in 4c regardless of which option they pick (si
 **For `relationship` / `field_metadata` / `table_metadata` edits** (existing entries): build the ops array, **write it with the Write tool** (never a heredoc / shell variable / `python3 -c` — JSON quotes and `null` break those), then apply via the curation engine — it validates the whole model, commits to the profile git repo, logs to `curation_log.jsonl`, and **reverts every change if validation fails**:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-correction-ops.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-correction-ops.json"
 ```
 
 Stdout: `{applied, skipped, errors, validated, committed}`.
@@ -366,7 +368,7 @@ Stdout: `{applied, skipped, errors, validated, committed}`.
 **For `new_metric`** (creating an entry): use the packaged `add` command — don't hand-write the YAML. It validates the item + the whole tree, writes `subject_areas/<area>/metrics/<slug>.yaml`, reverts on failure, and commits. Put the one metric in a JSON array:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file /tmp/agami-new-metric.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-new-metric.json"
 ```
 Same `{applied, skipped, errors, validated, committed}` contract as above: `validated: false` → it already reverted, surface `errors`; `skipped` → the metric was structurally invalid (e.g. missing `calculation`), surface the reason.
 

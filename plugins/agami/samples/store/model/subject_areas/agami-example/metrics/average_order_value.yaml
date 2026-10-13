@@ -1,5 +1,5 @@
 name: average order value
-description: Average value of an order.
+description: Typical size of a single order in dollars.
 other_names:
 - AOV
 - avg order value

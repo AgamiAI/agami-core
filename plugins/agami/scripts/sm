@@ -11,7 +11,7 @@
 # Interpreter resolution order:
 #   $AGAMI_PYTHON               (explicit override)
 #   <artifacts_dir>/local/.config tool_paths.python3   (agami's configured interpreter)
-#   python3 / python on PATH
+#   python3 / python on PATH (never the Windows Store stub)
 #
 # Deps: if pydantic/sqlglot/pyyaml aren't importable, install them once into that
 # interpreter (user site first, then plain) and tell the user. Idempotent.
@@ -43,34 +43,8 @@ GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 # didn't — so `sm discover` never depends on the caller remembering to export it.
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
-resolve_python() {
-  if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
-  # configured interpreter from <artifacts_dir>/local/.config (best-effort), with a
-  # legacy ~/.agami/.config fallback during the transition
-  local cfg
-  cfg="$(python3 - <<'PY' 2>/dev/null || true
-import json, os, pathlib
-art = os.environ.get("AGAMI_ARTIFACTS_DIR")
-if not art:
-    ptr = pathlib.Path("~/.config/agami/path").expanduser()
-    try:
-        art = ptr.read_text().strip() if ptr.exists() else ""
-    except OSError:
-        art = ""
-art = art or str(pathlib.Path("~/agami-artifacts").expanduser())
-p = pathlib.Path(os.path.expanduser(art)) / "local" / ".config"
-if not p.exists():
-    legacy = pathlib.Path("~/.agami/.config").expanduser()
-    p = legacy if legacy.exists() else p
-try:
-    print(json.loads(p.read_text()).get("tool_paths", {}).get("python3") or "")
-except Exception:
-    print("")
-PY
-)"
-  if [ -n "$cfg" ] && [ -x "$cfg" ]; then echo "$cfg"; return; fi
-  command -v python3 || command -v python || true
-}
+. "$SCRIPT_DIR/_python.sh"   # usable_python / path_python / config_python / resolve_python
+agami_scratch_dir >/dev/null   # the skills write scratch files there; make sure it exists
 
 PY="$(resolve_python)"
 if [ -z "$PY" ]; then
@@ -116,9 +90,18 @@ _imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot
 # (CONTRIBUTING → "Files to touch on a release"), so the plugin's own version is exactly the library its
 # skills were written against — no second constant to drift out of sync with the first.
 _version_ok() {
-  # Only meaningful in a versioned cache dir. A dev checkout's $VER is a directory name, not a version,
-  # and its editable install already tracks the source.
-  case "$VER" in [0-9]*) ;; *) return 0 ;; esac
+  # Only meaningful in a versioned cache dir. A dev checkout's $VER is a directory name, not a version:
+  # there the question is whether the importable package IS this checkout. A released agami-core
+  # installed before the checkout was used satisfies the import, so the checkout's own code never ran
+  # (`--plugin-dir` rehearsals introspected with the old release). Not this checkout → reinstall from it.
+  case "$VER" in
+    [0-9]*) ;;
+    *) [ -z "$DEV_PKG_DIR" ] && return 0
+       ( cd / && "$PY" -c 'import os, sys, semantic_model as m
+sys.exit(0 if os.path.realpath(m.__file__).startswith(os.path.realpath(sys.argv[1]) + os.sep) else 1)' \
+         "$DEV_PKG_DIR/src" ) 2>/dev/null
+       return ;;
+  esac
   ( cd / && "$PY" - "$VER" <<'PY'
 import re, sys
 try:
@@ -152,7 +135,10 @@ ensure_pkg() {
   local up=""
   if _imports_ok; then
     up="--upgrade"
-    echo "agami: agami-core in $PY is older than this plugin ($VER); upgrading …" >&2
+    case "$VER" in
+      [0-9]*) echo "agami: agami-core in $PY is older than this plugin ($VER); upgrading …" >&2 ;;
+      *) echo "agami: agami-core in $PY isn't this checkout; installing it from $DEV_PKG_DIR …" >&2 ;;
+    esac
   else
     echo "agami: installing agami-core (semantic model) into $PY …" >&2
   fi
@@ -185,4 +171,4 @@ ensure_pkg
 # portable guarantee.
 export PYTHONSAFEPATH=1
 cd /
-exec "$PY" -m semantic_model.cli "$@"
+exec "$PY" -X utf8 -m semantic_model.cli "$@"

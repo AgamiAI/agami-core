@@ -45,7 +45,8 @@ def make_catalog_runner(
             return [{"schema_name": schema}]
         if "information_schema.tables" in s and "table_type" in s:
             return list(table_rows)
-        if "information_schema.columns" in s:
+        # Redshift reads columns from svv_columns (late-binding views), same fields.
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             for t in tables:
                 if f"'{t}'" in s:
                     return list(cols_by_table.get(t, []))
