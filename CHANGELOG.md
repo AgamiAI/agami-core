@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Receipts flag a large table pulled in from the outer side of a join, and a timeout says where the
+  size is (#451).** Each table entry on the receipt carries `scan_risk`, a sentence or null. It is
+  set when the table is large (about a million rows or more, by the model's row estimate) and the
+  statement reads it from the outer side of a join from a smaller table (`small LEFT JOIN large`,
+  which keeps every small row and stops the large table being narrowed first). When a statement
+  hits the time limit, the refusal now names that, and the other large tables it reads with the
+  filter the model recommends for each, instead of the generic "narrow it". Advisory only; nothing
+  is refused for it.
+
 ### Fixed
 
 - **Receipts find a fan-out when a column is qualified in a different case from its table (#453).**

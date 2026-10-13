@@ -535,6 +535,107 @@ def statement_shape(ctx: "GuardContext | None") -> "str | None":
     return "aggregate" if ctx.tree.find(exp.Group) is not None else "listing"
 
 
+# A table this large is worth narrowing before it is scanned. The same line introspection draws for
+# `recommended_filters` and `get_datasource_schema` draws for `large_tables`, so the three agree on
+# which tables are large.
+SCAN_LARGE_ROWS = 1_000_000
+
+
+def scan_findings(tree: "exp.Expression | None", org: "Datasource | None",
+                  tidx: "dict[str, tuple] | None" = None) -> list[dict[str, Any]]:
+    """Where a large table is the side an outer join does not preserve, and the preserved side holds
+    no large table (#451): `small LEFT JOIN large` keeps every small row, so the engine cannot narrow
+    the large table by the join first, and on a distributed engine it moves all of it.
+
+    One structural shape, deliberately. Whether a large table is otherwise "narrowed" depends on
+    every way SQL can filter (through a joined dimension, a USING join, a cast key, a date
+    expression), and a guess at that wrongly flags good queries. Advisory, never a refusal. Sizes
+    come from `performance_hints.estimated_row_count`; a table without one is never flagged. Each
+    finding names the table as the model declares it, and carries the `exp.Table` it was read
+    through so the receipt puts it on that reference and no other."""
+    if tree is None or not _HAVE_SQLGLOT or (tidx is None and org is None):
+        return []
+    tidx = _without_ctes(tree, tidx if tidx is not None else _model_table_index(org))
+    out: list[dict[str, Any]] = []
+    for sel in tree.find_all(exp.Select):
+        out.extend(_outer_join_findings(sel, tidx))
+    return out
+
+
+def _without_ctes(tree: "exp.Expression", tidx: "dict[str, tuple]") -> "dict[str, tuple]":
+    """A CTE named like a model table is the statement's own result, not that table."""
+    ctes = _cte_names(tree)
+    return {k: v for k, v in tidx.items() if k not in ctes} if ctes else tidx
+
+
+def _large(node: "exp.Expression", tidx: "dict[str, tuple]") -> "Any":
+    """The model table an `exp.Table` reads, when the model says it is large; else None."""
+    if not isinstance(node, exp.Table):
+        return None
+    hit = tidx.get(_tkey(node.name))
+    t = hit[0] if hit else None
+    rows = t.performance_hints.estimated_row_count if t and t.performance_hints else None
+    return t if rows and rows >= SCAN_LARGE_ROWS else None
+
+
+def _outer_join_findings(sel: "exp.Select", tidx: "dict[str, tuple]") -> list[dict[str, Any]]:
+    frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
+    seen: list["exp.Expression"] = [frm.this] if frm is not None else []
+    findings: list[dict[str, Any]] = []
+    for join in sel.args.get("joins") or []:
+        side = (join.side or "").upper()
+        if side in ("LEFT", "RIGHT") and seen:
+            preserved, dropped = (seen, [join.this]) if side == "LEFT" else ([join.this], seen)
+            if not any(_large(n, tidx) for n in preserved):
+                small = preserved[0]
+                small_name = (tidx.get(_tkey(small.name)) or (None,))[0]
+                for node in dropped:
+                    t = _large(node, tidx)
+                    if t is not None:
+                        findings.append({
+                            "node": node, "table": t.name,
+                            "rows": t.performance_hints.estimated_row_count, "risk": "outer_join",
+                            "from": small_name.name if small_name else small.alias_or_name})
+        seen.append(join.this)
+    return findings
+
+
+def scan_sentence(finding: dict[str, Any]) -> str:
+    """One outer-join finding in words a caller can act on; the same on the receipt and the refusal."""
+    table, rows = _echo_name(finding["table"]), finding["rows"]
+    small = _echo_name(str(finding.get("from") or "the preserved table"))
+    return (f"`{table}` (about {rows:,} rows) is the outer side of a join from `{small}`: every "
+            f"`{small}` row is kept, so the engine cannot narrow `{table}` by the join first and "
+            f"reads or moves all of it. Start FROM `{table}` and INNER JOIN `{small}`, keeping the "
+            f"outer join only if `{small}` rows with no match are needed.")
+
+
+def scan_risks(ctx: "GuardContext | None") -> list[str]:
+    """What a timeout refusal names (#451): each outer-join finding, then every other large table
+    the statement reads with the filter the model recommends for it. Facts the model holds, not a
+    judgment of whether the statement already narrowed them; it is shown only once the statement
+    has run out of time, which is when the caller needs to know where the size is.
+
+    Plain strings for the reason `statement_shape` returns one: `execute_sql` ships in a stdlib-only
+    mirror that cannot import this module's parse, so the analysis runs here and travels as text."""
+    if ctx is None or ctx.tree is None or not _HAVE_SQLGLOT:
+        return []
+    tidx = _without_ctes(ctx.tree, ctx.model_table_index)
+    findings = scan_findings(ctx.tree, None, tidx)
+    out = list(dict.fromkeys(scan_sentence(f) for f in findings))  # a UNION can repeat one shape
+    named = {_tkey(f["table"]) for f in findings}
+    for node in ctx.tree.find_all(exp.Table):
+        t = _large(node, tidx)
+        if t is None or _tkey(t.name) in named:
+            continue
+        named.add(_tkey(t.name))
+        cols = t.performance_hints.recommended_filters
+        how = (f"a range on `{_echo_name(cols[0])}`" if cols else "a date or period range")
+        out.append(f"`{_echo_name(t.name)}` is large (about {t.performance_hints.estimated_row_count:,} "
+                   f"rows); narrow it with {how} if the question allows.")
+    return out
+
+
 # Ambiguity threshold — "ask, don't guess" when top-two are within this delta.
 AMBIGUITY_DELTA = 0.15
 
@@ -3290,6 +3391,14 @@ def assemble_receipt(
     # attributed to a table, and attributing one to a table nothing read is the same error.
     used = {bare for bare in scope.values() if _tkey(bare) not in cte_names}
     tidx = _model_table_index(org)
+    # One sentence per large table read from the outer side of a join, keyed by the table node, so
+    # a finding in one CTE body or UNION arm never lands on a same-named reference elsewhere (#451).
+    # Advisory, so an analysis that fails costs the hint, never the receipt.
+    try:
+        scan_by_node = {id(f["node"]): scan_sentence(f) for f in scan_findings(tree, org, tidx)
+                        if f.get("node") is not None}
+    except Exception:
+        scan_by_node = {}
     # The names the analysis can see BEHIND: a table the model declares, minus any name the
     # statement bound to a result of its own. Computed once and handed to both callers that need
     # it — `_model_table_index` walks the whole model and this path runs for every executed query.
@@ -3592,6 +3701,7 @@ def assemble_receipt(
     # and re-derive it there. `_table_references` is the same list with the nodes dropped, and it is
     # not called here for that reason.
     sites = _reference_sites(tree)
+    node_of_ref = {id(site.ref): site.node for site in sites}
     dropped_refs = max(0, len(sites) - _RECEIPT_MAX_REFS)
     # How many of the LISTED references the accounting could not settle, for the marker below. A
     # reference counts here when it has declared filters and ANY one of them came back
@@ -3637,6 +3747,9 @@ def assemble_receipt(
             "declared": t is not None,
             "rows": (ph.estimated_row_count if ph else None),
             "rows_as_of": (ph.estimated_row_count_at if ph else None),
+            # Advisory: this table is large and the statement reads it from the outer side of a join
+            # (#451). Null otherwise, or when its size is unknown.
+            "scan_risk": scan_by_node.get(id(node_of_ref.get(id(r)))) if t else None,
             # Freshness describes a table the model declares. An undeclared reference (a CTE name,
             # say) has no model row for it to be about, so claiming it would be a lie by shape.
             "freshness": freshness if t else None,
