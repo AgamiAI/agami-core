@@ -612,6 +612,11 @@ def _apply_one(root: Path, op: dict, signer, role,
         doc = _load(path)
         if op.get("column"):
             _set_column_field(doc, op["column"], op, new_state, signer, role)
+        elif op.get("op") == "edit" and op.get("field") == "recommended_filters":
+            # The filter list lives inside `performance_hints` beside the measured row count; editing
+            # it alone keeps the count, which a whole-block edit would make the caller restate.
+            doc["performance_hints"] = {**(doc.get("performance_hints") or {}),
+                                        "recommended_filters": _filter_columns(doc, op.get("value"))}
         else:
             _set_trust(doc, op, new_state, signer, role, desc_source=True)  # table desc has provenance
         _dump(path, doc)
@@ -745,6 +750,18 @@ def _reconcile_expose_groups(root: Path, area: str, table: str,
     if changed:
         _snapshot(backups, sap)
         _dump(sap, sa)
+
+
+def _filter_columns(table_doc: dict, value: Any) -> list[str]:
+    """`value` as a list of this table's column names, or ValueError. Nothing downstream checks
+    that a recommended filter names a real column, so a typo here would be stored silently."""
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ValueError("recommended_filters takes a list of column names")
+    known = {(c.get("name") or "").lower(): c.get("name") for c in table_doc.get("columns", [])}
+    unknown = [v for v in value if v.lower() not in known]
+    if unknown:
+        raise ValueError(f"not a column of this table: {', '.join(unknown)}")
+    return [known[v.lower()] for v in value]
 
 
 def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,

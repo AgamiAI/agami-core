@@ -139,6 +139,10 @@ class IntrospectReport:
     relationship_count: int = 0
     subject_areas: list[str] = field(default_factory=list)
     deep_tables: list[str] = field(default_factory=list)
+    # Tables at or above the large-table line: name -> (estimated rows, the seeded filter columns).
+    # Listed so whoever builds the model confirms the filters; the seed is every date column, and on
+    # a warehouse that is often load timestamps nobody asks a question about.
+    large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
@@ -158,6 +162,8 @@ class IntrospectReport:
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
               for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
+            *(f"large table {t}: about {rows:,} rows; suggested filters: {', '.join(cols) or '(none)'}"
+              for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
             "## notes",
             *[f"  - {n}" for n in self.notes],
@@ -330,6 +336,10 @@ def introspect(
                 report.new_tables.append(_qualified(t))
                 continue
             m, change = _merge_table(old, t)
+            # Already large, so its filters were settled when the seed was first offered and the
+            # merge keeps them: listing the fresh seed would ask again about a table already answered.
+            if old.performance_hints and (old.performance_hints.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
+                report.large_tables.pop(t.name, None)
             merged.append(m)
             for area, copy in copies[(old.schema_name, old.name)]:
                 per_area[(area, (old.schema_name, old.name))] = m if copy is old else _merge_table(copy, t)[0]
@@ -654,13 +664,20 @@ def _retyped(c: Column, f: Column, change: dict) -> Column:
 
 
 def _merged_hints(old, fresh):
-    """Row-count hints from the new reading (a table grows); a curated filter list is kept."""
+    """Row-count hints from the new reading (a table grows); a curated filter list is kept.
+
+    Kept even when empty once the table was already large: that is when the seed was offered, and an
+    empty list then is the answer "it is narrowed through a joined table, not a column of its own",
+    which re-seeding every date column would undo. Otherwise an empty list takes the fresh seed, so
+    a table that has only now grown large gets one."""
     if fresh is None:
         return old
     if old is None:
         return fresh
+    was_large = (old.estimated_row_count or 0) >= _LARGE_TABLE_ROWS
     return fresh.model_copy(update={
-        "recommended_filters": old.recommended_filters or fresh.recommended_filters,
+        "recommended_filters": (old.recommended_filters if old.recommended_filters or was_large
+                                else fresh.recommended_filters),
         "indexes": fresh.indexes or old.indexes,
     })
 
@@ -954,13 +971,15 @@ def _build_table(
         )
 
     # On a large table, seed `recommended_filters` with the date/time columns — the natural
-    # way to narrow a scan. The query path's scan-risk warning then fires only when a query
-    # lacks a filter on one of these (and can name the column). Real index / partition /
-    # clustering keys are layered in per-dialect separately.
+    # way to narrow a scan, shown to the caller beside the table in `large_tables`. A seed, not a
+    # decision: the report lists it so the person building the model keeps the column a question
+    # would actually filter on. Real index / partition / clustering keys are layered in
+    # per-dialect separately.
     if perf and (perf.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
         date_cols = [c.name for c in cols if c.type in ("date", "timestamp", "time")]
         if 1 <= len(date_cols) <= _MAX_DATE_FILTER_COLS:
             perf.recommended_filters = date_cols
+            report.large_tables[table] = (perf.estimated_row_count, list(date_cols))
 
     return Table(
         name=table,
