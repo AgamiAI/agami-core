@@ -133,6 +133,29 @@ def test_a_table_is_sized_by_its_own_schema():
     assert rt.scan_findings(parse_one(sql.format("staging"), read="postgres"), org) == []
 
 
+def test_a_table_declared_twice_keeps_its_largest_estimate():
+    """Declared in two subject areas, the later copy unsized: declaration order must not hide it."""
+    org = m.Datasource(
+        datasource="shop",
+        subject_areas=[
+            m.SubjectArea(name="a", tables_defined=[_table("fact_lines", 7_000_000, ["k"]),
+                                                    _table("periods", 2_000, ["k"])]),
+            m.SubjectArea(name="b", tables_defined=[_table("fact_lines", None, ["k"])]),
+        ],
+    )
+    sql = "SELECT 1 FROM periods p LEFT JOIN fact_lines f ON f.k = p.k"
+    assert [f["table"] for f in rt.scan_findings(parse_one(sql, read="postgres"), org)] == ["fact_lines"]
+
+
+def test_many_right_joins_stay_bounded():
+    """Each RIGHT JOIN drops every source before it; the pairs are capped, not squared."""
+    joins = " ".join(f"RIGHT JOIN periods p{i} ON p{i}.period_key = f.period_key" for i in range(400))
+    tree = parse_one(f"SELECT 1 FROM fact_lines f {joins}", read="postgres")
+    assert sum(1 for _ in rt._outer_joins(tree)) == rt._SCAN_MAX_PAIRS
+    ctx = rt.build_guard_context(f"SELECT 1 FROM fact_lines f {joins}", ORG)
+    assert len(rt.scan_risks(ctx)) == 2
+
+
 def test_the_receipt_names_the_risk_on_the_table_it_is_about():
     by_ref = {item["ref"]: item for item in rt.assemble_receipt(ORG, OUTER)["tables"]["items"]}
     assert "outer side of a join from `periods`" in by_ref["fact_lines"]["scan_risk"]

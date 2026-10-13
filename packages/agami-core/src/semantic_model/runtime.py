@@ -50,7 +50,7 @@ import functools
 import re
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional
 
 # Absolute, not relative: `guardrail` is a flat top-level module that sits ALONGSIDE the
 # `semantic_model` package in both layouts — next to it in `packages/agami-core/src/`, and next to it
@@ -557,13 +557,12 @@ def scan_findings(tree: "exp.Expression | None", org: "Datasource | None") -> li
         return []
     size = _table_sizes(tree, org)
     out: list[dict[str, Any]] = []
-    for sel in tree.find_all(exp.Select):
-        for node, preserved, _side in _outer_joins(sel):
-            t, rows = size(node)
-            sizes = [size(n)[1] for n in preserved]
-            if rows >= SCAN_LARGE_ROWS and all(r and r < SCAN_LARGE_ROWS for r in sizes):
-                out.append({"node": node, "table": t.name, "rows": rows, "risk": "outer_join",
-                            "from": preserved[0].name})
+    for node, preserved, _side in _outer_joins(tree):
+        t, rows = size(node)
+        sizes = [size(n)[1] for n in preserved]
+        if rows >= SCAN_LARGE_ROWS and all(r and r < SCAN_LARGE_ROWS for r in sizes):
+            out.append({"node": node, "table": t.name, "rows": rows, "risk": "outer_join",
+                        "from": preserved[0].name})
     return out
 
 
@@ -575,8 +574,14 @@ def _table_sizes(tree: "exp.Expression", org: "Datasource",
     `sales.orders`'s size."""
     ctes = _cte_references(tree)
     sidx = _schema_index(org)
-    by_qname = {(_tkey(t.schema_name) or None, _tkey(t.name)): t
-                for sa in org.subject_areas for t in sa.tables_defined}
+    # The same physical table may be declared in several subject areas; the largest estimate wins,
+    # so declaration order cannot decide whether the warning shows.
+    by_qname: dict[tuple, Any] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            key = (_tkey(t.schema_name) or None, _tkey(t.name))
+            if _rows_of(t) >= _rows_of(by_qname.get(key)):
+                by_qname[key] = t
 
     def size(node: "exp.Expression") -> "tuple[Any, int]":
         if not isinstance(node, exp.Table) or id(node) in ctes:
@@ -589,21 +594,36 @@ def _table_sizes(tree: "exp.Expression", org: "Datasource",
     return size
 
 
-def _outer_joins(sel: "exp.Select") -> "list[tuple[exp.Table, list[exp.Table], str]]":
-    """Each (unpreserved table, preserved tables, side) of this SELECT's LEFT/RIGHT outer joins
-    whose both sides are plain tables. Semi and anti joins carry a side too but are not outer joins."""
-    frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
-    seen: list["exp.Expression"] = [frm.this] if frm is not None else []
-    out: list[tuple["exp.Table", list["exp.Table"], str]] = []
-    for join in sel.args.get("joins") or []:
-        side = (join.side or "").upper()
-        kind = (join.kind or "").upper()
-        if side in ("LEFT", "RIGHT") and kind in ("", "OUTER") and seen:
-            preserved, dropped = (seen, [join.this]) if side == "LEFT" else ([join.this], seen)
-            if all(isinstance(n, exp.Table) for n in preserved + dropped):
-                out.extend((n, list(preserved), side) for n in dropped)
-        seen.append(join.this)
-    return out
+def _rows_of(t: Any) -> int:
+    return (t.performance_hints.estimated_row_count or 0) if t is not None and t.performance_hints else 0
+
+
+# A RIGHT JOIN drops every source before it, so the pairs grow with the square of the join count;
+# a statement of hundreds of joins fits under the SQL length cap. Both callers need only a few.
+_SCAN_MAX_PAIRS = 64
+
+
+def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.Table], str]]":
+    """Each (unpreserved table, preserved tables, side) of the statement's LEFT/RIGHT outer joins
+    whose both sides are plain tables, at most `_SCAN_MAX_PAIRS`, produced lazily. Semi and anti
+    joins carry a side too but are not outer joins."""
+    budget = _SCAN_MAX_PAIRS
+    for sel in tree.find_all(exp.Select):
+        frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
+        seen: list["exp.Expression"] = [frm.this] if frm is not None else []
+        for join in sel.args.get("joins") or []:
+            side = (join.side or "").upper()
+            kind = (join.kind or "").upper()
+            if side in ("LEFT", "RIGHT") and kind in ("", "OUTER") and seen:
+                preserved, dropped = (seen, [join.this]) if side == "LEFT" else ([join.this], seen)
+                if all(isinstance(n, exp.Table) for n in preserved + dropped):
+                    snapshot = list(preserved)
+                    for n in dropped:
+                        if budget <= 0:
+                            return
+                        budget -= 1
+                        yield n, snapshot, side
+            seen.append(join.this)
 
 
 def scan_sentence(finding: dict[str, Any]) -> str:
@@ -627,15 +647,16 @@ def scan_risks(ctx: "GuardContext | None") -> list[str]:
     mirror that cannot import this module's parse, so the analysis runs here and travels as text."""
     if ctx is None or ctx.tree is None or not _HAVE_SQLGLOT:
         return []
-    out: list[str] = []
-    for sel in ctx.tree.find_all(exp.Select):
-        for node, preserved, side in _outer_joins(sel):
-            big, small = _echo_name(node.name), _echo_name(preserved[0].name)
-            out.append(f"The statement keeps every `{small}` row and pulls `{big}` in from the outer "
-                       f"side of a {side} JOIN, which stops the engine narrowing `{big}` by the join "
-                       f"first. If `{big}` is the larger table, start FROM it and INNER JOIN `{small}`, "
-                       f"keeping the outer join only if `{small}` rows with no match are needed.")
-    return list(dict.fromkeys(out))  # a UNION can repeat one shape
+    out: dict[str, None] = {}  # ordered and de-duplicated: a UNION can repeat one shape
+    for node, preserved, side in _outer_joins(ctx.tree):
+        if len(out) >= 2:  # all `_narrow_it` shows
+            break
+        big, small = _echo_name(node.name), _echo_name(preserved[0].name)
+        out[f"The statement keeps every `{small}` row and pulls `{big}` in from the outer "
+            f"side of a {side} JOIN, which stops the engine narrowing `{big}` by the join "
+            f"first. If `{big}` is the larger table, start FROM it and INNER JOIN `{small}`, "
+            f"keeping the outer join only if `{small}` rows with no match are needed."] = None
+    return list(out)
 
 
 # Ambiguity threshold — "ask, don't guess" when top-two are within this delta.
