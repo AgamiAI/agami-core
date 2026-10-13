@@ -147,13 +147,28 @@ def test_a_table_declared_twice_keeps_its_largest_estimate():
     assert [f["table"] for f in rt.scan_findings(parse_one(sql, read="postgres"), org)] == ["fact_lines"]
 
 
-def test_many_right_joins_stay_bounded():
-    """Each RIGHT JOIN drops every source before it; the pairs are capped, not squared."""
-    joins = " ".join(f"RIGHT JOIN periods p{i} ON p{i}.period_key = f.period_key" for i in range(400))
-    tree = parse_one(f"SELECT 1 FROM fact_lines f {joins}", read="postgres")
-    assert sum(1 for _ in rt._outer_joins(tree)) == rt._SCAN_MAX_PAIRS
-    ctx = rt.build_guard_context(f"SELECT 1 FROM fact_lines f {joins}", ORG)
-    assert len(rt.scan_risks(ctx)) == 2
+def test_many_outer_joins_stay_bounded():
+    """The pairs are produced lazily and capped, however many arms carry the shape."""
+    arm = "SELECT 1 FROM periods p LEFT JOIN fact_lines f ON f.period_key = p.period_key"
+    sql = " UNION ALL ".join([arm] * 200)
+    assert sum(1 for _ in rt._outer_joins(parse_one(sql, read="postgres"))) == rt._SCAN_MAX_PAIRS
+    assert len(rt.scan_risks(rt.build_guard_context(sql, ORG))) == 1
+
+
+def test_only_a_direct_two_table_join_is_described():
+    """With two tables on the preserved side, the one the outer table joins is in the ON clause, so
+    advice naming either could be wrong: say nothing."""
+    sql = ("SELECT 1 FROM events e JOIN periods p ON p.period_key = e.period_key "
+           "LEFT JOIN fact_lines f ON f.period_key = p.period_key")
+    assert _risks(sql) == []
+    assert rt.scan_risks(rt.build_guard_context(sql, ORG)) == []
+
+
+def test_tables_are_named_as_written():
+    sql = "SELECT 1 FROM public.periods p LEFT JOIN public.fact_lines f ON f.period_key = p.period_key"
+    assert "INNER JOIN `public.periods`" in rt.scan_risks(rt.build_guard_context(sql, ORG))[0]
+    found = rt.scan_findings(parse_one(sql, read="postgres"), ORG)
+    assert "INNER JOIN `public.periods`" in rt.scan_sentence(found[0])
 
 
 def test_the_receipt_names_the_risk_on_the_table_it_is_about():

@@ -562,7 +562,7 @@ def scan_findings(tree: "exp.Expression | None", org: "Datasource | None") -> li
         sizes = [size(n)[1] for n in preserved]
         if rows >= SCAN_LARGE_ROWS and all(r and r < SCAN_LARGE_ROWS for r in sizes):
             out.append({"node": node, "table": t.name, "rows": rows, "risk": "outer_join",
-                        "from": preserved[0].name})
+                        "from": _written(preserved[0])})
     return out
 
 
@@ -594,6 +594,11 @@ def _table_sizes(tree: "exp.Expression", org: "Datasource",
     return size
 
 
+def _written(node: "exp.Table") -> str:
+    """The table as the statement qualified it, without its alias: what a rewrite has to name."""
+    return ".".join(p for p in (node.catalog, node.db, node.name) if p)
+
+
 def _rows_of(t: Any) -> int:
     return (t.performance_hints.estimated_row_count or 0) if t is not None and t.performance_hints else 0
 
@@ -605,7 +610,7 @@ _SCAN_MAX_PAIRS = 64
 
 def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.Table], str]]":
     """Each (unpreserved table, preserved tables, side) of the statement's LEFT/RIGHT outer joins
-    whose both sides are plain tables, at most `_SCAN_MAX_PAIRS`, produced lazily. Semi and anti
+    between exactly two plain tables, at most `_SCAN_MAX_PAIRS`, produced lazily. Semi and anti
     joins carry a side too but are not outer joins."""
     budget = _SCAN_MAX_PAIRS
     for sel in tree.find_all(exp.Select):
@@ -616,7 +621,10 @@ def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.
             kind = (join.kind or "").upper()
             if side in ("LEFT", "RIGHT") and kind in ("", "OUTER") and seen:
                 preserved, dropped = (seen, [join.this]) if side == "LEFT" else ([join.this], seen)
-                if all(isinstance(n, exp.Table) for n in preserved + dropped):
+                # Only the direct two-table shape: with more on the preserved side, which table the
+                # outer one joins to is in the ON clause, and advice naming the wrong one is invalid.
+                if len(preserved) == 1 and len(dropped) == 1 and all(
+                        isinstance(n, exp.Table) for n in preserved + dropped):
                     snapshot = list(preserved)
                     for n in dropped:
                         if budget <= 0:
@@ -651,7 +659,7 @@ def scan_risks(ctx: "GuardContext | None") -> list[str]:
     for node, preserved, side in _outer_joins(ctx.tree):
         if len(out) >= 2:  # all `_narrow_it` shows
             break
-        big, small = _echo_name(node.name), _echo_name(preserved[0].name)
+        big, small = _echo_name(_written(node)), _echo_name(_written(preserved[0]))
         out[f"The statement keeps every `{small}` row and pulls `{big}` in from the outer "
             f"side of a {side} JOIN, which stops the engine narrowing `{big}` by the join "
             f"first. If `{big}` is the larger table, start FROM it and INNER JOIN `{small}`, "
