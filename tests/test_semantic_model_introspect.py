@@ -1042,3 +1042,12 @@ def test_a_count_that_fails_leaves_the_size_unknown(tmp_path, dialect, estimate)
     # Unknown, not -1: a never-analysed Postgres table no longer stores the catalog's -1.
     assert hints is None or hints.estimated_row_count is None
     assert any("COUNT(*) AS estimated_rows" in s for s in seen)  # the fallback was tried
+
+
+@pytest.mark.parametrize("dialect", ["mysql", "bigquery"])
+def test_engines_without_a_native_bound_are_not_counted(dialect):
+    """Until #459 gives introspection reads BigQuery's byte cap and MySQL's server-side time limit,
+    those engines never get the exact-count fallback: a view stays unsized, as before."""
+    from semantic_model import dialects as D
+
+    assert D.get_dialect(dialect).sql_row_count("s", "t") is None

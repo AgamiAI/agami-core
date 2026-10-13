@@ -21,7 +21,8 @@ below corresponds to one such version.
   `recommended_filters`, so nothing warned about a query scanning all of it. When the statistics
   give no usable figure, the model build now counts the rows instead, with a read-only query under
   the normal statement time limit. If the count fails or times out, the size is unknown (a
-  Postgres `-1` is no longer stored as a size). Refresh a model built from views to pick the counts up.
+  Postgres `-1` is no longer stored as a size). MySQL and BigQuery are left out until introspection reads carry their own byte and
+  server-side time limits (#459). Refresh a model built from views to pick the counts up.
 
 ## [0.9.13] — 2026-10-12
 
