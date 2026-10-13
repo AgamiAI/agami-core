@@ -613,6 +613,7 @@ def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.
     between exactly two plain tables, at most `_SCAN_MAX_PAIRS`, produced lazily. Semi and anti
     joins carry a side too but are not outer joins."""
     budget = _SCAN_MAX_PAIRS
+    ctes = _cte_references(tree)  # a CTE reference is an `exp.Table` too, but not a plain table
     for sel in tree.find_all(exp.Select):
         frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
         seen: list["exp.Expression"] = [frm.this] if frm is not None else []
@@ -624,7 +625,7 @@ def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.
                 # Only the direct two-table shape: with more on the preserved side, which table the
                 # outer one joins to is in the ON clause, and advice naming the wrong one is invalid.
                 if len(preserved) == 1 and len(dropped) == 1 and all(
-                        isinstance(n, exp.Table) for n in preserved + dropped):
+                        isinstance(n, exp.Table) and id(n) not in ctes for n in preserved + dropped):
                     snapshot = list(preserved)
                     for n in dropped:
                         if budget <= 0:
@@ -640,7 +641,7 @@ def scan_sentence(finding: dict[str, Any]) -> str:
     small = _echo_name(str(finding.get("from") or "the preserved table"))
     return (f"`{table}` (about {rows:,} rows) is the outer side of a join from `{small}`: every "
             f"`{small}` row is kept, so the engine cannot narrow `{table}` by the join first and "
-            f"reads or moves all of it. Start FROM `{table}` and INNER JOIN `{small}`, keeping the "
+            f"can read or move all of it. Start FROM `{table}` and INNER JOIN `{small}`, keeping the "
             f"outer join only if `{small}` rows with no match are needed.")
 
 

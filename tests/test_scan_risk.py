@@ -164,6 +164,12 @@ def test_only_a_direct_two_table_join_is_described():
     assert rt.scan_risks(rt.build_guard_context(sql, ORG)) == []
 
 
+def test_a_cte_is_not_described_as_a_table():
+    sql = ("WITH fact_lines AS (SELECT 1 AS period_key) "
+           "SELECT 1 FROM periods p LEFT JOIN fact_lines f ON f.period_key = p.period_key")
+    assert rt.scan_risks(rt.build_guard_context(sql, ORG)) == []
+
+
 def test_tables_are_named_as_written():
     sql = "SELECT 1 FROM public.periods p LEFT JOIN public.fact_lines f ON f.period_key = p.period_key"
     assert "INNER JOIN `public.periods`" in rt.scan_risks(rt.build_guard_context(sql, ORG))[0]
