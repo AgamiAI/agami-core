@@ -2120,8 +2120,10 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # lowercase. Compared as written, the fan detector found no edge and the receipt reported a
     # multiplied SUM as `not_multiplied` (#201). Folded ONCE, on both sides, with the same `_tkey`
     # the scope gate and the table index use, so no fan/chasm comparison can disagree with another.
-    # The aggregation-class and semi-additivity checks read the same folded map: their lookups match
-    # names case-insensitively (#453), so a folded name finds the model's own spelling.
+    # The aggregation-class and semi-additivity checks keep the map AS WRITTEN. Their lookups match
+    # across case themselves (#453), exact name first, so a model declaring both `ORDERS` and
+    # `orders` still finds the one the statement named; a folded name would lose that.
+    written_scope = tables_in_scope
     tables_in_scope = {alias: _tkey(t) for alias, t in tables_in_scope.items()}
     rels = [_folded_rel(r) for r in rels]
     table_set = set(tables_in_scope.values())
@@ -2238,7 +2240,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # Returned as (site index, finding) rather than as bare findings: these are the two checks that
     # already knew which aggregate they were about, and re-deriving that from the finding text
     # afterwards would be inventing an answer the check had in hand.
-    for i, finding in _check_aggregation_semantics(tree, sites, org, tables_in_scope, ctx=ctx):
+    for i, finding in _check_aggregation_semantics(tree, sites, org, written_scope, ctx=ctx):
         attached[i].append(finding)
 
     reports: list[AggregateReport] = []
@@ -2683,16 +2685,36 @@ def _column_index(org: Datasource) -> dict[str, dict[str, Column]]:
     return idx
 
 
-def _ci_get(mapping: dict[str, Any], name: Optional[str]) -> Any:
-    """`mapping[name]`, matching the key the way SQL matches an unquoted identifier: exactly, else
-    case-insensitively, and only when that finds exactly one key (two keys differing only in case
-    are ambiguous, and a guess here would attach a finding to the wrong column)."""
+def _ci_get(mapping: dict[str, Any], name: Optional[str], *, quoted: bool = False) -> Any:
+    """`mapping[name]`, matching the key the way SQL matches an identifier: exactly, else (for an
+    unquoted name) case-insensitively and only when that finds exactly one key. Two keys differing
+    only in case are ambiguous, and a guess would attach a finding to the wrong column; a quoted name
+    is case-sensitive, so it never falls back."""
     if not name:
         return None
     if name in mapping:
         return mapping[name]
+    if quoted:
+        return None
     hits = [k for k in mapping if _tkey(k) == _tkey(name)]
     return mapping[hits[0]] if len(hits) == 1 else None
+
+
+def _is_quoted(col: "exp.Column") -> bool:
+    ident = col.args.get("this")
+    return isinstance(ident, exp.Identifier) and bool(ident.args.get("quoted"))
+
+
+def _semi_metric(semi: dict[tuple[str, str], "Metric"], table: str, col: "exp.Column") -> Optional["Metric"]:
+    """The semi-additive metric summing `table.col`, matched like `_ci_get`: the declared pair
+    exactly, else (unquoted column) the one pair equal ignoring case. A quoted `"Balance"` beside a
+    declared `balance` is a different column and does not match (#453)."""
+    if (table, col.name) in semi:
+        return semi[(table, col.name)]
+    hits = [key for key in semi
+            if _tkey(key[0]) == _tkey(table)
+            and (key[1] == col.name if _is_quoted(col) else _tkey(key[1]) == _tkey(col.name))]
+    return semi[hits[0]] if len(hits) == 1 else None
 
 
 def _lookup_column(col: "exp.Column", scope: dict[str, str],
@@ -2702,7 +2724,7 @@ def _lookup_column(col: "exp.Column", scope: dict[str, str],
     engine that stores names uppercase, read by a statement written in lowercase or the reverse, is
     the same table and column, and an exact match made those checks go quiet."""
     t = _resolve_ci(col, scope)
-    found = _ci_get(_ci_get(colidx, t) or {}, col.name) if t else None
+    found = _ci_get(_ci_get(colidx, t) or {}, col.name, quoted=_is_quoted(col)) if t else None
     if found is not None:
         return found
     # bare column, ambiguous table: only safe if exactly one in-scope table defines it. Exact table
@@ -2716,9 +2738,9 @@ def _lookup_column(col: "exp.Column", scope: dict[str, str],
         if not owners:
             folded = {_tkey(v) for v in in_scope}
             owners = [cols for tt, cols in colidx.items()
-                      if _tkey(tt) in folded and _ci_get(cols, col.name) is not None]
+                      if _tkey(tt) in folded and _ci_get(cols, col.name, quoted=_is_quoted(col)) is not None]
         if len(owners) == 1:
-            return _ci_get(owners[0], col.name)
+            return _ci_get(owners[0], col.name, quoted=_is_quoted(col))
     return None
 
 
@@ -2776,9 +2798,7 @@ def _semi_additive_columns(org: Datasource) -> dict[tuple[str, str], "Metric"]:
                 tables = [col.table] if col.table else srcs
                 for tname in tables:
                     if tname:
-                        # Keyed folded (#453), and looked up folded, so a binding written
-                        # `SUM(ORDERS.balance)` and a statement reading `o.balance` meet.
-                        out.setdefault((_tkey(tname), _tkey(col.name)), mm)
+                        out.setdefault((tname, col.name), mm)
     return out
 
 
@@ -2853,7 +2873,7 @@ def _check_aggregation_semantics(
             # query; skip when it can't be pinned down (don't mis-fire on a bare column
             # that happens to share a name with a semi-additive measure elsewhere).
             ctable = _resolve_ci(col, scope)
-            mm = semi.get((_tkey(ctable), _tkey(col.name))) if ctable else None
+            mm = _semi_metric(semi, ctable, col) if ctable else None
             if mm is not None:
                 cname = _echo_name(col.name)
                 found.append((i, Finding(

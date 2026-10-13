@@ -372,3 +372,62 @@ def test_a_quoted_qualifier_binds_only_its_exact_alias():
         'SELECT SUM("o".total_amount) FROM orders AS "o" JOIN order_items AS oi ON oi.order_id = "o".id'
     )
     assert agg["status"] == rt.MULTIPLIED
+
+
+def _twin_org():
+    """Two tables, and two columns, that differ only in case: legal with quoted identifiers."""
+
+    def table(name, cols):
+        return m.Table(
+            name=name,
+            schema="public",
+            storage_connection="c",
+            grain=["id"],
+            columns=[m.Column(name="id", type="integer"), *cols],
+        )
+
+    tables = [
+        table("ORDERS", [m.Column(name="rate", type="decimal", aggregation="averageable")]),
+        table(
+            "orders",
+            [
+                m.Column(name="rate", type="decimal"),
+                m.Column(name="balance", type="decimal"),
+                m.Column(name="Balance", type="decimal"),
+                m.Column(name="created_at", type="timestamp"),
+            ],
+        ),
+    ]
+    metrics = [
+        m.Metric(
+            name="balance_total",
+            calculation="end-of-day balance",
+            bindings={"PostgreSQL": "SUM(orders.balance)"},
+            non_additive_dimensions=["created_at"],
+            source_tables=["orders"],
+        )
+    ]
+    return m.Datasource(
+        datasource="shop",
+        subject_areas=[m.SubjectArea(name="s", tables_defined=tables, metrics=metrics)],
+    )
+
+
+def test_a_model_with_twin_tables_keeps_each_ones_findings():
+    """`ORDERS.rate` is averageable, `orders.rate` is not. Exact names come first, so each statement
+    gets the finding of the table it named, not its twin's."""
+    assert _risks(_twin_org(), 'SELECT SUM("ORDERS".rate) FROM "ORDERS"') == [["bad_aggregation"]]
+    assert _risks(_twin_org(), "SELECT SUM(orders.rate) FROM orders") == [[]]
+
+
+def test_a_quoted_column_is_not_its_lowercase_twin():
+    """The metric sums `balance`; a quoted `"Balance"` is a different column and no semi-additive
+    finding of its own."""
+    twin = _twin_org()
+    assert _risks(
+        twin, "SELECT orders.created_at, SUM(orders.balance) FROM orders GROUP BY orders.created_at"
+    ) == [["semi_additive"]]
+    assert _risks(
+        twin,
+        'SELECT orders.created_at, SUM(orders."Balance") FROM orders GROUP BY orders.created_at',
+    ) == [[]]
