@@ -12,6 +12,21 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Receipts find a fan-out when a column is qualified in a different case from its table (#453).**
+  `SUM(ORDERS.total) FROM orders JOIN order_items …` reported the inflated total as
+  `not_multiplied`, because the qualifier matched no table in the statement. The fan and chasm
+  checks now match a qualifier to its table case-insensitively.
+- **The "summing a rate" and "summing a balance over time" warnings no longer depend on case.** On a
+  model whose names are stored in capitals, `SUM(o.rate) FROM orders o` passed without the warning,
+  and so did `SUM(O.rate) FROM orders o` on any model. Tables, aliases and columns in those checks
+  now match case-insensitively. The receipt's sensitive-projection fact is unchanged.
+- **Fan and chasm findings name tables as the model declares them** (`ORDERS`, not `orders`),
+  undoing the lowercase naming 0.9.13 introduced.
+- **A connection string with no `://` is never shown as a database type.** The local listing could
+  echo the whole string, password included; it now reports the type as unknown.
+
 ## [0.9.13] — 2026-10-12
 
 ### Fixed
