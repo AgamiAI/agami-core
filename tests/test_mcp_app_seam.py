@@ -89,7 +89,7 @@ _SURFACE = (
 # escaped form because the envelope is a JSON string inside the response body.
 _SERVER_VERSION = re.compile(r'("name":"agami","version":)"[^"]*"')
 _ENVELOPE_VOLATILE = re.compile(
-    r'(\\"(?:audit_id|execution_ms|elapsed_ms|executed_at|ts)\\": )(\\"[^\\"]*\\"|-?\d+(?:\.\d+)?)'
+    r'(\\"(?:audit_id|execution_ms|elapsed_ms|executed_at|ts)\\": ?)(\\"[^\\"]*\\"|-?\d+(?:\.\d+)?)'
 )
 
 
