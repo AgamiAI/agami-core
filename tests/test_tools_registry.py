@@ -64,6 +64,8 @@ def test_db_type_label_covers_advertised_databases():
         "trino://h": "trino",
         "duckdb:///tmp/f.db": "duckdb",
         "exotic://h": "exotic",  # unknown → passthrough
+        "u:secret@host/db": "",  # no scheme: never echo the string, which carries the password
+        "u:p@ss://x@host/db": "",  # `://` inside the password is not a scheme either
     }
     for url, expected in cases.items():
         assert tools._db_type_for("p", {"p": {"url": url}}) == expected, url

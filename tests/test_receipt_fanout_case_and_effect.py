@@ -285,3 +285,73 @@ def test_an_uppercase_model_still_reports_its_fan():
         "SELECT SUM(ORDERS.balance) FROM ORDERS JOIN ORDER_ITEMS "
         "ON ORDER_ITEMS.order_id = ORDERS.id",
     ) == [["fan_trap"]]
+
+
+# --- #453: a qualifier, the meaning checks and the finding text, in any case ------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The qualifier is spelled differently from the FROM clause it refers to.
+        "SELECT SUM(ORDERS.total_amount) FROM orders JOIN order_items "
+        "ON order_items.order_id = orders.id",
+        "SELECT SUM(O.total_amount) FROM orders o JOIN order_items oi ON oi.order_id = o.id",
+    ],
+)
+def test_a_qualifier_in_another_case_still_finds_the_fan(sql):
+    [agg] = _aggs(sql)
+    assert agg["status"] == rt.MULTIPLIED
+    assert [f["risk"] for f in agg["findings"]] == ["fan_trap"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT SUM(o.rate) FROM orders o",  # lowercase statement, uppercase model
+        "SELECT SUM(ORDERS.RATE) FROM ORDERS",  # the column in another case too
+    ],
+)
+def test_the_aggregation_class_check_matches_names_in_any_case(sql):
+    assert _risks(_upper_org(), sql) == [["bad_aggregation"]]
+
+
+def test_the_semi_additive_check_matches_names_in_any_case():
+    assert _risks(
+        _upper_org(),
+        "SELECT orders.created_at, SUM(orders.balance) FROM orders GROUP BY orders.created_at",
+    ) == [["semi_additive"]]
+
+
+def test_a_finding_names_tables_as_the_model_declares_them():
+    """Compared folded, shown as declared: `ORDERS` on a model that says `ORDERS`, whatever the
+    statement wrote, and `orders` on a model that says `orders`."""
+    upper = rt.assemble_receipt(
+        _upper_org(),
+        "select sum(orders.balance) from orders join order_items on order_items.order_id = orders.id",
+    )["aggregates"]["items"]
+    assert upper[0]["joins"] == ["ORDERS (1) <- ORDER_ITEMS (N)"]
+    [lower] = _aggs(
+        "SELECT SUM(ORDERS.total_amount) FROM ORDERS JOIN ORDER_ITEMS ON ORDER_ITEMS.order_id = ORDERS.id"
+    )
+    assert lower["joins"] == ["orders (1) <- order_items (N)"]
+
+
+@pytest.mark.parametrize(
+    "sql, risk",
+    [
+        ("SELECT SUM(O.rate) FROM orders o", "bad_aggregation"),
+        ("SELECT SUM(o.rate) FROM ORDERS O", "bad_aggregation"),
+        (
+            "SELECT o.created_at, SUM(O.balance) FROM orders o GROUP BY o.created_at",
+            "semi_additive",
+        ),
+        # The time grouping is found through the alias in another case too.
+        (
+            "SELECT O.created_at, SUM(o.balance) FROM orders o GROUP BY O.created_at",
+            "semi_additive",
+        ),
+    ],
+)
+def test_the_meaning_checks_follow_an_alias_in_another_case(sql, risk):
+    assert _risks(_upper_org(), sql) == [[risk]]
