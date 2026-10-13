@@ -355,3 +355,20 @@ def test_a_finding_names_tables_as_the_model_declares_them():
 )
 def test_the_meaning_checks_follow_an_alias_in_another_case(sql, risk):
     assert _risks(_upper_org(), sql) == [[risk]]
+
+
+def test_an_unquoted_qualifier_matching_two_aliases_is_never_cleared():
+    """`o` and a quoted `"O"` both in scope: which one an unquoted `O` binds to is engine folding,
+    and the scope map no longer knows which alias was quoted. Guessing the quoted one attributed the
+    SUM to `order_items` and reported it `not_multiplied`; it is left undetermined instead."""
+    [agg] = _aggs(
+        'SELECT SUM(O.total_amount) FROM orders AS o JOIN order_items AS "O" ON "O".order_id = o.id'
+    )
+    assert agg["status"] != rt.NOT_MULTIPLIED and agg["result_affected"] is not False
+
+
+def test_a_quoted_qualifier_binds_only_its_exact_alias():
+    [agg] = _aggs(
+        'SELECT SUM("o".total_amount) FROM orders AS "o" JOIN order_items AS oi ON oi.order_id = "o".id'
+    )
+    assert agg["status"] == rt.MULTIPLIED

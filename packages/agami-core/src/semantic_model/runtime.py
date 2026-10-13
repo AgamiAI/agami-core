@@ -2707,8 +2707,10 @@ def _lookup_column(col: "exp.Column", scope: dict[str, str],
         return found
     # bare column, ambiguous table: only safe if exactly one in-scope table defines it. Exact table
     # names first, so a model declaring two tables that differ only in case keeps the answer the
-    # exact match always gave; case-insensitively only when nothing matched exactly.
-    if not t:
+    # exact match always gave; case-insensitively only when nothing matched exactly. A QUALIFIED
+    # column that `_resolve_ci` left unresolved (an ambiguous qualifier) is not a bare column, and
+    # attributing it to whichever table owns the name would be the guess it declined to make.
+    if not t and not col.table:
         in_scope = set(scope.values())
         owners = [cols for tt, cols in colidx.items() if tt in in_scope and col.name in cols]
         if not owners:
@@ -5074,8 +5076,19 @@ def _resolve_ci(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
     and compares its answer with the model's names as declared. Making that fact case-insensitive is
     its own change, with its own tests."""
     if col.table:
-        hit = _ci_get(scope, col.table)
-        return hit if hit is not None else col.table
+        qualifier = col.args.get("table")
+        if isinstance(qualifier, exp.Identifier) and qualifier.args.get("quoted"):
+            # A quoted qualifier is case-sensitive: only its exact alias or table.
+            return scope.get(col.table, col.table)
+        # Unquoted: any alias or table equal ignoring case, but only ONE. `FROM orders AS o JOIN
+        # order_items AS "O"` puts both `o` and `O` in scope, and which one an unquoted `O` binds to
+        # depends on the engine's folding; the scope map no longer knows which alias was quoted, so
+        # two candidates leave the column unresolved, which the report calls undetermined rather
+        # than guessing a table and possibly calling an inflated number clean.
+        hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+        if len(hits) == 1:
+            return scope[hits[0]]
+        return None if hits else col.table
     return _resolve_col_table(col, scope)
 
 
