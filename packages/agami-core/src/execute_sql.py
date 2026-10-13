@@ -1508,10 +1508,10 @@ _guard_model: ContextVar[Any | None] = ContextVar("_guard_model", default=None)
 # absent or no model has been built yet. All of them get the shape-neutral remediation, which is why
 # that third text is not a defensive branch — it is the answer for every deployment without a model.
 _guard_shape: ContextVar[str | None] = ContextVar("_guard_shape", default=None)
-# What a timeout refusal can say about WHY the statement was slow (#451): one sentence per large table
-# the statement reads, the outer-join shape first, with how to narrow each. Computed
+# What a timeout refusal can say about WHY the statement was slow (#451): one sentence per outer join
+# between plain tables, in the caller's own names and never the model's facts. Computed
 # where `_guard_shape` is, for the same reason (this module cannot import sqlglot), and empty when the
-# model pass did not run or the model knows no table sizes.
+# model pass did not run or the statement has no such join.
 _guard_scan: ContextVar[tuple[str, ...]] = ContextVar("_guard_scan", default=())
 
 # The ACE-101 posture, resolved ONCE per call and then fixed for the rest of it.
@@ -1795,11 +1795,10 @@ _NARROW_IT = ("Narrow the time range, reduce the grouping, or add a selective fi
 
 
 def _narrow_it() -> str:
-    """The time-bound remediation, naming the large tables the statement reads and how to narrow
-    them when the model knows their size (#451), and the generic advice otherwise. At most two, so
-    the refusal stays one short paragraph."""
-    named = _guard_scan.get()[:2]
-    return " ".join(named) + " Then run it again." if named else _NARROW_IT
+    """The time-bound remediation: the outer-join shape the statement uses, in its own table names,
+    when it has one (#451), then the generic advice. At most two shapes, so the refusal stays one
+    short paragraph."""
+    return " ".join([*_guard_scan.get()[:2], _NARROW_IT])
 
 # The transfer bound's remediation, keyed by the shape `_guard_shape` carries. Three entries rather
 # than one, because the right fix genuinely differs and the wrong one is not merely unhelpful:

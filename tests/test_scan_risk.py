@@ -1,10 +1,9 @@
 """Scan risk on a large table (#451), kept to what the model knows for certain.
 
 The receipt flags one structural shape: a large table on the side of an outer join that is not
-preserved, from a side holding no large table. A timeout refusal names that, and every other large
-table the statement reads with the filter the model recommends for it, instead of the generic
-advice. Advisory everywhere; nothing here refuses. Sizes come from
-`performance_hints.estimated_row_count`, so a table the model holds no size for is never named.
+preserved, from plain tables the model sizes as small. A timeout refusal describes any outer join's
+shape in the caller's own table names, never a model fact, because a refusal may only echo what the
+caller wrote. Advisory everywhere; nothing here refuses.
 """
 
 from __future__ import annotations
@@ -60,7 +59,8 @@ OUTER = (
 
 
 def _risks(sql):
-    return [(f["risk"], f["table"]) for f in rt.scan_findings(parse_one(sql, read="postgres"), ORG)]
+    tree = parse_one(sql, read="spark" if " SEMI " in sql or " ANTI " in sql else "postgres")
+    return [(f["risk"], f["table"]) for f in rt.scan_findings(tree, ORG)]
 
 
 @pytest.mark.parametrize(
@@ -98,6 +98,11 @@ def _risks(sql):
             "LEFT JOIN fact_lines f ON f.period_key = e.period_key",
             [],
         ),
+        # Semi and anti joins carry a side but are not outer joins.
+        ("SELECT 1 FROM periods p LEFT SEMI JOIN fact_lines f ON f.period_key = p.period_key", []),
+        ("SELECT 1 FROM periods p LEFT ANTI JOIN fact_lines f ON f.period_key = p.period_key", []),
+        # A preserved table with no known size is not assumed small.
+        ("SELECT 1 FROM big_unsized b LEFT JOIN fact_lines f ON f.period_key = b.k", []),
         # A filtered or unfiltered read of one table is not judged at all.
         ("SELECT COUNT(*) FROM fact_lines", []),
     ],
@@ -107,15 +112,16 @@ def test_scan_findings(sql, expected):
 
 
 def test_a_table_is_sized_by_its_own_schema():
-    """`staging.orders` is small; it must not borrow the large `sales.orders` row count."""
+    """`staging.orders` is small; it must not borrow the large `sales.orders` row count, and the large
+    one is found though it is the second table of that name the model declares."""
     org = m.Datasource(
         datasource="shop",
         subject_areas=[
             m.SubjectArea(
                 name="s",
                 tables_defined=[
-                    _table("orders", 5_000_000, ["k"], schema="sales"),
                     _table("orders", 10, ["k"], schema="staging"),
+                    _table("orders", 5_000_000, ["k"], schema="sales"),
                     _table("periods", 2_000, ["k"]),
                 ],
             )
@@ -139,8 +145,8 @@ def test_the_risk_lands_on_that_reference_and_no_other():
     flagged, and a schema-qualified one is matched as well."""
     sql = (
         "WITH x AS (SELECT amount FROM public.fact_lines WHERE date_key = 1) "
-        "SELECT SUM(x.amount) FROM x CROSS JOIN periods p LEFT JOIN public.fact_lines "
-        "ON fact_lines.period_key = p.period_key"
+        "SELECT 1 FROM periods p LEFT JOIN public.fact_lines "
+        "ON fact_lines.period_key = p.period_key WHERE EXISTS (SELECT 1 FROM x)"
     )
     items = rt.assemble_receipt(ORG, sql)["tables"]["items"]
     assert len([i for i in items if i["ref"] == "public.fact_lines"]) == 2
@@ -154,39 +160,38 @@ def test_an_inner_join_read_carries_no_scan_risk():
     assert all(item["scan_risk"] is None for item in receipt["tables"]["items"])
 
 
-def test_a_timeout_names_every_large_table_read_and_its_filter():
-    sql = OUTER.replace("GROUP BY 1", "CROSS JOIN events e GROUP BY 1")
-    risks = rt.scan_risks(rt.build_guard_context(sql, ORG))
-    assert len(risks) == 2
-    assert "outer side of a join from `periods`" in risks[0]
-    assert risks[1].startswith("`events` is large (about 3,000,000 rows)")
-    assert "a date or period range" in risks[1]  # no recommended filter declared
+def _refusal(sql):
+    token = execute_sql._guard_scan.set(tuple(rt.scan_risks(rt.build_guard_context(sql, ORG))))
+    try:
+        return execute_sql._resource_limit_refusal(execute_sql._ResourceLimit("x")).remediation
+    finally:
+        execute_sql._guard_scan.reset(token)
+
+
+def test_a_timeout_describes_the_outer_join_in_the_callers_names():
+    remediation = _refusal(OUTER)
+    assert remediation.startswith(
+        "The statement keeps every `periods` row and pulls `fact_lines` in from the outer side of a "
+        "LEFT JOIN"
+    )
+    assert "INNER JOIN `periods`" in remediation
+    assert remediation.endswith(execute_sql._NARROW_IT)
+
+
+def test_a_timeout_refusal_names_no_model_fact():
+    """No row count and no recommended filter, and the same wording whatever the sizes: a forced
+    timeout must not read what the model declares (SECURITY.md, "What a refusal may name")."""
+    remediation = _refusal(OUTER)
+    assert "7,000,000" not in remediation and "date_key" not in remediation
+    small_outer = "SELECT 1 FROM fact_lines f LEFT JOIN periods p ON p.period_key = f.period_key"
+    assert "pulls `periods` in from the outer side" in _refusal(small_outer)
+    assert _refusal("SELECT COUNT(*) FROM fact_lines") == execute_sql._NARROW_IT
 
 
 def test_a_repeated_shape_is_named_once():
-    risks = rt.scan_risks(rt.build_guard_context(f"{OUTER} UNION ALL {OUTER}", ORG))
-    assert len(risks) == 1
+    assert len(rt.scan_risks(rt.build_guard_context(f"{OUTER} UNION ALL {OUTER}", ORG))) == 1
 
 
-def test_a_timeout_names_the_recommended_filter():
-    risks = rt.scan_risks(rt.build_guard_context("SELECT COUNT(*) FROM fact_lines", ORG))
-    assert risks == [
-        "`fact_lines` is large (about 7,000,000 rows); narrow it with a range on `date_key` "
-        "if the question allows."
-    ]
-    assert rt.scan_risks(rt.build_guard_context("SELECT COUNT(*) FROM periods", ORG)) == []
-
-
-def test_a_timeout_refusal_names_the_large_table_and_the_fix():
-    token = execute_sql._guard_scan.set(("`fact_lines` is large (about 7,000,000 rows).",))
-    try:
-        remediation = execute_sql._resource_limit_refusal(execute_sql._ResourceLimit("x")).remediation
-    finally:
-        execute_sql._guard_scan.reset(token)
-    assert remediation.startswith("`fact_lines` is large")
-    assert remediation.endswith("Then run it again.")
-
-
-def test_without_a_known_large_table_the_advice_stays_generic():
+def test_without_an_outer_join_the_advice_stays_generic():
     remediation = execute_sql._resource_limit_refusal(execute_sql._ResourceLimit("x")).remediation
     assert remediation == execute_sql._NARROW_IT
