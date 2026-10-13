@@ -290,6 +290,32 @@ def test_a_multiplication_the_aggregate_cannot_feel_is_confirmed_with_a_note(tmp
     assert row["verdict"] == "confirmed" and "cannot move" in row["note"]
 
 
+def _fan_ledger(tmp_path, agg: dict) -> dict:
+    _ran_ok(tmp_path)
+    _write(tmp_path, "join-probes.json", {"joins": [
+        _join_probe("order_items", "order_id", "orders", "id", declared_between=True, matches=True)],
+        "unreadable": None})
+    _write(tmp_path, "statement-prepare.json", _prepare(agg))
+    return _parts(ledger(tmp_path))[f"fan_out:{agg['aggregate']}"]
+
+
+def test_an_immune_aggregate_with_an_unresolved_read_stays_unresolved(tmp_path):
+    """`result_affected: null` (#450): the duplication cannot move the aggregate, but it also reads a
+    subquery or CTE the check could not see into. Confirming it would clear exactly that doubt."""
+    agg = _agg("MAX(orders.total + t.v)", "multiplied", joins=["order_items → orders"],
+               risks=["fan_out_invariant"])
+    row = _fan_ledger(tmp_path, {**agg, "result_affected": None})
+    assert row["verdict"] == "unresolved" and "could not resolve" in row["note"]
+
+
+def test_the_receipts_result_affected_decides_a_multiplied_aggregate(tmp_path):
+    agg = _agg("MAX(orders.total)", "multiplied", joins=["order_items → orders"],
+               risks=["fan_out_invariant"])
+    assert _fan_ledger(tmp_path / "a", {**agg, "result_affected": False})["verdict"] == "confirmed"
+    trap = _agg("SUM(orders.total)", "multiplied", joins=["order_items → orders"], risks=["fan_trap"])
+    assert _fan_ledger(tmp_path / "b", {**trap, "result_affected": True})["verdict"] == "query_defect"
+
+
 def test_a_fan_out_check_over_an_unresolved_join_is_unresolved_never_clean(tmp_path):
     """The dependency rule. `sm prepare` had no cardinality for a join the semantic model does not
     declare and nobody probed, so its clean verdict on the total is blind, not clean."""

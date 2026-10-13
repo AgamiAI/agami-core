@@ -70,6 +70,13 @@ from guardrail import (
 # swallowed here is logged at WARNING with its exception instead.
 _LOG = logging.getLogger(__name__)
 
+# Every tool reply is serialised compactly (#418). The reader is a model, which gets nothing from
+# indentation and pays for every character of it: pretty-printing was ~25% of a schema reply's JSON
+# and ~22% of an execute_sql result. Files written to disk and the CLI's own output stay
+# pretty-printed — people read those. `mcp_http` re-serialises each reply to stamp
+# `caller_identity`, so it uses this same constant; otherwise it would restore the whitespace.
+REPLY_SEPARATORS = (",", ":")
+
 # Secrets + per-user state live under <artifacts_dir>/local/. Re-resolved after bootstrap() in main().
 AGAMI_LOCAL = agami_paths.local_dir()
 CREDENTIALS_PATH = agami_paths.credentials_path()
@@ -170,9 +177,11 @@ _SHARED_INSTRUCTIONS = (
     "fan the pair out per datasource rather than walking them one at a time.\n"
     "If a get_datasource_schema response carries `prompt_examples`, the datasource has stored "
     "examples: fetch them before writing SQL if you have not already.\n"
-    "Dialect: list_datasources reports it per datasource as `engine` (what the model declares) "
-    "and `database_type` (what the connection's DSN says). Take it from there and never assume "
-    "one; where they differ, `engine` is what the rules were chosen by. A metric's `binding` "
+    "Dialect: list_datasources reports it per datasource as `engine` (the engine the model "
+    "declares) and `database_type` (that engine as a lowercase label). When the model declares no "
+    "single engine, `engine` is absent and `database_type` is empty on a served deployment or "
+    "taken from the local credentials. Take the dialect from there and never assume one. A "
+    "metric's `binding` "
     "already arrives resolved to that dialect, so copy it rather than translating it — but the "
     "rest of the statement is yours to write in the right one, and date arithmetic, string "
     "functions and casts are where a guess shows up. When list_datasources carries "
@@ -190,8 +199,9 @@ _SHARED_INSTRUCTIONS = (
     "empty `items` with that marker set means NOT CHECKED while an empty `items` with a null "
     "marker means checked and clean. Reporting only `items` turns 'not checked' back into "
     "'nothing wrong', which is the one reading the receipt exists to prevent. (d) An `omitted` "
-    "filter (`receipt.tables.items[].filters`), a `multiplied` aggregate and an `unmatched` output "
-    "column are each a real gap between what the org means and what the answer counted — name the "
+    "filter (`receipt.tables.items[].filters`), a `multiplied` aggregate whose "
+    "`result_affected` is true and an `unmatched` output column are each a real gap between what "
+    "the org means and what the answer counted — name the "
     "number affected and why, and re-run when the question wanted the other reading.\n"
     "Caller identity: when a tool result includes `caller_identity`, that is the verified asker — "
     "resolve any self-referential term in the question ('my', 'me', 'I', 'mine') against it, never "
@@ -255,7 +265,7 @@ def bootstrap_paths() -> None:
 def _load_config() -> dict[str, Any]:
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text())
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
     return {}
@@ -342,7 +352,7 @@ def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> 
                     "remediation": "no datasources are deployed for this organization.",
                 }
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
     return json.dumps(
         {
@@ -355,7 +365,7 @@ def _choose_datasource_error(org_id: str, served: "list[str] | None" = None) -> 
                 ),
             }
         },
-        indent=2,
+        separators=REPLY_SEPARATORS,
     )
 
 
@@ -496,7 +506,7 @@ def _credentials_sections() -> dict[str, dict[str, str]]:
 
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     try:
-        cfg.read(CREDENTIALS_PATH)
+        cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
     except configparser.Error:
         return {}
     out: dict[str, dict[str, str]] = {}
@@ -507,10 +517,18 @@ def _credentials_sections() -> dict[str, dict[str, str]]:
     return out
 
 
+_DSN_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
 def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
     sect = creds.get(profile, {})
     t = sect.get("type", "")
     if not t and sect.get("url"):
+        # Only a real scheme at the very start is a label. A `url` without one (or with `://`
+        # further in, inside a password or a query string) would otherwise have "the part before
+        # ://" echoed into the listing, credentials included (#453); it reports nothing instead.
+        if not _DSN_SCHEME.match(sect["url"]):
+            return ""
         # Map a DSN scheme → the datasource `type` label (display only; execution is execute_sql's
         # job). Covers the DBs agami advertises; an unknown scheme passes through verbatim.
         scheme = sect["url"].split("://", 1)[0].split("+", 1)[0].lower()
@@ -1164,7 +1182,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             out = [
                 {
                     "datasource": ds,
-                    "database_type": _served_db_type(ds),
+                    "database_type": _declared_db_type(engines.get(ds)),
                     "table_count": counts.get(ds, 0),
                     **_dialect_fields(engines.get(ds)),
                     # No `model_present` here. It was the literal `True`: this list is built FROM
@@ -1185,7 +1203,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
             # would read as a real account (#253); the data tools refuse that omission already.
             listed = any(d["datasource"] == active for d in out)
             return json.dumps(
-                {"datasources": out, "active_datasource": active if listed else None}, indent=2
+                {"datasources": out, "active_datasource": active if listed else None}, separators=REPLY_SEPARATORS
             )
         return json.dumps(
             {
@@ -1193,7 +1211,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                 "note": "No models deployed to this server yet. Load one with the deploy's model "
                 "loader (model_deploy scans <artifacts_dir>/*/datasource.yaml).",
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
 
     # Local skill path: enumerate the credentials-file profiles + their on-disk models.
@@ -1202,6 +1220,7 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
     out = []
     for profile in sorted(creds.keys()):
         pdir = artifacts / profile
+        engine = _local_engine(pdir)
         table_count = 0
         if pdir.is_dir():
             table_count = (
@@ -1212,9 +1231,11 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
         out.append(
             {
                 "datasource": profile,
-                "database_type": _db_type_for(profile, creds),
+                # The credentials only speak when no model declares a single engine: a profile not
+                # introspected yet, or a model whose connections name none or several.
+                "database_type": _declared_db_type(engine) or _db_type_for(profile, creds),
                 "table_count": table_count,
-                **_dialect_fields(_local_engine(pdir)),
+                **_dialect_fields(engine),
                 "model_present": (pdir / "datasource.yaml").exists(),
                 "is_active": profile == active,
             }
@@ -1225,9 +1246,9 @@ def tool_list_datasources(_args: dict[str, Any]) -> str:
                 "datasources": [],
                 "note": "No profiles found in your credentials file. Run the agami-connect skill first.",
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
-    return json.dumps({"datasources": out, "active_datasource": active}, indent=2)
+    return json.dumps({"datasources": out, "active_datasource": active}, separators=REPLY_SEPARATORS)
 
 
 def _dialect_fields(engine: "str | None") -> dict[str, Any]:
@@ -1238,11 +1259,9 @@ def _dialect_fields(engine: "str | None") -> dict[str, Any]:
     not vary with the scope being asked about, so they belong on the call that answers "which
     datasource, on what engine" and is made once.
 
-    `engine` is the model's own `storage_type`. It is emitted beside `database_type` rather than
-    replacing it: that field is derived from the DSN and reports the connection's scheme, which is
-    `postgres` for a Redshift warehouse reached the usual way (#401). Both are a client's answer to
-    "what dialect", and they can disagree — so the one the MODEL declares is the one the rules are
-    chosen by, and it is named.
+    `engine` is the model's own `storage_type`, and `database_type` is the same engine as a lowercase
+    label (#420). Both are kept because clients read both; they no longer disagree, since neither is
+    taken from the connection's DSN.
     """
     if not engine:
         return {}
@@ -1307,14 +1326,35 @@ def _local_engine(profile_dir: Path) -> "str | None":
     return engines.pop() if len(engines) == 1 else None
 
 
-def _served_db_type(datasource: str) -> str:
-    """Best-effort database-type label for a served datasource. The store holds the model, not the
-    warehouse credentials, so derive the type from the `DATASOURCE_URL[__<datasource>]` scheme the
-    executor already resolves. Display-only ("" when no DSN is set — the model still serves)."""
-    from execute_sql import _env_datasource_dsn  # sibling module; no import cycle
+# The `database_type` label for each engine a model can declare, in the vocabulary `_db_type_for`
+# already reports, so one listing reads the same whichever path produced it. Written out rather than
+# lowercased (`PostgreSQL` is `postgres`), and not `sql_dialect._SQLGLOT_DIALECT`, whose names are
+# sqlglot's: it calls SQL Server `tsql`, and this label is `sqlserver`.
+_ENGINE_DB_TYPE: dict[str, str] = {
+    "PostgreSQL": "postgres",
+    "MySQL": "mysql",
+    "Snowflake": "snowflake",
+    "BigQuery": "bigquery",
+    "Redshift": "redshift",
+    "SQLite": "sqlite",
+    "DuckDB": "duckdb",
+    "SQLServer": "sqlserver",
+    "Databricks": "databricks",
+    "Trino": "trino",
+    "Oracle": "oracle",
+}
 
-    dsn = _env_datasource_dsn(datasource)
-    return _db_type_for(datasource, {datasource: {"url": dsn}}) if dsn else ""
+
+def _declared_db_type(engine: "str | None") -> str:
+    """`database_type` from the engine the MODEL declares, or "" when it declares no single one.
+
+    It used to come from the connection's DSN scheme (#420), and that was wrong three ways: a
+    Redshift warehouse is usually reached over a `postgresql://` DSN, so it read as `postgres`; the
+    lookup ignored the tenant, so a per-tenant DSN was never found and the field came back empty;
+    and a per-user warehouse login has no DSN to read at all. The model declares its engine on every
+    connection, and `engine_mismatch` already refuses a query whose credentials point elsewhere, so
+    the declaration is the one source this field needs."""
+    return _ENGINE_DB_TYPE.get(engine or "", "")
 
 
 def _read_text(path: Path) -> str | None:
@@ -1356,8 +1396,9 @@ _LARGE_TABLE_ROWS = 1_000_000  # tables at/above this surface in `large_tables` 
 # Metric ranking (lexical, no embeddings): exact/substring hits ("strong") are always kept; the
 # weak token-overlap tail needs >= this coverage and is capped at top-K. This only decides which
 # metrics get FULL detail inline — `get_datasource_schema` ALWAYS returns `metric_index` (every
-# metric's name + one-liner), so a metric that matches nothing is never hidden: the client sees it
-# exists and can pull it by name via `metric_names`. The stopwords carry no metric-identity signal,
+# described metric's name + one-liner, and a count of the undescribed rest, #406), so a metric that
+# matches nothing is not silently hidden: the client sees it exists and can pull it by name via
+# `metric_names`, or open its table. The stopwords carry no metric-identity signal,
 # so they're dropped from the weak token-overlap path only (exact/substring still match them).
 _METRIC_MATCH_TOP_K = 10
 _METRIC_MATCH_MIN_COVERAGE = 0.6
@@ -1389,7 +1430,9 @@ _METRIC_MATCH_STOPWORDS = frozenset(
         "pct",
     }
 )
-_METRIC_WORD_RE = re.compile(r"[a-z0-9]+")
+# Unicode letters and digits, as `semantic_model.models._label_words` reads them: a description in
+# another script counts as one (#406), so it must also be searchable in that script.
+_METRIC_WORD_RE = re.compile(r"[^\W_]+")
 
 
 def _auto_mode_for(area_count: int) -> str:
@@ -1419,7 +1462,8 @@ def _content_tokens(s: str | None) -> set[str]:
 def _all_metrics(org) -> dict[str, tuple[Any, str | None]]:
     """Map a unique key -> (metric, area) for every metric (subject-area + cross-area). The key is
     the metric name, disambiguated by area on a collision so two areas sharing a metric name are
-    BOTH kept (the never-hide contract: every metric must appear in metric_index)."""
+    BOTH kept (the never-hide contract: every metric is listed in metric_index or counted beside
+    it)."""
     out: dict[str, tuple[Any, str | None]] = {}
 
     def _add(m, area: str | None) -> None:
@@ -1458,6 +1502,12 @@ def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]
             cand_tokens: set[str] = set()
             for cn in cand_norms:
                 cand_tokens |= _content_tokens(cn)
+            # A metric with no description is matched on its `calculation` too, or only its name
+            # could find it — and it is no longer in `metric_index` to be found by eye (#406). The
+            # weak, capped path only: `calculation` runs to sentences, so a substring hit there
+            # would make a one-word query a strong, uncapped match for most of the catalogue.
+            if not m.described:
+                cand_tokens |= _content_tokens(m.calculation)
             if cand_tokens:
                 coverage = len(q_tokens & cand_tokens) / len(q_tokens)
                 if coverage >= _METRIC_MATCH_MIN_COVERAGE:
@@ -1472,6 +1522,20 @@ def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]
     return result[: max(_METRIC_MATCH_TOP_K, len(strong_hits))]
 
 
+def _metric_index_fields(metrics: dict[str, tuple[Any, str | None]]) -> dict[str, Any]:
+    """`metric_index` for the metrics in scope that are described, and a count of the rest.
+
+    An undescribed metric used to be listed with its own name as its description, which costs its
+    characters on every call and tells the agent nothing the key did not; on a wide model that was
+    most of the index (#406). It is counted instead of listed, so the agent still knows it exists:
+    its table's reply returns it in full, and `query` matches its `calculation`."""
+    index = {n: m.description for n, (m, _a) in metrics.items() if m.described}
+    out: dict[str, Any] = {"metric_index": index}
+    if len(index) < len(metrics):
+        out["metrics_without_description"] = len(metrics) - len(index)
+    return out
+
+
 def _engine_of(org) -> "str | None":
     """The one engine this datasource's SQL runs on, as `Metric.bindings` spells it (`PostgreSQL`,
     `Snowflake`, …). None when no connection declares one, or two declare different ones — the same
@@ -1481,7 +1545,9 @@ def _engine_of(org) -> "str | None":
     return engines.pop() if len(engines) == 1 else None
 
 
-def _metric_full(m, area: str | None, engine: "str | None" = None) -> dict[str, Any]:
+def _metric_full(
+    m, area: str | None, engine: "str | None" = None, key: str | None = None
+) -> dict[str, Any]:
     """One metric in full, INCLUDING the binding for this deployment's engine.
 
     The server instructions and this tool's own description both tell the agent to reuse a metric's
@@ -1502,6 +1568,11 @@ def _metric_full(m, area: str | None, engine: "str | None" = None) -> dict[str, 
     declares, so shipping every dialect would multiply the largest block in the payload to no end.
     A metric declaring nothing for this engine simply has no `binding` key, which is a fact about
     the model's coverage and reads as one.
+
+    `selector` is the key `metric_names` takes, sent only when it differs from `name` — when two
+    areas share a metric name and `_all_metrics` disambiguated it. An undescribed metric is not in
+    `metric_index` (#406), so this entry is the only place its selector can be read from, and its
+    bare `name` would select the other metric.
     """
     out = {
         "name": m.name,
@@ -1511,6 +1582,8 @@ def _metric_full(m, area: str | None, engine: "str | None" = None) -> dict[str, 
         "other_names": list(m.other_names or []),
         "review_state": m.review_state,
     }
+    if key and key != m.name:
+        out["selector"] = key
     binding = (m.bindings or {}).get(engine) if engine else None
     if binding and binding.strip():
         out["binding"] = binding
@@ -1753,7 +1826,7 @@ class _ModelNames(NamedTuple):
         }
         if hints:
             error["hints"] = hints
-        return json.dumps({"error": error}, indent=2)
+        return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
     def miss_advice(self, name: str, guesses: Mapping[str, list[str]]) -> str:
         """What to try instead of `name`: its wrong-kind hint first, else its closest names.
@@ -1911,7 +1984,7 @@ def _normalized_args(
         # The miss is the parameter's key; the value it was sent is kept when it is a string.
         _note_miss("argument", key, extra.get("did_you_mean") or [], fixed.get(key))
         error = {"kind": "invalid_argument", "remediation": remediation, **extra}
-        return fixed, json.dumps({"error": error}, indent=2)
+        return fixed, json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
     for key in ("dataset_names", "metric_names"):
         if key not in keys:
@@ -1983,7 +2056,7 @@ def _unknown_area_error(org, area: str, profile: str) -> str:
     }
     if hint:
         error["hint"] = hint
-    return json.dumps({"error": error}, indent=2)
+    return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
 
 def _scoped_metrics(
@@ -2058,7 +2131,8 @@ def _schema_payload(
     """Build the structured schema payload at the given verbosity, WITHIN `scope`.
 
     `metric_index` + `large_tables` are always present — the never-hide net, now stated relative to
-    the declared scope: every metric IN SCOPE is listed, whatever the verbosity. `metrics` carries
+    the declared scope: every described metric IN SCOPE is listed, and the rest counted, whatever
+    the verbosity (`_metric_index_fields`). `metrics` carries
     FULL detail for the matched set, or every in-scope metric in `full` with no query.
 
     Only the datasource and area tiers reach this function; the table tier builds its own payload
@@ -2088,7 +2162,7 @@ def _schema_payload(
         # a `dataset_names` call returns them in full on its own `relationships` block, so
         # repeating every relationship object here would restate what the next call states better.
         "cross_area_relationships": _cross_area_map(org, scope),
-        "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
+        **_metric_index_fields(metrics),
         "large_tables": _large_tables(org),
     }
     # Omitted outright when there is nothing to route, which the table tier already does with this
@@ -2131,7 +2205,7 @@ def _schema_payload(
     selected = matched if matched else (list(metrics) if mode == "full" else [])
     engine = _engine_of(org)  # resolved once, not per metric
     result["metrics"] = [
-        _metric_full(metrics[n][0], metrics[n][1], engine) for n in selected if n in metrics
+        _metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected if n in metrics
     ]
     return result
 
@@ -2159,7 +2233,7 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
     if known and profile in known:
         # The name is right and the model is broken — a dangling `ref`, a missing area directory.
         # The loader's message names the file; a list of datasources would only hide it.
-        return json.dumps({"error": error}, indent=2)
+        return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
     if known:
         guesses = _did_you_mean(profile, known)
         # Only here. A known name has a broken model, and with nothing known there is no model at
@@ -2174,7 +2248,7 @@ def _unknown_datasource_error(profile: str, remediation: str) -> str:
                 f"{', '.join(repr(g) for g in guesses)}? Known datasources: {', '.join(known)}."
             )
         error["datasources"] = known
-    return json.dumps({"error": error}, indent=2)
+    return json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
 
 def tool_get_datasource_schema(args: dict[str, Any]) -> str:
@@ -2200,8 +2274,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     `mode="auto"` (default) picks verbosity by the IN-SCOPE subject-area count (full <=12, summary
     <=50, index 51+); a hard ~60K-char budget then downgrades one rung at a time
     (full→summary→index) even for an explicit `mode="full"`, setting `truncated=true`.
-    `metric_index` (name->description for every metric in scope) + `large_tables` are always
-    present. Plus datasource.md / USER_MEMORY.md domain context.
+    `metric_index` (name->description for every described metric in scope, the rest counted) +
+    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context: whole on
+    the overview, cut to the tables in scope on the `area` and table tiers (#419).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
     _call_misses.set(None)
@@ -2250,7 +2325,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                     "plugins/agami/scripts/semantic_model/requirements.txt",
                 }
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
 
     from semantic_model import loader as L
@@ -2322,7 +2397,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                         f"or name tables from that area.",
                     }
                 },
-                indent=2,
+                separators=REPLY_SEPARATORS,
             )
     # Never-hide, within the scope the caller DECLARED. `metric_index` and the full `metrics`
     # block are both projected from this one set, so they cannot disagree about what is in scope.
@@ -2332,7 +2407,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # `query` ranks and `metric_names` selects WHICH in-scope metrics come back in full detail.
     # Resolved once, for every tier: they meant nothing on the table branch before, so the same
     # argument narrowed the detail block at area scope and was silently dropped one tier down.
-    # Neither narrows the SCOPE — `metric_index` still lists everything in it.
+    # Neither narrows the SCOPE — `metric_index` still lists every described metric in it, and
+    # counts the rest.
     explicit = [n for n in (args.get("metric_names") or []) if n in metrics]
     matched = list(dict.fromkeys(explicit + _match_metrics(args.get("query"), metrics)))
     selected = matched or list(metrics)
@@ -2411,8 +2487,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
             "relationships": ctx["relationships"],
-            "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine) for n in selected],
-            "metric_index": {n: (m.description or n) for n, (m, _a) in metrics.items()},
+            "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected],
+            **_metric_index_fields(metrics),
             "large_tables": _large_tables(org),
         }
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they
@@ -2451,8 +2527,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             if nxt is None:
                 # At the floor (index) and STILL over budget — the inline `metrics` (full detail
                 # for matched/all metrics) is the remaining bulk. Shed it; `metric_index` still
-                # lists every metric by name, so nothing is hidden — the client requests specifics
-                # via `metric_names`. Flag truncated so the overflow is never silent (C1/C3).
+                # lists every described metric and counts the rest, so nothing is hidden silently —
+                # the client requests specifics via `metric_names`, or by opening a table. Flag
+                # truncated so the overflow is never silent (C1/C3).
                 truncated = True
                 if result.get("metrics"):
                     result["metrics"] = []
@@ -2481,7 +2558,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # What execute_sql must be sent back on a hosted deployment (#364).
     result["model_version"] = model_version
 
-    parts = [json.dumps(result, indent=2, default=str)]
+    parts = [json.dumps(result, separators=REPLY_SEPARATORS, default=str)]
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
     # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
     # Source (datasource.md / USER_MEMORY.md text) comes from the DB under the DB backend, files
@@ -2492,24 +2569,59 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # narrative + derived summary. All the text is read on ONE DB connection (see _context_sources). No
     # record ⇒ compose_org_context degrades to the single-level output, so a deployment without a record
     # is unaffected.
+    # Below the overview, the domain context is cut to what the call in hand needs (#419). It used
+    # to be the same ~25K characters on every tier, a third of everything a run of real questions
+    # received, and a question makes several schema calls. What stays on every tier is the
+    # narrative (`datasource.md`): its rules change answers, and a conversation can reach SQL
+    # without ever making the overview call, so it cannot depend on the client having seen it.
+    # What is cut is decided by the arguments alone, never by a guess about what the client
+    # already holds: the subject-area listing, which only the overview needs, and the datasource
+    # glossary entries that name none of the tables in scope. The company glossary stays whole:
+    # its terms are business vocabulary, not table names. The pointer says where the rest is.
+    scoped = _scope_tables(org, scope)
     domain_context = _OD.compose_org_context(
         record,
         [org],
         company_narrative=company_md,
         source_narratives=[org_md_raw],
-        # Suppressed only where the JSON above actually carries the areas. The justification is
-        # "the reader already has this block", so it has to be conditioned on the reader having
-        # it: the table tier emits no `subject_areas`, and dropping the prose there too would
-        # remove the listing from both surfaces at once. The narrative, glossary, coded-value
-        # legends and counts always render — they can change an answer and are duplicated nowhere.
-        with_area_list="subject_areas" not in result,
+        # Only the overview lists the areas, and there only when its JSON does not already carry
+        # them as `subject_areas`. Counts, the narrative and the glossary are duplicated nowhere.
+        with_area_list=scoped is None and "subject_areas" not in result,
+        glossary_tables=scoped,
     )
     if domain_context:
         parts.append(f"\n## Domain context\n{domain_context}")
+        if scoped is not None:
+            parts.append(
+                "\nThis is the domain context for the tables in scope. Glossary terms for other "
+                "tables and the subject-area list come with `get_datasource_schema` called "
+                "without `area` or `dataset_names`."
+            )
     user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     return "\n".join(parts)
+
+
+def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
+    """The tables a scoped reply's glossary is narrowed to, or None for the whole datasource.
+
+    An area means every table it holds, defined there or referenced from another area — the same
+    set its reply can describe. A table tier keeps only the names the model has: a mixed list still
+    gets a reply, and an unknown name that happens to be a common word would otherwise match most
+    of the glossary. Names are bare, because that is how a glossary term writes a table."""
+    # Only tables the served model defines. A rejected definition is dropped by the loader while
+    # the `TableRef`s naming it are kept, so a reference alone does not mean the table is live.
+    known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
+    if scope.level == "table":
+        return frozenset(t for t in scope.tables if t in known)
+    if scope.level == "area":
+        sa = org.subject_area(scope.area)
+        if sa is None:
+            return frozenset()
+        names = [t.name for t in sa.tables_defined] + [r.table for r in sa.tables]
+        return frozenset(n.rsplit(".", 1)[-1] for n in names) & known
+    return None
 
 
 def _unknown_example_area(area: Any, profile: str) -> "str | None":
@@ -2596,7 +2708,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 # and this is the same value get_datasource_schema reports (#364).
                 "model_version": model_version,
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
             default=str,
         )
 
@@ -2626,7 +2738,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 "note": f"No examples under {ex_dir}/<area>/examples.yaml. "
                 f"Corrections saved via agami-save-correction will appear here.",
             },
-            indent=2,
+            separators=REPLY_SEPARATORS,
         )
     header = (
         f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
@@ -2968,7 +3080,7 @@ def _finalize_execution(
         "sql": sql,
         "execution_ms": execution_ms,
     }
-    return json.dumps(result, indent=2, default=str)
+    return json.dumps(result, separators=REPLY_SEPARATORS, default=str)
 
 
 def _envelope(
@@ -3225,7 +3337,7 @@ def _emit(
             row_count,
         )
     )
-    return json.dumps(body, indent=2, default=str)
+    return json.dumps(body, separators=REPLY_SEPARATORS, default=str)
 
 
 # The most of a caller's statement that reaches the audit store. Deliberately far below the guard's
@@ -3767,6 +3879,11 @@ def _pass_child_env() -> dict[str, str]:
 
     return {
         **os.environ,
+        # UTF-8 from the first byte the child writes, including a traceback raised before its `main`
+        # can switch its streams: the parent decodes both streams as UTF-8. PYTHONIOENCODING too,
+        # because an inherited one takes precedence over UTF-8 mode for the standard streams.
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
         "AGAMI_GOVERNANCE_ENFORCED": "false" if _model_pass_disabled() else "true",
         "AGAMI_SQL_MAX_ROWS": str(_resolve_row_cap()),
         "AGAMI_SQL_TIMEOUT_S": str(_resolve_timeout_s()),
@@ -3931,6 +4048,7 @@ def _tool_execute_sql(args: dict[str, Any]) -> str:
             cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=supervisor_timeout_s,
             env=_pass_child_env(),
         )
@@ -4776,8 +4894,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`database_type`, `engine` and `table_count`, plus the `description` its model declares WHEN it "
             "declares one — enough to route a question without pulling a schema per candidate. "
             "`engine` is the dialect the MODEL declares and is what any `dialect_rules` here were "
-            "chosen by; `database_type` is derived from the connection's DSN and can differ (a "
-            "Redshift warehouse reached over a postgresql:// DSN reads as postgres). On an engine "
+            "chosen by; `database_type` is that engine as a lowercase label (`postgres`, "
+            "`redshift`, …). When the model declares no single engine, `engine` is absent and "
+            "`database_type` is empty on a served deployment or taken from the local "
+            "credentials. On an engine "
             "with known gaps the entry also carries `dialect_rules` — what it rejects and what to "
             "write instead — sent here once rather than on every schema call. "
             # `description` is conditional on the served path and absent on the local one, so it is
@@ -4815,10 +4935,13 @@ TOOLS: dict[str, dict[str, Any]] = {
             "returns their joins and the metrics that apply to them — so that is the call to "
             "make before writing SQL. Give neither for the whole datasource. Cross-area metrics "
             "come back at every level. `query` and `metric_names` pick which metrics come back "
-            "in full detail; they do NOT narrow. `metric_index` lists every metric in the "
-            "current scope, and the response reports that scope. `mode=auto` (default) picks "
+            "in full detail; they do NOT narrow. `metric_index` lists every described metric in "
+            "the current scope, and the response reports that scope; "
+            "`metrics_without_description` counts the rest, which come back in full with their "
+            "tables and are matched by `query`. `mode=auto` (default) picks "
             "verbosity (full/summary/index) under a char budget. Plus datasource.md / "
-            "USER_MEMORY.md context. Use metric `calculation`/`binding` VERBATIM (`binding` is "
+            "USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
+            "scoped calls carry the terms for their tables. Use metric `calculation`/`binding` VERBATIM (`binding` is "
             "already this deployment's dialect). "
             # These four ride in the table context on every call and were described nowhere, so a
             # declared filter was first met on the receipt — after the statement it belonged in had
@@ -4886,8 +5009,9 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "items": {"type": "string"},
                     "description": (
                         "Return full detail for these named metrics. Selects detail; does not "
-                        "scope. Keys of `metric_index`, copied exactly — a name two areas share "
-                        "is keyed `name (area)` or `name (cross-area)`."
+                        "scope. Keys of `metric_index`, or a `metrics` entry's `selector` (its "
+                        "`name` when it has none), copied exactly — a name two areas share is "
+                        "keyed `name (area)` or `name (cross-area)`."
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,
@@ -5051,14 +5175,22 @@ TOOLS: dict[str, dict[str, Any]] = {
             "an `omitted` or `undetermined` one is a real gap between what the org means by that "
             "table and what the answer counted.\n"
             "`receipt.aggregates.items` — one entry per aggregate the statement computes, each "
-            "`{aggregate, scope, status, joins, findings}` with status multiplied / "
-            "not_multiplied / undetermined, and `scope` the same arm label the `tables` entries "
-            "carry. A `multiplied` one means a join multiplied the rows behind THAT number and "
-            "`joins` names the join — say which number and which join, and say that whether it is "
-            "wrong depends on what they asked for, because the same total is right for line-item "
-            "exposure and wrong for order revenue. `undetermined` means the check could not "
+            "`{aggregate, scope, status, result_affected, joins, findings, reason}` with status "
+            "multiplied / not_multiplied / undetermined, and `scope` the same arm label the "
+            "`tables` entries carry. A `multiplied` one means a join multiplied the rows behind "
+            "THAT number and `joins` names the join. `result_affected` says whether the duplication "
+            "can have changed the value: false when nothing multiplied or every multiplying finding "
+            "is `fan_out_invariant` (a MIN, MAX, boolean fold or DISTINCT aggregate under a fan), "
+            "so "
+            "do not warn about the duplication; true when any finding is a fan or chasm trap (a "
+            "MIN or MAX under a chasm reads true) — say which number and which join, and that "
+            "whether it is wrong depends on what they asked for, because the same total is right "
+            "for line-item exposure and wrong for order revenue; null when undetermined, including "
+            "an immune aggregate that also reads a subquery or CTE. `undetermined` means the check "
+            "could not "
             "resolve what the aggregate reads (a `COUNT(*)`, an unqualified column, a CTE the walk "
-            "does not enter), so do NOT report it as clean. Its sibling `findings` is a different "
+            "does not enter) or a join behind it has no declaration settling its cardinality, so "
+            "do NOT report it as clean. Its sibling `findings` is a different "
             "question — whether the arithmetic is meaningful at all — and a number can be "
             "un-multiplied and still meaningless.\n"
             "OPTIONALLY send `basis` — the choices behind this query, each with why. Recorded for "

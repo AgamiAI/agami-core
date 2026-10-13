@@ -39,7 +39,8 @@ def _model(root: Path) -> None:
     (root / "subject_areas" / "s" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
         "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
         "description": "o", "default_filters": ["{alias}.deleted_at IS NULL"],
-        # The caveat, not the filter, is what makes this table's COUNT(*) worth proposing (#404).
+        # A caveat, a default filter and (on order_items) a unit: each once kept a plain metric
+        # alive (#404), and suggest-metrics must propose none of them now (#406).
         "caveats": ["Soft-deleted orders are still rows"],
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "deleted_at", "type": "timestamp"},
@@ -49,9 +50,6 @@ def _model(root: Path) -> None:
         "description": "oi",
         "columns": [{"name": "id", "type": "integer", "primary_key": True},
                     {"name": "order_id", "type": "integer"}, {"name": "qty", "type": "integer"},
-                    # A unit is something SUM carries that the aggregation class does not, so this
-                    # one survives #404 — and it is the only metric here with no caveat prose, so
-                    # it is also the only one that still auto-approves.
                     {"name": "weight", "type": "decimal", "aggregation": "additive",
                      "unit": "kg"}]}))
     (root / "subject_areas" / "s" / "relationships.yaml").write_text(yaml.safe_dump({
@@ -101,33 +99,57 @@ def test_set_units_is_idempotent(tmp_path):
     assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] == 0
 
 
-def test_suggest_metrics_writes_and_auto_approves_trivial(tmp_path):
+def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path):
     _model(tmp_path)
+    items = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"
+    spec = yaml.safe_load(items.read_text())
+    spec["columns"].append({"name": "is_gift", "type": "boolean", "description": "gift wrapped"})
+    # Unreadable: no rate until someone describes it, and the output says how many are waiting.
+    spec["columns"].append({"name": "is_hazmat", "type": "boolean",
+                            "description_source": "ai_unknown"})
+    # Half of a duration, so it counts too; a timestamp that pairs with nothing does not.
+    spec["columns"].append({"name": "delivered_at", "type": "timestamp",
+                            "description_source": "ai_unknown"})
+    spec["columns"].append({"name": "audited_on", "type": "timestamp",
+                            "description_source": "ai_unknown"})
+    items.write_text(yaml.safe_dump(spec))
+
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     d = json.loads(out)
-    # Two survive #404, for the two different reasons, and only one of them auto-approves.
-    # `orders` carries a caveat its COUNT(*) has to respect; `order_items.weight` carries a unit.
-    # `order_items`' own COUNT(*) is one row per id with no caveat, so it would restate its name
-    # and is no longer proposed at all.
-    assert rc == 0 and d["written"] == 2, d
-    assert d["auto_approved"] == 1, d
+    assert rc == 0 and d["written"] == 1, d
+    assert d["skipped_opaque"] == 2, d
+    assert "auto_approved" not in d  # nothing is system-signed any more, so there is nothing to count
     mets = tmp_path / "subject_areas" / "s" / "metrics"
-    assert not (mets / "order_items_count.yaml").exists()
+    assert sorted(f.name for f in mets.iterdir()) == ["order_items_is_gift_rate.yaml"]
 
-    # A unit is not prose, so SUM(weight) is still judgment-free → system sign-off, no queue.
-    plain = yaml.safe_load((mets / "order_items_total_weight.yaml").read_text())
-    assert plain["confidence"] == "confirmed" and plain["review_state"] == "approved"
-    assert plain["signed_off_by"] == "agami_suggest" and plain["signed_off_role"] == "system"
-    assert plain.get("signed_off_at")
-    assert plain["bindings"] == {"PostgreSQL": "SUM(weight)"} and plain["unit"] == "kg"
-
-    # The caveat is unverified prose and is the whole reason this metric exists, so it waits for a
-    # person — and it arrives carrying the caveat, not just citing it.
-    met = yaml.safe_load((mets / "orders_count.yaml").read_text())
+    met = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())
     assert met["review_state"] == "unreviewed" and met["confidence"] == "proposed"
-    assert not met.get("signed_off_at")
-    assert met["calculation"].endswith("Soft-deleted orders are still rows.")
-    assert met["bindings"] == {"PostgreSQL": "COUNT(*)"}
+    assert not met.get("signed_off_by") and not met.get("description")
+
+
+def test_suggest_metrics_never_resurrects_a_rejected_metric(tmp_path):
+    """A rejected metric is invisible to the default load, and `write_items` overwrites a file of
+    the same name, so a re-run used to write the proposal over it — resetting a person's "no" to
+    unreviewed. The rejection must survive any number of re-runs."""
+    _model(tmp_path)
+    items = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"
+    spec = yaml.safe_load(items.read_text())
+    spec["columns"].append({"name": "is_gift", "type": "boolean", "description": "gift wrapped"})
+    items.write_text(yaml.safe_dump(spec))
+    mets = tmp_path / "subject_areas" / "s" / "metrics"
+    mets.mkdir()
+    rejected = {"name": "order_items_is_gift_rate", "calculation": "nobody asks for this",
+                "bindings": {"PostgreSQL": "AVG(CASE WHEN is_gift THEN 1.0 ELSE 0.0 END)"},
+                "source_tables": ["order_items"], "confidence": "proposed",
+                "review_state": "rejected"}
+    (mets / "order_items_is_gift_rate.yaml").write_text(yaml.safe_dump(rejected))
+
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+
+    assert rc == 0 and json.loads(out)["written"] == 0, out
+    on_disk = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())
+    assert on_disk["review_state"] == "rejected"
+    assert on_disk["calculation"] == "nobody asks for this"
 
 
 def test_describe_file_applies_tsv(tmp_path):
@@ -144,6 +166,13 @@ def test_describe_file_applies_tsv(tmp_path):
     total = next(c for c in orders["columns"] if c["name"] == "total")
     assert total["description"] == "Total order value"
     assert total["description_source"] == "ai_unvalidated"   # source:ai → earns trust via use
+
+
+def test_describe_file_reports_an_unreadable_path_as_json(tmp_path):
+    # a directory (or no permission) is a JSON error, not a traceback a skill reads as "nothing applied"
+    _model(tmp_path)
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tmp_path)])
+    assert rc == 2 and "could not read" in json.loads(out)["error"]
 
 
 def test_prepare_does_not_apply_default_filters(tmp_path):
@@ -278,6 +307,34 @@ def test_add_examples_appends_dedups_and_skips_invalid(tmp_path):
     ex = list_prompt_examples(tmp_path, "sales")
     assert len(ex) == 2  # dedup by question — not 3
     assert next(e for e in ex if e["question"] == "revenue")["sql"] == "SELECT SUM(amount) FROM orders"
+
+
+def test_re_saving_an_example_with_the_same_sql_keeps_what_it_did_not_restate(tmp_path):
+    # Signing off re-saves an example with only question + sql; that must not strip its status or
+    # tags. A different SQL is a correction and still replaces the whole example.
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    sql = "SELECT SUM(total) FROM orders"
+    curate.add_examples(tmp_path, "s", [{"question": "revenue", "sql": sql, "tables": ["orders"],
+                                         "status": "confirmed"}])
+    curate.add_examples(tmp_path, "s", [{"question": "revenue", "sql": f"  {sql}\n"}],
+                        signer="you@example.com", role="owner")
+    (ex,) = list_prompt_examples(tmp_path, "s")
+    assert ex["status"] == "confirmed" and ex["tables"] == ["orders"]
+    curate.add_examples(tmp_path, "s", [{"question": "revenue", "sql": "SELECT SUM(net) FROM orders"}])
+    (ex,) = list_prompt_examples(tmp_path, "s")
+    assert "status" not in ex and "tables" not in ex
+
+
+def test_re_adding_a_rejected_example_with_the_same_sql_un_rejects_it(tmp_path):
+    from semantic_model import curate
+    from semantic_model.loader import list_prompt_examples
+    sql = "SELECT COUNT(*) FROM orders"
+    curate.add_examples(tmp_path, "s", [{"question": "orders", "sql": sql, "tables": ["orders"]}])
+    curate.remove_examples(tmp_path, "s", ["orders"])
+    curate.add_examples(tmp_path, "s", [{"question": "orders", "sql": sql}])
+    (ex,) = list_prompt_examples(tmp_path, "s")
+    assert ex.get("status") != "rejected" and ex["tables"] == ["orders"]
 
 
 def test_curate_edit_op_sets_enrichment_fields(tmp_path):
@@ -554,7 +611,7 @@ def test_seed_validate_runs_through_safety_and_shapes_items(tmp_path, monkeypatc
 
     calls = []
 
-    def fake_run(cmd, capture_output, text, env):
+    def fake_run(cmd, capture_output, text, env, encoding=None):
         calls.append((cmd, env))
         sql = cmd[cmd.index("--sql") + 1]
 
@@ -600,7 +657,7 @@ def test_seed_validate_formats_numbers_with_model_units(tmp_path, monkeypatch):
     _model(tmp_path)
     curate.add_examples(tmp_path, "s", [{"question": "total billed?", "sql": "SELECT SUM(total) AS total FROM orders"}])
 
-    def fake_run(cmd, capture_output, text, env):
+    def fake_run(cmd, capture_output, text, env, encoding=None):
         class R:
             pass
         r = R()

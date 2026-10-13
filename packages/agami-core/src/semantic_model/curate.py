@@ -22,7 +22,9 @@ Locators address an entry uniquely: {kind, area, name, [column]} where kind ∈
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -340,6 +342,9 @@ def _rel_item(area: Optional[str], rel) -> dict:
     origin = "fk" if getattr(rel, "signed_off_role", None) == "system" else "introspect_heuristic"
     return {"kind": "relationship", "entity_type": "join", "rule": 2, "rule_1": False,
             "area": area, "name": f"{rel.from_table}->{rel.to_table}", "title": join,
+            # which join between these two tables: a curate op carries these to name it exactly
+            "from_column": rel.from_column, "to_column": rel.to_column, "on": rel.on,
+            "from_schema": rel.from_schema, "to_schema": rel.to_schema,
             "subtitle": rel.relationship, "cardinality": rel.relationship,
             "source_signal": rel.description or join,
             "signals": [{"ok": True, "text": rel.description or f"{rel.relationship} · {join}"}],
@@ -390,10 +395,13 @@ class ApplyResult:
     errors: list[str] = field(default_factory=list)
     validated: bool = False
     committed: bool = False
+    # Why nothing was committed, in a sentence the skill can pass on; empty when it was.
+    commit_note: str = ""
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
-                "validated": self.validated, "committed": self.committed}
+                "validated": self.validated, "committed": self.committed,
+                **({"commit_note": self.commit_note} if self.commit_note else {})}
 
 
 def _area_dir(root: Path, area: str) -> Path:
@@ -452,7 +460,7 @@ def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) ->
         dsp.write_text(prior, encoding="utf-8")
         return res
     res.applied = [f"key_terminology: {len(merged)} term(s)"]
-    res.committed = _git_commit(root, f"terminology: {len(merged)} term(s)")
+    res.committed, res.commit_note = _git_commit(root, f"terminology: {len(merged)} term(s)")
     return res
 
 
@@ -489,7 +497,7 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
         dsp.write_text(prior, encoding="utf-8")
         return res
     res.applied = ["description"]
-    res.committed = _git_commit(root, "datasource description")
+    res.committed, res.commit_note = _git_commit(root, "datasource description")
     return res
 
 
@@ -531,7 +539,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
 
     if res.applied:
         _append_curation_log(root, ops, signer, role)
-        res.committed = _git_commit(root, f"curation: {len(res.applied)} change(s)")
+        res.committed, res.commit_note = _git_commit(root, f"curation: {len(res.applied)} change(s)")
     return res
 
 
@@ -657,30 +665,56 @@ def _apply_one(root: Path, op: dict, signer, role,
 
     if kind == "relationship":
         frm, _, to = name.partition("->")
-        path = _area_dir(root, area) / "relationships.yaml"
-        if path.exists():
+        # Where joins live: the area's relationships.yaml, then the org-level cross-area joins — in
+        # datasource.yaml or in their own file, which is where add_relationships writes them.
+        places: list[tuple[Path, str]] = []
+        if area:
+            places.append((_area_dir(root, area) / "relationships.yaml", "relationships"))
+        places += [(root / "datasource.yaml", "cross_subject_area_relationships"),
+                   (root / "cross_subject_area_relationships.yaml", "edges")]
+        # Count matches across every place before choosing: a join in the area and one between areas
+        # can share a table pair, and stopping at the first place with one match would pick one.
+        found = []
+        for path, key in places:
+            if not path.exists():
+                continue
             doc = _load(path) or {}
-            rels = doc.get("relationships", doc if isinstance(doc, list) else [])
-            hit = next((r for r in rels if r.get("from_table") == frm and r.get("to_table") == to), None)
-            if hit is not None:
-                _snapshot(backups, path)
-                _set_trust(hit, op, new_state, signer, role)
-                _dump(path, {"relationships": rels})
-                return path
-        # Cross-area (cross-schema / cross-datasource) join — it lives at the org level, not
-        # in an area's relationships.yaml. Fall back to datasource.yaml's cross_subject_area_relationships.
-        dsp = root / "datasource.yaml"
-        _snapshot(backups, dsp)
-        odoc = _load(dsp) or {}
-        crels = odoc.get("cross_subject_area_relationships", [])
-        chit = next((r for r in crels if r.get("from_table") == frm and r.get("to_table") == to), None)
-        if chit is None:
-            raise ValueError(f"relationship {name} not found in {path} or org cross-area relationships")
-        _set_trust(chit, op, new_state, signer, role)
-        _dump(dsp, odoc)
-        return dsp
+            rels = doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
+            found += [(path, key, doc, rels, hit) for hit in _matching_joins(rels, frm, to, op)]
+        if not found:
+            raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
+        if len(found) > 1:
+            raise ValueError(
+                f"{len(found)} joins match {name}; name the one you mean with from_column and "
+                "to_column, or its `on` condition, and from_schema / to_schema when the table "
+                "names repeat across schemas — the table pair alone would pick one at random")
+        path, key, doc, rels, hit = found[0]
+        _snapshot(backups, path)
+        _set_trust(hit, op, new_state, signer, role)
+        _dump(path, doc if isinstance(doc, dict) else {key: rels})
+        return path
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
+    """The joins an op means: same two tables, narrowed by whichever of from_schema / to_schema /
+    from_column / to_column / `on` the op names (`on` compared with whitespace collapsed, so a re-wrapped condition still matches)."""
+    def norm(text) -> str:
+        return " ".join(str(text or "").split()).lower()
+
+    out = [r for r in rels if isinstance(r, dict) and r.get("from_table") == frm and r.get("to_table") == to]
+    # The schemas tell apart same-named tables in two schemas (sales.orders vs archive.orders); a join
+    # written before schemas were recorded has none, and still matches.
+    for fld in ("from_schema", "to_schema"):
+        if op.get(fld):
+            out = [r for r in out if not r.get(fld) or str(r[fld]).lower() == str(op[fld]).lower()]
+    for fld in ("from_column", "to_column"):
+        if op.get(fld):
+            out = [r for r in out if (r.get(fld) or "").lower() == str(op[fld]).lower()]
+    if op.get("on"):
+        out = [r for r in out if norm(r.get("on")) == norm(op["on"])]
+    return out
 
 
 def _reconcile_expose_groups(root: Path, area: str, table: str,
@@ -719,6 +753,13 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         fld, val = op.get("field"), op.get("value")
         if not fld:
             raise ValueError("edit op needs field")
+        # A generated description never replaces one a person wrote or the database's own dictionary
+        # supplied — enrichment describes what is undescribed. A person can still overwrite either.
+        if (fld == "description" and desc_source and op.get("source") == "ai"
+                and doc.get("description_source") in ("human", "metadata")
+                and (doc.get("description") or "").strip()):
+            raise ValueError(f"kept the existing {doc['description_source']} description "
+                             "(a generated description doesn't replace it)")
         doc[fld] = val
         # Description provenance (advisory; see DescriptionSource in models.py). ONLY tables
         # and columns carry `description_source`; relationships / metrics / entities have a
@@ -765,17 +806,24 @@ def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signe
 # ---------------------------------------------------------------------------
 
 
+# Set by a git hook or a caller, these point git at ANOTHER repository whatever `-C` says, and a
+# commit would land there with its whole working tree (#436).
+_GIT_LOCATION_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
+
+
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root), *args],
-                          capture_output=True, text=True)
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_VARS}
+    return subprocess.run(["git", "-C", str(root), *args], env=env,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace")
 
 
 _KINDS = {"metric": ("metrics", Metric), "entity": ("entities", Entity)}
 
 
 def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
-    return s or "unnamed"
+    from .build import item_file_stem  # one naming rule for every writer of entity/metric files
+
+    return item_file_stem(name)
 
 
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
@@ -834,8 +882,17 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     _append_curation_log(
         root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
                for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
     return res
+
+
+def _rel_label(r: dict) -> str:
+    # An `on:`-form join has no from/to column; label it by its tables so it reads in the log. It also
+    # labels the invalid ones being skipped, so a missing endpoint reads "?" rather than raising.
+    ft, tt = r.get("from_table") or "?", r.get("to_table") or "?"
+    if r.get("from_column"):
+        return f"{ft}.{r['from_column']}→{tt}"
+    return f"{ft}→{tt} (on)"
 
 
 def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]] = None,
@@ -851,37 +908,45 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
     intra, cross = intra or {}, cross or []
     backups: list[tuple[Path, Optional[str]]] = []
 
-    for area, rels in intra.items():
-        if not rels:
-            continue
-        path = _area_dir(root, area) / "relationships.yaml"
-        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-        doc = _load(path) if path.exists() else None
-        lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
-        for r in rels:
-            try:
-                Relationship(**r)
-            except Exception as e:
-                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
+    # One batch: an error part-way through (after an earlier area's file is written) must restore
+    # every file already touched, not leave the model half-updated.
+    try:
+        for area, rels in intra.items():
+            if not rels:
                 continue
-            lst.append(r)
-            res.applied.append(f"rel {area}/{r['from_table']}.{r['from_column']}→{r['to_table']}")
-        _dump(path, {"relationships": lst})
+            path = _area_dir(root, area) / "relationships.yaml"
+            backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+            doc = _load(path) if path.exists() else None
+            lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
+            for r in rels:
+                try:
+                    Relationship(**r)
+                except Exception as e:
+                    res.skipped.append({"item": _rel_label(r), "reason": str(e)})
+                    continue
+                lst.append(r)
+                res.applied.append(f"rel {area}/{_rel_label(r)}")
+            _dump(path, {"relationships": lst})
 
-    if cross:
-        path = root / "cross_subject_area_relationships.yaml"
-        backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-        doc = _load(path) if path.exists() else None
-        edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
-        for r in cross:
-            try:
-                CrossSubjectAreaRelationship(**r)
-            except Exception as e:
-                res.skipped.append({"item": f"{r.get('from_table')}.{r.get('from_column')}", "reason": str(e)})
-                continue
-            edges.append(r)
-            res.applied.append(f"xrel {r['from_table']}.{r['from_column']}→{r['to_table']}")
-        _dump(path, {"edges": edges})
+        if cross:
+            path = root / "cross_subject_area_relationships.yaml"
+            backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+            doc = _load(path) if path.exists() else None
+            edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
+            for r in cross:
+                try:
+                    CrossSubjectAreaRelationship(**r)
+                except Exception as e:
+                    res.skipped.append({"item": _rel_label(r), "reason": str(e)})
+                    continue
+                edges.append(r)
+                res.applied.append(f"xrel {_rel_label(r)}")
+            _dump(path, {"edges": edges})
+    except Exception as e:
+        _restore(backups)
+        res.applied = []
+        res.errors.append(f"adding relationships failed and every file was restored: {e}")
+        return res
 
     if not res.applied:
         return res
@@ -900,7 +965,7 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
         return res
     _append_curation_log(
         root, [{"op": "add", "kind": "relationship", "name": a} for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
+    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
     return res
 
 
@@ -928,7 +993,13 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
             res.skipped.append({"item": q or "?", "reason": "question and sql are required"})
             continue
         if q in by_q:
-            existing[by_q[q]] = ex
+            old = existing[by_q[q]]
+            # The same SQL is a re-save (a sign-off, a tag), not a correction: keep the fields it
+            # didn't restate, or re-saving a confirmed example to sign it would strip its status.
+            same_sql = " ".join(str(old.get("sql", "")).split()) == " ".join(str(sql).split())
+            # A rejection is not carried over: re-adding a rejected question un-rejects it.
+            kept = {k: v for k, v in old.items() if not (k == "status" and v == "rejected")}
+            existing[by_q[q]] = {**kept, **ex} if same_sql else ex
             res.applied.append(f"example (replaced) {area}/{q[:50]}")
         else:
             by_q[q] = len(existing)
@@ -942,7 +1013,7 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     res.validated = True    # examples aren't model-validated; the skill EXPLAIN-checks the SQL
     _append_curation_log(root, [{"op": "add", "kind": "example", "area": area,
                                  "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
+    res.committed, res.commit_note = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
     return res
 
 
@@ -975,7 +1046,7 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
     res.validated = True
     _append_curation_log(root, [{"op": "reject", "kind": "example", "area": area,
                                  "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
-    res.committed = _git_commit(root, f"examples: rejected {len(res.applied)} in {area}")
+    res.committed, res.commit_note = _git_commit(root, f"examples: rejected {len(res.applied)} in {area}")
     return res
 
 
@@ -1022,21 +1093,51 @@ def _restore(backups: list[tuple[Path, Optional[str]]]) -> None:
             pass
 
 
-def _git_commit(root: Path, msg: str) -> bool:
-    # Model-write finalization point for every curation path (apply / write_items /
-    # terminology / examples / metadata relationships). Stamp the model_version
-    # snapshot here FIRST — unconditionally, before the git check — so it happens
-    # whether or not the artifacts dir is a git repo (it usually isn't).
+def _repository_top(root: Path) -> Optional[Path]:
+    """The git repository `root` sits in, found the way git finds it (searching upwards), or None.
+    A folder that repository ignores (an artifacts folder under a dotfiles repo at `~`) isn't in it."""
+    try:
+        r = _git(root, "rev-parse", "--show-toplevel")
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        if _git(root, "check-ignore", "-q", ".").returncode == 0:
+            return None
+    except Exception:
+        return None
+    return Path(r.stdout.strip())
+
+
+def _git_commit(root: Path, msg: str) -> tuple[bool, str]:
+    """Commit the model's change when the profile folder is its own repository; else say why not.
+
+    Model-write finalization point for every curation path (apply / write_items / terminology /
+    examples / metadata relationships). The model_version snapshot is stamped FIRST, unconditionally,
+    so it happens whether or not anything is committed.
+
+    A profile folder inside a LARGER repository — the usual home of a deployed model, checked in with
+    the team's other files — is never committed to (#436): `git add -A` there stages the whole working
+    tree, the commit lands on whatever branch is checked out under whoever's identity git has, and the
+    message is agami's, not the team's. The note says which folder changed so the person commits it.
+    Rollback never depended on git: a change that fails validation is restored from its backups."""
     from . import snapshot
     snapshot.write_snapshot(root)
-    if not (root / ".git").exists():
-        return False
-    try:
-        _git(root, "add", "-A")
-        r = _git(root, "commit", "-m", msg)
-        return r.returncode == 0
-    except Exception:
-        return False
+    if (root / ".git").exists():
+        try:
+            _git(root, "add", "-A")
+            r = _git(root, "commit", "-m", msg)
+        except Exception:
+            return False, "git could not commit here; the change is written but not committed"
+        if r.returncode == 0:
+            return True, ""
+        return False, "git could not commit here (is git's user.name/user.email set?); the change is written"
+    if shutil.which("git") is None:
+        return False, "git isn't installed here, so the change is written but not versioned"
+    top = _repository_top(root)
+    if top is None:
+        return False, ("this model isn't in git, so the change is written but has no history; "
+                       "`git init` its folder to keep one")
+    return False, (f"this model is inside the git repository at {top}; agami doesn't commit there — "
+                   f"review and commit the changes under {root} yourself")
 
 
 def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:

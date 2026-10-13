@@ -52,7 +52,9 @@ Each path is walked through in full below ([Quickstart](#quickstart-under-5-minu
 - ✅ **Governed answers, not guesses** — every join is FK-derived or human-approved; every metric is signed off (name + role) before the runtime trusts it.
 - 🧾 **A receipt on every answer** — the literal SQL, the tables touched, the relationships used, and the model version it pinned. Reproducible, auditable.
 - 🔒 **Local and private** — runs inside Claude Code via Bash/Read/Write. Credentials, schema, and results never touch a server we operate.
-- 🧩 **A portable semantic model** — plain, git-native YAML you own (subject areas, tables, entities, metrics, relationships). No lock-in.
+- 🧩 **A portable semantic model** — plain YAML you own and can keep in git (subject areas, tables, entities, metrics, relationships). No lock-in.
+- 📋 **Built the way your warehouse's owners describe it** — when the joins aren't declared (a star schema of views, keys named for their role), fill in a [model spec workbook](plugins/agami/shared/model-spec-format.md) and the model is built exactly as it says.
+- 🎯 **Proof it still answers correctly** — keep a golden dataset of questions with agreed answers, and re-score the model against it whenever it changes.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
 - 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
 - 👥 **Shareable with your team** *(early access — in testing)* — self-host [one governed server](#self-hosted-team-server--early-access-in-testing) that your whole team and business users query from their own Claude over a URL, still zero-egress. The team layer is newer than the local path; we're validating it with early users.
@@ -117,6 +119,16 @@ entity, auto-approves the clear ones (real foreign keys, well-named columns), an
 you to sign off the judgment calls. Full walkthrough: [docs/usage.md](docs/usage.md).
 Connection details for each database: [docs/credentials.md](docs/credentials.md).
 
+**Joins not declared in the database?** Many warehouses are views with no foreign keys, where
+`ship_to_customer_key` joins the customer table only by convention. Introspection can't see those
+joins, so describe them instead: fill in the
+[model spec workbook](plugins/agami/shared/model-spec-template.xlsx) — subject areas, which area owns
+each table, the joins (including condition joins such as `current_flag = 'Y'`), metrics, sensitive
+columns and rules — and attach it when `/agami-connect` asks for context. After introspection reads
+the listed tables, a dry run checks the whole workbook against them, and the spec replaces the
+introspected model only if it all validates — built exactly as it describes. Format:
+[model-spec-format.md](plugins/agami/shared/model-spec-format.md) *(early: the format may still change)*.
+
 ## Databases supported
 
 agami runs your SQL **locally**, with whatever's already on your machine — a native database CLI, the
@@ -142,14 +154,19 @@ server ever sees your data.
 agami picks the first method available for your database: a **native CLI** if one's on your `PATH`
 (nothing to `pip install`), then the **DuckDB** binary where it applies (Postgres · MySQL · SQLite),
 then the **Python driver**. Per-database connection fields and the read-only-grant SQL for every dialect
-are in [docs/credentials.md](docs/credentials.md).
+are in [docs/credentials.md](docs/credentials.md). A read-only Postgres role still sees the primary and
+foreign keys (read from `pg_constraint`), and Redshift's late-binding views introspect with their
+columns.
 
 ## Install
 
 > **Platform note.** Validated on **macOS and Linux**. On **Windows** the skills
 > need **[Git for Windows](https://git-scm.com/downloads/win)** (Claude Code uses
-> Git Bash for its Bash tool); Windows is not yet validated end-to-end. The
-> optional local MCP server is pure-stdlib Python and is cross-platform.
+> Git Bash for its Bash tool). As of 0.9.11 the Python side works on Windows —
+> UTF-8 throughout, correct query results, the Microsoft Store Python and Claude
+> Desktop builds — but some skill instructions still assume macOS/Linux commands,
+> and there's no Windows CI run yet ([#362](https://github.com/AgamiAI/agami-core/issues/362)).
+> The optional local MCP server is pure-stdlib Python and is cross-platform.
 
 The same plugin works across Claude Code CLI, VS Code, and Cursor.
 
@@ -181,16 +198,28 @@ and structural column names auto-approve; everything inferred stays
 `unreviewed` and surfaces in the Review tab.
 - **Metrics must be signed off (Rule 1).** A metric needs an approver email, a
 role, and a non-empty `calculation` before the runtime treats it as truth —
-one bad metric skews every report that uses it. Joins & entities are lazy
+one bad metric skews every report that uses it. A query that uses an unsigned
+metric still answers, with a warning on the receipt. Joins & entities are lazy
 (Rule 2): usable while unreviewed, flagged on the receipt until confirmed.
 - **Every answer ships a receipt** — the literal SQL, tables + row counts,
 relationships used (with confidence/state), metric definitions with author +
 date, data freshness, and the model snapshot hash. A warning banner appears if
-any unreviewed entry was used. Nothing is silently trusted.
-- **Snapshot-pinned + git-native.** The model is YAML under
-`~/agami-artifacts/<profile>/`, `git init`'d on first introspect. Every answer
-records the model snapshot hash, so old answers reproduce exactly and schema
-drift flips affected entries to `stale` instead of silently changing the number.
+any unreviewed entry was used, and a total behind a join the model can't vouch
+for is reported as *undetermined* rather than clean. Nothing is silently trusted.
+- **Read-only, enforced where the SQL runs — not in the prompt.** Every statement
+passes one executor that always refuses writes and side-effecting functions on
+every dialect (`SLEEP`, `pg_read_file`, Snowflake `SYSTEM$…`, `OPENROWSET`,
+`UTL_HTTP`, `load_extension`, …). A second pass confines it to the tables and
+columns the model declares (schema-qualified, so `staging.orders` isn't
+`sales.orders`) and refuses a projected `SELECT *`. That pass always runs locally;
+on a server it runs when `AGAMI_GOVERNANCE_ENFORCED` is on, which is **off by
+default**, and every answer says when it didn't run. Details: [SECURITY.md](SECURITY.md).
+- **Snapshot-pinned.** The model is YAML under `~/agami-artifacts/<profile>/`
+(or wherever you point `AGAMI_ARTIFACTS_DIR`). Make that profile folder a git
+repository and each curation step tries to commit there (it carries on if git
+can't commit, e.g. no identity set); a change that fails validation is never written. Every answer records the model snapshot
+hash, so old answers reproduce exactly and schema drift flips affected entries to
+`stale` instead of silently changing the number.
 
 Full mechanics — the trust block, Rule 1/Rule 2, the review queue, the receipt,
 examples validation: **[docs/trust-layer.md](docs/trust-layer.md)**.
@@ -204,14 +233,14 @@ typing the slash command.
 
 | Command                                       | What it does                                                                                                                                                                                                                                                                                                                                                                   |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/agami-connect`                              | One-stop setup + introspect: detect/collect credentials, introspect the live DB into the semantic model (tables, columns, PK grain, FK relationships, sensitive-column flags), layer LLM enrichment, generate EXPLAIN-validated seed examples. Validator-gated; `git init` + snapshots. Also `/agami-connect sample` for the no-DB sample.                                     |
+| `/agami-connect`                              | One-stop setup + introspect: detect/collect credentials, introspect the live DB into the semantic model (tables, columns, PK grain, FK relationships, sensitive-column flags), layer LLM enrichment, generate EXPLAIN-validated seed examples. Builds from a **model spec workbook** when you attach one, and asks for the one-line datasource description an agent uses to pick the right database. Validator-gated, snapshotted. Also `/agami-connect sample` for the no-DB sample. |
 | `/agami-query`                                | Answers a natural-language question: picks examples + relationships, generates and runs SQL, formats the result + chart, and surfaces a provenance receipt. Flags any unreviewed entry it relied on. (Usually you don't type this — plain language routes here.)                                                                                                               |
 | `/agami-model`                                | One dashboard to **browse, curate, and sign off** the model: every table/field/metric/entity/join, per-table/column Exclude/Include, edits, new metrics. The **Review** tab is the trust-layer sign-off queue. Open it on the queue with `/agami-model review`.                                                                                                                |
 | `/agami-save-correction`                      | Records a correction and routes it to the right home (SQL example, column metadata, display preference, business concept, or a new metric), showing its classification before writing. Attribution surfaces on future answers it influences.                                                                                                                                   |
-| `/agami-reconcile`                            | Point it at an existing dashboard — a **screenshot** (Metabase / Power BI / Tableau / Looker) or a CSV of known numbers; it generates each question, runs it through agami, and shows a side-by-side diff with tolerances. Validate the model against numbers you already trust.                                                                                               |
-| `/agami-eval`                                 | Run a **golden dataset** through the agent loop — every question regenerated, executed and scored against its confirmed answer key — and see, failures first, what stopped matching.                                                                                                                                                                                           |
-| `/agami-save-golden`                          | Fill the golden dataset `/agami-eval` runs. **Import** a CSV question bank as unverified items, or **save** one answer you just accepted — with the statement that produced it and its result as the receipt — as a verified item. The two doors stay separate so an import can never forge the gate. Append-only: a write that would change an existing item stops for a yes.  |
-| `/agami-serve`                                | Use agami from the **Claude Desktop** app: wires up the optional local MCP server (same tools as the hosted connector, backed by your local model + execution — stdio, read-only, no network). See [docs/mcp-server.md](docs/mcp-server.md).                                                                                                                                   |
+| `/agami-reconcile`                            | Point it at numbers you already trust — a dashboard **screenshot** (Metabase / Power BI / Tableau / Looker), a CSV, or a pasted table — and it asks each question through agami and shows a side-by-side diff with tolerances. Hand it **SQL you trust** and it grades that query part by part against the model instead of taking it as the answer. Matching rows can be kept as golden questions. |
+| `/agami-eval`                                 | Run a **golden dataset** through the agent loop — every question regenerated, executed and scored against its confirmed answer key — and see, failures first, what stopped matching. It's your model's regression suite: it says whether the questions your team already agreed still get the agreed answer. |
+| `/agami-save-golden`                          | Fill the golden dataset `/agami-eval` runs. **Import** a question bank — a CSV, one sheet of an Excel workbook, or a pasted table (rows with a statement import as confirmed, bare questions as unconfirmed) — or **save** one answer you just accepted, with the statement that produced it (the result you reviewed is recorded as accepted, not stored). A browsable explorer page queues changes that may weaken a claim but never grant one. Append-only: a write that would change an existing item stops for a yes. |
+| `/agami-serve`                                | Use agami from the **Claude Desktop** app (including the Microsoft Store build): wires up the optional local MCP server (same tools as the hosted connector, backed by your local model + execution — stdio, read-only, no network), using an interpreter it has checked can load your database driver. See [docs/mcp-server.md](docs/mcp-server.md). |
 | `/agami-deploy` *(early access — in testing)* | **Deploy a shared team server.** Writes a ready-to-run Docker bundle (the published image + HTTPS + OAuth + an admin console) so a team can stand up one governed server their Claude connects to. Business users query it over a URL — no local setup. Newer than the local path — we're validating it with early users ([details + how to give feedback](deploy/README.md)). |
 
 
@@ -236,7 +265,7 @@ If you're exploring a database you already understand, a bare MCP is fine. If yo
 ## Privacy
 
 agami runs entirely locally — credentials (`chmod 600`), the semantic model, charts,
-exports, and dashboards all live under `~/agami-artifacts/`, and the skill never
+exports, and dashboards all live under `~/agami-artifacts/` (or the folder you chose), and the skill never
 reads files outside those paths (except your DB tool's auth config, set up on first
 connect with your permission). Details: [docs/privacy.md](docs/privacy.md).
 
@@ -247,7 +276,7 @@ semantic model, NL→SQL + local execution, the trust layer, corrections, and se
 your own organization — is **free** (serving people outside your organization needs a commercial
 license). The hosted cloud adds the org-scale layer on top: advanced governance and access
 controls (**RBAC**, audit, enterprise **SSO** with SAML/SCIM), a shared multi-tenant model
-registry, and continuous evals. What's free vs paid, in full:
+registry, and scheduled evals with alerting (on-demand golden runs are in core). What's free vs paid, in full:
 [docs/open-vs-hosted.md](docs/open-vs-hosted.md).
 
 ## Self-hosted team server — Early access (in testing)
@@ -279,6 +308,15 @@ Cloud Run) — is in [deploy/README.md](deploy/README.md).** (Prefer to wire it 
 using the bundle? The [manual install + environment-variable reference](docs/self-hosting.md) covers
 that.) Admins sign in with a password; teammates get per-user access to `/mcp`.
 
+The served tools are built to be called by an agent you don't control. All four are advertised
+read-only (`readOnlyHint`), so a client that honours the hint can skip confirming each call. The schema reply carries a
+`model_version`, and `execute_sql` refuses a statement written against an older one (`stale_model`),
+so a resumed conversation can't query a model that changed under it. When a datasource has curated
+examples, `execute_sql` also takes the closest example's id and whether the statement `followed` it
+or it was only `shown_only` — the honest answer when none fits. Calls and refusals are recorded in
+the activity log the admin console shows, grouped into conversations; if the log can't be reached
+the query is refused, and if a write fails the result is withheld.
+
 It's cloud-neutral (a VM + Postgres, or a serverless platform + managed Postgres), configured entirely
 by environment variables, and **LLM-free + zero-egress by default**. Self-hosting this for people
 **inside your organization is free**; exposing data to people outside it is the paid line
@@ -290,6 +328,9 @@ by environment variables, and **LLM-free + zero-egress by default**. Self-hostin
 - [Credentials](docs/credentials.md) — every dialect, the connection-method picker
 - [The trust layer](docs/trust-layer.md) — confidence, sign-off, receipts, snapshots
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
+- [Model spec workbook](plugins/agami/shared/model-spec-format.md) *(early)* — build the model from a filled-in spreadsheet ([template](plugins/agami/shared/model-spec-template.xlsx))
+- [Golden datasets](plugins/agami/shared/golden-dataset-shape.md) — the question bank `/agami-eval` scores against
+- [Security](SECURITY.md) — the read-only guarantee per dialect, and what a refusal may name
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop
 - [Deploy a shared team server](deploy/README.md) *(early access — in testing)* — the Docker bundle, step-by-step (VM, DNS/TLS, variants)
 - [Self-hosting reference](docs/self-hosting.md) — manual (non-Docker) install + the environment-variable reference

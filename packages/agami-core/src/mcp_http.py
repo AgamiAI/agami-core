@@ -49,6 +49,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from store import Store
 from tools import (
+    REPLY_SEPARATORS,
     SERVER_NAME,
     TOOLS,
     _current_org_ctx,
@@ -428,7 +429,7 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
         body = {k: v for k, v in body.items() if k != "caller_identity"}
     else:
         body["caller_identity"] = actor
-    return json.dumps(body, indent=2) + suffix
+    return json.dumps(body, separators=REPLY_SEPARATORS) + suffix
 
 
 def _declared_pages(registry: dict) -> dict[str, dict]:

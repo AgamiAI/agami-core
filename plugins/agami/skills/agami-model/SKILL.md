@@ -35,7 +35,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
   - **A pasted feedback block names its own target.** When applying a block from the dashboard's "Generate feedback for Claude", its first line is `profile: <name>` — that dashboard was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one dashboard's approvals to whatever happens to be the active profile (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named profile, target it directly — don't fall back to `active_profile` or hunt with `find`.
 - **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
-- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
+- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
 
 **Scope / initial tab.** Look at `$ARGUMENTS`:
 - `review`, `preseed`, or `rule1` → the user wants the sign-off queue: render with `--initial-tab review` so the dashboard opens on the Review tab. (`preseed`/`rule1` come from `/agami-connect`'s Phase 4 gate — the Review tab already groups Rule 1 metrics under "Needs your eyes", so no separate scope filter is needed; the user signs those off there.)
@@ -59,7 +59,7 @@ ts=$(date -u +%Y%m%d-%H%M%S)
 # Per-profile subdir so multi-profile users can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
 out="<artifacts_dir>/local/model/$profile/$ts.html"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
   ${initial_tab:+--initial-tab "$initial_tab"} \
@@ -91,14 +91,10 @@ You can also type commands directly:
   done
 ```
 
-**Auto-open with the standard multi-command fallback chain:**
+**Auto-open it** (macOS, Linux and Windows alike; on failure it prints the path to open by hand):
 
 ```bash
-( command -v open    >/dev/null 2>&1 && open "$out" ) || \
-( command -v xdg-open >/dev/null 2>&1 && xdg-open "$out" ) || \
-( command -v start    >/dev/null 2>&1 && start "$out" ) || \
-( command -v cmd      >/dev/null 2>&1 && cmd /c start "" "$out" ) || \
-echo "agami: couldn't auto-open the explorer — open manually: $out"
+bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "$out"
 ```
 
 End the turn. Wait for the user.
@@ -110,7 +106,7 @@ End the turn. Wait for the user.
 The user pastes the dashboard's "Generate feedback" block. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
-parse_model_feedback.py --block-file <pasted>
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_model_feedback.py --block-file <pasted>
 ```
 
 It prints `{data, anomalies, needs_judgment}`:
@@ -146,11 +142,11 @@ It prints `{data, anomalies, needs_judgment}`:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
-  --ops-file /tmp/agami-model-ops.json \
+  --ops-file "<artifacts_dir>/local/tmp/agami-model-ops.json" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
-`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`.
+`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table).
 
 **Success** (`validated: true`):
 - Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*
@@ -173,7 +169,7 @@ Every successful apply produces a new explorer file at a new timestamp.
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
 new_out="<artifacts_dir>/local/model/$profile/$new_ts.html"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
   --profile "$profile" --artifacts-dir "$artifacts_dir" --out "$new_out"
 ```
 
@@ -214,8 +210,8 @@ Then end the turn. The skill is one-shot per invocation — re-enter via the sla
 | User types `include tables: schema.table` for a table that's already unreviewed | Same — idempotent flip; entry stays unreviewed; curator name recorded. |
 | User types `exclude columns: schema.table.col` and the column doesn't exist | The applier returns it in `skipped[]` with reason "field not found on dataset". Surface the skip; continue with the rest. |
 | User types `exclude tables: schema.table.col` (3 segments — looks like a column) | The grammar is positional; agami treats the `exclude tables:` prefix as authoritative. The applier will fail to find a table with that 3-segment name and return `skipped` with reason "table yaml not found". Surface clearly. |
-| Validator fails on a partially-applied batch | The applier reverts ALL YAML changes via `git checkout -- .` before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
-| User has the profile dir but no `.git/` (legacy from before Phase 3e) | The applier skips the git commit + revert steps silently. Curation log still gets appended. The user loses revert-on-validator-fail safety — surface a one-liner suggesting `git init` in the profile dir. |
+| Validator fails on a partially-applied batch | The applier restores every file it touched from its own backups (no git needed) before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
+| `committed: false` with a `commit_note` | Nothing went wrong — the change is written and validated; it just wasn't committed. Pass the note on in one line, in your own words: the model isn't in git (suggest `git init` in its folder), or it's inside a larger repository (agami never commits there — tell them which folder changed so they commit it themselves). |
 | The model has 5000+ fields | The renderer handles it (JSON manifest is ~hundreds of KB at the high end). Client-side search is instant up to the millions of DOM nodes mark. If it gets sluggish, file an issue. |
 
 ---

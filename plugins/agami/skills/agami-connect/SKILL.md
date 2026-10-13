@@ -28,7 +28,7 @@ For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_e
 
 ## Progress tracking — set up a todo list at the very start
 
-This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to call `TodoWrite`** with the skill's major phases, so the user can watch progress. Validated as a strong UX signal — it makes the wait feel intentional rather than opaque.
+This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to show the skill's major phases as a checklist**, so the user can watch progress: with `TodoWrite` where the client has it, otherwise as a short numbered list in your first message, updated as each phase finishes. Validated as a strong UX signal — it makes the wait feel intentional rather than opaque.
 
 Seed (one task per major phase, in order):
 
@@ -71,7 +71,7 @@ Non-negotiable. They override every other instruction here when they conflict.
 
 1. **Connect ONLY to the host/port/database/user/password in `<artifacts_dir>/local/credentials`.** That file is the sole credential source — there is no env-var bypass. Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
 2. **Never ask the user for connection values (host / port / user / password / token / DSN) in chat.** Not even temporarily. The single authorized credential path is **Phase 0a**, which writes a `credentials.example` template the user fills in and saves. Phase 0a never reads secrets inline — it writes a template, surfaces a hand-off, and ends the turn.
-3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `python3 -c 'import <module>'`.
+3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import <module>'`.
 4. **If credentials are missing for the active profile, run Phase 0a.** After the user fills in the template they re-invoke (or just ask a data question — `agami-query` auto-invokes us).
 5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `python -m execute_sql` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
 
@@ -80,7 +80,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 ### Preflight steps
 
 0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (This is why the option in 0a.2 isn't enough on its own: a returning user with an onboarded profile never reaches 0a.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
-1. **Resolve the environment** — `python3 "$AGAMI_PLUGIN_ROOT/scripts/connect_resolve.py" [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → continue (Phase 1 / existing-model check); **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → run Phase 0a and stop. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`); never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+1. **Resolve the environment** — `bash "$AGAMI_PLUGIN_ROOT/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → continue (Phase 1 / existing-model check); **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → run Phase 0a and stop. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`); never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
 2. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
 3. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
 
@@ -314,7 +314,7 @@ block, and fill in whatever `<…>` placeholders it uses (e.g. `<db>` / `<schema
 The user filled in `<artifacts_dir>/local/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/promote_credentials.py"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" promote_credentials.py
 ```
 
 Read the first token of stdout and act:
@@ -360,7 +360,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    path = <resolved abs path to local/samples/store.db>
    ```
    ```bash
-   python3 "$AGAMI_PLUGIN_ROOT/scripts/promote_credentials.py"
+   bash "$AGAMI_PLUGIN_ROOT/scripts/py" promote_credentials.py
    ```
    `SECURED`/`APPENDED` → chmod 600, collision-safe. (No placeholders → never trips `PLACEHOLDERS_REMAIN`.)
 5. **Write `<artifacts_dir>/local/.config`** (same shape as 0a.7): `active_profile: agami-example`, `artifacts_dir`, `tool_paths.python3 = $PY` (+ `sqlite3` if found), `tier`. `chmod 600`.
@@ -382,7 +382,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
        (This is only sanctioned for the curated sample; a real database keeps the human sign-off gate.)
      - **When the model validates, OPEN THE MODEL-EXPLORER so the user sees what was built** — render it in **browse mode** (i.e. `/agami-model` browse — **not** the `/agami-model preseed` sign-off gate that ends the turn elsewhere in this skill). The script takes the profile and artifacts dir as **separate** flags (there is no `--root`); use the same invocation the [`/agami-model` skill documents](../agami-model/SKILL.md):
        ```bash
-       python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+       bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
          --profile agami-example --artifacts-dir "<artifacts_dir>" \
          --out "<artifacts_dir>/local/model/agami-example/<ts>.html"
        ```
@@ -426,7 +426,7 @@ Introspection can take a while against cloud DBs. Tell the user **before** the f
 ### 1.1 — Existing-model check
 
 If `<artifacts_dir>/<profile>/datasource.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. Offer (AskUserQuestion, no `(Recommended)` — these are equal-weight choices), capped at 4:
-- **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path).
+- **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path; 2e: preview, then write).
 - **Open model explorer** — browse + curate the existing model and review/sign off the trust layer (`/agami-model`).
 - **Onboard another database** — set up a **different** database (a different connection), leaving `<profile>` untouched. On this choice, **first ask whether it's the same company or a different one** (see 1.1a), then start a fresh onboarding: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `<artifacts_dir>/local/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
 - **Try the sample database** — explore agami's bundled **`agami-example`** sample (retail + subscriptions, no connection needed), leaving `<profile>` untouched. Routes to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection). This MUST be a real selectable option here (not a prose aside) — a returning user with an onboarded profile has no other visible path to the sample, since plain `/agami-connect` resolves their active profile and lands on this menu.
@@ -521,10 +521,13 @@ Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Se
 > • **A metrics / KPI list** — a spreadsheet, CSV, or doc of your metrics and how each is defined (e.g. "Approval rate = approved ÷ applications"). I'll turn each into a reusable metric so answers match your numbers.
 > • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
 > • **A published product schema** — if this DB is a well-known product (ServiceNow, Salesforce, Jira, NetSuite, SAP, HubSpot, Workday…), I can look up its official table/column reference online so the standard fields get correct descriptions automatically.
+> • **A model spec workbook** — agami's template (`shared/model-spec-template.xlsx`) filled in with your subject areas, which area owns each table, the joins, metrics, sensitive columns and rules. The model is built **exactly** as it says — the way to model a warehouse whose joins aren't declared (a star schema of views, keys named for their role).
 
-Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Skip — nothing to share`. (Multi-select — combine as needed.)
+Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Model spec workbook — I'll attach it` / `Skip — nothing to share`. (Multi-select — combine as needed.)
 
-**If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). `.xlsx`/`.docx` → ask for PDF, proceed without if not.
+**A model spec workbook is recognised by its sheets, whatever the user called it:** an `.xlsx` with `Subject areas`, `Tables` and `Joins` sheets is one, even if they picked "Doc". Take the [model-spec path](#18--apply-a-model-spec-only-when-one-was-attached) for it — **never `Read` it as a doc**: the parser reads every row, and a doc read is trimmed and paraphrased.
+
+**If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). Any other `.xlsx`/`.docx` → ask for PDF, proceed without if not.
 
 **If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user wants the standard fields grounded in the authoritative reference, not your training memory.
 
@@ -573,11 +576,23 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 
 **On re-entry — the user pastes an `AGAMI PRUNE …` block.** Don't hand-parse it — pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
 ```bash
-parse_prune_block.py --block-file <pasted> --tables-out /tmp/agami-keep.txt
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_prune_block.py --block-file <pasted> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
 ```
 It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
 
 If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
+
+### 1.6s — With a model spec: the spec IS the kept set
+
+When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 prune page — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
+
+```bash
+"$PY" "$AGAMI_PLUGIN_ROOT/scripts/model_spec_workbook.py" parse --file "<workbook.xlsx>" \
+  --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" \
+  --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
+```
+
+It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
@@ -585,11 +600,11 @@ This is the deterministic core — it replaces hand-authoring tables/columns/FK 
 
 ```bash
 # write the kept allowlist to a file first (zsh-safe — no word-splitting to get wrong)
-printf '%s\n' incident problem change_request sys_user ... > /tmp/agami-keep.txt
+printf '%s\n' incident problem change_request sys_user ... > "<artifacts_dir>/local/tmp/agami-keep.txt"
 AGAMI_SQL_MAX_ROWS=200000 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
   --profile <profile> --db-type <db_type> \
   --artifacts "<artifacts_dir>" \
-  [--tables-file /tmp/agami-keep.txt] \
+  [--tables-file "<artifacts_dir>/local/tmp/agami-keep.txt"] \
   [--exclude-columns <schema.table.column list from 1.6>]
 ```
 
@@ -601,8 +616,8 @@ AGAMI_SQL_MAX_ROWS=200000 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
 
 1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
    ```bash
-   split -l 12 /tmp/agami-keep.txt /tmp/agami-batch-      # batch files
-   for b in /tmp/agami-batch-*; do
+   split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
+   for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
      AGAMI_SQL_MAX_ROWS=200000 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" introspect \
        --profile <p> --db-type <t> \
        --artifacts "<artifacts_dir>" --tables-file "$b" --append
@@ -620,6 +635,26 @@ The validator gates the write — **if it fails, the model is not persisted.** S
 Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe> mode); <R> relationships, <D> deep tables, <S> sensitive columns flagged.`
 
 **Backstop reconciliation — if `<N>` is fewer than the catalog held, say what's NOT in the model and why** (the 1.3 guard should have covered this up front; repeat it here so it can't slip). E.g. *"Modeled 52 of 70 tables — left out `public` (17, separate Salesforce dataset) and `pg_auto_copy` (1, system). Say the word if you want any of them."* A user who picked "all" should never have to diff the catalog themselves to notice a schema is missing.
+
+### 1.8 — Apply a model spec (ONLY when one was attached)
+
+Introspection proposed areas by name and joins only where the catalog or `*_id` names showed them. The spec replaces both, in one validated step that writes nothing unless the whole result validates and restores the previous model if anything fails:
+
+1. **Dry run** and show the result:
+   ```bash
+   bash "$AGAMI_PLUGIN_ROOT/scripts/sm" apply-spec "<artifacts_dir>/<profile>" \
+     --file "<artifacts_dir>/local/model-spec/<profile>/spec.json" --dry-run
+   ```
+   `errors` lists every problem at once (a table the build didn't find, an area a table names that the spec doesn't declare, a join column that doesn't exist) — show them all and stop; the person fixes the workbook and you re-run 1.6s.
+
+   **A table "not in the introspected model" that IS in the database** means its columns couldn't be read during the build (introspect's notes say `dropped … no readable columns`; a dropped connection is the usual cause). A second introspect into the same profile can't add it — once a model exists, its queries are scoped to the model's own tables — so move the partial model aside and rebuild once: `mv "<artifacts_dir>/<profile>" "<artifacts_dir>/<profile>.partial-<timestamp>"` (never delete it), then re-run 1.7 with the same `--tables-file`. If the same tables are missing again, stop and name them: the connecting role probably can't read them.
+2. **If the spec approves anything** (`joins_approved` > 0, or a metric marked approved), ask ONE question: *"The spec marks <n> joins and <m> metrics approved. Sign them off as you (<email>)?"* — `Yes` → pass `--signer <email> --role owner`; `No` → re-run without `--signer` after the person clears the Approved column. Never sign off in someone's name without asking.
+3. **Apply**: the same command without `--dry-run`. Each join lands where the runtime serves it — in the area that owns both its tables, else as a cross-area join between the two owners — so the counts are `joins` = area joins + `cross_area_joins`.
+4. Surface the counts from the JSON, verbatim: *"Applied the spec: <A> subject areas (<per-area owns / lists>), <J> joins (<approved> approved, <with condition> with a condition, <cross> between areas), <M> metrics, <S> sensitive columns, <R> rules; dropped <D> introspected tables the spec doesn't name; replaced <I> joins introspection had guessed."*
+
+Surface any `notes` too — in particular a metric flagged as a plain aggregate: ask once whether to drop it and put its name in the column description instead (re-run 1.6s after they edit the workbook), or keep it.
+
+**After a spec, the model's structure is the person's, not yours.** Through the rest of the run: don't propose, add or re-infer joins; don't re-split subject areas (Phase 3 shows the spec's areas, it doesn't propose new ones); don't add metrics the spec didn't name (2c — the spec's metrics are already in); carry its rules as written (they are in `datasource.md` already). Enrichment still describes tables and the columns the spec's Columns sheet left out — the spec's own descriptions are `human` and a generated one is refused over them. **Run 2b (entities) as usual:** entities are the model's vocabulary (the business nouns questions are routed by), not structure, and a spec doesn't declare them.
 
 ---
 
@@ -666,7 +701,7 @@ Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), th
 2. **Expand the legend into one description per coded column — deterministically, NOT as N separate LLM guesses.** Write a small in-skill decoder (a token→phrase map + a per-table parse of `(prefix, metric, window, threshold)`) and compose each description from it, then emit them through the same `sm curate` batch. This is exact, internally consistent, and costs zero per-column LLM tokens. e.g. `EL_REVENUE_30D` → "Total revenue from the Electronics category over the last 30 days"; `WEST_ORDERS_12M` → "Number of orders in the West region over the last 12 months"; `EL_ORDERS_LT_1K_90D` → "Number of Electronics orders under 1,000 placed in the last 90 days." (Use the user's actual token vocabulary + domain, not these placeholders.)
 3. The same decoded legend also lands in the **structured glossary** `key_terminology` (term → definition) — abbreviations and codes a reader needs (an acronym → its expansion; a status/type code → its meaning). **Decode once, write both** — the per-column descriptions (what shows in the explorer + feeds the SQL generator's column context) AND the glossary. Write it with the packaged command (a JSON object `{term: definition, …}`); it merges over any existing terms, validates, and commits:
    ```bash
-   bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file /tmp/agami-terminology.json
+   bash "$AGAMI_PLUGIN_ROOT/scripts/sm" set-terminology "$ROOT" --file "<artifacts_dir>/local/tmp/agami-terminology.json"
    ```
    The glossary is rendered into `datasource.md`'s `## Key terminology` by `org-draft` (which **also** auto-seeds enum legends from `choice_field` columns) — so it survives a regeneration and is never a bare placeholder. **Do NOT skip this on a code-dense schema** (abbreviations, master-coded values): an empty Key terminology on a DB full of codes is a real miss.
 
@@ -684,7 +719,7 @@ Why structured beats prose: the SQL generator translates "high severity" → `se
 
 Pass `area` **only** to disambiguate a bare name that exists in two schemas (curate skips an ambiguous op with a clear "pass an explicit area" reason rather than editing the wrong one). **Always include `"source":"ai"` on every generated description** — this stamps `description_source: ai_unvalidated` so the description earns trust through use (agami-query surfaces it in the answer receipt for confirmation the first time a query actually uses that column, instead of forcing an upfront review of hundreds of descriptions). **Skip any column that already has a description** (so a partial hand-edit or a reintrospect merge is never clobbered):
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-descriptions.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-descriptions.json"
 ```
 
 | Column | Bad (reject) | Good (keep) | Empty (preferred) |
@@ -728,36 +763,42 @@ If, after this, a single-grain schema genuinely has one entity, that's the right
 
 **Write them with the packaged command, not by hand** — build a JSON array and run it once (it validates each item, writes `subject_areas/<area>/entities/<slug>.yaml`, validates the whole model, reverts on failure, commits). Never author a throwaway script to loop. The canonical entity YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) — **never read another profile's artifacts to copy it** (see the boundary note under 2c):
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind entity --area <area> --file /tmp/agami-entities.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind entity --area <area> --file "<artifacts_dir>/local/tmp/agami-entities.json"
 ```
 
 ### 2c — Metrics
 
-Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds `AVG(rating)`, a row count, an `AVG(order_value)`; it misses the domain KPIs a business actually tracks — refund rate, repeat-purchase rate, cohort retention, fulfillment SLA — because those aren't visible in column names).
+Metrics come from two sources, handled very differently. **Always prefer declared metrics** — schema-only inference is a shallow guess (it finds flag rates and start→end durations; it misses the domain KPIs a business actually tracks — refund rate, repeat-purchase rate, cohort retention, fulfillment SLA — because those aren't visible in column names).
 
 **(A) Declared metrics — extract in FULL, no cap.** If the user attached a semantic-layer repo or a metrics file in 1.5 (`$DATA_MODEL_DOC_TEXT`), those are the org's *real* definitions — pull **every** one, don't sample to 4:
-- **LookML** `measure {}` → metric: `type` + `sql` → `bindings`, `label`/`description` → `calculation`, `label`+`view_label` → `other_names`.
-- **dbt** `metrics:` / `semantic_models[].measures` (MetricFlow) → name, `agg`+`expr` → `bindings`, `description`/`label` → `calculation` + `other_names`.
+- **LookML** `measure {}` → metric: `type` + `sql` → `bindings`, `description` → `description` + `calculation`, `label` → `description` when there is no description (below), `label`+`view_label` → `other_names`.
+- **dbt** `metrics:` / `semantic_models[].measures` (MetricFlow) → name, `agg`+`expr` → `bindings`, `description` → `description` + `calculation`, `label` → `description` when there is no description (below), `label` → `other_names`.
 - **Cube** `measures` → `sql`+`type` → `bindings`.
-- **Metrics file** (CSV/YAML/markdown KPI dictionary the user uploaded) → one metric per row/entry: name, definition → `calculation`, formula → `bindings`.
+- **Metrics file** (CSV/YAML/markdown KPI dictionary the user uploaded) → one metric per row/entry: name, definition → `description` + `calculation` (below), formula → `bindings`.
+
+**`description` and `calculation` are two fields with two jobs — write both, never one copied into the other.** `description` is a **one-line label** (≈60 characters): *is this the metric I want?* It is all the agent sees of a metric before it opens the metric's table — `metric_index` lists it on every schema call and the metric search matches it — so a metric **without** one is left out of the index entirely (the validator warns `metric_undescribed`). `calculation` is the **full definition**: what is counted, the filters, the traps, and when to prefer it over a sibling. The agent writes the SQL from it once the table is open. So from a declared source, fill both every time, falling back in this order:
+- `description` ← the source description's first sentence; else its `label`, if the label says more than the metric's name; else one line you write from the definition.
+- `calculation` ← the source description in full; else a sentence you write from its `type`/`agg` and `sql`/`expr` (what it aggregates, over which rows, with which filter). Never leave it as the label: it is required, and a label is not a definition. A `description` that only restates the name (`"Incident count"` for `incident_count`) counts as none.
 
 Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off on the `/agami-model` Review tab). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-model."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
 
-**(B) Inferred metrics — infer a sensible set for BULK review, don't ask for 4.** Run **`sm suggest-metrics "$ROOT"`**: it infers per-table measures (flag rates, start→end durations, and the plain aggregates that earn their place — see below). It auto-approves the *mechanically trivial* ones (COUNT(*) / SUM(col) / AVG(col) — system-signed, no judgment beyond the column's aggregation class) and leaves the interpretive ones (rates, durations) `proposed`. SUM/AVG metrics **inherit the source column's `unit`** automatically. Rule 1 keeps proposed metrics out of every answer until sign-off, so a large set is safe — the user reviews them **in bulk in the explorer** (Phase 4). Reserve **AskUserQuestion** only for a bespoke KPI the user describes in words that the column shapes don't imply.
+**(B) Inferred metrics — infer a sensible set for BULK review, don't ask for 4.** Run **`sm suggest-metrics "$ROOT"`**: it infers per-table measures — flag rates and start→end durations, never a plain aggregate (see below) — and writes every one `proposed`, because each picks a condition or pairs two columns. An unsigned metric is still used — the answer carries a warning that it is unreviewed (Rule 1) — so drop a proposal nobody would ask for rather than leave it for the queue; the user reviews the rest **in bulk in the explorer** (Phase 4). Reserve **AskUserQuestion** only for a bespoke KPI the user describes in words that the column shapes don't imply.
 
-**Don't hand-add the plain ones it deliberately skips.** A `{table}_count` = `COUNT(*)` or a `{table}_total_{col}` = `SUM(col)` is **not** a metric: the column's `aggregation` class is enforced on every statement with or without a named metric, so the entry adds a name and nothing else. On a wide model that pattern was 137 of 175 metrics — a catalogue whose entries all restated their own names, which makes the *real* metrics harder to find. `suggest-metrics` therefore proposes a plain aggregate only when the metric carries something the class does not: a **unit**, a **caveat** (which it appends to the `calculation`), or — for `COUNT(*)` — a grain that isn't exactly one primary key, so it may not be counting things. A table's `default_filters` does **not** count: `execute_sql` doesn't apply them and a bare `COUNT(*)` binding doesn't embed them. So **a table with no metric of its own is the expected outcome**, not a gap to fill: mark the columns' `aggregation` and `unit` correctly instead, and spend metric effort on the ones with real definitions (ratios, multi-table measures, anything with a filter or a business rule in it).
+**Don't hand-add the plain ones it deliberately skips.** A `{table}_count` = `COUNT(*)` or a `{table}_total_{col}` = `SUM(col)` is **not** a metric: the column's `aggregation` class is enforced on every statement with or without a named metric, and everything such a metric could carry already reaches the agent on the table it opens — the column's `unit` (which the formatter carries through `SUM`/`AVG` by itself), the table's and column's `caveats`, and the table's `grain`. So the entry adds a name and nothing else; on a wide model that pattern was 137 of 175 metrics, each listed by its own name, burying the real ones. **A table with no metric of its own is the expected outcome**, not a gap to fill: mark the columns' `aggregation` and `unit` correctly and put caveats on the column or table, and spend metric effort on the ones with real definitions (ratios, multi-table measures, anything with a filter or a business rule in it).
 
 **Run order matters — describe columns FIRST, then suggest metrics.** `suggest-metrics` **skips columns agami couldn't read** (`description_source: ai_unknown`) — it won't propose a metric on a column it can't explain (the prose would just restate opaque SQL like *"Fraction of alm_asset where active_to is true"*). Its output reports `skipped_opaque: N`. So: settle 2b/2c column descriptions first, run suggest-metrics, and **after the user describes any still-opaque columns** (the explorer's "couldn't read" pile, or a later pass), **re-run `sm suggest-metrics "$ROOT"`** — it's incremental (skips names already written), so the newly-described columns pick up their metrics with no duplicates. This is the re-pass: *describe → suggest → describe more → suggest again.*
 
-**Then HUMANIZE the inferred prose (B-metrics only).** The `calculation` that `suggest-metrics` writes is a *mechanical restatement of the SQL* (`"Total cost across alm_asset"`, `"Fraction of alm_asset where active_to is true"`) — accurate but not a business definition, and it's what agami matches a question against. Once the columns are described, **rewrite each inferred metric's `calculation` into a one-line business definition that conveys WHEN to use it**, grounded in the column/table descriptions + the glossary (NOT product memory). E.g. `"Fraction of alm_asset where active_to is true"` → `"Share of assets still within their active lifecycle window"`. Apply as **one `sm curate` batch** of `{op:edit, kind:metric, area, name, field:"calculation", value:"<prose>"}` ops (decisions to you, plumbing to the engine — never a generator script). Keep auto-approved metrics `approved` and **re-stamp `signed_off_at`** (the definition changed, but the trivial SQL didn't — the user isn't re-vetting math, just better words). Leave declared (A) metrics alone — their prose already came from the source.
+**Then HUMANIZE the inferred prose (B-metrics only).** `suggest-metrics` writes a `calculation` that is a *mechanical restatement of the SQL* (`"Fraction of alm_asset where active_to is true"`) and **no `description`** — what a metric is *for* is judgement it cannot derive. Once the columns are described, write **both**, grounded in the column/table descriptions + the glossary (NOT product memory):
+- `description` — the one-line label: `"Share of assets still in their active lifecycle window"`.
+- `calculation` — the full definition, carrying anything the agent must know to write it: `"Fraction of assets whose active_to flag is true — the asset is inside its contracted lifecycle window. Retired assets keep their rows with the flag false, so the rate falls as the estate ages."`
 
-> **Keep any caveat sentence the generator appended.** Where a plain COUNT/SUM/AVG survives at all, the caveat in its `calculation` is the whole reason it exists (see above) — and `calculation` is the only prose field the metric has, so a wholesale rewrite deletes it. Rewrite the *definition* clause and carry the caveat through: *"Number of orders records. Voided orders are still rows."* → *"Orders placed, including voided ones — voided orders are still rows."*
+Apply as **one `sm curate` batch** of `{op:edit, kind:metric, area, name, field:"description", value:"<label>"}` and `{…, field:"calculation", value:"<definition>"}` ops (decisions to you, plumbing to the engine — never a generator script). Leave declared (A) metrics alone — their prose already came from the source. **Drop a proposal rather than describe it** when you can't say what it is for: a flag rate on a column nobody would ask about is noise in the review queue, not a metric.
 
 **In the SAME batch, fill `other_names` (aliases) where the org has well-known ones** — a metric with empty `other_names` only matches its literal name, so a user asking for "MTTR" / "AHT" / "P1 count" misses a metric named `incident_avg_duration_days`. Add the aliases the org actually uses: from the metrics file / glossary if provided, or the standard abbreviation for that metric *type* (a mean-time-to-resolve duration → `MTTR`; average handle time → `AHT`). Only add genuine aliases — don't pad with restatements of the name. `{op:edit, kind:metric, area, name, field:"other_names", value:["MTTR", …]}`.
 
-For every metric (A or B) fill `name`, prose `calculation` (intent — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`. The canonical YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) (synthetic example). **Write them with the packaged command** — build a JSON array and run it once; never hand-write each YAML and never author a throwaway loop script. It validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, validates the whole model, and reverts the batch on failure:
+For every metric (A or B) fill `name`, a one-line `description` (the index label — without it the metric is left out of `metric_index`), prose `calculation` (the full definition — **required**), per-dialect `bindings` (the SQL), `source_tables`, `other_names`. The canonical YAML shape is [`shared/metric-entity-shape.md`](../../shared/metric-entity-shape.md) (synthetic example). **Write them with the packaged command** — build a JSON array and run it once; never hand-write each YAML and never author a throwaway loop script. It validates each item, writes `subject_areas/<area>/metrics/<slug>.yaml`, validates the whole model, and reverts the batch on failure:
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file /tmp/agami-metrics.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-metrics.json"
 ```
 > **Never read another profile to learn the shape.** Do not glob or read other profiles' artifacts (e.g. `find <artifacts_dir> -path '*/metrics/*.yaml'`, or reading `<artifacts_dir>/<other-profile>/…`) to "copy the binding shape." That crosses the profile boundary — in a hosted/multi-tenant deployment it's a **tenant-data leak** (onboarding one customer must never read another's model), and even locally it risks lifting another profile's filters / calculation text into this one. You don't need to: the packaged `sm add` command validates every item against the schema. Get the shape from `shared/metric-entity-shape.md` and the profile's **own** schema — never a sibling profile.
 Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
@@ -779,7 +820,7 @@ It stamps `unit` on every detected money column in a single validated curate bat
 
 **Write all of these with `sm curate` edit ops — never hand-edit `tables/*.yaml` or script a loop over them.** One ops array, one call (validated + committed + reverted on failure):
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveats.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-caveats.json"
 ```
 ```json
 [{"op":"edit","kind":"table","area":"main","name":"orders","field":"caveats","value":["Order total can be negative on refunds."]},
@@ -789,7 +830,12 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-caveat
 
 ### 2e — Reintrospect merge
 
-On `reintrospect`, the engine rewrites the structural skeleton. **Preserve hand-edits**: descriptions, entities, metrics, caveats, value_transforms, and trust sign-offs (`confidence`/`review_state`/`signed_off_*`) carry over for tables/columns that still exist. Only structure the DB unambiguously reports (table list, columns, types, PK, FK) is refreshed. Mark entries `stale` only when their underlying column/table changed.
+**Refreshing an existing model is the engine's job, not yours — never rebuild it and merge enrichment back by hand.** When the user says the database changed ("new columns were added", "reload the schema", "refresh `<table>`"), run introspection with `--append` on the existing profile, naming only the tables that changed when they say which (`--tables schema.table …`). When they don't say, first find out whether the database has **new tables**: `--tables` is an allowlist, so passing only the model's own tables can never turn one up. Run `sm discover` for the model's schemas, compare its table list with the tables already in the model, and if there are new ones ask (multi-select) which to include; then pass the model's tables plus the chosen ones:
+
+1. **Preview first:** the same command with `--dry-run`. The report lists `new tables:` and `changed <table>: added …; dropped …; retyped …` and writes nothing. Show that list to the user in plain words and ask before writing. If it lists nothing, say the model already matches the database and stop.
+2. **Then write:** the same command without `--dry-run`, then validate.
+
+What the engine guarantees, so you don't re-do it: an existing table keeps every description, flag, caveat and sign-off; a new column arrives with no enrichment; a column the database dropped is kept and marked `stale` (never deleted — the person decides); a changed type is updated in place. Subject areas, their descriptions, entities, metrics and existing joins are untouched — except a confirmed join on a column whose type changed, which goes back to review (`joins to review` in the preview: tell the user they need re-approving in `/agami-model`); a new table goes in the area named for its schema (or the only area), and you tell the user where it went. Afterwards, describe **only the new columns** (2b's skip-already-described rule does this), using the model spec's Columns sheet when one was attached. Never `rm`, move aside or rebuild the profile to refresh it.
 
 ### 2f — Seed the narrative if the user didn't write one
 
@@ -840,7 +886,7 @@ If they adjust, edit the `subject_areas/` tree accordingly and re-validate (sizi
 **Replace each area's auto-proposed description with a real one** — the engine seeds `"Auto-proposed subject area covering: <tables>"`, which is boilerplate, but the **subject-area description is load-bearing**: it's what the MCP shows in its first pass so the LLM can ROUTE a question to the right area (`get_datasource_schema` returns name + description per area). A blank/boilerplate description means the router is guessing. So write one business line per area — what domain it covers and when you'd query it — grounded in its tables/columns (NOT product memory). Apply through the validated path, one batch (no generator script):
 ```bash
 # one {op:edit, kind:subject_area, area:<name>, name:<name>, field:description, value:"<line>"} per area
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file /tmp/agami-area-desc.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-area-desc.json"
 ```
 
 ---
@@ -871,7 +917,7 @@ Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns a
 
 > **This gate OPENS the explorer; it is not a choice.** When either count is > 0 you open `/agami-model preseed` and end the turn. A high count is a reason to open it, not to skip it (bulk-approve the *Looks right* pile, eyeball PII + the cross-schema joins there). The "continue anyway" option exists **only** at the 4b return gate — after the user has been in the explorer at least once.
 
-**4b — return gate:** when they're back, **recount the sign-offs** (`--scope preseed`). If **0** → Phase 5 (the seed command runs clean). If **> 0** (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **PII left un-excluded does NOT block seeds** — keeping a sensitive column queryable is the user's call; only unreviewed *sign-offs* gate the seeds.
+**4b — return gate:** when they're back, **recount the sign-offs** with `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0** (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **PII left un-excluded does NOT block seeds** — keeping a sensitive column queryable is the user's call; only unreviewed *sign-offs* gate the seeds.
 
 On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip silently.
 
@@ -885,14 +931,15 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 - **Shapes:** a count, a top-N, a time-bucketed trend, a breakdown, a recency filter. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset.
 - **Spread:** across the whole set, touch each major table/family, exercise **every approved metric at least once**, use the key **entities** by their real names/synonyms, and cover **representative joins** — intra-area *and* cross-schema.
-- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** Read the model's `cross_subject_area_relationships` (the cross-schema / cross-area joins). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
+- **Get every join from the model through `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --tables <t1> <t2> …`** — it returns the joins touching those tables exactly as a question will be answered (area and cross-area alike), each with its role label and full condition (a `current_flag = 'Y'` included), so a seed writes the join the model declares. Never read the model's YAML to find joins.
+- **Cross-schema seeds — the highest-value few-shots, include them deliberately.** The cross-schema / cross-area joins are in that same output (and in `cross_subject_area_relationships`). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
 - **Count scales with the model:** a single-schema DB is fine at ~10–12; a multi-schema one wants ~2–3 per subject area **plus** the 2–4 cross-schema seeds — don't undersample a 5-schema DB at a flat 12.
 
-Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metric`. **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.
+Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metric`. **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `<artifacts_dir>/local/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metric`.
 
 **5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error:
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-examples "$ROOT" --area <area> --profile <profile> --file /tmp/agami-seeds.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-examples "$ROOT" --area <area> --profile <profile> --file "<artifacts_dir>/local/tmp/agami-seeds.json"
 ```
 Output `{added, written, committed, rejected:[{question, error}]}`. For each `rejected`, optionally regenerate once and re-run with just those; don't block the flow on a few drops. Corrections later append via `/agami-save-correction` (same `add-example` path).
 
@@ -907,7 +954,7 @@ Output `{added, written, committed, rejected:[{question, error}]}`. For each `re
 **Run every seed with ONE packaged call — `sm seed-validate` — never a hand-rolled "run all the seeds" script.** It executes each written seed against the live DB **through `execute_sql`** (the same path agami-query uses), so the **fan-trap / chasm-trap pre-flight and the scope/PII gates always apply** — a raw-connection driver could skip that safety and let a fan-out scan the whole table. It emits the examples-validation items (`{n, question, sql, row_headers, row_preview, row_count, state}`); a seed the pre-flight refuses or that errors comes back with its `error`, not a faked result:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-validate "$ROOT" --area <area> --profile <profile> > /tmp/agami-examples-items.json
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-validate "$ROOT" --area <area> --profile <profile> > "<artifacts_dir>/local/tmp/agami-examples-items.json"
 ```
 
 (Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected, and run it in the background if it's slow.)
@@ -915,8 +962,9 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" seed-validate "$ROOT" --area <area> --profi
 Then render the examples-validation dashboard (per-profile subdir) from those items:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_examples_validation.py" \
-  --items-file /tmp/agami-examples-items.json \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_examples_validation.py \
+  --title "Seed examples · <profile>" --profile <profile> \
+  --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" \
   --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
 ```
 
@@ -932,7 +980,7 @@ Reply: approve N · reject N · edit N · done (when you're through).
 ```
 
 **Processing the batch:** the dashboard emits `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all` — apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the dashboard's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back (the per-area seed numbers no longer collide):
-- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), stamp it via `sm add-example` (re-write the same example with `--signer`/`--role`).
+- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written). The sign-off is recorded in `curation_log.jsonl`, not on the example: an example carries no signer field, so don't look for one there.
 - **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). It flags the example `status: rejected` — kept in `examples.yaml` for audit, dropped from the runtime ranker. **Do NOT hand-delete or hand-rewrite the YAML** (there's a command now); map `N` → the example's question from the items you rendered.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
 

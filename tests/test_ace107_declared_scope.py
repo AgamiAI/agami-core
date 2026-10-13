@@ -75,7 +75,7 @@ def _write_model(root: Path) -> None:
                        for t in tables]}))
 
     def _metric(name: str, source_tables: list[str]) -> dict:
-        return {"name": name, "calculation": f"the {name}", "description": f"the {name}",
+        return {"name": name, "calculation": f"the {name}", "description": f"How {name} is defined here",
                 "bindings": {"PostgreSQL": f"SUM({name})"}, "source_tables": source_tables,
                 "confidence": "proposed", "review_state": "unreviewed"}
 

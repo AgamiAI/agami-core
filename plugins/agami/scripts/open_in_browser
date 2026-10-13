@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# open_in_browser — open a local file (or a URL) with the default app, on macOS, Linux and Windows.
+#
+# Replaces the `open || xdg-open || start` chain the skills used to inline, which could never work on
+# Windows: `start` is a cmd.exe builtin (so `command -v start` finds nothing), and cmd.exe can't
+# resolve a Git Bash path such as /c/Users/... — it needs `cygpath -w`. Windows opens it through
+# rundll32's FileProtocolHandler rather than `cmd /c start`: cmd re-parses the line, so a `&` in a URL
+# or path (Git Bash quotes an argument only when it has a space) splits it into two commands, and
+# `%NAME%` expands. Exit 1 with a one-line hint when nothing can open it.
+#
+# Usage:  bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "<path or URL>"
+set -u
+target="${1:?usage: open_in_browser <path or URL>}"
+case "$(uname -s 2>/dev/null)" in
+  Darwin)
+    open "$target" && exit 0 ;;
+  MINGW*|MSYS*|CYGWIN*)
+    case "$target" in
+      http://*|https://*) win="$target" ;;
+      *) win="$(cygpath -w "$target" 2>/dev/null || printf '%s' "$target")" ;;
+    esac
+    rundll32.exe url.dll,FileProtocolHandler "$win" && exit 0 ;;
+  *)
+    command -v xdg-open >/dev/null 2>&1 && xdg-open "$target" >/dev/null 2>&1 && exit 0 ;;
+esac
+echo "agami: couldn't open it automatically — open this yourself: $target" >&2
+exit 1
