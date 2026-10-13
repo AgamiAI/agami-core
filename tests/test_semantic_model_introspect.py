@@ -973,3 +973,118 @@ def test_an_unknown_row_estimate_is_not_a_small_table():
     full = [{}] * I.SAMPLE_ROWS
     assert not I._sample_covers_values(full, -1)
     assert I._sample_covers_values(full, I.SAMPLE_ROWS)
+
+
+# ---------------------------------------------------------------------------
+# Row counts for views and never-analysed tables (#451): the catalog keeps no usable estimate, so
+# introspection counts instead, and a large view gets `large_tables` + `recommended_filters`.
+# ---------------------------------------------------------------------------
+
+
+def _estimate_runner(table, *, estimate, count, seen):
+    """One table with a date column. `estimate` is what the catalog stat returns (None = no row, as
+    `svv_table_info` gives for a view); `count` is the COUNT(*) answer (None = the count fails)."""
+    cols = [
+        {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+        {"column_name": "submitted_on", "data_type": "date", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
+    ]
+
+    def run(sql):
+        s = " ".join(sql.split())
+        seen.append(s)
+        if "information_schema.schemata" in s or "pg_namespace" in s and "nspname AS schema_name" in s:
+            return [{"schema_name": "public"}]
+        if ("information_schema.tables" in s or "svv_tables" in s) and "table_type" in s:
+            return [{"schema_name": "public", "table_name": table, "table_type": "VIEW"}]
+        if "information_schema.columns" in s or "svv_columns" in s:
+            return cols
+        if "PRIMARY KEY" in s:
+            return [{"column_name": "id"}]
+        if "FOREIGN KEY" in s:
+            return []
+        if "reltuples" in s or "svv_table_info" in s:
+            return [] if estimate is None else [{"estimated_rows": str(estimate)}]
+        if "COUNT(*) AS estimated_rows" in s:
+            if count is None:
+                raise RuntimeError("statement timed out")
+            return [{"estimated_rows": str(count)}]
+        return []
+
+    return run
+
+
+@pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
+def test_a_table_the_catalog_cannot_size_is_counted(tmp_path, dialect, estimate):
+    seen: list[str] = []
+    run = _estimate_runner("orders_v", estimate=estimate, count=7_000_000, seen=seen)
+    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    view = org.subject_areas[0].defined_table("orders_v")
+    assert view.performance_hints.estimated_row_count == 7_000_000
+    # Large, so it carries the filter the scan-risk check names.
+    assert view.performance_hints.recommended_filters == ["submitted_on"]
+    assert any("COUNT(*) AS estimated_rows" in s for s in seen)
+
+
+def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
+    seen: list[str] = []
+    run = _estimate_runner("orders", estimate=5_000_000, count=1, seen=seen)
+    org, _ = I.introspect("fin", "postgres", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    assert org.subject_areas[0].defined_table("orders").performance_hints.estimated_row_count == 5_000_000
+    assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
+
+
+@pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
+def test_a_count_that_fails_leaves_the_size_unknown(tmp_path, dialect, estimate):
+    seen: list[str] = []
+    run = _estimate_runner("orders_v", estimate=estimate, count=None, seen=seen)
+    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
+    # Unknown, not -1: a never-analysed Postgres table no longer stores the catalog's -1.
+    assert hints is None or hints.estimated_row_count is None
+    assert any("COUNT(*) AS estimated_rows" in s for s in seen)  # the fallback was tried
+
+
+def test_a_spent_count_budget_leaves_the_rest_unknown(tmp_path, monkeypatch):
+    """Counts run serially, so one run-level budget bounds them all; past it a table stays unsized
+    and the report says how many were skipped."""
+    monkeypatch.setattr(I, "_COUNT_BUDGET_S", 0.0)
+    seen: list[str] = []
+    run = _estimate_runner("orders_v", estimate=None, count=7_000_000, seen=seen)
+    org, report = I.introspect("fin", "redshift", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
+    assert hints is None or hints.estimated_row_count is None
+    assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
+    assert any("1 table(s) left unsized" in n for n in report.notes)
+
+
+def test_a_count_spends_the_budget():
+    from semantic_model import dialects as D
+
+    budget = I._CountBudget(seconds_left=5.0)
+    assert I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget) is None
+    assert budget.seconds_left < 5.0 and budget.skipped == 0
+
+
+@pytest.mark.parametrize("rows", [0, 42])
+def test_an_engine_whose_estimate_is_the_count_runs_it_once(rows):
+    """SQLite has no catalog statistics, so its estimate query IS the exact count: a 0 (or any)
+    answer must not run the same full scan a second time."""
+    from semantic_model import dialects as D
+
+    seen: list[str] = []
+
+    def run(sql):
+        seen.append(sql)
+        return [{"estimated_rows": str(rows)}]
+
+    assert I._estimate_rows(D.get_dialect("sqlite"), run, None, "t") == rows
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("dialect", ["mysql", "bigquery"])
+def test_engines_without_a_native_bound_are_not_counted(dialect):
+    """Until #459 gives introspection reads BigQuery's byte cap and MySQL's server-side time limit,
+    those engines never get the exact-count fallback: a view stays unsized, as before."""
+    from semantic_model import dialects as D
+
+    assert D.get_dialect(dialect).sql_row_count("s", "t") is None

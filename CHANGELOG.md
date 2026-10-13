@@ -14,6 +14,16 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Views and never-analysed tables get a row count, so large ones are flagged (#451).** The model
+  sizes each table from the database's statistics, and a view has none: Redshift's `svv_table_info`
+  lists only tables, and Postgres reports a view or an unanalysed table as `0` or `-1`, depending on the version. A fact
+  view with millions of rows therefore never reached `large_tables` or got its date columns as
+  `recommended_filters`, so nothing warned about a query scanning all of it. When the statistics
+  give no usable figure, the model build now counts the rows instead, with a read-only query under
+  the normal statement time limit. If the count fails or times out, the size is unknown (a
+  Postgres `-1` is no longer stored as a size). MySQL and BigQuery are left out until introspection reads carry their own byte and
+  server-side time limits (#459). The counts share a 10-minute budget per build; tables past it stay
+  unsized and the build report says how many. Refresh a model built from views to pick the counts up.
 - **Receipts find a fan-out when a column is qualified in a different case from its table (#453).**
   `SUM(ORDERS.total) FROM orders JOIN order_items …` reported the inflated total as
   `not_multiplied`, because the qualifier matched no table in the statement. The fan and chasm
