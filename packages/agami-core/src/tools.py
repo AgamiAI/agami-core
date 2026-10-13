@@ -517,10 +517,18 @@ def _credentials_sections() -> dict[str, dict[str, str]]:
     return out
 
 
+_DSN_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+
+
 def _db_type_for(profile: str, creds: dict[str, dict[str, str]]) -> str:
     sect = creds.get(profile, {})
     t = sect.get("type", "")
     if not t and sect.get("url"):
+        # Only a real scheme at the very start is a label. A `url` without one (or with `://`
+        # further in, inside a password or a query string) would otherwise have "the part before
+        # ://" echoed into the listing, credentials included (#453); it reports nothing instead.
+        if not _DSN_SCHEME.match(sect["url"]):
+            return ""
         # Map a DSN scheme → the datasource `type` label (display only; execution is execute_sql's
         # job). Covers the DBs agami advertises; an unknown scheme passes through verbatim.
         scheme = sect["url"].split("://", 1)[0].split("+", 1)[0].lower()

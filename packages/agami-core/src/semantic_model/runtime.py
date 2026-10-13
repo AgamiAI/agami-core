@@ -2120,15 +2120,21 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # lowercase. Compared as written, the fan detector found no edge and the receipt reported a
     # multiplied SUM as `not_multiplied` (#201). Folded ONCE, on both sides, with the same `_tkey`
     # the scope gate and the table index use, so no fan/chasm comparison can disagree with another.
-    #
-    # The aggregation-class and semi-additivity checks keep the names AS WRITTEN: they look columns
-    # up in `_column_index` and metrics in `_semi_additive_columns`, both keyed by the model's own
-    # spelling, so a folded name finds nothing on a model whose tables are uppercase and their
-    # findings would quietly disappear.
+    # The aggregation-class and semi-additivity checks keep the map AS WRITTEN. Their lookups match
+    # across case themselves (#453), exact name first, so a model declaring both `ORDERS` and
+    # `orders` still finds the one the statement named; a folded name would lose that.
     written_scope = tables_in_scope
     tables_in_scope = {alias: _tkey(t) for alias, t in tables_in_scope.items()}
     rels = [_folded_rel(r) for r in rels]
     table_set = set(tables_in_scope.values())
+
+    def shown(table: str) -> str:
+        # Findings name a table as the model declares it, not in the folded spelling the
+        # comparisons above use (#453): `ORDERS`, not `orders`, on a model that says `ORDERS`. A name
+        # the model does not declare (a CTE, a derived table) is shown as it reached here.
+        hit = tidx.get(table)
+        return _echo_name(hit[0].name if hit else table)
+
     # Only the edges the statement's own joins could have traversed count below (ACE-133). The fan
     # and chasm detectors match a declared edge to a join by TABLE PAIR, and a model can declare two
     # edges between one pair: a subclass view joined to its base table on the key the model declares
@@ -2156,8 +2162,8 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 # a PAIR of tables into a report on each aggregate the cross-product inflates —
                 # the pair is not the unit a caller reads, the number is.
                 many_sources = {s for s in agg_sources if _many_side_facing_one(rels, s, shared)}
-                srcs = [_echo_name(s) for s in sorted(agg_sources)]
-                shared_echo = _echo_name(shared)
+                srcs = [shown(s) for s in sorted(agg_sources)]
+                shared_echo = shown(shared)
                 reason = (
                     f"chasm trap: independent measures from {srcs} both join shared "
                     f"dimension {shared_echo!r}; cross-product inflates both aggregates."
@@ -2186,7 +2192,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 _bare(r.from_table) if _bare(r.to_table) == measure_table else _bare(r.to_table)
                 for r in fan_rels
             }
-            measure = _echo_name(measure_table)
+            measure = shown(measure_table)
             for i, site in enumerate(sites):
                 if measure_table not in site.sources:
                     continue
@@ -2200,7 +2206,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 inflating = [mt for mt in sorted(many_tables) if mt not in site.value_sources]
                 if not inflating:
                     continue
-                many = [_echo_name(mt) for mt in inflating]
+                many = [shown(mt) for mt in inflating]
                 # Two sentences about ONE fan, picked per aggregate. The edge is the same edge and
                 # the duplication is the same duplication; what differs is whether the number moved
                 # with it. The second states that and stops there — it names no fix, because under
@@ -2679,17 +2685,62 @@ def _column_index(org: Datasource) -> dict[str, dict[str, Column]]:
     return idx
 
 
+def _ci_get(mapping: dict[str, Any], name: Optional[str], *, quoted: bool = False) -> Any:
+    """`mapping[name]`, matching the key the way SQL matches an identifier: exactly, else (for an
+    unquoted name) case-insensitively and only when that finds exactly one key. Two keys differing
+    only in case are ambiguous, and a guess would attach a finding to the wrong column; a quoted name
+    is case-sensitive, so it never falls back."""
+    if not name:
+        return None
+    if name in mapping:
+        return mapping[name]
+    if quoted:
+        return None
+    hits = [k for k in mapping if _tkey(k) == _tkey(name)]
+    return mapping[hits[0]] if len(hits) == 1 else None
+
+
+def _is_quoted(col: "exp.Column") -> bool:
+    ident = col.args.get("this")
+    return isinstance(ident, exp.Identifier) and bool(ident.args.get("quoted"))
+
+
+def _semi_metric(semi: dict[tuple[str, str], "Metric"], table: str, col: "exp.Column") -> Optional["Metric"]:
+    """The semi-additive metric summing `table.col`, matched like `_ci_get`: the declared pair
+    exactly, else (unquoted column) the one pair equal ignoring case. A quoted `"Balance"` beside a
+    declared `balance` is a different column and does not match (#453)."""
+    if (table, col.name) in semi:
+        return semi[(table, col.name)]
+    hits = [key for key in semi
+            if _tkey(key[0]) == _tkey(table)
+            and (key[1] == col.name if _is_quoted(col) else _tkey(key[1]) == _tkey(col.name))]
+    return semi[hits[0]] if len(hits) == 1 else None
+
+
 def _lookup_column(col: "exp.Column", scope: dict[str, str],
                    colidx: dict[str, dict[str, Column]]) -> Optional[Column]:
-    t = _resolve_col_table(col, scope)
-    if t and col.name in colidx.get(t, {}):
-        return colidx[t][col.name]
-    # bare column, ambiguous table: only safe if exactly one in-scope table defines it
-    if not t:
-        owners = [tt for tt, cols in colidx.items()
-                  if tt in set(scope.values()) and col.name in cols]
+    """The model's Column a statement column reads, for the aggregation-class and semi-additivity
+    checks. Table and column names match case-insensitively (#453): a model introspected from an
+    engine that stores names uppercase, read by a statement written in lowercase or the reverse, is
+    the same table and column, and an exact match made those checks go quiet."""
+    t = _resolve_ci(col, scope)
+    found = _ci_get(_ci_get(colidx, t) or {}, col.name, quoted=_is_quoted(col)) if t else None
+    if found is not None:
+        return found
+    # bare column, ambiguous table: only safe if exactly one in-scope table defines it. Exact table
+    # names first, so a model declaring two tables that differ only in case keeps the answer the
+    # exact match always gave; case-insensitively only when nothing matched exactly. A QUALIFIED
+    # column that `_resolve_ci` left unresolved (an ambiguous qualifier) is not a bare column, and
+    # attributing it to whichever table owns the name would be the guess it declined to make.
+    if not t and not col.table:
+        in_scope = set(scope.values())
+        owners = [cols for tt, cols in colidx.items() if tt in in_scope and col.name in cols]
+        if not owners:
+            folded = {_tkey(v) for v in in_scope}
+            owners = [cols for tt, cols in colidx.items()
+                      if _tkey(tt) in folded and _ci_get(cols, col.name, quoted=_is_quoted(col)) is not None]
         if len(owners) == 1:
-            return colidx[owners[0]][col.name]
+            return _ci_get(owners[0], col.name, quoted=_is_quoted(col))
     return None
 
 
@@ -2821,8 +2872,8 @@ def _check_aggregation_semantics(
             # match on (table, column) — resolve the summed column's table from the
             # query; skip when it can't be pinned down (don't mis-fire on a bare column
             # that happens to share a name with a semi-additive measure elsewhere).
-            ctable = _resolve_col_table(col, scope)
-            mm = semi.get((ctable, col.name)) if ctable else None
+            ctable = _resolve_ci(col, scope)
+            mm = _semi_metric(semi, ctable, col) if ctable else None
             if mm is not None:
                 cname = _echo_name(col.name)
                 found.append((i, Finding(
@@ -4683,7 +4734,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
     the aggregate's identity one line before the receipt wanted it: the section could name the
     measure TABLE and never the number. Same walk, same resolution, one more thing kept.
 
-    **`resolved` is what stops the report from over-claiming.** `_resolve_col_table` returns None
+    **`resolved` is what stops the report from over-claiming.** `_resolve_folded` returns None
     for an unqualified column with two or more tables in scope, and `COUNT(*)` has no column at all,
     so neither contributes a source table and no fan around either is visible to the detector. As a
     finding list that was silence. As a per-aggregate report it would be `not_multiplied`, a
@@ -4733,7 +4784,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
         cols = list(agg.find_all(exp.Column))
-        resolved = [_resolve_col_table(col, scope_map) for col in cols]
+        resolved = [_resolve_folded(col, scope_map) for col in cols]
         why = _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
@@ -4990,7 +5041,7 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
         current, folding = stack.pop()
         reading, operands = _value_operands(current)
         if reading == _VALUE_COLUMN:
-            table = _resolve_col_table(current, scope_map)
+            table = _resolve_folded(current, scope_map)
             computed[id(current)] = frozenset([table]) if table else frozenset()
             continue
         if reading == _VALUE_UNKNOWN or not operands:
@@ -5033,6 +5084,39 @@ def _output_aggregates(node: "exp.Expression") -> list["exp.AggFunc"]:
 # and a fan trap does not refuse — it does not refuse now and there is no code left that could.
 # Do not re-add either as a general helper: the shape they compute is rewrite-eligibility, not a
 # fact about the statement.
+
+
+def _resolve_ci(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
+    """`_resolve_col_table`, with the qualifier matched to its alias or table the way SQL matches an
+    unquoted identifier: `SUM(O.rate) FROM orders o` reads `orders` (#453). The one resolver for the
+    fan/chasm analysis and the aggregation-class and semi-additivity checks, so those cannot
+    disagree about which table a column belongs to.
+
+    `_resolve_col_table` itself is left exact: the receipt's sensitive-projection fact also calls it
+    and compares its answer with the model's names as declared. Making that fact case-insensitive is
+    its own change, with its own tests."""
+    if col.table:
+        qualifier = col.args.get("table")
+        if isinstance(qualifier, exp.Identifier) and qualifier.args.get("quoted"):
+            # A quoted qualifier is case-sensitive: only its exact alias or table.
+            return scope.get(col.table, col.table)
+        # Unquoted: any alias or table equal ignoring case, but only ONE. `FROM orders AS o JOIN
+        # order_items AS "O"` puts both `o` and `O` in scope, and which one an unquoted `O` binds to
+        # depends on the engine's folding; the scope map no longer knows which alias was quoted, so
+        # two candidates leave the column unresolved, which the report calls undetermined rather
+        # than guessing a table and possibly calling an inflated number clean.
+        hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+        if len(hits) == 1:
+            return scope[hits[0]]
+        return None if hits else col.table
+    return _resolve_col_table(col, scope)
+
+
+def _resolve_folded(col: "exp.Column", scope_map: dict[str, str]) -> Optional[str]:
+    """`_resolve_ci` in the folded spelling the fan/chasm detectors compare (#201), so a qualifier that
+    matches nothing in the statement still meets the folded relationships."""
+    table = _resolve_ci(col, scope_map)
+    return _tkey(table) if table else table
 
 
 def _resolve_col_table(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:

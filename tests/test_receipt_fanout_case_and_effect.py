@@ -285,3 +285,149 @@ def test_an_uppercase_model_still_reports_its_fan():
         "SELECT SUM(ORDERS.balance) FROM ORDERS JOIN ORDER_ITEMS "
         "ON ORDER_ITEMS.order_id = ORDERS.id",
     ) == [["fan_trap"]]
+
+
+# --- #453: a qualifier, the meaning checks and the finding text, in any case ------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        # The qualifier is spelled differently from the FROM clause it refers to.
+        "SELECT SUM(ORDERS.total_amount) FROM orders JOIN order_items "
+        "ON order_items.order_id = orders.id",
+        "SELECT SUM(O.total_amount) FROM orders o JOIN order_items oi ON oi.order_id = o.id",
+    ],
+)
+def test_a_qualifier_in_another_case_still_finds_the_fan(sql):
+    [agg] = _aggs(sql)
+    assert agg["status"] == rt.MULTIPLIED
+    assert [f["risk"] for f in agg["findings"]] == ["fan_trap"]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT SUM(o.rate) FROM orders o",  # lowercase statement, uppercase model
+        "SELECT SUM(ORDERS.RATE) FROM ORDERS",  # the column in another case too
+    ],
+)
+def test_the_aggregation_class_check_matches_names_in_any_case(sql):
+    assert _risks(_upper_org(), sql) == [["bad_aggregation"]]
+
+
+def test_the_semi_additive_check_matches_names_in_any_case():
+    assert _risks(
+        _upper_org(),
+        "SELECT orders.created_at, SUM(orders.balance) FROM orders GROUP BY orders.created_at",
+    ) == [["semi_additive"]]
+
+
+def test_a_finding_names_tables_as_the_model_declares_them():
+    """Compared folded, shown as declared: `ORDERS` on a model that says `ORDERS`, whatever the
+    statement wrote, and `orders` on a model that says `orders`."""
+    upper = rt.assemble_receipt(
+        _upper_org(),
+        "select sum(orders.balance) from orders join order_items on order_items.order_id = orders.id",
+    )["aggregates"]["items"]
+    assert upper[0]["joins"] == ["ORDERS (1) <- ORDER_ITEMS (N)"]
+    [lower] = _aggs(
+        "SELECT SUM(ORDERS.total_amount) FROM ORDERS JOIN ORDER_ITEMS ON ORDER_ITEMS.order_id = ORDERS.id"
+    )
+    assert lower["joins"] == ["orders (1) <- order_items (N)"]
+
+
+@pytest.mark.parametrize(
+    "sql, risk",
+    [
+        ("SELECT SUM(O.rate) FROM orders o", "bad_aggregation"),
+        ("SELECT SUM(o.rate) FROM ORDERS O", "bad_aggregation"),
+        (
+            "SELECT o.created_at, SUM(O.balance) FROM orders o GROUP BY o.created_at",
+            "semi_additive",
+        ),
+        # The time grouping is found through the alias in another case too.
+        (
+            "SELECT O.created_at, SUM(o.balance) FROM orders o GROUP BY O.created_at",
+            "semi_additive",
+        ),
+    ],
+)
+def test_the_meaning_checks_follow_an_alias_in_another_case(sql, risk):
+    assert _risks(_upper_org(), sql) == [[risk]]
+
+
+def test_an_unquoted_qualifier_matching_two_aliases_is_never_cleared():
+    """`o` and a quoted `"O"` both in scope: which one an unquoted `O` binds to is engine folding,
+    and the scope map no longer knows which alias was quoted. Guessing the quoted one attributed the
+    SUM to `order_items` and reported it `not_multiplied`; it is left undetermined instead."""
+    [agg] = _aggs(
+        'SELECT SUM(O.total_amount) FROM orders AS o JOIN order_items AS "O" ON "O".order_id = o.id'
+    )
+    assert agg["status"] != rt.NOT_MULTIPLIED and agg["result_affected"] is not False
+
+
+def test_a_quoted_qualifier_binds_only_its_exact_alias():
+    [agg] = _aggs(
+        'SELECT SUM("o".total_amount) FROM orders AS "o" JOIN order_items AS oi ON oi.order_id = "o".id'
+    )
+    assert agg["status"] == rt.MULTIPLIED
+
+
+def _twin_org():
+    """Two tables, and two columns, that differ only in case: legal with quoted identifiers."""
+
+    def table(name, cols):
+        return m.Table(
+            name=name,
+            schema="public",
+            storage_connection="c",
+            grain=["id"],
+            columns=[m.Column(name="id", type="integer"), *cols],
+        )
+
+    tables = [
+        table("ORDERS", [m.Column(name="rate", type="decimal", aggregation="averageable")]),
+        table(
+            "orders",
+            [
+                m.Column(name="rate", type="decimal"),
+                m.Column(name="balance", type="decimal"),
+                m.Column(name="Balance", type="decimal"),
+                m.Column(name="created_at", type="timestamp"),
+            ],
+        ),
+    ]
+    metrics = [
+        m.Metric(
+            name="balance_total",
+            calculation="end-of-day balance",
+            bindings={"PostgreSQL": "SUM(orders.balance)"},
+            non_additive_dimensions=["created_at"],
+            source_tables=["orders"],
+        )
+    ]
+    return m.Datasource(
+        datasource="shop",
+        subject_areas=[m.SubjectArea(name="s", tables_defined=tables, metrics=metrics)],
+    )
+
+
+def test_a_model_with_twin_tables_keeps_each_ones_findings():
+    """`ORDERS.rate` is averageable, `orders.rate` is not. Exact names come first, so each statement
+    gets the finding of the table it named, not its twin's."""
+    assert _risks(_twin_org(), 'SELECT SUM("ORDERS".rate) FROM "ORDERS"') == [["bad_aggregation"]]
+    assert _risks(_twin_org(), "SELECT SUM(orders.rate) FROM orders") == [[]]
+
+
+def test_a_quoted_column_is_not_its_lowercase_twin():
+    """The metric sums `balance`; a quoted `"Balance"` is a different column and no semi-additive
+    finding of its own."""
+    twin = _twin_org()
+    assert _risks(
+        twin, "SELECT orders.created_at, SUM(orders.balance) FROM orders GROUP BY orders.created_at"
+    ) == [["semi_additive"]]
+    assert _risks(
+        twin,
+        'SELECT orders.created_at, SUM(orders."Balance") FROM orders GROUP BY orders.created_at',
+    ) == [[]]
