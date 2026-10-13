@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.14] — 2026-10-13
+
 ### Added
 
 - **The model build asks which date a large table is filtered on (#451).** Introspection suggests
