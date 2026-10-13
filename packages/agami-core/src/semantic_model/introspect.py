@@ -264,7 +264,7 @@ def introspect(
     if budget.skipped:
         report.notes.append(
             f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
-            "in total (catalog statistics, or a refresh after ANALYZE, will size them)")
+            "in total; build those tables in a separate run to size them")
 
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
