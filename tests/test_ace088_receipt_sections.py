@@ -649,7 +649,11 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
                    # the same two things every other field here is made of. Neither can carry a
                    # sampled value, and the two assertions below are what says so rather than this
                    # sentence.
-                   "scope", "filters"})}
+                   "scope", "filters",
+                   # `scan_risk` (#451) is a sentence built from the model's own table name and
+                   # row ESTIMATE (the `rows` field above) and the statement's join structure, or
+                   # null: no sampled value can reach it either.
+                   "scan_risk"})}
 
     numbers = [v for v in _leaves(sections) if isinstance(v, int) and not isinstance(v, bool)]
     assert set(numbers) <= {ROW_ESTIMATE}

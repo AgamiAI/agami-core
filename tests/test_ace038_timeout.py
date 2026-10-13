@@ -256,11 +256,17 @@ def test_the_budget_has_exactly_one_configuration_surface():
     # once per call before any bound is derived, and `tools._pass_child_env` writes both numbers into
     # the child's `AGAMI_SQL_*` keys, so the fork carries it explicitly instead of losing it.
     # `tests/test_per_org_statement_limits.py` drives that across a real process boundary.
+    #
+    # `_guard_scan` (#451) is the ninth, and the same kind as `_guard_shape`: the safety pass's reading
+    # of the statement (its outer joins, in the caller's own table names and never the model's sizes)
+    # carried across to the refusal builder within one call, cleared at entry beside it, and read only to WORD a refusal already decided,
+    # never to compute a bound.
     context_vars -= {
         "_last_error_detail",
         "_guard_model",
         "_last_outcome",
         "_guard_shape",
+        "_guard_scan",
         "_pass_posture",
         "_last_executing_identity",
         "_last_warehouse_query_id",

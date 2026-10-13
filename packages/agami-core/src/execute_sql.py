@@ -1508,6 +1508,11 @@ _guard_model: ContextVar[Any | None] = ContextVar("_guard_model", default=None)
 # absent or no model has been built yet. All of them get the shape-neutral remediation, which is why
 # that third text is not a defensive branch — it is the answer for every deployment without a model.
 _guard_shape: ContextVar[str | None] = ContextVar("_guard_shape", default=None)
+# What a timeout refusal can say about WHY the statement was slow (#451): one sentence per outer join
+# between plain tables, in the caller's own names and never the model's facts. Computed
+# where `_guard_shape` is, for the same reason (this module cannot import sqlglot), and empty when the
+# model pass did not run or the statement has no such join.
+_guard_scan: ContextVar[tuple[str, ...]] = ContextVar("_guard_scan", default=())
 
 # The ACE-101 posture, resolved ONCE per call and then fixed for the rest of it.
 #
@@ -1788,6 +1793,13 @@ _EXECUTOR_SATURATED = "the executor already has its limit of abandoned calls out
 _NARROW_IT = ("Narrow the time range, reduce the grouping, or add a selective filter, "
               "then run it again.")
 
+
+def _narrow_it() -> str:
+    """The time-bound remediation: the outer-join shape the statement uses, in its own table names,
+    when it has one (#451), then the generic advice. At most two shapes, so the refusal stays one
+    short paragraph."""
+    return " ".join([*_guard_scan.get()[:2], _NARROW_IT])
+
 # The transfer bound's remediation, keyed by the shape `_guard_shape` carries. Three entries rather
 # than one, because the right fix genuinely differs and the wrong one is not merely unhelpful:
 #
@@ -1874,10 +1886,10 @@ def _resource_limit_refusal(exc: _ResourceLimit | None) -> Refusal:
             f"The executor did not return within the {timeout_s + _OUTER_BOUND_SKEW_S}s limit "
             "and the query was abandoned."
         )
-        remediation = _NARROW_IT
+        remediation = _narrow_it()
     else:
         detail = f"The statement ran longer than the {timeout_s}s limit and was cancelled."
-        remediation = _NARROW_IT
+        remediation = _narrow_it()
     return refuse(RULE_RESOURCE_LIMIT, detail=detail, remediation=remediation)
 
 
@@ -2519,6 +2531,13 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
     # one. Set here and not at the chokepoint because the chokepoint cannot import sqlglot — see
     # `_guard_shape`. Stays None when `ctx` is None (no sqlglot) or the statement did not parse.
     _guard_shape.set(RT.statement_shape(ctx))
+    # `getattr`, like `_engine_mismatch`'s reads: the installed runtime can be older than this file.
+    # Advisory text for a later timeout, so a failure here costs the hint, never the query.
+    scan_risks = getattr(RT, "scan_risks", None)
+    try:
+        _guard_scan.set(tuple(scan_risks(ctx)) if scan_risks is not None else ())
+    except Exception:
+        _guard_scan.set(())
 
     # Readability gate — refuse a statement the guard cannot read in this datasource's own grammar,
     # BEFORE any gate below is asked to judge it. Each gate below degrades to allow when it has no
@@ -2990,6 +3009,7 @@ def execute_guarded(
     # And the same again for the shape. A stale value here is worse than none: it would word this
     # call's refusal for a statement somebody else sent, and the two wordings give opposite advice.
     _guard_shape.set(None)
+    _guard_scan.set(())
     # And the ACE-101 posture, resolved once here rather than cleared. Same reason as the four above,
     # one step stronger: those must not carry a STALE value into this call, and this one must not
     # CHANGE during it. The gate below and the receipt built after it have to be two statements about
