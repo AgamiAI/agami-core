@@ -17,7 +17,7 @@ below corresponds to one such version.
 - **The model build asks which date a large table is filtered on (#451).** Introspection suggests
   every date column of a large table as its `recommended_filters`, and on a warehouse many of those
   are load or audit timestamps. The build report now lists each large table with its row estimate
-  and suggested filters, `/agami-connect` asks which date a question would mean, and the new
+  and date columns, `/agami-connect` asks which date a question would mean, and the new
   `recommended_filters` curate edit changes the list without touching the row count beside it.
 - **Receipts flag a large table pulled in from the outer side of a join, and a timeout points at the
   join (#451).** Each table entry on the receipt carries `scan_risk`, a sentence or null. It is set

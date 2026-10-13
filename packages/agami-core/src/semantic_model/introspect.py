@@ -139,7 +139,7 @@ class IntrospectReport:
     relationship_count: int = 0
     subject_areas: list[str] = field(default_factory=list)
     deep_tables: list[str] = field(default_factory=list)
-    # Tables at or above the large-table line: name -> (estimated rows, the seeded filter columns).
+    # Tables at or above the large-table line: name -> (estimated rows, its date columns).
     # Listed so whoever builds the model confirms the filters; the seed is every date column, and on
     # a warehouse that is often load timestamps nobody asks a question about.
     large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
@@ -162,7 +162,7 @@ class IntrospectReport:
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
               for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
-            *(f"large table {t}: about {rows:,} rows; suggested filters: {', '.join(cols) or '(none)'}"
+            *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
             "## notes",
@@ -979,7 +979,9 @@ def _build_table(
         date_cols = [c.name for c in cols if c.type in ("date", "timestamp", "time")]
         if 1 <= len(date_cols) <= _MAX_DATE_FILTER_COLS:
             perf.recommended_filters = date_cols
-            report.large_tables[table] = (perf.estimated_row_count, list(date_cols))
+        # Every large table, whatever the seed did: the question is which of its dates a question
+        # means, and a table with more dates than the seed takes still has one.
+        report.large_tables[table] = (perf.estimated_row_count, date_cols)
 
     return Table(
         name=table,

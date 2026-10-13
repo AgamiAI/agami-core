@@ -43,7 +43,7 @@ def test_the_report_lists_each_large_table_with_its_seeded_filters(tmp_path):
     )
     assert report.large_tables == {"orders": (5_000_000, ["order_date", "row_loaded_at"])}
     assert (
-        "large table orders: about 5,000,000 rows; suggested filters: order_date, row_loaded_at"
+        "large table orders: about 5,000,000 rows; date columns: order_date, row_loaded_at"
         in report.render()
     )
 
@@ -181,3 +181,16 @@ def test_a_filter_is_stored_in_the_columns_own_spelling(tmp_path):
         ],
     )
     assert _filters(root) == ["order_date"]
+
+
+def test_a_large_table_with_many_dates_is_still_listed(tmp_path):
+    """More date columns than the seed takes: no seed, but the table is still offered."""
+    dates = [col(f"d{i}", "date") for i in range(I._MAX_DATE_FILTER_COLS + 1)]
+    run = make_catalog_runner(
+        tables=["wide"],
+        columns={"wide": [col("id", "integer", nullable=False), *dates]},
+        estimate="5000000",
+    )
+    org, report = I.introspect("shop", "postgres", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    assert report.large_tables["wide"] == (5_000_000, [c["column_name"] for c in dates])
+    assert org.subject_areas[0].defined_table("wide").performance_hints.recommended_filters == []
