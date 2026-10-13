@@ -542,43 +542,57 @@ SCAN_LARGE_ROWS = 1_000_000
 
 
 def scan_findings(tree: "exp.Expression | None", org: "Datasource | None",
-                  tidx: "dict[str, tuple] | None" = None) -> list[dict[str, Any]]:
-    """Where a large table is the side an outer join does not preserve, and the preserved side holds
-    no large table (#451): `small LEFT JOIN large` keeps every small row, so the engine cannot narrow
-    the large table by the join first, and on a distributed engine it moves all of it.
+                  tidx: "dict[str, tuple] | None" = None,
+                  sidx: "dict[str, dict[str | None, set[str]]] | None" = None) -> list[dict[str, Any]]:
+    """Where a large table is the side an outer join does not preserve, and the preserved side is
+    plain tables none of which is large (#451): `small LEFT JOIN large` keeps every small row, so the
+    engine cannot narrow the large table by the join first, and on a distributed engine it moves all
+    of it.
 
     One structural shape, deliberately. Whether a large table is otherwise "narrowed" depends on
     every way SQL can filter (through a joined dimension, a USING join, a cast key, a date
-    expression), and a guess at that wrongly flags good queries. Advisory, never a refusal. Sizes
-    come from `performance_hints.estimated_row_count`; a table without one is never flagged. Each
-    finding names the table as the model declares it, and carries the `exp.Table` it was read
-    through so the receipt puts it on that reference and no other."""
-    if tree is None or not _HAVE_SQLGLOT or (tidx is None and org is None):
+    expression), and a guess at that wrongly flags good queries. For the same reason a subquery or
+    CTE on either side is not looked into: a preserved side that is one says nothing is flagged.
+    Advisory, never a refusal. Sizes come from `performance_hints.estimated_row_count`; a table
+    without one is never flagged. Each finding names the table as the model declares it, and carries
+    the `exp.Table` it was read through so the receipt puts it on that reference and no other."""
+    if tree is None or not _HAVE_SQLGLOT or (org is None and (tidx is None or sidx is None)):
         return []
-    tidx = _without_ctes(tree, tidx if tidx is not None else _model_table_index(org))
+    large = _large_tables(tree, tidx if tidx is not None else _model_table_index(org),
+                          sidx if sidx is not None else _schema_index(org))
     out: list[dict[str, Any]] = []
     for sel in tree.find_all(exp.Select):
-        out.extend(_outer_join_findings(sel, tidx))
+        out.extend(_outer_join_findings(sel, large))
     return out
 
 
-def _without_ctes(tree: "exp.Expression", tidx: "dict[str, tuple]") -> "dict[str, tuple]":
-    """A CTE named like a model table is the statement's own result, not that table."""
-    ctes = _cte_names(tree)
-    return {k: v for k, v in tidx.items() if k not in ctes} if ctes else tidx
+def _large_tables(tree: "exp.Expression", tidx: "dict[str, tuple]",
+                  sidx: "dict[str, dict[str | None, set[str]]]") -> "Callable[[exp.Expression], Any]":
+    """For `tree`: node -> the model table that physical reference reads when the model says it is
+    large, else None. Resolved by schema and name the way the scope gates resolve it, so a read of
+    `staging.orders` never borrows `sales.orders`'s size; a reference to a visible CTE, a subquery,
+    or a name the model leaves ambiguous is None."""
+    ctes = _cte_references(tree)
+
+    def large(node: "exp.Expression") -> Any:
+        if not isinstance(node, exp.Table) or id(node) in ctes:
+            return None
+        hit = _resolve_table(sidx, node)
+        if not isinstance(hit, tuple):
+            return None
+        info = tidx.get(hit[1])
+        t = info[0] if info else None
+        # `tidx` is first-wins by bare name: a different schema's table is not this one's size.
+        if t is None or (_tkey(t.schema_name) or None) != hit[0]:
+            return None
+        rows = t.performance_hints.estimated_row_count if t.performance_hints else None
+        return t if rows and rows >= SCAN_LARGE_ROWS else None
+
+    return large
 
 
-def _large(node: "exp.Expression", tidx: "dict[str, tuple]") -> "Any":
-    """The model table an `exp.Table` reads, when the model says it is large; else None."""
-    if not isinstance(node, exp.Table):
-        return None
-    hit = tidx.get(_tkey(node.name))
-    t = hit[0] if hit else None
-    rows = t.performance_hints.estimated_row_count if t and t.performance_hints else None
-    return t if rows and rows >= SCAN_LARGE_ROWS else None
-
-
-def _outer_join_findings(sel: "exp.Select", tidx: "dict[str, tuple]") -> list[dict[str, Any]]:
+def _outer_join_findings(sel: "exp.Select", large: "Callable[[exp.Expression], Any]",
+                         ) -> list[dict[str, Any]]:
     frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
     seen: list["exp.Expression"] = [frm.this] if frm is not None else []
     findings: list[dict[str, Any]] = []
@@ -586,16 +600,16 @@ def _outer_join_findings(sel: "exp.Select", tidx: "dict[str, tuple]") -> list[di
         side = (join.side or "").upper()
         if side in ("LEFT", "RIGHT") and seen:
             preserved, dropped = (seen, [join.this]) if side == "LEFT" else ([join.this], seen)
-            if not any(_large(n, tidx) for n in preserved):
+            plain = all(isinstance(n, exp.Table) for n in preserved)
+            if plain and not any(large(n) for n in preserved):
                 small = preserved[0]
-                small_name = (tidx.get(_tkey(small.name)) or (None,))[0]
                 for node in dropped:
-                    t = _large(node, tidx)
+                    t = large(node)
                     if t is not None:
                         findings.append({
                             "node": node, "table": t.name,
                             "rows": t.performance_hints.estimated_row_count, "risk": "outer_join",
-                            "from": small_name.name if small_name else small.alias_or_name})
+                            "from": small.name})
         seen.append(join.this)
     return findings
 
@@ -620,12 +634,13 @@ def scan_risks(ctx: "GuardContext | None") -> list[str]:
     mirror that cannot import this module's parse, so the analysis runs here and travels as text."""
     if ctx is None or ctx.tree is None or not _HAVE_SQLGLOT:
         return []
-    tidx = _without_ctes(ctx.tree, ctx.model_table_index)
-    findings = scan_findings(ctx.tree, None, tidx)
+    sidx = ctx.schema_index if ctx.schema_index is not None else {}
+    findings = scan_findings(ctx.tree, None, ctx.model_table_index, sidx)
+    large = _large_tables(ctx.tree, ctx.model_table_index, sidx)
     out = list(dict.fromkeys(scan_sentence(f) for f in findings))  # a UNION can repeat one shape
     named = {_tkey(f["table"]) for f in findings}
     for node in ctx.tree.find_all(exp.Table):
-        t = _large(node, tidx)
+        t = large(node)
         if t is None or _tkey(t.name) in named:
             continue
         named.add(_tkey(t.name))

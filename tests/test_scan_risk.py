@@ -20,10 +20,10 @@ from sqlglot import parse_one  # noqa: E402
 from test_semantic_model_runtime import m, rt  # noqa: E402
 
 
-def _table(name, rows=None, cols=(), filters=()):
+def _table(name, rows=None, cols=(), filters=(), schema="public"):
     return m.Table(
         name=name,
-        schema="public",
+        schema=schema,
         storage_connection="c",
         grain=["id"],
         columns=[
@@ -86,12 +86,45 @@ def _risks(sql):
             "SELECT 1 FROM periods p LEFT JOIN fact_lines f ON f.period_key = p.period_key",
             [],
         ),
+        # A CTE hides the table only where it is visible: a schema-qualified read is the table.
+        (
+            "WITH fact_lines AS (SELECT 1 AS period_key) "
+            "SELECT 1 FROM periods p LEFT JOIN public.fact_lines f ON f.period_key = p.period_key",
+            [("outer_join", "fact_lines")],
+        ),
+        # A subquery on the preserved side may hold the large read: not looked into, not flagged.
+        (
+            "SELECT 1 FROM (SELECT period_key FROM events) e "
+            "LEFT JOIN fact_lines f ON f.period_key = e.period_key",
+            [],
+        ),
         # A filtered or unfiltered read of one table is not judged at all.
         ("SELECT COUNT(*) FROM fact_lines", []),
     ],
 )
 def test_scan_findings(sql, expected):
     assert _risks(sql) == expected
+
+
+def test_a_table_is_sized_by_its_own_schema():
+    """`staging.orders` is small; it must not borrow the large `sales.orders` row count."""
+    org = m.Datasource(
+        datasource="shop",
+        subject_areas=[
+            m.SubjectArea(
+                name="s",
+                tables_defined=[
+                    _table("orders", 5_000_000, ["k"], schema="sales"),
+                    _table("orders", 10, ["k"], schema="staging"),
+                    _table("periods", 2_000, ["k"]),
+                ],
+            )
+        ],
+    )
+    sql = "SELECT 1 FROM periods p LEFT JOIN {}.orders o ON o.k = p.k"
+    found = [f["table"] for f in rt.scan_findings(parse_one(sql.format("sales"), read="postgres"), org)]
+    assert found == ["orders"]
+    assert rt.scan_findings(parse_one(sql.format("staging"), read="postgres"), org) == []
 
 
 def test_the_receipt_names_the_risk_on_the_table_it_is_about():
