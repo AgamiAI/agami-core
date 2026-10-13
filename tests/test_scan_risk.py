@@ -90,7 +90,7 @@ def _risks(sql):
         (
             "WITH fact_lines AS (SELECT 1 AS period_key) "
             "SELECT 1 FROM periods p LEFT JOIN public.fact_lines f ON f.period_key = p.period_key",
-            [("outer_join", "fact_lines")],
+            [("outer_join", "public.fact_lines")],
         ),
         # A subquery on the preserved side may hold the large read: not looked into, not flagged.
         (
@@ -129,7 +129,7 @@ def test_a_table_is_sized_by_its_own_schema():
     )
     sql = "SELECT 1 FROM periods p LEFT JOIN {}.orders o ON o.k = p.k"
     found = [f["table"] for f in rt.scan_findings(parse_one(sql.format("sales"), read="postgres"), org)]
-    assert found == ["orders"]
+    assert found == ["sales.orders"]
     assert rt.scan_findings(parse_one(sql.format("staging"), read="postgres"), org) == []
 
 
@@ -169,6 +169,7 @@ def test_tables_are_named_as_written():
     assert "INNER JOIN `public.periods`" in rt.scan_risks(rt.build_guard_context(sql, ORG))[0]
     found = rt.scan_findings(parse_one(sql, read="postgres"), ORG)
     assert "INNER JOIN `public.periods`" in rt.scan_sentence(found[0])
+    assert "Start FROM `public.fact_lines`" in rt.scan_sentence(found[0])
 
 
 def test_the_receipt_names_the_risk_on_the_table_it_is_about():

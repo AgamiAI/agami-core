@@ -551,7 +551,7 @@ def scan_findings(tree: "exp.Expression | None", org: "Datasource | None") -> li
     every way SQL can filter (through a joined dimension, a USING join, a cast key, a date
     expression), and a guess at that wrongly flags good queries. For the same reason nothing is
     flagged when the preserved side is a subquery or CTE, or any of its tables has no known size.
-    Advisory, never a refusal. Each finding names the table as the model declares it, and carries
+    Advisory, never a refusal. Each finding names the table as the statement wrote it, and carries
     the `exp.Table` it was read through so the receipt puts it on that reference and no other."""
     if tree is None or org is None or not _HAVE_SQLGLOT:
         return []
@@ -561,7 +561,7 @@ def scan_findings(tree: "exp.Expression | None", org: "Datasource | None") -> li
         t, rows = size(node)
         sizes = [size(n)[1] for n in preserved]
         if rows >= SCAN_LARGE_ROWS and all(r and r < SCAN_LARGE_ROWS for r in sizes):
-            out.append({"node": node, "table": t.name, "rows": rows, "risk": "outer_join",
+            out.append({"node": node, "table": _written(node), "rows": rows, "risk": "outer_join",
                         "from": _written(preserved[0])})
     return out
 
