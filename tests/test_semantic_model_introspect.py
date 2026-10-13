@@ -1033,7 +1033,7 @@ def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
     assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
 
 
-@pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1)])
+@pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
 def test_a_count_that_fails_leaves_the_size_unknown(tmp_path, dialect, estimate):
     seen: list[str] = []
     run = _estimate_runner("orders_v", estimate=estimate, count=None, seen=seen)

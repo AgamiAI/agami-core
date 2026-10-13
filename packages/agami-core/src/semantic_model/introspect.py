@@ -1036,9 +1036,10 @@ def _estimate_rows(
         return est
     count_q = dialect.sql_row_count(schema, table)
     if count_q and count_q != q:
-        counted = _rows_from(_try(runner, count_q))
-        if counted is not None:
-            return counted
+        # A distinct count was tried, so its answer replaces the catalog's: when it fails, the size
+        # is unknown, never the catalog's 0 (an unanalysed table with rows would read as empty).
+        return _rows_from(_try(runner, count_q))
+    # The estimate query was itself the exact count (no catalog statistics on this engine).
     return est if est is not None and est >= 0 else None
 
 
