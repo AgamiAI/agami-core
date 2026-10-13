@@ -258,8 +258,8 @@ def test_the_budget_has_exactly_one_configuration_surface():
     # `tests/test_per_org_statement_limits.py` drives that across a real process boundary.
     #
     # `_guard_scan` (#451) is the ninth, and the same kind as `_guard_shape`: the safety pass's reading
-    # of the statement (which large tables it reads, the outer-join shape first) carried across to the refusal builder
-    # within one call, cleared at entry beside it, and read only to WORD a refusal already decided,
+    # of the statement (its outer joins, in the caller's own table names and never the model's sizes)
+    # carried across to the refusal builder within one call, cleared at entry beside it, and read only to WORD a refusal already decided,
     # never to compute a bound.
     context_vars -= {
         "_last_error_detail",
