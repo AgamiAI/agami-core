@@ -1283,12 +1283,32 @@ def projected_sensitive_columns(sql: str, org: Datasource,
     return _projected_sensitive(tree, org, ctx=ctx)
 
 
+def _sensitive_ci(by_table: dict[str, set[str]]) -> dict[str, dict[str, str]]:
+    """folded table -> folded column -> "table.column" as the model declares them.
+
+    Folded quoted or not, unlike `_ci_get`: a miss here makes the receipt say no sensitive column
+    came back when one did, while an extra match only over-warns (#456)."""
+    idx: dict[str, dict[str, str]] = {}
+    for table in sorted(by_table):
+        cols = idx.setdefault(_tkey(table), {})
+        for col in sorted(by_table[table]):
+            cols.setdefault(_tkey(col), f"{table}.{col}")
+    return idx
+
+
 def _projected_sensitive(tree, org: Datasource,
                          ctx: "GuardContext | None" = None) -> list[str]:
-    """The analysis half, on an already-parsed tree."""
+    """The analysis half, on an already-parsed tree.
+
+    Table and column names match whatever case the statement wrote them in (#456): `SELECT
+    ORDERS.SSN FROM ORDERS` projects the declared `orders.ssn` as surely as the lowercase spelling
+    does. A resolved column is named as the model declares it; one whose table can't be pinned keeps
+    the name the statement wrote."""
     by_table, allnames = ctx.sensitive_by_table if ctx is not None else _sensitive_by_table(org)
     if not allnames:
         return []
+    sensitive = _sensitive_ci(by_table)
+    folded_names = {_tkey(n) for n in allnames}
     # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not
     # exp.Select — gate on "contains a SELECT" and scan every OUTPUT-bearing arm, else
     # `… UNION SELECT ssn FROM customers` would project a sensitive column past this gate.
@@ -1302,22 +1322,34 @@ def _projected_sensitive(tree, org: Datasource,
         for proj in sel.expressions:
             # (a) a raw projection of a sensitive column, not protected by COUNT
             for col in proj.find_all(exp.Column):
-                if col.name not in allnames or _count_protects(col):
+                if _tkey(col.name) not in folded_names or _count_protects(col):
                     continue
-                tbl = _resolve_col_table(col, scope)
-                if tbl is None:
-                    offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
-                elif tbl in by_table and col.name in by_table[tbl]:
-                    offending.add(f"{tbl}.{col.name}")
+                if col.table:
+                    # The exact alias, else every alias the qualifier could name ignoring case.
+                    hits = [col.table] if col.table in scope else [
+                        k for k in scope if _tkey(k) == _tkey(col.table)]
+                    tables = {scope[k] for k in hits} or {col.table}
+                else:
+                    only = _resolve_col_table(col, scope)
+                    if only is None:
+                        offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
+                        continue
+                    tables = {only}
+                for tbl in tables:
+                    hit = sensitive.get(_tkey(tbl), {}).get(_tkey(col.name))
+                    if hit:
+                        offending.add(hit)
                 # same-named column on a non-sensitive table → not offending
             # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
             is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
             if is_star:
                 qualifier = proj.table if isinstance(proj, exp.Column) else None
-                tables = {scope.get(qualifier, qualifier)} if qualifier else direct
+                # An unquoted `O.*` may name `o` or `O`; every alias it could bind to counts.
+                hits = ([qualifier] if qualifier in scope else
+                        [k for k in scope if _tkey(k) == _tkey(qualifier)]) if qualifier else []
+                tables = ({scope[k] for k in hits} or {qualifier}) if qualifier else direct
                 for tbl in tables:
-                    for c in sorted(by_table.get(tbl, set())):
-                        offending.add(f"{tbl}.{c}")
+                    offending.update(sensitive.get(_tkey(tbl), {}).values())
 
     return sorted(offending)
 
@@ -3610,7 +3642,8 @@ def assemble_receipt(
         out = []
         for b in used:
             info = _declared_table(b)
-            if info and any(c.name == cname for c in info[0].columns):
+            # Ignoring case, like the qualifier below (#456): `SELECT Ssn FROM orders` reads `ssn`.
+            if info and any(_tkey(c.name) == _tkey(cname) for c in info[0].columns):
                 out.append(b)
         return out
 
@@ -3625,7 +3658,13 @@ def assemble_receipt(
         # walk and the unqualified branch below never reached a qualified column. The reference
         # itself is kept either way: a dropped reference is an unchecked one.
         if col.table:                                   # qualified -> resolve via alias scope
-            bare = scope.get(col.table, col.table)
+            # The alias matched ignoring case, like the sensitive check (#456); an exact match
+            # wins, and a qualifier that could be two aliases keeps the written name.
+            hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+            if col.table in scope:
+                bare = scope[col.table]
+            else:
+                bare = scope[hits[0]] if len(hits) == 1 else col.table
         else:                                           # unqualified -> attribute only if unambiguous
             cands = _tables_defining(col.name)
             bare = cands[0] if len(cands) == 1 else None
@@ -3680,6 +3719,8 @@ def assemble_receipt(
     # Which sensitive columns this statement projects RAW — the same analysis that used to refuse
     # it, on the tree already parsed above rather than a second parse of the same statement.
     projected_sensitive = set(_projected_sensitive(tree, org, ctx=None))
+    # Folded: `_projected_sensitive` uses the model's spelling, `column_refs` the statement's (#456).
+    projected_folded = {_tkey(name) for name in projected_sensitive}
     column_items: list[dict[str, Any]] = []
     for bare, cname in column_refs[:_RECEIPT_MAX_REFS]:
         info = _declared_table(bare)
@@ -3717,7 +3758,7 @@ def assemble_receipt(
         # by bare name, so both forms are checked. It means PROJECTED, not merely referenced: a
         # sensitive column used only in a WHERE is not flagged, because the value did not come
         # back and saying otherwise would cry wolf on the filters that are the normal safe use.
-        if f"{bare}.{cname}" in projected_sensitive or cname in projected_sensitive:
+        if _tkey(f"{bare}.{cname}") in projected_folded or _tkey(cname) in projected_folded:
             item["sensitive"] = True
         column_items.append(item)
     # The output columns lead. They are what the caller READ, so a surface rendering the first few
@@ -5237,9 +5278,9 @@ def _resolve_ci(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
     fan/chasm analysis and the aggregation-class and semi-additivity checks, so those cannot
     disagree about which table a column belongs to.
 
-    `_resolve_col_table` itself is left exact: the receipt's sensitive-projection fact also calls it
-    and compares its answer with the model's names as declared. Making that fact case-insensitive is
-    its own change, with its own tests."""
+    `_resolve_col_table` itself is left exact, for the callers that still want the written name.
+    The receipt's sensitive-projection fact does NOT use this: `_projected_sensitive` matches
+    qualifiers itself, more broadly (quoted names fold too), so a change here doesn't reach it."""
     if col.table:
         qualifier = col.args.get("table")
         if isinstance(qualifier, exp.Identifier) and qualifier.args.get("quoted"):

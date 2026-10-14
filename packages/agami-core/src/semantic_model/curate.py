@@ -729,8 +729,8 @@ def _reconcile_expose_groups(root: Path, table: str, schema: Optional[str], old_
     """After a table's `column_groups` are rewritten, carry every `TableRef.expose_column_groups`
     naming it over to the new groups, in EVERY subject area, not just the owner's.
 
-    By columns, not by name: an area keeps showing the columns its old groups held, through the new
-    groups that contain any of them. A regroup renames groups, so matching names would leave nothing
+    By columns, not by name: an area shows the new groups that contain any column its old groups
+    held (a new group spanning the old boundary brings its other columns along). A regroup renames groups, so matching names would leave nothing
     and silently widen the area to every column. A table a spec lists in several areas has a
     reference in each, and one left behind fails validation and rolls the whole batch back (#465).
     The field is dropped when the new groups it maps to cover every group ("expose all"). A reference

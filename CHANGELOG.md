@@ -23,8 +23,16 @@ below corresponds to one such version.
 - **Regrouping a table shown by several subject areas works.** A curate `column_groups` edit
   updated only the owning area's `expose_column_groups`; another area showing the table kept the
   old group names, so validation failed and the batch rolled back. Every area is now updated, by
-  columns: it keeps showing what it showed, through the new groups that hold those columns, instead
-  of widening to every column.
+  columns: it shows the new groups that hold any column it showed before. A new group that spans
+  the old boundary adds its other columns, instead of the area widening to every column.
+
+### Fixed
+
+- **Receipts flag a sensitive column whatever case the statement writes it in (#456).** With
+  `orders.ssn` declared sensitive, `SELECT ORDERS.SSN FROM ORDERS` or `SELECT O.ssn FROM orders o`
+  reported no sensitive column projected, because names were compared exactly. Table, alias and
+  column names now match ignoring case, in the check and in the receipt's column list. Nothing is
+  refused; this changes only what the receipt reports.
 
 ## [0.9.14] — 2026-10-13
 
