@@ -610,6 +610,7 @@ def _apply_one(root: Path, op: dict, signer, role,
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
         _snapshot(backups, path)
         doc = _load(path)
+        old_groups = dict(doc.get("column_groups") or {})
         if op.get("column"):
             _set_column_field(doc, op["column"], op, new_state, signer, role)
         elif op.get("op") == "edit" and op.get("field") == "recommended_filters":
@@ -623,7 +624,8 @@ def _apply_one(root: Path, op: dict, signer, role,
         # A column_groups edit renames the groups a TableRef may expose — reconcile so we
         # don't orphan `expose_column_groups` (which would fail validation).
         if op.get("op") == "edit" and op.get("field") == "column_groups" and not op.get("column"):
-            _reconcile_expose_groups(root, area, name, doc.get("column_groups") or {}, backups)
+            _reconcile_expose_groups(root, name, doc.get("schema"), old_groups,
+                                     doc.get("column_groups") or {}, backups)
         return path
 
     if kind == "entity":
@@ -722,34 +724,36 @@ def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
     return out
 
 
-def _reconcile_expose_groups(root: Path, area: str, table: str,
+def _reconcile_expose_groups(root: Path, table: str, schema: Optional[str], old_groups: dict,
                              new_groups: dict, backups: "dict[Path, Optional[str]]") -> None:
-    """After a table's `column_groups` are rewritten, fix any `TableRef.expose_column_groups`
-    in subject_area.yaml that referenced the OLD group names: keep only names that still exist,
-    and drop the field entirely when it would cover every group (or nothing) — i.e. "expose all".
-    Without this, a regroup orphans the exposes and the model fails validation."""
-    sap = _area_dir(root, area) / "subject_area.yaml"
-    if not sap.exists():
-        return
-    sa = _load(sap) or {}
-    valid = set(new_groups.keys())
-    changed = False
-    for tr in sa.get("tables", []) or []:
-        if tr.get("table") != table:
-            continue
-        exp = tr.get("expose_column_groups")
-        if not exp:
-            continue
-        kept = [g for g in exp if g in valid]
-        if not kept or set(kept) == valid:      # exposes everything (or nothing valid left)
-            tr.pop("expose_column_groups", None)
+    """After a table's `column_groups` are rewritten, carry every `TableRef.expose_column_groups`
+    naming it over to the new groups, in EVERY subject area, not just the owner's.
+
+    By columns, not by name: an area shows the new groups that contain any column its old groups
+    held (a new group spanning the old boundary brings its other columns along). A regroup renames groups, so matching names would leave nothing
+    and silently widen the area to every column. A table a spec lists in several areas has a
+    reference in each, and one left behind fails validation and rolls the whole batch back (#465).
+    The field is dropped when the new groups it maps to cover every group ("expose all"). A reference
+    to a same-named table in another schema is a different table and is left alone."""
+    for sap in sorted((root / "subject_areas").glob("*/subject_area.yaml")):
+        sa = _load(sap) or {}
+        changed = False
+        for tr in sa.get("tables", []) or []:
+            if (tr.get("table") != table or not tr.get("expose_column_groups")
+                    or (tr.get("schema") or "").lower() != (schema or "").lower()):
+                continue
+            shown = {c for g in tr["expose_column_groups"] for c in old_groups.get(g, [])}
+            kept = [g for g, cols in new_groups.items() if shown & set(cols)]
+            if not kept or set(kept) == set(new_groups):
+                tr.pop("expose_column_groups", None)
+            elif kept != tr["expose_column_groups"]:
+                tr["expose_column_groups"] = kept
+            else:
+                continue
             changed = True
-        elif kept != exp:
-            tr["expose_column_groups"] = kept
-            changed = True
-    if changed:
-        _snapshot(backups, sap)
-        _dump(sap, sa)
+        if changed:
+            _snapshot(backups, sap)
+            _dump(sap, sa)
 
 
 def _filter_columns(table_doc: dict, value: Any) -> list[str]:

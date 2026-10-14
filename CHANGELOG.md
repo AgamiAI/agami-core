@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/agami-connect` describes the column groups it creates, on every build route (#465).** A wide
+  table's groups are regrouped by meaning, but kept the engine's descriptions ("Columns named exp*
+  (grouped by prefix)"), and a model built from a spec workbook skipped the regroup step entirely.
+  The step now writes a one-line description per group, saying what it holds and which questions
+  need it, and runs after a spec too. A group still carrying the engine's description is the sign
+  that a table hasn't been regrouped.
+- **Regrouping a table shown by several subject areas works.** A curate `column_groups` edit
+  updated only the owning area's `expose_column_groups`; another area showing the table kept the
+  old group names, so validation failed and the batch rolled back. Every area is now updated, by
+  columns: it shows the new groups that hold any column it showed before. A new group that spans
+  the old boundary adds its other columns, instead of the area widening to every column.
+
 ### Fixed
 
 - **Receipts flag a sensitive column whatever case the statement writes it in (#456).** With
