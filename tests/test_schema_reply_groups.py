@@ -234,3 +234,10 @@ def test_merging_keeps_joins_that_differ_only_in_join_type():
         for p in (r.get("column_pairs") or [[r["from_column"], r["to_column"]]])
     ]
     assert sorted(pairs) == [["a", "k"], ["b", "k"], ["c", "k"], ["d", "k"]]
+
+
+@pytest.mark.parametrize("binding", ['SUM(wide."C15")', "SUM(WIDE.C15)", "sum(c15)"])
+def test_a_metric_column_is_kept_however_the_binding_spells_it(binding):
+    org, result = _result(metric_binding=binding)
+    tools._group_wide_columns(result, org, [])
+    assert "c15" in _full_names(result)

@@ -1637,7 +1637,6 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
 # a caveat, a cleaning rule or a date encoding changes how the column must be written, and a
 # sensitive flag changes whether it may be projected.
 _ALWAYS_FULL_KEYS = ("caveats", "value_transform", "sensitive", "date_format", "timezone")
-_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> None:
@@ -1653,8 +1652,10 @@ def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> No
     """
     groups_of = {t.name: (t.column_groups, t.column_group_descriptions, t.grain)
                  for sa in org.subject_areas for t in sa.tables_defined if t.column_groups}
-    metric_words = {w for m in result.get("metrics") or []
-                    for w in _IDENT.findall(json.dumps(m.get("binding") or m.get("calculation") or ""))}
+    # Folded, and matched as whole names in the metric text rather than by an identifier regex, so a
+    # quoted `"Order Total"` or a binding written in another case still counts.
+    metric_text = " ".join(str(m.get("binding") or m.get("calculation") or "")
+                           for m in result.get("metrics") or []).lower()
     asked = {(r.rsplit(".", 1)[0] if "." in r else None, r.rsplit(".", 1)[-1])
              for r in requested if isinstance(r, str) and r}
     unknown = set(asked)
@@ -1662,6 +1663,8 @@ def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> No
         if name not in groups_of or not isinstance(tinfo.get("columns"), list):
             continue
         groups, descs, grain = groups_of[name]
+        metric_words = {c["name"] for c in tinfo["columns"] if metric_text and re.search(
+            rf"(?<![\w]){re.escape(c['name'].lower())}(?![\w])", metric_text)}
         shown = {c["name"] for c in tinfo["columns"]}  # already narrowed by the area's exposure
         wanted = {g for t, g in asked if g in groups and t in (None, name)}
         unknown -= {(t, g) for t, g in asked if g in groups and t in (None, name)}
