@@ -824,6 +824,50 @@ def _relationships_among(
     return out
 
 
+# What makes two lean edges the same kind of join between the same two tables. An edge with an
+# `on:` expression or a non-default `executable` is never merged: its condition is its own.
+_PAIR_KEYS = ("from_table", "to_table", "from_schema", "to_schema", "join_type", "relationship")
+
+
+def _merge_lean_pairs(edges: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Lean edges joining the same two tables the same way, as ONE entry listing every column
+    pair (#449). Applied by the schema reply (`tools._table_contexts`), after it dedupes the raw
+    edges; `get_table_context` itself still returns one entry per edge.
+
+    A hub reaches a dimension many ways: an employee row has two dozen date keys into the date
+    table, a fact table a dozen person roles. Sent one edge each, that was most of a scoped reply
+    for joins to tables the caller didn't even request. The merged entry keeps every join: each
+    column pair is still there, under `column_pairs`, so nothing becomes unreachable. A pair with a
+    single edge keeps the ordinary `from_column`/`to_column` shape, and full edges (both tables
+    requested) are never merged: they carry the detail a written join needs."""
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    order: list[Any] = []
+    for e in edges:
+        mergeable = ("review_state" not in e and "on" not in e and "executable" not in e
+                     and "from_column" in e and "to_column" in e)
+        if not mergeable:
+            order.append(e)
+            continue
+        key = tuple(e.get(k) for k in _PAIR_KEYS)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+    out: list[dict[str, Any]] = []
+    for item in order:
+        if not isinstance(item, tuple):
+            out.append(item)
+            continue
+        members = groups[item]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        merged = {k: v for k, v in zip(_PAIR_KEYS, item) if v is not None}
+        merged["column_pairs"] = [[e["from_column"], e["to_column"]] for e in members]
+        out.append(merged)
+    return out
+
+
 def _metrics_for(org: Datasource, tables: list[str], area: Optional[str]) -> list[dict[str, Any]]:
     names = {_table_alias(t) for t in tables} | set(tables)
     out: list[dict[str, Any]] = []

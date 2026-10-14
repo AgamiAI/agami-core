@@ -14,6 +14,17 @@ below corresponds to one such version.
 
 ### Changed
 
+- **A wide table's schema reply sends its column groups, not every column in full (#449).** For a
+  table with column groups, a `dataset_names` reply of `get_datasource_schema` lists each group (its
+  description and column names) and sends full detail only for the grain, the columns a metric in
+  the reply binds, and columns with a caveat, a value transform or a sensitive flag. The new
+  `column_groups` argument (`"group"` or `"table.group"`) brings whole groups in full; unknown names
+  come back in `unknown_column_groups`. Every column stays named, so nothing becomes unreachable.
+  In the same reply, lean joins (to tables not requested) between the same two tables are merged
+  into one entry with `column_pairs`; `get_table_context` and the CLI context commands are
+  unchanged. On a 150-column fact table, replies were about 15% smaller in a live check, with
+  the agent picking the right groups from their descriptions alone.
+
 - **`/agami-connect` describes the column groups it creates, on every build route (#465).** A wide
   table's groups are regrouped by meaning, but kept the engine's descriptions ("Columns named exp*
   (grouped by prefix)"), and a model built from a spec workbook skipped the regroup step entirely.

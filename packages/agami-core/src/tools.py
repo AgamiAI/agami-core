@@ -1633,6 +1633,62 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
     return {t: sorted(v) for t, v in sorted(joins.items())}
 
 
+# Column-detail keys that make a column worth sending in full even when its group wasn't asked for:
+# a caveat, a cleaning rule or a date encoding changes how the column must be written, and a
+# sensitive flag changes whether it may be projected.
+_ALWAYS_FULL_KEYS = ("caveats", "value_transform", "sensitive", "date_format", "timezone")
+
+
+def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> None:
+    """For each table with column groups, send its groups and only the columns every query needs in
+    full; the rest arrive when the caller names their group (#449).
+
+    A wide table sent column by column was most of a scoped reply: a 150-column fact table ran to
+    ~23K chars, for a question that reads eight of them. Each group carries its description and its
+    column NAMES, so every column stays visible (a column-scope repair still finds it) and the
+    caller can pick what to fetch. Always in full: the grain, columns a metric in this reply binds,
+    and columns with a caveat, a value transform or a sensitive flag. `column_groups=[...]` adds
+    whole groups, by bare name (any table) or `table.group`. Tables without groups are unchanged.
+    """
+    groups_of = {t.name: (t.column_groups, t.column_group_descriptions, t.grain)
+                 for sa in org.subject_areas for t in sa.tables_defined if t.column_groups}
+    # Folded, and matched as whole names in the metric text rather than by an identifier regex, so a
+    # quoted `"Order Total"` or a binding written in another case still counts.
+    metric_text = " ".join(str(m.get("binding") or m.get("calculation") or "")
+                           for m in result.get("metrics") or []).lower()
+    asked = {(r.rsplit(".", 1)[0] if "." in r else None, r.rsplit(".", 1)[-1])
+             for r in requested if isinstance(r, str) and r}
+    unknown = set(asked)
+    for name, tinfo in (result.get("tables") or {}).items():
+        if name not in groups_of or not isinstance(tinfo.get("columns"), list):
+            continue
+        groups, descs, grain = groups_of[name]
+        metric_words = {c["name"] for c in tinfo["columns"] if metric_text and re.search(
+            rf"(?<![\w]){re.escape(c['name'].lower())}(?![\w])", metric_text)}
+        shown = {c["name"] for c in tinfo["columns"]}  # already narrowed by the area's exposure
+        wanted = {g for t, g in asked if g in groups and t in (None, name)}
+        unknown -= {(t, g) for t, g in asked if g in groups and t in (None, name)}
+        in_wanted = {c for g in wanted for c in groups[g]}
+        grouped = {c for cols in groups.values() for c in cols}
+        tinfo["columns"] = [
+            c for c in tinfo["columns"]
+            # A column in no group is sent in full, so it stays named (groups need not cover a
+            # table under the 30-column line).
+            if c["name"] in grain or c["name"] in metric_words or c["name"] in in_wanted
+            or c["name"] not in grouped
+            or any(k in c for k in _ALWAYS_FULL_KEYS)
+        ]
+        tinfo["column_groups"] = {
+            g: {"description": descs.get(g, ""), "columns": [c for c in cols if c in shown]}
+            for g, cols in groups.items() if any(c in shown for c in cols)
+        }
+        tinfo["columns_in_full"] = ("keys, metric columns, columns with a caveat or cleaning rule, "
+                                    "and any group you named; ask for others with "
+                                    "column_groups=[\"<group>\"] (or \"<table>.<group>\")")
+    if unknown:
+        result["unknown_column_groups"] = sorted(f"{t}.{g}" if t else g for t, g in unknown)
+
+
 def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
     """Full get_table_context for the named tables: `{"tables": {name: ctx}, "relationships": [...]}`.
 
@@ -1682,7 +1738,8 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
             if key not in seen:
                 seen.add(key)
                 relationships.append(rel)
-    return {"tables": contexts, "relationships": relationships}
+    # Merged only now, after the dedupe above, which keys on each raw edge's join columns (#449).
+    return {"tables": contexts, "relationships": L._merge_lean_pairs(relationships)}
 
 
 def _bare_name(name: str) -> str:
@@ -1960,7 +2017,7 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
 # The mode ladder plus `auto`, from the one table that defines the ladder.
 _SCHEMA_MODES = ("auto", *_SCHEMA_MODE_DOWNGRADE)
 # Every key `_normalized_args` repairs; a tool passes the subset it actually takes.
-_SHAPED_KEYS = ("dataset_names", "metric_names", "area", "mode")
+_SHAPED_KEYS = ("dataset_names", "metric_names", "column_groups", "area", "mode")
 
 
 def _normalized_args(
@@ -1986,7 +2043,7 @@ def _normalized_args(
         error = {"kind": "invalid_argument", "remediation": remediation, **extra}
         return fixed, json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
-    for key in ("dataset_names", "metric_names"):
+    for key in ("dataset_names", "metric_names", "column_groups"):
         if key not in keys:
             continue
         value = fixed.get(key)
@@ -2491,6 +2548,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             **_metric_index_fields(metrics),
             "large_tables": _large_tables(org),
         }
+        _group_wide_columns(result, org, args.get("column_groups") or [])
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they
         # always have been: a caller that named its tables is not asking for the area map, and
         # `relationships` above answers "how do I join these" better than the org-level edge list,
@@ -4984,6 +5042,17 @@ TOOLS: dict[str, dict[str, Any]] = {
                         "Scope to these tables — full field-level detail, their joins, and the "
                         "metrics that apply to them (no downgrade). Narrowest scope. Bare table "
                         "names (no schema), exactly as listed; case-sensitive."
+                    ),
+                },
+                "column_groups": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "With `dataset_names`: full detail for these column groups of a wide "
+                        "table. A wide table's reply lists its groups (description + column names) "
+                        "and sends only key, metric and caveat columns in full; name a group to get "
+                        "the rest. A bare group name applies to every requested table; "
+                        "`table.group` to one."
                     ),
                 },
                 "query": {
