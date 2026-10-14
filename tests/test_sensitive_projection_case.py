@@ -97,3 +97,8 @@ def test_the_receipt_flags_the_column_however_it_was_written(sql, label):
     receipt = rt.assemble_receipt(ORG, sql)
     flagged = [i["column"] for i in receipt["columns"]["items"] if i.get("sensitive")]
     assert flagged == [label]
+
+
+def test_an_exact_alias_wins_over_a_case_twin():
+    sql = 'SELECT "o".ssn FROM orders AS "O" JOIN regions AS "o" ON "o".id = "O".id'
+    assert rt.projected_sensitive_columns(sql, ORG) == []

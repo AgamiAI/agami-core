@@ -1325,8 +1325,9 @@ def _projected_sensitive(tree, org: Datasource,
                 if _tkey(col.name) not in folded_names or _count_protects(col):
                     continue
                 if col.table:
-                    # Every alias or table the qualifier could name, ignoring case.
-                    hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+                    # The exact alias, else every alias the qualifier could name ignoring case.
+                    hits = [col.table] if col.table in scope else [
+                        k for k in scope if _tkey(k) == _tkey(col.table)]
                     tables = {scope[k] for k in hits} or {col.table}
                 else:
                     only = _resolve_col_table(col, scope)
@@ -1344,7 +1345,8 @@ def _projected_sensitive(tree, org: Datasource,
             if is_star:
                 qualifier = proj.table if isinstance(proj, exp.Column) else None
                 # An unquoted `O.*` may name `o` or `O`; every alias it could bind to counts.
-                hits = [k for k in scope if _tkey(k) == _tkey(qualifier)] if qualifier else []
+                hits = ([qualifier] if qualifier in scope else
+                        [k for k in scope if _tkey(k) == _tkey(qualifier)]) if qualifier else []
                 tables = ({scope[k] for k in hits} or {qualifier}) if qualifier else direct
                 for tbl in tables:
                     offending.update(sensitive.get(_tkey(tbl), {}).values())
@@ -5277,7 +5279,8 @@ def _resolve_ci(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
     disagree about which table a column belongs to.
 
     `_resolve_col_table` itself is left exact, for the callers that still want the written name.
-    The receipt's sensitive-projection fact resolves through here too (#456)."""
+    The receipt's sensitive-projection fact does NOT use this: `_projected_sensitive` matches
+    qualifiers itself, more broadly (quoted names fold too), so a change here doesn't reach it."""
     if col.table:
         qualifier = col.args.get("table")
         if isinstance(qualifier, exp.Identifier) and qualifier.args.get("quoted"):
