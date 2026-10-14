@@ -99,3 +99,13 @@ def test_a_partly_overlapping_group_is_shown_rather_than_hidden(tmp_path):
     _edit_groups(root, owner, {"a": ["id"] + NAMES[:5], "b": NAMES[5:15], "c": NAMES[15:]})
     after = _exposed_columns(root, "other")
     assert set(SHOWN) <= set(after) and "c29" not in after
+
+
+def test_a_same_named_table_in_another_schema_is_left_alone(tmp_path):
+    root, owner = _model(tmp_path)
+    sap = root / "subject_areas" / "other" / "subject_area.yaml"
+    sa = yaml.safe_load(sap.read_text())
+    sa["tables"][0]["schema"] = "archive"  # now a reference to archive.wide, not this table
+    sap.write_text(yaml.safe_dump(sa))
+    C._reconcile_expose_groups(root, "wide", "public", {"g1": SHOWN}, {"x": SHOWN}, {})
+    assert yaml.safe_load(sap.read_text())["tables"][0]["expose_column_groups"] == ["g1"]

@@ -745,7 +745,7 @@ For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. V
  {"op":"edit","kind":"table","name":"<wide_table>","field":"column_group_descriptions",
   "value":{"identity":"...","location":"...","lifecycle_timestamps":"...","telemetry":"..."}}]
 ```
-Send these in the same `sm curate` batch as the descriptions (or a follow-up batch). Only worth doing on genuinely wide tables — narrow tables have no `column_groups` and need none. **A wide table whose groups still carry the engine's "Columns named …" descriptions hasn't been regrouped yet** — check for that before Phase 7 and do the rest.
+Send these in the same `sm curate` batch as the descriptions (or a follow-up batch). Only worth doing on genuinely wide tables — narrow tables have no `column_groups` and need none. **A wide table whose group descriptions are all the engine's own wording hasn't been regrouped yet**: "Columns named … (grouped by prefix)", or one of its fixed lines for `identity`, `references`, `codes`, `flags`, `audit`, `measures`, `dates` and `misc` ("Primary keys and unique identifiers for this table.", "Numeric columns that can be aggregated (summed or averaged).", and so on). Check for that before Phase 7 and do the rest.
 
 **Column-pass completeness gate (MANDATORY — do not skip the column pass).** After enriching, run:
 ```bash

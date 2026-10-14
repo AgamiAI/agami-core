@@ -624,7 +624,8 @@ def _apply_one(root: Path, op: dict, signer, role,
         # A column_groups edit renames the groups a TableRef may expose — reconcile so we
         # don't orphan `expose_column_groups` (which would fail validation).
         if op.get("op") == "edit" and op.get("field") == "column_groups" and not op.get("column"):
-            _reconcile_expose_groups(root, name, old_groups, doc.get("column_groups") or {}, backups)
+            _reconcile_expose_groups(root, name, doc.get("schema"), old_groups,
+                                     doc.get("column_groups") or {}, backups)
         return path
 
     if kind == "entity":
@@ -723,8 +724,8 @@ def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
     return out
 
 
-def _reconcile_expose_groups(root: Path, table: str, old_groups: dict, new_groups: dict,
-                             backups: "dict[Path, Optional[str]]") -> None:
+def _reconcile_expose_groups(root: Path, table: str, schema: Optional[str], old_groups: dict,
+                             new_groups: dict, backups: "dict[Path, Optional[str]]") -> None:
     """After a table's `column_groups` are rewritten, carry every `TableRef.expose_column_groups`
     naming it over to the new groups, in EVERY subject area, not just the owner's.
 
@@ -732,12 +733,14 @@ def _reconcile_expose_groups(root: Path, table: str, old_groups: dict, new_group
     groups that contain any of them. A regroup renames groups, so matching names would leave nothing
     and silently widen the area to every column. A table a spec lists in several areas has a
     reference in each, and one left behind fails validation and rolls the whole batch back (#465).
-    The field is dropped when the new groups it maps to cover every group ("expose all")."""
+    The field is dropped when the new groups it maps to cover every group ("expose all"). A reference
+    to a same-named table in another schema is a different table and is left alone."""
     for sap in sorted((root / "subject_areas").glob("*/subject_area.yaml")):
         sa = _load(sap) or {}
         changed = False
         for tr in sa.get("tables", []) or []:
-            if tr.get("table") != table or not tr.get("expose_column_groups"):
+            if (tr.get("table") != table or not tr.get("expose_column_groups")
+                    or (tr.get("schema") or "").lower() != (schema or "").lower()):
                 continue
             shown = {c for g in tr["expose_column_groups"] for c in old_groups.get(g, [])}
             kept = [g for g, cols in new_groups.items() if shown & set(cols)]
