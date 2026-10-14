@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.15] — 2026-10-14
+
 ### Changed
 
 - **A wide table's schema reply sends its column groups, not every column in full (#449).** For a
