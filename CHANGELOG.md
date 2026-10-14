@@ -12,6 +12,14 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Receipts flag a sensitive column whatever case the statement writes it in (#456).** With
+  `orders.ssn` declared sensitive, `SELECT ORDERS.SSN FROM ORDERS` or `SELECT O.ssn FROM orders o`
+  reported no sensitive column projected, because names were compared exactly. Table, alias and
+  column names now match ignoring case, in the check and in the receipt's column list. Nothing is
+  refused; this changes only what the receipt reports.
+
 ## [0.9.14] — 2026-10-13
 
 ### Added
