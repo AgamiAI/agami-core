@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/agami-connect` describes the column groups it creates, on every build route (#465).** A wide
+  table's groups are regrouped by meaning, but kept the engine's descriptions ("Columns named exp*
+  (grouped by prefix)"), and a model built from a spec workbook skipped the regroup step entirely.
+  The step now writes a one-line description per group, saying what it holds and which questions
+  need it, and runs after a spec too. A group still carrying the engine's description is the sign
+  that a table hasn't been regrouped.
+
 ## [0.9.14] — 2026-10-13
 
 ### Added
