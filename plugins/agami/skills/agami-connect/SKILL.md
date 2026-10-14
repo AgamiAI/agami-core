@@ -740,10 +740,10 @@ For large schemas (>100 tables) batch 50 at a time; narrate `[batch 2/4] …`. V
 
 **Regroup wide tables into SEMANTIC column groups (do this right after describing their columns).** A deep table (≥30 cols) gets `column_groups` from the engine, but those are a deterministic **name-prefix** split — buckets like `is`, `last`, `latest`, `created`, `bp` — not concepts. They exist only so the explorer can collapse a wide table; they're a fallback, not the goal. Having just described every column, **you** are positioned to cluster them by *meaning* into a handful of named groups that read like mini subject-areas — e.g. `identity`, `location`, `lifecycle_timestamps`, `telemetry`, `swap_details`, `alerts`, `flags`. Keep it to ~5–10 groups; **every column must land in exactly one** (the validator rejects orphans on a deep table). **Describe every group too:** the engine's descriptions ("Columns named exp* (grouped by prefix)") don't fit regrouped columns, and an agent reading the schema picks which group to fetch by its description. Say what the group holds and which questions need it, in one line, e.g. *"travel: destination, trip dates and foreign-activity fields; use for questions about where or when someone travelled."* Apply both as two curate edit ops per wide table:
 ```json
-{"op":"edit","kind":"table","name":"<wide_table>","field":"column_groups",
- "value":{"identity":["..."],"location":["..."],"lifecycle_timestamps":["..."],"telemetry":["..."]}},
-{"op":"edit","kind":"table","name":"<wide_table>","field":"column_group_descriptions",
- "value":{"identity":"...","location":"...","lifecycle_timestamps":"...","telemetry":"..."}}
+[{"op":"edit","kind":"table","name":"<wide_table>","field":"column_groups",
+  "value":{"identity":["..."],"location":["..."],"lifecycle_timestamps":["..."],"telemetry":["..."]}},
+ {"op":"edit","kind":"table","name":"<wide_table>","field":"column_group_descriptions",
+  "value":{"identity":"...","location":"...","lifecycle_timestamps":"...","telemetry":"..."}}]
 ```
 Send these in the same `sm curate` batch as the descriptions (or a follow-up batch). Only worth doing on genuinely wide tables — narrow tables have no `column_groups` and need none. **A wide table whose groups still carry the engine's "Columns named …" descriptions hasn't been regrouped yet** — check for that before Phase 7 and do the rest.
 

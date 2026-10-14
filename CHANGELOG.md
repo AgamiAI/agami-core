@@ -20,6 +20,11 @@ below corresponds to one such version.
   The step now writes a one-line description per group, saying what it holds and which questions
   need it, and runs after a spec too. A group still carrying the engine's description is the sign
   that a table hasn't been regrouped.
+- **Regrouping a table shown by several subject areas works.** A curate `column_groups` edit
+  updated only the owning area's `expose_column_groups`; another area showing the table kept the
+  old group names, so validation failed and the batch rolled back. Every area is now updated, by
+  columns: it keeps showing what it showed, through the new groups that hold those columns, instead
+  of widening to every column.
 
 ## [0.9.14] — 2026-10-13
 
