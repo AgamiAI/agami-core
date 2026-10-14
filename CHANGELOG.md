@@ -28,6 +28,11 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A regroup no longer rewrites another area's own copy of the table.** The curate `column_groups`
+  edit from #467 updated `expose_column_groups` in every subject area that listed the table,
+  including an area that defines its own copy, whose groups are independent. That could widen the
+  copy to every column. Such areas are now left alone; areas that only reference the table are still
+  updated.
 - **Receipts flag a sensitive column whatever case the statement writes it in (#456).** With
   `orders.ssn` declared sensitive, `SELECT ORDERS.SSN FROM ORDERS` or `SELECT O.ssn FROM orders o`
   reported no sensitive column projected, because names were compared exactly. Table, alias and
