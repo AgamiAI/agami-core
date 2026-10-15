@@ -43,6 +43,7 @@ from pydantic import (
     ConfigDict,
     Field,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -948,6 +949,41 @@ class SubjectArea(_Base):
 # ---------------------------------------------------------------------------
 
 
+class AmbiguityOption(_Base):
+    """One meaning of an ambiguous question: what to call it, and how to write the SQL for it."""
+
+    label: str
+    how: str = ""
+    default: bool = False
+
+
+class Ambiguity(_Base):
+    """A kind of question the model owner knows can mean more than one thing (#473).
+
+    Guidance for the agent, not enforcement: `ask` means ask the user which option they mean before
+    running SQL; `answer_and_offer` means answer with the default option, say which one was used,
+    and offer the others. Either applies only when the question doesn't already settle the choice.
+    `applies_to` names the tables it concerns, so a scoped schema reply carries only the entries
+    for what's in scope; empty means the whole datasource."""
+
+    name: str
+    when: str
+    options: list[AmbiguityOption]
+    behaviour: Literal["ask", "answer_and_offer"] = "ask"
+    applies_to: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _options(self) -> "Ambiguity":
+        if len(self.options) < 2:
+            raise ValueError(f"ambiguity {self.name!r} needs at least two options")
+        defaults = sum(1 for o in self.options if o.default)
+        if defaults > 1:
+            raise ValueError(f"ambiguity {self.name!r} marks {defaults} options as default; at most one")
+        if self.behaviour == "answer_and_offer" and not defaults:
+            raise ValueError(f"ambiguity {self.name!r} is answer_and_offer but has no default option")
+        return self
+
+
 class Datasource(_Base):
     # Locally-minted, globally-unique deployment identity (F14 / ACE-056): a uuid4 hex minted ONCE at
     # agami-connect and persisted in datasource.yaml, then immutable. Optional/None so pre-F14 datasource.yaml files
@@ -972,6 +1008,18 @@ class Datasource(_Base):
     # The structured home means it survives a datasource.md regeneration (a prose section
     # the LLM has to remember to write does not).
     key_terminology: dict[str, str] = Field(default_factory=dict)
+    # Questions the owner knows are ambiguous, and what the agent should do about each (#473).
+    ambiguities: list[Ambiguity] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_ambiguities(self, handler: Any) -> Any:
+        # Left out of every dump when empty, so a model with none declared serializes exactly as it
+        # did before this field existed. An older agami-core forbids unknown keys, and a stored model
+        # carrying `ambiguities: []` would stop it loading after a rollback.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("ambiguities"):
+            data.pop("ambiguities", None)
+        return data
 
     @field_validator("fiscal_year_start_month")
     @classmethod

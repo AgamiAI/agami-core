@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Declared ambiguities (#473).** `datasource.yaml` can list `ambiguities`: kinds of question the
+  model owner knows can mean more than one thing. Each entry has:
+  - `when`, the kind of question it applies to;
+  - `options`, each with a `label` and the SQL `how`, with at most one `default`;
+  - `behaviour`, either `ask` (ask the user before running SQL) or `answer_and_offer` (answer with
+    the default, say so, offer the others);
+  - `applies_to`, the tables it concerns.
+
+  `get_datasource_schema` returns the entries relevant to its scope, and the server instructions
+  tell the agent what to do with them. Validation checks the options and that every table exists,
+  and a refresh keeps the list. Models without it are unchanged. Guidance, not enforcement.
+
 ## [0.9.15] — 2026-10-14
 
 ### Changed

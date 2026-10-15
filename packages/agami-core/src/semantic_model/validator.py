@@ -220,6 +220,22 @@ def _check_relationship_served(
         )
 
 
+def _check_ambiguities(org: Datasource, org_tables: dict, res: ValidationResult) -> None:
+    """Declared ambiguities (#473): unique names, and every `applies_to` names a model table. A
+    misspelled table would silently scope the entry out of every reply that should carry it."""
+    seen: set[str] = set()
+    # Bare, case-folded names: `applies_to` may write a table with or without its schema.
+    known = {t.split(".")[-1].lower() for t in org_tables}
+    for a in org.ambiguities:
+        if a.name in seen:
+            res.error("ambiguity_duplicate_name", f"ambiguity {a.name!r} is declared more than once")
+        seen.add(a.name)
+        for t in a.applies_to:
+            if t.split(".")[-1].lower() not in known:
+                res.error("ambiguity_unknown_table",
+                          f"ambiguity {a.name!r} applies_to {t!r}, which the model doesn't define")
+
+
 def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> ValidationResult:
     """Run every cross-cutting rule. Returns a ValidationResult (never raises on
     a model-level problem — those surface as the model failing to parse upstream).
@@ -258,6 +274,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
         _check_cross_relationship(rel, org, res)
 
     _check_cross_area_entity_collisions(org, res)
+    _check_ambiguities(org, org_tables, res)
     _check_table_name_across_schemas(org, res)
     _check_metric_backend_neutrality(org, res)
     _check_metric_descriptions(org, res)

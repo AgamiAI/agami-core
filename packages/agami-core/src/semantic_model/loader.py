@@ -126,6 +126,7 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         cross_subject_area_entities=_load_cross_entities(root, ds_doc),
         cross_subject_area_metrics=_load_cross_metrics(root, ds_doc),
         key_terminology=ds_doc.get("key_terminology", {}) or {},
+        ambiguities=ds_doc.get("ambiguities", []) or [],
     )
     if not include_rejected:
         _drop_uses_of_unserved(org, hidden)

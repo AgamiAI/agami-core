@@ -547,10 +547,11 @@ def _previous_description(out: Path) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-# Datasource-level enrichment a rewrite must not drop: the glossary (`sm set-terminology`) and the
-# cross-area entities and metrics kept in this file. Carried over as written, because the loader
+# Datasource-level enrichment a rewrite must not drop: the glossary (`sm set-terminology`), the
+# declared ambiguities (#473), and the cross-area entities and metrics kept in this file. Carried over as written, because the loader
 # merges the latter with their own sidecar files and re-serializing the merged list would duplicate them.
-_CARRIED_DATASOURCE_KEYS = ("key_terminology", "cross_subject_area_entities", "cross_subject_area_metrics")
+_CARRIED_DATASOURCE_KEYS = ("key_terminology", "ambiguities", "cross_subject_area_entities",
+                            "cross_subject_area_metrics")
 
 
 def _carried_datasource_fields(org: Datasource, out: Path) -> dict:
@@ -558,6 +559,8 @@ def _carried_datasource_fields(org: Datasource, out: Path) -> dict:
     carried = {k: prev[k] for k in _CARRIED_DATASOURCE_KEYS if prev.get(k)}
     if org.key_terminology:
         carried["key_terminology"] = dict(org.key_terminology)
+    if org.ambiguities:
+        carried["ambiguities"] = [a.model_dump(exclude_defaults=True) for a in org.ambiguities]
     return carried
 
 

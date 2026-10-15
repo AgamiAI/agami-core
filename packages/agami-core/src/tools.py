@@ -147,6 +147,11 @@ _SHARED_INSTRUCTIONS = (
     "verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
+    "Ambiguities: when the schema returns `ambiguities` and the user's question matches one's "
+    "`when` without already settling it, follow its `behaviour`. `ask`: before running SQL, ask "
+    "the user which option they mean, listing the option labels (default first). "
+    "`answer_and_offer`: answer with the `default` option, say which one you used, and offer "
+    "the others. Each option's `how` says how to write the SQL for it.\n"
     "Columns: write the statement from the columns the schema returned for those tables, and "
     "nothing else. **Name every column you PROJECT — never a bare `*` or `t.*`**, in the outer "
     "query, a subquery and a CTE body alike: a star returns columns the statement never names, so "
@@ -2175,6 +2180,27 @@ def _areas_owning(org, tables: set[str]) -> set[str]:
     return out
 
 
+def _add_ambiguities(result: dict[str, Any], org, scope: "Scope") -> None:
+    """The model's declared ambiguities that bear on this reply's scope (#473): every entry for
+    the whole datasource; for an area or named tables, entries for any table in scope plus those
+    that name no table. Left out when there are none, so a model without any replies as before."""
+    if scope.level == "datasource":
+        tables = None
+    elif scope.level == "area":
+        sa = org.subject_area(scope.area) if scope.area else None
+        tables = ({_bare_name(t.name) for t in sa.tables_defined} | {_bare_name(r.table) for r in sa.tables}
+                  if sa else set())
+    else:
+        tables = {_bare_name(t) for t in scope.tables}
+    folded = None if tables is None else {t.lower() for t in tables}
+    picked = [a.model_dump(exclude_defaults=True) | {"behaviour": a.behaviour}
+              for a in getattr(org, "ambiguities", [])
+              if folded is None or not a.applies_to
+              or any(_bare_name(t).lower() in folded for t in a.applies_to)]
+    if picked:
+        result["ambiguities"] = picked
+
+
 def _schema_payload(
     org,
     profile: str,
@@ -2222,6 +2248,7 @@ def _schema_payload(
         **_metric_index_fields(metrics),
         "large_tables": _large_tables(org),
     }
+    _add_ambiguities(result, org, scope)
     # Omitted outright when there is nothing to route, which the table tier already does with this
     # key. It also keeps the old emptiness test working: the block was a list, so a client writing
     # `if response["cross_area_relationships"]:` read False on a model with no cross-area edges —
@@ -2549,6 +2576,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             "large_tables": _large_tables(org),
         }
         _group_wide_columns(result, org, args.get("column_groups") or [])
+        _add_ambiguities(result, org, scope)
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they
         # always have been: a caller that named its tables is not asking for the area map, and
         # `relationships` above answers "how do I join these" better than the org-level edge list,
@@ -4989,7 +5017,9 @@ TOOLS: dict[str, dict[str, Any]] = {
             "verbosity (full/summary/index) under a char budget. Plus datasource.md / "
             "USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
             "scoped calls carry the terms for their tables. Use metric `calculation`/`binding` VERBATIM (`binding` is "
-            "already this deployment's dialect). "
+            "already this deployment's dialect). `ambiguities`, when present, lists questions the "
+            "model owner marked as having more than one meaning, for the tables in scope; see the "
+            "server instructions for what to do. "
             # These four ride in the table context on every call and were described nowhere, so a
             # declared filter was first met on the receipt — after the statement it belonged in had
             # already run. Naming them here puts them in front of the agent while it writes SQL.
