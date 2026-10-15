@@ -126,6 +126,7 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         cross_subject_area_entities=_load_cross_entities(root, ds_doc),
         cross_subject_area_metrics=_load_cross_metrics(root, ds_doc),
         key_terminology=ds_doc.get("key_terminology", {}) or {},
+        ambiguities=ds_doc.get("ambiguities", []) or [],
     )
     if not include_rejected:
         _drop_uses_of_unserved(org, hidden)
@@ -253,6 +254,23 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
     org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
     _drop_metrics_on_removed_bases(org)
+    org.ambiguities = _ambiguities_served(org.ambiguities, hidden)
+
+
+def _ambiguities_served(ambiguities: list, hidden: "_Hidden") -> list:
+    """A declared ambiguity without its hidden tables (#473): an entry naming only hidden tables is
+    left out, one naming some keeps the rest. One naming no table concerns the whole datasource and
+    stays. The file on disk is untouched."""
+    out = []
+    for a in ambiguities:
+        if not a.applies_to:
+            out.append(a)
+            continue
+        # The intact name: `table_hidden` parses any qualifier itself, catalog.schema.table included.
+        kept = [t for t in a.applies_to if not hidden.table_hidden(None, t)]
+        if kept:
+            out.append(a.model_copy(update={"applies_to": kept}) if kept != a.applies_to else a)
+    return out
 
 
 def _drop_metrics_on_removed_bases(org: Datasource) -> None:
