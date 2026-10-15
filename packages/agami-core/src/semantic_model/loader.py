@@ -266,8 +266,8 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden") -> list:
         if not a.applies_to:
             out.append(a)
             continue
-        kept = [t for t in a.applies_to
-                if not hidden.table_hidden(t.rsplit(".", 1)[0] if "." in t else None, t.rsplit(".", 1)[-1])]
+        # The intact name: `table_hidden` parses any qualifier itself, catalog.schema.table included.
+        kept = [t for t in a.applies_to if not hidden.table_hidden(None, t)]
         if kept:
             out.append(a.model_copy(update={"applies_to": kept}) if kept != a.applies_to else a)
     return out

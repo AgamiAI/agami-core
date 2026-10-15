@@ -249,3 +249,31 @@ def test_an_entry_on_a_hidden_table_is_not_served(tmp_path, monkeypatch):
     assert [a for a in served.ambiguities if a.name == "both"][0].applies_to == ["orders"]
     assert len(load_datasource(root, include_rejected=True).ambiguities) == 3
     assert _names(reply) == ["both", "currency", "customer_region"]
+
+
+def test_a_catalog_qualified_target_on_a_hidden_table_is_not_served(tmp_path):
+    I.introspect("shop", "postgres", runner=_two_tables, artifacts_dir=tmp_path / "y")
+    root = tmp_path / "y" / "shop"
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["ambiguities"] = [{**CUSTOMER_REGION, "applies_to": ["demo.public.customers"]}]
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds, sort_keys=False))
+    from semantic_model import curate as C
+
+    area = load_datasource(root).subject_areas[0].name
+    C.apply(root, [{"op": "exclude", "kind": "table", "area": area, "name": "customers"}])
+    assert load_datasource(root).ambiguities == []
+
+
+def test_the_shared_contract_declares_ambiguities():
+    sys.path.insert(0, str(REPO_ROOT / "packages" / "agami-core" / "src"))
+    import contracts
+
+    assert "ambiguities" in contracts.DatasourceSchemaResult.model_fields
+    parsed = contracts.DatasourceSchemaResult.model_validate(
+        {"datasource": "shop", "ambiguities": [ORDER_DATE]}
+    )
+    assert parsed.ambiguities == [ORDER_DATE]
+
+
+def test_the_agent_is_told_to_ask_in_the_users_terms():
+    assert "never name tables" in tools._SHARED_INSTRUCTIONS
