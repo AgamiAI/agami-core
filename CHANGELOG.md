@@ -22,8 +22,9 @@ below corresponds to one such version.
     the default, say so, offer the others);
   - `applies_to`, the tables it concerns.
 
-  `get_datasource_schema` returns the entries relevant to its scope, and the server instructions
-  tell the agent what to do with them. Validation checks the options and that every table exists,
+  `get_datasource_schema` returns the entries relevant to its scope, with an `ambiguities_note`
+  beside them saying how to act on them. That note takes precedence over a rule or example that
+  picks one option, and it still arrives when a client trims the server instructions. Validation checks the options and that every table exists,
   and a refresh keeps the list. Models without it are unchanged. Guidance, not enforcement.
 
 ## [0.9.15] — 2026-10-14

@@ -199,6 +199,9 @@ class DatasourceSchemaResult(_Contract):
     # Declared ambiguities for the tables in scope (#473): each `{name, when, options, behaviour,
     # applies_to}`. Absent when none apply. Declared so a typed client sees the guidance.
     ambiguities: list[dict[str, Any]] | None = None
+    # How to act on `ambiguities`, sent with them so it survives a client trimming the server
+    # instructions.
+    ambiguities_note: str | None = None
     # Pass 2 (dataset_names): per-table context + relationships/metrics from get_table_context.
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None

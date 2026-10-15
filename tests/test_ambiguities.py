@@ -189,6 +189,16 @@ def test_the_whole_datasource_carries_every_entry(tmp_path, monkeypatch):
     assert _names(reply) == ["currency", "customer_region", "order_period"]
 
 
+def test_the_entries_carry_how_to_act_on_them(tmp_path, monkeypatch):
+    """A rule that picks one option must not read as settling the question."""
+    reply = _schema(tmp_path, monkeypatch, [ORDER_DATE])
+    assert "even where a rule or example picks one option" in reply["ambiguities_note"]
+    assert "ambiguities_note" not in _schema(tmp_path / "b", monkeypatch, None)
+    import contracts
+
+    assert "ambiguities_note" in contracts.DatasourceSchemaResult.model_fields
+
+
 def test_named_tables_carry_their_entries_and_the_untargeted_ones(tmp_path, monkeypatch):
     reply = _schema(
         tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], dataset_names=["orders"]

@@ -2201,6 +2201,17 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope") -> None:
               or any(_bare_name(t).lower() in folded for t in a.applies_to)]
     if picked:
         result["ambiguities"] = picked
+        # Beside the entries, not only in the server instructions: a client may cut those short,
+        # and a model rule or example that picks one option otherwise reads as already settled.
+        result["ambiguities_note"] = _AMBIGUITIES_NOTE
+
+
+_AMBIGUITIES_NOTE = (
+    "If the question matches an entry's `when` and does not itself say which option it means, "
+    "follow the entry's `behaviour` even where a rule or example picks one option: `ask` = ask "
+    "the user before running SQL, listing the option labels; `answer_and_offer` = answer with "
+    "the default, say so, and offer the others. Use the labels, never table or column names."
+)
 
 
 def _schema_payload(
