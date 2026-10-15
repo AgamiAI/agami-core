@@ -953,8 +953,16 @@ class AmbiguityOption(_Base):
     """One meaning of an ambiguous question: what to call it, and how to write the SQL for it."""
 
     label: str
-    how: str = ""
+    how: str
     default: bool = False
+
+    @field_validator("label", "how")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        # The agent writes the SQL from `how`; an option without it leaves the meaning to a guess.
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v
 
 
 class Ambiguity(_Base):

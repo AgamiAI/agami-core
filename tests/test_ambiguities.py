@@ -78,12 +78,20 @@ def test_a_model_without_ambiguities_is_unchanged(tmp_path):
 @pytest.mark.parametrize(
     "change, message",
     [
-        ({"options": [{"label": "only one"}]}, "at least two options"),
+        ({"options": [{"label": "only one", "how": "x"}]}, "at least two options"),
         (
-            {"options": [{"label": "a", "default": True}, {"label": "b", "default": True}]},
+            {
+                "options": [
+                    {"label": "a", "how": "x", "default": True},
+                    {"label": "b", "how": "y", "default": True},
+                ]
+            },
             "at most one",
         ),
-        ({"options": [{"label": "a"}, {"label": "b"}]}, "no default option"),
+        (
+            {"options": [{"label": "a", "how": "x"}, {"label": "b", "how": "y"}]},
+            "no default option",
+        ),
     ],
 )
 def test_a_badly_shaped_entry_is_refused_by_name(change, message):
@@ -94,7 +102,11 @@ def test_a_badly_shaped_entry_is_refused_by_name(change, message):
 
 def test_ask_needs_no_default():
     a = m.Ambiguity(
-        **{**ORDER_DATE, "behaviour": "ask", "options": [{"label": "a"}, {"label": "b"}]}
+        **{
+            **ORDER_DATE,
+            "behaviour": "ask",
+            "options": [{"label": "a", "how": "x"}, {"label": "b", "how": "y"}],
+        }
     )
     assert a.behaviour == "ask"
 
@@ -145,7 +157,10 @@ _two_tables = make_catalog_runner(
 CUSTOMER_REGION = {
     "name": "customer_region",
     "when": "a question asks about a customer's region",
-    "options": [{"label": "Billing region"}, {"label": "Shipping region"}],
+    "options": [
+        {"label": "Billing region", "how": "customers.billing_region"},
+        {"label": "Shipping region", "how": "customers.shipping_region"},
+    ],
     "behaviour": "ask",
     "applies_to": ["customers"],
 }
@@ -207,3 +222,30 @@ def test_a_model_with_ambiguities_round_trips_through_a_dump(tmp_path):
     org = load_datasource(_model(tmp_path, [ORDER_DATE]))
     again = m.Datasource.model_validate(org.model_dump())
     assert [a.name for a in again.ambiguities] == ["order_period"]
+
+
+def test_an_option_must_say_how_to_write_it():
+    with pytest.raises(ValueError):
+        m.Ambiguity(
+            **{**ORDER_DATE, "options": [{"label": "a", "how": " "}, {"label": "b", "how": "y"}]}
+        )
+    with pytest.raises(ValueError):
+        m.AmbiguityOption(label="a")
+
+
+def test_an_entry_on_a_hidden_table_is_not_served(tmp_path, monkeypatch):
+    """Excluding `customers` hides it from the agent, and its ambiguity with it; an entry naming
+    `customers` and `orders` keeps `orders`. The file still has both."""
+    both = {**ORDER_DATE, "name": "both", "applies_to": ["orders", "customers"]}
+    reply = _schema(tmp_path, monkeypatch, [CUSTOMER_REGION, both, EVERYWHERE])
+    root = tmp_path / "shop"
+    area = load_datasource(root).subject_areas[0].name
+    from semantic_model import curate as C
+
+    res = C.apply(root, [{"op": "exclude", "kind": "table", "area": area, "name": "customers"}])
+    assert not res.errors, res.errors
+    served = load_datasource(root)
+    assert sorted(a.name for a in served.ambiguities) == ["both", "currency"]
+    assert [a for a in served.ambiguities if a.name == "both"][0].applies_to == ["orders"]
+    assert len(load_datasource(root, include_rejected=True).ambiguities) == 3
+    assert _names(reply) == ["both", "currency", "customer_region"]
