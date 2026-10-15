@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.16] — 2026-10-15
+
 ### Added
 
 - **Declared ambiguities (#473).** `datasource.yaml` can list `ambiguities`: kinds of question the
