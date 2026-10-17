@@ -199,6 +199,12 @@ class DatasourceSchemaResult(_Contract):
     # Declared ambiguities for the tables in scope (#473): each `{name, when, options, behaviour,
     # applies_to}`. Absent when none apply. Declared so a typed client sees the guidance.
     ambiguities: list[dict[str, Any]] | None = None
+    # Entries this reply reaches without opening what they're tied to (#477): each
+    # `{name, when, open}`, where `open` is `{datasource, ambiguity_names: [name]}`, the
+    # get_datasource_schema call that returns the full entry. Absent when there are none.
+    ambiguity_signposts: list[dict[str, Any]] | None = None
+    # Names in `ambiguity_names` that no declared ambiguity has. Absent when every name resolved.
+    unknown_ambiguity_names: list[str] | None = None
     # How to act on `ambiguities`, sent with them so it survives a client trimming the server
     # instructions.
     ambiguities_note: str | None = None
@@ -206,6 +212,10 @@ class DatasourceSchemaResult(_Contract):
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None
     relationships: list[dict[str, Any]] | None = None
+    # Joins from a requested table to one the caller didn't request (#477): one
+    # `{table, from, relationship, keys: ["from_col=table_col", ...], schema?, join_type?}` per
+    # pair of tables. Absent when there are none.
+    joins_to_other_tables: list[dict[str, Any]] | None = None
     metrics: list[dict[str, Any]] | None = None
 
 

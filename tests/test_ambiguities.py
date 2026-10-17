@@ -184,9 +184,25 @@ def _names(reply):
     return sorted(a["name"] for a in reply.get("ambiguities", []))
 
 
-def test_the_whole_datasource_carries_every_entry(tmp_path, monkeypatch):
-    reply = _schema(tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE])
-    assert _names(reply) == ["currency", "customer_region", "order_period"]
+def _signposts(reply):
+    return sorted(a["name"] for a in reply.get("ambiguity_signposts", []))
+
+
+def test_the_whole_datasource_signposts_the_entries_tied_to_tables(tmp_path, monkeypatch):
+    """Progressive disclosure (#477): the overview carries a datasource-wide entry in full and, for
+    every other entry, a signpost naming the call that opens it."""
+    # `summary`: a model this small would otherwise size itself to `full`, which opens every table.
+    reply = _schema(
+        tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], mode="summary"
+    )
+    assert _names(reply) == ["currency"]
+    assert _signposts(reply) == ["customer_region", "order_period"]
+    (order,) = [s for s in reply["ambiguity_signposts"] if s["name"] == "order_period"]
+    assert order == {
+        "name": "order_period",
+        "when": ORDER_DATE["when"],
+        "open": {"datasource": "shop", "ambiguity_names": ["order_period"]},
+    }
 
 
 def test_the_entries_carry_how_to_act_on_them(tmp_path, monkeypatch):
@@ -208,10 +224,14 @@ def test_named_tables_carry_their_entries_and_the_untargeted_ones(tmp_path, monk
     assert order["behaviour"] == "answer_and_offer" and order["options"][0]["default"] is True
 
 
-def test_an_area_carries_the_entries_for_its_tables(tmp_path, monkeypatch):
+def test_an_area_signposts_the_entries_for_its_tables(tmp_path, monkeypatch):
+    """An area is a container: its tables' entries open with the tables themselves."""
     area = load_datasource(_model(tmp_path / "probe")).subject_areas[0].name
-    reply = _schema(tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], area=area)
-    assert _names(reply) == ["currency", "customer_region", "order_period"]
+    reply = _schema(
+        tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], area=area, mode="summary"
+    )
+    assert _names(reply) == ["currency"]
+    assert _signposts(reply) == ["customer_region", "order_period"]
 
 
 def test_no_entries_means_no_key(tmp_path, monkeypatch):
@@ -247,7 +267,7 @@ def test_an_entry_on_a_hidden_table_is_not_served(tmp_path, monkeypatch):
     """Excluding `customers` hides it from the agent, and its ambiguity with it; an entry naming
     `customers` and `orders` keeps `orders`. The file still has both."""
     both = {**ORDER_DATE, "name": "both", "applies_to": ["orders", "customers"]}
-    reply = _schema(tmp_path, monkeypatch, [CUSTOMER_REGION, both, EVERYWHERE])
+    reply = _schema(tmp_path, monkeypatch, [CUSTOMER_REGION, both, EVERYWHERE], mode="summary")
     root = tmp_path / "shop"
     area = load_datasource(root).subject_areas[0].name
     from semantic_model import curate as C
@@ -258,7 +278,7 @@ def test_an_entry_on_a_hidden_table_is_not_served(tmp_path, monkeypatch):
     assert sorted(a.name for a in served.ambiguities) == ["both", "currency"]
     assert [a for a in served.ambiguities if a.name == "both"][0].applies_to == ["orders"]
     assert len(load_datasource(root, include_rejected=True).ambiguities) == 3
-    assert _names(reply) == ["both", "currency", "customer_region"]
+    assert _names(reply) == ["currency"] and _signposts(reply) == ["both", "customer_region"]
 
 
 def test_a_catalog_qualified_target_on_a_hidden_table_is_not_served(tmp_path):

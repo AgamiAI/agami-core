@@ -972,13 +972,35 @@ class Ambiguity(_Base):
     running SQL; `answer_and_offer` means answer with the default option, say which one was used,
     and offer the others. Either applies only when the question doesn't already settle the choice.
     `applies_to` names the tables it concerns, so a scoped schema reply carries only the entries
-    for what's in scope; empty means the whole datasource."""
+    for what's in scope; empty means the whole datasource.
+
+    It can be tied more finely (#477): `columns` (`table.column`), `column_groups` (`table.group`)
+    or `metrics` (metric names). Then the full entry arrives only with a reply that opens one of
+    them, and every other reply that reaches it carries a signpost saying what to open. They are
+    separate fields because `applies_to` already accepts `schema.table`."""
 
     name: str
     when: str
     options: list[AmbiguityOption]
     behaviour: Literal["ask", "answer_and_offer"] = "ask"
     applies_to: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
+    column_groups: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_anchors(self, handler):
+        # A model without the finer anchors still dumps as 0.9.16 wrote it, so it loads on a server
+        # that doesn't know them (rollback safety, as for `Datasource.ambiguities`).
+        d = handler(self)
+        for k in ("columns", "column_groups", "metrics"):
+            if isinstance(d, dict) and not d.get(k):
+                d.pop(k, None)
+        return d
+
+    def anchored(self) -> bool:
+        """Tied to something narrower than the whole datasource."""
+        return bool(self.applies_to or self.columns or self.column_groups or self.metrics)
 
     @model_validator(mode="after")
     def _options(self) -> "Ambiguity":

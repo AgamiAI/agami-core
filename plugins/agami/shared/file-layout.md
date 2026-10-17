@@ -31,7 +31,7 @@ Everything else in here is non-secret and team-useful. The default location is `
 | Path | What it is |
 |---|---|
 | `USER_MEMORY.md` | Top-level — cross-database preferences (default filters, currency, display rules). Power users committing this share their tuning with the team. |
-| `<profile>/datasource.yaml` | Org root: description, the `key_terminology` glossary, declared `ambiguities` (questions with more than one meaning: their options, a default, and whether the agent asks or answers-and-offers), storage-connection + subject-area references, and cross-area relationships / entities / metrics |
+| `<profile>/datasource.yaml` | Org root: description, the `key_terminology` glossary, declared `ambiguities` (questions with more than one meaning: their options, a default, whether the agent asks or answers-and-offers, and what they're tied to: `applies_to` tables, or more finely `columns` (`table.column`), `column_groups` (`table.group`) or `metrics`, so a reply carries the full entry only when it opens one of them, and otherwise a signpost that asks for it by name through `ambiguity_names`), storage-connection + subject-area references, and cross-area relationships / entities / metrics |
 | `<profile>/datasources/<connection>/storage.yaml` | Physical connection metadata (storage type + config; **no secrets** — references, not values) |
 | `<profile>/subject_areas/<area>/subject_area.yaml` | Subject-area definition: name + the tables it exposes (TableRefs, with optional column-group scoping) |
 | `<profile>/subject_areas/<area>/tables/<table>.yaml` | Canonical table (one per file): columns + types, primary-key grain, foreign keys, `column_groups`, choice fields, caveats, performance hints |
