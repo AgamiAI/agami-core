@@ -142,7 +142,8 @@ _SHARED_INSTRUCTIONS = (
     "Flow: (1) list_datasources, then get_datasource_schema for the datasource the question "
     "touches (it sizes itself — pass `area` or `dataset_names` to SCOPE it, `query` to rank "
     "metrics; a `dataset_names` call also returns those tables' joins and metrics, so it is what "
-    "you need to write the SQL). (2) Examples-first — call get_prompt_examples with the user's "
+    "you need to write the SQL; joins to tables you didn't name come as key lists under "
+    "`joins_to_other_tables`, so name every table you will query). (2) Examples-first — call get_prompt_examples with the user's "
     "question as `query` and mirror the closest match; use metric `calculation`/`binding` "
     "verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
@@ -1749,6 +1750,53 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
     return {"tables": contexts, "relationships": L._merge_lean_pairs(relationships)}
 
 
+_FLIP = {"many_to_one": "one_to_many", "one_to_many": "many_to_one"}
+
+
+def _compact_other_joins(
+    relationships: list[dict[str, Any]], requested: set[str], schemas: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a table reply's joins (#477): edges between two requested tables stay in full; an edge
+    to a table the caller didn't request becomes one compact entry per (table, requested table,
+    cardinality), listing its keys as `"requested_col=other_col"`.
+
+    Those edges were most of a table reply, and a caller's SQL almost always uses only the tables it
+    asked for. The compact entry still says how to join, so the rare statement that reaches a
+    further table needs no second call. Cardinality is stated from the requested table's side,
+    because that is the side a join would multiply. An edge with its own `on` condition (a join on a
+    natural key that also filters to the current version) keeps that condition verbatim under `on`.
+    Only a non-default `executable` stays in `relationships`: it says the join runs elsewhere."""
+    kept: list[dict[str, Any]] = []
+    grouped: dict[tuple, dict[str, list[str]]] = {}
+    for r in relationships:
+        frm, to = r.get("from_table"), r.get("to_table")
+        if (frm in requested and to in requested) or "executable" in r:
+            kept.append(r)
+            continue
+        forward = frm in requested
+        near, far = (frm, to) if forward else (to, frm)
+        rel = r.get("relationship")
+        if not forward:
+            rel = _FLIP.get(rel, rel)
+        key = (far, near, rel, r.get("join_type"), r.get("to_schema") if forward else r.get("from_schema"))
+        slot = grouped.setdefault(key, {"keys": [], "on": []})
+        if "on" in r:
+            slot["on"].append(r["on"])
+            continue
+        pairs = r.get("column_pairs") or [[r.get("from_column"), r.get("to_column")]]
+        slot["keys"].extend(f"{a}={b}" if forward else f"{b}={a}" for a, b in pairs)
+    compact: list[dict[str, Any]] = []
+    for (far, near, rel, join_type, far_schema), slot in grouped.items():
+        item: dict[str, Any] = {"table": far, "from": near, "relationship": rel}
+        item.update({k: v for k, v in slot.items() if v})
+        if far_schema and far_schema != schemas.get(near):
+            item["schema"] = far_schema
+        if join_type and join_type != "LEFT":
+            item["join_type"] = join_type
+        compact.append(item)
+    return kept, compact
+
+
 def _bare_name(name: str) -> str:
     """A table name with any schema qualifier stripped.
 
@@ -2570,6 +2618,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                     ctx["tables"][n].get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
                 )
                 _note_miss("table", n, searched)
+        requested = {_bare_name(n) for n in ctx["tables"]} | set(ctx["tables"])
+        schemas = {n: t.get("schema") for n, t in ctx["tables"].items() if isinstance(t, dict)}
+        kept_joins, other_joins = _compact_other_joins(ctx["relationships"], requested, schemas)
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
@@ -2583,11 +2634,14 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             # for one reaching a table the caller has no columns for; `metrics` is re-projected
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
-            "relationships": ctx["relationships"],
+            # Joins to tables the caller didn't request travel compactly (#477).
+            "relationships": kept_joins,
             "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected],
             **_metric_index_fields(metrics),
             "large_tables": _large_tables(org),
         }
+        if other_joins:
+            result["joins_to_other_tables"] = other_joins
         _group_wide_columns(result, org, args.get("column_groups") or [])
         _add_ambiguities(result, org, scope)
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they

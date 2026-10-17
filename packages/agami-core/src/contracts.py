@@ -206,6 +206,10 @@ class DatasourceSchemaResult(_Contract):
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None
     relationships: list[dict[str, Any]] | None = None
+    # Joins from a requested table to one the caller didn't request (#477): one
+    # `{table, from, relationship, keys: ["from_col=table_col", ...], schema?, join_type?}` per
+    # pair of tables. Absent when there are none.
+    joins_to_other_tables: list[dict[str, Any]] | None = None
     metrics: list[dict[str, Any]] | None = None
 
 
