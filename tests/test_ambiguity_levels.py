@@ -678,3 +678,41 @@ def test_a_named_entry_rides_a_table_reply_in_full(tmp_path, monkeypatch):
     _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
     reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"], ambiguity_names=["order_date"])
     assert _full(reply) == ["order_date"] and "ambiguity_signposts" not in reply
+
+
+# --- Copilot's seventh review on #484 -----------------------------------------------------------
+
+
+def test_an_unknown_name_is_reported_beside_a_table_request(tmp_path, monkeypatch):
+    _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
+    reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"], ambiguity_names=["nope"])
+    assert reply["unknown_ambiguity_names"] == ["nope"]
+
+
+def test_names_beside_a_metric_request_keep_the_metric_detail(tmp_path, monkeypatch):
+    root = _build(tmp_path, [_entry("rev_basis", metrics=["revenue"])])
+    _add_metric(root)
+    reply = _reply(tmp_path, monkeypatch, metric_names=["revenue"], ambiguity_names=["rev_basis"])
+    assert _full(reply) == ["rev_basis"]
+    assert [m["name"] for m in reply["metrics"]] == ["revenue"], (
+        "the metric asked for still comes back"
+    )
+
+
+def test_a_restricted_copy_in_another_schema_does_not_hide_the_signpost(tmp_path, monkeypatch):
+    """`public.orders` shows `dates`; `archive.orders`, defined later, exposes only `money`. The
+    anchor names `public`, so it is reachable and the overview signposts it."""
+    root = _build(tmp_path, [_entry("public_date", column_groups=["public.orders.dates"])], GROUPS)
+    _add_archive_orders(root)
+    sa_file = root / "subject_areas" / "archive" / "subject_area.yaml"
+    sa = yaml.safe_load(sa_file.read_text())
+    sa["tables"][0]["expose_column_groups"] = ["money"]
+    sa_file.write_text(yaml.safe_dump(sa, sort_keys=False))
+    tfile = root / "subject_areas" / "archive" / "tables" / "orders.yaml"
+    t = yaml.safe_load(tfile.read_text())
+    t["columns"].append({"name": "amount", "type": "decimal"})
+    t["column_groups"] = {"dates": ["shipped_on"], "money": ["amount"]}
+    t["column_group_descriptions"] = {"dates": "dates", "money": "money"}
+    tfile.write_text(yaml.safe_dump(t))
+    overview = _reply(tmp_path, monkeypatch, mode="summary")
+    assert _posts(overview) == {"public_date": {"ambiguity_names": ["public_date"]}}
