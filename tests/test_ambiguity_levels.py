@@ -485,3 +485,64 @@ def test_a_join_from_a_same_named_table_in_another_schema_stays_whole():
     }
     kept, other = tools._compact_other_joins([edge], {"orders"}, {"orders": "public"})
     assert kept == [edge] and other == []
+
+
+# --- Copilot's fourth review on #484 ------------------------------------------------------------
+
+
+def test_an_empty_condition_beside_keys_is_a_key_join():
+    edge = {
+        "from_table": "orders",
+        "to_table": "dates",
+        "from_column": "ordered_on",
+        "to_column": "date_key",
+        "on": "",
+        "relationship": "many_to_one",
+    }
+    (entry,) = tools._compact_other_joins([edge], {"orders"}, {})[1]
+    assert entry["keys"] == ["ordered_on=date_key"] and "on" not in entry
+
+
+def _restrict(root, area_file, groups):
+    sa = yaml.safe_load(area_file.read_text())
+    for ref in sa["tables"]:
+        if ref["table"] == "orders":
+            ref["expose_column_groups"] = groups
+    area_file.write_text(yaml.safe_dump(sa, sort_keys=False))
+
+
+def test_a_column_in_no_group_is_hidden_by_a_restriction_too(tmp_path, monkeypatch):
+    """Under `expose_column_groups` the loader serves only the exposed groups' columns."""
+    root = _build(tmp_path, [_entry("order_id", columns=["orders.id"])], GROUPS)
+    (sa_file,) = root.rglob("subject_area.yaml")
+    _restrict(root, sa_file, ["money"])
+    for args in ({"dataset_names": ["orders"]}, {"mode": "summary"}):
+        reply = _reply(tmp_path, monkeypatch, **args)
+        assert "order_id" not in _posts(reply) and "order_id" not in _full(reply), args
+
+
+def test_the_copy_a_table_request_returns_decides_what_is_exposed(tmp_path, monkeypatch):
+    """A later area's unrestricted copy is the one served, so an earlier copy's restriction must
+    not hide an anchor that the served copy shows."""
+    import shutil
+
+    root = _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
+    first = root / "subject_areas" / "shop"
+    _restrict(root, first / "subject_area.yaml", ["money"])
+    second = root / "subject_areas" / "shop_copy"
+    shutil.copytree(first, second)
+    sa = yaml.safe_load((second / "subject_area.yaml").read_text())
+    sa["name"] = "shop_copy"
+    sa["tables"] = [
+        {k: v for k, v in r.items() if k != "expose_column_groups"}
+        for r in sa["tables"]
+        if r["table"] == "orders"
+    ]
+    (second / "subject_area.yaml").write_text(yaml.safe_dump(sa, sort_keys=False))
+    (second / "tables" / "customers.yaml").unlink()
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/shop_copy")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds, sort_keys=False))
+    reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
+    assert "order_date" in _posts(reply), "the served copy shows `dates`, so the entry is reachable"
+    assert _full(_follow(tmp_path, monkeypatch, reply, "order_date")) == ["order_date"]

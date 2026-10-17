@@ -1777,6 +1777,8 @@ def _compact_other_joins(
         # here would compact a join between two requested tables, or read it from the wrong side.
         frm_in = _bare_name(frm or "") in requested or frm in requested
         to_in = _bare_name(to or "") in requested or to in requested
+        # Only a nonblank `on` is a condition join, as the model reads it; `on: ""` beside keys is not.
+        cond = (r.get("on") or "").strip()
         if (frm_in and to_in) or "executable" in r:
             kept.append(r)
             continue
@@ -1796,9 +1798,9 @@ def _compact_other_joins(
         far_schema = r.get("to_schema") if forward else r.get("from_schema")
         # A condition join and a key join to the same table are separate entries, so a reader never
         # wonders whether `keys` and `on` are alternatives or meant together.
-        key = (far, near, rel, join_type, far_schema, "on" in r)
+        key = (far, near, rel, join_type, far_schema, bool(cond))
         slot = grouped.setdefault(key, {"keys": [], "on": []})
-        if "on" in r:
+        if cond:
             slot["on"].append(r["on"])
             continue
         pairs = r.get("column_pairs") or [[r.get("from_column"), r.get("to_column")]]
@@ -2272,13 +2274,15 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
     defs = {_bare_name(t.name).lower(): t for sa in org.subject_areas for t in sa.tables_defined}
     # What a table request can actually show: a table resolves in its owning area, whose
     # `expose_column_groups` may hide some groups. None = every group.
+    # A later area's copy wins, as in `_table_contexts`, so a copy without a restriction resets it.
     exposed: dict[str, set[str] | None] = {}
     for sa in org.subject_areas:
-        owned = {_bare_name(t.name).lower() for t in sa.tables_defined}
-        for ref in sa.tables:
-            t = _bare_name(ref.table).lower()
-            if t in owned and ref.expose_column_groups:
-                exposed[t] = {g.lower() for g in ref.expose_column_groups}
+        refs = {_bare_name(r.table).lower(): r for r in sa.tables}
+        for t in sa.tables_defined:
+            bare = _bare_name(t.name).lower()
+            ref = refs.get(bare)
+            exposed[bare] = ({g.lower() for g in ref.expose_column_groups}
+                             if ref is not None and ref.expose_column_groups else None)
     # The metrics in this reply's scope, by canonical name -> the selectors this tool accepts for
     # them (a name shared by two areas is selected as `name (area)`), whether or not they're shown.
     selectors: dict[str, list[str]] = {}
@@ -2356,9 +2360,11 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
         return next((g for g in containing if allowed is None or g.lower() in allowed), None)
 
     def column_reachable(t: str, col: str) -> bool:
-        groups = (defs[t].column_groups or {}) if t in defs else {}
-        in_any = any(col.lower() in {c.lower() for c in cols} for cols in groups.values())
-        return not in_any or group_of(t, col) is not None
+        # Under a restriction the loader serves only the exposed groups' columns, so a column in no
+        # group is hidden too; without one, every column is shown.
+        if exposed.get(t) is None:
+            return True
+        return group_of(t, col) is not None
 
     def column_open(t: str, col: str) -> bool:
         return t in tables and (tables[t] is None or col.lower() in tables[t])
