@@ -21,12 +21,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "packages" / "agami-core" / "src"))
 
+import tools  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
 from semantic_model import models as m  # noqa: E402
 from semantic_model import validator as V  # noqa: E402
 from semantic_model.loader import load_datasource  # noqa: E402
 
-import tools  # noqa: E402
 from catalog_helpers import col, make_catalog_runner  # noqa: E402
 
 _runner = make_catalog_runner(
