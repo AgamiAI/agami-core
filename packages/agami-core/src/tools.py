@@ -2263,6 +2263,15 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
     opened = _opened_in_reply(result)
     # Every defined table by bare, folded name, built once per reply rather than once per entry.
     defs = {_bare_name(t.name).lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+    # What a table request can actually show: a table resolves in its owning area, whose
+    # `expose_column_groups` may hide some groups. None = every group.
+    exposed: dict[str, set[str] | None] = {}
+    for sa in org.subject_areas:
+        owned = {_bare_name(t.name).lower() for t in sa.tables_defined}
+        for ref in sa.tables:
+            t = _bare_name(ref.table).lower()
+            if t in owned and ref.expose_column_groups:
+                exposed[t] = {g.lower() for g in ref.expose_column_groups}
     # The metrics in this reply's scope, by canonical name -> the selectors this tool accepts for
     # them (a name shared by two areas is selected as `name (area)`), whether or not they're shown.
     selectors: dict[str, list[str]] = {}
@@ -2274,7 +2283,7 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
         if not a.anchored():
             full.append(_ambiguity_entry(a))
             continue
-        status, to_open = _ambiguity_reach(a, opened, in_scope, defs, selectors)
+        status, to_open = _ambiguity_reach(a, opened, in_scope, defs, selectors, exposed)
         if status == "reached" and datasource:
             # Followed literally, a call without it is refused when several datasources are served.
             to_open = {"datasource": datasource, **to_open}
@@ -2310,7 +2319,8 @@ def _opened_in_reply(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
-                     defs: dict[str, Any], selectors: dict[str, list[str]]) -> tuple[str, dict]:
+                     defs: dict[str, Any], selectors: dict[str, list[str]],
+                     exposed: dict[str, set[str] | None]) -> tuple[str, dict]:
     """("open", {}) when this reply opens something the entry is tied to; ("reached", the
     get_datasource_schema arguments that open it) when the reply touches it without opening it;
     ("out", {}) when it is outside this reply's scope.
@@ -2346,8 +2356,16 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
         groups = (defs[t].column_groups or {}) if t in defs else {}
         return next((g for g in groups if g.lower() == group.lower()), group)
 
+    def reachable_group(t: str, group: str | None) -> bool:
+        # An anchor the owning area doesn't expose can't be opened by any call: following a
+        # signpost to it would bring the same signpost back. A column in no group is always shown.
+        return group is None or exposed.get(t) is None or group.lower() in exposed[t]
+
     table_refs = {_bare_name(x).lower() for x in a.applies_to}
-    finer = [split(r) for r in a.columns], [split(r) for r in a.column_groups]
+    finer = ([c for c in map(split, a.columns) if reachable_group(c[0], group_of(*c))],
+             [g for g in map(split, a.column_groups) if reachable_group(*g)])
+    if not (table_refs or finer[0] or finer[1] or a.metrics):
+        return "out", {}
     anchor_tables = table_refs | {t for t, _ in finer[0]} | {t for t, _ in finer[1]}
     metric_keys = {k for m in a.metrics for k in [m, *selectors.get(m, [])]}
     if (any(t in tables for t in table_refs) or any(column_open(*c) for c in finer[0])

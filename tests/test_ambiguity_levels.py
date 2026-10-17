@@ -344,6 +344,9 @@ def test_a_signpost_keeps_the_declared_spelling_of_tables_and_groups(tmp_path, m
         "column_groups": ["ORDERS.Dates"],
     }
     assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]
+    assert V.validate(load_datasource(root)).ok, (
+        "the anchor resolves the way the validator reads it"
+    )
 
 
 def test_a_rejected_metric_alone_drops_its_entry(tmp_path):
@@ -357,3 +360,69 @@ def test_a_rejected_metric_alone_drops_its_entry(tmp_path):
     doc["review_state"] = "rejected"
     mf.write_text(yaml.safe_dump(doc))
     assert [a.name for a in load_datasource(root).ambiguities] == ["kept"]
+
+
+# --- Copilot re-review on #484 ------------------------------------------------------------------
+
+
+def test_a_rejected_copy_of_a_shared_metric_name_keeps_the_entry(tmp_path):
+    """Two definitions may share a name; rejecting one doesn't remove the one still served."""
+    root = _build(tmp_path, [_entry("rev_basis", metrics=["revenue"])])
+    _add_metric(root)
+    (mf,) = root.rglob("revenue.yaml")
+    doc = yaml.safe_load(mf.read_text())
+    doc["review_state"] = "rejected"
+    mf.write_text(yaml.safe_dump(doc))
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [{**doc, "review_state": "unreviewed"}]
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds, sort_keys=False))
+    assert [a.name for a in load_datasource(root).ambiguities] == ["rev_basis"]
+
+
+def test_an_entry_on_a_group_emptied_by_exclusion_is_dropped(tmp_path):
+    from semantic_model import curate as C
+
+    root = _build(
+        tmp_path,
+        [
+            _entry("order_date", column_groups=["orders.dates"]),
+            _entry("kept", applies_to=["orders"]),
+        ],
+        GROUPS,
+    )
+    area = load_datasource(root).subject_areas[0].name
+    ops = [
+        {"op": "exclude", "kind": "table", "area": area, "name": "orders", "column": c}
+        for c in GROUPS["dates"]
+    ]
+    assert not C.apply(root, ops).errors
+    org = load_datasource(root)
+    assert [a.name for a in org.ambiguities] == ["kept"]
+    assert not [f for f in V.validate(org).findings if f.code == "ambiguity_unknown_anchor"]
+
+
+def test_an_anchor_its_area_does_not_expose_is_never_signposted(tmp_path, monkeypatch):
+    """A group hidden by the owning area's `expose_column_groups` can't be opened by any call, so
+    a signpost to it would only loop. A reachable anchor beside it still works."""
+    root = _build(
+        tmp_path,
+        [
+            _entry("order_date", column_groups=["orders.dates"]),
+            _entry("order_status", columns=["orders.status"]),
+        ],
+        GROUPS,
+    )
+    (sa_file,) = root.rglob("subject_area.yaml")
+    sa = yaml.safe_load(sa_file.read_text())
+    for ref in sa["tables"]:
+        if ref["table"] == "orders":
+            ref["expose_column_groups"] = ["money"]
+    sa_file.write_text(yaml.safe_dump(sa, sort_keys=False))
+    for args in ({"dataset_names": ["orders"]}, {"mode": "summary"}):
+        reply = _reply(tmp_path, monkeypatch, **args)
+        assert "order_date" not in _posts(reply) and "order_date" not in _full(reply), args
+    reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
+    if "order_status" in _posts(reply):
+        assert _full(_follow(tmp_path, monkeypatch, reply, "order_status")) == ["order_status"]
+    else:
+        assert "order_status" in _full(reply)

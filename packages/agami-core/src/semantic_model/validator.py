@@ -261,7 +261,8 @@ def _check_ambiguity_anchors(org: Datasource, org_tables: dict, a, res: Validati
                       f"ambiguity {a.name!r} columns {ref!r}: the table has no such column")
     for ref in a.column_groups:
         t, group = table_of(ref, "column_groups")
-        if t is not None and group not in (t.column_groups or {}):
+        # Folded, as the loader and the reply resolve a group anchor.
+        if t is not None and group.lower() not in {g.lower() for g in (t.column_groups or {})}:
             res.error("ambiguity_unknown_anchor",
                       f"ambiguity {a.name!r} column_groups {ref!r}: the table has no such group")
     metric_names = {m.name for sa in org.subject_areas for m in sa.metrics}
