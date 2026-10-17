@@ -21,9 +21,17 @@ import tools  # noqa: E402
 
 
 def _edge(frm, to, fc, tc, **extra):
-    return {"from_table": frm, "to_table": to, "from_column": fc, "to_column": tc,
-            "from_schema": "public", "to_schema": "public", "join_type": "LEFT",
-            "relationship": "many_to_one", **extra}
+    return {
+        "from_table": frm,
+        "to_table": to,
+        "from_column": fc,
+        "to_column": tc,
+        "from_schema": "public",
+        "to_schema": "public",
+        "join_type": "LEFT",
+        "relationship": "many_to_one",
+        **extra,
+    }
 
 
 REQ = {"orders", "customers"}
@@ -41,13 +49,21 @@ def test_a_join_between_two_requested_tables_stays_in_full():
 
 
 def test_joins_to_one_other_table_become_one_entry_with_every_key():
-    kept, other = _split([
-        _edge("orders", "dates", "ordered_on", "date_key"),
-        _edge("orders", "dates", column_pairs=None, fc="shipped_on", tc="date_key"),
-    ])
+    kept, other = _split(
+        [
+            _edge("orders", "dates", "ordered_on", "date_key"),
+            _edge("orders", "dates", column_pairs=None, fc="shipped_on", tc="date_key"),
+        ]
+    )
     assert kept == []
-    assert other == [{"table": "dates", "from": "orders", "relationship": "many_to_one",
-                      "keys": ["ordered_on=date_key", "shipped_on=date_key"]}]
+    assert other == [
+        {
+            "table": "dates",
+            "from": "orders",
+            "relationship": "many_to_one",
+            "keys": ["ordered_on=date_key", "shipped_on=date_key"],
+        }
+    ]
 
 
 def test_merged_column_pairs_are_all_kept():
@@ -61,8 +77,9 @@ def test_an_edge_pointing_at_a_requested_table_reads_from_its_side():
     """`lines -> orders` is many-to-one from lines; from orders it fans out, which is what a join
     from orders would do to the row count."""
     _, other = _split([_edge("lines", "orders", "order_id", "id")])
-    assert other == [{"table": "lines", "from": "orders", "relationship": "one_to_many",
-                      "keys": ["id=order_id"]}]
+    assert other == [
+        {"table": "lines", "from": "orders", "relationship": "one_to_many", "keys": ["id=order_id"]}
+    ]
 
 
 def test_a_join_with_its_own_condition_keeps_it_verbatim():
@@ -78,8 +95,12 @@ def test_a_join_that_runs_elsewhere_is_left_whole():
 
 
 def test_schema_and_join_type_appear_only_when_they_differ():
-    _, other = _split([_edge("orders", "dates", "a", "k"),
-                       _edge("orders", "regions", "b", "k", to_schema="ref", join_type="INNER")])
+    _, other = _split(
+        [
+            _edge("orders", "dates", "a", "k"),
+            _edge("orders", "regions", "b", "k", to_schema="ref", join_type="INNER"),
+        ]
+    )
     plain, odd = other
     assert "schema" not in plain and "join_type" not in plain
     assert odd["schema"] == "ref" and odd["join_type"] == "INNER"
