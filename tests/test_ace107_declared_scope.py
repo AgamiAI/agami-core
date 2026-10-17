@@ -216,7 +216,7 @@ def test_a_table_scoped_call_returns_the_joins_for_those_tables(profile):
     others = _head(profile, dataset_names=["orders"])["joins_to_other_tables"]
     assert others, "relationships were computed and discarded"
     edge = next(r for r in others if r["table"] == "users")
-    assert edge["from"] == "orders" and all("=" in k for k in edge["keys"]), "the join keys"
+    assert edge["from"] == "orders" and edge["keys"] == ["id=id"], "the join keys"
     assert edge["relationship"] == "many_to_one", "cardinality reaches the caller"
 
 

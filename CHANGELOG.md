@@ -27,7 +27,9 @@ below corresponds to one such version.
   carries it under `ambiguity_signposts` as `{name, when, open}`, where `open` is the call that
   brings the full entry. The overview no longer carries table-tied entries in full. An entry whose
   anchors are all hidden is dropped rather than widened. The new fields are left out of a model's
-  dump when empty, so a model that doesn't use them still loads on older servers.
+  dump when empty, so a model that doesn't use them still loads on older servers. A model that does
+  use them needs this version: older servers refuse the unknown fields, so upgrade the server before
+  adding them to a model.
 
 ## [0.9.16] — 2026-10-15
 

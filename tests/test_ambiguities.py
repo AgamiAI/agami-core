@@ -191,12 +191,18 @@ def _signposts(reply):
 def test_the_whole_datasource_signposts_the_entries_tied_to_tables(tmp_path, monkeypatch):
     """Progressive disclosure (#477): the overview carries a datasource-wide entry in full and, for
     every other entry, a signpost naming the call that opens it."""
-    reply = _schema(tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE])
+    # `summary`: a model this small would otherwise size itself to `full`, which opens every table.
+    reply = _schema(
+        tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], mode="summary"
+    )
     assert _names(reply) == ["currency"]
     assert _signposts(reply) == ["customer_region", "order_period"]
     (order,) = [s for s in reply["ambiguity_signposts"] if s["name"] == "order_period"]
-    assert order == {"name": "order_period", "when": ORDER_DATE["when"],
-                     "open": {"dataset_names": ["orders"]}}
+    assert order == {
+        "name": "order_period",
+        "when": ORDER_DATE["when"],
+        "open": {"dataset_names": ["orders"]},
+    }
 
 
 def test_the_entries_carry_how_to_act_on_them(tmp_path, monkeypatch):
@@ -221,7 +227,9 @@ def test_named_tables_carry_their_entries_and_the_untargeted_ones(tmp_path, monk
 def test_an_area_signposts_the_entries_for_its_tables(tmp_path, monkeypatch):
     """An area is a container: its tables' entries open with the tables themselves."""
     area = load_datasource(_model(tmp_path / "probe")).subject_areas[0].name
-    reply = _schema(tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], area=area)
+    reply = _schema(
+        tmp_path, monkeypatch, [ORDER_DATE, CUSTOMER_REGION, EVERYWHERE], area=area, mode="summary"
+    )
     assert _names(reply) == ["currency"]
     assert _signposts(reply) == ["customer_region", "order_period"]
 
@@ -259,7 +267,7 @@ def test_an_entry_on_a_hidden_table_is_not_served(tmp_path, monkeypatch):
     """Excluding `customers` hides it from the agent, and its ambiguity with it; an entry naming
     `customers` and `orders` keeps `orders`. The file still has both."""
     both = {**ORDER_DATE, "name": "both", "applies_to": ["orders", "customers"]}
-    reply = _schema(tmp_path, monkeypatch, [CUSTOMER_REGION, both, EVERYWHERE])
+    reply = _schema(tmp_path, monkeypatch, [CUSTOMER_REGION, both, EVERYWHERE], mode="summary")
     root = tmp_path / "shop"
     area = load_datasource(root).subject_areas[0].name
     from semantic_model import curate as C
