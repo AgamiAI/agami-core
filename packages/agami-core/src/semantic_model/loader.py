@@ -263,13 +263,19 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden") -> list:
     stays. The file on disk is untouched."""
     out = []
     for a in ambiguities:
-        if not a.applies_to:
+        if not a.anchored():
             out.append(a)
             continue
         # The intact name: `table_hidden` parses any qualifier itself, catalog.schema.table included.
         kept = [t for t in a.applies_to if not hidden.table_hidden(None, t)]
-        if kept:
-            out.append(a.model_copy(update={"applies_to": kept}) if kept != a.applies_to else a)
+        # `table.column` / `table.group` (#477): the table is everything before the last dot.
+        cols = [c for c in a.columns if not hidden.table_hidden(None, c.rsplit(".", 1)[0])]
+        groups = [g for g in a.column_groups if not hidden.table_hidden(None, g.rsplit(".", 1)[0])]
+        update = {"applies_to": kept, "columns": cols, "column_groups": groups}
+        # An entry whose every anchor is hidden is left out, never widened to the whole datasource.
+        if kept or cols or groups or a.metrics:
+            changed = (kept, cols, groups) != (a.applies_to, a.columns, a.column_groups)
+            out.append(a.model_copy(update=update) if changed else a)
     return out
 
 

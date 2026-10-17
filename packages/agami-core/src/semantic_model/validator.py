@@ -234,6 +234,42 @@ def _check_ambiguities(org: Datasource, org_tables: dict, res: ValidationResult)
             if t.split(".")[-1].lower() not in known:
                 res.error("ambiguity_unknown_table",
                           f"ambiguity {a.name!r} applies_to {t!r}, which the model doesn't define")
+        _check_ambiguity_anchors(org, org_tables, a, res)
+
+
+def _check_ambiguity_anchors(org: Datasource, org_tables: dict, a, res: ValidationResult) -> None:
+    """The finer anchors (#477) name a real `table.column`, `table.group` or metric. A misspelled
+    one would leave the entry signposted at a thing that never opens."""
+    by_bare = {name.split(".")[-1].lower(): t for name, t in org_tables.items()}
+
+    def table_of(ref: str, kind: str):
+        if "." not in ref:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} {kind} {ref!r} must be written table.{kind[:-1]}")
+            return None, ""
+        table, part = ref.rsplit(".", 1)
+        t = by_bare.get(table.split(".")[-1].lower())
+        if t is None:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} {kind} {ref!r} names a table the model doesn't define")
+        return t, part
+
+    for ref in a.columns:
+        t, col = table_of(ref, "columns")
+        if t is not None and col.lower() not in {c.name.lower() for c in t.columns}:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} columns {ref!r}: the table has no such column")
+    for ref in a.column_groups:
+        t, group = table_of(ref, "column_groups")
+        if t is not None and group not in (t.column_groups or {}):
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} column_groups {ref!r}: the table has no such group")
+    metric_names = {m.name for sa in org.subject_areas for m in sa.metrics}
+    metric_names |= {m.name for m in org.cross_subject_area_metrics}
+    for name in a.metrics:
+        if name not in metric_names:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} metrics {name!r}, which the model doesn't define")
 
 
 def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> ValidationResult:

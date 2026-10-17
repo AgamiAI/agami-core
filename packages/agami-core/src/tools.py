@@ -2231,27 +2231,105 @@ def _areas_owning(org, tables: set[str]) -> set[str]:
 
 
 def _add_ambiguities(result: dict[str, Any], org, scope: "Scope") -> None:
-    """The model's declared ambiguities that bear on this reply's scope (#473): every entry for
-    the whole datasource; for an area or named tables, entries for any table in scope plus those
-    that name no table. Left out when there are none, so a model without any replies as before."""
+    """The model's declared ambiguities, disclosed progressively (#473, #477).
+
+    An entry for the whole datasource rides every reply in full. One tied to tables, column groups,
+    columns or metrics arrives in full only with a reply that opens one of them; any other reply
+    that reaches it carries a signpost: its name, its `when` and the call that opens it. So the
+    overview stays small however many entries a model declares, and the agent still learns, before
+    it writes SQL, that something it is about to touch has more than one meaning. Left out when
+    there are none, so a model without any replies as before."""
     if scope.level == "datasource":
-        tables = None
+        in_scope = None
     elif scope.level == "area":
         sa = org.subject_area(scope.area) if scope.area else None
-        tables = ({_bare_name(t.name) for t in sa.tables_defined} | {_bare_name(r.table) for r in sa.tables}
-                  if sa else set())
+        in_scope = ({_bare_name(t.name) for t in sa.tables_defined} | {_bare_name(r.table) for r in sa.tables}
+                    if sa else set())
     else:
-        tables = {_bare_name(t) for t in scope.tables}
-    folded = None if tables is None else {t.lower() for t in tables}
-    picked = [a.model_dump(exclude_defaults=True) | {"behaviour": a.behaviour}
-              for a in getattr(org, "ambiguities", [])
-              if folded is None or not a.applies_to
-              or any(_bare_name(t).lower() in folded for t in a.applies_to)]
-    if picked:
-        result["ambiguities"] = picked
+        in_scope = {_bare_name(t) for t in scope.tables}
+    in_scope = None if in_scope is None else {t.lower() for t in in_scope}
+    opened = _opened_in_reply(result, org)
+    full, signposts = [], []
+    for a in getattr(org, "ambiguities", []):
+        if not a.anchored():
+            full.append(_ambiguity_entry(a))
+            continue
+        status, to_open = _ambiguity_reach(a, opened, in_scope, org)
+        if status == "open":
+            full.append(_ambiguity_entry(a))
+        elif status == "reached":
+            signposts.append({"name": a.name, "when": a.when, "open": to_open})
+    if full:
+        result["ambiguities"] = full
+    if signposts:
+        result["ambiguity_signposts"] = signposts
+    if full or signposts:
         # Beside the entries, not only in the server instructions: a client may cut those short,
         # and a model rule or example that picks one option otherwise reads as already settled.
-        result["ambiguities_note"] = _AMBIGUITIES_NOTE
+        result["ambiguities_note"] = _AMBIGUITIES_NOTE + (_SIGNPOSTS_NOTE if signposts else "")
+
+
+def _ambiguity_entry(a) -> dict[str, Any]:
+    return a.model_dump(exclude_defaults=True) | {"behaviour": a.behaviour}
+
+
+def _opened_in_reply(result: dict[str, Any], org) -> dict[str, Any]:
+    """What this reply has opened: per table, the columns it sends in full (every column, for a
+    table it doesn't group), and the metrics it sends in full."""
+    tables: dict[str, set[str] | None] = {}
+    for name, tinfo in (result.get("tables") if isinstance(result.get("tables"), dict) else {}).items():
+        if not isinstance(tinfo, dict) or not isinstance(tinfo.get("columns"), list):
+            continue
+        full_cols = {c["name"].lower() for c in tinfo["columns"] if isinstance(c, dict) and "name" in c}
+        # None = every column is in full (the table isn't grouped in this reply).
+        tables[_bare_name(name).lower()] = full_cols if tinfo.get("column_groups") else None
+    metrics = {m.get("name") for m in result.get("metrics") or [] if isinstance(m, dict)}
+    return {"tables": tables, "metrics": metrics}
+
+
+def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None, org) -> tuple[str, dict]:
+    """("open", {}) when this reply opens something the entry is tied to; ("reached", what to call)
+    when the reply touches it without opening it; ("out", {}) when it is out of this reply's scope."""
+    tables = opened["tables"]
+    defs = {t.name.split(".")[-1].lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+
+    def split(ref: str) -> tuple[str, str]:
+        t, part = ref.rsplit(".", 1)
+        return t.split(".")[-1].lower(), part
+
+    def group_open(t: str, group: str) -> bool:
+        if t not in tables:
+            return False
+        full = tables[t]
+        cols = (defs[t].column_groups or {}).get(group, []) if t in defs else []
+        return full is None or all(c.lower() in full for c in cols)
+
+    def column_open(t: str, col: str) -> bool:
+        return t in tables and (tables[t] is None or col.lower() in tables[t])
+
+    anchor_tables = {_bare_name(x).lower() for x in a.applies_to}
+    anchor_tables |= {split(r)[0] for r in [*a.columns, *a.column_groups]}
+    if a.metrics:
+        if any(m in opened["metrics"] for m in a.metrics):
+            return "open", {}
+        to_open = {"metric_names": list(a.metrics)}
+    elif a.columns or a.column_groups:
+        if any(column_open(*split(r)) for r in a.columns) or any(group_open(*split(r)) for r in a.column_groups):
+            return "open", {}
+        missing = sorted({t for t in anchor_tables if t not in tables})
+        if missing and not any(t in tables for t in anchor_tables):
+            to_open = {"dataset_names": missing}
+        else:
+            groups = list(a.column_groups) + [
+                f"{t}.{g}" for t, c in map(split, a.columns) if t in defs
+                for g, cols in (defs[t].column_groups or {}).items() if c in cols]
+            to_open = {"column_groups": groups}
+    else:
+        if any(t in tables for t in anchor_tables):
+            return "open", {}
+        to_open = {"dataset_names": sorted(anchor_tables)}
+    reached = in_scope is None or bool(anchor_tables & in_scope) or bool(set(a.metrics) & opened["metrics"])
+    return ("reached", to_open) if reached else ("out", {})
 
 
 _AMBIGUITIES_NOTE = (
@@ -2259,6 +2337,12 @@ _AMBIGUITIES_NOTE = (
     "follow the entry's `behaviour` even where a rule or example picks one option: `ask` = ask "
     "the user before running SQL, listing the option labels; `answer_and_offer` = answer with "
     "the default, say so, and offer the others. Use the labels, never table or column names."
+)
+# Added only when a reply carries signposts, so a reply without them pays nothing for it.
+_SIGNPOSTS_NOTE = (
+    " An entry under `ambiguity_signposts` is one you haven't opened yet: if the question matches "
+    "its `when`, make the get_datasource_schema call its `open` names before writing SQL, and "
+    "the full entry comes with it."
 )
 
 
