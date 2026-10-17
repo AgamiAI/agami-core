@@ -101,20 +101,18 @@ def test_a_group_entry_is_signposted_until_its_group_is_opened(tmp_path, monkeyp
     _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
     plain = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
     assert _full(plain) == [] and _posts(plain) == {
-        "order_date": {"dataset_names": ["orders"], "column_groups": ["orders.dates"]}
+        "order_date": {"ambiguity_names": ["order_date"]}
     }
     opened = _reply(tmp_path, monkeypatch, dataset_names=["orders"], column_groups=["dates"])
     assert _full(opened) == ["order_date"] and "ambiguity_signposts" not in opened
 
 
-def test_a_group_entry_on_a_table_not_requested_says_to_request_it(tmp_path, monkeypatch):
+def test_a_group_entry_on_a_table_not_requested_is_signposted_by_name(tmp_path, monkeypatch):
     _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
     reply = _reply(tmp_path, monkeypatch, dataset_names=["customers"])
     assert _full(reply) == [] and "ambiguity_signposts" not in reply, "out of this reply's scope"
     overview = _reply(tmp_path, monkeypatch, mode="summary")
-    assert _posts(overview) == {
-        "order_date": {"dataset_names": ["orders"], "column_groups": ["orders.dates"]}
-    }
+    assert _posts(overview) == {"order_date": {"ambiguity_names": ["order_date"]}}
 
 
 def test_a_column_entry_opens_with_an_ungrouped_table(tmp_path, monkeypatch):
@@ -123,12 +121,10 @@ def test_a_column_entry_opens_with_an_ungrouped_table(tmp_path, monkeypatch):
     assert _full(_reply(tmp_path, monkeypatch, dataset_names=["orders"])) == ["order_status"]
 
 
-def test_a_column_entry_on_a_grouped_table_points_at_its_group(tmp_path, monkeypatch):
+def test_a_column_entry_on_a_grouped_table_opens_with_its_group(tmp_path, monkeypatch):
     _build(tmp_path, [_entry("order_status", columns=["orders.status"])], GROUPS)
     reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
-    assert _posts(reply) == {
-        "order_status": {"dataset_names": ["orders"], "column_groups": ["orders.money"]}
-    }
+    assert _posts(reply) == {"order_status": {"ambiguity_names": ["order_status"]}}
     opened = _reply(tmp_path, monkeypatch, dataset_names=["orders"], column_groups=["money"])
     assert _full(opened) == ["order_status"]
 
@@ -205,7 +201,7 @@ def test_a_metric_entry_opens_with_its_metric_and_its_signpost_does_not_loop(tmp
     # A query that matches no metric, so `revenue` is only indexed, never sent in full.
     overview = _reply(tmp_path, monkeypatch, query="zzz", mode="summary")
     assert _full(overview) == [] and _posts(overview) == {
-        "rev_basis": {"metric_names": ["revenue"]}
+        "rev_basis": {"ambiguity_names": ["rev_basis"]}
     }
     assert _full(_follow(tmp_path, monkeypatch, overview, "rev_basis")) == ["rev_basis"]
 
@@ -232,7 +228,7 @@ def test_following_a_group_signpost_literally_opens_the_entry(tmp_path, monkeypa
     _build(tmp_path, [_entry("order_date", column_groups=["public.orders.dates"])], GROUPS)
     reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
     post = _posts(reply)["order_date"]
-    assert post == {"dataset_names": ["orders"], "column_groups": ["orders.dates"]}, "bare names"
+    assert post == {"ambiguity_names": ["order_date"]}
     assert _full(_follow(tmp_path, monkeypatch, reply, "order_date")) == ["order_date"]
     overview = _reply(tmp_path, monkeypatch, mode="summary")
     assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]
@@ -283,7 +279,7 @@ def test_an_undescribed_metric_entry_is_still_signposted_in_an_area_summary(tmp_
     doc["description"] = ""
     mf.write_text(yaml.safe_dump(doc))
     reply = _reply(tmp_path, monkeypatch, area=area, query="zzz", mode="summary")
-    assert _posts(reply) == {"rev_basis": {"metric_names": ["revenue"]}}
+    assert _posts(reply) == {"rev_basis": {"ambiguity_names": ["rev_basis"]}}
     assert _full(_follow(tmp_path, monkeypatch, reply, "rev_basis")) == ["rev_basis"]
 
 
@@ -328,7 +324,7 @@ def test_a_reversed_join_keeps_which_side_the_outer_join_preserves():
     assert "join_type" not in entry, "RIGHT read from the other side is the default LEFT"
 
 
-def test_a_signpost_keeps_the_declared_spelling_of_tables_and_groups(tmp_path, monkeypatch):
+def test_an_entry_on_mixed_case_names_opens_and_validates(tmp_path, monkeypatch):
     root = _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
     (path,) = root.rglob("orders.yaml")
     t = yaml.safe_load(path.read_text())
@@ -339,10 +335,7 @@ def test_a_signpost_keeps_the_declared_spelling_of_tables_and_groups(tmp_path, m
     for sa in root.rglob("subject_area.yaml"):
         sa.write_text(sa.read_text().replace("table: orders", "table: ORDERS"))
     overview = _reply(tmp_path, monkeypatch, mode="summary")
-    assert _posts(overview)["order_date"] == {
-        "dataset_names": ["ORDERS"],
-        "column_groups": ["ORDERS.Dates"],
-    }
+    assert _posts(overview)["order_date"] == {"ambiguity_names": ["order_date"]}
     assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]
     assert V.validate(load_datasource(root)).ok, (
         "the anchor resolves the way the validator reads it"
@@ -456,7 +449,9 @@ def test_a_group_emptied_in_one_copy_but_served_by_another_keeps_its_entry(tmp_p
     assert [a.name for a in load_datasource(root).ambiguities] == ["order_date"]
 
 
-def test_a_column_in_two_groups_opens_through_the_one_its_area_exposes(tmp_path, monkeypatch):
+def test_a_column_in_two_groups_is_reachable_through_the_one_its_area_exposes(
+    tmp_path, monkeypatch
+):
     groups = {"internal": ["status"], "public": ["status", "amount"], "dates": GROUPS["dates"]}
     root = _build(tmp_path, [_entry("order_status", columns=["orders.status"])], groups)
     (sa_file,) = root.rglob("subject_area.yaml")
@@ -466,10 +461,7 @@ def test_a_column_in_two_groups_opens_through_the_one_its_area_exposes(tmp_path,
             ref["expose_column_groups"] = ["public", "dates"]
     sa_file.write_text(yaml.safe_dump(sa, sort_keys=False))
     overview = _reply(tmp_path, monkeypatch, mode="summary")
-    assert _posts(overview)["order_status"] == {
-        "dataset_names": ["orders"],
-        "column_groups": ["orders.public"],
-    }
+    assert _posts(overview)["order_status"] == {"ambiguity_names": ["order_status"]}
     assert _full(_follow(tmp_path, monkeypatch, overview, "order_status")) == ["order_status"]
 
 
@@ -634,7 +626,7 @@ def test_a_group_anchor_survives_an_exclusion_in_another_schema(tmp_path):
     assert [a.name for a in load_datasource(root).ambiguities] == ["order_date"]
 
 
-def test_a_table_declared_with_its_schema_is_opened_through_its_area(tmp_path, monkeypatch):
+def test_an_entry_on_a_table_declared_with_its_schema_opens_by_name(tmp_path, monkeypatch):
     """`dataset_names` reaches such a table in neither spelling (#258), so the signpost routes
     through its area in full, and following it exactly returns the entry."""
     root = _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
@@ -643,5 +635,46 @@ def test_a_table_declared_with_its_schema_is_opened_through_its_area(tmp_path, m
     doc["name"], doc["schema"] = "public.orders", None
     path.write_text(yaml.safe_dump(doc))
     overview = _reply(tmp_path, monkeypatch, mode="summary")
-    assert _posts(overview)["order_date"] == {"area": "shop", "mode": "full"}
+    assert _posts(overview)["order_date"] == {"ambiguity_names": ["order_date"]}
     assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]
+
+
+# --- Copilot's sixth review on #484: a signpost opens by name, whatever the table resolves to ---
+
+
+def test_an_anchor_on_one_of_two_same_named_tables_opens_by_name(tmp_path, monkeypatch):
+    root = _build(tmp_path, [_entry("public_date", columns=["public.orders.ordered_on"])], GROUPS)
+    _add_archive_orders(root)
+    overview = _reply(tmp_path, monkeypatch, mode="summary")
+    assert _posts(overview) == {"public_date": {"ambiguity_names": ["public_date"]}}
+    assert _full(_follow(tmp_path, monkeypatch, overview, "public_date")) == ["public_date"]
+
+
+def test_a_call_by_name_returns_just_those_entries(tmp_path, monkeypatch):
+    _build(
+        tmp_path,
+        [
+            _entry("order_date", column_groups=["orders.dates"]),
+            _entry("other", applies_to=["customers"]),
+        ],
+        GROUPS,
+    )
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    out = tools.tool_get_datasource_schema(
+        {"datasource": "shop", "ambiguity_names": ["order_date", "nope"]}
+    )
+    reply = json.loads(out)
+    assert _full(reply) == ["order_date"] and reply["unknown_ambiguity_names"] == ["nope"]
+    assert "tables" not in reply and len(out) < 2000, "small, whatever the area or table would cost"
+    one = json.loads(
+        tools.tool_get_datasource_schema({"datasource": "shop", "ambiguity_names": "order_date"})
+    )
+    assert _full(one) == ["order_date"], (
+        "a lone string is a list of one, as for the other name lists"
+    )
+
+
+def test_a_named_entry_rides_a_table_reply_in_full(tmp_path, monkeypatch):
+    _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
+    reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"], ambiguity_names=["order_date"])
+    assert _full(reply) == ["order_date"] and "ambiguity_signposts" not in reply

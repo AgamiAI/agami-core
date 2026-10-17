@@ -201,7 +201,7 @@ def test_the_whole_datasource_signposts_the_entries_tied_to_tables(tmp_path, mon
     assert order == {
         "name": "order_period",
         "when": ORDER_DATE["when"],
-        "open": {"datasource": "shop", "dataset_names": ["orders"]},
+        "open": {"datasource": "shop", "ambiguity_names": ["order_period"]},
     }
 
 

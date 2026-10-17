@@ -200,9 +200,11 @@ class DatasourceSchemaResult(_Contract):
     # applies_to}`. Absent when none apply. Declared so a typed client sees the guidance.
     ambiguities: list[dict[str, Any]] | None = None
     # Entries this reply reaches without opening what they're tied to (#477): each
-    # `{name, when, open}`, where `open` is the get_datasource_schema arguments that bring the full
-    # entry (`dataset_names`, `column_groups` or `metric_names`). Absent when there are none.
+    # `{name, when, open}`, where `open` is `{datasource, ambiguity_names: [name]}`, the
+    # get_datasource_schema call that returns the full entry. Absent when there are none.
     ambiguity_signposts: list[dict[str, Any]] | None = None
+    # Names in `ambiguity_names` that no declared ambiguity has. Absent when every name resolved.
+    unknown_ambiguity_names: list[str] | None = None
     # How to act on `ambiguities`, sent with them so it survives a client trimming the server
     # instructions.
     ambiguities_note: str | None = None

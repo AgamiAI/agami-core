@@ -24,8 +24,10 @@ below corresponds to one such version.
 - **Ambiguities are disclosed progressively (#477).** An entry can be tied to `columns`
   (`table.column`), `column_groups` (`table.group`) or `metrics` as well as `applies_to` tables.
   The full entry arrives with the reply that opens one of them; any other reply that reaches it
-  carries it under `ambiguity_signposts` as `{name, when, open}`, where `open` is the call that
-  brings the full entry, datasource included, with names as the model declares them. The overview no longer carries table-tied entries in full. An entry whose
+  carries it under `ambiguity_signposts` as `{name, when, open}`, where `open` is
+  `{datasource, ambiguity_names: [name]}`. The new `ambiguity_names` argument returns the named
+  entries in full; alone, the reply is just those entries, so following a signpost never depends
+  on how a table, group or area would resolve. The overview no longer carries table-tied entries in full. An entry whose
   anchors are all hidden, excluded, stale or rejected is dropped rather than widened. The new fields are left out of a model's
   dump when empty, so a model that doesn't use them still loads on older servers. A model that does
   use them needs this version: older servers refuse the unknown fields, so upgrade the server before
