@@ -1752,6 +1752,8 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
 
 
 _FLIP = {"many_to_one": "one_to_many", "one_to_many": "many_to_one"}
+# Which side an outer join keeps follows the endpoints: `a LEFT JOIN b` read from b is `b RIGHT JOIN a`.
+_FLIP_JOIN = {"LEFT": "RIGHT", "RIGHT": "LEFT"}
 
 
 def _compact_other_joins(
@@ -1780,13 +1782,14 @@ def _compact_other_joins(
             continue
         forward = frm_in
         near, far = (frm, to) if forward else (to, frm)
-        rel = r.get("relationship")
+        rel, join_type = r.get("relationship"), r.get("join_type")
         if not forward:
             rel = _FLIP.get(rel, rel)
+            join_type = _FLIP_JOIN.get((join_type or "LEFT").upper(), join_type)
         far_schema = r.get("to_schema") if forward else r.get("from_schema")
         # A condition join and a key join to the same table are separate entries, so a reader never
         # wonders whether `keys` and `on` are alternatives or meant together.
-        key = (far, near, rel, r.get("join_type"), far_schema, "on" in r)
+        key = (far, near, rel, join_type, far_schema, "on" in r)
         slot = grouped.setdefault(key, {"keys": [], "on": []})
         if "on" in r:
             slot["on"].append(r["on"])
@@ -1799,7 +1802,7 @@ def _compact_other_joins(
         item.update({k: v for k, v in slot.items() if v})
         if far_schema and far_schema != schemas.get(near, schemas.get(_bare_name(near or ""))):
             item["schema"] = far_schema
-        if join_type and join_type != "LEFT":
+        if join_type and join_type.upper() != "LEFT":
             item["join_type"] = join_type
         compact.append(item)
     return kept, compact
@@ -2238,7 +2241,8 @@ def _areas_owning(org, tables: set[str]) -> set[str]:
     return out
 
 
-def _add_ambiguities(result: dict[str, Any], org, scope: "Scope") -> None:
+def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
+                     metrics: dict[str, tuple[Any, str | None]] | None = None) -> None:
     """The model's declared ambiguities, disclosed progressively (#473, #477).
 
     An entry for the whole datasource rides every reply in full. One tied to tables, column groups,
@@ -2259,12 +2263,21 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope") -> None:
     opened = _opened_in_reply(result)
     # Every defined table by bare, folded name, built once per reply rather than once per entry.
     defs = {_bare_name(t.name).lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+    # The metrics in this reply's scope, by canonical name -> the selectors this tool accepts for
+    # them (a name shared by two areas is selected as `name (area)`), whether or not they're shown.
+    selectors: dict[str, list[str]] = {}
+    for key, (m, _area) in (metrics or {}).items():
+        selectors.setdefault(m.name, []).append(key)
+    datasource = result.get("datasource")
     full, signposts = [], []
     for a in getattr(org, "ambiguities", []):
         if not a.anchored():
             full.append(_ambiguity_entry(a))
             continue
-        status, to_open = _ambiguity_reach(a, opened, in_scope, defs)
+        status, to_open = _ambiguity_reach(a, opened, in_scope, defs, selectors)
+        if status == "reached" and datasource:
+            # Followed literally, a call without it is refused when several datasources are served.
+            to_open = {"datasource": datasource, **to_open}
         if status == "open":
             full.append(_ambiguity_entry(a))
         elif status == "reached":
@@ -2285,7 +2298,7 @@ def _ambiguity_entry(a) -> dict[str, Any]:
 
 def _opened_in_reply(result: dict[str, Any]) -> dict[str, Any]:
     """What this reply has opened: per table, the columns it sends in full (None = every column, for
-    a table it doesn't group); the metrics it sends in full; and every metric it names at all."""
+    a table it doesn't group); and the metrics it sends in full."""
     tables: dict[str, set[str] | None] = {}
     for name, tinfo in (result.get("tables") if isinstance(result.get("tables"), dict) else {}).items():
         if not isinstance(tinfo, dict) or not isinstance(tinfo.get("columns"), list):
@@ -2293,12 +2306,11 @@ def _opened_in_reply(result: dict[str, Any]) -> dict[str, Any]:
         full_cols = {c["name"].lower() for c in tinfo["columns"] if isinstance(c, dict) and "name" in c}
         tables[_bare_name(name).lower()] = full_cols if tinfo.get("column_groups") else None
     metrics = {m.get("name") for m in result.get("metrics") or [] if isinstance(m, dict)}
-    named = metrics | set(result.get("metric_index") or {})
-    return {"tables": tables, "metrics": metrics, "named_metrics": named}
+    return {"tables": tables, "metrics": metrics}
 
 
 def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
-                     defs: dict[str, Any]) -> tuple[str, dict]:
+                     defs: dict[str, Any], selectors: dict[str, list[str]]) -> tuple[str, dict]:
     """("open", {}) when this reply opens something the entry is tied to; ("reached", the
     get_datasource_schema arguments that open it) when the reply touches it without opening it;
     ("out", {}) when it is outside this reply's scope.
@@ -2326,24 +2338,36 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
     def group_open(t: str, group: str) -> bool:
         return t in tables and (tables[t] is None or all(c.lower() in tables[t] for c in group_cols(t, group)))
 
+    def table_name(t: str) -> str:
+        # Folded only to compare: the call must carry the name as declared, which lookups match.
+        return _bare_name(defs[t].name) if t in defs else t
+
+    def group_name(t: str, group: str) -> str:
+        groups = (defs[t].column_groups or {}) if t in defs else {}
+        return next((g for g in groups if g.lower() == group.lower()), group)
+
     table_refs = {_bare_name(x).lower() for x in a.applies_to}
     finer = [split(r) for r in a.columns], [split(r) for r in a.column_groups]
     anchor_tables = table_refs | {t for t, _ in finer[0]} | {t for t, _ in finer[1]}
+    metric_keys = {k for m in a.metrics for k in [m, *selectors.get(m, [])]}
     if (any(t in tables for t in table_refs) or any(column_open(*c) for c in finer[0])
-            or any(group_open(*g) for g in finer[1]) or set(a.metrics) & opened["metrics"]):
+            or any(group_open(*g) for g in finer[1]) or metric_keys & opened["metrics"]):
         return "open", {}
     if table_refs:
-        to_open: dict[str, Any] = {"dataset_names": sorted(table_refs)}
+        to_open: dict[str, Any] = {"dataset_names": sorted(table_name(t) for t in table_refs)}
     elif finer[0] or finer[1]:
-        groups = {f"{t}.{g}" for t, g in finer[1]}
-        groups |= {f"{t}.{g}" for t, c in finer[0] if (g := group_of(t, c))}
-        to_open = {"dataset_names": sorted(anchor_tables)}
+        groups = {f"{table_name(t)}.{group_name(t, g)}" for t, g in finer[1]}
+        groups |= {f"{table_name(t)}.{g}" for t, c in finer[0] if (g := group_of(t, c))}
+        to_open = {"dataset_names": sorted(table_name(t) for t in anchor_tables)}
         if groups:
             to_open["column_groups"] = sorted(groups)
     else:
-        to_open = {"metric_names": list(a.metrics)}
+        # The selector this scope knows the metric by, so the call can't pick another area's.
+        to_open = {"metric_names": [k for m in a.metrics for k in selectors.get(m, [m])]}
+    # A metric in this reply's scope reaches the entry whether or not the reply lists it: an
+    # undescribed one is counted, not indexed, and its entry must not vanish with it.
     reached = (in_scope is None or bool(anchor_tables & in_scope)
-               or bool(set(a.metrics) & opened["named_metrics"]))
+               or any(selectors.get(m) for m in a.metrics))
     return ("reached", to_open) if reached else ("out", {})
 
 
@@ -2452,7 +2476,7 @@ def _schema_payload(
     ]
     # Last, once `tables` and `metrics` are in: an entry is open only if this reply opens what it is
     # tied to, and a signpost whose call returned the same signpost would loop (#477).
-    _add_ambiguities(result, org, scope)
+    _add_ambiguities(result, org, scope, metrics)
     return result
 
 
@@ -2744,7 +2768,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         if other_joins:
             result["joins_to_other_tables"] = other_joins
         _group_wide_columns(result, org, args.get("column_groups") or [])
-        _add_ambiguities(result, org, scope)
+        _add_ambiguities(result, org, scope, metrics)
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they
         # always have been: a caller that named its tables is not asking for the area map, and
         # `relationships` above answers "how do I join these" better than the org-level edge list,

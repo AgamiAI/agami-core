@@ -78,7 +78,14 @@ def test_an_edge_pointing_at_a_requested_table_reads_from_its_side():
     from orders would do to the row count."""
     _, other = _split([_edge("lines", "orders", "order_id", "id")])
     assert other == [
-        {"table": "lines", "from": "orders", "relationship": "one_to_many", "keys": ["id=order_id"]}
+        {
+            "table": "lines",
+            "from": "orders",
+            "relationship": "one_to_many",
+            "keys": ["id=order_id"],
+            # `lines LEFT JOIN orders` read from orders keeps every line: a RIGHT join (#484 review).
+            "join_type": "RIGHT",
+        }
     ]
 
 

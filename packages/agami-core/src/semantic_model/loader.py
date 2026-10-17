@@ -129,8 +129,17 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         ambiguities=ds_doc.get("ambiguities", []) or [],
     )
     if not include_rejected:
+        before = _metric_names(org)
         _drop_uses_of_unserved(org, hidden)
+        hidden.metrics_removed |= before - _metric_names(org)
+        # Always, not only when a table or column is hidden: a rejected metric hides nothing else.
+        org.ambiguities = _ambiguities_served(org.ambiguities, hidden, org)
     return org
+
+
+def _metric_names(org: Datasource) -> set[str]:
+    return {m.name for sa in org.subject_areas for m in sa.metrics} | {
+        m.name for m in org.cross_subject_area_metrics}
 
 
 def _key(schema: Optional[str], table: str) -> tuple[str, str]:
@@ -149,6 +158,7 @@ class _Hidden:
     served: dict = field(default_factory=dict)     # table -> columns some copy serves
     on_disk: dict = field(default_factory=dict)    # table -> columns some copy excluded or found stale
     dropped: set = field(default_factory=set)      # tables some copy excluded or found stale whole
+    metrics_removed: set = field(default_factory=set)  # metric names on disk but not served (#477)
 
     def keep(self, schema: Optional[str], name: str, kept: list, all_cols: list) -> None:
         k = _key(schema, name)
@@ -254,13 +264,34 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
     org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
     _drop_metrics_on_removed_bases(org)
-    org.ambiguities = _ambiguities_served(org.ambiguities, hidden)
 
 
-def _ambiguities_served(ambiguities: list, hidden: "_Hidden") -> list:
-    """A declared ambiguity without its hidden tables (#473): an entry naming only hidden tables is
-    left out, one naming some keeps the rest. One naming no table concerns the whole datasource and
-    stays. The file on disk is untouched."""
+def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -> list:
+    """A declared ambiguity without what the runtime doesn't serve (#473, #477): a hidden table, an
+    excluded or stale column, a group whose every column is hidden, a rejected or dropped metric.
+    Only on positive evidence: a name the model simply lacks is the validator's to report. An entry
+    naming nothing that survives is left out, never widened to the whole datasource. One naming
+    nothing at all concerns the whole datasource and stays. The file on disk is untouched."""
+    groups = {(t.name.split(".")[-1].lower()): t.column_groups or {}
+              for sa in org.subject_areas for t in sa.tables_defined}
+
+    # A ref without its table is malformed: left for the validator, never treated as removed.
+    def column_gone(ref: str) -> bool:
+        if "." not in ref:
+            return False
+        t, c = ref.rsplit(".", 1)
+        return hidden.table_hidden(None, t) or hidden.column_hidden(None, t, c)
+
+    def group_gone(ref: str) -> bool:
+        if "." not in ref:
+            return False
+        t, g = ref.rsplit(".", 1)
+        if hidden.table_hidden(None, t):
+            return True
+        cols = next((cs for name, cs in groups.get(t.split(".")[-1].lower(), {}).items()
+                     if name.lower() == g.lower()), None)
+        return bool(cols) and all(hidden.column_hidden(None, t, c) for c in cols)
+
     out = []
     for a in ambiguities:
         if not a.anchored():
@@ -268,14 +299,14 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden") -> list:
             continue
         # The intact name: `table_hidden` parses any qualifier itself, catalog.schema.table included.
         kept = [t for t in a.applies_to if not hidden.table_hidden(None, t)]
-        # `table.column` / `table.group` (#477): the table is everything before the last dot.
-        cols = [c for c in a.columns if not hidden.table_hidden(None, c.rsplit(".", 1)[0])]
-        groups = [g for g in a.column_groups if not hidden.table_hidden(None, g.rsplit(".", 1)[0])]
-        update = {"applies_to": kept, "columns": cols, "column_groups": groups}
-        # An entry whose every anchor is hidden is left out, never widened to the whole datasource.
-        if kept or cols or groups or a.metrics:
-            changed = (kept, cols, groups) != (a.applies_to, a.columns, a.column_groups)
-            out.append(a.model_copy(update=update) if changed else a)
+        cols = [c for c in a.columns if not column_gone(c)]
+        grps = [g for g in a.column_groups if not group_gone(g)]
+        mets = [m for m in a.metrics if m not in hidden.metrics_removed]
+        if not (kept or cols or grps or mets):
+            continue
+        update = {"applies_to": kept, "columns": cols, "column_groups": grps, "metrics": mets}
+        same = (kept, cols, grps, mets) == (a.applies_to, a.columns, a.column_groups, a.metrics)
+        out.append(a if same else a.model_copy(update=update))
     return out
 
 
@@ -420,6 +451,8 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
         for mf in sorted(mdir.glob("*.yaml")):
             mm = Metric(**(_read_yaml(mf) or {}))
             if not include_rejected and _rejected(mm):
+                if hidden is not None:
+                    hidden.metrics_removed.add(mm.name)
                 continue
             metrics.append(mm)
 

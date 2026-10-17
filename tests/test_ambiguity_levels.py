@@ -86,7 +86,12 @@ def _full(reply):
 
 
 def _posts(reply):
-    return {s["name"]: s["open"] for s in reply.get("ambiguity_signposts", [])}
+    """Each signpost's `open`, less the datasource it must always carry (checked here)."""
+    out = {}
+    for s in reply.get("ambiguity_signposts", []):
+        assert s["open"]["datasource"] == "shop", "a signpost must name its datasource"
+        out[s["name"]] = {k: v for k, v in s["open"].items() if k != "datasource"}
+    return out
 
 
 GROUPS = {"dates": ["ordered_on", "shipped_on"], "money": ["amount", "status"]}
@@ -186,9 +191,12 @@ def _add_metric(root, name="revenue"):
     return area.name
 
 
-def _follow(tmp_path, monkeypatch, open_args):
-    """Make exactly the call a signpost names, the way the note tells the agent to."""
-    return _reply(tmp_path, monkeypatch, **open_args)
+def _follow(tmp_path, monkeypatch, reply, name):
+    """Make exactly the call a signpost names, adding nothing, the way the note tells the agent to."""
+    (post,) = [p["open"] for p in reply["ambiguity_signposts"] if p["name"] == name]
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    out, _ = json.JSONDecoder().raw_decode(tools.tool_get_datasource_schema(dict(post)))
+    return out
 
 
 def test_a_metric_entry_opens_with_its_metric_and_its_signpost_does_not_loop(tmp_path, monkeypatch):
@@ -199,7 +207,7 @@ def test_a_metric_entry_opens_with_its_metric_and_its_signpost_does_not_loop(tmp
     assert _full(overview) == [] and _posts(overview) == {
         "rev_basis": {"metric_names": ["revenue"]}
     }
-    assert _full(_follow(tmp_path, monkeypatch, {"metric_names": ["revenue"]})) == ["rev_basis"]
+    assert _full(_follow(tmp_path, monkeypatch, overview, "rev_basis")) == ["rev_basis"]
 
 
 def test_a_metric_entry_is_signposted_not_dropped_when_a_query_narrows_the_metrics(
@@ -207,7 +215,7 @@ def test_a_metric_entry_is_signposted_not_dropped_when_a_query_narrows_the_metri
 ):
     root = _build(tmp_path, [_entry("rev_basis", metrics=["revenue"])])
     area = _add_metric(root)
-    reply = _reply(tmp_path, monkeypatch, area=area, query="customers")
+    reply = _reply(tmp_path, monkeypatch, area=area, query="customers", mode="summary")
     assert "rev_basis" in _full(reply) or "rev_basis" in _posts(reply)
 
 
@@ -222,11 +230,12 @@ def test_a_table_and_column_entry_opens_with_its_table_and_never_points_nowhere(
 
 def test_following_a_group_signpost_literally_opens_the_entry(tmp_path, monkeypatch):
     _build(tmp_path, [_entry("order_date", column_groups=["public.orders.dates"])], GROUPS)
-    post = _posts(_reply(tmp_path, monkeypatch, dataset_names=["orders"]))["order_date"]
+    reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
+    post = _posts(reply)["order_date"]
     assert post == {"dataset_names": ["orders"], "column_groups": ["orders.dates"]}, "bare names"
-    assert _full(_follow(tmp_path, monkeypatch, post)) == ["order_date"]
-    overview_post = _posts(_reply(tmp_path, monkeypatch, mode="summary"))["order_date"]
-    assert _full(_follow(tmp_path, monkeypatch, overview_post)) == ["order_date"]
+    assert _full(_follow(tmp_path, monkeypatch, reply, "order_date")) == ["order_date"]
+    overview = _reply(tmp_path, monkeypatch, mode="summary")
+    assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]
 
 
 def test_a_schema_qualified_edge_is_matched_by_its_bare_name():
@@ -260,3 +269,91 @@ def test_condition_and_key_joins_to_one_table_stay_separate_and_read_from_the_na
     keyed, conditioned = other
     assert keyed["keys"] == ["rep_key=rep_key"] and "on" not in keyed
     assert conditioned["on"] == [cond] and conditioned["relationship"] == "one_to_many"
+
+
+# --- Copilot review on #484 ---------------------------------------------------------------------
+
+
+def test_an_undescribed_metric_entry_is_still_signposted_in_an_area_summary(tmp_path, monkeypatch):
+    """Undescribed metrics are counted, not indexed, so reach comes from the scope's registry."""
+    root = _build(tmp_path, [_entry("rev_basis", metrics=["revenue"])])
+    area = _add_metric(root)
+    (mf,) = root.rglob("revenue.yaml")
+    doc = yaml.safe_load(mf.read_text())
+    doc["description"] = ""
+    mf.write_text(yaml.safe_dump(doc))
+    reply = _reply(tmp_path, monkeypatch, area=area, query="zzz", mode="summary")
+    assert _posts(reply) == {"rev_basis": {"metric_names": ["revenue"]}}
+    assert _full(_follow(tmp_path, monkeypatch, reply, "rev_basis")) == ["rev_basis"]
+
+
+def test_an_entry_tied_to_an_excluded_column_or_a_rejected_metric_is_dropped(tmp_path):
+    from semantic_model import curate as C
+
+    root = _build(
+        tmp_path,
+        [
+            _entry("by_status", columns=["orders.status"]),
+            _entry("rev_basis", metrics=["revenue"]),
+            _entry("kept", applies_to=["orders"]),
+        ],
+    )
+    area = _add_metric(root)
+    res = C.apply(
+        root,
+        [{"op": "exclude", "kind": "table", "area": area, "name": "orders", "column": "status"}],
+    )
+    assert not res.errors, res.errors
+    (mf,) = root.rglob("revenue.yaml")
+    doc = yaml.safe_load(mf.read_text())
+    doc["review_state"] = "rejected"
+    mf.write_text(yaml.safe_dump(doc))
+    assert [a.name for a in load_datasource(root).ambiguities] == ["kept"]
+    assert len(load_datasource(root, include_rejected=True).ambiguities) == 3
+
+
+def test_a_reversed_join_keeps_which_side_the_outer_join_preserves():
+    """`lines LEFT JOIN orders` keeps every line; read from orders it is `orders RIGHT JOIN lines`."""
+    left = {
+        "from_table": "lines",
+        "to_table": "orders",
+        "from_column": "order_id",
+        "to_column": "id",
+        "relationship": "many_to_one",
+        "join_type": "LEFT",
+    }
+    (entry,) = tools._compact_other_joins([left], {"orders"}, {})[1]
+    assert entry["join_type"] == "RIGHT" and entry["relationship"] == "one_to_many"
+    (entry,) = tools._compact_other_joins([{**left, "join_type": "RIGHT"}], {"orders"}, {})[1]
+    assert "join_type" not in entry, "RIGHT read from the other side is the default LEFT"
+
+
+def test_a_signpost_keeps_the_declared_spelling_of_tables_and_groups(tmp_path, monkeypatch):
+    root = _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
+    (path,) = root.rglob("orders.yaml")
+    t = yaml.safe_load(path.read_text())
+    t["name"] = "ORDERS"
+    t["column_groups"] = {"Dates": GROUPS["dates"], "money": GROUPS["money"]}
+    t["column_group_descriptions"] = {"Dates": "dates", "money": "money"}
+    path.write_text(yaml.safe_dump(t, sort_keys=False))
+    for sa in root.rglob("subject_area.yaml"):
+        sa.write_text(sa.read_text().replace("table: orders", "table: ORDERS"))
+    overview = _reply(tmp_path, monkeypatch, mode="summary")
+    assert _posts(overview)["order_date"] == {
+        "dataset_names": ["ORDERS"],
+        "column_groups": ["ORDERS.Dates"],
+    }
+    assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]
+
+
+def test_a_rejected_metric_alone_drops_its_entry(tmp_path):
+    """With nothing else hidden, the loader's other pruning is skipped; this one must still run."""
+    root = _build(
+        tmp_path, [_entry("rev_basis", metrics=["revenue"]), _entry("kept", applies_to=["orders"])]
+    )
+    _add_metric(root)
+    (mf,) = root.rglob("revenue.yaml")
+    doc = yaml.safe_load(mf.read_text())
+    doc["review_state"] = "rejected"
+    mf.write_text(yaml.safe_dump(doc))
+    assert [a.name for a in load_datasource(root).ambiguities] == ["kept"]

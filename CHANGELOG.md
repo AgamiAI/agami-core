@@ -17,16 +17,16 @@ below corresponds to one such version.
 - **A table reply sends joins to tables you didn't name compactly (#477).** A `dataset_names` reply
   keeps every join between the tables it names in full, and lists each join to another table under
   `joins_to_other_tables`: one entry per pair of tables, with its keys as `"named_col=other_col"`
-  (or its own condition, verbatim), its cardinality from the named table's side, and its schema or
-  join type only when they differ from the usual. Those joins were the largest part of a table
+  (or its own condition, verbatim), its cardinality and outer-join direction from the named table's side (a `LEFT` join read from
+  its other end is `RIGHT`), and its schema or join type only when they differ from the usual. Those joins were the largest part of a table
   reply, and a statement almost always uses only the tables it named. Replaying a 51-call question
   run on a 48-table model: 13% fewer schema characters, with no join dropped.
 - **Ambiguities are disclosed progressively (#477).** An entry can be tied to `columns`
   (`table.column`), `column_groups` (`table.group`) or `metrics` as well as `applies_to` tables.
   The full entry arrives with the reply that opens one of them; any other reply that reaches it
   carries it under `ambiguity_signposts` as `{name, when, open}`, where `open` is the call that
-  brings the full entry. The overview no longer carries table-tied entries in full. An entry whose
-  anchors are all hidden is dropped rather than widened. The new fields are left out of a model's
+  brings the full entry, datasource included, with names as the model declares them. The overview no longer carries table-tied entries in full. An entry whose
+  anchors are all hidden, excluded, stale or rejected is dropped rather than widened. The new fields are left out of a model's
   dump when empty, so a model that doesn't use them still loads on older servers. A model that does
   use them needs this version: older servers refuse the unknown fields, so upgrade the server before
   adding them to a model.
