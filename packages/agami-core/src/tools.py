@@ -2395,9 +2395,11 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
         return False
 
     table_refs = {_bare_name(x).lower() for x in a.applies_to}
-    # An anchor no table request can show would never open, so it can't justify a signpost.
-    cols = [c for c in map(split, a.columns) if column_reachable(*c)]
-    grps = [g for g in map(split, a.column_groups) if group_reachable(*g)]
+    # An anchor without its table is malformed: skipped here, as the loader skips it, and left for
+    # the validator to report, so it can never break a schema request. One no table request can
+    # show would never open, so it can't justify a signpost either.
+    cols = [c for c in map(split, (r for r in a.columns if "." in r)) if column_reachable(*c)]
+    grps = [g for g in map(split, (r for r in a.column_groups if "." in r)) if group_reachable(*g)]
     if not (table_refs or cols or grps or a.metrics):
         return "out"
     if (any(t in tables for t in table_refs) or any(column_open(*c) for c in cols)

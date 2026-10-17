@@ -716,3 +716,25 @@ def test_a_restricted_copy_in_another_schema_does_not_hide_the_signpost(tmp_path
     tfile.write_text(yaml.safe_dump(t))
     overview = _reply(tmp_path, monkeypatch, mode="summary")
     assert _posts(overview) == {"public_date": {"ambiguity_names": ["public_date"]}}
+
+
+def test_a_malformed_anchor_never_breaks_a_schema_request(tmp_path, monkeypatch):
+    """`columns: [status]` and `column_groups: [dates]` lack their table: the validator reports
+    them, and every schema request still answers."""
+    _build(
+        tmp_path,
+        [
+            _entry("bad_col", columns=["status"]),
+            _entry("bad_group", column_groups=["dates"]),
+            _entry("good", applies_to=["orders"]),
+        ],
+        GROUPS,
+    )
+    for args in (
+        {},
+        {"mode": "summary"},
+        {"dataset_names": ["orders"]},
+        {"dataset_names": ["customers"]},
+    ):
+        reply = _reply(tmp_path, monkeypatch, **args)
+        assert "error" not in reply, args
