@@ -426,3 +426,62 @@ def test_an_anchor_its_area_does_not_expose_is_never_signposted(tmp_path, monkey
         assert _full(_follow(tmp_path, monkeypatch, reply, "order_status")) == ["order_status"]
     else:
         assert "order_status" in _full(reply)
+
+
+# --- Copilot's third review on #484 -------------------------------------------------------------
+
+
+def test_a_group_emptied_in_one_copy_but_served_by_another_keeps_its_entry(tmp_path):
+    """Two areas may each define `orders`; a group is removed only when no copy still serves it."""
+    import shutil
+
+    from semantic_model import curate as C
+
+    root = _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
+    second = root / "subject_areas" / "shop_copy"
+    shutil.copytree(root / "subject_areas" / "shop", second)
+    sa = yaml.safe_load((second / "subject_area.yaml").read_text())
+    sa["name"] = "shop_copy"
+    sa["tables"] = [r for r in sa["tables"] if r["table"] == "orders"]
+    (second / "subject_area.yaml").write_text(yaml.safe_dump(sa, sort_keys=False))
+    (second / "tables" / "customers.yaml").unlink()
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/shop_copy")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds, sort_keys=False))
+    ops = [
+        {"op": "exclude", "kind": "table", "area": "shop", "name": "orders", "column": c}
+        for c in GROUPS["dates"]
+    ]
+    assert not C.apply(root, ops).errors
+    assert [a.name for a in load_datasource(root).ambiguities] == ["order_date"]
+
+
+def test_a_column_in_two_groups_opens_through_the_one_its_area_exposes(tmp_path, monkeypatch):
+    groups = {"internal": ["status"], "public": ["status", "amount"], "dates": GROUPS["dates"]}
+    root = _build(tmp_path, [_entry("order_status", columns=["orders.status"])], groups)
+    (sa_file,) = root.rglob("subject_area.yaml")
+    sa = yaml.safe_load(sa_file.read_text())
+    for ref in sa["tables"]:
+        if ref["table"] == "orders":
+            ref["expose_column_groups"] = ["public", "dates"]
+    sa_file.write_text(yaml.safe_dump(sa, sort_keys=False))
+    overview = _reply(tmp_path, monkeypatch, mode="summary")
+    assert _posts(overview)["order_status"] == {
+        "dataset_names": ["orders"],
+        "column_groups": ["orders.public"],
+    }
+    assert _full(_follow(tmp_path, monkeypatch, overview, "order_status")) == ["order_status"]
+
+
+def test_a_join_from_a_same_named_table_in_another_schema_stays_whole():
+    edge = {
+        "from_table": "orders",
+        "from_schema": "archive",
+        "to_table": "ledger",
+        "to_schema": "public",
+        "from_column": "id",
+        "to_column": "order_id",
+        "relationship": "one_to_many",
+    }
+    kept, other = tools._compact_other_joins([edge], {"orders"}, {"orders": "public"})
+    assert kept == [edge] and other == []

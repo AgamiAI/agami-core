@@ -161,7 +161,15 @@ class _Hidden:
     on_disk: dict = field(default_factory=dict)    # table -> columns some copy excluded or found stale
     dropped: set = field(default_factory=set)      # tables some copy excluded or found stale whole
     metrics_removed: set = field(default_factory=set)  # metric names on disk but not served (#477)
-    groups_removed: set = field(default_factory=set)   # (bare table, group), folded: emptied on load
+    # (table key, folded group): a group some copy emptied on load, and one some copy still serves.
+    # Removed means emptied and served by no copy, as for columns.
+    groups_emptied: set = field(default_factory=set)
+    groups_served: set = field(default_factory=set)
+
+    def group_removed(self, table: str, group: str) -> bool:
+        k = self._resolve(None, table)
+        g = (k, group.lower())
+        return k is not None and g in self.groups_emptied and g not in self.groups_served
 
     def keep(self, schema: Optional[str], name: str, kept: list, all_cols: list) -> None:
         k = _key(schema, name)
@@ -289,7 +297,7 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -
         if "." not in ref:
             return False
         t, g = ref.rsplit(".", 1)
-        if hidden.table_hidden(None, t) or (t.split(".")[-1].lower(), g.lower()) in hidden.groups_removed:
+        if hidden.table_hidden(None, t) or hidden.group_removed(t, g):
             return True
         cols = next((cs for name, cs in groups.get(t.split(".")[-1].lower(), {}).items()
                      if name.lower() == g.lower()), None)
@@ -439,8 +447,9 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
                 # (excluding a deep table's column would otherwise break the whole model).
                 emptied = _prune_column_groups(t)
                 if hidden is not None:
-                    bare = t.name.split(".")[-1].lower()
-                    hidden.groups_removed.update((bare, g.lower()) for g in emptied)
+                    k = _key(t.schema_name, t.name)
+                    hidden.groups_emptied.update((k, g.lower()) for g in emptied)
+                    hidden.groups_served.update((k, g.lower()) for g in t.column_groups)
             tables_defined.append(t)
 
     live_tables = {t.name for t in tables_defined}

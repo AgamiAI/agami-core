@@ -1782,6 +1782,13 @@ def _compact_other_joins(
             continue
         forward = frm_in
         near, far = (frm, to) if forward else (to, frm)
+        # Edges are gathered by bare name, so one may start from a same-named table in another
+        # schema. Compacted, it would read as a join from the table this reply returned: keep it whole.
+        near_schema = r.get("from_schema") if forward else r.get("to_schema")
+        returned = schemas.get(near, schemas.get(_bare_name(near or "")))
+        if near_schema and returned and near_schema != returned:
+            kept.append(r)
+            continue
         rel, join_type = r.get("relationship"), r.get("join_type")
         if not forward:
             rel = _FLIP.get(rel, rel)
@@ -2339,8 +2346,19 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
         return next((cols for g, cols in groups.items() if g.lower() == group.lower()), [])
 
     def group_of(t: str, col: str) -> str | None:
+        """The group to open for a column: one the owning area exposes, when a column sits in
+        several. None for a column in no group, or in no group the area exposes."""
         groups = (defs[t].column_groups or {}) if t in defs else {}
-        return next((g for g, cols in groups.items() if col.lower() in {c.lower() for c in cols}), None)
+        containing = [g for g, cols in groups.items() if col.lower() in {c.lower() for c in cols}]
+        if not containing:
+            return None
+        allowed = exposed.get(t)
+        return next((g for g in containing if allowed is None or g.lower() in allowed), None)
+
+    def column_reachable(t: str, col: str) -> bool:
+        groups = (defs[t].column_groups or {}) if t in defs else {}
+        in_any = any(col.lower() in {c.lower() for c in cols} for cols in groups.values())
+        return not in_any or group_of(t, col) is not None
 
     def column_open(t: str, col: str) -> bool:
         return t in tables and (tables[t] is None or col.lower() in tables[t])
@@ -2362,7 +2380,7 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
         return group is None or exposed.get(t) is None or group.lower() in exposed[t]
 
     table_refs = {_bare_name(x).lower() for x in a.applies_to}
-    finer = ([c for c in map(split, a.columns) if reachable_group(c[0], group_of(*c))],
+    finer = ([c for c in map(split, a.columns) if column_reachable(*c)],
              [g for g in map(split, a.column_groups) if reachable_group(*g)])
     if not (table_refs or finer[0] or finer[1] or a.metrics):
         return "out", {}
