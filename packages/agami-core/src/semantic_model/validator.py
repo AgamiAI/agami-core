@@ -234,35 +234,54 @@ def _check_ambiguities(org: Datasource, org_tables: dict, res: ValidationResult)
             if t.split(".")[-1].lower() not in known:
                 res.error("ambiguity_unknown_table",
                           f"ambiguity {a.name!r} applies_to {t!r}, which the model doesn't define")
-        _check_ambiguity_anchors(org, org_tables, a, res)
+        _check_ambiguity_anchors(org, a, res)
 
 
-def _check_ambiguity_anchors(org: Datasource, org_tables: dict, a, res: ValidationResult) -> None:
+def _check_ambiguity_anchors(org: Datasource, a, res: ValidationResult) -> None:
     """The finer anchors (#477) name a real `table.column`, `table.group` or metric. A misspelled
     one would leave the entry signposted at a thing that never opens."""
-    by_bare = {name.split(".")[-1].lower(): t for name, t in org_tables.items()}
+    from .models import table_key
 
-    def table_of(ref: str, kind: str):
+    # Every definition by identity, so `sales.orders` and `archive.orders` are told apart.
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+
+    def resolve(table: str) -> list:
+        schema, bare = table_key(table)
+        if schema:
+            exact = [(k, t) for k, t in defs if k == (schema, bare)]
+            # A stored table without a schema also matches, as the loader reads it.
+            return exact or [(k, t) for k, t in defs if k == ("", bare)]
+        return [(k, t) for k, t in defs if k[1] == bare]
+
+    def copies_of(ref: str, kind: str) -> tuple[list, str]:
+        """Every served copy of the table `ref` names (one table may be defined in several areas),
+        or [] after reporting why it can't be resolved."""
         if "." not in ref:
             res.error("ambiguity_unknown_anchor",
                       f"ambiguity {a.name!r} {kind} {ref!r} must be written table.{kind[:-1]}")
-            return None, ""
+            return [], ""
         table, part = ref.rsplit(".", 1)
-        t = by_bare.get(table.split(".")[-1].lower())
-        if t is None:
+        found = resolve(table)
+        if not found:
             res.error("ambiguity_unknown_anchor",
                       f"ambiguity {a.name!r} {kind} {ref!r} names a table the model doesn't define")
-        return t, part
+            return [], part
+        if len({k for k, _ in found}) > 1:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} {kind} {ref!r} matches tables in several schemas; "
+                      "write it schema.table.<name>")
+            return [], part
+        return [t for _, t in found], part
 
     for ref in a.columns:
-        t, col = table_of(ref, "columns")
-        if t is not None and col.lower() not in {c.name.lower() for c in t.columns}:
+        copies, col = copies_of(ref, "columns")
+        if copies and col.lower() not in {c.name.lower() for t in copies for c in t.columns}:
             res.error("ambiguity_unknown_anchor",
                       f"ambiguity {a.name!r} columns {ref!r}: the table has no such column")
     for ref in a.column_groups:
-        t, group = table_of(ref, "column_groups")
+        copies, group = copies_of(ref, "column_groups")
         # Folded, as the loader and the reply resolve a group anchor.
-        if t is not None and group.lower() not in {g.lower() for g in (t.column_groups or {})}:
+        if copies and group.lower() not in {g.lower() for t in copies for g in (t.column_groups or {})}:
             res.error("ambiguity_unknown_anchor",
                       f"ambiguity {a.name!r} column_groups {ref!r}: the table has no such group")
     metric_names = {m.name for sa in org.subject_areas for m in sa.metrics}

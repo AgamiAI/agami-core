@@ -546,3 +546,102 @@ def test_the_copy_a_table_request_returns_decides_what_is_exposed(tmp_path, monk
     reply = _reply(tmp_path, monkeypatch, dataset_names=["orders"])
     assert "order_date" in _posts(reply), "the served copy shows `dates`, so the entry is reachable"
     assert _full(_follow(tmp_path, monkeypatch, reply, "order_date")) == ["order_date"]
+
+
+# --- Copilot's fifth review on #484: tables told apart by schema, and qualified declared names --
+
+
+def _add_archive_orders(root):
+    """A second `orders` in schema `archive`, in its own area, with different columns and groups."""
+    adir = root / "subject_areas" / "archive"
+    (adir / "tables").mkdir(parents=True)
+    (adir / "tables" / "orders.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "orders",
+                "schema": "archive",
+                "storage_connection": "c",
+                "grain": ["id"],
+                "description": "archived orders",
+                "columns": [
+                    {"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "shipped_on", "type": "date"},
+                    {"name": "historical_status", "type": "string"},
+                ],
+                "column_groups": {"dates": ["shipped_on"]},
+                "column_group_descriptions": {"dates": "dates"},
+            }
+        )
+    )
+    conn = yaml.safe_load((root / "datasource.yaml").read_text())["storage_connections"][0]["name"]
+    doc = yaml.safe_load((adir / "tables" / "orders.yaml").read_text())
+    doc["storage_connection"] = conn
+    (adir / "tables" / "orders.yaml").write_text(yaml.safe_dump(doc))
+    (adir / "subject_area.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "archive",
+                "description": "archive",
+                "tables": [{"storage_connection": conn, "schema": "archive", "table": "orders"}],
+            }
+        )
+    )
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/archive")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds, sort_keys=False))
+
+
+def test_a_qualified_anchor_is_checked_against_its_own_schema(tmp_path):
+    root = _build(
+        tmp_path,
+        [
+            _entry("ok_public", columns=["public.orders.ordered_on"]),
+            _entry("ok_archive", columns=["archive.orders.historical_status"]),
+            _entry("ok_group", column_groups=["archive.orders.dates"]),
+            _entry("bad_archive", columns=["archive.orders.ordered_on"]),
+            _entry("ambiguous", columns=["orders.ordered_on"]),
+        ],
+        GROUPS,
+    )
+    _add_archive_orders(root)
+    res = V.validate(load_datasource(root))
+    bad = sorted(
+        f.message.split("'")[1] for f in res.findings if f.code == "ambiguity_unknown_anchor"
+    )
+    assert bad == ["ambiguous", "bad_archive"]
+
+
+def test_a_group_anchor_survives_an_exclusion_in_another_schema(tmp_path):
+    """`public.orders.dates` keeps `ordered_on`; excluding `shipped_on` there must not be read
+    against `archive.orders.dates`, which holds only `shipped_on`."""
+    from semantic_model import curate as C
+
+    root = _build(tmp_path, [_entry("order_date", column_groups=["public.orders.dates"])], GROUPS)
+    _add_archive_orders(root)
+    res = C.apply(
+        root,
+        [
+            {
+                "op": "exclude",
+                "kind": "table",
+                "area": "shop",
+                "name": "orders",
+                "column": "shipped_on",
+            }
+        ],
+    )
+    assert not res.errors, res.errors
+    assert [a.name for a in load_datasource(root).ambiguities] == ["order_date"]
+
+
+def test_a_table_declared_with_its_schema_is_opened_through_its_area(tmp_path, monkeypatch):
+    """`dataset_names` reaches such a table in neither spelling (#258), so the signpost routes
+    through its area in full, and following it exactly returns the entry."""
+    root = _build(tmp_path, [_entry("order_date", column_groups=["orders.dates"])], GROUPS)
+    (path,) = root.rglob("orders.yaml")
+    doc = yaml.safe_load(path.read_text())
+    doc["name"], doc["schema"] = "public.orders", None
+    path.write_text(yaml.safe_dump(doc))
+    overview = _reply(tmp_path, monkeypatch, mode="summary")
+    assert _posts(overview)["order_date"] == {"area": "shop", "mode": "full"}
+    assert _full(_follow(tmp_path, monkeypatch, overview, "order_date")) == ["order_date"]

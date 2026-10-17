@@ -2276,7 +2276,9 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
     # `expose_column_groups` may hide some groups. None = every group.
     # A later area's copy wins, as in `_table_contexts`, so a copy without a restriction resets it.
     exposed: dict[str, set[str] | None] = {}
+    owner: dict[str, str] = {}
     for sa in org.subject_areas:
+        owner.update({_bare_name(t.name).lower(): sa.name for t in sa.tables_defined})
         refs = {_bare_name(r.table).lower(): r for r in sa.tables}
         for t in sa.tables_defined:
             bare = _bare_name(t.name).lower()
@@ -2294,7 +2296,7 @@ def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
         if not a.anchored():
             full.append(_ambiguity_entry(a))
             continue
-        status, to_open = _ambiguity_reach(a, opened, in_scope, defs, selectors, exposed)
+        status, to_open = _ambiguity_reach(a, opened, in_scope, defs, selectors, exposed, owner)
         if status == "reached" and datasource:
             # Followed literally, a call without it is refused when several datasources are served.
             to_open = {"datasource": datasource, **to_open}
@@ -2331,7 +2333,7 @@ def _opened_in_reply(result: dict[str, Any]) -> dict[str, Any]:
 
 def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
                      defs: dict[str, Any], selectors: dict[str, list[str]],
-                     exposed: dict[str, set[str] | None]) -> tuple[str, dict]:
+                     exposed: dict[str, set[str] | None], owner: dict[str, str]) -> tuple[str, dict]:
     """("open", {}) when this reply opens something the entry is tied to; ("reached", the
     get_datasource_schema arguments that open it) when the reply touches it without opening it;
     ("out", {}) when it is outside this reply's scope.
@@ -2374,7 +2376,11 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
 
     def table_name(t: str) -> str:
         # Folded only to compare: the call must carry the name as declared, which lookups match.
-        return _bare_name(defs[t].name) if t in defs else t
+        # A qualified declared name stays whole, so it can be routed to its area below.
+        if t in defs:
+            name = defs[t].name
+            return name if "." in name else _bare_name(name)
+        return t
 
     def group_name(t: str, group: str) -> str:
         groups = (defs[t].column_groups or {}) if t in defs else {}
@@ -2406,6 +2412,12 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
     else:
         # The selector this scope knows the metric by, so the call can't pick another area's.
         to_open = {"metric_names": [k for m in a.metrics for k in selectors.get(m, [m])]}
+    # A table declared with its schema in its name (`public.orders`) can't be reached through
+    # `dataset_names` in either spelling (#258), so open it through its area, in full.
+    unrequestable = [t for t in to_open.get("dataset_names", []) if "." in t]
+    if unrequestable:
+        t = _bare_name(unrequestable[0]).lower()
+        to_open = {"area": owner.get(t, ""), "mode": "full"}
     # A metric in this reply's scope reaches the entry whether or not the reply lists it: an
     # undescribed one is counted, not indexed, and its entry must not vanish with it.
     reached = (in_scope is None or bool(anchor_tables & in_scope)

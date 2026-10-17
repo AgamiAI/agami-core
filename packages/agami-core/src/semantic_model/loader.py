@@ -283,9 +283,6 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -
     Only on positive evidence: a name the model simply lacks is the validator's to report. An entry
     naming nothing that survives is left out, never widened to the whole datasource. One naming
     nothing at all concerns the whole datasource and stays. The file on disk is untouched."""
-    groups = {(t.name.split(".")[-1].lower()): t.column_groups or {}
-              for sa in org.subject_areas for t in sa.tables_defined}
-
     # A ref without its table is malformed: left for the validator, never treated as removed.
     def column_gone(ref: str) -> bool:
         if "." not in ref:
@@ -297,11 +294,8 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -
         if "." not in ref:
             return False
         t, g = ref.rsplit(".", 1)
-        if hidden.table_hidden(None, t) or hidden.group_removed(t, g):
-            return True
-        cols = next((cs for name, cs in groups.get(t.split(".")[-1].lower(), {}).items()
-                     if name.lower() == g.lower()), None)
-        return bool(cols) and all(hidden.column_hidden(None, t, c) for c in cols)
+        # Only the schema-aware record: emptied by some copy of this table and served by none.
+        return hidden.table_hidden(None, t) or hidden.group_removed(t, g)
 
     out = []
     for a in ambiguities:
