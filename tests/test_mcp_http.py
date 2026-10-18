@@ -388,10 +388,11 @@ def test_a_json_result_with_a_trailing_text_suffix_is_still_stamped(base_url):
     assert text[end:] == "\n## Domain context\nsome narrative prose, not JSON"
 
 
-def test_get_datasource_schemas_markdown_suffix_still_gets_stamped(base_url, tmp_path, monkeypatch):
-    """The real shape, not a synthetic stand-in: `tool_get_datasource_schema` always appends a
-    '## Domain context' section after its JSON body (org narrative + model-derived summary), so its
-    result is exactly the "JSON prefix + trailing text" case the fix above exists for."""
+def test_get_datasource_schemas_reply_gets_stamped_and_stays_one_json_document(base_url, tmp_path, monkeypatch):
+    """The real shape, not a synthetic stand-in. `tool_get_datasource_schema` used to append its
+    '## Domain context' after the JSON body; it now carries it inside, as `domain_context` (#477),
+    so the reply is one JSON document before and after stamping. The "JSON prefix + trailing text"
+    path stays for any tool that still answers that way."""
     pytest.importorskip("pydantic")
     pytest.importorskip("yaml")
     from semantic_model import build
@@ -405,14 +406,14 @@ def test_get_datasource_schemas_markdown_suffix_still_gets_stamped(base_url, tmp
     tools.resolved_org_id.cache_clear()
 
     raw = tools.tool_get_datasource_schema({"datasource": "crm"})
-    head, end = json.JSONDecoder().raw_decode(raw)
-    assert raw[end:], "expected this profile to produce a non-empty domain-context suffix"
+    head = json.loads(raw)  # one document: a client's JSON parser reads it whole
+    assert head.get("domain_context"), "expected this profile to produce a domain context"
 
     stamped = mcp_http._with_caller_identity(raw, "jordan@example.com")
-    body, stamped_end = json.JSONDecoder().raw_decode(stamped)
+    body = json.loads(stamped)
     assert body["caller_identity"] == "jordan@example.com"
     assert body["datasource"] == "crm"  # the real payload, not just any dict
-    assert stamped[stamped_end:] == raw[end:]  # the markdown tail is untouched
+    assert body["domain_context"] == head["domain_context"]  # the context is untouched
 
 
 def test_a_tool_results_own_caller_identity_key_is_overwritten_not_trusted(base_url):

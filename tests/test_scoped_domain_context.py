@@ -145,9 +145,10 @@ def served(tmp_path, monkeypatch):
     tools.bootstrap_paths()
 
     def reply(**args) -> str:
-        out = tools.tool_get_datasource_schema({"datasource": "crm", **args})
-        _head, end = json.JSONDecoder().raw_decode(out)
-        return out[end:]
+        # The domain context is the reply's `domain_context` field, inside the JSON (#477).
+        return json.loads(tools.tool_get_datasource_schema({"datasource": "crm", **args})).get(
+            "domain_context", ""
+        )
 
     return reply
 
