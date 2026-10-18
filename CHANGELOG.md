@@ -14,6 +14,12 @@ below corresponds to one such version.
 
 ### Changed
 
+- **A schema reply is one JSON document (#477).** `get_datasource_schema` used to append its domain
+  context (the `datasource.md` narrative, the derived model summary and `USER_MEMORY.md`) as text
+  after the JSON object, so a client that saved a large reply to a file and parsed it as JSON failed
+  with "Extra data". The same text now rides inside, as `domain_context`. **Clients:** read
+  `domain_context` instead of the text after the object; the golden-eval runner reads either shape.
+
 - **A table reply sends joins to tables you didn't name compactly (#477).** A `dataset_names` reply
   keeps every join between the tables it names in full, and lists each join to another table under
   `joins_to_other_tables`: one entry per pair of tables, with its keys as `"named_col=other_col"`

@@ -125,8 +125,8 @@ class ListDatasourcesResult(_Contract):
 
 
 # ---------------------------------------------------------------------------
-# get_datasource_schema — the structured payload (the tool also appends Markdown
-# domain context as text; a serving backend can emit this structured part as JSON).
+# get_datasource_schema — the structured payload; its Markdown domain context is the
+# `domain_context` field (#477).
 # ---------------------------------------------------------------------------
 
 
@@ -216,6 +216,9 @@ class DatasourceSchemaResult(_Contract):
     # `{table, from, relationship, keys: ["from_col=table_col", ...], schema?, join_type?}` per
     # pair of tables. Absent when there are none.
     joins_to_other_tables: list[dict[str, Any]] | None = None
+    # The datasource.md narrative, derived model summary and USER_MEMORY.md preferences, as one
+    # Markdown string (#477). It used to follow the JSON object as text. Absent when there is none.
+    domain_context: str | None = None
     metrics: list[dict[str, Any]] | None = None
 
 

@@ -571,16 +571,23 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
 
 
 def _split_payload(payload: str) -> tuple[dict, str]:
-    """The tool's response in its two parts: the leading JSON document, and the prose after it.
+    """The tool's response in its two parts: the JSON document, and its prose (the domain context).
 
-    A response that does not open with a JSON object — an error sentence, say — has no document and
-    is all prose, which is the reading that keeps everything and drops nothing.
+    The prose is the document's `domain_context` field (#477), or, from an older server, the text
+    after the object. A response that does not open with a JSON object — an error sentence, say —
+    has no document and is all prose, which is the reading that keeps everything and drops nothing.
     """
     try:
         document, end = json.JSONDecoder().raw_decode(payload)
     except ValueError:
         return {}, payload
-    return (document if isinstance(document, dict) else {}), payload[end:]
+    if not isinstance(document, dict):
+        return {}, payload[end:]
+    # The prose now rides inside the JSON as `domain_context` (#477); an older server sent it after
+    # the object, so both are read and kept.
+    prose = document.pop("domain_context", None) or ""
+    tail = payload[end:]
+    return document, (prose + ("\n" + tail if tail.strip() else "")) if prose else tail
 
 
 def _fixed_context(schema: str, org_context: str) -> str:

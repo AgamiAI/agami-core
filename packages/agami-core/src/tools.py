@@ -2586,7 +2586,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     <=50, index 51+); a hard ~60K-char budget then downgrades one rung at a time
     (full→summary→index) even for an explicit `mode="full"`, setting `truncated=true`.
     `metric_index` (name->description for every described metric in scope, the rest counted) +
-    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context: whole on
+    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context, in the
+    JSON as `domain_context` (#477): whole on
     the overview, cut to the tables in scope on the `area` and table tiers (#419).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
@@ -2884,7 +2885,10 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # What execute_sql must be sent back on a hosted deployment (#364).
     result["model_version"] = model_version
 
-    parts = [json.dumps(result, separators=REPLY_SEPARATORS, default=str)]
+    # The prose rides INSIDE the JSON, as `domain_context` (#477): it used to follow the object as
+    # text, which a client's JSON parser rejects ("Extra data"), so a reply offloaded to a file
+    # couldn't be read back as one document.
+    parts: list[str] = []
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
     # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
     # Source (datasource.md / USER_MEMORY.md text) comes from the DB under the DB backend, files
@@ -2916,7 +2920,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         glossary_tables=scoped,
     )
     if domain_context:
-        parts.append(f"\n## Domain context\n{domain_context}")
+        parts.append(f"## Domain context\n{domain_context}")
         if scoped is not None:
             parts.append(
                 "\nThis is the domain context for the tables in scope. Glossary terms for other "
@@ -2926,7 +2930,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
-    return "\n".join(parts)
+    if parts:
+        result["domain_context"] = "\n".join(parts).strip()
+    return json.dumps(result, separators=REPLY_SEPARATORS, default=str)
 
 
 def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
@@ -5254,8 +5260,8 @@ TOOLS: dict[str, dict[str, Any]] = {
             "the current scope, and the response reports that scope; "
             "`metrics_without_description` counts the rest, which come back in full with their "
             "tables and are matched by `query`. `mode=auto` (default) picks "
-            "verbosity (full/summary/index) under a char budget. Plus datasource.md / "
-            "USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
+            "verbosity (full/summary/index) under a char budget. `domain_context` carries the "
+            "datasource.md / USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
             "scoped calls carry the terms for their tables. Use metric `calculation`/`binding` VERBATIM (`binding` is "
             "already this deployment's dialect). `ambiguities`, when present, lists questions the "
             "model owner marked as having more than one meaning, opened by this reply's scope, and "
