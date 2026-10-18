@@ -129,8 +129,19 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         ambiguities=ds_doc.get("ambiguities", []) or [],
     )
     if not include_rejected:
+        before = _metric_names(org)
         _drop_uses_of_unserved(org, hidden)
+        hidden.metrics_removed |= before - _metric_names(org)
+        # Two areas may share a metric name: rejecting one copy doesn't remove the name.
+        hidden.metrics_removed -= _metric_names(org)
+        # Always, not only when a table or column is hidden: a rejected metric hides nothing else.
+        org.ambiguities = _ambiguities_served(org.ambiguities, hidden, org)
     return org
+
+
+def _metric_names(org: Datasource) -> set[str]:
+    return {m.name for sa in org.subject_areas for m in sa.metrics} | {
+        m.name for m in org.cross_subject_area_metrics}
 
 
 def _key(schema: Optional[str], table: str) -> tuple[str, str]:
@@ -149,6 +160,16 @@ class _Hidden:
     served: dict = field(default_factory=dict)     # table -> columns some copy serves
     on_disk: dict = field(default_factory=dict)    # table -> columns some copy excluded or found stale
     dropped: set = field(default_factory=set)      # tables some copy excluded or found stale whole
+    metrics_removed: set = field(default_factory=set)  # metric names on disk but not served (#477)
+    # (table key, folded group): a group some copy emptied on load, and one some copy still serves.
+    # Removed means emptied and served by no copy, as for columns.
+    groups_emptied: set = field(default_factory=set)
+    groups_served: set = field(default_factory=set)
+
+    def group_removed(self, table: str, group: str) -> bool:
+        k = self._resolve(None, table)
+        g = (k, group.lower())
+        return k is not None and g in self.groups_emptied and g not in self.groups_served
 
     def keep(self, schema: Optional[str], name: str, kept: list, all_cols: list) -> None:
         k = _key(schema, name)
@@ -254,22 +275,43 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
     org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
     _drop_metrics_on_removed_bases(org)
-    org.ambiguities = _ambiguities_served(org.ambiguities, hidden)
 
 
-def _ambiguities_served(ambiguities: list, hidden: "_Hidden") -> list:
-    """A declared ambiguity without its hidden tables (#473): an entry naming only hidden tables is
-    left out, one naming some keeps the rest. One naming no table concerns the whole datasource and
-    stays. The file on disk is untouched."""
+def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -> list:
+    """A declared ambiguity without what the runtime doesn't serve (#473, #477): a hidden table, an
+    excluded or stale column, a group whose every column is hidden, a rejected or dropped metric.
+    Only on positive evidence: a name the model simply lacks is the validator's to report. An entry
+    naming nothing that survives is left out, never widened to the whole datasource. One naming
+    nothing at all concerns the whole datasource and stays. The file on disk is untouched."""
+    # A ref without its table is malformed: left for the validator, never treated as removed.
+    def column_gone(ref: str) -> bool:
+        if "." not in ref:
+            return False
+        t, c = ref.rsplit(".", 1)
+        return hidden.table_hidden(None, t) or hidden.column_hidden(None, t, c)
+
+    def group_gone(ref: str) -> bool:
+        if "." not in ref:
+            return False
+        t, g = ref.rsplit(".", 1)
+        # Only the schema-aware record: emptied by some copy of this table and served by none.
+        return hidden.table_hidden(None, t) or hidden.group_removed(t, g)
+
     out = []
     for a in ambiguities:
-        if not a.applies_to:
+        if not a.anchored():
             out.append(a)
             continue
         # The intact name: `table_hidden` parses any qualifier itself, catalog.schema.table included.
         kept = [t for t in a.applies_to if not hidden.table_hidden(None, t)]
-        if kept:
-            out.append(a.model_copy(update={"applies_to": kept}) if kept != a.applies_to else a)
+        cols = [c for c in a.columns if not column_gone(c)]
+        grps = [g for g in a.column_groups if not group_gone(g)]
+        mets = [m for m in a.metrics if m not in hidden.metrics_removed]
+        if not (kept or cols or grps or mets):
+            continue
+        update = {"applies_to": kept, "columns": cols, "column_groups": grps, "metrics": mets}
+        same = (kept, cols, grps, mets) == (a.applies_to, a.columns, a.column_groups, a.metrics)
+        out.append(a if same else a.model_copy(update=update))
     return out
 
 
@@ -338,18 +380,21 @@ def _rejected(obj) -> bool:
     return getattr(obj, "review_state", None) == "rejected"
 
 
-def _prune_column_groups(t: Table) -> None:
+def _prune_column_groups(t: Table) -> list[str]:
     """Drop excluded/missing columns from a table's `column_groups` (and its descriptions),
     removing any group left empty. Keeps a loaded model self-consistent after per-column
-    exclusions — without this, a group still listing a dropped column fails validation."""
+    exclusions — without this, a group still listing a dropped column fails validation. Returns
+    the groups it emptied, the evidence an ambiguity tied to one of them needs (#477)."""
     if not t.column_groups:
-        return
+        return []
     live = {c.name for c in t.columns}
     pruned = {g: [c for c in cols if c in live] for g, cols in t.column_groups.items()}
+    emptied = [g for g, cols in pruned.items() if not cols]
     pruned = {g: cols for g, cols in pruned.items() if cols}
     t.column_groups = pruned
     if t.column_group_descriptions:
         t.column_group_descriptions = {g: d for g, d in t.column_group_descriptions.items() if g in pruned}
+    return emptied
 
 
 def _reconcile_table_ref_exposes(refs: "list[TableRef]", tables_defined: "list[Table]") -> None:
@@ -394,7 +439,11 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
                 # ...and prune those dropped columns out of column_groups, else a group still
                 # naming an excluded column fails the column_group_missing_column check on load
                 # (excluding a deep table's column would otherwise break the whole model).
-                _prune_column_groups(t)
+                emptied = _prune_column_groups(t)
+                if hidden is not None:
+                    k = _key(t.schema_name, t.name)
+                    hidden.groups_emptied.update((k, g.lower()) for g in emptied)
+                    hidden.groups_served.update((k, g.lower()) for g in t.column_groups)
             tables_defined.append(t)
 
     live_tables = {t.name for t in tables_defined}
@@ -414,6 +463,8 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
         for mf in sorted(mdir.glob("*.yaml")):
             mm = Metric(**(_read_yaml(mf) or {}))
             if not include_rejected and _rejected(mm):
+                if hidden is not None:
+                    hidden.metrics_removed.add(mm.name)
                 continue
             metrics.append(mm)
 

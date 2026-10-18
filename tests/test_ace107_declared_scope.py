@@ -212,10 +212,11 @@ def test_metric_names_selects_detail_but_does_not_narrow(profile):
 def test_a_table_scoped_call_returns_the_joins_for_those_tables(profile):
     """The functional bug. Without this the client has columns and no way to join them, and has
     to fall back on whatever a human wrote into the prose narrative."""
-    rels = _head(profile, dataset_names=["orders"])["relationships"]
-    assert rels, "relationships were computed and discarded"
-    edge = next(r for r in rels if r["to_table"] == "users")
-    assert edge["from_column"] and edge["to_column"], "the join keys, not just the endpoints"
+    # `users` wasn't requested, so its join travels compactly (#477), keys and cardinality intact.
+    others = _head(profile, dataset_names=["orders"])["joins_to_other_tables"]
+    assert others, "relationships were computed and discarded"
+    edge = next(r for r in others if r["table"] == "users")
+    assert edge["from"] == "orders" and edge["keys"] == ["id=id"], "the join keys"
     assert edge["relationship"] == "many_to_one", "cardinality reaches the caller"
 
 
