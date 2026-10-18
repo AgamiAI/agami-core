@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.17] — 2026-10-18
+
 ### Changed
 
 - **A schema reply is one JSON document (#477).** `get_datasource_schema` used to append its domain
