@@ -125,8 +125,8 @@ class ListDatasourcesResult(_Contract):
 
 
 # ---------------------------------------------------------------------------
-# get_datasource_schema — the structured payload (the tool also appends Markdown
-# domain context as text; a serving backend can emit this structured part as JSON).
+# get_datasource_schema — the structured payload; its Markdown domain context is the
+# `domain_context` field (#477).
 # ---------------------------------------------------------------------------
 
 

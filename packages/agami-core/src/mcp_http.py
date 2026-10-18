@@ -374,10 +374,10 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     no `caller_identity` key returns unchanged too — but one that DOES carry that key is still
     reserialized with it stripped; see the overwrite-guarantee paragraph below.
 
-    Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` builds
-    its response this way, a JSON payload with a "## Domain context" / "## USER_MEMORY.md" markdown
-    suffix appended after it — by parsing only the leading JSON object and re-appending whatever
-    followed it, untouched.
+    Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` built its
+    response this way until its domain context moved inside the JSON (#477), and a consumer's tool
+    may still — by parsing only the leading JSON object and re-appending whatever followed it,
+    untouched.
 
     **`tool_get_prompt_examples`'s local file-serving branch (no DB configured) is NOT handled, and
     this is not merely deferred scope — it is a mode where the gap cannot matter.** That branch

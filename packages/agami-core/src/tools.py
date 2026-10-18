@@ -2931,7 +2931,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
     if parts:
-        result["domain_context"] = "\n".join(parts)
+        result["domain_context"] = "\n".join(parts).strip()
     return json.dumps(result, separators=REPLY_SEPARATORS, default=str)
 
 
