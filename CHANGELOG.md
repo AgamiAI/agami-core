@@ -12,6 +12,12 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_prompt_examples` serves the same examples on every read (#203).** Examples were read in
+  no set order, so when more of them tied on word overlap than the top-10 cap admits, which ones
+  were served could change from one process to the next. Ties are now broken by question, then id.
+
 ## [0.9.17] — 2026-10-18
 
 ### Changed

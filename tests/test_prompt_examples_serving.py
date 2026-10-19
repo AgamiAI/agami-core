@@ -45,6 +45,23 @@ def test_large_library_is_ranked_and_capped(tmp_path, monkeypatch):
     assert all("revenue" in e["question"] for e in out["examples"][:5])
 
 
+def test_ties_at_the_cap_are_served_the_same_whatever_the_insert_order(tmp_path, monkeypatch):
+    """Every example ties on overlap, so only the read order decides which ten are served (#203)."""
+    examples = [
+        {"area": "sales", "question": f"revenue by region {i:02d}", "sql": "SELECT 1"}
+        for i in range(30)
+    ]
+    served = []
+    for name, seed in (("forward", examples), ("reversed", examples[::-1])):
+        (tmp_path / name).mkdir()
+        url = _seed(tmp_path / name, seed)
+        monkeypatch.setenv("AGAMI_DB_URL", url)
+        out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "query": "revenue"}))
+        served.append([e["question"] for e in out["examples"]])
+    assert served[0] == served[1]
+    assert served[0] == [f"revenue by region {i:02d}" for i in range(10)]
+
+
 def test_char_budget_bounds_the_result(tmp_path, monkeypatch):
     # one giant example + many small: the budget stops accumulation (but always returns >=1).
     big = {"area": "s", "question": "x " * 50, "sql": "Q" * 30_000}
