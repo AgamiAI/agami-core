@@ -65,6 +65,22 @@ def test_quoting_per_family():
     assert D.get_dialect("sqlserver").quote_ident("x") == "[x]"
 
 
+@pytest.mark.parametrize("key", ["mysql", "snowflake", "bigquery", "databricks"])
+def test_a_trailing_backslash_cannot_end_the_literal_where_it_escapes(key):
+    """These engines read `\\` as an escape inside a string literal, so `'acme\\'` would leave the
+    literal open (#439)."""
+    d = D.get_dialect(key)
+    assert d.quote_lit("acme\\") == "'acme\\\\'"
+    assert d.quote_lit("it's\\") == "'it''s\\\\'"
+    assert d.quote_lit("orders\\") in d.sql_columns("SALES_DATA", "orders\\")
+
+
+@pytest.mark.parametrize("key", ["postgres", "sqlite", "sqlserver", "duckdb", "trino", "oracle"])
+def test_a_backslash_stays_literal_where_it_does_not_escape(key):
+    """Doubling it here would change the name being looked up."""
+    assert D.get_dialect(key).quote_lit("acme\\") == "'acme\\'"
+
+
 # --- row-limit syntax ---
 
 

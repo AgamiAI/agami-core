@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import asdict
@@ -58,6 +59,8 @@ PROFILE = "acme"
 CANARY_TABLE = "settlement_batches"
 CANARY_COLUMN = "clearing_ref"
 CANARY_SIGNER = "dana@example.com"
+# Long enough that no other number in a reply plausibly spells it.
+ROW_ESTIMATE = 4_242_917
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +96,7 @@ def _write_model(root: Path) -> None:
     (root / "subject_areas" / "finance" / "tables" / "orders.yaml").write_text(
         yaml.safe_dump({
             "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
-            "description": "orders", "performance_hints": {"estimated_row_count": 4242},
+            "description": "orders", "performance_hints": {"estimated_row_count": ROW_ESTIMATE},
             "columns": [
                 {"name": "id", "type": "integer", "primary_key": True},
                 {"name": "batch_id", "type": "integer"},
@@ -508,7 +511,9 @@ def test_a_refusal_receipt_names_nothing_the_caller_did_not_send(declared, route
     # And the resolved form of the table the caller DID send is absent too: `orders` is the caller's
     # own word, `public.orders` is the model's, and only the caller's may be echoed.
     assert "public.orders" not in text
-    assert "4242" not in text  # the model's row estimate is a model fact, not a statement fact
+    # The model's row estimate is a model fact, not a statement fact. Matched as a whole token, since
+    # the text also carries random hex ids that can contain any run of digits (#489).
+    assert not re.search(rf"\b{ROW_ESTIMATE}\b", text)
 
 
 def test_a_refusal_receipt_carries_only_the_reference_and_the_membership_bit(declared):
