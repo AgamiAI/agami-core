@@ -12,6 +12,18 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A metric about today measures to today (#482).** Enrichment sometimes bound "days since start"
+  or "age" to the latest date found in the data, or to a fixed date, so the figure was reproducible.
+  When the data is not loaded up to today that silently changes the answer and which rows qualify.
+  A new `metric_today_not_current_date` warning fires when a metric's calculation or description
+  says today, the current date or the run date, but its binding has no current date in it: it uses
+  a fixed date, a `MAX` over the data in a subquery, or neither. Every engine's form of today is
+  recognised (`CURRENT_DATE`, `NOW()`, `GETDATE()`, `SYSDATE`, `CURDATE()`, `today()`, SQLite's
+  `'now'`), and a date literal beside it, such as a placeholder end date, is not flagged.
+  agami-connect now says to bind `CURRENT_DATE` and leave freshness to the receipt.
+
 ## [0.9.17] — 2026-10-18
 
 ### Changed

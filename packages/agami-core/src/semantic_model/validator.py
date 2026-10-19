@@ -38,6 +38,7 @@ list[str] contract while adding structured findings for the review dashboard.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -333,6 +334,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_ambiguities(org, org_tables, res)
     _check_table_name_across_schemas(org, res)
     _check_metric_backend_neutrality(org, res)
+    _check_metric_current_date(org, res)
     _check_metric_descriptions(org, res)
     _check_derived_metrics(org, res)
     _check_metric_binding_columns(org, res)
@@ -992,6 +994,66 @@ def _check_cross_area_entity_collisions(org: Datasource, res: ValidationResult) 
                             f"    maps_to: [<{area_a} mapping>, <{area_b} mapping>]"
                         ),
                     )
+
+
+# A metric whose own text measures to today (#482). "current" alone is left out on purpose: a
+# "current balance" is the latest snapshot, not a date calculation.
+_MEANS_TODAY_RE = re.compile(
+    r"\b(?:today|today's|current (?:date|day|time)|run date|as of now|right now)\b", re.I)
+_DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _today_problem(sql: str, storage_type: str) -> Optional[str]:
+    """Why a binding does not measure to today, or None when it does (or does not parse).
+
+    Every engine's today (CURRENT_DATE, NOW(), GETDATE(), SYSDATE, CURDATE(), today()) parses to
+    sqlglot's CurrentDate / CurrentTimestamp family; SQLite spells it as the string 'now'."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return None
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return None
+    strings = [lit.this for lit in tree.find_all(exp.Literal) if lit.is_string]
+    today = (exp.CurrentDate, exp.CurrentTimestamp, exp.CurrentDatetime, exp.CurrentTime)
+    if next(tree.find_all(*today), None) is not None or any(v.lower() == "now" for v in strings):
+        return None  # measures to today; a date literal beside it is a filter, e.g. a placeholder
+    dated = next((v for v in strings if _DATE_LITERAL_RE.match(v)), None)
+    if dated:
+        return f"uses the fixed date {dated!r} instead"
+    for sub in tree.find_all(exp.Subquery):
+        if next(sub.find_all(exp.Max), None) is not None:
+            return "measures to the latest date in the data instead (a MAX in a subquery)"
+    return "has no current date in it (CURRENT_DATE or the engine's equivalent)"
+
+
+def _check_metric_current_date(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric's text measures to today but its binding does not use the current date
+    (#482). A binding that stops at a fixed date or at the latest date in the data gives a stable
+    figure, but when the data is not loaded up to today it silently changes the answer and which
+    rows qualify (overdue, at risk). How stale the data is belongs on the answer's receipt, not
+    in the formula."""
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if not _MEANS_TODAY_RE.search(f"{met.calculation} {met.description}"):
+            continue
+        for stype, sql in (met.bindings or {}).items():
+            why = _today_problem(sql, stype)
+            if why:
+                res.warn(
+                    "metric_today_not_current_date",
+                    f"metric {met.name!r} ({stype}) says it measures to today, but its binding "
+                    f"{why}. Use CURRENT_DATE (or the engine's equivalent) and say in the "
+                    "calculation that the result depends on the run date; how far the data lags "
+                    "today belongs on the answer's receipt, not in the formula.",
+                )
+                break
 
 
 def _check_metric_backend_neutrality(org: Datasource, res: ValidationResult) -> None:
