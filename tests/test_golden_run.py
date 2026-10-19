@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import get_args
 
@@ -1174,3 +1175,24 @@ def test_an_effort_level_reaches_the_pick(spawn, monkeypatch):
     gr.pick_tables("How many orders?", "acme", "demo", fixed=SCHEMA, timeout_s=30.0, effort="low")
     (args, _), = recorder.invocations
     assert _flag_value(args, "--effort") == "low"
+
+
+def test_an_item_s_decimals_reaches_the_comparison(chokepoint):
+    """An answer key that rounds in its own SQL, against a generated statement that does not.
+
+    The item states two decimal places, and the run has to carry that to the comparison: without it
+    the same two results are a failure, which the second half pins so the pass cannot come from
+    anything else.
+    """
+    rows = {
+        GOLDEN_SQL: [(Decimal("21582.83"),), (Decimal("8.40"),)],
+        GENERATED_SQL: [(Decimal("21582.8325064"),), (Decimal("8.4046762"),)],
+    }
+
+    stated = _run(
+        _dataset(_item(match="values", decimals=2)), _StubGenerator(), _SpyExecutor(rows)
+    )
+    assert [outcome.score.accuracy for outcome in stated.outcomes] == [1.0]
+
+    unstated = _run(_dataset(_item(match="values")), _StubGenerator(), _SpyExecutor(rows))
+    assert [outcome.score.accuracy for outcome in unstated.outcomes] == [0.0]

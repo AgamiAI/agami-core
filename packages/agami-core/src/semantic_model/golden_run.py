@@ -456,6 +456,7 @@ def _score(
         golden_sql=None if item.match in _SELF_JUDGING_LEVELS else (golden_sql or None),
         bounds=item.bounds,
         dialect=dialect,
+        decimals=item.decimals,
     )
 
 

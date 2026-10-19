@@ -1050,6 +1050,10 @@ def _save(
     for key in ("match", "bounds", "must_filter"):
         if payload.get(key):
             fields[key] = payload[key]
+    # Carried forward for the same reason, and tested for presence rather than truth: zero decimal
+    # places is a setting, and dropping it would put a replaced item back on the stricter default.
+    if payload.get("decimals") is not None:
+        fields["decimals"] = payload["decimals"]
 
     # Before the write and not after it. A warning that arrives once the answer key is on disk is a
     # warning about a file the reader now has to decide whether to undo, and the append-only rule

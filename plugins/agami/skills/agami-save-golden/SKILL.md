@@ -153,9 +153,10 @@ Write the item with the **Write tool** as JSON — the same rule as any JSON fil
 - `recorded` is stamped by the script itself and never taken from this payload — omit it. The golden-datasets directory has no gitignore exclusion, so the door does not write a query's result rows to it; a run is judged against `expected`, re-executed live at score time, never against anything recorded here.
 - `confirmed_by.method` is free text and is **required** — an answer key whose provenance is blank cannot be audited later, and the script refuses without it. Say how it was checked ("read on screen and accepted", "cross-checked against the finance close"), not who in a way that names a person.
 - `match` is optional and **defaults to `exact`, which is almost always the right answer**. Column pairing is by value at every level — neither a column's name nor its position is ever consulted — so "the names or the order might differ" is never a reason to loosen. `values` forgives exactly two things: a floating-point tail, and an extra column the question did not ask for. Reach for it when the answer carries a real float, and **not for a count or a result whose columns the question already names** — over-answering is the most common way a generated statement is wrong, and `values` is the level that forgives it. `bounded` takes a `bounds` block, for an answer that legitimately moves — see [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md). `bounded` with no band is refused with exit `2`: a level with nothing to consult would keep passing forever.
+- `decimals` goes with `match: values` only, and says how many decimal places the answer is good to (`decimals: 2`). Add it when the accepted statement rounds in its own SQL, so a statement that returns the same number unrounded is not failed for it.
 - `must_filter` gates *how* the answer was reached. Add it when the question only means what it says with a filter in place (`must_filter: [status]`).
 
-`match`, `bounds` and `must_filter` all reach the written item exactly as sent — which is why a replacement has to repeat whatever the existing item carried (Phase 4).
+`match`, `decimals`, `bounds` and `must_filter` all reach the written item exactly as sent — which is why a replacement has to repeat whatever the existing item carried (Phase 4).
 
 ```bash
 python3 "$AGAMI_PLUGIN_ROOT/scripts/golden_author.py" save \
@@ -237,7 +238,7 @@ Exit codes are Phase 4's, unchanged. On `1` the payload carries `needs_confirmat
 
 On a `needs_confirmation` payload — a list of `{id, before, after}` — **render both sides** — a markdown table or two fenced blocks per id, the existing item and the one that would take its place. "This id already exists" is not enough for anyone to decide with: the thing being overwritten is an answer key, and they have to see what they would lose.
 
-**A replacement is wholesale** — the item that is written is the item you sent, so anything the existing one carries and yours does not (its `tags`, a `must_filter`, a `match`) is gone. Read the `before` and carry forward what still applies before you ask; that is also what the user is agreeing to when they look at the two sides.
+**A replacement is wholesale** — the item that is written is the item you sent, so anything the existing one carries and yours does not (its `tags`, a `must_filter`, a `match`, a `decimals`) is gone. Read the `before` and carry forward what still applies before you ask; that is also what the user is agreeing to when they look at the two sides.
 
 Then ask, and only after an explicit yes re-run the **same command with `--confirm-replace` appended**:
 

@@ -117,6 +117,11 @@ class GoldenItem(_Base):
     query: str
     expected: GoldenExpected
     match: MatchLevel = "exact"
+    # How many decimal places the answer is good to. `values` then rounds both sides to that many
+    # before comparing, in place of its own nine-significant-digit bucket. For an answer key that
+    # rounds in its own SQL: the generated statement was never told to round, so without this a
+    # right answer carrying its full precision fails against the key's two decimals.
+    decimals: Optional[int] = Field(default=None, ge=0)
     bounds: Optional[GoldenBounds] = None
     must_filter: list[str] = Field(default_factory=list)
     recorded: Optional[GoldenRecorded] = None
@@ -150,6 +155,18 @@ class GoldenItem(_Base):
             )
         if self.bounds is not None and self.match != "bounded":
             raise ValueError("bounds is set but match is not bounded, so nothing reads the band")
+        return self
+
+    @model_validator(mode="after")
+    def _decimals_needs_values(self) -> "GoldenItem":
+        # Read by one level, like `bounds`. Under `exact` it would be a promise of digit-for-digit
+        # equality with a rounding written beside it, and under the rest no number is compared with
+        # the answer key's at all, so the key would sit there doing nothing while the case passed.
+        if self.decimals is not None and self.match != "values":
+            raise ValueError(
+                "decimals is set but match is not values, so nothing rounds to it; set match to "
+                "values, or remove decimals"
+            )
         return self
 
 

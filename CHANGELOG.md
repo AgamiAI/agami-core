@@ -12,6 +12,24 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A golden item can say how many decimal places its answer is good to.** An answer key that
+  rounds in its own SQL (`ROUND(x, 2)`) returns `21582.83`, while a generated statement that
+  computes the same thing and was never told to round returns `21582.8325…`. `match: values` put
+  each number in a bucket at nine significant digits, where those two differ, so a right answer
+  scored 0.0 and read "no generated column carries the values of …".
+
+  An item now takes an optional `decimals` (a whole number of 0 or more). Under `values`, every
+  number that is not whole is rounded to that many decimal places on both sides before they are
+  compared, half-up, in place of the nine-digit bucket. The score's notes say what precision was
+  used. Whole numbers are still never rounded, `exact` is unchanged, and `decimals` is refused at
+  any level other than `values`, the way `bounds` is refused without `bounded`. An item that does
+  not set it is compared exactly as before.
+
+  **Reading a dataset:** a file that sets `decimals` is refused by a release older than this one,
+  which does not know the key.
+
 ### Changed
 
 - **The golden eval gives its generator the columns of the tables a question needs (#424).** A model

@@ -48,7 +48,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from decimal import Context, Decimal
+from decimal import ROUND_HALF_UP, Context, Decimal
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Optional
 
@@ -103,7 +103,9 @@ _CELL_TYPES: dict[str, Optional[str]] = {
 }
 
 
-def _canonical_number(value: int | float | Decimal, quantize: bool) -> tuple[str, Any]:
+def _canonical_number(
+    value: int | float | Decimal, quantize: bool, decimals: Optional[int] = None
+) -> tuple[str, Any]:
     """Key a numeric as a normalised Decimal, so spelling and storage type stop mattering."""
     if isinstance(value, float):
         if math.isnan(value):
@@ -133,7 +135,17 @@ def _canonical_number(value: int | float | Decimal, quantize: bool) -> tuple[str
     # decimal operation in this module names its context, and a module whose promise is
     # independence from how a number arrived should not read the process-global one at all.
     if quantize and dec != dec.to_integral_value(context=_NORMALIZE_CTX):
-        dec = _QUANTIZE_CTX.plus(dec)
+        if decimals is None:
+            dec = _QUANTIZE_CTX.plus(dec)
+        else:
+            # The author stated how many decimal places the answer is good to, so both sides are
+            # rounded to exactly that many and the nine-digit bucket is not applied on top. Still a
+            # bucket and not a tolerance: the same function of the value on both sides. Half-up,
+            # because that is how a database's ROUND treats a numeric tie, and an answer key that
+            # rounds in its own SQL must land on the key a generated value rounds to here.
+            dec = dec.quantize(
+                Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP, context=_NORMALIZE_CTX
+            )
     return ("num", dec.normalize(context=_NORMALIZE_CTX))
 
 
@@ -171,13 +183,18 @@ def _canonical_text(value: str) -> tuple[str, Any]:
     return ("text", value)
 
 
-def canonical_cell(value: Any, *, quantize: bool = False) -> tuple[str, Any]:
+def canonical_cell(
+    value: Any, *, quantize: bool = False, decimals: Optional[int] = None
+) -> tuple[str, Any]:
     """Turn one result-set cell into a hashable ``(type_tag, value)`` key.
 
     With `quantize`, a number that is not a whole number is additionally rounded to nine
     significant digits. That is a BUCKET and not a tolerance: two values land on one key when they
     round alike, so two straddling a bucket edge stay apart however close they are. Nothing else is
     affected.
+
+    With `decimals` as well, that number is rounded to that many decimal places instead, half-up.
+    `decimals` alone does nothing: it sizes the bucket `quantize` asks for.
     """
     if value is None:
         return ("null", None)
@@ -186,7 +203,7 @@ def canonical_cell(value: Any, *, quantize: bool = False) -> tuple[str, Any]:
     if isinstance(value, bool):
         return ("bool", value)
     if isinstance(value, (int, float, Decimal)):
-        return _canonical_number(value, quantize)
+        return _canonical_number(value, quantize, decimals)
     # Before `date`, because datetime is a subclass of it.
     if isinstance(value, datetime):
         return _canonical_datetime(value)
@@ -197,9 +214,11 @@ def canonical_cell(value: Any, *, quantize: bool = False) -> tuple[str, Any]:
     return ("text", str(value))
 
 
-def canonical_row(row: Sequence[Any], *, quantize: bool = False) -> tuple[tuple[str, Any], ...]:
+def canonical_row(
+    row: Sequence[Any], *, quantize: bool = False, decimals: Optional[int] = None
+) -> tuple[tuple[str, Any], ...]:
     """Canonicalise a whole row, so the row itself is hashable and countable."""
-    return tuple(canonical_cell(cell, quantize=quantize) for cell in row)
+    return tuple(canonical_cell(cell, quantize=quantize, decimals=decimals) for cell in row)
 
 
 def cell_type(canon: tuple[str, Any]) -> Optional[str]:
@@ -296,6 +315,7 @@ def _column_vectors(
     *,
     ordered: bool,
     quantize: bool,
+    decimals: Optional[int] = None,
 ) -> list[tuple[tuple[str, Any], ...]]:
     """One comparable vector per column: its cells in row order, or sorted when order is not part
     of the answer."""
@@ -303,7 +323,7 @@ def _column_vectors(
     for row in rows:
         if len(row) != len(columns):
             raise RaggedRow(f"a row of {len(row)} cells arrived with {len(columns)} columns")
-        canonical.append(canonical_row(row, quantize=quantize))
+        canonical.append(canonical_row(row, quantize=quantize, decimals=decimals))
     vectors = []
     for index in range(len(columns)):
         cells = [row[index] for row in canonical]
@@ -418,6 +438,7 @@ def pair_columns(
     *,
     ordered: bool,
     quantize: bool = False,
+    decimals: Optional[int] = None,
 ) -> ColumnPairing:
     """Pair golden columns with generated columns, by values first and then by best effort.
 
@@ -449,10 +470,10 @@ def pair_columns(
     column with no such partner is reported unmatched.
     """
     golden_vectors = _column_vectors(
-        golden_columns, golden_rows, ordered=ordered, quantize=quantize
+        golden_columns, golden_rows, ordered=ordered, quantize=quantize, decimals=decimals
     )
     generated_vectors = _column_vectors(
-        generated_columns, generated_rows, ordered=ordered, quantize=quantize
+        generated_columns, generated_rows, ordered=ordered, quantize=quantize, decimals=decimals
     )
     columns = (golden_columns, golden_vectors, generated_columns, generated_vectors)
     pairing = _pair_equal_vectors(*columns, names_first=True)
@@ -460,14 +481,16 @@ def pair_columns(
         in_order = _pair_equal_vectors(*columns, names_first=False)
         if in_order != pairing:
             overlap = compare_rows(
-                golden_rows, generated_rows, pairing, ordered=False, quantize=quantize
+                golden_rows, generated_rows, pairing,
+                ordered=False, quantize=quantize, decimals=decimals,
             )[0]
             # Both pairings pair the same golden columns, so no pairing can line up more rows than
             # the shorter result holds. Once the names have lined up that many, reading the rows a
             # second time can only tie, and a tie goes to the names.
             if overlap < min(len(golden_rows), len(generated_rows)):
                 in_order_overlap = compare_rows(
-                    golden_rows, generated_rows, in_order, ordered=False, quantize=quantize
+                    golden_rows, generated_rows, in_order,
+                    ordered=False, quantize=quantize, decimals=decimals,
                 )[0]
                 if in_order_overlap > overlap:
                     pairing = in_order
@@ -510,25 +533,26 @@ def match_columns(
     *,
     ordered: bool,
     quantize: bool = False,
+    decimals: Optional[int] = None,
 ) -> tuple[dict[int, int], tuple[str, ...]]:
     """`pair_columns` as the golden-index → generated-index pairing and the golden column names that
     found no partner, the shape every caller and pin has read since Slice 1."""
     paired = pair_columns(
         golden_columns, golden_rows, generated_columns, generated_rows,
-        ordered=ordered, quantize=quantize,
+        ordered=ordered, quantize=quantize, decimals=decimals,
     )
     return paired.pairing, paired.unmatched
 
 
 def _project(
-    row: Sequence[Any], indices: Sequence[int], quantize: bool
+    row: Sequence[Any], indices: Sequence[int], quantize: bool, decimals: Optional[int] = None
 ) -> tuple[tuple[str, Any], ...]:
     """The paired cells of one row, canonicalised, in golden column order."""
     try:
         cells = [row[index] for index in indices]
     except IndexError:
         raise RaggedRow(f"a row of {len(row)} cells is too short for the matched columns") from None
-    return canonical_row(cells, quantize=quantize)
+    return canonical_row(cells, quantize=quantize, decimals=decimals)
 
 
 def compare_rows(
@@ -538,6 +562,7 @@ def compare_rows(
     *,
     ordered: bool,
     quantize: bool = False,
+    decimals: Optional[int] = None,
 ) -> tuple[int, int, int]:
     """How far the two sides agree over their paired columns, as (overlap, golden, generated).
 
@@ -548,8 +573,8 @@ def compare_rows(
     """
     golden_indices = sorted(pairing)
     generated_indices = [pairing[index] for index in golden_indices]
-    golden = [_project(row, golden_indices, quantize) for row in golden_rows]
-    generated = [_project(row, generated_indices, quantize) for row in generated_rows]
+    golden = [_project(row, golden_indices, quantize, decimals) for row in golden_rows]
+    generated = [_project(row, generated_indices, quantize, decimals) for row in generated_rows]
     if ordered:
         overlap = sum(1 for left, right in zip(golden, generated) if left == right)
     else:
@@ -632,13 +657,16 @@ def _score_values(
     *,
     ordered: bool,
     loose: bool,
+    decimals: Optional[int] = None,
 ) -> _Verdict:
     """Pair the columns by value, then score how far the rows agree over the pairing.
 
     `loose` is the `values` level: it forgives a floating-point tail and an extra column the
     question did not ask for. One flag rather than two, because no level asks for one and not the
-    other.
+    other. `decimals` sizes what that level forgives in a number, and is read under it alone.
     """
+    if not loose:
+        decimals = None
     if len(golden.rows) != len(generated.rows):
         # Before any pairing, because a column vector's LENGTH is the row count: when the counts
         # differ no column can pair, and reporting that through the unmatched-column branch below
@@ -656,6 +684,7 @@ def _score_values(
         generated.rows,
         ordered=ordered,
         quantize=loose,
+        decimals=decimals,
     )
     if unmatched:
         # Not a partial answer. The question asked for that column and the result does not carry
@@ -672,7 +701,7 @@ def _score_values(
             "scored", 0.0, f"the generated result carries {extra} column(s) the answer key does not"
         )
     overlap, golden_count, generated_count = compare_rows(
-        golden.rows, generated.rows, pairing, ordered=ordered, quantize=loose
+        golden.rows, generated.rows, pairing, ordered=ordered, quantize=loose, decimals=decimals
     )
     accuracy = _accuracy(overlap, golden_count)
     if accuracy == 1.0:
@@ -790,6 +819,7 @@ def _judge(
     match: MatchLevel,
     bounds: Optional[GoldenBounds],
     ordered: bool,
+    decimals: Optional[int] = None,
 ) -> _Verdict:
     """Dispatch to the level the author asked for, loosening left to right."""
     if match in _KEYED_LEVELS and not golden.rows and not generated.rows:
@@ -797,7 +827,9 @@ def _judge(
     if match in ("exact", "values"):
         # `values` forgives a floating-point tail and an extra column the question did not ask
         # for; `exact` forgives neither, which is the only difference between the two.
-        return _score_values(golden, generated, ordered=ordered, loose=match == "values")
+        return _score_values(
+            golden, generated, ordered=ordered, loose=match == "values", decimals=decimals
+        )
     if match == "shape":
         return _score_shape(golden, generated)
     if match == "bounded":
@@ -810,7 +842,11 @@ def _judge(
 
 
 def _pairing_facts(
-    golden: ExecResult, generated: ExecResult, match: MatchLevel, ordered: bool
+    golden: ExecResult,
+    generated: ExecResult,
+    match: MatchLevel,
+    ordered: bool,
+    decimals: Optional[int] = None,
 ) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...], tuple[float, ...], Optional[float]]:
     """(golden column, generated column) pairs, the generated columns left over, each pair's
     agreement and the share of rows every pair agrees on, for the two levels that pair columns at
@@ -825,16 +861,20 @@ def _pairing_facts(
         # every column would read unpaired: not a fact about the columns, only about the counts,
         # which the score already reports. Nothing is claimed here.
         return nothing
+    # The same rounding the score used, or these facts would describe a different comparison.
     quantize = match == "values"
+    if not quantize:
+        decimals = None
     try:
         paired = pair_columns(
             golden.columns, golden.rows, generated.columns, generated.rows,
-            ordered=ordered, quantize=quantize,
+            ordered=ordered, quantize=quantize, decimals=decimals,
         )
         share: Optional[float] = None
         if paired.pairing:
             overlap, golden_count, _generated_count = compare_rows(
-                golden.rows, generated.rows, paired.pairing, ordered=ordered, quantize=quantize
+                golden.rows, generated.rows, paired.pairing,
+                ordered=ordered, quantize=quantize, decimals=decimals,
             )
             share = _accuracy(overlap, golden_count)
     except Exception:
@@ -858,6 +898,7 @@ def compare_result_sets(
     bounds: Optional[GoldenBounds] = None,
     dialect: Optional[str] = None,
     ordered: Optional[bool] = None,
+    decimals: Optional[int] = None,
 ) -> ItemScore:
     """Score one generated result against its answer key. Never raises.
 
@@ -869,13 +910,18 @@ def compare_result_sets(
     `ordered`, when given, decides instead of the statement. Reconcile passes False: it compares two
     trusted statements whose ordering is a claim of its own, so the rows are a set here and the
     ORDER BY is judged where it is named. The golden run never passes it.
+
+    `decimals` is the item's own statement of how many decimal places its answer is good to. Under
+    `values` both sides are rounded to that many before they are compared, and the score says so in
+    its notes, because a pass at two decimal places is a narrower claim than a pass at nine digits.
+    Every other level ignores it.
     """
     if ordered is None:
         ordered, note = has_top_level_order_by(golden_sql, dialect=dialect)
     else:
         note = None if ordered else "row order was not compared"
     try:
-        verdict = _judge(golden, generated, match, bounds, ordered)
+        verdict = _judge(golden, generated, match, bounds, ordered, decimals)
     except RaggedRow as exc:
         # Its message counts cells and names no value, so it can be reported as it stands.
         verdict = _Verdict("error", None, str(exc))
@@ -885,7 +931,10 @@ def compare_result_sets(
         verdict = _Verdict(
             "error", None, f"the comparison failed with an unexpected {type(exc).__name__}"
         )
-    pairs, extra, agreement, share = _pairing_facts(golden, generated, match, ordered)
+    pairs, extra, agreement, share = _pairing_facts(golden, generated, match, ordered, decimals)
+    notes = [note] if note else []
+    if decimals is not None and match == "values":
+        notes.append(f"numbers were compared at {decimals} decimal place(s)")
     return ItemScore(
         status=verdict.status,
         accuracy=verdict.accuracy,
@@ -896,7 +945,7 @@ def compare_result_sets(
         golden_row_count=len(golden.rows),
         generated_row_count=len(generated.rows),
         order_sensitive=ordered,
-        notes=(note,) if note else (),
+        notes=tuple(notes),
         column_agreement=agreement,
         paired_row_share=share,
     )

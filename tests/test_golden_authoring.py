@@ -1011,6 +1011,20 @@ def test_a_must_filter_survives_the_save(tmp_path, monkeypatch, capsys):
     assert _items(tmp_path)[0].must_filter == ["status"]
 
 
+@pytest.mark.parametrize("decimals", [2, 0])
+def test_decimals_survives_the_save(tmp_path, monkeypatch, capsys, decimals):
+    """Carried forward like `must_filter`, and zero as well as two: a door that tested the value
+    for truth would drop `decimals: 0` and put the replaced item back on the stricter default."""
+    code, _, _ = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        _save_argv(_item_file(tmp_path, match="values", decimals=decimals)),
+    )
+    assert code == 0
+    assert (_items(tmp_path)[0].match, _items(tmp_path)[0].decimals) == ("values", decimals)
+
+
 def test_a_bounded_item_saves_with_its_band(tmp_path, monkeypatch, capsys):
     """`bounds` is the other half of `match: bounded`, and AH-100 refuses either half alone."""
     code, _, err = _run(

@@ -108,7 +108,7 @@ that has to be comparable against something; with no SQL it would pass forever
 and nobody would notice. An unconfirmed case with no SQL is legal — that is the
 in-progress shape, and it simply cannot gate.
 
-Alongside `expected`, an item takes six optional fields:
+Alongside `expected`, an item takes seven optional fields:
 
 - `match` — how closely the run has to match the answer key, loosening left to
   right: `exact`, `values`, `shape`, `bounded`, `nonempty`. **Defaults to
@@ -119,6 +119,19 @@ Alongside `expected`, an item takes six optional fields:
   makes it right for a result carrying a real float and wrong for a count — the
   extra column it waves through is the most common way a generated statement is
   wrong.
+- `decimals` — how many decimal places the answer is good to, a whole number of
+  0 or more (`decimals: 2`). Under `match: values`, every number that is not
+  whole is rounded to that many places on **both** sides before the two are
+  compared, half-up, in place of the nine-significant-digit bucket `values`
+  uses on its own. Set it when the answer key rounds in its own SQL
+  (`ROUND(x, 2)`): the generated statement was never told to round, so without
+  it a right answer carrying full precision fails against the key's two
+  decimals. Whole numbers are never rounded, so a count or an id still has to
+  be equal. **`decimals` is read under `values` only, and is refused at any
+  other level**: under `exact` it would contradict the level, and the rest
+  compare no number with the answer key's. It is a wider bucket than the
+  default, so use the precision the answer really has; `decimals: 0` accepts
+  any two numbers that round to the same whole number.
 - `bounds` — the band `match: bounded` is judged against: `min_rows` /
   `max_rows` on the number of rows, and `min_value` / `max_value` on a
   single-cell numeric answer. All four keys are optional but at least one has to
