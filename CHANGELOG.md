@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The validator warns on an average of per-row ratios of two amounts that add up (#480).** A metric
+  bound as `AVG(online_sales / total_sales)` weighs a store with 100 sales the same as one with 1,000,
+  so for a group it is not the share of the total and disagrees with the totals beside it. A new
+  `metric_avg_of_ratio` warning fires when both sides of the ratio are `additive` columns, and
+  suggests `SUM(numerator) / NULLIF(SUM(denominator), 0)`. A ratio of aggregates, a ratio computed per
+  group in a subquery, and columns of unknown class are left alone, and a metric whose calculation
+  says it is an average of each row's ratio is not flagged. agami-connect now says to bind a share of
+  a total as a ratio of totals.
+
 ## [0.9.17] — 2026-10-18
 
 ### Changed

@@ -805,6 +805,8 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add "$ROOT" --kind metric --area <area> --f
 > **Never read another profile to learn the shape.** Do not glob or read other profiles' artifacts (e.g. `find <artifacts_dir> -path '*/metrics/*.yaml'`, or reading `<artifacts_dir>/<other-profile>/…`) to "copy the binding shape." That crosses the profile boundary — in a hosted/multi-tenant deployment it's a **tenant-data leak** (onboarding one customer must never read another's model), and even locally it risks lifting another profile's filters / calculation text into this one. You don't need to: the packaged `sm add` command validates every item against the schema. Get the shape from `shared/metric-entity-shape.md` and the profile's **own** schema — never a sibling profile.
 Don't propose metrics depending on choice-field literals you didn't detect, or cross-area metrics unless a cross-area edge wires the join (then put them under the cross-cutting area).
 
+**A share of a total is a ratio of totals.** When a metric divides two amounts that add up (sales, watts, hours, counts), bind the group's value as `SUM(numerator) / NULLIF(SUM(denominator), 0)` over the rows where both are known — not `AVG(numerator / denominator)`, which weighs a small row the same as a large one and disagrees with the totals shown beside it. Average the per-row ratios only when the metric really means that (an average per-student score), and say so in its `calculation` ("the average of each row's ratio"). The validator warns on `AVG` of a ratio of two `additive` columns (`metric_avg_of_ratio`).
+
 ### 2d — Caveats, value_transforms, currency
 
 From samples + the domain doc, add provider-portable cleaning where evidence supports it:

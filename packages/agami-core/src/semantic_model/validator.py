@@ -38,6 +38,7 @@ list[str] contract while adding structured findings for the review dashboard.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -336,6 +337,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_descriptions(org, res)
     _check_derived_metrics(org, res)
     _check_metric_binding_columns(org, res)
+    _check_metric_avg_of_ratio(org, res)
 
     return res
 
@@ -1120,6 +1122,114 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
                     f"found on its source table(s) {met.source_tables} — check for a typo or a "
                     "missing source_table",
                 )
+
+
+# A metric's calculation can declare that it really is an average of per-row values (an average
+# per-student score, say), which silences `metric_avg_of_ratio` for it (#480).
+_PER_ROW_AVERAGE_RE = re.compile(
+    r"\b(?:per[- ]row|each row's|row[- ]level)\b.{0,40}\baverage|\baverage\b.{0,40}\b(?:per[- ]row|each row's|row[- ]level)\b",
+    re.I | re.S,
+)
+
+
+def _column_classes(org: Datasource) -> dict[str, dict[str, str]]:
+    """table name -> {column name -> aggregation class}, lower-cased."""
+    classes: dict[str, dict[str, str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            classes.setdefault(t.name.lower(), {}).update(
+                {c.name.lower(): c.aggregation for c in t.columns})
+    return classes
+
+
+def _ratio_side_is_additive(side, classes: dict[str, str], by_table: dict[str, dict[str, str]]) -> bool:
+    """True when one side of a ratio is built only from `additive` columns (at least one) and no
+    aggregate. A side holding an aggregate is a ratio of totals already, and a column whose class
+    is unknown, averageable or ambiguous never counts as additive, so the check stays quiet."""
+    from sqlglot import expressions as exp
+    if next(side.find_all(exp.AggFunc), None) is not None:
+        return False
+    cols = list(side.find_all(exp.Column))
+    if not cols:
+        return False
+    for c in cols:
+        if c.table and c.table.lower() in by_table:
+            cls = by_table[c.table.lower()].get(c.name.lower())
+        else:
+            cls = classes.get(c.name.lower())
+        if cls != "additive":
+            return False
+    return True
+
+
+def _avg_of_ratio(sql: str, storage_type: str, classes: dict[str, str],
+                  by_table: dict[str, dict[str, str]]) -> bool:
+    """True when the binding averages a per-row ratio of two additive amounts: `AVG(a / b)`.
+
+    Parsed in the binding's own engine dialect, so `a::numeric` and engine quoting read as they
+    run; a binding that does not parse, or an engine with no dialect mapping, is no evidence."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return False
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return False
+    for avg in tree.find_all(exp.Avg):
+        for div in avg.this.find_all(exp.Div):
+            # only a ratio computed row by row inside this AVG — not one inside a nested query or
+            # another aggregate, which is computed per group first and is a ratio of totals
+            node, nested = div.parent, False
+            while node is not None and node is not avg:
+                if isinstance(node, (exp.Select, exp.Subquery, exp.AggFunc)):
+                    nested = True
+                    break
+                node = node.parent
+            if nested:
+                continue
+            if (_ratio_side_is_additive(div.this, classes, by_table)
+                    and _ratio_side_is_additive(div.expression, classes, by_table)):
+                return True
+    return False
+
+
+def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric averages a per-row ratio of two additive amounts (#480). For a group,
+    `AVG(online_sales / total_sales)` weighs a store with 100 sales the same as one with 1,000 and
+    disagrees with the totals beside it; the group's share is `SUM(a) / SUM(b)`.
+
+    A warning, not a gate: an average of per-row values is sometimes what a metric means, and a
+    calculation that says so ("the average of each row's ratio") silences it."""
+    from . import derived as D
+    by_table = _column_classes(org)
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue
+        if _PER_ROW_AVERAGE_RE.search(f"{met.calculation} {met.description}"):
+            continue
+        scoped = {t.lower(): by_table.get(t.lower(), {}) for t in met.source_tables}
+        classes: dict[str, str] = {}
+        for table_cols in scoped.values():
+            for name, cls in table_cols.items():
+                # a name on two source tables with different classes is ambiguous: not additive
+                classes[name] = cls if classes.get(name, cls) == cls else "unknown"
+        for stype, sql in (met.bindings or {}).items():
+            if _avg_of_ratio(sql, stype, classes, scoped):
+                res.warn(
+                    "metric_avg_of_ratio",
+                    f"metric {met.name!r} ({stype}) averages a per-row ratio of two additive "
+                    "amounts, which weighs every row the same whatever its size. For a group's "
+                    "share use SUM(numerator) / NULLIF(SUM(denominator), 0) over the rows where "
+                    "both are known; if an average of per-row values is meant, say so in the "
+                    "calculation (\"the average of each row's ratio\").",
+                )
+                break
 
 
 # ---------------------------------------------------------------------------
