@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **agami-connect binds a value as its label and unit say, even when the data looks implausible
+  (#481).** Enrichment sometimes decided a stated meaning was wrong because the values did not look
+  as expected — reading a field stored as `'0.73%'` as a 0–1 ratio because every value was below 1,
+  or swapping a documented column for a neighbour whose values looked more plausible — and stated the
+  guess as a rule that every answer then inherited. The skill now says to keep the stated meaning,
+  record the oddity as a caveat, and ask the user which reading is right before changing a binding.
+
 ## [0.9.17] — 2026-10-18
 
 ### Changed
