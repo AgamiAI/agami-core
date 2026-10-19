@@ -1041,6 +1041,9 @@ _NUM = r"\d[\d,]*(?:\.\d+)?"
 _MEASURED_FIGURE_RES = (
     re.compile(rf"\b{_NUM}\s+(?:out\s+)?of\s+(?:the\s+)?(?:about\s+|~)?(?P<of>{_NUM})\b", re.I),
     re.compile(rf"\bcover(?:s|ing)?\s+(?:only|about|~)\s*{_NUM}", re.I),
+    # Not after `-` or a quote: "2016-2020 rows" is a year range and "'1500 records'" a sample value.
+    re.compile(rf"(?<![-'\"])\b{_NUM}\s+(?:rows|records)\b", re.I),
+    re.compile(rf"\b(?:null|missing|empty|blank)\s+(?:on|in|for)\s+(?:about\s+|~)?{_NUM}", re.I),
     re.compile(
         rf"\b{_NUM}\s*%\s+(?:of\s+(?:the\s+|all\s+)?(?:rows|records|values|entries)"
         r"|(?:are\s+|is\s+)?(?:null|empty|blank|missing))\b",

@@ -28,6 +28,11 @@ from semantic_model.models import Datasource  # noqa: E402
         "12.5% of records are duplicates",
         "62% null",
         "roughly 30% are missing",
+        "arcref alone fans out (829 rows)",
+        "negative on 53 rows, so the ratio blows up",
+        "NULL on 576 (not quantifiable)",
+        "JSON null on ~15%",
+        "NULL for 100 accounts",
     ],
 )
 def test_a_measured_figure_is_found(text):
@@ -46,6 +51,9 @@ def test_a_measured_figure_is_found(text):
         "NULL means the value was not recorded",
         "covers EU and US regions",
         "Order total can be negative on refunds.",
+        "2016-2020 rows have no category return",  # a year range, not a count
+        "stored as '1500 records' or a bare '12'",  # a sample value, not a count
+        "NULL means the row was never scored",
         "",
     ],
 )
