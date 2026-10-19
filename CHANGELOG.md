@@ -14,6 +14,11 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`get_prompt_examples` serves the same examples on every read (#203).** Examples were read in
+  no set order, so when more of them tied on word overlap than the top-10 cap admits, which ones
+  were served could change from one process to the next. Ties are now broken by example id, the
+  order the store's primary-key index already returned in practice, on SQLite and Postgres alike.
+
 - **Introspection escapes a backslash in a string literal where the engine reads it as an escape
   (#439).** MySQL, Snowflake, BigQuery and Databricks treat `\` inside a string literal as an escape
   by default, and introspection only doubled single quotes, so a schema or table name ending in a
