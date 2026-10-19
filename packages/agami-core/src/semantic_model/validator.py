@@ -38,6 +38,7 @@ list[str] contract while adding structured findings for the review dashboard.
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -335,6 +336,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_backend_neutrality(org, res)
     _check_metric_descriptions(org, res)
     _check_derived_metrics(org, res)
+    _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
 
     return res
@@ -1068,6 +1070,86 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
                         "table — verify they're at the same grain (cross-grain composition "
                         "needs the grain-attributed planner, #4)",
                     )
+
+
+# Words that tell the reader a missing value really means zero, so filling it with a constant is
+# faithful to the data (#478): "NULL means none", "missing is treated as 0", "empty counts as zero".
+_NULL_MEANS_ZERO_RE = re.compile(
+    r"\b(?:null|nulls|missing|empty|blank|absent|no value)\b[^.;]{0,30}?"
+    r"\b(?:means?|is|are|=|treated as|counts? as|stands? for)\b[^.;]{0,15}?"
+    r"\b(?:0|zero|none|nothing|no)\b",
+    re.I,
+)
+
+
+def _null_filled_columns(sql: str, storage_type: str) -> list:
+    """The column nodes a binding wraps in COALESCE / IFNULL / NVL / ISNULL with a numeric
+    constant, e.g. `COALESCE(staff_count, 0)`.
+
+    A fill whose first argument holds an aggregate (`COALESCE(SUM(x), 0)`, a total over no rows)
+    is left alone: that is the empty-set case, not an invented value for a row. Parsed in the
+    binding's own engine dialect; a binding that does not parse is no evidence."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return []
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return []
+    found = []
+    for fill in tree.find_all(exp.Coalesce):  # IFNULL, NVL and ISNULL parse to the same node
+        constant = any(
+            isinstance(e, exp.Literal) and e.is_number
+            or isinstance(e, exp.Neg) and isinstance(e.this, exp.Literal) and e.this.is_number
+            for e in fill.expressions
+        )
+        if not constant or next(fill.this.find_all(exp.AggFunc), None) is not None:
+            continue
+        found.extend(fill.this.find_all(exp.Column))
+    return found
+
+
+def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric's binding fills a missing column value with a constant although nothing
+    says that missing means zero (#478). `COALESCE(staff_count, 0)` on a column described as
+    "NULL means the count was not recorded" invents a value: the row gets a misleading result
+    instead of none, averages and rates are pulled toward zero, and sessions copy the binding
+    verbatim. The column's description or caveats can say otherwise ("NULL means none"), which
+    silences it."""
+    from . import derived as D
+    texts: dict[str, dict[str, str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            table = texts.setdefault(t.name.lower(), {})
+            for c in t.columns:
+                table[c.name.lower()] = " ".join([c.description or "", *c.caveats])
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue
+        scoped = {t.lower(): texts.get(t.lower(), {}) for t in met.source_tables}
+        filled: set[str] = set()
+        for stype, sql in (met.bindings or {}).items():
+            for col in _null_filled_columns(sql, stype):
+                tables = ([col.table.lower()] if col.table and col.table.lower() in scoped
+                          else list(scoped))
+                said = [scoped[t][col.name.lower()] for t in tables if col.name.lower() in scoped[t]]
+                if said and not any(_NULL_MEANS_ZERO_RE.search(text) for text in said):
+                    filled.add(col.name)
+        if filled:
+            res.warn(
+                "metric_null_filled",
+                f"metric {met.name!r} fills a missing value of {sorted(filled)} with a constant, "
+                "but nothing says a missing value there means zero. That invents a value: the row "
+                "gets a result it should not have and averages are pulled toward the constant. Let "
+                "NULL propagate so the result stays empty, or, if missing really does mean zero, "
+                "say so in the column's description (\"NULL means none\").",
+            )
 
 
 def _binding_column_refs(sql: str) -> set[str]:
