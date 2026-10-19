@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The validator warns on figures measured on the data in model text (#479).** Enrichment wrote
+  build-time counts into metric calculations and descriptions and into table, column and entity
+  caveats ("covers only 57 of the 231 operations", "427 of 670 accounts have a value"). After the
+  next load these are wrong, but they read as part of the definition, and sessions repeat them in
+  answers. A new `measured_figure` warning, one for the whole model, names each such text and the
+  phrase found: `<n> of <m>` (with a denominator of 10 or more), "covers only <n>", "<n>% of
+  rows" or "<n>% null", "<n> rows", and "NULL on <n>". Thresholds, weights and unit factors are
+  not flagged. agami-connect now says to state the lasting fact, not its current count.
+
 ### Fixed
 
 - **`get_prompt_examples` serves the same examples on every read (#203).** Examples were read in
