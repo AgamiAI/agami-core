@@ -28,7 +28,7 @@ from semantic_model.models import Datasource  # noqa: E402
         "12.5% of records are duplicates",
         "62% null",
         "roughly 30% are missing",
-        "arcref alone fans out (829 rows)",
+        "joining on the site key alone fans out (829 rows)",
         "negative on 53 rows, so the ratio blows up",
         "NULL on 576 (not quantifiable)",
         "JSON null on ~15%",
