@@ -527,16 +527,18 @@ def select_examples(
     context. No embeddings (that tier is deploy-time + off by default)."""
     # Ordered so that examples tying on overlap are capped the same way on every read: the ranking
     # sort below is stable, so without it the rows past the cap followed the engine's row order (#203).
+    # By id alone: ids are hex, so every engine's collation sorts them alike, and it is the order the
+    # primary-key index already returned in practice, so the examples served do not change.
     if area:
         rows = store.query(
             "SELECT id, question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
-            "AND (area = ? OR area IS NULL) ORDER BY question, id",
+            "AND (area = ? OR area IS NULL) ORDER BY id",
             (org_id, datasource, area),
         )
     else:
         rows = store.query(
             "SELECT id, question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
-            "ORDER BY question, id",
+            "ORDER BY id",
             (org_id, datasource),
         )
     q = _tokens(query)

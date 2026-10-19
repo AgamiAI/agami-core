@@ -57,9 +57,9 @@ def test_ties_at_the_cap_are_served_the_same_whatever_the_insert_order(tmp_path,
         url = _seed(tmp_path / name, seed)
         monkeypatch.setenv("AGAMI_DB_URL", url)
         out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "query": "revenue"}))
-        served.append([e["question"] for e in out["examples"]])
+        served.append([e["id"] for e in out["examples"]])
     assert served[0] == served[1]
-    assert served[0] == [f"revenue by region {i:02d}" for i in range(10)]
+    assert served[0] == sorted(model_store.example_id(ex) for ex in examples)[:10]
 
 
 def test_char_budget_bounds_the_result(tmp_path, monkeypatch):
