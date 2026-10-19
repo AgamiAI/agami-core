@@ -19,6 +19,12 @@ below corresponds to one such version.
   were served could change from one process to the next. Ties are now broken by example id, the
   order the store's primary-key index already returned in practice, on SQLite and Postgres alike.
 
+- **Introspection escapes a backslash in a string literal where the engine reads it as an escape
+  (#439).** MySQL, Snowflake, BigQuery and Databricks treat `\` inside a string literal as an escape
+  by default, and introspection only doubled single quotes, so a schema or table name ending in a
+  backslash could end the literal early. Those four now double the backslash too. The other
+  engines are unchanged, since doubling it there would change the name being looked up.
+
 ## [0.9.17] — 2026-10-18
 
 ### Changed
