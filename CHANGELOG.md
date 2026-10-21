@@ -21,7 +21,9 @@ below corresponds to one such version.
   suggests `SUM(numerator) / NULLIF(SUM(denominator), 0)`. A ratio of aggregates, a ratio computed per
   group in a subquery, and columns of unknown class are left alone, and a metric whose calculation
   says it is an average of each row's ratio is not flagged. agami-connect now says to bind a share of
-  a total as a ratio of totals.
+  a total as a ratio of totals — also when the definition gives the formula for one row, since a
+  binding with no aggregate leaves the query to average the rows — and to mark amount columns
+  `additive` so the check can see them.
 
 - **The validator warns on figures measured on the data in model text (#479).** Enrichment wrote
   build-time counts into metric calculations and descriptions and into table, column and entity

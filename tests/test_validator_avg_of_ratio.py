@@ -104,3 +104,17 @@ def test_a_binding_for_an_engine_with_no_dialect_never_warns():
     met = org.subject_areas[0].metrics[0]
     met.bindings = {"NoSuchEngine": met.bindings["PostgreSQL"]}
     assert _codes(org) == []
+
+
+SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
+    encoding="utf-8")
+
+
+def test_the_skill_binds_a_share_as_a_ratio_of_totals_even_from_a_one_row_formula():
+    # a rebuilt model wrote a share as a per-row formula with no aggregate, which leaves the query
+    # to average the rows — the same mistake one step later
+    assert "A share of a total is a ratio of totals" in SKILL
+    assert "even when the definition you were given writes the formula for one row" in SKILL
+    assert "a binding with no aggregate leaves the query to average the rows" in SKILL
+    # the check needs the class: the skill says to set it
+    assert "Mark the amount columns `aggregation: additive`" in SKILL
