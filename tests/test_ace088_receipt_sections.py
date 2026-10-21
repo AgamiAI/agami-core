@@ -659,7 +659,7 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
     assert set(numbers) <= {ROW_ESTIMATE}
     # The statement's own literal is data-shaped; it reaches the receipt nowhere.
     assert CTE_LITERAL in CTE_SQL
-    assert CTE_LITERAL not in json.dumps(sections)
+    assert not re.search(rf"\b{CTE_LITERAL}\b", json.dumps(sections))  # whole token (#489)
 
 
 # --- the whole of what the assembler returns --------------------------------

@@ -94,6 +94,10 @@ class Dialect:
     name: StorageType = "PostgreSQL"
     limit_style: str = "limit"  # "limit" | "top" | "fetch"
     fk_enforced: bool = True    # False => always confirm inferred FKs by overlap
+    # True where a backslash escapes inside a string literal by default, so a name ending in one
+    # would end the literal early (#439). Introspection reads skip the model pass, so this escaping
+    # is their remaining defence.
+    backslash_escapes: bool = False
 
     # --- identifier / literal helpers ---
 
@@ -101,6 +105,8 @@ class Dialect:
         return '"' + name.replace('"', '""') + '"'
 
     def quote_lit(self, s: str) -> str:
+        if self.backslash_escapes:
+            s = s.replace("\\", "\\\\")
         return "'" + _esc(s) + "'"
 
     def qualified(self, schema: Optional[str], table: str) -> str:
@@ -348,6 +354,7 @@ class Redshift(PostgreSQL):
 
 class MySQL(Dialect):
     name = "MySQL"
+    backslash_escapes = True
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound
@@ -384,6 +391,7 @@ class MySQL(Dialect):
 
 class Snowflake(Dialect):
     name = "Snowflake"
+    backslash_escapes = True
     _SYS_SCHEMAS = ("INFORMATION_SCHEMA",)
 
     def duration_days_expr(self, start: str, end: str) -> str:
@@ -403,6 +411,7 @@ class DuckDB(Dialect):
 
 class Databricks(Dialect):
     name = "Databricks"
+    backslash_escapes = True
     fk_enforced = False  # Unity Catalog constraints are informational
 
     def quote_ident(self, name: str) -> str:
@@ -459,6 +468,7 @@ class SQLServer(Dialect):
 
 class BigQuery(Dialect):
     name = "BigQuery"
+    backslash_escapes = True
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound
