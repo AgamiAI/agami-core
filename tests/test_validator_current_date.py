@@ -90,3 +90,33 @@ def test_unparseable_binding_never_warns():
 def test_validate_runs_the_check():
     res = V.validate(_org("AVG(DATE '2025-02-19' - start_date)"))
     assert any(f.code == "metric_today_not_current_date" for f in res.findings)
+
+
+@pytest.mark.parametrize("calculation", [
+    "Days from each project's start until now.",
+    "Days from start up to now, averaged.",
+])
+def test_until_now_means_today(calculation):
+    assert len(_warnings(_org("AVG(DATE '2025-02-19' - start_date)", calculation=calculation))) == 1
+
+
+def test_now_in_ordinary_prose_is_not_a_date_calculation():
+    # "the metric now uses …" is the commonest "now" in model text, and it is not about the present
+    calc = "The metric now uses the planned end date: days between start and planned end."
+    assert _warnings(_org("AVG(DATE '2025-02-19' - start_date)", calculation=calc)) == []
+
+
+def test_a_now_label_in_a_filter_is_not_the_present():
+    binding = "AVG(CASE WHEN phase = 'now' THEN julianday('2025-02-19') - julianday(start_date) END)"
+    msgs = _warnings(_org(binding, storage_type="SQLite"))
+    assert len(msgs) == 1 and "fixed date '2025-02-19'" in msgs[0]
+
+
+SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
+    encoding="utf-8")
+
+
+def test_the_skill_keeps_data_freshness_out_of_model_text():
+    # how far the data lags today changes with every load; it belongs on the receipt (#448)
+    assert "If the data lags today, say so as a caveat" not in SKILL
+    assert "Don't write how far the data lags today into a caveat either" in SKILL

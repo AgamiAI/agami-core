@@ -1000,8 +1000,11 @@ def _check_cross_area_entity_collisions(org: Datasource, res: ValidationResult) 
 
 # A metric whose own text measures to today (#482). "current" alone is left out on purpose: a
 # "current balance" is the latest snapshot, not a date calculation.
+# Bare "now" is left out too: model text says "the metric now uses …" far more often than it means
+# the present; "until now", "up to now" and "to now" do mean it.
 _MEANS_TODAY_RE = re.compile(
-    r"\b(?:today|today's|current (?:date|day|time)|run date|as of now|right now)\b", re.I)
+    r"\b(?:today|today's|current (?:date|day|time)|run date|as of now|right now|(?:up )?(?:un)?til now"
+    r"|up to now|to now)\b", re.I)
 _DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
@@ -1022,7 +1025,13 @@ def _today_problem(sql: str, storage_type: str) -> Optional[str]:
         return None
     strings = [lit.this for lit in tree.find_all(exp.Literal) if lit.is_string]
     today = (exp.CurrentDate, exp.CurrentTimestamp, exp.CurrentDatetime, exp.CurrentTime)
-    if next(tree.find_all(*today), None) is not None or any(v.lower() == "now" for v in strings):
+    # 'now' means the present only as a date function's argument or a cast (SQLite's
+    # julianday('now'), Postgres's 'now'::timestamp); as a compared value it is just a label
+    now_in_date_call = any(
+        lit.is_string and lit.this.lower() == "now"
+        and isinstance(lit.parent, exp.Func) and not isinstance(lit.parent, exp.Predicate)
+        for lit in tree.find_all(exp.Literal))
+    if next(tree.find_all(*today), None) is not None or now_in_date_call:
         return None  # measures to today; a date literal beside it is a filter, e.g. a placeholder
     dated = next((v for v in strings if _DATE_LITERAL_RE.match(v)), None)
     if dated:
