@@ -28,7 +28,8 @@ NOT_RECORDED = "Staff on the operation. NULL means the count was not recorded."
 
 
 def _org(binding: str, *, staff_desc: str = NOT_RECORDED, staff_caveats: list[str] | None = None,
-         storage_type: str = "PostgreSQL") -> m.Datasource:
+         storage_type: str = "PostgreSQL",
+         calculation: str = "Average staff count per operation.") -> m.Datasource:
     t = m.Table(name="operations", schema="s", storage_connection="c", grain=["op_id"],
                 description="One row per operation.", columns=[
                     m.Column(name="op_id", type="integer", primary_key=True),
@@ -36,7 +37,7 @@ def _org(binding: str, *, staff_desc: str = NOT_RECORDED, staff_caveats: list[st
                              caveats=staff_caveats or []),
                     m.Column(name="volunteers", type="integer", description="Volunteers on it.")])
     met = m.Metric(name="staff_per_op", description="Average staff per operation",
-                   calculation="Average staff count per operation.", source_tables=["operations"],
+                   calculation=calculation, source_tables=["operations"],
                    bindings={storage_type: binding})
     sa = m.SubjectArea(name="s", tables_defined=[t], metrics=[met])
     return m.Datasource(datasource="demo", subject_areas=[sa])
@@ -104,3 +105,35 @@ def test_units_still_render_beside_the_rule():
     text = OD.derived_context(org)
     assert "- Units / currency in use: USD." in text
     assert text.index("Units / currency") < text.index("placed after the rest")
+
+
+@pytest.mark.parametrize("calculation", [
+    "The KB formula counts a missing staff count as 0, so this binding does the same.",
+    "Per the business definition, which treats a missing count as zero.",
+    "Average staff per operation; a missing staff count means none were assigned.",
+])
+def test_a_metric_that_names_the_definition_behind_its_fill_is_left_alone(calculation):
+    # a definition the author was given can write the fill into its formula; saying so, with
+    # where it comes from, is a reviewable reason, not an invented zero
+    assert _warnings(_org("AVG(COALESCE(staff_count, 0))", calculation=calculation)) == []
+
+
+@pytest.mark.parametrize("calculation", [
+    "Total personnel = staff_counts.total (null as 0).",  # names no source
+    "Missing staff counts are filled so every operation gets a score.",  # a reason, not a rule
+])
+def test_a_metric_that_fills_without_naming_a_source_still_warns(calculation):
+    assert len(_warnings(_org("AVG(COALESCE(staff_count, 0))", calculation=calculation))) == 1
+
+
+SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
+    encoding="utf-8")
+
+
+def test_the_skill_tells_a_missing_value_from_no_related_rows():
+    # a staff count nobody entered stays empty; a hub with no supply records serves no disasters,
+    # which is often a real zero — the rule must not blank the second case along with the first
+    assert "**a recorded value that is missing**" in SKILL
+    assert "**no related rows at all**" in SKILL
+    assert "decide it per metric from what the formula means" in SKILL
+    assert '("the KB formula counts a missing percentage as 0")' in SKILL

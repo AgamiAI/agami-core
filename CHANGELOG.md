@@ -18,12 +18,15 @@ below corresponds to one such version.
   `COALESCE(staff_count, 0)` on columns whose description says NULL means "not recorded", which gives
   a row a result it should not have and pulls averages and rates toward zero. A new
   `metric_null_filled` warning fires when a binding fills a column with a numeric constant through
-  `COALESCE`, `IFNULL`, `NVL` or `ISNULL` and the column's description and caveats don't say that a
-  missing value means zero. A total over no rows (`COALESCE(SUM(x), 0)`), a fallback column and a
+  `COALESCE`, `IFNULL`, `NVL` or `ISNULL` and nothing gives a reason: neither the column's
+  description and caveats saying a missing value means zero, nor the metric's calculation saying the
+  definition it follows counts a missing value as 0 and naming that definition ("the KB formula counts
+  a missing percentage as 0"). A bare "(null as 0)" names no source and still warns. A total over no rows (`COALESCE(SUM(x), 0)`), a fallback column and a
   text label are left alone. Every model's derived context now carries the row-keeping convention:
   a row whose value cannot be calculated stays in a list, ranking or grouping, shown empty and last,
   and counts in neither the numerator nor the denominator of an average, total or rate.
-  agami-connect now says to let NULL propagate.
+  agami-connect now says to let NULL propagate, and to tell a recorded value that is missing (left
+  empty) from no related rows at all (often a real zero, decided per metric).
 
 - **The validator warns on figures measured on the data in model text (#479).** Enrichment wrote
   build-time counts into metric calculations and descriptions and into table, column and entity

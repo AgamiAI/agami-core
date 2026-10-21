@@ -1154,6 +1154,16 @@ _NULL_MEANS_ZERO_RE = re.compile(
     r"\b(?:0|zero|none|nothing|no)\b",
     re.I,
 )
+# A metric's own text can carry the reason instead, when it names where the rule comes from: "the
+# KB formula counts a missing percentage as 0", "the business definition treats a missing gap as
+# zero". A bare "(null as 0)" names no source and does not count — that is how an invented fill
+# reads.
+_METRIC_DEFINES_ZERO_RE = re.compile(
+    r"\b(?:definition|defined|formula|kb|business rule|metrics? (?:file|document)|spec)\b[^.;]{0,80}?"
+    r"\b(?:counts?|treats?|takes?|fills?|sets?|reads?)\b[^.;]{0,60}?"
+    r"\b(?:missing|null|nulls|empty|blank|absent)\b[^.;]{0,40}?\bas (?:0|zero)\b",
+    re.I,
+)
 
 
 def _null_filled_columns(sql: str, storage_type: str) -> list:
@@ -1191,8 +1201,10 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
     says that missing means zero (#478). `COALESCE(staff_count, 0)` on a column described as
     "NULL means the count was not recorded" invents a value: the row gets a misleading result
     instead of none, averages and rates are pulled toward zero, and sessions copy the binding
-    verbatim. The column's description or caveats can say otherwise ("NULL means none"), which
-    silences it."""
+    verbatim. Two things silence it: the column's description or caveats saying a missing value
+    means zero ("NULL means none"), or the metric's own calculation saying the definition it follows
+    counts a missing value as 0 and naming that definition ("the KB formula counts a missing
+    percentage as 0")."""
     from . import derived as D
     texts: dict[str, dict[str, str]] = {}
     for sa in org.subject_areas:
@@ -1206,6 +1218,9 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
     for met in all_metrics:
         if D.is_derived(met) or not met.source_tables:
             continue
+        own = f"{met.calculation} {met.description}"
+        if _METRIC_DEFINES_ZERO_RE.search(own) or _NULL_MEANS_ZERO_RE.search(own):
+            continue  # the metric says why it fills, and where that rule comes from
         scoped = {t.lower(): texts.get(t.lower(), {}) for t in met.source_tables}
         filled: set[str] = set()
         for stype, sql in (met.bindings or {}).items():
@@ -1221,8 +1236,10 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
                 f"metric {met.name!r} fills a missing value of {sorted(filled)} with a constant, "
                 "but nothing says a missing value there means zero. That invents a value: the row "
                 "gets a result it should not have and averages are pulled toward the constant. Let "
-                "NULL propagate so the result stays empty, or, if missing really does mean zero, "
-                "say so in the column's description (\"NULL means none\").",
+                "NULL propagate so the result stays empty. If missing really does mean zero, say so "
+                "in the column's description (\"NULL means none\"), or, when a definition you follow "
+                "says to count it as 0, say that in the metric's calculation and name the "
+                "definition (\"the KB formula counts a missing value as 0\").",
             )
 
 
