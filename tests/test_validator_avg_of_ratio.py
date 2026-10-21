@@ -118,3 +118,35 @@ def test_the_skill_binds_a_share_as_a_ratio_of_totals_even_from_a_one_row_formul
     assert "a binding with no aggregate leaves the query to average the rows" in SKILL
     # the check needs the class: the skill says to set it
     assert "Mark the amount columns `aggregation: additive`" in SKILL
+
+
+@pytest.mark.parametrize("binding", [
+    "AVG(CASE WHEN online_sales / NULLIF(total_sales, 0) > 0.5 THEN 1.0 ELSE 0.0 END)",
+    "AVG(CASE WHEN (online_sales / total_sales) >= 0.5 THEN 1 END)",
+])
+def test_a_division_used_only_as_a_condition_is_left_alone(binding):
+    # the share of rows above a threshold, not an average ratio: SUM/SUM would change its meaning
+    assert _codes(_org(binding)) == []
+
+
+def test_a_division_in_a_result_branch_still_warns():
+    binding = "AVG(CASE WHEN total_sales > 0 THEN online_sales / total_sales END)"
+    assert _codes(_org(binding)) == ["metric_avg_of_ratio"]
+
+
+def test_a_schema_qualified_source_table_is_resolved():
+    org = _org("AVG(online_sales / total_sales)")
+    org.subject_areas[0].metrics[0].source_tables = ["s.store_sales"]
+    assert _codes(org) == ["metric_avg_of_ratio"]
+
+
+@pytest.mark.parametrize("copy_first", [True, False])
+def test_copies_that_disagree_on_a_class_never_warn_in_either_order(copy_first):
+    # the same table defined in two subject areas, one copy calling online_sales averageable
+    org = _org("AVG(online_sales / total_sales)")
+    original = org.subject_areas[0].tables_defined[0]
+    copy = original.model_copy(deep=True)
+    copy.columns[1].aggregation = "averageable"
+    other = m.SubjectArea(name="other", tables_defined=[copy])
+    org.subject_areas = [other, org.subject_areas[0]] if copy_first else [org.subject_areas[0], other]
+    assert _codes(org) == []

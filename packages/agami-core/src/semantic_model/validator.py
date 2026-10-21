@@ -1206,14 +1206,39 @@ _PER_ROW_AVERAGE_RE = re.compile(
 )
 
 
-def _column_classes(org: Datasource) -> dict[str, dict[str, str]]:
-    """table name -> {column name -> aggregation class}, lower-cased."""
-    classes: dict[str, dict[str, str]] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            classes.setdefault(t.name.lower(), {}).update(
-                {c.name.lower(): c.aggregation for c in t.columns})
-    return classes
+def _source_column_classes(org: Datasource, refs: list[str]) -> dict[str, dict[str, str]]:
+    """bare table name -> {column name -> aggregation class} for the tables a metric's
+    `source_tables` names, resolved by schema-aware identity: `s.store_sales` finds schema `s`'s
+    table (or a schema-less definition), a bare name every table of that name. Where the copies
+    of a table in several subject areas, or two same-named tables, disagree on a column's class,
+    the column is `ambiguous`, so the evidence never depends on the order the areas load in."""
+    from .models import table_key
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+    seen: dict[str, dict[str, set]] = {}
+    for ref in refs:
+        schema, bare = table_key(ref)
+        hits = ([t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+                if schema else [t for k, t in defs if k[1] == bare])
+        for t in hits:
+            cols = seen.setdefault(bare, {})
+            for c in t.columns:
+                cols.setdefault(c.name.lower(), set()).add(c.aggregation)
+    return {bare: {c: (next(iter(v)) if len(v) == 1 else "ambiguous") for c, v in cols.items()}
+            for bare, cols in seen.items()}
+
+
+def _in_condition(div, avg) -> bool:
+    """True when the division sits in a condition inside the AVG — a comparison (`>`, `IN`,
+    `BETWEEN`, …), which is how a CASE/IF test or a filter uses it — rather than in the value
+    being averaged. `AVG(CASE WHEN a / b > 0.5 THEN 1.0 ELSE 0.0 END)` is the share of rows above
+    a threshold, not an average ratio."""
+    from sqlglot import expressions as exp
+    node = div.parent
+    while node is not None and node is not avg:
+        if isinstance(node, exp.Predicate):
+            return True
+        node = node.parent
+    return False
 
 
 def _ratio_side_is_additive(side, classes: dict[str, str], by_table: dict[str, dict[str, str]]) -> bool:
@@ -1262,7 +1287,7 @@ def _avg_of_ratio(sql: str, storage_type: str, classes: dict[str, str],
                     nested = True
                     break
                 node = node.parent
-            if nested:
+            if nested or _in_condition(div, avg):
                 continue
             if (_ratio_side_is_additive(div.this, classes, by_table)
                     and _ratio_side_is_additive(div.expression, classes, by_table)):
@@ -1278,7 +1303,6 @@ def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
     A warning, not a gate: an average of per-row values is sometimes what a metric means, and a
     calculation that says so ("the average of each row's ratio") silences it."""
     from . import derived as D
-    by_table = _column_classes(org)
     all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
     for sa in org.subject_areas:
         all_metrics.extend(sa.metrics)
@@ -1287,12 +1311,12 @@ def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
             continue
         if _PER_ROW_AVERAGE_RE.search(f"{met.calculation} {met.description}"):
             continue
-        scoped = {t.lower(): by_table.get(t.lower(), {}) for t in met.source_tables}
+        scoped = _source_column_classes(org, met.source_tables)
         classes: dict[str, str] = {}
         for table_cols in scoped.values():
             for name, cls in table_cols.items():
                 # a name on two source tables with different classes is ambiguous: not additive
-                classes[name] = cls if classes.get(name, cls) == cls else "unknown"
+                classes[name] = cls if classes.get(name, cls) == cls else "ambiguous"
         for stype, sql in (met.bindings or {}).items():
             if _avg_of_ratio(sql, stype, classes, scoped):
                 res.warn(
