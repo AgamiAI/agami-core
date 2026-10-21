@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.18] — 2026-10-21
+
 ### Added
 
 - **A missing value is not filled with 0 by default (#478).** Enrichment wrote metric bindings like
