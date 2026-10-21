@@ -29,6 +29,16 @@ below corresponds to one such version.
   and counts in neither the numerator nor the denominator of an average, total or rate.
   agami-connect now says to let NULL propagate, and to tell a recorded value that is missing (left
   empty) from no related rows at all (often a real zero, decided per metric).
+- **A metric about today measures to today (#482).** Enrichment sometimes bound "days since start"
+  or "age" to the latest date found in the data, or to a fixed date, so the figure was reproducible.
+  When the data is not loaded up to today that silently changes the answer and which rows qualify.
+  A new `metric_today_not_current_date` warning fires when a metric's calculation or description
+  says today, the current date, the run date or "until now", but its binding has no current date in it: it uses
+  a fixed date, a `MAX` over the data in a subquery, or neither. Every engine's form of today is
+  recognised (`CURRENT_DATE`, `NOW()`, `GETDATE()`, `SYSDATE`, `CURDATE()`, `today()`, SQLite's
+  `'now'` as a date function's argument, not as a compared label), and a date literal beside it,
+  such as a placeholder end date, is not flagged. agami-connect now says to bind `CURRENT_DATE` and
+  to keep how far the data lags today out of model text, since the receipt carries it.
 
 - **The validator warns on figures measured on the data in model text (#479).** Enrichment wrote
   build-time counts into metric calculations and descriptions and into table, column and entity
