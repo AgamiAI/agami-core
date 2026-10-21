@@ -23,6 +23,15 @@ below corresponds to one such version.
   rows" or "<n>% null", "<n> rows", and "NULL on <n>". Thresholds, weights and unit factors are
   not flagged. agami-connect now says to state the lasting fact, not its current count.
 
+### Changed
+
+- **agami-connect binds a value as its label and unit say, even when the data looks implausible
+  (#481).** Enrichment sometimes decided a stated meaning was wrong because the values did not look
+  as expected — reading a field stored as `'0.73%'` as a 0–1 ratio because every value was below 1,
+  or swapping a documented column for a neighbour whose values looked more plausible — and stated the
+  guess as a rule that every answer then inherited. The skill now says to keep the stated meaning,
+  record the oddity as a caveat, and ask the user which reading is right before changing a binding.
+
 ### Fixed
 
 - **`get_prompt_examples` serves the same examples on every read (#203).** Examples were read in
