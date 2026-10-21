@@ -21,7 +21,9 @@ below corresponds to one such version.
   `COALESCE`, `IFNULL`, `NVL` or `ISNULL` and nothing gives a reason: neither the column's
   description and caveats saying a missing value means zero, nor the metric's calculation saying the
   definition it follows counts a missing value as 0 and naming that definition ("the KB formula counts
-  a missing percentage as 0"). A bare "(null as 0)" names no source and still warns. A total over no rows (`COALESCE(SUM(x), 0)`), a fallback column and a
+  a missing percentage as 0"). A bare "(null as 0)" names no source and still warns, and so does a
+  statement that denies the zero ("NULL is not zero", "the definition never treats it as 0"). Source
+  tables written with their schema (`s.operations`) resolve to that table only. A total over no rows (`COALESCE(SUM(x), 0)`), a fallback column and a
   text label are left alone. Every model's derived context now carries the row-keeping convention:
   a row whose value cannot be calculated stays in a list, ranking or grouping, shown empty and last,
   and counts in neither the numerator nor the denominator of an average, total or rate.

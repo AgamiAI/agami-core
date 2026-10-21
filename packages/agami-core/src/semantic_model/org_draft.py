@@ -42,7 +42,8 @@ _ROW_KEEPING_RULE = (
     "only when the question asks.",
     "- An average, total, rate or percentage is taken over the rows where the value is known: a row "
     "whose value cannot be calculated counts in neither the numerator nor the denominator. A "
-    "missing value is not counted as 0 unless its column says that missing means zero.",
+    "missing value is not counted as 0 unless its column says that missing means zero, or the "
+    "metric's calculation says the definition it follows counts it as 0.",
 )
 
 

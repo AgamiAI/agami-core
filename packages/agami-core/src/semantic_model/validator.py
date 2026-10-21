@@ -1151,7 +1151,7 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
 _NULL_MEANS_ZERO_RE = re.compile(
     r"\b(?:null|nulls|missing|empty|blank|absent|no value)\b[^.;]{0,30}?"
     r"\b(?:means?|is|are|=|treated as|counts? as|stands? for)\b[^.;]{0,15}?"
-    r"\b(?:0|zero|none|nothing|no)\b",
+    r"\b(?:0|zero|none|nothing)\b",
     re.I,
 )
 # A metric's own text can carry the reason instead, when it names where the rule comes from: "the
@@ -1164,6 +1164,44 @@ _METRIC_DEFINES_ZERO_RE = re.compile(
     r"\b(?:missing|null|nulls|empty|blank|absent)\b[^.;]{0,40}?\bas (?:0|zero)\b",
     re.I,
 )
+
+
+# A statement that denies the zero ("NULL is not zero", "the definition never treats it as 0") must
+# not read as permission to fill.
+_NEGATION_RE = re.compile(r"\b(?:not|never|no longer|isn't|aren't|doesn't|don't|cannot|can't)\b", re.I)
+
+
+def _says_missing_is_zero(text: str, pattern: "re.Pattern[str]") -> bool:
+    """True when `text` affirmatively says a missing value is (or is counted as) zero.
+
+    The negation is looked for in the whole clause up to the match, not only inside it: in "the
+    KB never treats a missing staff count as 0" the pattern can start at "missing", past the
+    "never"."""
+    text = text or ""
+    for m in pattern.finditer(text):
+        start = max(text.rfind(".", 0, m.start()), text.rfind(";", 0, m.start())) + 1
+        if not _NEGATION_RE.search(text[start:m.end()]):
+            return True
+    return False
+
+
+def _source_column_texts(org: Datasource, refs: list[str]) -> list[tuple[str, dict[str, str]]]:
+    """(bare table name, {column -> description + caveats}) for every table a metric's
+    `source_tables` names, resolved by schema-aware identity: `s.operations` finds the
+    `operations` table of schema `s`, a bare `operations` finds every table of that name, and
+    two same-named tables in different schemas stay apart instead of merging their texts."""
+    from .models import table_key
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+    found: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for ref in refs:
+        schema, bare = table_key(ref)
+        hits = ([t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+                if schema else [t for k, t in defs if k[1] == bare])
+        for t in hits:
+            cols = found.setdefault(table_key(t.name, t.schema_name), {})
+            for c in t.columns:  # a table defined in several areas: every copy's text counts
+                cols.setdefault(c.name.lower(), []).append(" ".join([c.description or "", *c.caveats]))
+    return [(key[1], {c: " ".join(v) for c, v in cols.items()}) for key, cols in found.items()]
 
 
 def _null_filled_columns(sql: str, storage_type: str) -> list:
@@ -1206,12 +1244,6 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
     counts a missing value as 0 and naming that definition ("the KB formula counts a missing
     percentage as 0")."""
     from . import derived as D
-    texts: dict[str, dict[str, str]] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            table = texts.setdefault(t.name.lower(), {})
-            for c in t.columns:
-                table[c.name.lower()] = " ".join([c.description or "", *c.caveats])
     all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
     for sa in org.subject_areas:
         all_metrics.extend(sa.metrics)
@@ -1219,16 +1251,19 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
         if D.is_derived(met) or not met.source_tables:
             continue
         own = f"{met.calculation} {met.description}"
-        if _METRIC_DEFINES_ZERO_RE.search(own) or _NULL_MEANS_ZERO_RE.search(own):
+        if (_says_missing_is_zero(own, _METRIC_DEFINES_ZERO_RE)
+                or _says_missing_is_zero(own, _NULL_MEANS_ZERO_RE)):
             continue  # the metric says why it fills, and where that rule comes from
-        scoped = {t.lower(): texts.get(t.lower(), {}) for t in met.source_tables}
+        scoped = _source_column_texts(org, met.source_tables)
         filled: set[str] = set()
         for stype, sql in (met.bindings or {}).items():
             for col in _null_filled_columns(sql, stype):
-                tables = ([col.table.lower()] if col.table and col.table.lower() in scoped
-                          else list(scoped))
-                said = [scoped[t][col.name.lower()] for t in tables if col.name.lower() in scoped[t]]
-                if said and not any(_NULL_MEANS_ZERO_RE.search(text) for text in said):
+                # a qualifier naming a source table picks that table; otherwise (no qualifier, or
+                # an alias) the column may come from any of them
+                named = [cols for bare, cols in scoped if col.table and bare == col.table.lower()]
+                tables = named or [cols for _, cols in scoped]
+                said = [cols[col.name.lower()] for cols in tables if col.name.lower() in cols]
+                if said and not any(_says_missing_is_zero(text, _NULL_MEANS_ZERO_RE) for text in said):
                     filled.add(col.name)
         if filled:
             res.warn(

@@ -137,3 +137,48 @@ def test_the_skill_tells_a_missing_value_from_no_related_rows():
     assert "**no related rows at all**" in SKILL
     assert "decide it per metric from what the formula means" in SKILL
     assert '("the KB formula counts a missing percentage as 0")' in SKILL
+
+
+@pytest.mark.parametrize("desc,calculation", [
+    ("Staff on the operation. NULL is not zero.", "Average staff count per operation."),
+    ("Staff on the operation. NULL means no measurement was recorded.", "Average staff count."),
+    (NOT_RECORDED, "The business definition never treats a missing staff count as 0."),
+    (NOT_RECORDED, "The KB formula does not count a missing staff count as 0."),
+])
+def test_a_statement_that_denies_the_zero_does_not_silence_the_warning(desc, calculation):
+    org = _org("AVG(COALESCE(staff_count, 0))", staff_desc=desc, calculation=calculation)
+    assert len(_warnings(org)) == 1
+
+
+def _qualified_org(source_ref: str, *, other_schema_desc: str | None = None) -> m.Datasource:
+    org = _org("AVG(COALESCE(staff_count, 0))")
+    org.subject_areas[0].metrics[0].source_tables = [source_ref]
+    if other_schema_desc is not None:
+        # a same-named table in another schema, whose column does say missing means zero
+        twin = m.Table(name="operations", schema="archive", storage_connection="c", grain=["op_id"],
+                       description="Archived operations.", columns=[
+                           m.Column(name="op_id", type="integer", primary_key=True),
+                           m.Column(name="staff_count", type="integer",
+                                    description=other_schema_desc)])
+        org.subject_areas[0].tables_defined.append(twin)
+    return org
+
+
+def test_a_schema_qualified_source_table_is_resolved():
+    assert len(_warnings(_qualified_org("s.operations"))) == 1
+
+
+def test_same_named_tables_in_other_schemas_do_not_lend_their_text():
+    # `archive.operations` says NULL means none; the metric reads `s.operations`, which does not
+    org = _qualified_org("s.operations", other_schema_desc="NULL means none were assigned.")
+    assert len(_warnings(org)) == 1
+
+
+def test_a_qualifier_in_the_sql_picks_its_table():
+    org = _org("AVG(COALESCE(operations.staff_count, 0))")
+    assert len(_warnings(org)) == 1
+
+
+def test_the_query_time_rule_carries_the_sourced_definition_exception():
+    text = OD.derived_context(_org("AVG(staff_count)"))
+    assert "or the metric's calculation says the definition it follows counts it as 0" in text
