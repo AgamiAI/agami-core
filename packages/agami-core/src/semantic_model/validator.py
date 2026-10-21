@@ -341,6 +341,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_derived_metrics(org, res)
     _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
+    _check_metric_avg_of_ratio(org, res)
 
     return res
 
@@ -1398,6 +1399,138 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
                     f"found on its source table(s) {met.source_tables} — check for a typo or a "
                     "missing source_table",
                 )
+
+
+# A metric's calculation can declare that it really is an average of per-row values (an average
+# per-student score, say), which silences `metric_avg_of_ratio` for it (#480).
+_PER_ROW_AVERAGE_RE = re.compile(
+    r"\b(?:per[- ]row|each row's|row[- ]level)\b.{0,40}\baverage|\baverage\b.{0,40}\b(?:per[- ]row|each row's|row[- ]level)\b",
+    re.I | re.S,
+)
+
+
+def _source_column_classes(org: Datasource, refs: list[str]) -> dict[str, dict[str, str]]:
+    """bare table name -> {column name -> aggregation class} for the tables a metric's
+    `source_tables` names, resolved by schema-aware identity: `s.store_sales` finds schema `s`'s
+    table (or a schema-less definition), a bare name every table of that name. Where the copies
+    of a table in several subject areas, or two same-named tables, disagree on a column's class,
+    the column is `ambiguous`, so the evidence never depends on the order the areas load in."""
+    from .models import table_key
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+    seen: dict[str, dict[str, set]] = {}
+    for ref in refs:
+        schema, bare = table_key(ref)
+        hits = ([t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+                if schema else [t for k, t in defs if k[1] == bare])
+        for t in hits:
+            cols = seen.setdefault(bare, {})
+            for c in t.columns:
+                cols.setdefault(c.name.lower(), set()).add(c.aggregation)
+    return {bare: {c: (next(iter(v)) if len(v) == 1 else "ambiguous") for c, v in cols.items()}
+            for bare, cols in seen.items()}
+
+
+def _in_condition(div, avg) -> bool:
+    """True when the division sits in a condition inside the AVG — a comparison (`>`, `IN`,
+    `BETWEEN`, …), which is how a CASE/IF test or a filter uses it — rather than in the value
+    being averaged. `AVG(CASE WHEN a / b > 0.5 THEN 1.0 ELSE 0.0 END)` is the share of rows above
+    a threshold, not an average ratio."""
+    from sqlglot import expressions as exp
+    node = div.parent
+    while node is not None and node is not avg:
+        if isinstance(node, exp.Predicate):
+            return True
+        node = node.parent
+    return False
+
+
+def _ratio_side_is_additive(side, classes: dict[str, str], by_table: dict[str, dict[str, str]]) -> bool:
+    """True when one side of a ratio is built only from `additive` columns (at least one) and no
+    aggregate. A side holding an aggregate is a ratio of totals already, and a column whose class
+    is unknown, averageable or ambiguous never counts as additive, so the check stays quiet."""
+    from sqlglot import expressions as exp
+    if next(side.find_all(exp.AggFunc), None) is not None:
+        return False
+    cols = list(side.find_all(exp.Column))
+    if not cols:
+        return False
+    for c in cols:
+        if c.table and c.table.lower() in by_table:
+            cls = by_table[c.table.lower()].get(c.name.lower())
+        else:
+            cls = classes.get(c.name.lower())
+        if cls != "additive":
+            return False
+    return True
+
+
+def _avg_of_ratio(sql: str, storage_type: str, classes: dict[str, str],
+                  by_table: dict[str, dict[str, str]]) -> bool:
+    """True when the binding averages a per-row ratio of two additive amounts: `AVG(a / b)`.
+
+    Parsed in the binding's own engine dialect, so `a::numeric` and engine quoting read as they
+    run; a binding that does not parse, or an engine with no dialect mapping, is no evidence."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return False
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return False
+    for avg in tree.find_all(exp.Avg):
+        for div in avg.this.find_all(exp.Div):
+            # only a ratio computed row by row inside this AVG — not one inside a nested query or
+            # another aggregate, which is computed per group first and is a ratio of totals
+            node, nested = div.parent, False
+            while node is not None and node is not avg:
+                if isinstance(node, (exp.Select, exp.Subquery, exp.AggFunc)):
+                    nested = True
+                    break
+                node = node.parent
+            if nested or _in_condition(div, avg):
+                continue
+            if (_ratio_side_is_additive(div.this, classes, by_table)
+                    and _ratio_side_is_additive(div.expression, classes, by_table)):
+                return True
+    return False
+
+
+def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric averages a per-row ratio of two additive amounts (#480). For a group,
+    `AVG(online_sales / total_sales)` weighs a store with 100 sales the same as one with 1,000 and
+    disagrees with the totals beside it; the group's share is `SUM(a) / SUM(b)`.
+
+    A warning, not a gate: an average of per-row values is sometimes what a metric means, and a
+    calculation that says so ("the average of each row's ratio") silences it."""
+    from . import derived as D
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue
+        if _PER_ROW_AVERAGE_RE.search(f"{met.calculation} {met.description}"):
+            continue
+        scoped = _source_column_classes(org, met.source_tables)
+        classes: dict[str, str] = {}
+        for table_cols in scoped.values():
+            for name, cls in table_cols.items():
+                # a name on two source tables with different classes is ambiguous: not additive
+                classes[name] = cls if classes.get(name, cls) == cls else "ambiguous"
+        for stype, sql in (met.bindings or {}).items():
+            if _avg_of_ratio(sql, stype, classes, scoped):
+                res.warn(
+                    "metric_avg_of_ratio",
+                    f"metric {met.name!r} ({stype}) averages a per-row ratio of two additive "
+                    "amounts, which weighs every row the same whatever its size. For a group's "
+                    "share use SUM(numerator) / NULLIF(SUM(denominator), 0) over the rows where "
+                    "both are known; if an average of per-row values is meant, say so in the "
+                    "calculation (\"the average of each row's ratio\").",
+                )
+                break
 
 
 # ---------------------------------------------------------------------------

@@ -39,6 +39,18 @@ below corresponds to one such version.
   `'now'` as a date function's argument, not as a compared label), and a date literal beside it,
   such as a placeholder end date, is not flagged. agami-connect now says to bind `CURRENT_DATE` and
   to keep how far the data lags today out of model text, since the receipt carries it.
+- **The validator warns on an average of per-row ratios of two amounts that add up (#480).** A metric
+  bound as `AVG(online_sales / total_sales)` weighs a store with 100 sales the same as one with 1,000,
+  so for a group it is not the share of the total and disagrees with the totals beside it. A new
+  `metric_avg_of_ratio` warning fires when both sides of the ratio are `additive` columns, and
+  suggests `SUM(numerator) / NULLIF(SUM(denominator), 0)`. A ratio of aggregates, a ratio computed per
+  group in a subquery, a division used only as a condition (`CASE WHEN a / b > 0.5`), columns of
+  unknown class, and columns whose copies in different subject areas disagree on their class are left
+  alone; source tables written with their schema resolve to that table, and a metric whose calculation
+  says it is an average of each row's ratio is not flagged. agami-connect now says to bind a share of
+  a total as a ratio of totals — also when the definition gives the formula for one row, since a
+  binding with no aggregate leaves the query to average the rows — and to mark amount columns
+  `additive` so the check can see them.
 
 - **The validator warns on figures measured on the data in model text (#479).** Enrichment wrote
   build-time counts into metric calculations and descriptions and into table, column and entity
