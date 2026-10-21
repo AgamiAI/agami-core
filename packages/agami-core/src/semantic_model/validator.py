@@ -338,6 +338,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_descriptions(org, res)
     _check_measured_figures(org, res)
     _check_derived_metrics(org, res)
+    _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
 
     return res
@@ -1143,6 +1144,138 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
                         "table — verify they're at the same grain (cross-grain composition "
                         "needs the grain-attributed planner, #4)",
                     )
+
+
+# Words that tell the reader a missing value really means zero, so filling it with a constant is
+# faithful to the data (#478): "NULL means none", "missing is treated as 0", "empty counts as zero".
+_NULL_MEANS_ZERO_RE = re.compile(
+    r"\b(?:null|nulls|missing|empty|blank|absent|no value)\b[^.;]{0,30}?"
+    r"\b(?:means?|is|are|=|treated as|counts? as|stands? for)\b[^.;]{0,15}?"
+    r"\b(?:0|zero|none|nothing)\b",
+    re.I,
+)
+# A metric's own text can carry the reason instead, when it names where the rule comes from: "the
+# KB formula counts a missing percentage as 0", "the business definition treats a missing gap as
+# zero". A bare "(null as 0)" names no source and does not count — that is how an invented fill
+# reads.
+_METRIC_DEFINES_ZERO_RE = re.compile(
+    r"\b(?:definition|defined|formula|kb|business rule|metrics? (?:file|document)|spec)\b[^.;]{0,80}?"
+    r"\b(?:counts?|treats?|takes?|fills?|sets?|reads?)\b[^.;]{0,60}?"
+    r"\b(?:missing|null|nulls|empty|blank|absent)\b[^.;]{0,40}?\bas (?:0|zero)\b",
+    re.I,
+)
+
+
+# A statement that denies the zero ("NULL is not zero", "the definition never treats it as 0") must
+# not read as permission to fill.
+_NEGATION_RE = re.compile(r"\b(?:not|never|no longer|isn't|aren't|doesn't|don't|cannot|can't)\b", re.I)
+
+
+def _says_missing_is_zero(text: str, pattern: "re.Pattern[str]") -> bool:
+    """True when `text` affirmatively says a missing value is (or is counted as) zero.
+
+    The negation is looked for in the whole clause up to the match, not only inside it: in "the
+    KB never treats a missing staff count as 0" the pattern can start at "missing", past the
+    "never"."""
+    text = text or ""
+    for m in pattern.finditer(text):
+        start = max(text.rfind(".", 0, m.start()), text.rfind(";", 0, m.start())) + 1
+        if not _NEGATION_RE.search(text[start:m.end()]):
+            return True
+    return False
+
+
+def _source_column_texts(org: Datasource, refs: list[str]) -> list[tuple[str, dict[str, str]]]:
+    """(bare table name, {column -> description + caveats}) for every table a metric's
+    `source_tables` names, resolved by schema-aware identity: `s.operations` finds the
+    `operations` table of schema `s`, a bare `operations` finds every table of that name, and
+    two same-named tables in different schemas stay apart instead of merging their texts."""
+    from .models import table_key
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+    found: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for ref in refs:
+        schema, bare = table_key(ref)
+        hits = ([t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+                if schema else [t for k, t in defs if k[1] == bare])
+        for t in hits:
+            cols = found.setdefault(table_key(t.name, t.schema_name), {})
+            for c in t.columns:  # a table defined in several areas: every copy's text counts
+                cols.setdefault(c.name.lower(), []).append(" ".join([c.description or "", *c.caveats]))
+    return [(key[1], {c: " ".join(v) for c, v in cols.items()}) for key, cols in found.items()]
+
+
+def _null_filled_columns(sql: str, storage_type: str) -> list:
+    """The column nodes a binding wraps in COALESCE / IFNULL / NVL / ISNULL with a numeric
+    constant, e.g. `COALESCE(staff_count, 0)`.
+
+    A fill whose first argument holds an aggregate (`COALESCE(SUM(x), 0)`, a total over no rows)
+    is left alone: that is the empty-set case, not an invented value for a row. Parsed in the
+    binding's own engine dialect; a binding that does not parse is no evidence."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return []
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return []
+    found = []
+    for fill in tree.find_all(exp.Coalesce):  # IFNULL, NVL and ISNULL parse to the same node
+        constant = any(
+            isinstance(e, exp.Literal) and e.is_number
+            or isinstance(e, exp.Neg) and isinstance(e.this, exp.Literal) and e.this.is_number
+            for e in fill.expressions
+        )
+        if not constant or next(fill.this.find_all(exp.AggFunc), None) is not None:
+            continue
+        found.extend(fill.this.find_all(exp.Column))
+    return found
+
+
+def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric's binding fills a missing column value with a constant although nothing
+    says that missing means zero (#478). `COALESCE(staff_count, 0)` on a column described as
+    "NULL means the count was not recorded" invents a value: the row gets a misleading result
+    instead of none, averages and rates are pulled toward zero, and sessions copy the binding
+    verbatim. Two things silence it: the column's description or caveats saying a missing value
+    means zero ("NULL means none"), or the metric's own calculation saying the definition it follows
+    counts a missing value as 0 and naming that definition ("the KB formula counts a missing
+    percentage as 0")."""
+    from . import derived as D
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue
+        own = f"{met.calculation} {met.description}"
+        if (_says_missing_is_zero(own, _METRIC_DEFINES_ZERO_RE)
+                or _says_missing_is_zero(own, _NULL_MEANS_ZERO_RE)):
+            continue  # the metric says why it fills, and where that rule comes from
+        scoped = _source_column_texts(org, met.source_tables)
+        filled: set[str] = set()
+        for stype, sql in (met.bindings or {}).items():
+            for col in _null_filled_columns(sql, stype):
+                # a qualifier naming a source table picks that table; otherwise (no qualifier, or
+                # an alias) the column may come from any of them
+                named = [cols for bare, cols in scoped if col.table and bare == col.table.lower()]
+                tables = named or [cols for _, cols in scoped]
+                said = [cols[col.name.lower()] for cols in tables if col.name.lower() in cols]
+                if said and not any(_says_missing_is_zero(text, _NULL_MEANS_ZERO_RE) for text in said):
+                    filled.add(col.name)
+        if filled:
+            res.warn(
+                "metric_null_filled",
+                f"metric {met.name!r} fills a missing value of {sorted(filled)} with a constant, "
+                "but nothing says a missing value there means zero. That invents a value: the row "
+                "gets a result it should not have and averages are pulled toward the constant. Let "
+                "NULL propagate so the result stays empty. If missing really does mean zero, say so "
+                "in the column's description (\"NULL means none\"), or, when a definition you follow "
+                "says to count it as 0, say that in the metric's calculation and name the "
+                "definition (\"the KB formula counts a missing value as 0\").",
+            )
 
 
 def _binding_column_refs(sql: str) -> set[str]:

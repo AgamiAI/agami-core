@@ -33,6 +33,18 @@ def _plural(n: int, word: str) -> str:
 # full tables/metrics/entities live in the structured model, browsable in the explorer.
 _MAX_AREAS_LISTED = 30
 _AREA_DESC_CHARS = 110
+# How to treat a row whose value cannot be calculated (#478). It rides in every model's derived
+# context, so it reaches every question without depending on a hand-written datasource.md and a
+# person cannot delete it by editing their narrative.
+_ROW_KEEPING_RULE = (
+    "- A row whose value cannot be calculated because an input is missing stays in a list, ranking "
+    "or grouping of every row of an entity, shown empty and placed after the rest; leave it out "
+    "only when the question asks.",
+    "- An average, total, rate or percentage is taken over the rows where the value is known: a row "
+    "whose value cannot be calculated counts in neither the numerator nor the denominator. A "
+    "missing value is not counted as 0 unless its column says that missing means zero, or the "
+    "metric's calculation says the definition it follows counts it as 0.",
+)
 
 
 def _short(text: str, limit: int) -> str:
@@ -103,11 +115,12 @@ def derived_context(org: "Datasource", *, with_curated_glossary: bool = True,
         lines.append("")
 
     units = sorted({c.unit for sa in areas for t in sa.tables_defined for c in t.columns if c.unit})
+    lines.append("### Conventions")
+    lines.append("")
     if units:
-        lines.append("### Conventions")
-        lines.append("")
         lines.append(f"- Units / currency in use: {', '.join(units)}.")
-        lines.append("")
+    lines.extend(_ROW_KEEPING_RULE)
+    lines.append("")
 
     _key_terminology(lines, org, areas, include_curated=with_curated_glossary,
                      tables=glossary_tables)
