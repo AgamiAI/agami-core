@@ -23,6 +23,29 @@ below corresponds to one such version.
   says it is an average of each row's ratio is not flagged. agami-connect now says to bind a share of
   a total as a ratio of totals.
 
+- **The validator warns on figures measured on the data in model text (#479).** Enrichment wrote
+  build-time counts into metric calculations and descriptions and into table, column and entity
+  caveats ("covers only 57 of the 231 operations", "427 of 670 accounts have a value"). After the
+  next load these are wrong, but they read as part of the definition, and sessions repeat them in
+  answers. A new `measured_figure` warning, one for the whole model, names each such text and the
+  phrase found: `<n> of <m>` (with a denominator of 10 or more), "covers only <n>", "<n>% of
+  rows" or "<n>% null", "<n> rows", and "NULL on <n>". Thresholds, weights and unit factors are
+  not flagged. agami-connect now says to state the lasting fact, not its current count.
+
+### Fixed
+
+- **`get_prompt_examples` serves the same examples on every read (#203).** Examples were read in
+  no set order, so when more of them tied on word overlap than the top-10 cap admits, which ones
+  were served could change from one process to the next. Ties are now broken by example id, the
+  order the store's primary-key index already returned in practice, on SQLite and Postgres alike.
+
+- **Introspection escapes a backslash in a string literal where the engine reads it as an escape
+  (#439).** MySQL, Snowflake, BigQuery and Databricks treat `\` inside a string literal as an escape
+  by default, and introspection only doubled single quotes, so a schema or table name ending in a
+  backslash could end the literal early. Those four now double the backslash too. The other
+  engines are unchanged, since doubling it there would change the name being looked up.
+
+
 ## [0.9.17] — 2026-10-18
 
 ### Changed

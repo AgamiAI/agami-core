@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -335,6 +336,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_table_name_across_schemas(org, res)
     _check_metric_backend_neutrality(org, res)
     _check_metric_descriptions(org, res)
+    _check_measured_figures(org, res)
     _check_derived_metrics(org, res)
     _check_metric_binding_columns(org, res)
     _check_metric_avg_of_ratio(org, res)
@@ -1029,6 +1031,78 @@ def _check_metric_descriptions(org: Datasource, res: ValidationResult) -> None:
             f"{len(missing)} metric(s) have no description, or one that only restates the name, "
             f"so they are left out of metric_index: {shown}{more}. Write a one-line description "
             "of what each is for.",
+        )
+
+
+# Phrasings that state a count measured on the data rather than a rule about it (#479). Each needs a
+# population word or a ratio, so a threshold (`score > 0.8`), a weight (`x 1.5`) or a unit factor
+# (`/ 100`) never matches. `<n> of <m>` wants a denominator of 10 or more: "2 of 3 criteria" is a
+# definition, while "57 of 231 operations" is a measurement.
+_NUM = r"\d[\d,]*(?:\.\d+)?"
+_MEASURED_FIGURE_RES = (
+    re.compile(rf"\b{_NUM}\s+(?:out\s+)?of\s+(?:the\s+)?(?:about\s+|~)?(?P<of>{_NUM})\b", re.I),
+    re.compile(rf"\bcover(?:s|ing)?\s+(?:only|about|~)\s*{_NUM}", re.I),
+    # Not after `-` or a quote: "2016-2020 rows" is a year range and "'1500 records'" a sample value.
+    re.compile(rf"(?<![-'\"])\b{_NUM}\s+(?:rows|records)\b", re.I),
+    re.compile(rf"\b(?:null|missing|empty|blank)\s+(?:on|in|for)\s+(?:about\s+|~)?{_NUM}", re.I),
+    re.compile(
+        rf"\b{_NUM}\s*%\s+(?:of\s+(?:the\s+|all\s+)?(?:rows|records|values|entries)"
+        r"|(?:are\s+|is\s+)?(?:null|empty|blank|missing))\b",
+        re.I,
+    ),
+)
+
+
+def _measured_figure(text: str) -> Optional[str]:
+    """The first phrase in `text` that states a figure measured on the data, or None."""
+    for pattern in _MEASURED_FIGURE_RES:
+        for m in pattern.finditer(text):
+            of = m.groupdict().get("of")
+            if of is not None and float(of.replace(",", "")) < 10:
+                continue
+            return m.group(0)
+    return None
+
+
+def _model_texts(org: Datasource) -> Iterator[tuple[str, str]]:
+    """(where, text) for every model text enrichment writes as a lasting statement about the data."""
+    metrics = list(org.cross_subject_area_metrics)
+    entities = list(org.cross_subject_area_entities)
+    for sa in org.subject_areas:
+        metrics.extend(sa.metrics)
+        entities.extend(sa.entities)
+    for met in metrics:
+        yield f"metric {met.name!r}", met.calculation
+        yield f"metric {met.name!r}", met.description
+    for ent in entities:
+        for caveat in ent.caveats:
+            yield f"entity {ent.name!r} caveat", caveat
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for caveat in t.caveats:
+                yield f"table {t.name!r} caveat", caveat
+            for col in t.columns:
+                for caveat in col.caveats:
+                    yield f"column '{t.name}.{col.name}' caveat", caveat
+
+
+def _check_measured_figures(org: Datasource, res: ValidationResult) -> None:
+    """A count measured at build time ("covers 57 of 231 rows") is wrong after the next load, but
+    reads as part of the definition, and sessions repeat it in answers (#479). One warning for the
+    whole model, as for undescribed metrics: an older model can carry many."""
+    hits = []
+    for where, text in _model_texts(org):
+        phrase = _measured_figure(text or "")
+        if phrase:
+            hits.append(f"{where} ({phrase!r})")
+    if hits:
+        shown = ", ".join(hits[:5])
+        more = f" and {len(hits) - 5} more" if len(hits) > 5 else ""
+        res.warn(
+            "measured_figure",
+            f"{len(hits)} model text(s) state a figure measured on the data, which is wrong after "
+            f"the next load: {shown}{more}. State the lasting fact instead (\"NULL means the value "
+            "was not recorded\"), not its current count.",
         )
 
 
