@@ -14,6 +14,21 @@ below corresponds to one such version.
 
 ### Added
 
+- **A missing value is not filled with 0 by default (#478).** Enrichment wrote metric bindings like
+  `COALESCE(staff_count, 0)` on columns whose description says NULL means "not recorded", which gives
+  a row a result it should not have and pulls averages and rates toward zero. A new
+  `metric_null_filled` warning fires when a binding fills a column with a numeric constant through
+  `COALESCE`, `IFNULL`, `NVL` or `ISNULL` and nothing gives a reason: neither the column's
+  description and caveats saying a missing value means zero, nor the metric's calculation saying the
+  definition it follows counts a missing value as 0 and naming that definition ("the KB formula counts
+  a missing percentage as 0"). A bare "(null as 0)" names no source and still warns, and so does a
+  statement that denies the zero ("NULL is not zero", "the definition never treats it as 0"). Source
+  tables written with their schema (`s.operations`) resolve to that table only. A total over no rows (`COALESCE(SUM(x), 0)`), a fallback column and a
+  text label are left alone. Every model's derived context now carries the row-keeping convention:
+  a row whose value cannot be calculated stays in a list, ranking or grouping, shown empty and last,
+  and counts in neither the numerator nor the denominator of an average, total or rate.
+  agami-connect now says to let NULL propagate, and to tell a recorded value that is missing (left
+  empty) from no related rows at all (often a real zero, decided per metric).
 - **A metric about today measures to today (#482).** Enrichment sometimes bound "days since start"
   or "age" to the latest date found in the data, or to a fixed date, so the figure was reproducible.
   When the data is not loaded up to today that silently changes the answer and which rows qualify.
@@ -33,6 +48,15 @@ below corresponds to one such version.
   phrase found: `<n> of <m>` (with a denominator of 10 or more), "covers only <n>", "<n>% of
   rows" or "<n>% null", "<n> rows", and "NULL on <n>". Thresholds, weights and unit factors are
   not flagged. agami-connect now says to state the lasting fact, not its current count.
+
+### Changed
+
+- **agami-connect binds a value as its label and unit say, even when the data looks implausible
+  (#481).** Enrichment sometimes decided a stated meaning was wrong because the values did not look
+  as expected — reading a field stored as `'0.73%'` as a 0–1 ratio because every value was below 1,
+  or swapping a documented column for a neighbour whose values looked more plausible — and stated the
+  guess as a rule that every answer then inherited. The skill now says to keep the stated meaning,
+  record the oddity as a caveat, and ask the user which reading is right before changing a binding.
 
 ### Fixed
 
