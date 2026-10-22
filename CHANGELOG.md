@@ -21,6 +21,13 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
+  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
+  areas, which reads as database schemas. Labels that really are about database schemas, such as a
+  cross-schema join, are unchanged.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
