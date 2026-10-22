@@ -355,3 +355,34 @@ def test_verified_references_unverified_when_table_too_big():
     assert probed["n"] == 0          # too big → not scanned
     assert unverified == 1 and len(cross) == 1
     assert cross[0]["review_state"] == "unreviewed" and cross[0]["confidence"] == "inferred"
+
+
+def test_a_preset_only_reference_is_unreviewed_even_when_values_overlap():
+    # #509: matching values are evidence, not a declaration. Only a reference this database's own
+    # dictionary declares is engine-approved; one only the preset assumes waits for review.
+    from semantic_model import cli
+    from semantic_model import dialects as D
+    from semantic_model import models as mm
+
+    def tbl(name, cols):
+        return mm.Table(name=name, schema="public", storage_connection="c", grain=["sys_id"],
+                        columns=[mm.Column(name="sys_id", type="integer", primary_key=True)]
+                                + [mm.Column(name=c, type="integer") for c in cols])
+    org = mm.Datasource(datasource="o", version=1, subject_areas=[
+        mm.SubjectArea(name="itsm", description="d",
+                       tables_defined=[tbl("incident", ["caller_id", "assignment_group"])]),
+        mm.SubjectArea(name="sys", description="d",
+                       tables_defined=[tbl("sys_user", []), tbl("sys_user_group", [])])])
+
+    def runner(sql):
+        return [{"matched": "5"}] if "matched" in sql else []
+    _, cross, _, unverified = cli._build_verified_references(
+        org, runner, D.get_dialect("redshift"),
+        {"caller_id": "sys_user", "assignment_group": "sys_user_group"}, declared={"caller_id"})
+    by_col = {r["from_column"]: r for r in cross}
+    assert by_col["caller_id"]["review_state"] == "approved"
+    assert by_col["caller_id"]["signed_off_role"] == "system"
+    preset_only = by_col["assignment_group"]
+    assert (preset_only["review_state"], preset_only["confidence"]) == ("unreviewed", "inferred")
+    assert "signed_off_by" not in preset_only and "not declared" in preset_only["description"]
+    assert unverified == 0   # it was verified — it is unreviewed because it is undeclared
