@@ -1498,6 +1498,14 @@ def _same_identifier(a: tuple[bool, str], b: tuple[bool, str]) -> bool:
 def _cte_references(tree: "exp.Expression") -> set[int]:
     """The `exp.Table` nodes (by id) that name a CTE VISIBLE where they are written.
 
+    The ids of `_cte_bindings`, for the gates that only ask whether a reference is a CTE.
+    """
+    return set(_cte_bindings(tree))
+
+
+def _cte_bindings(tree: "exp.Expression") -> "dict[int, exp.CTE]":
+    """Each `exp.Table` node (by id) that names a CTE VISIBLE where it is written -> that CTE.
+
     The scope gates used to skip every table whose name ANY WITH bound, anywhere in the statement,
     which let a physical table through: an inner `WITH secret AS (…)` inside an EXISTS hid the outer
     `FROM secret`; a CTE body naming a sibling defined after it read the physical table; so did a
@@ -1514,8 +1522,8 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
     this walk does not understand is checked as a table. Iterative, because a caller controls the
     tree depth and a long `AND` chain already exceeds the recursion limit.
     """
-    bound: set[int] = set()
-    stack: list[tuple[object, tuple[tuple[bool, str], ...]]] = [(tree, ())]
+    bound: dict[int, exp.CTE] = {}
+    stack: list[tuple[object, tuple[tuple[tuple[bool, str], exp.CTE], ...]]] = [(tree, ())]
 
     def push_children(node: "exp.Expression", visible: tuple, skip: tuple[str, ...]) -> None:
         for key, value in node.args.items():
@@ -1529,8 +1537,11 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
         node, visible = stack.pop()
         if isinstance(node, exp.Table) and not node.db:
             key = _identifier_key(node.this)
-            if key is not None and any(_same_identifier(key, v) for v in visible):
-                bound.add(id(node))
+            # Innermost first: a nested WITH's name shadows an enclosing one's.
+            cte = next((c for v, c in reversed(visible) if key is not None
+                        and _same_identifier(key, v)), None)
+            if cte is not None:
+                bound[id(node)] = cte
         # sqlglot renamed the arg from `with` to `with_`; read both.
         with_ = node.args.get("with_") or node.args.get("with")
         inner = visible
@@ -1546,13 +1557,13 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
                     # self-reference in B as the physical table, so everything left of it, and the
                     # union's own modifiers, is checked as the anchor.
                     push_children(cte, inner, ("this",))
-                    stack.append((body.expression, inner + (name,)))
+                    stack.append((body.expression, inner + ((name, cte),)))
                     stack.append((body.this, inner))
                     push_children(body, inner, ("this", "expression"))
                 else:
                     stack.append((cte, inner))
                 if name is not None:
-                    inner = inner + (name,)
+                    inner = inner + ((name, cte),)
         push_children(node, inner, ("with_", "with"))
     return bound
 
@@ -1808,13 +1819,14 @@ def check_column_scope(sql: str, org: Datasource,
     parse, tracked in `tests/test_parse_fidelity_gaps.py` and owned by the fail-closed work.
 
     Strict where a column visibly binds to a declared physical table — qualified by
-    that table (or its alias), or the single in-scope declared table for a bare
-    column; fail-open where the column comes from a CTE/subquery output or a
-    select-list alias we can't attribute to a physical table. This mirrors the
-    table-scope and fan/chasm gates' degrade-to-allow posture, so legitimate complex
-    SQL never false-refuses, while the common hallucinated-column case (including
-    columns inside a CTE/subquery body, which bind directly to their physical table)
-    is still caught. Matching is case-insensitive (unquoted identifiers fold case),
+    that table (or its alias), or unqualified in a scope that reads one. An unqualified
+    column passes when a table it reads declares it or a CTE / derived source there
+    names it in its projection; otherwise, if that scope reads a declared table, it is
+    refused, since the table's undeclared physical columns are what the engine would
+    bind (#339). A scope with no source supplying it defers to the enclosing query, as a
+    correlated reference does. Fail-open stays only where no declared table is in reach:
+    a column qualified by a CTE/derived alias (judged in that source's body) or a
+    select-list alias. Matching is case-insensitive (unquoted identifiers fold case),
     consistent with `check_table_scope`. Runs AFTER the table-scope + star gates, so
     every physical table in scope is known-declared and no `*` remains.
 
@@ -1844,7 +1856,7 @@ def check_column_scope(sql: str, org: Datasource,
             else _schema_index(org))
     declared = {(schema, name): cols for name, by_schema in sidx.items()
                 for schema, cols in by_schema.items()}
-    cte_refs = _cte_references(tree)
+    cte_refs = _cte_bindings(tree)
 
     def _select_chain(node):
         """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
@@ -1862,13 +1874,12 @@ def check_column_scope(sql: str, org: Datasource,
     # would let an inner alias validate an outer column against the wrong table, or an
     # inner `AS x` mask an unrelated outer column `x`. For each select we track the
     # physical tables it reads directly (alias -> bare table), its output aliases, and
-    # whether it reads from a CTE ref / derived subquery (→ a bare column we can't
-    # match may be that source's output, so fail-open).
+    # the columns its CTE / derived / table-function sources name (#339).
     # An unresolvable physical table (undeclared or ambiguous — table scope refuses it) binds its
     # alias to False, so the qualifier is known to be a physical table rather than a CTE alias.
     alias_by_select: dict[int, dict[str, Any]] = {}  # id(select) -> {alias -> (schema, name) | False}
     direct_phys: dict[int, set[tuple]] = {}          # id(select) -> {(schema, name) read directly}
-    has_derived: dict[int, bool] = {}                # id(select) -> reads a CTE ref / derived subquery directly
+    source_cols: dict[int, set[str]] = {}            # id(select) -> {column a non-physical source names}
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
     for tbl in tree.find_all(exp.Table):
         name = (tbl.name or "").lower()
@@ -1876,8 +1887,6 @@ def check_column_scope(sql: str, org: Datasource,
             continue
         sel = _enclosing_select(tbl)
         if id(tbl) in cte_refs:
-            if sel is not None:
-                has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
             continue
         if sel is not None:
             resolved = _resolve_table(sidx, tbl)
@@ -1890,12 +1899,11 @@ def check_column_scope(sql: str, org: Datasource,
                 aliases[f"{tbl.db}.{name}".lower()] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
-    for sq in tree.find_all(exp.Subquery):
-        # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
-        if isinstance(sq.parent, (exp.From, exp.Join)):
-            sel = _enclosing_select(sq)
-            if sel is not None:
-                has_derived[id(sel)] = True
+    for sel in tree.find_all(exp.Select):
+        for src in _from_sources(sel):
+            names = _source_column_names(src, cte_refs)
+            if names is not None:
+                source_cols.setdefault(id(sel), set()).update(names)
     for al in tree.find_all(exp.Alias):
         if not al.alias:
             continue
@@ -1907,6 +1915,9 @@ def check_column_scope(sql: str, org: Datasource,
     # The declared tables each offending column was judged against — what the refusal may list. Only
     # tables the statement itself reads: never the rest of the model (see `_declared_listing`).
     judged: dict[str, set[tuple]] = {}
+    # Refused in a scope that also reads a CTE / derived source: the column may be one that source
+    # returns without a name the gate can read, which qualifying it says.
+    beside_source: set[str] = set()
     for col in tree.find_all(exp.Column):
         name = col.name
         if not name:
@@ -1933,18 +1944,23 @@ def check_column_scope(sql: str, org: Datasource,
                 offending.add(f"{phys[1]}.{name}")
                 judged.setdefault(f"{phys[1]}.{name}", set()).add(phys)
             continue
-        # unqualified: judge against the tables its own SELECT reads directly
-        if sel is not None and lname in output_by_select.get(id(sel), set()):
+        # Unqualified: bound where the engine binds it — the innermost scope with a source that
+        # supplies the name, then outward through correlation. It is refused at the first scope
+        # with a declared table that could supply it instead: that table's physical columns are
+        # not known, so an undeclared one of that name would be read (#339).
+        scopes = _column_scopes(col)
+        if scopes and lname in output_by_select.get(id(scopes[0]), set()):
             continue  # a select-list output alias of THIS select, not a base column
-        local = {t for t in direct_phys.get(id(sel), set()) if t in declared} if sel is not None else set()
-        if any(lname in declared[t] for t in local):
-            continue  # declared on a table this select reads (possibly ambiguous — don't false-reject)
-        if sel is not None and has_derived.get(id(sel), False):
-            continue  # fail-open: may be an output column of this select's CTE/derived source
-        if not local:
-            continue  # no declared physical table in this scope to judge against — fail-open
-        offending.add(name)
-        judged.setdefault(name, set()).update(local)
+        for s in scopes:
+            local = {t for t in direct_phys.get(id(s), set()) if t in declared}
+            if any(lname in declared[t] for t in local) or lname in source_cols.get(id(s), set()):
+                break  # declared, or named by a CTE / derived source (possibly ambiguous — the DB's call)
+            if local:
+                offending.add(name)
+                judged.setdefault(name, set()).update(local)
+                if id(s) in source_cols:
+                    beside_source.add(name)
+                break
 
     if not offending:
         return None
@@ -1964,6 +1980,8 @@ def check_column_scope(sql: str, org: Datasource,
         detail="query references column(s) not in the semantic model: " + _echo_identifiers(cols)
                + " — only columns declared on the model's tables may be queried.",
         remediation=_declared_listing(org, cols, judged)
+                    + ("If a column comes from a CTE or subquery, give it a name there (AS ...) "
+                       "or qualify it with that source's alias. " if beside_source else "")
                     + "Add the column to the model (agami-connect / '/agami-model'), "
                     "or remove it from the query.",
     )
@@ -4072,6 +4090,78 @@ def _enclosing_select(node: "exp.Expression") -> "exp.Select | None":
     while p is not None and not isinstance(p, exp.Select):
         p = p.parent
     return p
+
+
+def _column_scopes(node: "exp.Expression") -> list["exp.Select"]:
+    """The SELECTs whose sources an unqualified column can bind to, innermost first.
+
+    `_enclosing_selects` stopped where SQL stops visibility: a CTE body and a derived table in
+    FROM / JOIN cannot see the query that reads them (a LATERAL one can, which is why only a
+    subquery sitting directly in FROM / JOIN ends the walk). Past that point a name the scope does
+    not supply is an error on the engine, not a correlated reference.
+    """
+    scopes: list["exp.Select"] = []
+    p = node.parent
+    while p is not None:
+        if isinstance(p, exp.Select):
+            scopes.append(p)
+        elif isinstance(p, exp.CTE) or (
+                isinstance(p, exp.Subquery) and isinstance(p.parent, (exp.From, exp.Join))):
+            break
+        p = p.parent
+    return scopes
+
+
+def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
+    """The items a SELECT's FROM and JOINs read, in order."""
+    # sqlglot renamed the arg from `from` to `from_`; read both.
+    from_ = sel.args.get("from_") or sel.args.get("from")
+    items = [from_.this] if isinstance(from_, exp.From) else []
+    return items + [j.this for j in sel.args.get("joins") or []]
+
+
+def _query_column_names(query: "exp.Expression") -> set[str]:
+    """The folded output names of a query a CTE or derived table wraps.
+
+    The first arm of a set operation names its columns. An output with no readable name — an
+    unaliased expression, a star — is left out, so a column naming it is judged as though no
+    source supplied it: the fail-closed direction.
+    """
+    while isinstance(query, (exp.Subquery, exp.SetOperation)):
+        query = query.this
+    names: set[str] = set()
+    for e in query.expressions if isinstance(query, exp.Select) else ():
+        if isinstance(e, exp.Alias) and e.alias:
+            names.add(e.alias.lower())
+        elif isinstance(e, exp.Column) and not isinstance(e.this, exp.Star) and e.name:
+            names.add(e.name.lower())
+    return names
+
+
+def _source_column_names(src: "exp.Expression",
+                         cte_refs: "dict[int, exp.CTE]") -> Optional[set[str]]:
+    """The folded columns one FROM / JOIN item names, or None for a physical table — whose
+    columns are the model's to say, not the statement's."""
+    alias = src.args.get("alias")
+    listed = ({c.name.lower() for c in alias.columns if c.name}
+              if isinstance(alias, exp.TableAlias) else set())
+    if isinstance(src, exp.Table):
+        cte = cte_refs.get(id(src))
+        if cte is not None:
+            cte_alias = cte.args.get("alias")
+            if isinstance(cte_alias, exp.TableAlias) and cte_alias.columns:
+                return {c.name.lower() for c in cte_alias.columns if c.name}
+            return listed or _query_column_names(cte.this)
+        if src.name:
+            return None
+    elif isinstance(src, (exp.Subquery, exp.Lateral)) and isinstance(
+            src.this, (exp.Subquery, exp.Query)):
+        return listed or _query_column_names(src.this)
+    # A table function, UNNEST or VALUES: only the alias says what it returns. Postgres names a
+    # one-column function's output after the table alias, so that counts too.
+    if isinstance(alias, exp.TableAlias) and alias.name and not listed:
+        return {alias.name.lower()}
+    return listed
 
 
 def _enclosing_selects(node: "exp.Expression") -> list["exp.Select"]:

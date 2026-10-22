@@ -192,6 +192,62 @@ def test_nested_output_alias_does_not_mask_outer_column():
         _scope_org()), "bogus")
 
 
+# An unqualified undeclared column beside a CTE / derived source (#339). The gate used to skip it
+# because the source MIGHT supply it; it is bound to the source only when the source's projection
+# names it, so each of these reads the physical table's undeclared column.
+BESIDE_A_SOURCE = [
+    ("WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, c", "secret_col"),
+    ("SELECT secret_col FROM orders JOIN (SELECT id AS k FROM customers) s ON s.k = orders.id",
+     "secret_col"),
+    ("WITH c AS (SELECT id FROM customers) SELECT orders.secret_col FROM orders, c",
+     "orders.secret_col"),
+    # An output with no readable name cannot vouch for a column: fail closed.
+    ("WITH c AS (SELECT count(*) FROM customers) SELECT count FROM orders, c", "count"),
+    ("WITH c AS (VALUES (1)) SELECT column1 FROM orders, c", "column1"),
+    # Correlated outward from a scope with no source supplying the name.
+    ("SELECT (SELECT secret_col) FROM orders", "secret_col"),
+    ("SELECT id FROM orders WHERE EXISTS "
+     "(SELECT 1 FROM (SELECT 1 AS n) z WHERE secret_col = 1)", "secret_col"),
+]
+
+
+@pytest.mark.parametrize("sql,offender", BESIDE_A_SOURCE)
+def test_undeclared_column_beside_a_source_refused(sql, offender):
+    _assert_columns_refused(rt.check_column_scope(sql, _scope_org()), offender)
+
+
+def test_refusal_beside_a_source_says_how_to_name_it():
+    res = rt.check_column_scope(
+        "WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, c", _scope_org())
+    assert "qualify it with that source's alias" in res.remediation
+
+
+# The other direction: a column one source names is bound to it, so none of these is refused.
+NAMED_BY_A_SOURCE = [
+    "WITH c AS (SELECT 1 AS n) SELECT n, amount FROM orders, c",
+    "WITH c(k) AS (SELECT id FROM customers) SELECT k, amount FROM orders "
+    "JOIN c ON c.k = orders.customer_id",
+    "SELECT k, amount FROM orders JOIN (SELECT id AS k FROM customers) s "
+    "ON s.k = orders.customer_id",
+    "SELECT region, amount FROM orders JOIN (SELECT id, region FROM customers) s "
+    "ON s.id = orders.customer_id",
+    "WITH c AS (SELECT id FROM customers UNION SELECT id FROM orders) SELECT c.id, amount "
+    "FROM orders, c",
+    "SELECT a, amount FROM orders JOIN LATERAL (SELECT 1 AS a) l ON true",
+    "SELECT a, amount FROM (VALUES (1)) AS v(a), orders",
+    "WITH c(a) AS (VALUES (1)) SELECT a, amount FROM orders, c",
+    "SELECT g, amount FROM generate_series(1, 3) AS g, orders",
+    "SELECT u, amount FROM orders o CROSS JOIN UNNEST(ARRAY[1]) AS t(u)",
+    # A union's ORDER BY inside a derived table names the union's output, not the outer query's.
+    "SELECT x.id FROM (SELECT id FROM orders UNION SELECT id FROM customers ORDER BY id) x",
+]
+
+
+@pytest.mark.parametrize("sql", NAMED_BY_A_SOURCE)
+def test_column_named_by_a_source_allowed(sql):
+    assert rt.check_column_scope(sql, _scope_org()) is None
+
+
 # ===========================================================================
 # Documented accepted fail-opens -> allow (the intended boundary)
 # ===========================================================================
