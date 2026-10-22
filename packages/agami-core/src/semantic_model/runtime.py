@@ -1595,7 +1595,7 @@ def _table_decls(org: Datasource) -> "dict[tuple, list[Table]]":
 # Engines where a quoted identifier is case-sensitive and an unquoted one folds: Postgres (and
 # Supabase, which parses as it) to lower, Snowflake and Oracle to upper. Elsewhere a quoted name
 # matches without regard to case, as the engine resolves it: Redshift folds quoted names by default,
-# and DuckDB, SQL Server, SQLite, MySQL, Databricks, Trino and BigQuery datasets match them
+# and DuckDB, SQL Server, SQLite, Databricks, Trino and BigQuery datasets match them
 # case-insensitively, so the folded comparison the index already makes is the engine's own.
 _QUOTED_EXACT_FOLD: dict[str, Callable[[str], str]] = {
     "postgres": str.lower,
@@ -1603,15 +1603,25 @@ _QUOTED_EXACT_FOLD: dict[str, Callable[[str], str]] = {
     "oracle": str.upper,
 }
 
+# Engines where a table or database name is case-sensitive whether or not it is quoted. MySQL on
+# Linux, its default (`lower_case_table_names=0`), keeps the case a table was created with and
+# compares it exactly, so `shop.Orders` and `shop.orders` are two tables; backticks change nothing.
+# A server that folds (`lower_case_table_names` 1 or 2) would resolve another case too, and refusing
+# it there is the fail-closed cost: the declared spelling works on every setting.
+_EXACT_NAMES = frozenset({"mysql"})
 
-def _quoted_part_names(ident: object, declared: str, dialect: "str | None") -> bool:
-    """Whether a written identifier part names the declared one, on an engine that keeps the case
-    of a quoted name. An unquoted part was already matched folded, and folding is right for it.
 
-    The declared spelling is the physical one when it has mixed case. In a single case it may be a
-    hand-written model's habit rather than the warehouse's (`orders` on Snowflake, whose table is
-    `ORDERS`), so the engine's fold of it counts too.
+def _part_names(ident: object, declared: str, dialect: "str | None") -> bool:
+    """Whether a written identifier part names the declared one in the case the engine compares.
+
+    On `_EXACT_NAMES` engines the written name must be the declared one. On `_QUOTED_EXACT_FOLD`
+    engines only a quoted part is checked, since an unquoted one was already matched folded and
+    folding is right for it. The declared spelling is the physical one when it has mixed case; in a
+    single case it may be a hand-written model's habit rather than the warehouse's (`orders` on
+    Snowflake, whose table is `ORDERS`), so the engine's fold of it counts too.
     """
+    if dialect in _EXACT_NAMES:
+        return not isinstance(ident, exp.Identifier) or ident.name == declared
     fold = _QUOTED_EXACT_FOLD.get(dialect or "")
     if fold is None or not isinstance(ident, exp.Identifier) or not ident.args.get("quoted"):
         return True
@@ -1623,15 +1633,15 @@ def _names_declared(tbl: "exp.Table", t: Table, dialect: "str | None") -> bool:
     """Whether reference `tbl` names declared table `t`, beyond the folded (schema, name) match:
     quoted parts in the declared case, and a catalog the model records for `t` matched (#337)."""
     catalog, schema, bare = stored_identity(t.name, t.schema_name, t.catalog)
-    if not _quoted_part_names(tbl.this, bare, dialect):
+    if not _part_names(tbl.this, bare, dialect):
         return False
-    if tbl.args.get("db") is not None and schema and not _quoted_part_names(
+    if tbl.args.get("db") is not None and schema and not _part_names(
             tbl.args["db"], schema, dialect):
         return False
     written = tbl.args.get("catalog")
     if written is not None and catalog:
         return (_tkey(written.name) == _tkey(catalog)
-                and _quoted_part_names(written, catalog, dialect))
+                and _part_names(written, catalog, dialect))
     return True
 
 
@@ -1645,11 +1655,12 @@ def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
     exactly one schema; under two or more, which table the engine reads depends on a search path
     the guard cannot see.
 
-    With `decls`, two finer checks (#337): a quoted part must name the declared table in the case
-    the engine keeps (`"Orders"` is not `orders` on Postgres), and a catalog part must match the one
-    the model records for the table. A catalog the model does not record is the connection's to
-    judge, which `check_catalog_scope` does once credentials are known. A four-part name reads
-    through a linked server or another catalog's schema, and never names a declared table.
+    With `decls`, two finer checks (#337): a name must match the declared table in the case the
+    engine compares (`"Orders"` is not `orders` on Postgres, nor `Orders` on MySQL), and a catalog
+    part must match the one the model records for the table. A catalog the model does not record is
+    the connection's to judge, which `check_catalog_scope` does once credentials are known. A
+    four-part name reads through a linked server or another catalog's schema, and never names a
+    declared table.
     """
     if isinstance(tbl.this, exp.Dot):
         return None
@@ -1812,7 +1823,7 @@ def check_catalog_scope(sql: str, org: Datasource,
         if any(t.catalog for t in decls.get(resolved, [])):
             continue  # matched against the model's own catalog above
         if (connection_catalog is None or _tkey(written.name) != _tkey(connection_catalog)
-                or not _quoted_part_names(written, connection_catalog, dialect)):
+                or not _part_names(written, connection_catalog, dialect)):
             offending.add(_written(tbl))
     if not offending:
         return None
@@ -1965,16 +1976,16 @@ def check_column_scope(sql: str, org: Datasource,
     if tree is None or tree.find(exp.Select) is None:
         return None
 
+    # The table-scope resolver, so a reference that gate refuses never binds a column here either.
+    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
+             else _table_decls(org))
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     # Keyed by (schema, name) rather than bare name: `_column_index` unions every same-named table's
     # columns, so a column only `staging.orders` declares passed on a read of `sales_data.orders`.
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
             else _schema_index(org))
     declared = {(schema, name): cols for name, by_schema in sidx.items()
                 for schema, cols in by_schema.items()}
-    # The table-scope resolver, so a reference that gate refuses never binds a column here either.
-    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
-             else _table_decls(org))
-    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     cte_refs = _cte_references(tree)
 
     def _select_chain(node):

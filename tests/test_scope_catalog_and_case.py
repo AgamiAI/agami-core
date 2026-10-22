@@ -45,7 +45,7 @@ def _table_scope(sql: str, org: m.Datasource):
     return alone
 
 
-# ---------------------------------------------------------------- quoted case
+# ---------------------------------------------------------------- name case
 
 
 @pytest.mark.parametrize("engine,declared,sql", [
@@ -78,6 +78,19 @@ def test_a_quoted_name_in_another_case_is_another_table(engine, declared, sql):
 ])
 def test_the_engines_own_spelling_passes(engine, declared, sql):
     assert _table_scope(sql, _org(engine, declared)) is None
+
+
+@pytest.mark.parametrize("sql,refused", [
+    ("SELECT id FROM sales.Orders", True),
+    ("SELECT id FROM sales.`Orders`", True),
+    ("SELECT id FROM SALES.orders", True),
+    ("SELECT id FROM sales.orders", False),
+    ("SELECT id FROM sales.`orders`", False),
+])
+def test_mysql_compares_table_and_database_names_exactly_quoted_or_not(sql, refused):
+    """On Linux MySQL keeps the case a table was created with: `sales.Orders` is another table."""
+    res = _table_scope(sql, _org("MySQL"))
+    assert (res is not None) is refused
 
 
 def test_column_scope_binds_through_the_same_resolver():
