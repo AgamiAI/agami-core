@@ -1058,8 +1058,11 @@ def cmd_enrich_metadata(args) -> int:
 
     preset = args.preset or MS.detect_preset(model_tables)
     if not preset:
-        _print_json({"enriched": False, "reason": "no metadata preset detected — pass --preset"})
-        return 1
+        # most databases carry no in-DB dictionary; that is nothing to do, not a failure (#526)
+        _print_json({"enriched": False,
+                     "reason": "no metadata preset applies to this database — nothing to do "
+                               "(pass --preset to name one)"})
+        return 0
     sources = MS.usable_sources(preset, model_tables)
     if not sources:
         _print_json({"enriched": False, "preset": preset,
