@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Security
+
+- **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**
+  Their private keys were weak enough to forge a certificate for any host, which opens the server's
+  outbound HTTPS (OIDC discovery and token exchange) to a man-in-the-middle. The `server` extra now
+  requires `certifi>=2026.10.19`, so every install resolves the fixed bundle rather than whichever one
+  it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
+  installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
