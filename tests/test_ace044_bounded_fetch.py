@@ -24,6 +24,8 @@ if str(PKG_SRC) not in sys.path:
 import execute_sql  # noqa: E402
 import guardrail  # noqa: E402
 
+from google_auth_fake import install_google_auth  # noqa: E402
+
 
 class _FakeCur:
     """A cursor that would return `nrows` rows; records how the sink pulls them."""
@@ -304,14 +306,9 @@ def test_bigquery_bounds_and_reports_overflow_like_the_cursor_path(monkeypatch):
     gcloud.bigquery = types.SimpleNamespace(Client=_Client, QueryJobConfig=lambda **k: object())
     goauth = types.ModuleType("google.oauth2")
     goauth.service_account = types.SimpleNamespace()
-    gauth = types.ModuleType("google.auth")
-    gauth.exceptions = types.SimpleNamespace(
-        RefreshError=type("RefreshError", (Exception,), {}),
-        DefaultCredentialsError=type("DefaultCredentialsError", (Exception,), {}),
-    )
     monkeypatch.setitem(sys.modules, "google.cloud", gcloud)
     monkeypatch.setitem(sys.modules, "google.oauth2", goauth)
-    monkeypatch.setitem(sys.modules, "google.auth", gauth)
+    install_google_auth(monkeypatch)
     monkeypatch.setenv("AGAMI_SQL_MAX_ROWS", "4")
 
     result = execute_sql._run_bigquery({"project": "p"}, "SELECT n FROM t")

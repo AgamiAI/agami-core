@@ -229,12 +229,19 @@ class ExecutorError(Exception):
     """A connect / credential / run failure raised by the built-in executor. Carries the exact
     stderr message and exit code the subprocess CLI emits, so ``main`` reproduces today's bytes and
     the in-process caller gets a catchable error instead of a process exit. Replaces the old
-    ``return _err(...)`` returns inside the per-engine run functions."""
+    ``return _err(...)`` returns inside the per-engine run functions.
 
-    def __init__(self, msg: str, *, code: int) -> None:
+    ``kind`` is set only where the raise site has already decided the classification from the
+    exception's TYPE. ``execute_guarded`` then uses it as given and does not read the message, because
+    a driver's text can contain a word that one of ``_classify_db_error``'s needles reads as a
+    different kind. ``code`` must be that kind's own exit code, so the fork transport, which carries
+    only the code, arrives at the same kind."""
+
+    def __init__(self, msg: str, *, code: int, kind: FailureKind | None = None) -> None:
         super().__init__(msg)
         self.msg = msg
         self.code = code
+        self.kind = kind
 
 
 # The CLI exit-code contract in code, in both directions — the module docstring's table, executable.
@@ -1048,12 +1055,6 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
         client = bigquery.Client(**client_kwargs)
     except Exception as e:
         raise ExecutorError(f"BigQuery client init failed: {e}", code=4)
-    # The client is built before any token is fetched: google-auth refreshes lazily, inside the first
-    # API call. So an expired or revoked Application Default Credential passes the init above and
-    # raises from `client.query()`, `job.result()` or a later page of rows. Caught by type, not by
-    # message, because it is a credentials failure wherever it surfaces and would otherwise read as an
-    # execution error no classifier arm recognises, which the caller is told is a server fault (#491).
-    auth_errors = (google_auth_errors.RefreshError, google_auth_errors.DefaultCredentialsError)
 
     timeout_s = _resolve_timeout_s()
     # `job_timeout_ms` is BigQuery's native server-side bound, and on this engine it is the ONLY
@@ -1076,6 +1077,11 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
             pass
 
     cap = _resolve_row_cap()
+    rows: list[tuple] = []
+    truncated = False
+    # ONE try covers the query, the wait for its result and the row iteration, because each of them
+    # makes API calls: iterating fetches the later pages, so a page can fail in every way the query
+    # can, and google-auth refreshes the token lazily inside whichever call comes first after expiry.
     try:
         job_config = bigquery.QueryJobConfig(**job_config_kwargs)
         job = client.query(sql, job_config=job_config)
@@ -1083,33 +1089,73 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
         # same bounded-fetch cap here. `max_results=cap+1` bounds what the API returns (transfer),
         # and the (cap+1)th row flags truncation — the never-silent guarantee holds for BigQuery too.
         results = job.result(max_results=cap + 1)  # waits for completion; raises on error
-    except _ResourceLimit:
-        # Nothing in this engine raises the marker today, and this clause is still not optional: the
-        # rule is that NO engine may relabel it as a driver error, and the clause below would. It is
-        # what makes the rule checkable across all ten engines rather than nine.
-        raise
-    except auth_errors as e:
-        raise ExecutorError(f"BigQuery credentials were rejected: {e}", code=4)
-    except Exception as e:
-        raise ExecutorError(f"BigQuery execution error: {e}", code=5)
-
-    if not results.schema:
-        return ExecResult(columns=[], rows=[], truncated=False)
-    columns = [f.name for f in results.schema]
-    ncols = len(results.schema)
-    rows: list[tuple] = []
-    truncated = False
-    try:
-        # Iterating fetches the later pages, and a page fetch can be the call that refreshes the
-        # token, so the credentials failure is caught here as well.
+        if not results.schema:
+            return ExecResult(columns=[], rows=[], truncated=False)
+        columns = [f.name for f in results.schema]
+        ncols = len(results.schema)
         for row in results:
             if len(rows) >= cap:
                 truncated = True
                 break
             rows.append(tuple(row[i] for i in range(ncols)))
-    except auth_errors as e:
-        raise ExecutorError(f"BigQuery credentials were rejected: {e}", code=4)
+    except _ResourceLimit:
+        # Nothing in this engine raises the marker today, and this clause is still not optional: the
+        # rule is that NO engine may relabel it as a driver error, and the clause below would. It is
+        # what makes the rule checkable across all ten engines rather than nine.
+        raise
+    except Exception as e:
+        kind = _google_auth_failure_kind(e, google_auth_errors)
+        if kind == "auth":
+            raise ExecutorError(
+                f"BigQuery credentials could not be refreshed: {e}",
+                code=FAILURE_KIND_TO_EXIT["auth"], kind="auth",
+            )
+        if kind == "network":
+            raise ExecutorError(
+                f"BigQuery credentials could not be refreshed because of a transient failure: {e}",
+                code=FAILURE_KIND_TO_EXIT["network"], kind="network",
+            )
+        raise ExecutorError(f"BigQuery execution error: {e}", code=5)
     return ExecResult(columns=columns, rows=rows, truncated=truncated)
+
+
+def _google_auth_failure_kind(exc: BaseException, errors: Any) -> FailureKind | None:
+    """The kind of a google-auth failure raised while a BigQuery statement ran, or None for anything
+    else (the statement's own error, which keeps its text-based classification).
+
+    The client is built before any token is fetched, so an expired or revoked credential passes
+    `bigquery.Client(...)` and fails inside the first API call after it (#491). Decided by TYPE,
+    never by message, because the two outcomes need opposite fixes and google-auth's text does not
+    say which one it is:
+
+    * The credential itself was refused: `RefreshError` (its `ReauthFailError` subclass included),
+      `UserAccessTokenError` when gcloud-backed credentials find the session logged out, and
+      `OAuthError`. That is `auth`, and the operator has to re-credential.
+    * The refresh never got an answer: a `TransportError` (the Compute Engine credential wraps a
+      metadata-server timeout in a `RefreshError` whose argument and cause are the transport error),
+      google-auth's own `TimeoutError`, or any of these that google-auth marks `retryable` (a 5xx
+      from the token endpoint). Nothing is wrong with the credential, so it is `network`.
+
+    `DefaultCredentialsError` is not here: `bigquery.Client()` resolves the default credential in
+    its constructor, so that error surfaces at client init, which already maps to `auth`.
+
+    Looked up with `getattr` because `TimeoutError` and `OAuthError` are newer than some google-auth
+    releases the BigQuery client accepts.
+    """
+
+    def classes(*names: str) -> tuple[type, ...]:
+        found = (getattr(errors, name, None) for name in names)
+        return tuple(cls for cls in found if isinstance(cls, type))
+
+    transient = classes("TransportError", "TimeoutError")
+    refused = classes("RefreshError", "UserAccessTokenError", "OAuthError")
+    if not isinstance(exc, transient + refused):
+        return None
+    if isinstance(exc, transient) or getattr(exc, "retryable", False):
+        return "network"
+    if any(isinstance(inner, transient) for inner in (exc.__cause__, *exc.args)):
+        return "network"
+    return "auth"
 
 
 def _run_sqlite(creds: dict[str, str], sql: str) -> ExecResult:
@@ -3177,7 +3223,9 @@ def execute_guarded(
         # Codes 4 and 5 carry the driver's own exception, interpolated at one of the twenty
         # per-engine sites. That text is an enumeration channel: a PostgreSQL HINT names declared
         # columns the caller never sent. Classify FROM it, return a fixed sentence INSTEAD of it.
-        kind = _classify_db_error(exc.msg, exc.code)
+        # A kind the raise site decided from the exception's type is final. Only an error without
+        # one is classified from its text.
+        kind = exc.kind or _classify_db_error(exc.msg, exc.code)
         # Keep the raw text for the operator, on two channels that reach two different places. The
         # ContextVar is read by `tools._record_execution` when the recorder shares this process, and
         # `_RAW_LOG` is the server-side trail everywhere else. Neither is the caller's channel.

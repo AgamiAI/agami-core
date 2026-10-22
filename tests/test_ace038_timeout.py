@@ -61,6 +61,8 @@ if str(PKG_SRC) not in sys.path:
 import execute_sql  # noqa: E402
 import guardrail  # noqa: E402
 
+from google_auth_fake import install_google_auth  # noqa: E402
+
 # Short enough that the whole file stays sub-second, long enough that a loaded CI runner still
 # schedules the timer thread before the assertion runs.
 _TINY = 0.05
@@ -1685,14 +1687,8 @@ def _install_bigquery(monkeypatch, *, on_execute=None, named_close_raises=False)
 
     bigquery = _module("google.cloud.bigquery", Client=_Client, QueryJobConfig=_job_config)
     oauth2 = _module("google.oauth2", service_account=_module("google.oauth2.service_account"))
-    auth_exceptions = _module(
-        "google.auth.exceptions",
-        RefreshError=type("RefreshError", (Exception,), {}),
-        DefaultCredentialsError=type("DefaultCredentialsError", (Exception,), {}),
-    )
     monkeypatch.setitem(sys.modules, "google", _module("google"))
-    monkeypatch.setitem(sys.modules, "google.auth", _module("google.auth", exceptions=auth_exceptions))
-    monkeypatch.setitem(sys.modules, "google.auth.exceptions", auth_exceptions)
+    install_google_auth(monkeypatch)
     monkeypatch.setitem(sys.modules, "google.cloud", _module("google.cloud", bigquery=bigquery))
     monkeypatch.setitem(sys.modules, "google.cloud.bigquery", bigquery)
     monkeypatch.setitem(sys.modules, "google.oauth2", oauth2)
