@@ -21,6 +21,19 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
+  `review_state: approved`, so an entity written during enrichment without the field came out
+  signed off, with no signer, and was trusted at query time although no one had looked at it. The
+  default is now `unreviewed`: such an entity waits in the review queue, and approving it in
+  `/agami-model` or with `sm approve-queue` records who signed it off and when. The shape reference
+  agami-connect follows showed `review_state: approved` in its entity example; it now shows
+  `unreviewed`.
+
+  **Existing models:** an entity file that states `review_state: approved` stays approved. Only one
+  that leaves the field out now loads as unreviewed and appears in the review queue.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
