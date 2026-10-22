@@ -21,6 +21,13 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
+  in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
+  script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
+  source tables are not in the model is still an error.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added

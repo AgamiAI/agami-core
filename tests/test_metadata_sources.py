@@ -293,6 +293,38 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     assert edge.signed_off_role == "system"
 
 
+def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, capsys):
+    # #526: a database with no in-DB dictionary is the common case — exit 0 so a script carries on
+    _servicenow_model(tmp_path)
+    itsm = tmp_path / "subject_areas" / "itsm"
+    (itsm / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "itsm", "tables": [{"storage_connection": "c", "schema": "public", "table": "incident"}]}))
+    for meta in ("sys_choice", "sys_dictionary"):
+        (itsm / "tables" / f"{meta}.yaml").unlink()
+    from semantic_model import introspect as INTRO
+
+    def no_db(profile, python=None):
+        raise AssertionError("nothing to do must not touch the database")
+
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", no_db)
+    from semantic_model import cli
+    ns = cli.build_parser().parse_args(
+        ["enrich-metadata", str(tmp_path), "--profile", "demo", "--db-type", "postgres"])
+    assert ns.func(ns) == 0
+    out = capsys.readouterr().out
+    assert '"enriched": false' in out and "nothing to do" in out
+
+
+def test_enrich_metadata_explicit_preset_without_sources_fails(tmp_path, monkeypatch):
+    # asking for a preset the model can't serve is still an error, unlike auto-detecting none
+    _servicenow_model(tmp_path)
+    from semantic_model import cli
+    ns = cli.build_parser().parse_args(
+        ["enrich-metadata", str(tmp_path), "--profile", "demo", "--db-type", "postgres",
+         "--preset", "no-such-preset"])
+    assert ns.func(ns) == 1
+
+
 def test_known_reference_graph_is_config():
     g = M.known_reference_graph("servicenow")
     assert g["caller_id"] == "sys_user" and g["assignment_group"] == "sys_user_group"
