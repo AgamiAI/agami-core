@@ -88,6 +88,8 @@ def _prose_lines(org: Datasource, root: Path, skipped: list[dict[str, str]]) -> 
                                  ("metric.calculation", getattr(metric, "calculation", ""))):
                 if text:
                     yield source, metric.name, text, None
+            for caveat in getattr(metric, "caveats", None) or []:
+                yield "metric.caveat", metric.name, caveat, None
     for term, definition in (org.key_terminology or {}).items():
         yield "glossary", term, f"{term}: {definition}", None
     narrative = root / "datasource.md"

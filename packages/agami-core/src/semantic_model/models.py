@@ -558,6 +558,9 @@ class Metric(_Base):
     # Empty for first-order / case-(a) metrics.
     inner_grain: list[str] = Field(default_factory=list)
     business_question: Optional[str] = None
+    # what the formula does not cover ("gives no value when the start date is missing"), kept out
+    # of description/calculation so it is served as a warning rather than read as the definition
+    caveats: list[str] = Field(default_factory=list)
     confidence: Confidence = "proposed"
     source: Optional[str] = None
     review_state: ReviewState = "unreviewed"
@@ -571,6 +574,14 @@ class Metric(_Base):
     def _calc_nonempty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("metric calculation (prose intent) must be non-empty")
+        return v
+
+    @field_validator("caveats")
+    @classmethod
+    def _caveats_nonempty(cls, v: list[str]) -> list[str]:
+        for c in v:
+            if not c or not c.strip():
+                raise ValueError("caveats entries must be non-empty strings")
         return v
 
     @model_validator(mode="after")
