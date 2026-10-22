@@ -322,3 +322,27 @@ def test_a_generated_description_never_replaces_a_human_one(tmp_path):
     assert col.description == "Who placed the order" and col.description_source == "human"
     # a person can still change it
     assert curate.apply(tmp_path, [{**human, "value": "Ordering customer"}]).applied
+
+
+def test_an_enrichment_entity_is_unreviewed_until_approved_with_a_signer(tmp_path):
+    """#508: an entity written without a review_state (as enrichment does) is unreviewed and in the
+    review queue, not trusted unseen; approving it through the review flow stamps who and when."""
+    _write_model(tmp_path)
+    res = curate.write_items(tmp_path, "sales", "entity", [
+        {"name": "customer", "maps_to": [{"table": "customers", "column": "id", "primary": True}]}])
+    assert res.applied and not res.errors, (res.skipped, res.errors)
+    ent = loader.load_datasource(tmp_path).subject_areas[0].entities[0]
+    assert ent.review_state == "unreviewed" and ent.signed_off_by is None
+    queued = curate.review_queue(loader.load_datasource(tmp_path))["rule_2"]
+    assert [it["name"] for it in queued if it["kind"] == "entity"] == ["customer"]
+
+    res = curate.apply(tmp_path, [{"op": "approve", "kind": "entity", "area": "sales",
+                                   "name": "customer", "at": "2026-10-22T00:00:00Z"}],
+                       signer="you@example.com", role="analyst")
+    assert res.applied and not res.skipped, res.skipped
+    ent = loader.load_datasource(tmp_path).subject_areas[0].entities[0]
+    assert ent.review_state == "approved"
+    assert (ent.signed_off_by, ent.signed_off_role, ent.signed_off_at) == (
+        "you@example.com", "analyst", "2026-10-22T00:00:00Z")
+    assert not [it for it in curate.review_queue(loader.load_datasource(tmp_path))["rule_2"]
+                if it["kind"] == "entity"]
