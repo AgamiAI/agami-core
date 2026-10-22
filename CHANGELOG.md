@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An expired BigQuery credential is reported as `auth`, not `other` (#491).** google-auth
+  refreshes a token lazily, so a stale Application Default Credential passed client setup and failed
+  inside the query. Every statement on the datasource then came back as `other` ("an unexpected
+  error on the server"). The refresh and missing-credential errors are now caught by type wherever
+  they surface (the query, the wait for its result, or a later page of rows) and reported as `auth`,
+  so the caller stops and the operator re-credentials.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added

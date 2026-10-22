@@ -988,6 +988,7 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
     `EU`, `asia-northeast1`).
     """
     try:
+        from google.auth import exceptions as google_auth_errors  # type: ignore
         from google.cloud import bigquery  # type: ignore
         from google.oauth2 import service_account  # type: ignore
     except ImportError:
@@ -1047,6 +1048,12 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
         client = bigquery.Client(**client_kwargs)
     except Exception as e:
         raise ExecutorError(f"BigQuery client init failed: {e}", code=4)
+    # The client is built before any token is fetched: google-auth refreshes lazily, inside the first
+    # API call. So an expired or revoked Application Default Credential passes the init above and
+    # raises from `client.query()`, `job.result()` or a later page of rows. Caught by type, not by
+    # message, because it is a credentials failure wherever it surfaces and would otherwise read as an
+    # execution error no classifier arm recognises, which the caller is told is a server fault (#491).
+    auth_errors = (google_auth_errors.RefreshError, google_auth_errors.DefaultCredentialsError)
 
     timeout_s = _resolve_timeout_s()
     # `job_timeout_ms` is BigQuery's native server-side bound, and on this engine it is the ONLY
@@ -1081,6 +1088,8 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
         # rule is that NO engine may relabel it as a driver error, and the clause below would. It is
         # what makes the rule checkable across all ten engines rather than nine.
         raise
+    except auth_errors as e:
+        raise ExecutorError(f"BigQuery credentials were rejected: {e}", code=4)
     except Exception as e:
         raise ExecutorError(f"BigQuery execution error: {e}", code=5)
 
@@ -1090,11 +1099,16 @@ def _run_bigquery(creds: dict[str, str], sql: str) -> ExecResult:
     ncols = len(results.schema)
     rows: list[tuple] = []
     truncated = False
-    for row in results:
-        if len(rows) >= cap:
-            truncated = True
-            break
-        rows.append(tuple(row[i] for i in range(ncols)))
+    try:
+        # Iterating fetches the later pages, and a page fetch can be the call that refreshes the
+        # token, so the credentials failure is caught here as well.
+        for row in results:
+            if len(rows) >= cap:
+                truncated = True
+                break
+            rows.append(tuple(row[i] for i in range(ncols)))
+    except auth_errors as e:
+        raise ExecutorError(f"BigQuery credentials were rejected: {e}", code=4)
     return ExecResult(columns=columns, rows=rows, truncated=truncated)
 
 
