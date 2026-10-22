@@ -21,6 +21,18 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **A join only the metadata preset assumes is not engine-approved (#509).** `sm enrich-metadata`
+  adds reference joins from two sources: the database's own dictionary, and the preset's list of
+  standard joins for that platform. A standard join whose values overlapped in the data was written
+  confirmed and approved by the engine, although this database never declared it. Such a join is
+  now written inferred and unreviewed, says it is the preset's standard join and not declared, and
+  waits in the review queue. A reference the database's dictionary declares is still
+  engine-approved once its values overlap, as a declared foreign key is during introspection.
+  Introspection already wrote every join it inferred from names and values unreviewed. New tests
+  now pin that for a database with no declared foreign keys.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
