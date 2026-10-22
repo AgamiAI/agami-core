@@ -812,6 +812,74 @@ def test_red_team_stacked_keywords(sql: str) -> None:
     assert check_read_only(sql) is not None, f"Stacked attack not blocked: {sql!r}"
 
 
+# ---------------------------------------------------------------------------
+# Issue #492 — a column NAMED like a denied keyword is a column
+# ---------------------------------------------------------------------------
+# `notify`, `lock`, `set` and `into` are ordinary column names (an ITSM incident table carries a
+# `notify` column). Quoted for the engine or qualified by its table, every engine reads them as a
+# name, so the keyword deny-list must not refuse them as writes.
+
+KEYWORD_NAMED_COLUMNS = ["notify", "lock", "set", "into", "listen", "release", "copy", "execute"]
+
+
+@pytest.mark.parametrize("word", KEYWORD_NAMED_COLUMNS)
+@pytest.mark.parametrize(
+    "template",
+    [
+        'SELECT "{w}" FROM acme.incident LIMIT 1',  # Postgres / Snowflake / ANSI quoting
+        "SELECT `{w}` FROM demo_ds.incident LIMIT 1",  # BigQuery / MySQL / Databricks
+        "SELECT [{w}] FROM dbo.incident",  # SQL Server
+        "SELECT t.{w} FROM acme.incident AS t LIMIT 1",  # qualified, bare
+        "SELECT demo_ds.incident.{w} FROM demo_ds.incident",  # fully qualified
+        'SELECT t."{w}", COUNT(*) FROM acme.incident t GROUP BY t."{w}"',
+        "SELECT `demo_ds.incident`.`{w}` FROM `demo_ds.incident` WHERE `{w}` = 'true'",
+        "SELECT t1.{w} FROM acme.incident t1 WHERE t1.{w} IS NOT NULL ORDER BY t1.{w}",
+    ],
+)
+def test_accepts_quoted_or_qualified_keyword_named_column(template: str, word: str) -> None:
+    sql = template.format(w=word)
+    assert check_read_only(sql) is None, f"keyword-named column refused: {sql!r}"
+
+
+REJECT_KEYWORD_STILL_A_KEYWORD = [
+    # The keyword used as a keyword stays refused next to a column that shares its name.
+    "SELECT 1; NOTIFY x",
+    "LOCK TABLE t",
+    "SELECT * INTO t2 FROM t",
+    'SELECT "notify" INTO t2 FROM t',
+    "SELECT t.notify INTO t2 FROM t",
+    "SELECT `into` INTO t2 FROM t",
+    # An UNQUALIFIED bare word still needs a parse to tell from a keyword, so it stays refused.
+    "SELECT notify FROM acme.incident",
+    # A number is not a qualifier: older Postgres lexes `1.into` as `1.` followed by INTO.
+    "SELECT 1.INTO t2 FROM t",
+    "SELECT 1.e.INTO t2 FROM t",
+    # A free-standing dot is lexed differently across engines, so it does not mask either.
+    "SELECT t. INTO t2 FROM t",
+    # MySQL's default mode reads `"`…`"` as a STRING, so these backticks exist only inside
+    # strings and the INTO between them is live: the double-quoted mask must run first.
+    "SELECT \"`\" INTO OUTFILE '/tmp/x', \"`\" FROM t",
+    # An unterminated backtick masks nothing.
+    "SELECT `x INTO t2 FROM t",
+    # A bracket with more than one word is a subscript expression, not a name.
+    "SELECT a[1 INTO t2] FROM t",
+    # Data-modifying CTEs keep their keyword even beside qualified names.
+    "WITH x AS (DELETE FROM t WHERE t.lock = 1 RETURNING t.id) SELECT x.id FROM x",
+]
+
+
+@pytest.mark.parametrize("sql", REJECT_KEYWORD_STILL_A_KEYWORD)
+def test_keyword_used_as_keyword_still_refused(sql: str) -> None:
+    refusal = check_read_only(sql)
+    assert refusal is not None and refusal.rule == RULE_READ_ONLY, f"not refused: {sql!r}"
+
+
+def test_quoted_function_name_still_caught_after_identifier_masking() -> None:
+    # The function deny-list reads the UNWRAPPED text, so masking for the keyword check must not
+    # turn `"pg_sleep"(10)` back into a name.
+    assert check_read_only('SELECT "pg_sleep"(10)') is not None
+
+
 def _every_reject_list(namespace: dict[str, Any]) -> list[Any]:
     """Every `REJECT_*` list in `namespace`, flattened, in declaration order.
 

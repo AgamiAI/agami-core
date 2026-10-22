@@ -61,7 +61,8 @@ _REMEDIATION: dict[str, str] = {
     "not_a_select": "Rewrite as a read-only SELECT or WITH…SELECT.",
     "denied_keyword": (
         "Rewrite as a read-only SELECT — this connection executes no writes, DDL, "
-        "transaction control, session state or prepared statements."
+        "transaction control, session state or prepared statements. If the word is a column or "
+        "table name, qualify it (`t.notify`) or quote it for the engine (`\"notify\"`, `` `notify` ``)."
     ),
     "row_lock": "Remove the row-lock clause; an analytic read never needs one.",
     "dangerous_function": (
@@ -367,6 +368,47 @@ _DENY_KEYWORD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Identifier forms the keyword deny-list must not read as keywords. A column called `notify`,
+# `lock`, `set` or `into` is ordinary in real schemas, and every engine reads these spellings as a
+# NAME, never as the statement or clause keyword:
+#   - a backtick-quoted identifier (MySQL, BigQuery, Databricks, SQLite). On the engines that do
+#     not quote with backticks the character is a syntax error, so nothing hidden by masking a
+#     backtick run can execute there either;
+#   - a bracket-quoted single word (SQL Server). Elsewhere `[word]` is a subscript, and a lone
+#     word cannot carry a clause, so only the one-word form is masked;
+#   - a member after a dot in a qualified name (`t.notify`, `ds.tbl.lock`). After `.` the
+#     grammar of every engine reads a name. The chain must open with a name, not a number, so
+#     `1.into` (a numeric literal followed by `INTO` on older Postgres) stays visible, and the dot
+#     must touch the member, because a free-standing `.` is lexed differently across engines.
+# An UNQUALIFIED bare word is still refused: telling `SELECT notify FROM t` from a clause keyword
+# takes a parse, and this gate is stdlib-only on the vendored plugin layout.
+_BACKTICK_IDENT_RE = re.compile(r"`[^`]*`")
+_BRACKET_WORD_RE = re.compile(r"\[[A-Za-z_][\w$]*\]")
+_QUALIFIED_CHAIN_RE = re.compile(r"(?<![\w$.])[A-Za-z_][\w$]*((?:\.[A-Za-z_][\w$]*)+)")
+
+
+def _mask_identifiers(neutral: _Neutralized) -> str:
+    """The neutralized text with every identifier that only LOOKS like a keyword blanked to `_`.
+
+    Feeds the keyword deny-list and nothing else. The function deny-list keeps reading the
+    unwrapped text, where `"pg_sleep"(10)` has to stay a call.
+
+    Order matters. Double-quoted content is masked FIRST, from the neutralizer's own spans, because
+    MySQL's default mode reads `"`…`"` as a STRING: `SELECT "`" INTO OUTFILE '/x', "`"` must not
+    have its INTO hidden between two backticks that only exist inside those strings. The masks keep
+    the length and the word-ness of what they replace, so no neighbouring token fuses or splits.
+    """
+    chars = list(neutral.text)
+    for start, end in neutral.quoted:
+        chars[start:end] = "_" * (end - start)
+    text = "".join(chars)
+    text = _BACKTICK_IDENT_RE.sub(lambda m: "_" * len(m.group(0)), text)
+    text = _BRACKET_WORD_RE.sub(lambda m: "_" * len(m.group(0)), text)
+    return _QUALIFIED_CHAIN_RE.sub(
+        lambda m: m.group(0)[: m.start(1) - m.start(0)] + re.sub(r"[^.]", "_", m.group(1)), text
+    )
+
+
 # Row-level lock clauses inside an otherwise-valid SELECT. `FOR UPDATE`,
 # `FOR SHARE`, `FOR NO KEY UPDATE`, `FOR KEY SHARE` — none belong in analytics.
 _ROW_LOCK_RE = re.compile(r"\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b", re.IGNORECASE)
@@ -560,9 +602,10 @@ def check_read_only(sql: str | None) -> Refusal | None:
     # nothing hidden inside a literal or comment can reach the checks below. See
     # `_neutralize` for why a single scan is required rather than layered regexes.
     try:
-        stripped = _neutralize(sql).text
+        neutral = _neutralize(sql)
     except _GuardReject as reject:
         return refuse(RULE_READ_ONLY, detail=reject.detail, remediation=reject.remediation)
+    stripped = neutral.text
 
     # Allow exactly one trailing `;`. Any other `;` indicates a second statement —
     # the classic statement-stacking bypass (`COMMIT; DROP SCHEMA public CASCADE`).
@@ -586,7 +629,9 @@ def check_read_only(sql: str | None) -> Refusal | None:
             remediation=_REMEDIATION["not_a_select"],
         )
 
-    deny = _DENY_KEYWORD_RE.search(stripped)
+    # Read against the identifier-masked copy, so a quoted or qualified column named `notify` is a
+    # column. Only this check reads it; the opener, row-lock and function checks keep `stripped`.
+    deny = _DENY_KEYWORD_RE.search(_mask_identifiers(neutral))
     if deny:
         return refuse(
             RULE_READ_ONLY,

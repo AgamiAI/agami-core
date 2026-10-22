@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A column named like a denied keyword can be read (#492).** The read-only guard refused any
+  `SELECT` that named a column called `notify`, `lock`, `set`, `into` or another word on its keyword
+  deny-list, even quoted or qualified, and called it a write. Quoted (`"notify"`, `` `notify` ``,
+  `[notify]`) and qualified (`t.notify`) names now pass on every engine. The keyword used as a
+  keyword is still refused, and so is an unqualified bare `notify`, whose refusal now says to
+  qualify or quote the name.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
