@@ -21,6 +21,37 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **A table is identified by its schema and catalog as well as its name (#258, #337).**
+  - **Storage.** The served model stored tables keyed by subject area and bare name, so
+    `sales_data.orders` and `staging.orders` in one area landed on one key and the deploy failed.
+    Migration `028_model_table_identity` adds the schema and catalog to `model_table`'s key. Rows
+    already stored copy across unchanged and still load, and the next deploy writes them in full.
+    One area defining the same table twice is now the validator error `duplicate_table_identity`,
+    which includes `public.orders` written next to `orders` with `schema: public`.
+  - **`dataset_names`.** It used to strip the schema, so `public.orders` could return
+    `archive.orders`. It now returns the table in the schema it names. A name declared under two
+    schemas returns both tables, each keyed `schema.table`. A schema the name isn't declared in is
+    answered with the spellings that do resolve.
+  - **Routing map.** On `mode="index"` it publishes `schema.table` where a name is ambiguous, and
+    passing that name back returns that table.
+  - **Name carrying its schema.** A table defined as `name: public.orders` can now be selected as
+    either `orders` or `public.orders`, and the scope gates match it.
+  - **Joins.** A join in `joins_to_other_tables` whose schema the returned table can't confirm now
+    stays whole, so it no longer reads `from: orders` with the schema dropped.
+  - **Scope gates.**
+    - A reference qualified with a database or project other than the connection's is refused once
+      the credentials say which one the connection is in. When the credentials don't name one, the
+      qualifier is refused.
+    - A model can now record a table's `catalog` for a multi-database model. Introspection leaves it
+      unset.
+    - A four-part name (`server.database.schema.table`) never matches a declared table.
+    - On Postgres, Snowflake and Oracle, a quoted name has to match the declared table in the case
+      the engine keeps, so `"Orders"` no longer passes for `orders`. Unquoted names still match
+      without regard to case. The other engines match quoted names without regard to case, as they
+      resolve them.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added

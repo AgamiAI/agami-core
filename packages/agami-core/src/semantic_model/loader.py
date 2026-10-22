@@ -52,6 +52,8 @@ from .models import (
     Table,
     TableRef,
     bare_name,
+    stored_identity,
+    table_key,
 )
 
 # The default `include` set for get_table_context / `sm context`. performance_hints
@@ -544,85 +546,131 @@ def _load_cross_metrics(root: Path, ds_doc: dict) -> list[Metric]:
 # ---------------------------------------------------------------------------
 
 
+def _choose(cands: list[Table], query: str, areas: frozenset[str] = frozenset()) -> list[Table]:
+    """The tables `query` names among `cands` (every table whose name is `query` or whose bare name
+    is `query`'s, in scan order). Several only when an unqualified name is declared under several
+    schemas, which is the caller's to show as ambiguous rather than this function's to settle.
+
+    A qualified name that is some table's exact name is that table. Otherwise it resolves by schema
+    (#258): with `public.orders` and `archive.orders` declared, `archive.orders` is that table and
+    never the other. A qualifier no candidate's schema matches finds a candidate only where it
+    cannot be naming another schema: it is a subject area's name (`areas`, folded), the prefix
+    `bare_name` has always stripped, or the lone candidate records no schema.
+    """
+    if "." not in query:
+        distinct: dict[tuple[str, str], Table] = {}
+        for t in cands:
+            distinct.setdefault(table_key(t.name, t.schema_name), t)
+        return list(distinct.values())
+    exact = [t for t in cands if t.name == query]
+    if exact:
+        return exact[:1]
+    want = table_key(query)[0]
+    same = [t for t in cands if table_key(t.name, t.schema_name)[0] == want]
+    if same:
+        return same[:1]
+    if len(cands) == 1 and (want in areas or not table_key(cands[0].name, cands[0].schema_name)[0]):
+        return cands
+    return []
+
+
 @dataclass(frozen=True)
 class TableIndex:
     """O(1) name→Table lookup that reproduces `_find_table` EXACTLY, so the schema hot path stops
     linear-scanning the whole model per table (ACE-047, scalability-audit finding P12). Match rule:
-    a defined table's name equals the query OR its bare form; on a name clash the first table in
-    scan order wins; area scoping and the TableRef multi-area fallback are preserved. Built once
-    from the cached model and threaded through get_table_context; byte-identical to the scan."""
+    `_choose` over the tables whose name is the query or whose bare name is its bare form, in scan
+    order; area scoping and the TableRef multi-area fallback are preserved. Built once from the
+    cached model and threaded through get_table_context; identical to the scan."""
 
-    org_wide: dict[str, tuple[Table, int]]           # t.name -> (table, global scan rank)
-    per_area: dict[str, dict[str, tuple[Table, int]]]  # area -> {t.name -> (table, rank)}
+    org_wide: dict[str, list[Table]]                 # bare name -> tables, in scan order
+    per_area: dict[str, dict[str, list[Table]]]      # area -> {bare name -> tables}
     area_refs: dict[str, set[str]]                   # area -> {ref.table} for the fallback test
+    areas: frozenset[str] = frozenset()              # folded area names, for `_choose`
 
-    @staticmethod
-    def _pick(m: dict[str, tuple[Table, int]], query: str, bare: str) -> Optional[Table]:
-        # Return the earlier-in-scan-order table among a name-match and a bare-match — exactly what
-        # `_find_table`'s in-order `t.name == query or t.name == bare` scan would have returned.
-        a = m.get(query)
-        b = m.get(bare) if bare != query else None
-        if a and b:
-            return a[0] if a[1] <= b[1] else b[0]
-        return a[0] if a else (b[0] if b else None)
+    def _pick(self, m: dict[str, list[Table]], query: str, bare: str) -> list[Table]:
+        return _choose(m.get(bare, []), query, self.areas)
 
-    def find(self, table_name: str, area: Optional[str] = None) -> Optional[Table]:
+    def find_all(self, table_name: str, area: Optional[str] = None) -> list[Table]:
         bare = bare_name(table_name)
         if area:
             hit = self._pick(self.per_area.get(area, {}), table_name, bare)
-            if hit is not None:
+            if hit:
                 return hit
             refs = self.area_refs.get(area, set())
             if table_name in refs or bare in refs:
                 return self._pick(self.org_wide, table_name, bare)
-            return None
+            return []
         return self._pick(self.org_wide, table_name, bare)
 
 
 def build_table_index(org: Datasource) -> TableIndex:
     """Build the O(1) name→Table index once per schema call (ACE-047). Scan order (areas, then
-    tables) matches `_find_table`, and first-occurrence-wins via setdefault keeps a clash resolving
-    identically."""
-    org_wide: dict[str, tuple[Table, int]] = {}
-    per_area: dict[str, dict[str, tuple[Table, int]]] = {}
+    tables) matches `_find_table`, so a clash resolves identically."""
+    org_wide: dict[str, list[Table]] = {}
+    per_area: dict[str, dict[str, list[Table]]] = {}
     area_refs: dict[str, set[str]] = {}
-    rank = 0
     for sa in org.subject_areas:
-        amap: dict[str, tuple[Table, int]] = {}
+        amap: dict[str, list[Table]] = {}
         for t in sa.tables_defined:
-            org_wide.setdefault(t.name, (t, rank))
-            amap.setdefault(t.name, (t, rank))
-            rank += 1
+            org_wide.setdefault(bare_name(t.name), []).append(t)
+            amap.setdefault(bare_name(t.name), []).append(t)
         # Area names are NOT enforced unique; `_find_table` resolves an area via
         # `org.subject_area(area)`, which returns the FIRST area of that name — so the per-area maps
         # must be first-wins too (setdefault), or a duplicate name would resolve the wrong area.
         per_area.setdefault(sa.name, amap)
         area_refs.setdefault(sa.name, {ref.table for ref in sa.tables})
-    return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs)
+    return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs,
+                      areas=_area_names(org))
 
 
-def _find_table(
+def _area_names(org: Datasource) -> frozenset[str]:
+    return frozenset(sa.name.lower() for sa in org.subject_areas)
+
+
+def _find_tables(
     org: Datasource, table_name: str, area: Optional[str] = None,
     *, index: Optional[TableIndex] = None,
-) -> Optional[Table]:
+) -> list[Table]:
+    """Every table `table_name` names (see `_choose`): one, none, or each schema's copy of an
+    ambiguous unqualified name."""
     if index is not None:
-        return index.find(table_name, area)
+        return index.find_all(table_name, area)
     bare = bare_name(table_name)
     areas = [org.subject_area(area)] if area else org.subject_areas
-    for sa in areas:
-        if sa is None:
-            continue
-        for t in sa.tables_defined:
-            if t.name == table_name or t.name == bare:
-                return t
+    cands = [t for sa in areas if sa is not None for t in sa.tables_defined
+             if bare_name(t.name) == bare]
+    found = _choose(cands, table_name, _area_names(org))
+    if found:
+        return found
     # Multi-area membership: a table is DEFINED in exactly one area but may be REFERENCED from
     # others via a TableRef (a shared dimension like `sys_user`). When the named area lists it
     # among its `tables`, fall back to the org-wide definition instead of reporting "not found".
     if area:
         sa = org.subject_area(area)
         if sa and any(ref.table == table_name or ref.table == bare for ref in sa.tables):
-            return _find_table(org, table_name, area=None)
-    return None
+            return _find_tables(org, table_name, area=None)
+    return []
+
+
+def _find_table(
+    org: Datasource, table_name: str, area: Optional[str] = None,
+    *, index: Optional[TableIndex] = None,
+) -> Optional[Table]:
+    found = _find_tables(org, table_name, area, index=index)
+    return found[0] if found else None
+
+
+def display_name(org: Datasource, table: Table, *, index: Optional[TableIndex] = None) -> str:
+    """The name a reply keys `table` by: its own, unless another schema declares the same bare name,
+    in which case `schema.name` — the spelling `dataset_names` resolves back to this table (#258).
+    Pass `index` to read the same-named tables from it rather than scanning the model (ACE-047)."""
+    _, schema, bare = stored_identity(table.name, table.schema_name)
+    if not schema or "." in table.name:
+        return table.name
+    same = (index.org_wide.get(bare, []) if index is not None else
+            [t for sa in org.subject_areas for t in sa.tables_defined if bare_name(t.name) == bare])
+    schemas = {table_key(t.name, t.schema_name)[0] for t in same}
+    return f"{schema}.{bare}" if len(schemas) > 1 else table.name
 
 
 def _table_alias(table_name: str) -> str:
@@ -694,9 +742,13 @@ def _visible_columns(
     return [c for c in table.columns if c.name in allowed]
 
 
-def _exposed_groups_for(sa: SubjectArea, table_name: str) -> Optional[list[str]]:
+def _exposed_groups_for(sa: SubjectArea, table: Table) -> Optional[list[str]]:
+    """The column groups `sa` exposes of `table`: from the TableRef naming it, by schema where the
+    ref gives one, so a same-named table in another schema does not lend it its view (#258)."""
+    schema, bare = table_key(table.name, table.schema_name)
     for ref in sa.tables:
-        if ref.table == table_name or ref.table == _table_alias(table_name):
+        ref_schema, ref_bare = table_key(ref.table, ref.schema_name)
+        if ref_bare == bare and (not ref_schema or not schema or ref_schema == schema):
             return ref.expose_column_groups
     return None
 
@@ -724,35 +776,13 @@ def get_table_context(
     result: dict[str, Any] = {"tables": {}}
 
     for name in tables:
-        table = _find_table(org, name, area, index=index)
-        if table is None:
+        found = _find_tables(org, name, area, index=index)
+        if not found:
             result["tables"][name] = {"error": "not found in scope"}
-            continue
-        exposed = _exposed_groups_for(sa, table.name) if sa else None
-        visible = _visible_columns(table, exposed)
-        if columns:
-            wanted = set(columns)
-            chosen = [c for c in visible if c.name in wanted]
-        else:
-            chosen = visible
-
-        tinfo: dict[str, Any] = {
-            "name": table.name,
-            "schema": table.schema_name,
-            "description": table.description,
-            "grain": table.grain,
-            "source_type": table.source_type,
-            "columns": [_column_detail(c, include) for c in chosen],
-        }
-        if "caveats" in include and table.caveats:
-            tinfo["caveats"] = table.caveats
-        if "default_filters" in include:
-            tinfo["default_filters"] = collect_default_filters(
-                org, [table.name], area=area, params=params, index=index
-            )
-        if "performance_hints" in include and table.performance_hints:
-            tinfo["performance_hints"] = table.performance_hints.model_dump(exclude_none=True)
-        result["tables"][table.name] = tinfo
+        for table in found:
+            result["tables"][display_name(org, table, index=index)] = _table_detail(
+                org, table, sa, area=area, columns=columns, include=include, params=params,
+                index=index)
 
     if "relationships" in include:
         result["relationships"] = _relationships_among(org, tables, area)
@@ -760,6 +790,39 @@ def get_table_context(
         result["metrics"] = _metrics_for(org, tables, area)
 
     return result
+
+
+def _table_detail(
+    org: Datasource, table: Table, sa: Optional[SubjectArea], *, area: Optional[str],
+    columns: Optional[list[str]], include: list[str], params: Optional[dict[str, str]],
+    index: Optional[TableIndex],
+) -> dict[str, Any]:
+    """One table's entry in a `get_table_context` reply."""
+    exposed = _exposed_groups_for(sa, table) if sa else None
+    visible = _visible_columns(table, exposed)
+    if columns:
+        wanted = set(columns)
+        chosen = [c for c in visible if c.name in wanted]
+    else:
+        chosen = visible
+
+    tinfo: dict[str, Any] = {
+        "name": table.name,
+        "schema": table.schema_name,
+        "description": table.description,
+        "grain": table.grain,
+        "source_type": table.source_type,
+        "columns": [_column_detail(c, include) for c in chosen],
+    }
+    if "caveats" in include and table.caveats:
+        tinfo["caveats"] = table.caveats
+    if "default_filters" in include:
+        tinfo["default_filters"] = collect_default_filters(
+            org, [display_name(org, table, index=index)], area=area, params=params, index=index
+        )
+    if "performance_hints" in include and table.performance_hints:
+        tinfo["performance_hints"] = table.performance_hints.model_dump(exclude_none=True)
+    return tinfo
 
 
 def _column_detail(col: Column, include: list[str]) -> dict[str, Any]:

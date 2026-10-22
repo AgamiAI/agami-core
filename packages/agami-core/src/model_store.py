@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from semantic_model.models import Datasource, OrgRecord
+from semantic_model.models import Datasource, OrgRecord, stored_identity, table_key
 from store import Store
 
 # The per-datasource model tables write_datasource clears before a re-seed (so a redeploy
@@ -121,10 +121,12 @@ def write_datasource(
         )
         for t in sa.tables_defined:
             tdoc = t.model_dump(mode="json")
+            catalog, schema, _ = stored_identity(t.name, t.schema_name, t.catalog)
             store.execute(
-                "INSERT INTO model_table (org_id, datasource, area, name, est_row_count, doc) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (org_id, datasource, sa.name, t.name, _est_rows(tdoc), json.dumps(tdoc)),
+                "INSERT INTO model_table (org_id, datasource, area, catalog_name, schema_name, name, "
+                "est_row_count, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (org_id, datasource, sa.name, catalog, schema, t.name, _est_rows(tdoc),
+                 json.dumps(tdoc)),
             )
         for m in sa.metrics:
             store.execute(
@@ -164,17 +166,18 @@ def load_datasource(store: Store, datasource: str, org_id: str = DEFAULT_ORG) ->
     ):
         sa_doc: dict[str, Any] = json.loads(sa_row["doc"])
         area = sa_row["name"]
-        for field, table in (
-            ("tables_defined", "model_table"),
-            ("metrics", "metric"),
-            ("entities", "entity"),
-            ("relationships", "relationship"),
+        for field, table, order in (
+            # Same-named tables in two schemas share a name, so the schema settles their order.
+            ("tables_defined", "model_table", "name, schema_name, catalog_name"),
+            ("metrics", "metric", "name"),
+            ("entities", "entity", "name"),
+            ("relationships", "relationship", "name"),
         ):
             sa_doc[field] = [
                 json.loads(r["doc"])
                 for r in store.query(
                     f"SELECT doc FROM {table} WHERE org_id = ? AND datasource = ? AND area = ? "
-                    "ORDER BY name",
+                    f"ORDER BY {order}",
                     (org_id, datasource, area),
                 )
             ]
@@ -261,26 +264,36 @@ def model_table_counts(store: Store, org_id: str = DEFAULT_ORG) -> dict[str, int
 def datasources_declaring(
     store: Store, names: list[str], org_id: str = DEFAULT_ORG
 ) -> dict[str, list[str]]:
-    """`{bare table name (lowercased): [datasource, ...]}` for the org's served models that declare
+    """`{name as given (lowercased): [datasource, ...]}` for the org's served models that declare
     each of `names`, in ONE query (#327).
 
     For a table-scope refusal on the wrong datasource: the refused tables are usually declared — just
     in another of the same organization's datasources — and saying which one turns a guess into one
     certain retry. Scoped to `org_id` by construction, so it can never name another tenant's
     datasource. Matching is case-folded, as the scope gate folds unquoted identifiers. A name no
-    served model declares is simply absent from the result."""
-    wanted = sorted({n.lower() for n in names if n})
+    served model declares is simply absent from the result.
+
+    A schema-qualified name matches only a table declared in that schema (#258), or a row written
+    before the schema was stored, whose schema is '' and so cannot be told apart."""
+    wanted = {n.lower(): table_key(n) for n in names if n}
     if not wanted:
         return {}
-    marks = ", ".join("?" for _ in wanted)
+    bares = sorted({bare for _, bare in wanted.values()})
+    marks = ", ".join("?" for _ in bares)
     rows = store.query(
-        f"SELECT DISTINCT datasource, lower(name) AS name FROM model_table "
-        f"WHERE org_id = ? AND lower(name) IN ({marks}) ORDER BY datasource",
-        (org_id, *wanted),
+        f"SELECT DISTINCT datasource, lower(name) AS name, lower(schema_name) AS schema_name "
+        f"FROM model_table WHERE org_id = ? AND lower(name) IN ({marks}) ORDER BY datasource",
+        (org_id, *bares),
     )
     found: dict[str, list[str]] = {}
-    for r in rows:
-        found.setdefault(r["name"], []).append(r["datasource"])
+    for given, (schema, bare) in wanted.items():
+        for r in rows:
+            row_schema, row_bare = table_key(r["name"], r["schema_name"])
+            if row_bare != bare or (schema and row_schema not in ("", schema)):
+                continue
+            homes = found.setdefault(given, [])
+            if r["datasource"] not in homes:
+                homes.append(r["datasource"])
     return found
 
 

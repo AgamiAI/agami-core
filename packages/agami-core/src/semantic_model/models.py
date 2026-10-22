@@ -97,6 +97,19 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
 
 
+def stored_identity(name: str, schema: Optional[str] = None,
+                    catalog: Optional[str] = None) -> tuple[str, str, str]:
+    """``(catalog, schema, bare name)`` as written, '' for a part the model does not give.
+
+    What `model_table` is keyed by (#258). Not folded, unlike `table_key`: the store keeps the
+    model's own spelling, and two definitions that differ only by case are the validator's to catch.
+    The schema may be embedded in the name, read the same way `table_key` reads it.
+    """
+    parts = (name or "").split(".")
+    embedded = parts[-2] if len(parts) > 1 else ""
+    return catalog or "", (schema if schema not in (None, "") else embedded) or "", parts[-1]
+
+
 # ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------
@@ -345,6 +358,10 @@ class Table(_Base):
 
     name: str
     schema_name: Optional[str] = Field(default=None, alias="schema")
+    # The database / project the table lives in, for a model that spans several. Unset means the
+    # connection's own, which is what introspection writes: naming it would tie the model to one
+    # environment's database (#337).
+    catalog: Optional[str] = None
     storage_connection: Optional[str] = None
 
     source_type: SourceType = "table"

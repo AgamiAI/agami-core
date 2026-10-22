@@ -2148,6 +2148,40 @@ def _engine_mismatch(profile: str, creds: dict) -> "Refusal | None":
     )
 
 
+def _connection_catalog(creds: dict) -> str | None:
+    """The catalog (database / project) the credentials connect to, as a table reference's first
+    part names it; None where the engine has none or the credentials leave it to a default."""
+    db_type = str(creds.get("type", "")).lower()
+    if db_type in ("postgres", "supabase", "redshift", "snowflake", "sqlserver", "mssql"):
+        return creds.get("database") or None
+    if db_type == "bigquery":
+        return creds.get("project") or None
+    if db_type in ("trino", "presto", "databricks"):
+        return creds.get("catalog") or None
+    if db_type == "duckdb":
+        # DuckDB names an attached database after its file, and the in-memory one `memory`.
+        path = creds.get("path") or creds.get("database") or ":memory:"
+        return "memory" if path == ":memory:" else Path(path).stem
+    return None
+
+
+def _foreign_catalog(sql: str, creds: dict) -> "Refusal | None":
+    """Refuse a reference to a declared table under a catalog the connection is not in (#337).
+
+    After the credentials, because they are what say which catalog that is. `getattr` for the same
+    reason as `_engine_mismatch`: an older installed runtime skips the check rather than raising.
+    """
+    # The model the gates just resolved and published, never a second load per query. None where
+    # no model is declared, and then there is no declared table for a catalog to misname.
+    org = _guard_model.get()
+    if org is None:
+        return None
+    from semantic_model import runtime as RT  # importable: the gates that published `org` ran on it
+
+    check = getattr(RT, "check_catalog_scope", None)
+    return None if check is None else check(sql, org, _connection_catalog(creds))
+
+
 def _disk_model_root(profile: str) -> Path | None:
     """The on-disk model root for `profile`, or None when no model is declared there.
 
@@ -3089,7 +3123,7 @@ def execute_guarded(
             # `engine_mismatch` reports OUR configuration drift, a model declaring an engine its own
             # credentials do not speak, and it refuses every statement on that datasource until an
             # operator fixes it. That is 4c, not 4a: nothing here is about what the statement can do.
-            mismatch = _engine_mismatch(profile, creds)
+            mismatch = _engine_mismatch(profile, creds) or _foreign_catalog(sql, creds)
             if mismatch is not None:
                 return _envelope("refused", refusal=mismatch,
                                  receipt=_refusal_receipt(mismatch, received_sql, profile))
