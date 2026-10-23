@@ -21,6 +21,19 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **A second-order metric can sit on a base metric that spans several tables, and its table names
+  are quoted for the engine (#525).** `OUTERAGG({base})` with `inner_grain` used to be refused when
+  the base metric read more than one table, and the synthesized statement wrote table and column
+  names bare, so a mixed-case table failed on PostgreSQL. The synthesized inner query now joins the
+  base metric's `primary_table` (else its first source table) to each other source table by the one
+  relationship declared directly between them. It is still refused, with the reason, when there is
+  no such edge, more than one, or the join would fan out the base aggregate's rows; a bare
+  `inner_grain` column must be declared by exactly one of the tables (or written `table.column`).
+  Identifiers are quoted only where the engine needs it, so a plain lower-case name is emitted as
+  before.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
