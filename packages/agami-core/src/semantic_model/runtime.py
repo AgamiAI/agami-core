@@ -1825,11 +1825,15 @@ def check_column_scope(sql: str, org: Datasource,
     names it in its projection; otherwise, if that scope reads a declared table, it is
     refused, since the table's undeclared physical columns are what the engine would
     bind (#339). A scope with no source supplying it defers to the enclosing query, as a
-    correlated reference does. Fail-open stays only where no declared table is in reach:
-    a column qualified by a CTE/derived alias (judged in that source's body) or a
-    select-list alias. Matching is case-insensitive (unquoted identifiers fold case),
-    consistent with `check_table_scope`. Runs AFTER the table-scope + star gates, so
-    every physical table in scope is known-declared and no `*` remains.
+    correlated reference does. A name a USING / NATURAL join merges is the physical side's,
+    and the join's compared names are checked against its own operands. Fail-open stays only
+    where no declared table is in reach: a column qualified by a CTE/derived alias (judged in
+    that source's body), or a select-list alias where the engine reads the alias (a whole
+    ORDER BY or GROUP BY item, or a window alias in QUALIFY; see `_reads_output_alias`).
+    NATURAL between two declared tables compares whatever columns they share physically,
+    which the model cannot see, so it stays allowed. Matching is case-insensitive (unquoted
+    identifiers fold case), consistent with `check_table_scope`. Runs AFTER the table-scope
+    + star gates, so every physical table in scope is known-declared and no `*` remains.
 
     Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, it is not
     a SELECT, or the model declares no columns.
@@ -1877,6 +1881,7 @@ def check_column_scope(sql: str, org: Datasource,
     # An unresolvable physical table (undeclared or ambiguous — table scope refuses it) binds its
     # alias to False, so the qualifier is known to be a physical table rather than a CTE alias.
     alias_by_select: dict[int, dict[str, Any]] = {}  # id(select) -> {alias -> (schema, name) | False}
+    binding_of: dict[int, Any] = {}                  # id(physical Table node) -> its alias binding
     direct_phys: dict[int, set[tuple]] = {}          # id(select) -> {(schema, name) read directly}
     source_cols: dict[int, set[str]] = {}            # id(select) -> {column a non-physical source names}
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
@@ -1896,21 +1901,26 @@ def check_column_scope(sql: str, org: Datasource,
                 # `sales_data.orders.amount` beside `staging.orders` in one FROM: both register
                 # under `orders`, last wins, so also register the qualified spelling.
                 aliases[f"{tbl.db}.{name}".lower()] = binding
+            binding_of[id(tbl)] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
-    merged: dict[int, tuple[set[str], bool]] = {}   # id(select) -> (USING keys, has NATURAL)
+    # Per FROM / JOIN item: the declared table it reads, or the names it supplies.
+    items_by_select: dict[int, list[tuple[Any, "set[str] | None"]]] = {}
     for sel in tree.find_all(exp.Select):
+        items = []
         for src in _from_sources(sel):
             names = _source_column_names(src, cte_refs, dialect)
+            inner = src
+            while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
+                inner = inner.this
+            items.append((binding_of.get(id(inner)) if names is None else None, names))
             if names is not None:
                 source_cols.setdefault(id(sel), set()).update(names)
-        merged[id(sel)] = _merged_columns(sel, dialect)
-    for al in tree.find_all(exp.Alias):
-        if not al.alias:
-            continue
-        sel = _enclosing_select(al)
-        if sel is not None:
-            output_by_select.setdefault(id(sel), set()).add(al.alias.lower())
+        items_by_select[id(sel)] = items
+        # Top-level aliases only: one inside a function argument (`XMLFOREST(id AS x)`) names
+        # nothing the select returns.
+        output_by_select[id(sel)] = {e.alias.lower() for e in sel.expressions
+                                     if isinstance(e, exp.Alias) and e.alias}
 
     offending: set[str] = set()
     # The declared tables each offending column was judged against — what the refusal may list. Only
@@ -1919,12 +1929,41 @@ def check_column_scope(sql: str, org: Datasource,
     # Refused in a scope that also reads a CTE / derived source: the column may be one that source
     # returns without a name the gate can read, which qualifying it says.
     beside_source: set[str] = set()
+    # A USING or NATURAL join compares names without a column reference, and merges them: the
+    # result is the physical side's value, or COALESCE of both, so a source naming it does not make
+    # it the source's. Each join is judged on its own operands, everything left of it and the item
+    # it joins, so a third table is not held to a key it never joins on.
+    merged_by_select: dict[int, set[str]] = {}
+    for sel in tree.find_all(exp.Select):
+        items = items_by_select.get(id(sel), [])
+        # `items` is the FROM item then one per join, so join k joins items[k + 1] to items[:k + 1].
+        for k, j in enumerate(sel.args.get("joins") or []):
+            left, right = items[:k + 1], items[k + 1]
+            for key in filter(None, (_column_key(u, dialect) for u in j.args.get("using") or [])):
+                merged_by_select.setdefault(id(sel), set()).add(key)
+                lk = key.lower()
+                left_ok = any((isinstance(ph, tuple) and ph in declared and lk in declared[ph])
+                              or (names is not None and key in names) for ph, names in left)
+                rph = right[0]
+                right_ok = not (isinstance(rph, tuple) and rph in declared and lk not in declared[rph])
+                if not (left_ok and right_ok):
+                    offending.add(key)
+                    judged.setdefault(key, set()).update(
+                        ph for ph, _ in (*left, right) if isinstance(ph, tuple) and ph in declared)
+            if str(j.args.get("method") or "").upper() == "NATURAL":
+                operands = (*left, right)
+                compared = set().union(*(names for _, names in operands if names is not None))
+                merged_by_select.setdefault(id(sel), set()).update(compared)
+                tables = [ph for ph, _ in operands if isinstance(ph, tuple) and ph in declared]
+                for key in sorted(compared):
+                    if tables and not all(key.lower() in declared[t] for t in tables):
+                        offending.add(key)
+                        judged.setdefault(key, set()).update(tables)
     for col in tree.find_all(exp.Column):
         name = col.name
         if not name:
             continue
         lname = name.lower()
-        ckey = _column_key(col.this, dialect)
         chain = _select_chain(col)
         sel = chain[0] if chain else None
         if col.table:
@@ -1952,13 +1991,13 @@ def check_column_scope(sql: str, org: Datasource,
         # not known, so an undeclared one of that name would be read (#339).
         scopes = _column_scopes(col, dialect)
         if (scopes and lname in output_by_select.get(id(scopes[0]), set())
-                and _reads_output_alias(col, scopes[0])):
+                and _reads_output_alias(col, scopes[0], dialect)):
             continue  # a select-list output alias of THIS select, not a base column
+        ckey = _column_key(col.this, dialect)
         for s in scopes:
             local = {t for t in direct_phys.get(id(s), set()) if t in declared}
-            using, natural = merged.get(id(s), (set(), False))
             supplied = (ckey in source_cols.get(id(s), set())
-                        and not natural and ckey not in using)
+                        and ckey not in merged_by_select.get(id(s), set()))
             if any(lname in declared[t] for t in local) or supplied:
                 break  # declared, or named by a CTE / derived source (possibly ambiguous — the DB's call)
             if local:
@@ -1967,18 +2006,6 @@ def check_column_scope(sql: str, org: Datasource,
                 if id(s) in source_cols:
                     beside_source.add(name)
                 break
-
-    # The names a join compares without a column reference: USING's list, and for NATURAL every
-    # name a CTE / derived source supplies. Each is read from the physical tables too, so each
-    # must be declared on all of them, or the join is an equality test on an undeclared column.
-    for sel in tree.find_all(exp.Select):
-        using, natural = merged.get(id(sel), (set(), False))
-        compared = using | (source_cols.get(id(sel), set()) if natural else set())
-        local = {t for t in direct_phys.get(id(sel), set()) if t in declared}
-        for key in sorted(compared):
-            if local and not all(key.lower() in declared[t] for t in local):
-                offending.add(key)
-                judged.setdefault(key, set()).update(local)
 
     if not offending:
         return None
@@ -4126,7 +4153,7 @@ def _column_scopes(node: "exp.Expression", dialect: "str | None" = None) -> list
         if isinstance(p, exp.Select) and id(p) not in hidden:
             scopes.append(p)
         if isinstance(p, exp.CTE) and p.parent is not None:
-            hidden.add(id(p.parent.parent))  # CTE -> With -> the query carrying it
+            hidden.add(id(p.parent.parent))  # CTE -> With -> the query (or set operation) carrying it
         elif (isinstance(p, exp.Subquery) and isinstance(p.parent, (exp.From, exp.Join))
               and dialect != "duckdb"):
             hidden.add(id(p.parent.parent))
@@ -4134,32 +4161,35 @@ def _column_scopes(node: "exp.Expression", dialect: "str | None" = None) -> list
     return scopes
 
 
-def _reads_output_alias(col: "exp.Column", sel: "exp.Select") -> bool:
-    """Whether an unqualified name in `sel` can mean one of `sel`'s own select-list aliases: only in
-    its ORDER BY, GROUP BY or HAVING, and not inside an aggregate or window there. Anywhere else,
-    the alias's own expression included, the engine reads the input column, so
-    `SELECT secret_col AS secret_col FROM orders` reads `orders.secret_col`."""
+# Engines whose QUALIFY clause reads a select-list alias: the dedup idiom
+# `row_number() OVER (...) AS rn ... QUALIFY rn = 1`.
+_QUALIFY_ALIAS_DIALECTS = frozenset({"duckdb", "snowflake", "bigquery", "databricks"})
+
+
+def _reads_output_alias(col: "exp.Column", sel: "exp.Select", dialect: "str | None") -> bool:
+    """Whether an unqualified name in `sel` means one of `sel`'s own select-list aliases.
+
+    Only where every engine reads the alias over a same-named input column: a whole ORDER BY item,
+    or a whole GROUP BY item. Inside an expression there, in HAVING or FILTER, and everywhere else,
+    Postgres and MySQL read the input column first, so `SELECT 1 AS secret_col FROM orders ORDER BY
+    CASE WHEN secret_col = 'x' THEN 0 END` sorts on `orders.secret_col`. QUALIFY on the engines that
+    have it reads an alias of a window function, which is how a deduplication is written there.
+    """
     p = col.parent
+    if isinstance(p, exp.Ordered) and isinstance(p.parent, exp.Order) and p.parent.parent is sel:
+        return True
+    if isinstance(p, exp.Group) and p.parent is sel:
+        return True
+    if dialect not in _QUALIFY_ALIAS_DIALECTS:
+        return False
     while p is not None and p is not sel:
-        if isinstance(p, (exp.AggFunc, exp.Window)):
+        if isinstance(p, (exp.AggFunc, exp.Window, exp.Filter)):
             return False
-        if isinstance(p, (exp.Order, exp.Group, exp.Having)) and p.parent is sel:
-            return True
+        if isinstance(p, exp.Qualify) and p.parent is sel:
+            return any(isinstance(e, exp.Alias) and e.alias.lower() == col.name.lower()
+                       and e.find(exp.Window) is not None for e in sel.expressions)
         p = p.parent
     return False
-
-
-def _merged_columns(sel: "exp.Select", dialect: "str | None") -> "tuple[set[str], bool]":
-    """The `_column_key`s a USING join merges in `sel`, and whether a NATURAL join merges more.
-
-    A merged column is the physical side's value, or COALESCE of both, so a CTE or derived source
-    naming it does not make it the source's."""
-    using: set[str] = set()
-    natural = False
-    for j in sel.args.get("joins") or []:
-        natural = natural or str(j.args.get("method") or "").upper() == "NATURAL"
-        using |= {k for k in (_column_key(u, dialect) for u in j.args.get("using") or []) if k}
-    return using, natural
 
 
 def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
@@ -4168,6 +4198,12 @@ def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
     from_ = sel.args.get("from_") or sel.args.get("from")
     items = [from_.this] if isinstance(from_, exp.From) else []
     return items + [j.this for j in sel.args.get("joins") or []]
+
+
+@functools.lru_cache(maxsize=None)
+def _dialect_object(dialect: "str | None") -> "Dialect":
+    """One sqlglot Dialect per name: `get_or_raise` builds a new instance on every call."""
+    return Dialect.get_or_raise(dialect)
 
 
 def _column_key(ident: object, dialect: "str | None") -> Optional[str]:
@@ -4180,7 +4216,7 @@ def _column_key(ident: object, dialect: "str | None") -> Optional[str]:
     """
     if not isinstance(ident, exp.Identifier) or not ident.name:
         return None
-    d = Dialect.get_or_raise(dialect)
+    d = _dialect_object(dialect)
     if d.NORMALIZATION_STRATEGY is NormalizationStrategy.CASE_SENSITIVE:
         return ident.name.lower()
     return d.normalize_identifier(ident.copy()).name

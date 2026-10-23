@@ -223,6 +223,14 @@ BESIDE_A_SOURCE = [
     ("SELECT id, row_number() OVER (ORDER BY secret_col) AS secret_col FROM orders", "secret_col"),
     ("SELECT secret_col FROM (SELECT secret_col AS secret_col FROM orders) d", "secret_col"),
     ("SELECT max(id) AS secret_col FROM orders ORDER BY max(secret_col)", "secret_col"),
+    # Inside an expression, HAVING or FILTER the engine reads the input column, not the alias.
+    ("SELECT id AS secret_col FROM orders ORDER BY CASE WHEN secret_col = 'x' THEN 0 ELSE 1 END",
+     "secret_col"),
+    ("SELECT 1 AS secret_col FROM orders GROUP BY id HAVING secret_col = 'x'", "secret_col"),
+    ("SELECT count(*) AS secret_col FROM orders GROUP BY id "
+     "HAVING count(*) FILTER (WHERE secret_col = 'x') > 0", "secret_col"),
+    # An alias inside a function argument is not one the select returns.
+    ("SELECT xmlforest(id AS secret_col) AS x FROM orders ORDER BY secret_col", "secret_col"),
     # A USING / NATURAL join merges the name with the physical table's column, and compares it.
     ("SELECT secret_col FROM orders LEFT JOIN (SELECT 'x' AS secret_col) d USING (secret_col)",
      "secret_col"),
@@ -258,6 +266,65 @@ def test_duckdb_reads_an_earlier_from_item_inside_a_derived_table(sql):
     org = _scope_org()
     org.storage_connections = [m.StorageConnection(name="c", storage_type="DuckDB")]
     _assert_columns_refused(rt.check_column_scope(sql, org), "secret_col")
+
+
+def test_a_bare_group_by_alias_is_the_alias():
+    """By decision, not oversight: `GROUP BY day` over `... AS day` is everyday SQL, and refusing it
+    to cover an alias that collides with an undeclared input column would refuse that. The residual
+    is the grouping alone (how many rows share a value), never a value."""
+    assert rt.check_column_scope(
+        "SELECT date(id) AS day, count(*) AS n FROM orders GROUP BY day ORDER BY day",
+        _scope_org()) is None
+
+
+def _duckdb_org():
+    org = _scope_org()
+    org.storage_connections = [m.StorageConnection(name="c", storage_type="DuckDB")]
+    return org
+
+
+def test_qualify_reads_a_window_alias():
+    """The dedup idiom on DuckDB, Snowflake, BigQuery and Databricks."""
+    assert rt.check_column_scope(
+        "SELECT id, row_number() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn "
+        "FROM orders QUALIFY rn = 1", _duckdb_org()) is None
+
+
+def test_qualify_does_not_trust_any_other_alias():
+    _assert_columns_refused(rt.check_column_scope(
+        "SELECT 1 AS secret_col FROM orders QUALIFY secret_col = 'x'", _duckdb_org()), "secret_col")
+    _assert_columns_refused(rt.check_column_scope(
+        "SELECT id, row_number() OVER (ORDER BY id) AS rn FROM orders QUALIFY rn = 1",
+        _scope_org()), "rn")
+
+
+def test_an_alias_elsewhere_is_the_input_column_on_engines_that_also_read_aliases():
+    """DuckDB reads a select-list alias in WHERE, and a window alias nested in another window in
+    QUALIFY, only when no input column has that name; the gate cannot see the input columns, so it
+    holds both to the model. Write the expression out, or filter in an outer query."""
+    _assert_columns_refused(rt.check_column_scope(
+        "SELECT amount * 2 AS dbl FROM orders WHERE dbl > 10", _duckdb_org()), "dbl")
+    _assert_columns_refused(rt.check_column_scope(
+        "SELECT id, row_number() OVER (ORDER BY id) AS rn FROM orders QUALIFY max(rn) OVER () = 1",
+        _duckdb_org()), "rn")
+
+
+def test_mysql_column_names_fold_whatever_their_case():
+    """MySQL's table names can be case-sensitive; its column names never are."""
+    org = _scope_org()
+    org.storage_connections = [m.StorageConnection(name="c", storage_type="MySQL")]
+    assert rt.check_column_scope("WITH c AS (SELECT 1 AS N) SELECT n, amount FROM orders, c",
+                                 org) is None
+    _assert_columns_refused(rt.check_column_scope(
+        "WITH c AS (SELECT 1 AS N) SELECT secret_col FROM orders, c", org), "secret_col")
+
+
+def test_an_empty_quoted_name_names_nothing():
+    """`""` is a zero-length identifier: it is no column, and as a source's output it vouches for
+    none."""
+    assert rt.check_column_scope('SELECT "" FROM orders', _scope_org()) is None
+    _assert_columns_refused(rt.check_column_scope(
+        'WITH c AS (SELECT 1 AS "") SELECT secret_col FROM orders, c', _scope_org()), "secret_col")
 
 
 def test_postgres_names_a_one_column_function_after_its_alias():
@@ -304,7 +371,11 @@ NAMED_BY_A_SOURCE = [
     "WITH c(secret_col) AS (SELECT 1) SELECT n, amount FROM orders, c AS x(n)",
     # Output aliases where the engine reads them, and USING / NATURAL on declared columns.
     "SELECT amount AS a FROM orders ORDER BY a",
-    "SELECT status AS s, count(*) AS n FROM orders GROUP BY s HAVING n > 1",
+    "SELECT status AS s, count(*) AS n FROM orders GROUP BY s HAVING count(*) > 1 ORDER BY n",
+    # A USING key is held only to that join's two sides; NATURAL only to its own operands.
+    "SELECT name FROM customers c JOIN orders o ON o.customer_id = c.id "
+    "JOIN (SELECT 1 AS amount) d USING (amount)",
+    "SELECT n FROM orders NATURAL JOIN customers, (SELECT 1 AS n) d",
     "SELECT id FROM orders JOIN customers USING (id)",
     "SELECT id FROM orders NATURAL JOIN customers",
     "SELECT n FROM orders JOIN (SELECT 1 AS id, 2 AS n) d USING (id)",
