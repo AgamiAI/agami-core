@@ -293,6 +293,80 @@ def test_cross_area_entity_collision_warns():
     assert "cross_area_entity_collision" not in _codes(v.validate(org))
 
 
+def _two_areas(entity_b, *, b_lists_accounts=False, conns=("c",)):
+    """Area `crm` defines crm.accounts (with an Account entity); area `finance` defines fin.rev
+    and carries `entity_b`."""
+    a = m.Table(name="accounts", schema="crm", storage_connection="c", grain=["id"],
+                description="d", columns=[_col("id")])
+    rr = m.Table(name="rev", schema="fin", storage_connection="c", grain=["id"],
+                 description="d", columns=[_col("id"), _col("account_id")])
+    refs_b = [m.TableRef(storage_connection="c", schema="fin", table="rev")]
+    if b_lists_accounts:
+        refs_b.append(m.TableRef(storage_connection="c", schema="crm", table="accounts"))
+    area_a = m.SubjectArea(name="crm",
+                           tables=[m.TableRef(storage_connection="c", schema="crm", table="accounts")],
+                           tables_defined=[a],
+                           entities=[m.Entity(name="Account",
+                                              maps_to=[m.EntityMapping(table="accounts", column="id", primary=True)])])
+    area_b = m.SubjectArea(name="finance", tables=refs_b, tables_defined=[rr], entities=[entity_b])
+    return m.Datasource(datasource="O", storage_connections=[_conn(c) for c in conns],
+                        subject_areas=[area_a, area_b])
+
+
+def test_entity_mapping_to_a_missing_table_warns():
+    org = _two_areas(m.Entity(name="Ledger", maps_to=[m.EntityMapping(table="ledger", column="id")]))
+    res = v.validate(org)
+    assert "entity_mapping_unknown_table" in _codes(res) and res.ok
+
+
+def test_entity_mapping_to_a_missing_column_on_another_areas_table_warns():
+    org = _two_areas(m.Entity(name="Customer", maps_to=[m.EntityMapping(table="accounts", column="acct_no")]))
+    res = v.validate(org)
+    assert "entity_mapping_column_not_found" in _codes(res) and res.ok
+    assert any("accounts.acct_no" in w for w in res.warnings)
+
+
+def test_cross_subject_area_entity_mapping_is_checked():
+    org = _two_areas(m.Entity(name="Revenue", maps_to=[m.EntityMapping(table="rev", column="id")]))
+    org.cross_subject_area_entities = [m.Entity(name="Customer", maps_to=[
+        m.EntityMapping(table="crm.accounts", column="id"),
+        m.EntityMapping(table="fin.rev", column="acct")])]
+    res = v.validate(org)
+    hits = [f for f in res.findings if f.code == "entity_mapping_column_not_found"]
+    assert len(hits) == 1 and "fin.rev.acct" in hits[0].message
+    assert "entity_mapping_unknown_table" not in _codes(res)
+
+
+def test_a_valid_cross_area_entity_mapping_stays_clean():
+    org = _two_areas(m.Entity(name="Customer", maps_to=[
+        m.EntityMapping(table="accounts", column="id"), m.EntityMapping(table="rev", column="account_id")]))
+    org.cross_subject_area_entities = [m.Entity(name="Payer", maps_to=[m.EntityMapping(table="crm.accounts", column="id")])]
+    codes = _codes(v.validate(org))
+    assert not codes & {"entity_mapping_unknown_table", "entity_mapping_column_not_found",
+                        "entity_mapping_unknown_column"}
+
+
+def test_cross_area_entity_collision_names_areas_and_schema_table():
+    org = _two_areas(m.Entity(name="Account", maps_to=[m.EntityMapping(table="rev", column="id", primary=True)]))
+    [msg] = [f.message for f in v.validate(org).findings if f.code == "cross_area_entity_collision"]
+    assert "'crm' (-> crm.accounts)" in msg and "'finance' (-> fin.rev)" in msg and "?" not in msg
+
+
+def test_cross_area_entity_collision_names_the_connection_only_when_there_are_several():
+    org = _two_areas(m.Entity(name="Account", maps_to=[m.EntityMapping(table="rev", column="id", primary=True)]),
+                     conns=("c", "c2"))
+    [msg] = [f.message for f in v.validate(org).findings if f.code == "cross_area_entity_collision"]
+    assert "crm.accounts on c" in msg
+
+
+@pytest.mark.parametrize("lists", [True, False])
+def test_two_areas_mapping_one_table_do_not_collide(lists):
+    # finance maps the Account entity to crm's table (listed via a TableRef, or not): same target
+    org = _two_areas(m.Entity(name="Account", maps_to=[m.EntityMapping(table="accounts", column="id", primary=True)]),
+                     b_lists_accounts=lists)
+    assert "cross_area_entity_collision" not in _codes(v.validate(org))
+
+
 # --- executable parity on cross-area edges ---
 
 
