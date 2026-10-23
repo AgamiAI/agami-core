@@ -541,14 +541,17 @@ def test_detect_money_column_handles_word_boundaries():
 
 @pytest.mark.parametrize("name", ["duration_minutes", "total_minutes", "total_hours",
                                   "credit_hours", "points_balance", "total_weight",
-                                  "totalMinutes", "reading_units", "balance_pts"])
+                                  "totalMinutes", "reading_units", "balance_pts",
+                                  "total_seconds", "duration_secs"])
 def test_non_money_unit_words_are_not_money(name):
     assert not build.detect_money_column(name)
 
 
 @pytest.mark.parametrize("name", ["gross_usd", "value_usd", "balance_usd", "fx_dollar",
                                   "amount_total", "total_amount", "revenueUSDMillions",
-                                  "revenue_per_day", "cost_per_kg", "fare_try"])
+                                  "revenue_per_day", "cost_per_kg", "fare_try",
+                                  "second_payment_amount", "second_installment_fee",
+                                  "hour_cost", "cost_per_hour"])
 def test_currency_named_and_money_named_columns_are_money(name):
     assert build.detect_money_column(name)
 

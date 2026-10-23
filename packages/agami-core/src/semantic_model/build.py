@@ -81,9 +81,11 @@ _CURRENCY_WORDS = {"usd": "USD", "dollar": "USD", "eur": "EUR", "euro": "EUR", "
 _NOT_MONEY_WORDS = frozenset({
     "rate", "pct", "percent", "percentage", "ratio", "count", "cnt", "qty", "quantity", "num",
     "number", "nbr", "id", "key", "sk", "fk", "flag", "year", "age", "day", "month", "score",
-    "rank", "code", "status", "minute", "mins", "hour", "second", "duration",
-    "weight", "kg", "lb", "gram", "point", "pts", "units",
+    "rank", "code", "status", "duration", "weight", "kg", "lb", "gram", "point", "pts", "units",
 })
+# Time words exclude only in the plural: `total_seconds` is a duration, `second_payment_amount`
+# is the second payment.
+_NOT_MONEY_PLURALS = frozenset({"seconds", "secs", "minutes", "mins", "hours", "hrs"})
 _SCALE_WORDS = {"thousand": "thousands", "million": "millions", "billion": "billions",
                 "lakh": "lakhs", "crore": "crores"}
 _PERIOD_WORDS = frozenset({"hour", "day", "week", "month", "quarter", "year"})
@@ -140,7 +142,7 @@ def detect_money_column(column_name: str) -> bool:
     `balance_usd` are money while `discount_rate`, `order_count`, `total_minutes`, `credit_hours`
     and `points_balance` are not. Name-only; the caller restricts this to numeric columns."""
     words, _ = _per_period(name_words(column_name))
-    if any(_in(w, _NOT_MONEY_WORDS) for w in words):
+    if any(_in(w, _NOT_MONEY_WORDS) or w in _NOT_MONEY_PLURALS for w in words):
         return False
     return name_currency(column_name) is not None or any(_in(w, _MONEY_WORDS) for w in words)
 
