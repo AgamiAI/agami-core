@@ -12,6 +12,20 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The interpreter resolver no longer picks a Python that can never be brought up to date (#529).**
+  `connect_resolve.py` checks each candidate for pip and for the agami-core version it carries, read
+  from installed metadata. A candidate with no pip and an agami-core that is missing or older than the
+  plugin is skipped, with a `reason` in `candidates_scored`; a pip-less one whose library is current is
+  still chosen, and `$AGAMI_PYTHON` is never skipped but gets a warning. The output says
+  `chosen_because`. `sm` and `py`, before agami-connect has recorded an interpreter, apply the same
+  rule to the Pythons on PATH, so an activated pip-less venv no longer shadows a working one. When the library a Python runs is older than the plugin, `connect_resolve`
+  (as a `library_older_than_plugin` anomaly), `py` and the scripts' library loader warn on stderr,
+  naming both versions, the interpreter and the fix (`sm install`, or `AGAMI_PYTHON`). `sm` says
+  "<python> has no pip" instead of a bare "couldn't install". The plugin version is read from
+  `plugin.json` by one shared helper, with the cache folder's name as the fallback.
+
 ### Security
 
 - **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**
