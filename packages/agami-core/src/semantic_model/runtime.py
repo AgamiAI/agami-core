@@ -74,6 +74,7 @@ from .models import (
     Entity,
     Metric,
     Relationship,
+    Table,
 )
 from .models import (
     bare_name as _bare,
@@ -2178,13 +2179,35 @@ def _aggregate_reports(tree, org: Datasource,
         sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
         declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
                     if sites else [])
-        join_statuses = ([(js.scope, _join_site_status(js, declared)[0],
+        join_statuses = ([(js.scope, _weighed_status(js, _join_site_status(js, declared)[0], tidx),
                            f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
                           for js in sites], written - len(sites))
     return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
 
 
 _UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat rows: "
+# What an undeclared join reports to `_downgrade_unweighed` when the model's own keys settle it.
+_KEYED_ONE_TO_ONE = "keyed_one_to_one"
+
+
+def _weighed_status(js: "_JoinSite", status: str, tidx: dict[str, tuple]) -> str:
+    """`status`, unless the model declares no such join but its columns are the whole of a key on
+    both sides: one row meets at most one row, so it repeats nothing and the number stays clean."""
+    if status != UNDECLARED or not js.pairs:
+        return status
+    cols: dict[str, list[str]] = {}
+    for pair in js.pairs:
+        if len(pair) != 2:
+            return status
+        for table_key, column in pair:
+            cols.setdefault(table_key, []).append(column)
+    if len(cols) != 2:
+        return status
+    for table_key, columns in cols.items():
+        hit = tidx.get(table_key)
+        if hit is None or not hit[0].unique_on(columns):
+            return status
+    return _KEYED_ONE_TO_ONE
 
 
 def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
@@ -2638,7 +2661,7 @@ def _projection_sources(body: "exp.Expression") -> dict[str, str]:
 
 
 def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain: list[str],
-              grains: dict[str, set[str]], scope_map: dict[str, str],
+              tables: dict[str, Table], scope_map: dict[str, str],
               outputs: dict[str, str]) -> Optional[Relationship]:
     """The join edge between a grain-CHANGING CTE and the table it is joined to, or None.
 
@@ -2663,9 +2686,9 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
       (a comma join, or an edge written some way this does not read); more than one means a
       composite key, whose cardinality is not the single-column rule's to state.
     * the far side resolving to no table in scope.
-    * the far side's DECLARED GRAIN being empty. This guard sits BEFORE the call and that placement
-      is the point: `infer_cardinality` tests `bool(to_pk)`, so a table declared `grain: []` and a
-      table with no grain at all are indistinguishable to it and BOTH fall through to its
+    * the far side declaring NO KEY — an empty grain and no unique key. This guard sits BEFORE the
+      call and that placement is the point: a table declared `grain: []` and a table with no grain
+      at all are indistinguishable to `infer_cardinality`, and BOTH fall through to its
       `many_to_one` default. Calling it anyway would put a cardinality on the receipt that no one
       declared, which is worse than saying nothing.
 
@@ -2693,11 +2716,12 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         return None
     near, far = pairs[0]
     other = scope_map.get(far.table)
-    if not other or not grains.get(_tkey(other)):
+    far_table = tables.get(_tkey(other)) if other else None
+    if far_table is None or not (far_table.grain or far_table.unique_keys):
         return None
 
     # Every name that reaches `infer_cardinality` is folded, on BOTH sides of every comparison it
-    # makes. `grains` was folded by the caller, `grain` by `_group_by_grain`, and the join keys are
+    # makes. `Table.unique_on` folds the keys, `grain` by `_group_by_grain`, and the join keys are
     # folded here — the module's own convention, stated on `check_column_scope` as "matching is
     # case-insensitive", and the one this comparison was missing. The `Relationship` keeps the
     # WRITTEN spellings, because that is what the receipt echoes back to the caller.
@@ -2711,9 +2735,7 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         from_table=cte_key, to_table=other,
         from_column=near.name, to_column=far.name,
         relationship=infer_cardinality(
-            _tkey(cte_key), _tkey(other), [near_key], [_tkey(far.name)],
-            {**grains, _tkey(cte_key): set(grain)},
-        ),
+            Table(name=cte_key, grain=list(grain)), far_table, [near_key], [_tkey(far.name)]),
     )
 
 
@@ -2768,13 +2790,11 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     matches nothing. So `WITH OI AS (…) … JOIN OI` derives an edge named `OI`, and the grain lookup
     that decides its cardinality folds on the way in.
     """
-    # Folded, because `Table.grain` comes from a catalog and the join keys come from the caller's
-    # SQL — Snowflake and Oracle hand back `ID` where the query writes `id`. Unfolded on either
-    # side, a declared `grain=["ID"]` matches no join key, `infer_cardinality` reads the CTE as
-    # non-unique and invents a fan the statement does not have. It also walks straight through the
-    # empty-grain guard above, since a case-mismatched grain is a non-empty one.
-    grains = {key: {_tkey(col) for col in table.grain or []}
-              for key, (table, _area) in tidx.items()}
+    # `infer_cardinality` compares keys case-folded (`Table.unique_on`), because `Table.grain` comes
+    # from a catalog and the join keys come from the caller's SQL — Snowflake and Oracle hand back
+    # `ID` where the query writes `id`. Unfolded, a declared `grain=["ID"]` matched no join key and
+    # the CTE was read as non-unique, inventing a fan the statement does not have.
+    tables = {key: table for key, (table, _area) in tidx.items()}
     conjuncts = [c for on in _all_join_predicates(sel) for c in _and_conjuncts(on)]
     resolved = dict(scope_map)
     # PASS ONE settles every grain-preserving rebinding, and nothing else. `_cte_edge` resolves the
@@ -2803,7 +2823,7 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     for alias, written in pending:
         body = bodies[_tkey(written)]
         grain = _group_by_grain(body)
-        edge = _cte_edge(conjuncts, alias, written, grain, grains, settled,
+        edge = _cte_edge(conjuncts, alias, written, grain, tables, settled,
                          _projection_sources(body)) if grain else None
         if edge is None:
             resolved[alias] = ""
@@ -3895,7 +3915,8 @@ def assemble_receipt(
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
     reports = _aggregate_reports(
         tree, org, ctx=None, visible=visible, tidx=tidx,
-        join_statuses=([(it["scope"], it["status"], it["from_to"]) for it in join_items], dropped_joins),
+        join_statuses=([(it["scope"], _weighed_status(js, it["status"], tidx), it["from_to"])
+                        for js, it in zip(join_sites, join_items)], dropped_joins),
     )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
