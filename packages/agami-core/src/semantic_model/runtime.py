@@ -3657,6 +3657,10 @@ def assemble_receipt(
         # CTE subtraction anywhere in between — so the fix that reached `tables`, the relationship
         # walk and the unqualified branch below never reached a qualified column. The reference
         # itself is kept either way: a dropped reference is an unchecked one.
+        if col.table and (origin := _qualified_reference_origin(col)) is not None:
+            # Resolved in the column's own scope, through a derived table or CTE (#521).
+            ref_cols.add(origin)
+            continue
         if col.table:                                   # qualified -> resolve via alias scope
             # The alias matched ignoring case, like the sensitive check (#456); an exact match
             # wins, and a qualifier that could be two aliases keeps the written name.
@@ -4500,6 +4504,97 @@ def _own_alias_map(sel: "exp.Select | None") -> dict[str, str]:
             for tbl in boundary if isinstance(tbl, exp.Table)}
 
 
+def _own_sources(sel: "exp.Select") -> list["exp.Expression"]:
+    """The relations this SELECT's own FROM and JOINs introduce, in the order it wrote them."""
+    frm = sel.args.get("from_") or sel.args.get("from")
+    nodes = [frm.this] if isinstance(frm, exp.From) else []
+    nodes += [join.this for join in sel.args.get("joins") or []]
+    return [node for node in nodes if node is not None]
+
+
+def _pick_binding(sources: list["exp.Expression"], qualifier: str) -> "exp.Expression | None":
+    """The source a qualifier names: an exact alias first, else the ONE that matches ignoring case."""
+    exact = [s for s in sources if s.alias_or_name == qualifier]
+    if exact:
+        return exact[0]
+    folded = [s for s in sources if _tkey(s.alias_or_name) == _tkey(qualifier)]
+    return folded[0] if len(folded) == 1 else None
+
+
+def _source_body(source: "exp.Expression") -> "exp.Expression | None":
+    """The query behind a derived table or a CTE reference, or None for a plain table."""
+    if isinstance(source, exp.Subquery):
+        return source.this
+    if isinstance(source, exp.Table):
+        return _visible_cte_bodies(source).get(_tkey(source.name))
+    return None
+
+
+def _origin_through(source: "exp.Expression", cname: str,
+                    depth: int) -> Optional[tuple[str, str]]:
+    """(table, column) behind `cname` read from `source`, or None when it is not a plain column.
+
+    A plain table is its own origin. A derived table or a CTE is followed only through a
+    projection that hands one input column back unchanged, bare or renamed: `x / y AS r` is a value
+    the statement computed and no single column is its origin. A UNION body, a star and an output
+    name projected twice stop here too.
+    """
+    if depth >= _MAX_CTE_CHAIN:
+        return None
+    if isinstance(source, exp.Table) and _tkey(source.name) not in _visible_cte_bodies(source):
+        return source.name, cname
+    body = _source_body(source)
+    if not isinstance(body, exp.Select):
+        return None
+    matches = [p for p in body.expressions if _tkey(p.alias_or_name) == _tkey(cname)]
+    if len(matches) != 1:
+        return None
+    inner = matches[0].this if isinstance(matches[0], exp.Alias) else matches[0]
+    if not isinstance(inner, exp.Column) or not inner.name:
+        return None
+    return _column_origin(inner, depth + 1)
+
+
+def _column_origin(col: "exp.Column", depth: int = 0) -> Optional[tuple[str, str]]:
+    """(table, column) a column reads, resolved in the scope it was written in, or None."""
+    chain = _enclosing_selects(col)
+    if not chain:
+        return None
+    if not col.table:
+        # Unqualified: followed only when the innermost SELECT reads exactly one source.
+        sources = _own_sources(chain[0])
+        if len(sources) != 1:
+            return None
+        return _origin_through(sources[0], col.name, depth)
+    for sel in chain:
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            return _origin_through(source, col.name, depth)
+    return None
+
+
+def _qualified_reference_origin(col: "exp.Column") -> Optional[tuple[str, str]]:
+    """(table, column) for the receipt's label of a QUALIFIED column, or None when its qualifier
+    names nothing in the scopes enclosing it.
+
+    The receipt's whole-statement alias map holds only plain tables, last one wins, so `s.x` over a
+    derived table or a CTE `s` stayed `s.x`, and an alias reused in a nested query resolved to
+    whichever table the walk met last (#521). This resolves the qualifier from the column's own
+    SELECT outward, and follows a derived table or a CTE to its table through plain projections.
+    When the qualifier is bound but the value is computed, the label keeps the name the source
+    was given: the CTE's name for a CTE reference, the alias for a derived table.
+
+    The receipt's labels only: the scope gate, the fan/chasm analysis and the metric match keep
+    their own resolution, so what is refused and what a value is matched to do not change here.
+    """
+    for sel in _enclosing_selects(col):
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            written = source.name if isinstance(source, exp.Table) else col.table
+            return _column_origin(col) or (written, col.name)
+    return None
+
+
 def _computed_relations(sel: "exp.Select | None") -> frozenset[str]:
     """The names THIS SELECT binds to a relation it COMPUTED, folded through `_tkey`.
 
@@ -4970,6 +5065,12 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
         cols = list(agg.find_all(exp.Column))
+        # `COUNT(*) FILTER (WHERE x > 0)` parses as `Filter(this=Count, expression=Where)`, so the
+        # predicate sits outside the aggregate node. It still decides which rows are folded, as the
+        # same test inside `COUNT(CASE WHEN x > 0 THEN 1 END)` does, so it is read too (#521). The
+        # value path below is left alone: the predicate is not part of the value.
+        if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
+            cols += list(agg.parent.expression.find_all(exp.Column))
         resolved = [_resolve_folded(col, scope_map) for col in cols]
         why = _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(

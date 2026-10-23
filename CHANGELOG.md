@@ -21,6 +21,19 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **The receipt names the table behind a subquery or CTE alias, and reads a `FILTER` clause (#521).**
+  `COUNT(*) FILTER (WHERE s.x > 0)` over a subquery `s` listed the reference as `s.x`, and the
+  aggregate said it names no column. A column qualified by a derived table or a CTE is now followed
+  through a projection that passes one column through unchanged (bare or renamed) to its table, so
+  the reference reads `public.t.x`. A computed projection (`x / id AS r`) keeps the alias it was
+  written with. A qualifier is resolved in the query it was written in, so an alias reused in a
+  nested query no longer borrows the other query's table. An aggregate's `FILTER (WHERE …)` columns
+  count as columns it reads, the same as a `CASE` inside it, so a single-table `COUNT(*) FILTER (…)`
+  is resolved and one over a join can report a fan. What the scope gate refuses is unchanged, and a
+  value read from a subquery is still not matched to a metric.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
