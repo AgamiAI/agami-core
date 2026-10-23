@@ -175,6 +175,100 @@ def test_describe_file_reports_an_unreadable_path_as_json(tmp_path):
     assert rc == 2 and "could not read" in json.loads(out)["error"]
 
 
+def _cols(root: Path, table: str) -> dict:
+    doc = yaml.safe_load((root / "subject_areas" / "s" / "tables" / f"{table}.yaml").read_text())
+    return {c["name"]: c for c in doc["columns"]}
+
+
+def test_describe_file_tsv_reports_lines_it_cannot_apply(tmp_path):
+    # #522: a malformed line, a missing table / column and an empty description used to vanish
+    _model(tmp_path)
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("orders.total\tTotal order value\n"
+                   "malformed-no-tab\n"
+                   "nope.total\tx\n"
+                   "orders.nope\tx\n"
+                   "orders.id\t \n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1, d
+    assert [(u["at"], u["reason"]) for u in d["unmatched"]] == [
+        ("line 2", "malformed"), ("line 3", "no_table"), ("line 4", "no_column"),
+        ("line 5", "empty_description")]
+
+
+def test_describe_file_csv_as_metadata(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text('Table,Column,Description,Schema\n'
+                        'orders,total,"Order value, tax included\nin USD",public\n'
+                        'ORDER_ITEMS,QTY,Units ordered,\n'
+                        'customers,id,Customer key,\n')
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 2, d
+    total = _cols(tmp_path, "orders")["total"]
+    assert total["description"] == "Order value, tax included\nin USD"
+    assert total["description_source"] == "metadata"
+    qty = _cols(tmp_path, "order_items")["qty"]
+    assert qty["description_source"] == "metadata"    # wrong case → the model's own spelling
+    assert d["case_corrected"] == [{"entry": "ORDER_ITEMS.QTY", "applied_to": "s.order_items.qty"}]
+    assert [u["reason"] for u in d["unmatched"]] == ["no_table"]
+
+
+def test_describe_file_metadata_keeps_a_description_a_person_wrote(tmp_path):
+    _model(tmp_path)
+    from semantic_model import curate
+    curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "orders", "column": "total",
+                             "field": "description", "value": "What finance calls revenue"}])
+    js = tmp_path / "dict.json"
+    js.write_text(json.dumps({"orders.total": "Order value", "s.orders.id": "Order key"}))
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(js)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1 and d["kept_human"] == ["s.orders.total"], d
+    cols = _cols(tmp_path, "orders")
+    assert cols["total"]["description"] == "What finance calls revenue"
+    assert cols["total"]["description_source"] == "human"
+    assert cols["id"]["description_source"] == "metadata"
+
+
+def test_describe_file_json_list_and_format_override(tmp_path):
+    _model(tmp_path)
+    js = tmp_path / "dict.txt"     # extension says TSV; --format says JSON
+    js.write_text(json.dumps([{"table": "orders", "column": "total", "description": "Order value"},
+                              {"table": "orders"}, "junk"]))
+    rc, out = _run(["describe-file", str(tmp_path), "--format", "json", "--file", str(js)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1, d
+    assert _cols(tmp_path, "orders")["total"]["description_source"] == "ai_unvalidated"
+    assert [u["reason"] for u in d["unmatched"]] == ["malformed", "malformed"]
+
+
+def test_describe_file_ambiguous_table_needs_an_area(tmp_path):
+    _model(tmp_path)
+    other = tmp_path / "subject_areas" / "t"
+    (other / "tables").mkdir(parents=True)
+    (other / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "archive", "storage_connection": "c",
+        "columns": [{"name": "total", "type": "decimal"}]}))
+    rows = [{"at": "row 2", "area": "", "schema": "", "table": "orders", "column": "total",
+             "description": "x"},
+            {"at": "row 3", "area": "", "schema": "archive", "table": "orders", "column": "total",
+             "description": "x"}]
+    from semantic_model import dictionary
+    m = dictionary.match(tmp_path, rows, source="metadata")
+    assert [u["reason"] for u in m["unmatched"]] == ["ambiguous_table"]
+    assert [(o["area"], o["name"]) for o in m["ops"]] == [("t", "orders")]
+
+
+def test_describe_file_reports_a_csv_without_the_needed_header(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text("name,text\norders.total,x\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(csv_path)])
+    assert rc == 2 and "missing: table, column, description" in json.loads(out)["error"]
+
+
 def test_prepare_does_not_apply_default_filters(tmp_path):
     """ACE-042: `sm prepare` hands back the caller's statement. The model declares
     `{alias}.deleted_at IS NULL` on `orders` and it neither reaches the SQL nor comes back as an

@@ -21,6 +21,21 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Added
+
+- **A customer's data dictionary is applied as `metadata` in one command (#522).** `sm describe-file`
+  stamped every description `source: ai`, so a dictionary the customer wrote could only land as their
+  own text through a script that built `curate` ops, which agami-connect forbids. It now takes
+  `--source metadata` and reads a CSV (`table`, `column`, `description`, optional `area` / `schema`
+  header; quoted text may hold commas and newlines) or JSON (a list of those objects, or an object
+  mapping `"table.column"` to a description) as well as the TSV it already read, by file extension or
+  `--format`. Each row is matched to a model column, exactly first and then ignoring case, and lands
+  on the model's spelling. A row that can't be applied comes back under `unmatched` with a reason
+  (`no_table`, `no_column`, `ambiguous_table`, `ambiguous_column`, `malformed`, `empty_description`),
+  where a TSV's bad lines used to be skipped without a word. A dictionary row never replaces a
+  description a person wrote; those are listed under `kept_human`. Without the flag the command stamps
+  `ai` as before. agami-connect applies a dictionary file this way and reports the unmatched rows.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
