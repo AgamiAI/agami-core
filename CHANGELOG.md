@@ -21,6 +21,28 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **A column's list of allowed values is the whole list, or none (#517).** Introspection built each
+  `choice_field` from the first 500 rows the engine returned, so on a table of a few thousand rows a
+  status with 14 values could list 6, and the list read as complete: a question about a missing value
+  was written against the list, and the reconcile probe graded a correct literal as a query defect.
+  Values the catalog declares now come first, on a table of any size and with no table scan: a
+  Postgres enum type, a MySQL/MariaDB `ENUM(...)` column, and a CHECK constraint that only lists one
+  column's values (`col IN ('a','b')`, `col = 'a' OR col = 'b'`), read on Postgres, MySQL 8, SQL
+  Server, Oracle, SQLite and DuckDB; a declared list is kept as declared, up to 200 values, integer
+  columns included. Postgres shows a CHECK's text only to the table's owner (the function that shows
+  it to any role is refused by the recon gate), so a SELECT-only role reads enums and no CHECKs. When nothing is declared, a small table (the same size rule as before) reads the
+  list with one bounded `SELECT DISTINCT` per column, at most 1,000 in a run; more than 25 values
+  gives no list rather than part of one. Keys (`*_key`, `*_sk`, `*_fk`), measures and years get no
+  list from the data. Values are listed exactly as stored: 'Open ' is no longer trimmed into 'Open',
+  and a column whose values differ only by spacing or case gets a caveat naming them; loading a model
+  no longer trims a `choice_field` key either. A refresh leaves an existing column's list alone, so
+  labels a person filled in are kept; new columns get the new lists.
+
+  **Reading a model:** a release older than this one trims `choice_field` keys as it loads them, so it
+  reads a list holding both 'Open' and 'Open ' as one 'Open'.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added

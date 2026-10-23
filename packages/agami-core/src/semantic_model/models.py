@@ -42,6 +42,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    constr,
     field_validator,
     model_serializer,
     model_validator,
@@ -274,8 +275,9 @@ class Column(_Base):
     description_source: Optional[DescriptionSource] = None
     primary_key: bool = False
     foreign_key: Optional[ForeignKey] = None
-    # enum semantics: maps stored value -> human meaning
-    choice_field: Optional[dict[str, str]] = None
+    # enum semantics: maps stored value -> human meaning. The stored value is kept exactly, never
+    # trimmed (#517): a query must match 'Open ' to find those rows.
+    choice_field: Optional[dict[constr(strip_whitespace=False), str]] = None
     # How this column may be aggregated as a measure (additive / averageable / dimension).
     # Set by an introspection heuristic, refined by the curator. Consumed by the query-time
     # enforcement layer (e.g. refuse SUM of an `averageable` price, or AVG of a `dimension`

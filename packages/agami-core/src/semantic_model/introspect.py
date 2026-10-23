@@ -100,6 +100,12 @@ class _Row(dict):
 SCRIPT_DIR = Path(__file__).resolve().parent.parent  # plugins/agami/scripts
 SAMPLE_ROWS = 500
 ENUM_MAX_DISTINCT = 25
+# A list declared in the catalog (an enum type, a CHECK ... IN) is exact, so it is kept far past the
+# cap on a list read from the data.
+DECLARED_MAX_VALUES = 200
+# Each value list read from the data is one DISTINCT query; this bounds them per run, so a wide model
+# can't fire thousands.
+DISTINCT_READ_CAP = 1000
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
 # Safety valve for confirming DECLARED-but-unenforced catalog FKs (Redshift/Databricks/Trino)
 # by value-overlap: each confirmation is one sequential COUNT probe, so a schema that declares
@@ -261,8 +267,9 @@ def introspect(
     grain_by_table: dict[str, set[str]] = {}
     _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
     budget = _CountBudget(_COUNT_BUDGET_S)
+    reads = _ReadBudget(DISTINCT_READ_CAP)
     for i, (schema, table) in enumerate(pairs, 1):
-        t = _build_table(dialect, runner, schema, table, conn_name, report, budget)
+        t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads)
         built.append(t)
         grain_by_table[t.name] = set(t.grain)
         if i % _step == 0 or i == len(pairs):
@@ -271,6 +278,10 @@ def introspect(
         report.notes.append(
             f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
             "in total; build those tables in a separate run to size them")
+    if reads.skipped:
+        report.notes.append(
+            f"{reads.skipped} column(s) got no value list: the run's {DISTINCT_READ_CAP} DISTINCT reads were "
+            "used up; build those tables in a separate run to list their values")
 
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
@@ -924,6 +935,7 @@ def _discover_tables(
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
+    reads: Optional[_ReadBudget] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
     cols, mode = _columns(dialect, runner, schema, table)
@@ -953,10 +965,10 @@ def _build_table(
             c.sensitive = True
             report.sensitive_columns += 1
 
-    # One live sample → date encoding/timezone AND choice_field skeletons for low-cardinality
-    # coded columns (so catalog-mode coded columns get an enum skeleton the LLM labels, not
-    # just the probe-mode path).
-    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows)
+    # Value lists the catalog declares, on a table of any size; then one live sample → date
+    # encoding/timezone, and value lists read from the data on a small table.
+    _apply_declared_values(dialect, runner, schema, table, cols)
+    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, reads=reads)
 
     column_groups = build.maybe_column_groups(cols)
     column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
@@ -1031,14 +1043,13 @@ def _probe_columns(
     else:
         names = []
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
-    covers = _sample_covers_values(sample, None)  # no size estimate yet: only a whole-table read counts
     if not names and sample:
         names = list(sample[0].keys())
     cols: list[Column] = []
+    # Value lists come later, from `_enrich_from_sample`, as for a catalog-read table.
     for n in names:
         values = [row.get(n) for row in sample if row.get(n) not in (None, "")]
-        cols.append(Column(name=n, type=_infer_value_type(values), description="",
-                            choice_field=_maybe_choice(values) if covers else None))
+        cols.append(Column(name=n, type=_infer_value_type(values), description=""))
     return cols
 
 
@@ -1051,6 +1062,12 @@ _COUNT_BUDGET_S = 600.0
 @dataclass
 class _CountBudget:
     seconds_left: float
+    skipped: int = 0
+
+
+@dataclass
+class _ReadBudget:
+    left: int
     skipped: int = 0
 
 
@@ -1549,9 +1566,9 @@ def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Opt
     return (None, None)
 
 
-# A value list is only as complete as the rows it was built from. The sample is the first
-# SAMPLE_ROWS rows the engine returns — not a fair draw — so a list is built only when that is the
-# whole table, or the catalog says the table is small enough that its first rows are most of it.
+# A value list read from the data is a DISTINCT over the whole column, so it is complete; it is
+# still read only on a table small enough for that to be cheap: the sample was the whole table, or
+# the catalog says the table is small.
 _CHOICE_FULL_TABLE_MAX_ROWS = SAMPLE_ROWS * 20
 
 
@@ -1564,24 +1581,16 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None,
+    *, est_rows: Optional[int] = None, reads: Optional[_ReadBudget] = None,
 ) -> None:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
-    (b) a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns (the LLM
-    enrichment fills the labels). (b) is the catalog-mode counterpart of probe mode's
-    `_maybe_choice` — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
+    (b) on a small table, a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns
+    the catalog declared nothing for (the LLM enrichment fills the labels), read with one bounded
+    DISTINCT per column — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
     `severity`) never get an enum skeleton, so the decode can only ever live in prose."""
     date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
-    # choice candidates: codeable columns with no choice_field yet, that aren't keys, dates,
-    # or free-text-ish. A short integer/string column with few distinct values is an enum.
-    # Exclude reference-named `*_id`/`sys_id` columns by NAME: introspection never populates
-    # Column.foreign_key, so that guard alone wouldn't catch a low-cardinality `dealer_id`
-    # (few dealers) — which is a JOIN target, not an enum to decode.
-    choice_cands = [c for c in cols
-                    if c.choice_field is None and not c.primary_key and c.foreign_key is None
-                    and c.type in ("integer", "string") and not _looks_time_named(c.name)
-                    and not _NOT_CHOICE_NAME_RE.search(c.name)]
+    choice_cands = [c for c in cols if _data_choice_candidate(c)]
     if not date_cands and not choice_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
@@ -1594,12 +1603,21 @@ def _enrich_from_sample(
         if tz:
             c.timezone = tz
     if not _sample_covers_values(sample, est_rows):
-        choice_cands = []  # first rows of a big table: a list here would state values it never saw
+        choice_cands = []  # a big table: DISTINCT would scan it, and a partial list would mislead
     for c in choice_cands:
-        ch = _maybe_choice([row.get(c.name) for row in sample])
+        if reads is not None:
+            if reads.left <= 0:
+                reads.skipped += 1
+                continue
+            reads.left -= 1
+        rows = _try(runner, dialect.distinct_sql(schema, table, c.name, ENUM_MAX_DISTINCT + 1))
+        if rows is None or len(rows) > ENUM_MAX_DISTINCT:
+            continue  # more values than a list holds: none, rather than an incomplete one
+        seen = sum(1 for row in sample if row.get(c.name) not in (None, ""))
+        ch = _maybe_choice([r.get("v") for r in rows], rows=seen)
         # only genuinely code-like: skip long free-text values (names, descriptions, ids).
         if ch and all(len(str(k)) <= 40 for k in ch):
-            c.choice_field = ch
+            _set_choice(c, ch)
     # Deterministic descriptions for universal coded formats (currency/country/timezone/locale) —
     # fills a column the LLM would otherwise leave `ai_unknown`, on any database. Only when blank.
     for c in cols:
@@ -1609,6 +1627,193 @@ def _enrich_from_sample(
         if cd:
             c.description = cd
             c.description_source = "metadata"  # authoritative deterministic fact (not an LLM guess)
+
+
+# Keys, surrogate keys and years: low-cardinality on a small table, never codes to decode.
+_NOT_DATA_CHOICE_NAME_RE = re.compile(r"_(key|sk|fk)$|(^|_)year$", re.IGNORECASE)
+
+
+def _data_choice_candidate(c: Column) -> bool:
+    """A column whose values may be read from the data into a list: a codeable column with no list
+    yet that isn't a key, a measure, a date or a year. Reference-named `*_id` columns are excluded by
+    NAME: introspection never populates Column.foreign_key, so that guard alone wouldn't catch a
+    low-cardinality `dealer_id` (few dealers) — a JOIN target, not an enum to decode."""
+    return (c.choice_field is None and not c.primary_key and c.foreign_key is None
+            and c.type in ("integer", "string")
+            and c.aggregation not in ("additive", "averageable")
+            and not _looks_time_named(c.name)
+            and not _NOT_CHOICE_NAME_RE.search(c.name)
+            and not _NOT_DATA_CHOICE_NAME_RE.search(c.name))
+
+
+def _set_choice(c: Column, choice: dict[str, str]) -> None:
+    c.choice_field = choice
+    note = _lookalike_caveat(list(choice))
+    if note and note not in c.caveats:
+        c.caveats.append(note)
+
+
+def _lookalike_caveat(values: list[str]) -> Optional[str]:
+    """A caveat naming the stored values that differ only by spacing or case: a query must match the
+    one it means exactly, and 'Open' finds none of the 'Open ' rows."""
+    groups: dict[str, list[str]] = {}
+    for v in values:
+        groups.setdefault(" ".join(v.split()).casefold(), []).append(v)
+    clashes = [", ".join(f"'{v}'" for v in g) for g in groups.values() if len(g) > 1]
+    if not clashes:
+        return None
+    return f"values differ only by spacing or case: {'; '.join(clashes)} — match them exactly"
+
+
+def _apply_declared_values(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+) -> None:
+    """A `choice_field` skeleton, in declared order, on each column whose values the catalog declares."""
+    declared = _declared_values(dialect, runner, schema, table)
+    for c in cols:
+        values = declared.get(c.name.lower())
+        if values and c.choice_field is None:
+            _set_choice(c, {v: "" for v in values})
+
+
+def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str) -> dict[str, list[str]]:
+    """Lowercased column name -> the values its enum type or a simple CHECK constraint allows.
+
+    Catalog reads only, so they run on a table of any size. A column two constraints give different
+    lists gets none: on MariaDB a CHECK's name is unique only per table, so the join that finds a
+    table's CHECKs can also return another table's of the same name."""
+    found: dict[str, list[str]] = {}
+    clash: set[str] = set()
+
+    def put(name: str, values: list[str]) -> None:
+        values = list(dict.fromkeys(v for v in values if v != ""))
+        key = name.lower()
+        if key in found and found[key] != values:
+            clash.add(key)
+        found.setdefault(key, values)
+
+    q = dialect.sql_enum_values(schema, table)
+    if q:
+        per: dict[str, list[str]] = {}
+        for r in _try(runner, q) or []:
+            name = r.get("column_name")
+            if not name:
+                continue
+            if r.get("enum_value") is not None:
+                per.setdefault(name, []).append(str(r.get("enum_value")))
+            elif r.get("column_type"):
+                per[name] = _enum_type_values(str(r.get("column_type")))
+        for name, values in per.items():
+            put(name, values)
+    q = dialect.sql_check_constraints(schema, table)
+    if q:
+        for r in _try(runner, q) or []:
+            for name, values in _check_lists(str(r.get("check_clause") or ""), dialect):
+                put(name, values)
+    return {k: v for k, v in found.items() if k not in clash and 0 < len(v) <= DECLARED_MAX_VALUES}
+
+
+_ENUM_TYPE_RE = re.compile(r"^\s*enum\s*\((.*)\)\s*$", re.IGNORECASE | re.DOTALL)
+_QUOTED_RE = re.compile(r"'((?:[^'\\]|''|\\.)*)'", re.DOTALL)
+
+
+def _enum_type_values(column_type: str) -> list[str]:
+    """The values of a MySQL/MariaDB `enum('a','b')` column type, quotes undone."""
+    m = _ENUM_TYPE_RE.match(column_type)
+    if not m:
+        return []
+    return [re.sub(r"\\(.)", r"\1", v.replace("''", "'")) for v in _QUOTED_RE.findall(m.group(1))]
+
+
+_CHECK_WORD_RE = re.compile(r"^\s*CHECK\b", re.IGNORECASE)
+_CHECK_TAIL_RE = re.compile(r"\s+(NOT\s+VALID|NO\s+INHERIT)(\s+(NOT\s+VALID|NO\s+INHERIT))?\s*$", re.IGNORECASE)
+
+
+def _check_lists(text: str, dialect: D.Dialect) -> list[tuple[str, list[str]]]:
+    """(column, values) for each CHECK in `text` that only lists one column's allowed literals —
+    `col IN ('a', 'b')`, `col = 'a' OR col = 'b'`, Postgres's `col = ANY (ARRAY[...])` — parsed in
+    the engine's dialect. Any other CHECK (a range, two columns, a function) declares no list.
+    `text` is one CHECK's expression, or SQLite's whole CREATE TABLE statement."""
+    import sqlglot
+    from sqlglot import exp
+    from sqlglot.errors import ErrorLevel
+
+    from .sql_dialect import DialectUnresolved, sqlglot_dialect
+
+    try:
+        sg = sqlglot_dialect(dialect.name)
+    except DialectUnresolved:
+        return []
+    body = _CHECK_TAIL_RE.sub("", _CHECK_WORD_RE.sub("", text.strip()))
+    if not body:
+        return []
+    try:
+        tree = sqlglot.parse_one(body, dialect=sg, error_level=ErrorLevel.RAISE)
+    except Exception:
+        return []
+    if isinstance(tree, exp.Create):
+        exprs = [c.this for c in tree.find_all(exp.CheckColumnConstraint)]
+    else:
+        exprs = [tree]
+    return [hit for hit in (_listed_values(e) for e in exprs) if hit]
+
+
+def _listed_values(e) -> Optional[tuple[str, list[str]]]:
+    from sqlglot import exp
+
+    def bare(x):
+        while isinstance(x, (exp.Paren, exp.Cast)):
+            x = x.this
+        return x
+
+    def terms(x):
+        x = bare(x)
+        if isinstance(x, exp.Or):
+            return terms(x.this) + terms(x.expression)
+        return [x]
+
+    def literal(x) -> Optional[str]:
+        x = bare(x)
+        if isinstance(x, exp.Introducer):  # MySQL's _utf8mb4'low'
+            x = x.expression
+        if isinstance(x, exp.Neg) and isinstance(x.this, exp.Literal) and not x.this.is_string:
+            return f"-{x.this.this}"
+        if isinstance(x, exp.National):  # T-SQL's N'low'
+            return str(x.this)
+        if isinstance(x, exp.Literal):
+            return str(x.this)
+        return None
+
+    name: Optional[str] = None
+    values: list[str] = []
+    for t in terms(e):
+        if isinstance(t, exp.In) and not t.args.get("query") and not t.args.get("unnest"):
+            col, lits = bare(t.this), list(t.expressions)
+        elif isinstance(t, exp.EQ):
+            col, rhs = bare(t.this), bare(t.expression)
+            if not isinstance(col, exp.Column):
+                col, rhs = rhs, col
+            if isinstance(rhs, exp.Any):  # Postgres stores IN (...) as = ANY (ARRAY[...])
+                arr = bare(rhs.this)
+                if not isinstance(arr, exp.Array):
+                    return None
+                lits = list(arr.expressions)
+            else:
+                lits = [rhs]
+        else:
+            return None
+        if not isinstance(col, exp.Column) or not lits:
+            return None
+        if name is None:
+            name = col.name
+        elif name.lower() != col.name.lower():
+            return None
+        for lit in lits:
+            v = literal(lit)
+            if v is None:
+                return None
+            values.append(v)
+    return (name, values) if name else None
 
 
 def _infer_value_type(values: list) -> str:
@@ -1628,13 +1833,17 @@ def _infer_value_type(values: list) -> str:
     return "string"
 
 
-def _maybe_choice(values: list) -> Optional[dict[str, str]]:
-    vals = [str(v).strip() for v in values if str(v).strip() != ""]
+def _maybe_choice(values: list, rows: Optional[int] = None) -> Optional[dict[str, str]]:
+    """A `{value: ""}` skeleton from a column's values, or None when they don't look like codes.
+
+    `rows` is how many rows hold them (default: one per value). Values are kept exactly as stored:
+    a query must match 'Open ' to find those rows, so trimming it would list a value that isn't there."""
+    vals = [str(v) for v in values if v is not None and str(v) != ""]
     distinct = sorted(set(vals))
-    # At least TWO distinct values. The sample is the first rows the engine returns, not a fair draw,
-    # so one value seen there says nothing about the column — and a list of one ("current_flag: N"
-    # on a table that is mostly Y) is worse than none: whoever writes the SQL filters on it.
-    if not (1 < len(distinct) <= ENUM_MAX_DISTINCT and len(vals) >= max(10, 2 * len(distinct))):
+    # At least TWO distinct values: a list of one ("current_flag: N") says nothing a filter needs.
+    # And enough rows that the values repeat — a few rows of unique names are not codes.
+    n = len(vals) if rows is None else rows
+    if not (1 < len(distinct) <= ENUM_MAX_DISTINCT and n >= max(10, 2 * len(distinct))):
         return None
     # GUID/UUID-valued columns are join keys, not enums — a real enum (severity 1/2/3, status
     # open/closed) never holds identifier values. One such distinct value disqualifies the column.

@@ -946,26 +946,26 @@ def _rows(n):
     "sample_rows, est_rows, expect_list",
     [
         (120, None, True),  # the sample is the whole table
-        (I.SAMPLE_ROWS, 5_000, True),  # first rows of a small table, per the catalog
-        (I.SAMPLE_ROWS, None, False),  # a view or no estimate: the first rows could be any corner
-        (I.SAMPLE_ROWS, 15_000_000, False),  # a big table: an incomplete list would mislead
+        (I.SAMPLE_ROWS, 5_000, True),  # a small table, per the catalog
+        (I.SAMPLE_ROWS, None, False),  # a view or no estimate: it could be any size
+        (I.SAMPLE_ROWS, 15_000_000, False),  # a big table: DISTINCT would scan it
     ],
 )
-def test_a_value_list_is_built_only_from_a_representative_sample(
+def test_a_value_list_is_read_with_distinct_on_a_small_table_only(
     sample_rows, est_rows, expect_list
 ):
+    # The list is the column's DISTINCT values (#517), so 'Returned', which the sampled rows never
+    # show, is in it; before, the list was the sample's values and missed it.
     from semantic_model import dialects as D
 
+    def run(sql):
+        if sql.startswith("SELECT DISTINCT"):
+            return [{"v": v} for v in ("Open", "Closed", "Returned")]
+        return _rows(sample_rows)
+
     col = _status_col()
-    I._enrich_from_sample(
-        D.get_dialect("postgres"),
-        lambda sql: _rows(sample_rows),
-        "s",
-        "t",
-        [col],
-        est_rows=est_rows,
-    )
-    assert (col.choice_field == {"Closed": "", "Open": ""}) is expect_list
+    I._enrich_from_sample(D.get_dialect("postgres"), run, "s", "t", [col], est_rows=est_rows)
+    assert (col.choice_field == {"Closed": "", "Open": "", "Returned": ""}) is expect_list
 
 
 def test_an_unknown_row_estimate_is_not_a_small_table():
