@@ -463,6 +463,14 @@ def cmd_review_items(args) -> int:
     return 0
 
 
+def cmd_history(args) -> int:
+    """The model's curation log, newest first: each change with when it was made, who made it, the
+    value it replaced and the model version it produced — the history a profile outside git keeps (#528)."""
+    from . import curate
+    _print_json(curate.history(args.root, limit=args.limit))
+    return 0
+
+
 def cmd_curate_gate(args) -> int:
     """The Phase-4 curate gate decision in ONE call: count still-queryable PII columns
     + pending pre-seed sign-offs, and say whether to open the explorer. Replaces the
@@ -1493,6 +1501,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
     sp.set_defaults(func=cmd_curate)
+
+    sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
+    sp.add_argument("root")
+    sp.add_argument("--limit", type=int, default=None, help="show only the newest N entries")
+    sp.set_defaults(func=cmd_history)
 
     sp = sub.add_parser("approve-queue",
                         help="sign off the whole pending review queue in one call (no-browser path)")

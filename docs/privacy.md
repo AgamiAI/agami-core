@@ -64,7 +64,7 @@ Every byte agami reads or writes stays on your machine:
 - **CSV exports** (`<artifacts_dir>/local/exports/<profile>/<ts>.csv`)
 - **Review + model-explorer + examples-validation dashboards** (`<artifacts_dir>/local/{review,model,examples-validation}/<profile>/<ts>.html`)
 - **Snapshots** (`<artifacts_dir>/<profile>/.snapshots/<hash>/`) — immutable copies of past model versions for reproducibility
-- **Curation log** (`<artifacts_dir>/<profile>/curation_log.jsonl`) — append-only audit trail of review actions
+- **Curation log** (`<artifacts_dir>/<profile>/curation_log.jsonl`) — append-only audit trail of model edits (when, who, the prior and new value); `sm history` reads it
 - **Corrections** (`<artifacts_dir>/<profile>/corrections.jsonl`) — append-only history of saved corrections
 
 The skill never reads files outside those paths, with one carve-out: your DB tool's auth config (`~/.pg_service.conf`, `~/.snowsql/config`, etc.) is read when `setup_pgauth.py` materializes the auth files on first connect, with your permission.
