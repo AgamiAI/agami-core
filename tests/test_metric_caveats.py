@@ -81,6 +81,21 @@ def test_validator_and_mentions_read_metric_caveats(tmp_path):
     assert ("metric.caveat", "avg_resolution_days", CAVEAT, None) in lines
 
 
+def test_mentions_read_cross_area_metric_caveats(tmp_path):
+    # a metric in the cross-cutting area is served like any other, so its prose is scanned too
+    caveat = "No value when tickets.opened_at is missing."
+    org = _org(_metric())
+    org.cross_subject_area_metrics.append(_metric(name="tickets_reopened_share", caveats=[caveat]))
+    lines = list(mentions._prose_lines(org, tmp_path, []))
+    assert ("metric.caveat", "tickets_reopened_share", caveat, None) in lines
+    assert ("metric.calculation", "tickets_reopened_share",
+            "Average of resolved_at minus opened_at, in days.", None) in lines
+    sql = "SELECT AVG(resolved_at - opened_at) FROM public.tickets"
+    found = mentions.prose_mentions(org, tmp_path, sql, "postgres")["mentions"]
+    assert {"about": "tickets.opened_at", "source": "metric.caveat",
+            "where": "tickets_reopened_share", "text": caveat} in found
+
+
 def test_a_metric_caveat_saying_missing_is_zero_silences_the_null_fill_warning():
     def warnings(caveats):
         met = _metric(bindings={"PostgreSQL": "AVG(COALESCE(resolved_at - opened_at, 0))"},
