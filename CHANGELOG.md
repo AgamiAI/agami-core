@@ -33,6 +33,11 @@ below corresponds to one such version.
   defers to the enclosing query as a correlated reference does, so `SELECT (SELECT secret_col) FROM
   orders` is refused too. An output with no readable name (`SELECT count(*)` with no alias) does not
   count, and the refusal says to name it with `AS` or to qualify the column with the source's alias.
+  Alias column lists rename by position, a quoted output name keeps its case where the engine does,
+  and a CTE inside a scalar subquery still sees the outer query. A column a `USING` or `NATURAL`
+  join merges or compares must be declared on the tables it joins. An output alias stands for
+  itself only in `ORDER BY`, `GROUP BY` and `HAVING`, so `SELECT secret_col AS secret_col FROM
+  orders` is refused too.
 
 ## [0.9.18] — 2026-10-21
 
