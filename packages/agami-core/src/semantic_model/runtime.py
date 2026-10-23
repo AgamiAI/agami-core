@@ -74,6 +74,8 @@ from .models import (
     Entity,
     Metric,
     Relationship,
+    Table,
+    stored_identity,
 )
 from .models import (
     bare_name as _bare,
@@ -131,6 +133,7 @@ class GuardContext:
     dialect: "str | None" = None
     unreadable: "UnreadableStatement | None" = None
     schema_index: "dict[str, dict[str | None, set[str]]] | None" = None
+    table_decls: "dict[tuple, list[Table]] | None" = None
 
 
 class UnreadableStatement(NamedTuple):
@@ -304,6 +307,7 @@ def build_guard_context(sql: str, org: Datasource) -> "GuardContext | None":
         dialect=dialect,
         unreadable=unreadable,
         schema_index=_schema_index(org),
+        table_decls=_table_decls(org),
     )
 
 
@@ -579,7 +583,8 @@ def _table_sizes(tree: "exp.Expression", org: "Datasource",
     by_qname: dict[tuple, Any] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            key = (_tkey(t.schema_name) or None, _tkey(t.name))
+            schema, bare = stored_identity(t.name, t.schema_name)
+            key = (_tkey(schema) or None, _tkey(bare))
             if _rows_of(t) >= _rows_of(by_qname.get(key)):
                 by_qname[key] = t
 
@@ -1567,29 +1572,104 @@ def _schema_index(org: Datasource) -> dict[str, dict[Optional[str], set[str]]]:
     idx: dict[str, dict[Optional[str], set[str]]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            by_schema = idx.setdefault(_tkey(t.name), {})
-            by_schema.setdefault(_tkey(t.schema_name) or None, set()).update(
+            # A schema embedded in the name (`public.orders`) is the table's schema, as everywhere
+            # else that reads a table's identity (#258); keyed whole, no reference could reach it.
+            schema, bare = stored_identity(t.name, t.schema_name)
+            by_schema = idx.setdefault(_tkey(bare), {})
+            by_schema.setdefault(_tkey(schema) or None, set()).update(
                 _tkey(c.name) for c in t.columns)
     return idx
 
 
+def _table_decls(org: Datasource) -> "dict[tuple, list[Table]]":
+    """`_schema_index`'s (schema, name) key -> the tables declared under it, with the spellings and
+    the folded index does not keep: what `_resolve_table` checks a reference's case against (#337)."""
+    decls: dict[tuple, list[Table]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, bare = stored_identity(t.name, t.schema_name)
+            decls.setdefault((_tkey(schema) or None, _tkey(bare)), []).append(t)
+    return decls
+
+
+# Engines where a quoted identifier is case-sensitive and an unquoted one folds: Postgres (and
+# Supabase, which parses as it) to lower, Snowflake and Oracle to upper. Elsewhere a quoted name
+# matches without regard to case, as the engine resolves it: Redshift folds quoted names by default,
+# and DuckDB, SQL Server, SQLite, Databricks, Trino and BigQuery datasets match them
+# case-insensitively, so the folded comparison the index already makes is the engine's own.
+_QUOTED_EXACT_FOLD: dict[str, Callable[[str], str]] = {
+    "postgres": str.lower,
+    "snowflake": str.upper,
+    "oracle": str.upper,
+}
+
+# Engines where a table or database name is case-sensitive whether or not it is quoted. MySQL on
+# Linux, its default (`lower_case_table_names=0`), keeps the case a table was created with and
+# compares it exactly, so `shop.Orders` and `shop.orders` are two tables; backticks change nothing.
+# A server that folds (`lower_case_table_names` 1 or 2) would resolve another case too, and refusing
+# it there is the fail-closed cost: the declared spelling works on every setting.
+_EXACT_NAMES = frozenset({"mysql"})
+
+
+def _part_names(ident: object, declared: str, dialect: "str | None") -> bool:
+    """Whether a written identifier part names the declared one in the case the engine compares.
+
+    On `_EXACT_NAMES` engines the written name must be the declared one. On `_QUOTED_EXACT_FOLD`
+    engines only a quoted part is checked, since an unquoted one was already matched folded and
+    folding is right for it. The declared spelling is the physical one when it has mixed case; in a
+    single case it may be a hand-written model's habit rather than the warehouse's (`orders` on
+    Snowflake, whose table is `ORDERS`), so the engine's fold of it counts too.
+    """
+    if dialect in _EXACT_NAMES:
+        return not isinstance(ident, exp.Identifier) or ident.name == declared
+    fold = _QUOTED_EXACT_FOLD.get(dialect or "")
+    if fold is None or not isinstance(ident, exp.Identifier) or not ident.args.get("quoted"):
+        return True
+    mixed = declared != declared.lower() and declared != declared.upper()
+    return ident.name in ({declared} if mixed else {declared, fold(declared)})
+
+
+def _names_declared(tbl: "exp.Table", t: Table, dialect: "str | None") -> bool:
+    """Whether reference `tbl` names declared table `t` in the case the engine compares, beyond the
+    folded (schema, name) match the index already made (#337)."""
+    schema, bare = stored_identity(t.name, t.schema_name)
+    if not _part_names(tbl.this, bare, dialect):
+        return False
+    return tbl.args.get("db") is None or not schema or _part_names(tbl.args["db"], schema, dialect)
+
+
 def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
-                   tbl: "exp.Table") -> "tuple[Optional[str], str] | str | None":
+                   tbl: "exp.Table", decls: "dict[tuple, list[Table]] | None" = None,
+                   dialect: "str | None" = None) -> "tuple[Optional[str], str] | str | None":
     """The declared (schema, name) a physical reference reads, `"ambiguous"`, or None if undeclared.
 
     Qualified: only a table declared with that schema — not one declared with no schema, since the
     model never said which schema that one lives in. Unqualified: the name must be declared under
     exactly one schema; under two or more, which table the engine reads depends on a search path
-    the guard cannot see. Only `db` counts: the model records no catalog.
+    the guard cannot see.
+
+    With `decls`, a name must also match the declared table in the case the engine compares
+    (#337): `"Orders"` is not `orders` on Postgres, nor `Orders` on MySQL. A model's tables live in
+    the connection's own database, so a catalog part is the connection's to judge, which
+    `check_catalog_scope` does once credentials are known. A four-part name reads through a linked
+    server or another catalog's schema, and never names a declared table.
     """
+    if isinstance(tbl.this, exp.Dot):
+        return None
     name = _tkey(tbl.name)
     by_schema = sidx.get(name, {})
     if tbl.db:
         schema = _tkey(tbl.db)
-        return (schema, name) if schema in by_schema else None
-    if len(by_schema) > 1:
+        found: "tuple[Optional[str], str] | str | None" = (
+            (schema, name) if schema in by_schema else None)
+    elif len(by_schema) > 1:
         return "ambiguous"
-    return (next(iter(by_schema)), name) if by_schema else None
+    else:
+        found = (next(iter(by_schema)), name) if by_schema else None
+    if decls is not None and isinstance(found, tuple):
+        if not any(_names_declared(tbl, t, dialect) for t in decls.get(found, [])):
+            return None
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -1658,6 +1738,9 @@ def check_table_scope(sql: str, org: Datasource,
 
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
             else _schema_index(org))
+    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
+             else _table_decls(org))
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     cte_refs = _cte_references(tree)
     offending: set[str] = set()
     ambiguous: dict[str, str] = {}  # folded name -> the caller's first spelling, for the echo
@@ -1665,11 +1748,11 @@ def check_table_scope(sql: str, org: Datasource,
         name = tbl.name
         if not name or id(tbl) in cte_refs:
             continue  # a CTE an enclosing WITH defines, not a physical table
-        resolved = _resolve_table(sidx, tbl)
+        resolved = _resolve_table(sidx, tbl, decls, dialect)
         if resolved is None:
             # The caller's own qualified spelling: echoing only `orders` for `staging.orders` would
             # read as nonsense beside a declared `sales_data.orders`.
-            offending.add(f"{tbl.db}.{name}" if tbl.db else name)
+            offending.add(_written(tbl))
         elif resolved == "ambiguous":
             ambiguous.setdefault(_tkey(name), name)
     if not offending and not ambiguous:
@@ -1696,6 +1779,51 @@ def check_table_scope(sql: str, org: Datasource,
         guardrail.RULE_TABLE_SCOPE,
         detail=" ".join(details),
         remediation=" ".join(remediations),
+    )
+
+
+def check_catalog_scope(sql: str, org: Datasource,
+                        connection_catalog: "str | None") -> "guardrail.Refusal | None":
+    """Refuse a reference qualified with a catalog (database / project) other than the connection's
+    (#337). A model's tables live in the connection's own database, so no other catalog holds them.
+
+    The table-scope gate matches `catalog.schema.table` on its schema and name, and on Snowflake,
+    BigQuery, SQL Server, DuckDB, Databricks and Trino one connection reaches other catalogs: a
+    reference naming another one reads a different table that only shares the declared one's schema
+    and name. Credentials say which catalog the connection is in, and they are loaded after the
+    gates, so this runs once they are. Unknown (`connection_catalog` None) refuses: the reference
+    could be naming any catalog, and dropping the qualifier is always a working rewrite.
+
+    Echo-only, like the table-scope refusal: the connection's catalog is never named.
+    """
+    if not _HAVE_SQLGLOT or sql.count(".") < 2:
+        return None
+    dialect = _dialect_of(org)[0]
+    tree = _parse_sql(sql, dialect)
+    if tree is None:
+        return None
+    sidx, decls = _schema_index(org), _table_decls(org)
+    cte_refs = _cte_references(tree)
+    offending: set[str] = set()
+    for tbl in tree.find_all(exp.Table):
+        written = tbl.args.get("catalog")
+        if written is None or not tbl.name or id(tbl) in cte_refs:
+            continue
+        resolved = _resolve_table(sidx, tbl, decls, dialect)
+        if not isinstance(resolved, tuple):
+            continue  # undeclared or ambiguous: the table-scope gate's to refuse
+        if (connection_catalog is None or _tkey(written.name) != _tkey(connection_catalog)
+                or not _part_names(written, connection_catalog, dialect)):
+            offending.add(_written(tbl))
+    if not offending:
+        return None
+    return guardrail.refuse(
+        guardrail.RULE_TABLE_SCOPE,
+        detail="query references table(s) in a database other than the connection's: "
+               + _echo_identifiers(sorted(offending))
+               + " — a declared table is read in the connection's own database.",
+        remediation="Drop the database / project qualifier and write schema.table, or qualify the "
+                    "table with the database the connection is configured for.",
     )
 
 
@@ -1838,6 +1966,10 @@ def check_column_scope(sql: str, org: Datasource,
     if tree is None or tree.find(exp.Select) is None:
         return None
 
+    # The table-scope resolver, so a reference that gate refuses never binds a column here either.
+    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
+             else _table_decls(org))
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     # Keyed by (schema, name) rather than bare name: `_column_index` unions every same-named table's
     # columns, so a column only `staging.orders` declares passed on a read of `sales_data.orders`.
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
@@ -1880,7 +2012,7 @@ def check_column_scope(sql: str, org: Datasource,
                 has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
             continue
         if sel is not None:
-            resolved = _resolve_table(sidx, tbl)
+            resolved = _resolve_table(sidx, tbl, decls, dialect)
             binding = resolved if isinstance(resolved, tuple) else False
             aliases = alias_by_select.setdefault(id(sel), {})
             aliases[tbl.alias_or_name.lower()] = binding
@@ -2000,12 +2132,13 @@ def _declared_listing(org: Datasource, offending: list[str],
     seen: dict[tuple, set[str]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            key = (_tkey(t.schema_name) or None, _tkey(t.name))
+            schema, bare = stored_identity(t.name, t.schema_name)
+            key = (_tkey(schema) or None, _tkey(bare))
             if key not in keys:
                 continue
             names.setdefault(key, t.name)
             have, had = columns.setdefault(key, []), seen.setdefault(key, set())
-            for c in _visible_columns(t, _exposed_groups_for(sa, t.name)):
+            for c in _visible_columns(t, _exposed_groups_for(sa, t)):
                 if _tkey(c.name) not in had:
                     had.add(_tkey(c.name))
                     have.append(c.name)
@@ -3060,8 +3193,12 @@ def _check_aggregation_semantics(
 
 
 def _model_table_index(org: Datasource) -> dict[str, tuple]:
-    """bare table name, CASE-FOLDED -> (Table, area_name). First occurrence wins (a cross-schema
-    name clash is rare and the relationships now carry schema to disambiguate).
+    """bare table name, CASE-FOLDED -> (Table, area_name). A schema written into the name
+    (`public.orders`) is not part of the key, as everywhere that reads a table's identity (#258).
+
+    First occurrence wins, so where two schemas declare one name the receipt and the mention scan
+    describe the first copy. The scope gates and `dataset_names` tell the copies apart; the receipt
+    and metric scoping doing the same is a follow-up.
 
     Folded because `check_table_scope` folds: it compares `{name.lower()}` against the statement's
     names, since Postgres and friends fold unquoted identifiers. When this index did not, the gate
@@ -3071,7 +3208,7 @@ def _model_table_index(org: Datasource) -> dict[str, tuple]:
     idx: dict[str, tuple] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            idx.setdefault(_tkey(t.name), (t, sa.name))
+            idx.setdefault(_tkey(stored_identity(t.name, t.schema_name)[1]), (t, sa.name))
     return idx
 
 

@@ -61,7 +61,9 @@ from .models import (
     Relationship,
     SubjectArea,
     Table,
+    TableRef,
     bare_name,
+    stored_identity,
     table_key,
 )
 
@@ -655,7 +657,24 @@ def _check_metric_combine(metric: CrossDatasourceMetric, res: ValidationResult) 
 
 
 def _all_tables(sa: SubjectArea) -> dict[str, Table]:
-    return {t.name: t for t in sa.tables_defined}
+    """An area's tables by name, and also by `schema.name` where a schema is known, so two
+    schemas' copies of one name in an area are both present (#258); see `_endpoint`."""
+    out: dict[str, Table] = {}
+    for t in sa.tables_defined:
+        out.setdefault(t.name, t)
+        schema, bare = stored_identity(t.name, t.schema_name)
+        if schema:
+            out[f"{schema}.{bare}"] = t
+    return out
+
+
+def _endpoint(defined: dict[str, Table], table: str, schema: Optional[str]) -> Optional[Table]:
+    """The table a relationship endpoint names: by its schema where it gives one, else by name."""
+    if schema:
+        found = defined.get(f"{schema}.{bare_name(table)}")
+        if found is not None:
+            return found
+    return defined.get(table)
 
 
 def _check_storage_connection_refs(org: Datasource, res: ValidationResult) -> None:
@@ -690,19 +709,42 @@ def _check_subject_area_sizing(sa: SubjectArea, res: ValidationResult) -> None:
 
 
 def _org_tables(org: Datasource) -> dict[str, Table]:
-    """Every canonical Table across the org, keyed by name (org-wide resolution)."""
+    """Every canonical Table across the org, keyed by name (org-wide resolution), and also by
+    `schema.name` where a schema is known, so a TableRef naming its schema finds that table rather
+    than whichever same-named one was defined last (#258)."""
     out: dict[str, Table] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             out[t.name] = t
+            schema, bare = stored_identity(t.name, t.schema_name)
+            if schema:
+                out[f"{schema}.{bare}"] = t
     return out
+
+
+def _ref_table(org_tables: dict[str, Table], ref: TableRef) -> Optional[Table]:
+    """The canonical Table a TableRef points at: by its schema when it gives one, else by name.
+
+    A ref naming a schema the table is not in points at nothing, rather than at the same-named
+    table of another schema: serving resolves it by schema too, so passing it here would let the
+    model validate and the table then go missing from that area."""
+    if ref.schema_name:
+        found = org_tables.get(f"{ref.schema_name}.{bare_name(ref.table)}")
+        if found is not None:
+            return found
+    found = org_tables.get(ref.table)
+    if found is not None and ref.schema_name:
+        schema = stored_identity(found.name, found.schema_name)[0]
+        if schema and schema.lower() != ref.schema_name.lower():
+            return None
+    return found
 
 
 def _check_table_refs_resolve(
     sa: SubjectArea, res: ValidationResult, org_tables: dict[str, Table]
 ) -> None:
     for ref in sa.tables:
-        if ref.table not in org_tables:
+        if _ref_table(org_tables, ref) is None:
             res.error(
                 "orphan_table_ref",
                 f"subject area {sa.name!r}: TableRef {ref.table!r} has no matching canonical "
@@ -717,7 +759,7 @@ def _check_expose_column_groups(
     for ref in sa.tables:
         if not ref.expose_column_groups:
             continue
-        table = org_tables.get(ref.table)
+        table = _ref_table(org_tables, ref)
         if table is None:
             continue  # already reported by orphan check
         for grp in ref.expose_column_groups:
@@ -930,24 +972,39 @@ def _check_cross_relationship(
 
 
 def _check_table_name_across_schemas(org: Datasource, res: ValidationResult) -> None:
-    """Warn when one table name is declared under two or more schemas.
+    """Warn when one table name is declared under two or more schemas, and refuse one subject area
+    defining the same table twice.
 
-    A warning, not an error: the scope gates tell such tables apart by schema (#332), so querying
-    them is safe. But model lookups and schema serving still key tables by bare name and will
-    resolve that name to one of them, and an unqualified reference is refused as ambiguous.
+    Across schemas is a warning, not an error: the model stores, serves and scope-checks a table by
+    its schema and name (#258, #332), so querying them is safe. What remains is that an unqualified
+    reference is ambiguous: the scope gate refuses it and `dataset_names` asks for the schema.
+
+    Twice in one area is an error. The serving store keys a table by area, schema and name,
+    so a second definition would fail the deploy; and `public.orders` beside `orders` with
+    `schema: public` are one table spelled two ways, which nothing downstream can tell apart.
     """
     schemas: dict[str, set[str]] = {}
     for sa in org.subject_areas:
+        seen: set[tuple[str, str]] = set()
         for t in sa.tables_defined:
-            schemas.setdefault(t.name.lower(), set()).add((t.schema_name or "").lower())
+            schema, bare = stored_identity(t.name, t.schema_name)
+            schemas.setdefault(bare.lower(), set()).add(schema.lower())
+            key = (schema.lower(), bare.lower())
+            if key in seen:
+                res.error(
+                    "duplicate_table_identity",
+                    f"subject area {sa.name!r} defines table "
+                    f"{'.'.join(p for p in (schema, bare) if p)!r} more than once",
+                    locator=f"{sa.name}.tables_defined[{t.name}]",
+                )
+            seen.add(key)
     for name, found in sorted(schemas.items()):
         if len(found) < 2:
             continue
         res.warn(
             "table_name_in_multiple_schemas",
-            f"table {name} is declared under {len(found)} schemas; model lookups and schema "
-            "serving treat it by bare name, and queries must use the qualified form "
-            "(schema.table)",
+            f"table {name} is declared under {len(found)} schemas; an unqualified reference to it "
+            "is ambiguous, so queries and dataset_names must use the qualified form (schema.table)",
         )
 
 
@@ -1541,8 +1598,8 @@ def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
 def _check_fk_type_compat(
     rel: Relationship, res: ValidationResult, defined: dict[str, Table]
 ) -> None:
-    from_t = defined.get(rel.from_table)
-    to_t = defined.get(rel.to_table)
+    from_t = _endpoint(defined, rel.from_table, rel.from_schema)
+    to_t = _endpoint(defined, rel.to_table, rel.to_schema)
     if not (from_t and to_t and rel.from_column and rel.to_column):
         return
     from_c = from_t.get_column(rel.from_column)
@@ -1581,8 +1638,8 @@ def recommended_confidence_cap(rel: Relationship, sa: SubjectArea) -> Optional[s
     if rel.on:
         return None
     defined = _all_tables(sa)
-    from_t = defined.get(rel.from_table)
-    to_t = defined.get(rel.to_table)
+    from_t = _endpoint(defined, rel.from_table, rel.from_schema)
+    to_t = _endpoint(defined, rel.to_table, rel.to_schema)
     if not (from_t and to_t and rel.from_column and rel.to_column):
         return None
     from_c = from_t.get_column(rel.from_column)

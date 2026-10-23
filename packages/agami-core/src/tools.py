@@ -1623,22 +1623,29 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
     an agent acts on is a TABLE NAME — which is what `dataset_names` takes — and the one
     parameter an area would serve is `area`, which the instructions tell clients to omit.
     """
-    # Names are published BARE, which is the only form the next call can honour: `_resolve_scope`
-    # strips every qualifier from `dataset_names`, and the bare name then resolves first-match. A
-    # qualified node would look precise and select a different table — publishing `public.orders`
-    # and receiving `archive.orders` is worse than publishing an ambiguity the caller can see.
-    #
-    # So where one name is declared under two schemas, both edges land on one node here. That is a
-    # fiction only in the sense the whole path is one: `dataset_names` cannot tell those tables
-    # apart either. #258 is the fix — the served model has no schema column at all, so the
-    # qualifier is gone before this tool answers. When it lands, this block should publish the
-    # qualified name, and `models.table_key` is the comparison to do it with.
+    # A node is the name `dataset_names` resolves back to that table: bare, unless the name is
+    # declared under more than one schema, then `schema.table` (#258). A bare node there would put
+    # two tables' edges on one name, and passing it back returns both.
+    from semantic_model.models import table_key
+
+    schemas: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            sch, bare = table_key(t.name, t.schema_name)
+            schemas.setdefault(bare, set()).add(sch)
+
+    def node(table: str, schema: str | None) -> str:
+        bare = _bare_name(table)
+        sch = table_key(table, schema)[0]
+        return f"{sch}.{bare}" if sch and len(schemas.get(bare.lower(), ())) > 1 else bare
+
     joins: dict[str, set[str]] = {}
     for r in org.cross_subject_area_relationships:
         if scope.level != "datasource" and scope.area not in (r.from_subject_area,
                                                               r.to_subject_area):
             continue
-        joins.setdefault(_bare_name(r.from_table), set()).add(_bare_name(r.to_table))
+        joins.setdefault(node(r.from_table, r.from_schema), set()).add(
+            node(r.to_table, r.to_schema))
     return {t: sorted(v) for t, v in sorted(joins.items())}
 
 
@@ -1659,8 +1666,20 @@ def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> No
     and columns with a caveat, a value transform or a sensitive flag. `column_groups=[...]` adds
     whole groups, by bare name (any table) or `table.group`. Tables without groups are unchanged.
     """
-    groups_of = {t.name: (t.column_groups, t.column_group_descriptions, t.grain)
+    from semantic_model.models import table_key
+
+    # By identity, as the reply keys tables: `public.orders` where the name is ambiguous (#258).
+    groups_of = {table_key(t.name, t.schema_name): (t.column_groups, t.column_group_descriptions,
+                                                    t.grain)
                  for sa in org.subject_areas for t in sa.tables_defined if t.column_groups}
+
+    def names(asked_table: "str | None", key: tuple[str, str]) -> bool:
+        """Whether a `table.group` request's table is this one: bare, or with its schema."""
+        if asked_table is None:
+            return True
+        schema, bare = table_key(asked_table)
+        return bare == key[1] and (not schema or schema == key[0])
+
     # Folded, and matched as whole names in the metric text rather than by an identifier regex, so a
     # quoted `"Order Total"` or a binding written in another case still counts.
     metric_text = " ".join(str(m.get("binding") or m.get("calculation") or "")
@@ -1669,14 +1688,19 @@ def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> No
              for r in requested if isinstance(r, str) and r}
     unknown = set(asked)
     for name, tinfo in (result.get("tables") or {}).items():
-        if name not in groups_of or not isinstance(tinfo.get("columns"), list):
+        key = table_key(name, tinfo.get("schema")) if isinstance(tinfo, dict) else None
+        if key is not None and key not in groups_of and not key[0]:
+            # An entry carrying no schema is the one grouped table of that name, if there is one.
+            same = [k for k in groups_of if k[1] == key[1]]
+            key = same[0] if len(same) == 1 else key
+        if key not in groups_of or not isinstance(tinfo.get("columns"), list):
             continue
-        groups, descs, grain = groups_of[name]
+        groups, descs, grain = groups_of[key]
         metric_words = {c["name"] for c in tinfo["columns"] if metric_text and re.search(
             rf"(?<![\w]){re.escape(c['name'].lower())}(?![\w])", metric_text)}
         shown = {c["name"] for c in tinfo["columns"]}  # already narrowed by the area's exposure
-        wanted = {g for t, g in asked if g in groups and t in (None, name)}
-        unknown -= {(t, g) for t, g in asked if g in groups and t in (None, name)}
+        wanted = {g for t, g in asked if g in groups and names(t, key)}
+        unknown -= {(t, g) for t, g in asked if g in groups and names(t, key)}
         in_wanted = {c for g in wanted for c in groups[g]}
         grouped = {c for cols in groups.values() for c in cols}
         tinfo["columns"] = [
@@ -1716,10 +1740,15 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
     not override that: forcing a named table into the declared area returns "not found in scope"
     for any table outside it, while its metrics stay advertised — a silent hide.
     """
-    area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+    # By the tables a name resolves to, not by its spelling (#258): `public.orders` is owned by the
+    # area defining that table, and a bare name declared under two schemas is asked of each copy's
+    # area, so neither copy is looked for in the other's.
+    area_of = {id(t): sa.name for sa in org.subject_areas for t in sa.tables_defined}
     by_area: dict[str | None, list[str]] = {}
-    for t in table_names:
-        by_area.setdefault(area_of.get(t), []).append(t)
+    for name in table_names:
+        owners = dict.fromkeys(area_of.get(id(t)) for t in L._find_tables(org, name, index=index))
+        for grp_area in owners or (None,):
+            by_area.setdefault(grp_area, []).append(name)
     contexts: dict[str, Any] = {}
     relationships: list[Any] = []
     seen: set[tuple] = set()
@@ -1769,6 +1798,9 @@ def _compact_other_joins(
     because that is the side a join would multiply. An edge with its own `on` condition (a join on a
     natural key that also filters to the current version) keeps that condition verbatim under `on`.
     Only a non-default `executable` stays in `relationships`: it says the join runs elsewhere."""
+    from semantic_model.models import table_key
+
+    returned_keys = {table_key(n, sch) for n, sch in schemas.items()}
     kept: list[dict[str, Any]] = []
     grouped: dict[tuple, dict[str, list[str]]] = {}
     for r in relationships:
@@ -1786,9 +1818,16 @@ def _compact_other_joins(
         near, far = (frm, to) if forward else (to, frm)
         # Edges are gathered by bare name, so one may start from a same-named table in another
         # schema. Compacted, it would read as a join from the table this reply returned: keep it whole.
+        # So does one whose schema no returned table confirms, including a returned table with no
+        # schema of its own: compacted, `from: orders` would lose the schema the edge declares.
         near_schema = r.get("from_schema") if forward else r.get("to_schema")
-        returned = schemas.get(near, schemas.get(_bare_name(near or "")))
-        if near_schema and returned and near_schema != returned:
+        if near_schema and table_key(near or "", near_schema) not in returned_keys:
+            kept.append(r)
+            continue
+        # Two returned tables share the near name (`public.orders` and `archive.orders`): a compact
+        # `from: orders` could not say which one the join leaves from, so the edge stays whole.
+        near_bare = _bare_name(near or "").lower()
+        if sum(1 for _, bare in returned_keys if bare == near_bare) > 1:
             kept.append(r)
             continue
         rel, join_type = r.get("relationship"), r.get("join_type")
@@ -1868,21 +1907,31 @@ class _ModelNames(NamedTuple):
     # from a metric really named `revenue (net)`.
     metric_keys: dict[str, "tuple[str, str | None]"]  # key -> (metric name, area or None)
     folded_tables: frozenset[str]  # casefolded bare table names, for "is this a table at all"
+    qualified: dict[str, list[str]]  # bare table name -> `schema.table` per schema declaring it
+    qualified_area: dict[str, str]  # `schema.table` -> the area that defines it
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
         from semantic_model import loader as L
+        from semantic_model.models import stored_identity
 
         tables: dict[str, str] = {}
         columns: dict[str, list[str]] = {}
+        qualified: dict[str, list[str]] = {}
+        qualified_area: dict[str, str] = {}
         for sa in org.subject_areas:
             for t in sa.tables_defined:
                 bare = _bare_name(t.name)
                 tables.setdefault(bare, sa.name)
+                schema = stored_identity(t.name, t.schema_name)[0]
+                if schema and f"{schema}.{bare}" not in qualified.get(bare, []):
+                    qualified.setdefault(bare, []).append(f"{schema}.{bare}")
+                if schema:
+                    qualified_area.setdefault(f"{schema}.{bare}", sa.name)
                 # Only the columns `get_datasource_schema` would show: a table read in its owning
                 # area exposes the column groups that area's TableRef names, and a hint naming a
                 # column outside them would disclose what the schema response deliberately hides.
-                exposed = L._exposed_groups_for(sa, t.name)
+                exposed = L._exposed_groups_for(sa, t)
                 for c in L._visible_columns(t, exposed):
                     columns.setdefault(c.name.casefold(), []).append(bare)
         metric_keys = {k: (m.name, a) for k, (m, a) in _all_metrics(org).items()}
@@ -1892,6 +1941,8 @@ class _ModelNames(NamedTuple):
             columns,
             metric_keys,
             frozenset(t.casefold() for t in tables),
+            qualified,
+            qualified_area,
         )
 
     def area_of(self, table: str) -> "str | None":
@@ -1899,9 +1950,10 @@ class _ModelNames(NamedTuple):
 
         Folding case here once told a caller `'Orders' is in subject area 'sales'` — true of
         `orders`, and a name that still resolved nowhere on retry. A case-only miss is a typo, and
-        `did_you_mean` is what answers it.
+        `did_you_mean` is what answers it. A declared `schema.table` is that table's area, not the
+        area of whichever same-named table came first (#258).
         """
-        return self.tables.get(_bare_name(table))
+        return self.qualified_area.get(table) or self.tables.get(_bare_name(table))
 
     def table_hint(self, name: str) -> "str | None":
         """Why `name` is not a table, when it is a real name of another kind.
@@ -1974,18 +2026,18 @@ class _ModelNames(NamedTuple):
         return ""
 
     def unresolvable_entry(self, name: str) -> dict[str, Any]:
-        """A table the model defines that `dataset_names` still cannot address (#258).
+        """A table name the model defines, qualified with a schema it is not declared in (#258).
 
-        Its own `name` carries its schema, the index keys it in full, and `dataset_names` arrives
-        bare — so neither spelling reaches it. The bare "not found in scope" left an agent that had
-        copied the name exactly with no next move; its area always lists it.
+        Not a typo, so no guesses: the name is right and the schema is not, and the spellings that
+        do resolve are the next move. Answering with the copy in another schema instead is what
+        handed a caller `archive.orders` when it asked for `public.orders`.
         """
-        area = self.tables[_bare_name(name)]
-        return {
-            "error": "not found in scope",
-            "hint": f"{name!r} is defined in subject area {area!r} but cannot be selected by name "
-            f"yet: call with area={area!r} to get it.",
-        }
+        bare = _bare_name(name)
+        spellings = self.qualified.get(bare, [])
+        where = (f"it is declared as {', '.join(repr(q) for q in spellings)}." if spellings
+                 else f"it is declared without a schema, so pass {bare!r}.")
+        return {"error": "not found in scope",
+                "hint": f"{bare!r} is not declared in that schema; {where}"}
 
     def unknown_table_entry(self, name: str) -> dict[str, Any]:
         """The per-table miss beside tables that did resolve."""
@@ -2058,7 +2110,7 @@ class Scope(NamedTuple):
 
     level: str  # "datasource" | "area" | "table"
     area: "str | None"  # the declared area; None at datasource scope
-    tables: tuple[str, ...]  # bare names, schema stripped; empty unless level == "table"
+    tables: tuple[str, ...]  # as the caller wrote them, schema kept (#258); empty unless level == "table"
 
 
 def _resolve_scope(args: dict[str, Any]) -> Scope:
@@ -2081,7 +2133,8 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
     """
     area = args.get("area")
     area = area.strip() if isinstance(area, str) and area.strip() else None
-    tables = tuple(_bare_name(str(n)) for n in (args.get("dataset_names") or []))
+    # The qualifier is kept: it is what tells `public.orders` from `archive.orders` (#258).
+    tables = tuple(str(n).strip() for n in (args.get("dataset_names") or []) if str(n).strip())
     if tables:
         return Scope("table", area, tables)
     if area:
@@ -2335,14 +2388,18 @@ def _ambiguity_entry(a) -> dict[str, Any]:
 
 
 def _opened_in_reply(result: dict[str, Any]) -> dict[str, Any]:
-    """What this reply has opened: per table, the columns it sends in full (None = every column, for
-    a table it doesn't group); and the metrics it sends in full."""
-    tables: dict[str, set[str] | None] = {}
+    """What this reply has opened: per table, keyed by `table_key` so two schemas' copies of one
+    name stay apart (#258), the columns it sends in full (None = every column, for a table it doesn't
+    group); and the metrics it sends in full."""
+    from semantic_model.models import table_key
+
+    tables: dict[tuple[str, str], set[str] | None] = {}
     for name, tinfo in (result.get("tables") if isinstance(result.get("tables"), dict) else {}).items():
         if not isinstance(tinfo, dict) or not isinstance(tinfo.get("columns"), list):
             continue
         full_cols = {c["name"].lower() for c in tinfo["columns"] if isinstance(c, dict) and "name" in c}
-        tables[_bare_name(name).lower()] = full_cols if tinfo.get("column_groups") else None
+        key = table_key(name, tinfo.get("schema"))
+        tables[key] = full_cols if tinfo.get("column_groups") else None
     metrics = {m.get("name") for m in result.get("metrics") or [] if isinstance(m, dict)}
     return {"tables": tables, "metrics": metrics}
 
@@ -2380,18 +2437,22 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
         return any(allowed is None or group.lower() in allowed
                    for _s, _t, allowed in candidates(schema, bare))
 
-    def column_open(_schema: str, bare: str, col: str) -> bool:
-        return bare in tables and (tables[bare] is None or col.lower() in tables[bare])
+    def opened_copies(schema: str, bare: str) -> list[set[str] | None]:
+        """What the reply opened of each copy of `bare` the anchor can mean: its schema's, or any."""
+        return [v for (s, b), v in tables.items()
+                if b == bare and (not schema or s in (schema, ""))]
+
+    def column_open(schema: str, bare: str, col: str) -> bool:
+        return any(v is None or col.lower() in v for v in opened_copies(schema, bare))
 
     def group_open(schema: str, bare: str, group: str) -> bool:
-        if bare not in tables:
-            return False
-        if tables[bare] is None:
-            return True
-        for _s, table, _allowed in candidates(schema, bare):
-            cs = next((v for g, v in groups_of(table).items() if g.lower() == group.lower()), None)
-            if cs and all(c.lower() in tables[bare] for c in cs):
+        for full in opened_copies(schema, bare):
+            if full is None:
                 return True
+            for _s, table, _allowed in candidates(schema, bare):
+                cs = next((v for g, v in groups_of(table).items() if g.lower() == group.lower()), None)
+                if cs and all(c.lower() in full for c in cs):
+                    return True
         return False
 
     table_refs = {_bare_name(x).lower() for x in a.applies_to}
@@ -2402,7 +2463,7 @@ def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
     grps = [g for g in map(split, (r for r in a.column_groups if "." in r)) if group_reachable(*g)]
     if not (table_refs or cols or grps or a.metrics):
         return "out"
-    if (any(t in tables for t in table_refs) or any(column_open(*c) for c in cols)
+    if (any(opened_copies("", t) for t in table_refs) or any(column_open(*c) for c in cols)
             or any(group_open(*g) for g in grps) or set(a.metrics) & opened["metrics"]):
         return "open"
     anchor_tables = table_refs | {b for _s, b, _ in cols} | {b for _s, b, _ in grps}
@@ -2505,8 +2566,11 @@ def _schema_payload(
             for sa in areas
         ]
     if mode == "full":
+        # Each table's display name, `schema.table` where the bare one is ambiguous, so the area's
+        # own copy comes back and not every same-named table (#258).
         result["tables"] = _table_contexts(
-            org, [t.name for sa in areas for t in sa.tables_defined], L, index=index
+            org, [L.display_name(org, t, index=index) for sa in areas for t in sa.tables_defined],
+            L, index=index,
         )["tables"]
     # metrics in full: the matched set (a query/metric_names limits them); else every metric in
     # full mode (back-compat); else none (rely on metric_index).
@@ -2665,18 +2729,12 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # A table that is not in the declared area makes the two halves contradict each other, and
         # answering anyway would echo a scope the response does not have.
         #
-        # The area's names are gathered once and each table looked up in them: rescanning the area
-        # per named table cost seconds on a wide area, for a list whose length nothing bounds.
-        in_area = {
-            _bare_name(n)
-            for sa in org.subject_areas
-            if sa.name == scope.area
-            for n in [
-                *(d.name for d in sa.tables_defined),
-                *(getattr(r, "table", "") for r in sa.tables),
-            ]
-        }
-        misplaced = list(dict.fromkeys(t for t in scope.tables if t not in in_area))
+        # Each table is looked up through the index, by identity (#258): `archive.orders` is not in
+        # an area holding only `public.orders`. Rescanning the area per named table cost seconds on
+        # a wide area, for a list whose length nothing bounds.
+        tindex = L.build_table_index(org)
+        in_area = {t: L._find_tables(org, t, scope.area, index=tindex) for t in scope.tables}
+        misplaced = list(dict.fromkeys(t for t, found in in_area.items() if not found))
         if misplaced:
             names = _ModelNames.of(org)
             # A table in NO area is a typo, not a misplacement: "not in subject area X" is true of
@@ -2765,15 +2823,21 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
         # O(1) name→table index so this resolves each table by lookup, not a per-table rescan
         # (scalability-audit finding P12).
-        ctx = _table_contexts(org, list(scope.tables), L, index=L.build_table_index(org))
+        tindex = L.build_table_index(org)
+        wanted = list(scope.tables)
+        if scope.area:
+            # The declared area's own copy of each name, so a bare `orders` in `sales` returns that
+            # area's table and not every schema's (#258). Misplaced names were refused above.
+            wanted = list(dict.fromkeys(
+                L.display_name(org, t, index=tindex)
+                for n in scope.tables for t in L._find_tables(org, n, scope.area, index=tindex)))
+        ctx = _table_contexts(org, wanted, L, index=tindex)
         # The loader's own verdict on each name, so "unknown" means exactly what it failed to find.
         missing = [n for n, t in ctx["tables"].items() if isinstance(t, dict) and "error" in t]
         if missing:
             names = names or _ModelNames.of(org)
-            # Only a name the model does not define is a caller's mistake. One it DOES define but
-            # the loader could not resolve — a table whose own `name` carries its schema, which the
-            # index keys in full while `dataset_names` arrives bare (#258) — is not refused, since
-            # that would suggest the very name the caller already sent. It is told to use its area.
+            # Only a name the model does not define is a typo. One it DOES define, qualified with a
+            # schema it is not declared in (#258), is told the spellings that resolve instead.
             unknown = [n for n in missing if names.area_of(n) is None]
             if unknown and len(unknown) == len(ctx["tables"]):
                 # Same rule as an unknown `area`: a scope that does not exist is refused, never
@@ -2946,7 +3010,8 @@ def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
     # the `TableRef`s naming it are kept, so a reference alone does not mean the table is live.
     known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
     if scope.level == "table":
-        return frozenset(t for t in scope.tables if t in known)
+        # `dataset_names` keeps a schema qualifier now (#258); a glossary term names the bare table.
+        return frozenset(_bare_name(t) for t in scope.tables) & known
     if scope.level == "area":
         sa = org.subject_area(scope.area)
         if sa is None:
@@ -3491,10 +3556,21 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
         tree = getattr(ctx, "tree", None)
         if tree is None:
             return env
-        declared = set(RT._model_table_index(org))
+        from semantic_model.models import table_key
+
+        # By schema and name, not bare name (#258): `staging.orders` is not declared because
+        # `sales.orders` is, and the hint must look for the table the statement named.
+        keys = {table_key(t.name, t.schema_name)
+                for sa in org.subject_areas for t in sa.tables_defined}
         ctes = {name.lower() for name in RT._cte_names(tree)}
-        referenced = {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - ctes
-        undeclared = sorted(referenced - declared)
+        referenced = {ref.written.lower() for ref in RT._table_references(tree)
+                      if ref.bare and ref.written.lower() not in ctes}
+
+        def _declared(written: str) -> bool:
+            schema, bare = table_key(written)
+            return any(k[1] == bare and (not schema or k[0] == schema) for k in keys)
+
+        undeclared = sorted(w for w in referenced if not _declared(w))
         if not undeclared:
             return env
         # Every referenced table, not only the undeclared ones: a datasource is only worth naming if it
