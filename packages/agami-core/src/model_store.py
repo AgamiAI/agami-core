@@ -121,12 +121,11 @@ def write_datasource(
         )
         for t in sa.tables_defined:
             tdoc = t.model_dump(mode="json")
-            catalog, schema, _ = stored_identity(t.name, t.schema_name, t.catalog)
+            schema, _ = stored_identity(t.name, t.schema_name)
             store.execute(
-                "INSERT INTO model_table (org_id, datasource, area, catalog_name, schema_name, name, "
-                "est_row_count, doc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (org_id, datasource, sa.name, catalog, schema, t.name, _est_rows(tdoc),
-                 json.dumps(tdoc)),
+                "INSERT INTO model_table (org_id, datasource, area, schema_name, name, est_row_count, "
+                "doc) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (org_id, datasource, sa.name, schema, t.name, _est_rows(tdoc), json.dumps(tdoc)),
             )
         for m in sa.metrics:
             store.execute(
@@ -168,7 +167,7 @@ def load_datasource(store: Store, datasource: str, org_id: str = DEFAULT_ORG) ->
         area = sa_row["name"]
         for field, table, order in (
             # Same-named tables in two schemas share a name, so the schema settles their order.
-            ("tables_defined", "model_table", "name, schema_name, catalog_name"),
+            ("tables_defined", "model_table", "name, schema_name"),
             ("metrics", "metric", "name"),
             ("entities", "entity", "name"),
             ("relationships", "relationship", "name"),
@@ -280,10 +279,14 @@ def datasources_declaring(
         return {}
     bares = sorted({bare for _, bare in wanted.values()})
     marks = ", ".join("?" for _ in bares)
+    # A table stored with its schema in its name (`public.customers`) is found by its suffix too.
+    # LIKE's wildcards can only widen this; the identity check below decides.
+    suffixes = " OR ".join("lower(name) LIKE ?" for _ in bares)
     rows = store.query(
         f"SELECT DISTINCT datasource, lower(name) AS name, lower(schema_name) AS schema_name "
-        f"FROM model_table WHERE org_id = ? AND lower(name) IN ({marks}) ORDER BY datasource",
-        (org_id, *bares),
+        f"FROM model_table WHERE org_id = ? AND (lower(name) IN ({marks}) OR {suffixes}) "
+        f"ORDER BY datasource",
+        (org_id, *bares, *(f"%.{b}" for b in bares)),
     )
     found: dict[str, list[str]] = {}
     for given, (schema, bare) in wanted.items():

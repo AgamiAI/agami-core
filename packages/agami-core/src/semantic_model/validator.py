@@ -699,7 +699,7 @@ def _org_tables(org: Datasource) -> dict[str, Table]:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             out[t.name] = t
-            _, schema, bare = stored_identity(t.name, t.schema_name)
+            schema, bare = stored_identity(t.name, t.schema_name)
             if schema:
                 out[f"{schema}.{bare}"] = t
     return out
@@ -953,22 +953,22 @@ def _check_table_name_across_schemas(org: Datasource, res: ValidationResult) -> 
     its schema and name (#258, #332), so querying them is safe. What remains is that an unqualified
     reference is ambiguous: the scope gate refuses it and `dataset_names` asks for the schema.
 
-    Twice in one area is an error. The serving store keys a table by area, catalog, schema and name,
+    Twice in one area is an error. The serving store keys a table by area, schema and name,
     so a second definition would fail the deploy; and `public.orders` beside `orders` with
     `schema: public` are one table spelled two ways, which nothing downstream can tell apart.
     """
     schemas: dict[str, set[str]] = {}
     for sa in org.subject_areas:
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[str, str]] = set()
         for t in sa.tables_defined:
-            catalog, schema, bare = stored_identity(t.name, t.schema_name, t.catalog)
+            schema, bare = stored_identity(t.name, t.schema_name)
             schemas.setdefault(bare.lower(), set()).add(schema.lower())
-            key = (catalog.lower(), schema.lower(), bare.lower())
+            key = (schema.lower(), bare.lower())
             if key in seen:
                 res.error(
                     "duplicate_table_identity",
                     f"subject area {sa.name!r} defines table "
-                    f"{'.'.join(p for p in (catalog, schema, bare) if p)!r} more than once",
+                    f"{'.'.join(p for p in (schema, bare) if p)!r} more than once",
                     locator=f"{sa.name}.tables_defined[{t.name}]",
                 )
             seen.add(key)

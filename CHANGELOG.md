@@ -23,10 +23,10 @@ below corresponds to one such version.
 
 ### Fixed
 
-- **A table is identified by its schema and catalog as well as its name (#258, #337).**
+- **A table is identified by its schema as well as its name (#258, #337).**
   - **Storage.** The served model stored tables keyed by subject area and bare name, so
     `sales_data.orders` and `staging.orders` in one area landed on one key and the deploy failed.
-    Migration `028_model_table_identity` adds the schema and catalog to `model_table`'s key. Rows
+    Migration `028_model_table_identity` adds the schema to `model_table`'s key. Rows
     already stored copy across unchanged and still load, and the next deploy writes them in full.
     One area defining the same table twice is now the validator error `duplicate_table_identity`,
     which includes `public.orders` written next to `orders` with `schema: public`.
@@ -41,11 +41,9 @@ below corresponds to one such version.
   - **Joins.** A join in `joins_to_other_tables` whose schema the returned table can't confirm now
     stays whole, so it no longer reads `from: orders` with the schema dropped.
   - **Scope gates.**
-    - A reference qualified with a database or project other than the connection's is refused once
-      the credentials say which one the connection is in. When the credentials don't name one, the
-      qualifier is refused.
-    - A model can now record a table's `catalog` for a multi-database model. Introspection leaves it
-      unset.
+    - A model's tables live in the connection's own database. A reference qualified with another
+      database or project is refused once the credentials say which one the connection is in. When
+      the credentials don't name one, the qualifier is refused.
     - A four-part name (`server.database.schema.table`) never matches a declared table.
     - On Postgres, Snowflake and Oracle, a quoted name has to match the declared table in the case
       the engine keeps, so `"Orders"` no longer passes for `orders`. Unquoted names still match

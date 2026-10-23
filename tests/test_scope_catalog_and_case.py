@@ -26,9 +26,8 @@ from semantic_model import models as m  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
 
-def _org(engine: str, name: str = "orders", schema: str = "sales",
-         catalog: str | None = None) -> m.Datasource:
-    table = m.Table(name=name, schema=schema, catalog=catalog, storage_connection="c",
+def _org(engine: str, name: str = "orders", schema: str = "sales") -> m.Datasource:
+    table = m.Table(name=name, schema=schema, storage_connection="c",
                     grain=["id"], description="orders",
                     columns=[m.Column(name="id", type="integer")])
     return m.Datasource(
@@ -101,14 +100,7 @@ def test_column_scope_binds_through_the_same_resolver():
     assert rt.check_column_scope("SELECT o.secret FROM sales.orders o", org) is not None
 
 
-# ---------------------------------------------------------------- catalog in the model
-
-
-def test_a_catalog_the_model_records_must_match():
-    org = _org("Snowflake", "ORDERS", "SALES", catalog="ANALYTICS")
-    assert _table_scope("SELECT id FROM analytics.sales.orders", org) is None
-    res = _table_scope("SELECT id FROM other_db.sales.orders", org)
-    assert res is not None and "other_db.sales.orders" in res.detail
+# ---------------------------------------------------------------- four-part names
 
 
 @pytest.mark.parametrize("sql", [
@@ -150,11 +142,6 @@ def test_another_catalog_than_the_connections_is_refused(engine, sql, connection
 ])
 def test_the_connections_own_catalog_passes(engine, sql, connection):
     assert rt.check_catalog_scope(sql, _org(engine), connection) is None
-
-
-def test_a_catalog_the_model_records_is_not_judged_against_the_connection():
-    org = _org("Snowflake", catalog="ARCHIVE")
-    assert rt.check_catalog_scope("SELECT id FROM archive.sales.orders", org, "ANALYTICS") is None
 
 
 @pytest.mark.parametrize("creds,expected", [

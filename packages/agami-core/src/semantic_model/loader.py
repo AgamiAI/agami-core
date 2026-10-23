@@ -584,7 +584,7 @@ class TableIndex:
 
     org_wide: dict[str, list[Table]]                 # bare name -> tables, in scan order
     per_area: dict[str, dict[str, list[Table]]]      # area -> {bare name -> tables}
-    area_refs: dict[str, set[str]]                   # area -> {ref.table} for the fallback test
+    area_refs: dict[str, list[TableRef]]             # area -> its TableRefs, for the fallback
     areas: frozenset[str] = frozenset()              # folded area names, for `_choose`
 
     def _pick(self, m: dict[str, list[Table]], query: str, bare: str) -> list[Table]:
@@ -596,9 +596,10 @@ class TableIndex:
             hit = self._pick(self.per_area.get(area, {}), table_name, bare)
             if hit:
                 return hit
-            refs = self.area_refs.get(area, set())
-            if table_name in refs or bare in refs:
-                return self._pick(self.org_wide, table_name, bare)
+            refs = _refs_naming(self.area_refs.get(area, []), table_name, bare)
+            if refs:
+                return _choose(_referenced(self.org_wide.get(bare, []), refs), table_name,
+                               self.areas)
             return []
         return self._pick(self.org_wide, table_name, bare)
 
@@ -608,7 +609,7 @@ def build_table_index(org: Datasource) -> TableIndex:
     tables) matches `_find_table`, so a clash resolves identically."""
     org_wide: dict[str, list[Table]] = {}
     per_area: dict[str, dict[str, list[Table]]] = {}
-    area_refs: dict[str, set[str]] = {}
+    area_refs: dict[str, list[TableRef]] = {}
     for sa in org.subject_areas:
         amap: dict[str, list[Table]] = {}
         for t in sa.tables_defined:
@@ -618,7 +619,7 @@ def build_table_index(org: Datasource) -> TableIndex:
         # `org.subject_area(area)`, which returns the FIRST area of that name — so the per-area maps
         # must be first-wins too (setdefault), or a duplicate name would resolve the wrong area.
         per_area.setdefault(sa.name, amap)
-        area_refs.setdefault(sa.name, {ref.table for ref in sa.tables})
+        area_refs.setdefault(sa.name, list(sa.tables))
     return TableIndex(org_wide=org_wide, per_area=per_area, area_refs=area_refs,
                       areas=_area_names(org))
 
@@ -647,9 +648,26 @@ def _find_tables(
     # among its `tables`, fall back to the org-wide definition instead of reporting "not found".
     if area:
         sa = org.subject_area(area)
-        if sa and any(ref.table == table_name or ref.table == bare for ref in sa.tables):
-            return _find_tables(org, table_name, area=None)
+        refs = _refs_naming(sa.tables, table_name, bare) if sa else []
+        if refs:
+            everywhere = [t for other in org.subject_areas for t in other.tables_defined
+                          if bare_name(t.name) == bare]
+            return _choose(_referenced(everywhere, refs), table_name, _area_names(org))
     return []
+
+
+def _refs_naming(refs: list[TableRef], table_name: str, bare: str) -> list[TableRef]:
+    """The TableRefs that name `table_name`, as written or by its bare name."""
+    return [r for r in refs if r.table == table_name or r.table == bare]
+
+
+def _referenced(cands: list[Table], refs: list[TableRef]) -> list[Table]:
+    """The tables among `cands` those refs reference: by the ref's schema where it gives one, so an
+    area listing `public.orders` does not also reach `archive.orders` (#258)."""
+    wanted = {table_key(r.table, r.schema_name)[0] for r in refs}
+    if "" in wanted:
+        return cands
+    return [t for t in cands if table_key(t.name, t.schema_name)[0] in wanted]
 
 
 def _find_table(
@@ -664,7 +682,7 @@ def display_name(org: Datasource, table: Table, *, index: Optional[TableIndex] =
     """The name a reply keys `table` by: its own, unless another schema declares the same bare name,
     in which case `schema.name` — the spelling `dataset_names` resolves back to this table (#258).
     Pass `index` to read the same-named tables from it rather than scanning the model (ACE-047)."""
-    _, schema, bare = stored_identity(table.name, table.schema_name)
+    schema, bare = stored_identity(table.name, table.schema_name)
     if not schema or "." in table.name:
         return table.name
     same = (index.org_wide.get(bare, []) if index is not None else

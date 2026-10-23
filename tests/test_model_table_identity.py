@@ -1,8 +1,8 @@
-"""A table's identity in the served model is its catalog, schema and name, not its bare name (#258).
+"""A table's identity in the served model is its schema and name, not its bare name (#258).
 
 `model_table` was keyed (org, datasource, area, name), so two same-named tables in one subject area
 landed on one key and the deploy failed, and `dataset_names` stripped every qualifier, so asking for
-`public.orders` could return `archive.orders`. Migration 028 adds the schema and catalog to the key,
+`public.orders` could return `archive.orders`. Migration 028 adds the schema to the key,
 the lookups resolve by them, and a reply keys an ambiguous name by its qualified spelling.
 """
 
@@ -56,11 +56,10 @@ def _store() -> Store:
 # ---------------------------------------------------------------- storage
 
 
-def test_the_key_carries_catalog_and_schema():
+def test_the_key_carries_the_schema():
     s = _store()
     pk = sorted((r["pk"], r["name"]) for r in s.query("PRAGMA table_info(model_table)") if r["pk"])
-    assert [n for _, n in pk] == ["org_id", "datasource", "area", "catalog_name", "schema_name",
-                                  "name"]
+    assert [n for _, n in pk] == ["org_id", "datasource", "area", "schema_name", "name"]
 
 
 def test_same_named_tables_in_one_area_round_trip():
@@ -105,8 +104,8 @@ def test_the_migration_keeps_rows_written_under_the_old_key(tmp_path):
 
     shutil.copy(MIGRATIONS_DIR / "028_model_table_identity.sql", old)
     assert s.run_migrations(migrations_dir=old) == ["028_model_table_identity.sql"]
-    row = s.query("SELECT catalog_name, schema_name, name FROM model_table")[0]
-    assert (row["catalog_name"], row["schema_name"], row["name"]) == ("", "", "orders")
+    row = s.query("SELECT schema_name, name FROM model_table")[0]
+    assert (row["schema_name"], row["name"]) == ("", "orders")
     loaded = model_store.load_datasource(s, "acme")
     assert loaded.subject_areas[0].tables_defined[0].schema_name == "public"
     assert s.run_migrations(migrations_dir=old) == []
@@ -118,6 +117,16 @@ def test_declaring_datasources_match_the_schema_named():
     found = model_store.datasources_declaring(
         s, ["orders", "archive.orders", "staging.orders", "missing"])
     assert found == {"orders": ["acme"], "archive.orders": ["acme"]}
+
+
+def test_a_table_stored_with_its_schema_in_its_name_is_found():
+    """`name: public.customers` is stored whole; both spellings still find its datasource."""
+    s = _store()
+    org = _two_schemas_org()
+    org.subject_areas[0].tables_defined[2] = _table("public.customers", None)
+    model_store.write_datasource(s, "acme", org)
+    assert model_store.datasources_declaring(s, ["customers", "public.customers", "x.customers"]) == {
+        "customers": ["acme"], "public.customers": ["acme"]}
 
 
 def test_a_row_stored_without_a_schema_matches_any_schema():
@@ -185,6 +194,28 @@ def test_an_unambiguous_name_is_keyed_as_before():
     assert list(ctx["tables"]) == ["customers"]
 
 
+def _ref_org() -> m.Datasource:
+    """`public.orders` in sales, `archive.orders` in history, and finance referencing only the first."""
+    return m.Datasource(
+        datasource="acme",
+        storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
+        subject_areas=[
+            m.SubjectArea(name="sales", tables_defined=[_table("orders", "public", "amount")]),
+            m.SubjectArea(name="history", tables_defined=[_table("orders", "archive", "archived_at")]),
+            m.SubjectArea(name="finance", tables=[
+                m.TableRef(storage_connection="c", schema="public", table="orders")]),
+        ],
+    )
+
+
+def test_an_area_referencing_one_schemas_table_reaches_only_that_one():
+    org = _ref_org()
+    idx = L.build_table_index(org)
+    for found in (L._find_tables(org, "orders", "finance"),
+                  L._find_tables(org, "orders", "finance", index=idx)):
+        assert [t.schema_name for t in found] == ["public"]
+
+
 def test_an_area_prefix_still_resolves_a_lone_table():
     """`bare_name` has always stripped an area prefix as well as a schema one."""
     org = _two_schemas_org()
@@ -222,3 +253,84 @@ def test_a_wrong_schema_is_told_the_spellings_that_resolve(served):
     entry = reply["tables"]["staging.orders"]
     assert entry["error"] == "not found in scope"
     assert "'public.orders'" in entry["hint"] and "'archive.orders'" in entry["hint"]
+
+
+# ---------------------------------------------------------------- every consumer of the identity
+
+
+def _serve(tmp_path, monkeypatch, org: m.Datasource) -> str:
+    db = "sqlite://" + str(tmp_path / "areas.db")
+    s = Store.connect(db)
+    s.run_migrations()
+    model_store.write_datasource(s, "acme", org)
+    s.close()
+    monkeypatch.setenv("AGAMI_DB_URL", db)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "none"))
+    tools._ORG_CACHE.clear()
+    return "acme"
+
+
+def _areas_org() -> m.Datasource:
+    """`public.orders` (grouped) in sales and `archive.orders` in history: one name, two areas."""
+    org = _ref_org()
+    pub = org.subject_areas[0].tables_defined[0]
+    pub.columns.append(m.Column(name="status", type="string"))
+    pub.column_groups = {"money": ["id", "amount"], "state": ["status"]}
+    return org
+
+
+def test_column_groups_apply_to_a_table_keyed_by_its_schema(tmp_path, monkeypatch):
+    reply = _schema_reply(_serve(tmp_path, monkeypatch, _areas_org()), dataset_names=["orders"],
+                          column_groups=["public.orders.state"])
+    pub = reply["tables"]["public.orders"]
+    assert set(pub["column_groups"]) == {"money", "state"}
+    assert "unknown_column_groups" not in reply
+    assert [c["name"] for c in pub["columns"]] == ["id", "status"]
+
+
+def test_an_area_full_reply_returns_only_that_areas_table(tmp_path, monkeypatch):
+    reply = _schema_reply(_serve(tmp_path, monkeypatch, _areas_org()), area="sales", mode="full")
+    assert list(reply["tables"]) == ["public.orders"]
+
+
+def test_an_area_with_dataset_names_keeps_to_that_areas_table(tmp_path, monkeypatch):
+    profile = _serve(tmp_path, monkeypatch, _areas_org())
+    assert list(_schema_reply(profile, area="sales", dataset_names=["orders"])["tables"]) == [
+        "public.orders"]
+    err = _schema_reply(profile, area="sales", dataset_names=["archive.orders"])["error"]
+    assert "'archive.orders' is in subject area 'history'" in json.dumps(err)
+
+
+def test_a_qualified_table_scope_narrows_the_glossary_to_its_bare_name():
+    scope = tools.Scope("table", None, ("public.orders", "missing"))
+    assert tools._scope_tables(_two_schemas_org(), scope) == frozenset({"orders"})
+
+
+def test_a_join_from_a_name_two_returned_tables_share_stays_whole():
+    edge = {"from_table": "orders", "from_schema": "public", "from_column": "customer_id",
+            "to_table": "customers", "to_schema": "public", "to_column": "id",
+            "relationship": "many_to_one"}
+    kept, compact = tools._compact_other_joins(
+        [edge], {"orders"}, {"public.orders": "public", "archive.orders": "archive"})
+    assert kept == [edge] and compact == []
+
+
+def test_an_area_referencing_a_table_without_a_schema_reaches_every_copy():
+    """A TableRef with no schema cannot say which copy it means, so both stay reachable."""
+    org = _ref_org()
+    org.subject_areas[2].tables[0].schema_name = None
+    assert sorted(t.schema_name for t in L._find_tables(org, "orders", "finance")) == [
+        "archive", "public"]
+
+
+def test_the_declaring_datasources_hint_reads_the_store(tmp_path, monkeypatch):
+    """The real lookup, not a stub: another datasource declaring the schema-qualified name."""
+    db = "sqlite://" + str(tmp_path / "hint.db")
+    s = Store.connect(db)
+    s.run_migrations()
+    model_store.write_datasource(s, "acme", _two_schemas_org())
+    model_store.write_datasource(s, "acme_archive", _two_schemas_org())
+    s.close()
+    monkeypatch.setenv("AGAMI_DB_URL", db)
+    assert tools._declared_elsewhere(["archive.orders", "staging.orders"], "acme") == {
+        "archive.orders": ["acme_archive"]}

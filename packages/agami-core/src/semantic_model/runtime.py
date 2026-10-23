@@ -1573,7 +1573,7 @@ def _schema_index(org: Datasource) -> dict[str, dict[Optional[str], set[str]]]:
         for t in sa.tables_defined:
             # A schema embedded in the name (`public.orders`) is the table's schema, as everywhere
             # else that reads a table's identity (#258); keyed whole, no reference could reach it.
-            _, schema, bare = stored_identity(t.name, t.schema_name)
+            schema, bare = stored_identity(t.name, t.schema_name)
             by_schema = idx.setdefault(_tkey(bare), {})
             by_schema.setdefault(_tkey(schema) or None, set()).update(
                 _tkey(c.name) for c in t.columns)
@@ -1582,12 +1582,11 @@ def _schema_index(org: Datasource) -> dict[str, dict[Optional[str], set[str]]]:
 
 def _table_decls(org: Datasource) -> "dict[tuple, list[Table]]":
     """`_schema_index`'s (schema, name) key -> the tables declared under it, with the spellings and
-    catalog the folded index does not keep: what `_resolve_table` checks a quoted or
-    catalog-qualified reference against (#337)."""
+    the folded index does not keep: what `_resolve_table` checks a reference's case against (#337)."""
     decls: dict[tuple, list[Table]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            _, schema, bare = stored_identity(t.name, t.schema_name)
+            schema, bare = stored_identity(t.name, t.schema_name)
             decls.setdefault((_tkey(schema) or None, _tkey(bare)), []).append(t)
     return decls
 
@@ -1630,19 +1629,12 @@ def _part_names(ident: object, declared: str, dialect: "str | None") -> bool:
 
 
 def _names_declared(tbl: "exp.Table", t: Table, dialect: "str | None") -> bool:
-    """Whether reference `tbl` names declared table `t`, beyond the folded (schema, name) match:
-    quoted parts in the declared case, and a catalog the model records for `t` matched (#337)."""
-    catalog, schema, bare = stored_identity(t.name, t.schema_name, t.catalog)
+    """Whether reference `tbl` names declared table `t` in the case the engine compares, beyond the
+    folded (schema, name) match the index already made (#337)."""
+    schema, bare = stored_identity(t.name, t.schema_name)
     if not _part_names(tbl.this, bare, dialect):
         return False
-    if tbl.args.get("db") is not None and schema and not _part_names(
-            tbl.args["db"], schema, dialect):
-        return False
-    written = tbl.args.get("catalog")
-    if written is not None and catalog:
-        return (_tkey(written.name) == _tkey(catalog)
-                and _part_names(written, catalog, dialect))
-    return True
+    return tbl.args.get("db") is None or not schema or _part_names(tbl.args["db"], schema, dialect)
 
 
 def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
@@ -1655,12 +1647,11 @@ def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
     exactly one schema; under two or more, which table the engine reads depends on a search path
     the guard cannot see.
 
-    With `decls`, two finer checks (#337): a name must match the declared table in the case the
-    engine compares (`"Orders"` is not `orders` on Postgres, nor `Orders` on MySQL), and a catalog
-    part must match the one the model records for the table. A catalog the model does not record is
-    the connection's to judge, which `check_catalog_scope` does once credentials are known. A
-    four-part name reads through a linked server or another catalog's schema, and never names a
-    declared table.
+    With `decls`, a name must also match the declared table in the case the engine compares
+    (#337): `"Orders"` is not `orders` on Postgres, nor `Orders` on MySQL. A model's tables live in
+    the connection's own database, so a catalog part is the connection's to judge, which
+    `check_catalog_scope` does once credentials are known. A four-part name reads through a linked
+    server or another catalog's schema, and never names a declared table.
     """
     if isinstance(tbl.this, exp.Dot):
         return None
@@ -1792,8 +1783,8 @@ def check_table_scope(sql: str, org: Datasource,
 
 def check_catalog_scope(sql: str, org: Datasource,
                         connection_catalog: "str | None") -> "guardrail.Refusal | None":
-    """Refuse a reference qualified with a catalog (database / project) other than the connection's,
-    for a declared table whose model records no catalog of its own (#337).
+    """Refuse a reference qualified with a catalog (database / project) other than the connection's
+    (#337). A model's tables live in the connection's own database, so no other catalog holds them.
 
     The table-scope gate matches `catalog.schema.table` on its schema and name, and on Snowflake,
     BigQuery, SQL Server, DuckDB, Databricks and Trino one connection reaches other catalogs: a
@@ -1820,8 +1811,6 @@ def check_catalog_scope(sql: str, org: Datasource,
         resolved = _resolve_table(sidx, tbl, decls, dialect)
         if not isinstance(resolved, tuple):
             continue  # undeclared or ambiguous: the table-scope gate's to refuse
-        if any(t.catalog for t in decls.get(resolved, [])):
-            continue  # matched against the model's own catalog above
         if (connection_catalog is None or _tkey(written.name) != _tkey(connection_catalog)
                 or not _part_names(written, connection_catalog, dialect)):
             offending.add(_written(tbl))
