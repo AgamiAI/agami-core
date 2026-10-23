@@ -21,6 +21,21 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **A column's `value_transform` and a join's `on:` parse in the datasource's own SQL dialect, and a
+  text column of ISO dates gets a date format whatever it is called (#518).** Both fragments were
+  parsed with sqlglot's generic grammar, so a valid Postgres transform such as
+  `CASE WHEN code ~ '^[0-9]+$' THEN code::int END` failed validation. A fragment is now accepted when
+  it parses in the engine's dialect or in the generic grammar, so nothing that validated before
+  starts failing; a datasource whose engine can't be resolved keeps the generic parse, and the
+  incremental validation cache includes the dialect. A field inside a JSON column is reached by a
+  transform on the JSON column that extracts the key itself (`(profile->>'signup_date')::date` on
+  Postgres, `json_extract(profile, '$.signup_date')` on SQLite); agami-connect now says so.
+  Introspection set `iso8601` only on columns with a date-like name; it now also sets it on a text
+  column with any name when at least 20 sampled values are present and every one is a real ISO date
+  or timestamp. Such a column no longer gets a `choice_field` skeleton.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
