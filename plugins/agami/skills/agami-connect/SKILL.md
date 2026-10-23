@@ -529,6 +529,8 @@ Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll
 
 **If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). Any other `.xlsx`/`.docx` → ask for PDF, proceed without if not.
 
+**A column data dictionary is not read as a doc.** A CSV or JSON with one row per column (`table`, `column`, `description`, optionally `area` / `schema`) is the customer's own text for each column: note its path as `$DICTIONARY_FILE` and apply it after introspection with `sm describe-file --source metadata` ([2a.0](#customer-dictionary-file)), which applies every row one to one. Don't `Read` it into the prompt (the read is trimmed and paraphrased) and don't convert it into curate ops yourself. A dictionary in another shape (PDF, prose, an `.xlsx`) → ask for a CSV export; if there is none, read it as a doc as above.
+
 **If a published product schema (or the user names one — "use the ServiceNow data model online"):** the user wants the standard fields grounded in the authoritative reference, not your training memory.
 
 1. **Prefer the in-DB metadata.** Most metadata-driven platforms carry their own dictionary *in the database* (ServiceNow `sys_dictionary`/`sys_choice`, SAP `DD03L`, …). That's authoritative AND machine-readable — far better than scraping docs. So the real answer here is usually **Phase 2a.0's `sm enrich-metadata`**, not a web fetch. Note that intent now; it runs during enrichment.
@@ -662,7 +664,7 @@ Surface any `notes` too — in particular a metric flagged as a plain aggregate:
 
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
 
-> **HARD RULE — decisions to you, plumbing to the engine. NEVER write a generator script** (`build_ops.py`, `build_desc.py`, `enrich_*.py`, a one-off that loops to build curate ops). It's the recurring failure mode and it's banned. When you have many edits, emit them as data and let a tested command apply them: `sm describe-file` (TSV of descriptions), `sm enrich-metadata` (in-DB metadata), `sm set-units`, `sm suggest-metrics`, or `sm curate --ops-file <json>`. You decide *what* (currency, which metrics, a column's meaning); the engine does the *applying*.
+> **HARD RULE — decisions to you, plumbing to the engine. NEVER write a generator script** (`build_ops.py`, `build_desc.py`, `enrich_*.py`, a one-off that loops to build curate ops). It's the recurring failure mode and it's banned. When you have many edits, emit them as data and let a tested command apply them: `sm describe-file` (TSV of descriptions; a customer's CSV/JSON dictionary with `--source metadata`), `sm enrich-metadata` (in-DB metadata), `sm set-units`, `sm suggest-metrics`, or `sm curate --ops-file <json>`. You decide *what* (currency, which metrics, a column's meaning); the engine does the *applying*.
 
 ### 2a.0 — Deterministic metadata FIRST (run before any hand-enrichment)
 
@@ -682,6 +684,12 @@ It auto-detects a preset (e.g. `servicenow`) or takes `--preset`, reads the dict
 > *Read `<dictionary_rows>` dictionary rows and `<choice_rows>` choice rows. Catalog and dictionary reads run with a temporarily raised row cap (200,000) — a data dictionary is far larger than the 1,000-row default. **Your query-time cap is unchanged:** a normal question that would return more than 1,000 rows is still refused rather than quietly truncated.*
 
 The second sentence is the load-bearing one. Without it a user reasonably concludes their safety bound was weakened.
+
+**<a id="customer-dictionary-file"></a>A customer dictionary file ([1.5](#15--existing-data-model--semantic-layer-mandatory--always-ask)).** When the user gave a column dictionary as a CSV or JSON, apply it in one command, before you write any descriptions of your own:
+```bash
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" describe-file "$ROOT" --source metadata --file "$DICTIONARY_FILE"
+```
+The format comes from the extension (`--format csv|json|tsv` overrides it). CSV needs a `table`, `column`, `description` header (`area` / `schema` optional); JSON is a list of objects with those keys, or an object mapping `"table.column"` to its description. Matched columns are stamped `description_source: metadata`, the customer's text; a different case (`ORDERS.Total`) lands on the model's spelling and is listed under `case_corrected`. A description a person wrote is never replaced: those come back under `kept_human`. Rows that matched nothing come back under `unmatched`, each with a `reason` (`no_table`, `no_column`, `ambiguous_table`, `ambiguous_column`, `malformed`, `empty_description`). **Tell the user how many columns were described and list every unmatched row with its reason** (an `ambiguous_table` row needs an `area` or `schema` column to say which one). Never drop them, and never fix them by guessing: a dictionary entry for a table that isn't in the model is the user's call. Then describe only what the dictionary didn't cover (2a below), with `source: ai`. Your own descriptions never replace the dictionary's.
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
