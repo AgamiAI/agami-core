@@ -21,6 +21,24 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **A foreign key over several columns is now one join on all of them, and a query joining on only
+  some of them is flagged (#510).** Introspection wrote each column of a composite key as its own
+  approved many-to-one join, and either one used alone repeats rows (981 became 2,502 in one
+  database). Every dialect's foreign-key query now returns the constraint name and column position,
+  and the generic `information_schema` query (Redshift, DuckDB, Databricks) and BigQuery's
+  match the referenced column by position, which they used to pair with every column of the key. A
+  key is written as one `on:` join, its cardinality read from the whole key; single-column joins are
+  unchanged. Where a catalog gives no constraint name, the columns are still kept apart but left for
+  review. A refresh replaces the split joins introspection approved for such a key with the one
+  join and lists that in the preview; if a person signed off any of them, nothing changes for that
+  key and the preview says so. On the receipt, a join written on part of a declared composite key
+  makes an aggregate on either side `multiplied`, with a `fan_trap` naming the missing columns; the
+  query still runs. Code that read only `from_column`/`to_column` now reads every column of an
+  `on:` join too (adding reference joins no longer raises on one), and the validator warns when an
+  `on:` names a column its table doesn't define.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added

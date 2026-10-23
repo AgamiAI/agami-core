@@ -440,7 +440,8 @@ def _relationships_text(bundles: list[dict]) -> str:
                 left = f"{rel['from_schema']}.{left}"
             if rel.get("to_schema"):
                 right = f"{rel['to_schema']}.{right}"
-            on = f"{left}.{rel.get('from_column')} = {right}.{rel.get('to_column')}"
+            # A composite key is an `on:` join with no from/to column (#510).
+            on = rel.get("on") or f"{left}.{rel.get('from_column')} = {right}.{rel.get('to_column')}"
             if on in seen:
                 continue
             seen.add(on)

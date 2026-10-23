@@ -879,10 +879,30 @@ def _check_relationship(
                 f"relationship {rel.from_table}->{rel.to_table}: on: does not parse "
                 f"({err}): {rel.on!r}",
             )
+        else:
+            _check_on_columns(rel, org, res, defined)
         return  # user took explicit ownership; skip simple-form type check
 
     # FK type-compatibility on the simple form (Gap 3)
     _check_fk_type_compat(rel, res, defined)
+
+
+def _check_on_columns(rel: Relationship, org: Datasource, res: ValidationResult, defined: dict[str, Table]) -> None:
+    """Warn when an `on:` join of column equalities names a column its table doesn't have. A
+    warning, not an error: hand-written `on:` joins validated before this check existed."""
+    from .runtime import join_key_pairs, model_dialect
+
+    pairs = join_key_pairs(rel, model_dialect(org)) or []
+    for table, cols in ((rel.from_table, [f for f, _ in pairs]), (rel.to_table, [t for _, t in pairs])):
+        t = defined.get(table) or defined.get(bare_name(table))
+        names = {c.name.lower() for c in t.columns} if t is not None else set()
+        missing = [c for c in cols if t is not None and c.lower() not in names]
+        if missing:
+            res.warn(
+                "relationship_on_unknown_column",
+                f"relationship {rel.from_table}->{rel.to_table}: on: names {', '.join(missing)}, "
+                f"which {table} doesn't define",
+            )
 
 
 def _check_cross_relationship(
