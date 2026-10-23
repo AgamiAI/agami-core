@@ -546,7 +546,8 @@ def _load_cross_metrics(root: Path, ds_doc: dict) -> list[Metric]:
 # ---------------------------------------------------------------------------
 
 
-def _choose(cands: list[Table], query: str, areas: frozenset[str] = frozenset()) -> list[Table]:
+def _choose(cands: list[Table], query: str,
+            areas: "dict[str, set[int]] | None" = None) -> list[Table]:
     """The tables `query` names among `cands` (every table whose name is `query` or whose bare name
     is `query`'s, in scan order). Several only when an unqualified name is declared under several
     schemas, which is the caller's to show as ambiguous rather than this function's to settle.
@@ -554,8 +555,9 @@ def _choose(cands: list[Table], query: str, areas: frozenset[str] = frozenset())
     A qualified name that is some table's exact name is that table. Otherwise it resolves by schema
     (#258): with `public.orders` and `archive.orders` declared, `archive.orders` is that table and
     never the other. A qualifier no candidate's schema matches finds a candidate only where it
-    cannot be naming another schema: it is a subject area's name (`areas`, folded), the prefix
-    `bare_name` has always stripped, or the lone candidate records no schema.
+    cannot be naming another schema: it is a subject area's name (`areas`: folded name -> ids of
+    the tables it defines), the prefix `bare_name` has always stripped, which picks that area's
+    table; or the lone candidate records no schema.
     """
     if "." not in query:
         distinct: dict[tuple[str, str], Table] = {}
@@ -569,7 +571,10 @@ def _choose(cands: list[Table], query: str, areas: frozenset[str] = frozenset())
     same = [t for t in cands if table_key(t.name, t.schema_name)[0] == want]
     if same:
         return same[:1]
-    if len(cands) == 1 and (want in areas or not table_key(cands[0].name, cands[0].schema_name)[0]):
+    in_area = [t for t in cands if id(t) in (areas or {}).get(want, set())]
+    if in_area:
+        return in_area[:1]
+    if len(cands) == 1 and not table_key(cands[0].name, cands[0].schema_name)[0]:
         return cands
     return []
 
@@ -585,7 +590,7 @@ class TableIndex:
     org_wide: dict[str, list[Table]]                 # bare name -> tables, in scan order
     per_area: dict[str, dict[str, list[Table]]]      # area -> {bare name -> tables}
     area_refs: dict[str, list[TableRef]]             # area -> its TableRefs, for the fallback
-    areas: frozenset[str] = frozenset()              # folded area names, for `_choose`
+    areas: "dict[str, set[int]]" = field(default_factory=dict)  # for `_choose`
 
     def _pick(self, m: dict[str, list[Table]], query: str, bare: str) -> list[Table]:
         return _choose(m.get(bare, []), query, self.areas)
@@ -624,8 +629,12 @@ def build_table_index(org: Datasource) -> TableIndex:
                       areas=_area_names(org))
 
 
-def _area_names(org: Datasource) -> frozenset[str]:
-    return frozenset(sa.name.lower() for sa in org.subject_areas)
+def _area_names(org: Datasource) -> "dict[str, set[int]]":
+    """Folded area name -> ids of the tables the areas of that name define, for `_choose`."""
+    areas: dict[str, set[int]] = {}
+    for sa in org.subject_areas:
+        areas.setdefault(sa.name.lower(), set()).update(id(t) for t in sa.tables_defined)
+    return areas
 
 
 def _find_tables(

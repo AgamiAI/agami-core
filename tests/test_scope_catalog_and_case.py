@@ -151,6 +151,8 @@ def test_the_connections_own_catalog_passes(engine, sql, connection):
     ({"type": "bigquery", "project": "acme-project"}, "acme-project"),
     ({"type": "trino", "catalog": "hive"}, "hive"),
     ({"type": "databricks", "host": "h"}, None),
+    # The connector is given no catalog, so one in the credentials is not the session's.
+    ({"type": "databricks", "host": "h", "catalog": "main"}, None),
     ({"type": "duckdb", "path": "/data/warehouse.duckdb"}, "warehouse"),
     ({"type": "duckdb"}, "memory"),
     ({"type": "mysql", "database": "shop"}, None),

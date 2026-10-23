@@ -2032,12 +2032,12 @@ class _ModelNames(NamedTuple):
         do resolve are the next move. Answering with the copy in another schema instead is what
         handed a caller `archive.orders` when it asked for `public.orders`.
         """
-        spellings = self.qualified.get(_bare_name(name), [])
-        return {
-            "error": "not found in scope",
-            "hint": f"{_bare_name(name)!r} is not declared in that schema; it is declared as "
-            f"{', '.join(repr(q) for q in spellings)}.",
-        }
+        bare = _bare_name(name)
+        spellings = self.qualified.get(bare, [])
+        where = (f"it is declared as {', '.join(repr(q) for q in spellings)}." if spellings
+                 else f"it is declared without a schema, so pass {bare!r}.")
+        return {"error": "not found in scope",
+                "hint": f"{bare!r} is not declared in that schema; {where}"}
 
     def unknown_table_entry(self, name: str) -> dict[str, Any]:
         """The per-table miss beside tables that did resolve."""

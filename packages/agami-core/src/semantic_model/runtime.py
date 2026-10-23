@@ -583,7 +583,8 @@ def _table_sizes(tree: "exp.Expression", org: "Datasource",
     by_qname: dict[tuple, Any] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            key = (_tkey(t.schema_name) or None, _tkey(t.name))
+            schema, bare = stored_identity(t.name, t.schema_name)
+            key = (_tkey(schema) or None, _tkey(bare))
             if _rows_of(t) >= _rows_of(by_qname.get(key)):
                 by_qname[key] = t
 
@@ -2131,7 +2132,8 @@ def _declared_listing(org: Datasource, offending: list[str],
     seen: dict[tuple, set[str]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            key = (_tkey(t.schema_name) or None, _tkey(t.name))
+            schema, bare = stored_identity(t.name, t.schema_name)
+            key = (_tkey(schema) or None, _tkey(bare))
             if key not in keys:
                 continue
             names.setdefault(key, t.name)
@@ -3191,8 +3193,12 @@ def _check_aggregation_semantics(
 
 
 def _model_table_index(org: Datasource) -> dict[str, tuple]:
-    """bare table name, CASE-FOLDED -> (Table, area_name). First occurrence wins (a cross-schema
-    name clash is rare and the relationships now carry schema to disambiguate).
+    """bare table name, CASE-FOLDED -> (Table, area_name). A schema written into the name
+    (`public.orders`) is not part of the key, as everywhere that reads a table's identity (#258).
+
+    First occurrence wins, so where two schemas declare one name the receipt and the mention scan
+    describe the first copy. The scope gates and `dataset_names` tell the copies apart; the receipt
+    and metric scoping doing the same is a follow-up.
 
     Folded because `check_table_scope` folds: it compares `{name.lower()}` against the statement's
     names, since Postgres and friends fold unquoted identifiers. When this index did not, the gate
@@ -3202,7 +3208,7 @@ def _model_table_index(org: Datasource) -> dict[str, tuple]:
     idx: dict[str, tuple] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            idx.setdefault(_tkey(t.name), (t, sa.name))
+            idx.setdefault(_tkey(stored_identity(t.name, t.schema_name)[1]), (t, sa.name))
     return idx
 
 

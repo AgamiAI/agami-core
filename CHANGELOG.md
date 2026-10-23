@@ -43,7 +43,9 @@ below corresponds to one such version.
   - **Scope gates.**
     - A model's tables live in the connection's own database. A reference qualified with another
       database or project is refused once the credentials say which one the connection is in. When
-      the credentials don't name one, the qualifier is refused.
+      the credentials don't name one, the qualifier is refused. On Databricks the connection is
+      always in the workspace's default catalog, so a catalog prefix is refused there; write
+      `schema.table`.
     - A four-part name (`server.database.schema.table`) never matches a declared table.
     - On Postgres, Snowflake and Oracle, a quoted name has to match the declared table in the case
       the engine keeps, so `"Orders"` no longer passes for `orders`. Unquoted names still match

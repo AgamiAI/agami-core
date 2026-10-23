@@ -2156,8 +2156,10 @@ def _connection_catalog(creds: dict) -> str | None:
         return creds.get("database") or None
     if db_type == "bigquery":
         return creds.get("project") or None
-    if db_type in ("trino", "presto", "databricks"):
+    if db_type in ("trino", "presto"):
         return creds.get("catalog") or None
+    # Databricks: `_run_databricks` passes no catalog, so the session runs in the workspace's default
+    # one whatever the credentials say. Unknown, then, and a catalog prefix is refused.
     if db_type == "duckdb":
         # DuckDB names an attached database after its file, and the in-memory one `memory`.
         path = creds.get("path") or creds.get("database") or ":memory:"
@@ -3123,6 +3125,9 @@ def execute_guarded(
             # `engine_mismatch` reports OUR configuration drift, a model declaring an engine its own
             # credentials do not speak, and it refuses every statement on that datasource until an
             # operator fixes it. That is 4c, not 4a: nothing here is about what the statement can do.
+            # `_foreign_catalog` rides here for the opposite reason: it IS about what the statement
+            # reads (a table in another database, 4b), but only the credentials say which database
+            # is the connection's own, so it can run no earlier than this.
             mismatch = _engine_mismatch(profile, creds) or _foreign_catalog(sql, creds)
             if mismatch is not None:
                 return _envelope("refused", refusal=mismatch,

@@ -334,3 +334,60 @@ def test_the_declaring_datasources_hint_reads_the_store(tmp_path, monkeypatch):
     monkeypatch.setenv("AGAMI_DB_URL", db)
     assert tools._declared_elsewhere(["archive.orders", "staging.orders"], "acme") == {
         "archive.orders": ["acme_archive"]}
+
+
+def test_one_area_holding_both_schemas_validates_its_relationship_and_types():
+    """Two `orders` in one area: each relationship endpoint resolves to its own schema's copy."""
+    org = _two_schemas_org()
+    pub = org.subject_areas[0].tables_defined[0]
+    pub.columns.append(m.Column(name="customer_id", type="integer"))
+    arc = org.subject_areas[0].tables_defined[1]
+    arc.columns.append(m.Column(name="customer_id", type="string"))
+    org.subject_areas[0].relationships = [m.Relationship(
+        from_table="orders", from_schema="public", from_column="customer_id",
+        to_table="customers", to_schema="public", to_column="id", relationship="many_to_one")]
+    findings = V.validate(org).findings
+    assert "relationship_not_served" not in {f.code for f in findings}
+    # Typed integer = integer on public's copy; archive's string column must not be the one judged.
+    assert not [f for f in findings if "customer_id" in f.message and "type" in f.message.lower()]
+
+
+def test_a_table_ref_naming_a_schema_the_table_is_not_in_is_an_orphan():
+    org = _two_schemas_org()
+    org.subject_areas.append(m.SubjectArea(name="ops", tables=[
+        m.TableRef(storage_connection="c", schema="staging", table="customers")]))
+    assert "orphan_table_ref" in {f.code for f in V.validate(org).findings}
+
+
+def test_an_area_prefix_picks_that_areas_table_among_several():
+    """`sales.orders` when two areas each define a schemaless `orders`."""
+    def area(name):
+        return m.SubjectArea(name=name, tables_defined=[_table("orders", None, name)])
+    org = m.Datasource(datasource="acme", subject_areas=[area("sales"), area("ops")],
+                       storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")])
+    for name, col in (("sales.orders", "sales"), ("ops.orders", "ops")):
+        found = L._find_tables(org, name)
+        assert [c.name for c in found[0].columns] == ["id", col]
+        assert L._find_tables(org, name, index=L.build_table_index(org)) == found
+
+
+def test_the_hint_for_a_schemaless_name_says_to_pass_it_bare():
+    names = tools._ModelNames.of(m.Datasource(datasource="acme", subject_areas=[
+        m.SubjectArea(name="sales", tables_defined=[_table("orders", None)])]))
+    assert "declared without a schema, so pass 'orders'" in names.unresolvable_entry(
+        "staging.orders")["hint"]
+
+
+def test_a_table_named_with_its_schema_is_sized_and_listed_like_any_other():
+    from semantic_model import runtime as rt
+
+    org = _two_schemas_org()
+    t = _table("public.payments", None, "amount")
+    t.performance_hints = m.PerformanceHints(estimated_row_count=50_000_000)
+    org.subject_areas[0].tables_defined.append(t)
+    res = rt.check_column_scope("SELECT id, bogus FROM public.payments", org)
+    assert "public.payments: id, amount." in res.remediation
+    assert rt._model_table_index(org)["payments"][0] is t
+    tree = rt._parse_sql("SELECT id FROM public.payments", "postgres")
+    size = rt._table_sizes(tree, org)
+    assert size(tree.find(rt.exp.Table)) == (t, 50_000_000)

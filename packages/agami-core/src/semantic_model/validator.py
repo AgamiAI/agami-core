@@ -657,7 +657,24 @@ def _check_metric_combine(metric: CrossDatasourceMetric, res: ValidationResult) 
 
 
 def _all_tables(sa: SubjectArea) -> dict[str, Table]:
-    return {t.name: t for t in sa.tables_defined}
+    """An area's tables by name, and also by `schema.name` where a schema is known, so two
+    schemas' copies of one name in an area are both present (#258); see `_endpoint`."""
+    out: dict[str, Table] = {}
+    for t in sa.tables_defined:
+        out.setdefault(t.name, t)
+        schema, bare = stored_identity(t.name, t.schema_name)
+        if schema:
+            out[f"{schema}.{bare}"] = t
+    return out
+
+
+def _endpoint(defined: dict[str, Table], table: str, schema: Optional[str]) -> Optional[Table]:
+    """The table a relationship endpoint names: by its schema where it gives one, else by name."""
+    if schema:
+        found = defined.get(f"{schema}.{bare_name(table)}")
+        if found is not None:
+            return found
+    return defined.get(table)
 
 
 def _check_storage_connection_refs(org: Datasource, res: ValidationResult) -> None:
@@ -706,12 +723,21 @@ def _org_tables(org: Datasource) -> dict[str, Table]:
 
 
 def _ref_table(org_tables: dict[str, Table], ref: TableRef) -> Optional[Table]:
-    """The canonical Table a TableRef points at: by its schema when it gives one, else by name."""
+    """The canonical Table a TableRef points at: by its schema when it gives one, else by name.
+
+    A ref naming a schema the table is not in points at nothing, rather than at the same-named
+    table of another schema: serving resolves it by schema too, so passing it here would let the
+    model validate and the table then go missing from that area."""
     if ref.schema_name:
         found = org_tables.get(f"{ref.schema_name}.{bare_name(ref.table)}")
         if found is not None:
             return found
-    return org_tables.get(ref.table)
+    found = org_tables.get(ref.table)
+    if found is not None and ref.schema_name:
+        schema = stored_identity(found.name, found.schema_name)[0]
+        if schema and schema.lower() != ref.schema_name.lower():
+            return None
+    return found
 
 
 def _check_table_refs_resolve(
@@ -1572,8 +1598,8 @@ def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
 def _check_fk_type_compat(
     rel: Relationship, res: ValidationResult, defined: dict[str, Table]
 ) -> None:
-    from_t = defined.get(rel.from_table)
-    to_t = defined.get(rel.to_table)
+    from_t = _endpoint(defined, rel.from_table, rel.from_schema)
+    to_t = _endpoint(defined, rel.to_table, rel.to_schema)
     if not (from_t and to_t and rel.from_column and rel.to_column):
         return
     from_c = from_t.get_column(rel.from_column)
@@ -1612,8 +1638,8 @@ def recommended_confidence_cap(rel: Relationship, sa: SubjectArea) -> Optional[s
     if rel.on:
         return None
     defined = _all_tables(sa)
-    from_t = defined.get(rel.from_table)
-    to_t = defined.get(rel.to_table)
+    from_t = _endpoint(defined, rel.from_table, rel.from_schema)
+    to_t = _endpoint(defined, rel.to_table, rel.to_schema)
     if not (from_t and to_t and rel.from_column and rel.to_column):
         return None
     from_c = from_t.get_column(rel.from_column)
