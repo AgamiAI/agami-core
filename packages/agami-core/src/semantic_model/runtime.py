@@ -2307,6 +2307,11 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # tables was also in the list, while the joins section of the same receipt, which reads the
     # written key, called the join one-to-one. The written key names the edge.
     rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0])
+    # A join written on only part of a declared composite key repeats rows on BOTH sides, which the
+    # one-way fan rule below cannot say, so such an edge is taken out of it and reported on its own.
+    partial = _partial_key_joins(rels, tree, tables_in_scope, _dialect_of(org)[0])
+    if partial:
+        rels = [r for r in rels if id(r) not in partial]
 
     sites = _aggregate_sites(tree, tables_in_scope, scope, visible)
     # The set the detectors read, derived from the sites rather than walked again — the two must
@@ -2390,6 +2395,26 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 attached[i].append(Finding(
                     risk, reason=reason,
                     triggering_joins=[f"{measure} (1) <- {mt} (N)" for mt in many],
+                    aggregate=site.aggregate,
+                ))
+
+        # PARTIAL KEY: either side's measure is repeated, since each row may match several.
+        for rel, written, needed in partial.values():
+            ends = {_bare(rel.from_table), _bare(rel.to_table)}
+            label = f"{shown(_bare(rel.from_table))} -> {shown(_bare(rel.to_table))}"
+            short = (f"joins {label} on {' AND '.join(written)} only; the declared join needs "
+                     f"{' AND '.join(needed)}, so each row can match several and rows repeat")
+            for i, site in enumerate(sites):
+                hit = sorted(site.sources & ends)
+                if not hit:
+                    continue
+                measure = shown(hit[0])
+                risk = "fan_out_invariant" if _is_fan_immune(site.node) else "fan_trap"
+                reason = (f"fan trap: aggregating {measure!r}, which {short}."
+                          if risk == "fan_trap" else
+                          f"fan out: {short}; this aggregate's value is unchanged by that duplication.")
+                attached[i].append(Finding(
+                    risk, reason=reason, triggering_joins=[f"{label} (partial key)"],
                     aggregate=site.aggregate,
                 ))
 
@@ -4736,6 +4761,48 @@ def _reduced_on(text: str, dialect: "str | None") -> "frozenset[frozenset[tuple[
     return pairs
 
 
+def model_dialect(org: "Datasource | None") -> "str | None":
+    """The sqlglot dialect `org`'s model text is read in, or None when its engine is unknown."""
+    return _dialect_of(org)[0]
+
+
+def join_key_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tuple[str, str]] | None":
+    """The (from column, to column) pairs a join is keyed on, in the order written.
+
+    The pair form is one pair. An `on:` join yields one pair per conjunct, read with the same parse
+    `_declared_pairs` uses, so a composite key written as `on:` is seen by every caller that used to
+    read `from_column`/`to_column` alone. None when the `on:` is anything but column equalities
+    between its own two tables (a CAST, a fixed value, a bind marker) or will not parse: such a
+    join has no column pairs to report. A self-join keeps each equality's written order."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return [(rel.from_column, rel.to_column)]
+    pairs = _on_key_pairs(rel.on or "", _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table)), dialect)
+    return list(pairs) if pairs is not None else None
+
+
+@functools.lru_cache(maxsize=1024)
+def _on_key_pairs(text: str, ft: str, tt: str, dialect: "str | None") -> "tuple[tuple[str, str], ...] | None":
+    """The `on:` half of `join_key_pairs`, remembered like `_reduced_on`: model text, one parse each."""
+    if not _HAVE_SQLGLOT or _BIND_MARKER.search(text):
+        return None
+    predicate = _parse_declared_predicate(text, dialect)
+    if predicate is None:
+        return None
+    out: list[tuple[str, str]] = []
+    for conj in _and_conjuncts(predicate):
+        lhs, rhs = (conj.this, conj.expression) if isinstance(conj, exp.EQ) else (None, None)
+        if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column)):
+            return None
+        sides = (_tkey(lhs.table), _tkey(rhs.table))
+        if sides == (ft, tt):
+            out.append((lhs.name, rhs.name))
+        elif sides == (tt, ft):
+            out.append((rhs.name, lhs.name))
+        else:
+            return None
+    return tuple(out) or None
+
+
 def _join_condition(join: "exp.Join") -> "str | None":
     """The condition THIS join wrote, serialized for a label — None when it wrote none.
 
@@ -5456,6 +5523,36 @@ def _edges_as_written(
         if not matching or rel in matching:
             kept.append(rel)
     return kept
+
+
+def _partial_key_joins(
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None"
+) -> "dict[int, tuple[Relationship, list[str], list[str]]]":
+    """The declared composite-key joins this SELECT wrote only PART of, by id: each with the columns
+    it wrote and the ones the declaration needs, named from the join's FROM side (#510).
+
+    Matched on the written column pairs as `_edges_as_written` matches, after it ran: an edge another
+    declaration matched whole is already gone from `rels`, so what remains here is a join on some but
+    not all of a key whose other columns are what keep it to one row."""
+    written = _written_join_pairs(tree, scope_map)
+    if not written:
+        return {}
+    out: dict[int, tuple[Relationship, list[str], list[str]]] = {}
+    for rel in rels:
+        pairs_written = written.get(_rel_tables(rel))
+        declared = _declared_pairs(rel, dialect) if rel.on and pairs_written else None
+        if declared is None:
+            continue
+        keys = {p for p in declared if not _is_fixed_value(p)}
+        used = keys & pairs_written
+        if len(keys) < 2 or not used or used == keys:
+            continue
+        ft, tt = _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table))
+        named = [(f, frozenset({(ft, f.lower()), (tt, t.lower())})) for f, t in join_key_pairs(rel, dialect) or []]
+        if not named:   # an `on:` with a fixed value too: name each pair by its FROM-side column
+            named = [(next((c for t, c in sorted(p) if t == ft), sorted(p)[0][1]), p) for p in sorted(keys, key=sorted)]
+        out[id(rel)] = (rel, [_echo_name(f) for f, p in named if p in used], [_echo_name(f) for f, _ in named])
+    return out
 
 
 # `apply_default_filters` was deleted here by ACE-042: declared filters are business logic, not a
@@ -6510,6 +6607,8 @@ __all__ = [
     "pre_flight_check",
     "assemble_receipt",
     "assemble_refusal_receipt",
+    "join_key_pairs",
+    "model_dialect",
     # Re-exported for the chokepoint, which reaches them through this module rather than
     # importing `sql_dialect` directly: `execute_sql` is vendored into the plugin while this
     # package resolves separately, so it reads what it needs off one module it already has.
