@@ -21,6 +21,27 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Fixed
+
+- **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
+  query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
+  skipped, since the CTE might have supplied it. A column the model excludes was then returned:
+  `WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, c` ran, while the same statement without
+  `c` was refused. The gate now reads what each CTE, derived table, `LATERAL` subquery, `VALUES` list
+  and table function names in its projection or alias. A column one of them names passes. Otherwise it
+  is refused when that scope reads a declared table, and a scope with no source supplying the name
+  defers to the enclosing query as a correlated reference does, so `SELECT (SELECT secret_col) FROM
+  orders` is refused too. An output with no readable name (`SELECT count(*)` with no alias) does not
+  count, and the refusal says to name it with `AS` or to qualify the column with the source's alias.
+  Alias column lists rename by position, a quoted output name keeps its case where the engine does,
+  and a CTE inside a scalar subquery still sees the outer query. A key a `USING` join compares must
+  be declared on the side of that join it comes from, and a name a `NATURAL` join compares from a
+  CTE or subquery must be declared on the tables of that join. An output alias stands for itself
+  only as a whole `ORDER BY` or `GROUP BY` item, or as a window-function alias in `QUALIFY` (DuckDB,
+  Snowflake, BigQuery, Databricks), where engines read the alias. Anywhere else, including
+  `HAVING`, expressions and `FILTER`, the engine reads the input column of that name, so `SELECT
+  secret_col AS secret_col FROM orders` is refused, and so is an alias referenced in `HAVING`.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
