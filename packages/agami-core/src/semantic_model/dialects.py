@@ -94,6 +94,7 @@ class Dialect:
     name: StorageType = "PostgreSQL"
     limit_style: str = "limit"  # "limit" | "top" | "fetch"
     fk_enforced: bool = True    # False => always confirm inferred FKs by overlap
+    unique_enforced: bool = True  # False => a declared unique key is confirmed on the data first
     # True where a backslash escapes inside a string literal by default, so a name ending in one
     # would end the literal early (#439). Introspection reads skip the model pass, so this escaping
     # is their remaining defence.
@@ -211,6 +212,20 @@ class Dialect:
             "ORDER BY kcu.ordinal_position"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        """Each unique key other than the primary key, one row per column: `constraint_name`,
+        `column_name`, in key order. None where the engine has no catalog of them."""
+        return (
+            "SELECT tc.constraint_name, kcu.column_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON tc.constraint_name = kcu.constraint_name "
+            "AND tc.table_schema = kcu.table_schema AND tc.table_name = kcu.table_name "
+            "WHERE tc.constraint_type = 'UNIQUE' "
+            f"AND tc.table_schema = {self.quote_lit(schema)} "
+            f"AND tc.table_name = {self.quote_lit(table)} "
+            "ORDER BY tc.constraint_name, kcu.ordinal_position"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # Also returns from_schema / to_schema so introspect can flag cross-schema joins and
         # resolve a target unambiguously when two schemas share a table name. ccu.table_schema
@@ -273,6 +288,35 @@ class PostgreSQL(Dialect):
             "ORDER BY k.ord"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Unique constraints and unique indexes (a unique index with no constraint enforces the same
+        # thing). Partial and expression indexes are left out: neither makes the column unique.
+        # indnkeyatts leaves out a covering index's INCLUDE columns.
+        return (
+            "SELECT con.conname AS constraint_name, a.attname AS column_name, k.ord "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum "
+            "WHERE con.contype = 'u' "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "UNION "
+            "SELECT ic.relname AS constraint_name, a.attname AS column_name, k.ord "
+            "FROM pg_index i "
+            "JOIN pg_class ic ON ic.oid = i.indexrelid "
+            "JOIN pg_class c ON c.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
+            "WHERE i.indisunique AND NOT i.indisprimary "
+            "AND i.indpred IS NULL AND i.indexprs IS NULL AND k.ord <= i.indnkeyatts "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "ORDER BY constraint_name, ord"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # unnest(conkey, confkey) pairs the columns of a composite key in declaration order, and
         # to_schema is the referenced table's own schema, which may differ from the constraint's.
@@ -311,11 +355,13 @@ class Supabase(PostgreSQL):
 class Redshift(PostgreSQL):
     name = "Redshift"
     fk_enforced = False  # Redshift declares but does not enforce FKs
+    unique_enforced = False  # nor unique keys
 
     # Redshift has no LATERAL and no unnest(...) WITH ORDINALITY, so the pg_constraint queries
     # PostgreSQL uses would fail there. It keeps the information_schema ones.
     sql_primary_keys = Dialect.sql_primary_keys
     sql_foreign_keys = Dialect.sql_foreign_keys
+    sql_unique_keys = Dialect.sql_unique_keys
 
     # Columns come from svv_columns, not information_schema.columns. A late-binding view (CREATE
     # VIEW ... WITH NO SCHEMA BINDING) is listed in information_schema.tables but its columns are not
@@ -369,6 +415,21 @@ class MySQL(Dialect):
     def duration_days_expr(self, start: str, end: str) -> str:
         return f"DATEDIFF({end}, {start})"
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Every unique index (a UNIQUE constraint is one). sub_part set means a prefix index, which
+        # only makes the prefix unique; a functional index part has no column_name.
+        return (
+            "SELECT index_name AS constraint_name, column_name FROM information_schema.statistics "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND non_unique = 0 AND index_name <> 'PRIMARY' "
+            "AND index_name NOT IN (SELECT index_name FROM information_schema.statistics "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND (sub_part IS NOT NULL OR column_name IS NULL)) "
+            "ORDER BY index_name, seq_in_index"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # MySQL exposes the target (incl. its schema) directly on key_column_usage.
         return (
@@ -392,6 +453,7 @@ class MySQL(Dialect):
 class Snowflake(Dialect):
     name = "Snowflake"
     backslash_escapes = True
+    unique_enforced = False  # Snowflake declares unique keys but does not enforce them
     _SYS_SCHEMAS = ("INFORMATION_SCHEMA",)
 
     def duration_days_expr(self, start: str, end: str) -> str:
@@ -408,11 +470,23 @@ class Snowflake(Dialect):
 class DuckDB(Dialect):
     name = "DuckDB"
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT constraint_index AS constraint_name, unnest(constraint_column_names) AS column_name "
+            "FROM duckdb_constraints() WHERE constraint_type = 'UNIQUE' "
+            f"AND schema_name = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "ORDER BY constraint_index"
+        )
+
 
 class Databricks(Dialect):
     name = "Databricks"
     backslash_escapes = True
     fk_enforced = False  # Unity Catalog constraints are informational
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None  # Unity Catalog has no unique constraint
 
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
@@ -436,6 +510,9 @@ class Trino(Dialect):
     def sql_foreign_keys(self, schema: str) -> str:
         return "SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column WHERE 1=0"
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return None  # varies per connector; skip
 
@@ -450,6 +527,22 @@ class SQLServer(Dialect):
 
     def duration_days_expr(self, start: str, end: str) -> str:
         return f"DATEDIFF(day, {start}, {end})"
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Unique constraints and unique indexes alike; a filtered index is unique only over its
+        # filter, and an INCLUDE column is not part of the key.
+        return (
+            "SELECT i.name AS constraint_name, col.name AS column_name "
+            "FROM sys.indexes i "
+            "JOIN sys.tables t ON t.object_id = i.object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+            "JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id "
+            "WHERE i.is_unique = 1 AND i.is_primary_key = 0 AND i.has_filter = 0 "
+            "AND ic.is_included_column = 0 "
+            f"AND s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
+            "ORDER BY i.name, ic.key_ordinal"
+        )
 
     def sql_foreign_keys(self, schema: str) -> str:
         # SQL Server's constraint_column_usage works for FK targets.
@@ -526,6 +619,9 @@ class BigQuery(Dialect):
             "ORDER BY kcu.ordinal_position"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None  # BigQuery has no unique constraint
+
     def sql_foreign_keys(self, schema: str) -> str:
         return (
             "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
@@ -585,6 +681,17 @@ class SQLite(Dialect):
         return (
             "SELECT name AS column_name FROM pragma_table_info("
             f"{self.quote_lit(table)}) WHERE pk > 0 ORDER BY pk"
+        )
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # UNIQUE constraints and CREATE UNIQUE INDEX alike; origin 'pk' is the primary key's own
+        # index, and a partial index is unique only over its WHERE.
+        return (
+            "SELECT il.name AS constraint_name, ii.name AS column_name "
+            f"FROM pragma_index_list({self.quote_lit(table)}) il "
+            "JOIN pragma_index_info(il.name) ii "
+            "WHERE il.\"unique\" = 1 AND il.origin <> 'pk' AND il.partial = 0 "
+            "ORDER BY il.name, ii.seqno"
         )
 
     def sql_foreign_keys(self, schema: str) -> str:
@@ -655,6 +762,17 @@ class Oracle(Dialect):
             "WHERE ac.constraint_type = 'P' "
             f"AND ac.owner = {self.quote_lit(schema)} "
             f"AND ac.table_name = {self.quote_lit(table)} ORDER BY acc.position"
+        )
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT ac.constraint_name, acc.column_name FROM all_constraints ac "
+            "JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name "
+            "AND ac.owner = acc.owner "
+            "WHERE ac.constraint_type = 'U' "
+            f"AND ac.owner = {self.quote_lit(schema)} "
+            f"AND ac.table_name = {self.quote_lit(table)} "
+            "ORDER BY ac.constraint_name, acc.position"
         )
 
     def sql_foreign_keys(self, schema: str) -> str:

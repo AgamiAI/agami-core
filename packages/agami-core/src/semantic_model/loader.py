@@ -261,6 +261,8 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             t.grain = [g for g in t.grain if not hidden.column_hidden(t.schema_name, t.name, g)]
+            t.unique_keys = [k for k in t.unique_keys
+                             if not any(hidden.column_hidden(t.schema_name, t.name, c) for c in k)]
             if t.default_filters:
                 alias = bare_name(t.name)
                 t.default_filters = [
@@ -436,6 +438,8 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
                 if hidden is not None:
                     hidden.keep(t.schema_name, t.name, kept, t.columns)
                 t.columns = kept
+                served = {c.name for c in kept}
+                t.unique_keys = [k for k in t.unique_keys if set(k) <= served]
                 # ...and prune those dropped columns out of column_groups, else a group still
                 # naming an excluded column fails the column_group_missing_column check on load
                 # (excluding a deep table's column would otherwise break the whole model).

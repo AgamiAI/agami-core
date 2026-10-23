@@ -12,6 +12,27 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
+  fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
+  alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out
+  many-to-one. Unique keys are now read from the catalog on PostgreSQL (unique constraints and
+  unique indexes), MySQL, SQLite, SQL Server, Oracle and DuckDB, and kept on the table as
+  `unique_keys`. Snowflake and Redshift declare unique keys without enforcing them, so one is kept
+  only when the data bears it out; BigQuery, Databricks and Trino have none. A join is one-to-one
+  when its columns are the whole of a key on both sides, and the same rule now labels a join a
+  query writes that the model doesn't declare, a join to a grouped CTE, and the references
+  enrichment adds. When no key settles a join but its many side turns out unique in the data, the
+  label is kept and the join waits for review with a note saying so, since data that is unique
+  today is not a promise. A refresh relabels each join introspection approved itself from the
+  database's keys and lists it under `joins corrected from the database's constraints`; a join a
+  person signed off is never changed. Labelling reads each table's own keys, so two tables of one
+  name in two schemas no longer lend each other a key.
+
+  **Reading a model:** a table that sets `unique_keys` is refused by a release older than this
+  one, which does not know the key — upgrade the server before the plugin.
+
 ### Security
 
 - **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**
