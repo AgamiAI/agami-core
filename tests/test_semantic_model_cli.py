@@ -69,7 +69,7 @@ def _run(args):
 
 def test_set_units_stamps_currency_on_money_columns(tmp_path):
     _model(tmp_path)
-    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD"])
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD", "--yes"])
     d = json.loads(out)
     assert rc == 0 and d["unit"] == "USD" and d["set"] >= 1, d
     orders = yaml.safe_load((tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())
@@ -94,9 +94,53 @@ def test_set_units_columns_override_detection(tmp_path):
 
 def test_set_units_is_idempotent(tmp_path):
     _model(tmp_path)
-    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] >= 1
+    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD", "--yes"])[1])["set"] >= 1
     # re-running skips columns that already carry a unit → nothing re-stamped
-    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] == 0
+    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD", "--yes"])[1])["set"] == 0
+
+
+def _orders_cols(root: Path) -> dict:
+    t = yaml.safe_load((root / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())
+    return {c["name"]: c for c in t["columns"]}
+
+
+def _add_order_columns(root: Path, *cols: dict) -> None:
+    p = root / "subject_areas" / "s" / "tables" / "orders.yaml"
+    t = yaml.safe_load(p.read_text())
+    t["columns"].extend(cols)
+    p.write_text(yaml.safe_dump(t))
+
+
+def test_set_units_without_yes_only_prints_the_plan(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD"])
+    d = json.loads(out)
+    assert rc == 0 and d["set"] == 0, d
+    assert {(p["table"], p["column"], p["unit"]) for p in d["planned"]} == {("orders", "total", "USD")}
+    assert "unit" not in _orders_cols(tmp_path)["total"]   # nothing written
+
+
+def test_set_units_uses_the_unit_a_name_states(tmp_path):
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "revenue_usd_millions", "type": "decimal"},
+                       {"name": "total_minutes", "type": "integer"})
+    d = json.loads(_run(["set-units", str(tmp_path), "--currency", "EUR"])[1])
+    assert {p["column"]: p["unit"] for p in d["planned"]} == {
+        "total": "EUR", "revenue_usd_millions": "USD_millions"}
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "EUR", "--yes"])
+    assert rc == 0 and json.loads(out)["set"] == 2, out
+    cols = _orders_cols(tmp_path)
+    assert cols["revenue_usd_millions"]["unit"] == "USD_millions" and cols["total"]["unit"] == "EUR"
+    assert "unit" not in cols["total_minutes"]
+
+
+def test_set_units_columns_write_only_those(tmp_path):
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "gross_usd", "type": "decimal"})
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD", "--columns", "orders.total"])
+    assert rc == 0 and json.loads(out)["set"] == 1, out
+    cols = _orders_cols(tmp_path)
+    assert cols["total"]["unit"] == "USD" and "unit" not in cols["gross_usd"]
 
 
 def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path):
@@ -808,6 +852,15 @@ def test_suggest_units_finds_money_columns(tmp_path):
     assert ("orders", "total") in names            # numeric + money-named
     assert ("order_items", "qty") not in names      # a count, not money
     assert all(c["column"] != "id" for c in cols)   # ids excluded
+
+
+def test_suggest_units_suggests_the_unit_a_name_states(tmp_path):
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "revenue_usd_millions", "type": "decimal"},
+                       {"name": "duration_minutes", "type": "integer"})
+    cols = {c["column"]: c["suggested_unit"]
+            for c in json.loads(_run(["suggest-units", str(tmp_path)])[1])["money_columns"]}
+    assert cols == {"total": None, "revenue_usd_millions": "USD_millions"}
 
 
 def _model_with_pending(root: Path) -> None:

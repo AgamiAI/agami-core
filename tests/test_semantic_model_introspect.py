@@ -539,6 +539,33 @@ def test_detect_money_column_handles_word_boundaries():
         assert not build.detect_money_column(c), f"{c} should NOT be money"
 
 
+@pytest.mark.parametrize("name", ["duration_minutes", "total_minutes", "total_hours",
+                                  "credit_hours", "points_balance", "total_weight",
+                                  "totalMinutes", "reading_units", "balance_pts",
+                                  "total_seconds", "duration_secs"])
+def test_non_money_unit_words_are_not_money(name):
+    assert not build.detect_money_column(name)
+
+
+@pytest.mark.parametrize("name", ["gross_usd", "value_usd", "balance_usd", "fx_dollar",
+                                  "amount_total", "total_amount", "revenueUSDMillions",
+                                  "revenue_per_day", "cost_per_kg", "fare_try",
+                                  "second_payment_amount", "second_installment_fee",
+                                  "hour_cost", "cost_per_hour"])
+def test_currency_named_and_money_named_columns_are_money(name):
+    assert build.detect_money_column(name)
+
+
+@pytest.mark.parametrize("name,unit", [
+    ("revenue_usd_millions", "USD_millions"), ("revenueUSDMillions", "USD_millions"),
+    ("gross_usd", "USD"), ("fx_dollar", "USD"), ("cost_usd_per_day", "USD/day"),
+    ("monthly_fee_inr_thousands", "INR_thousands/month"), ("total_amount", None),
+    ("try_count", None),   # a leading ISO-looking word is not a currency
+])
+def test_suggest_unit_reads_currency_scale_and_period_from_the_name(name, unit):
+    assert build.suggest_unit(name) == unit
+
+
 # ---------------------------------------------------------------------------
 # Cross-schema relationships (Case 1): schema is stamped on every edge, declared
 # cross-schema FKs are surfaced for review (not auto-approved), and the inferred
