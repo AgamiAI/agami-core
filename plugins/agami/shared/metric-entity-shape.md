@@ -23,7 +23,7 @@ YAML when building them during onboarding/enrichment. The data below is
 
 Fields: `name`, `description`, `calculation` (prose intent — **required**,
 provider-portable), `bindings` (per-dialect SQL keyed by `StorageType`),
-`source_tables`, `other_names`, `unit` (optional, e.g. a currency ISO code),
+`source_tables`, `other_names`, `unit` (optional: a currency ISO code, optionally scaled and/or a rate — `USD`, `USD_millions`, `USD/day`, `USD_millions/year` — or a plain label),
 `subject_areas` (optional; only for cross-cutting metrics). Trust:
 `confidence` + `review_state` (declared → `inferred`/`unreviewed`; pure guess →
 `proposed`/`unreviewed`).

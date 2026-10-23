@@ -53,6 +53,12 @@ from catalog_helpers import make_catalog_runner
     ("total_cost", "decimal", False, "additive"),
     ("account_balance", "decimal", False, "additive"),   # stock: summable across accounts
     ("inventory_on_hand", "integer", False, "additive"),
+    ("units_sold", "integer", False, "additive"),
+    ("shipped_units", "integer", False, "additive"),
+    ("qty_sold", "integer", False, "additive"),
+    # a per-entity reading: the name doesn't settle that SUM means anything (#515)
+    ("reading_units", "float", False, "unknown"),
+    ("sensor_units", "float", False, "unknown"),
     # unrecognized numeric → unknown (safe; never enforced)
     ("xyz", "decimal", False, "unknown"),
     ("v_1", "float", False, "unknown"),
