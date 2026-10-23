@@ -1,6 +1,7 @@
 # _python.sh — which Python agami runs, on every OS. Sourced (never run) by `sm` and `py`, so the two
 # can never disagree about the interpreter: $AGAMI_PYTHON, then the one agami-connect configured
-# (`.config` tool_paths.python3), then python3 / python on PATH — never the Windows Store stub.
+# (`.config` tool_paths.python3), then python3 / python on PATH — never the Windows Store stub, and
+# not a pip-less one `sm install` could never make current while a better one is on PATH.
 # shellcheck shell=bash
 
 # On Windows, `python3` (and often `python`) may be the Microsoft Store's App Execution Alias: a stub
@@ -15,13 +16,21 @@ usable_python() {
   esac
 }
 
+# The first Python on PATH that `sm install` can bring current, so an activated project venv with no
+# pip and an old or missing agami-core doesn't shadow a working one later on PATH (#529). With none,
+# the first usable one, so `sm` can say what is wrong with it.
+_PY_VERSION_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_plugin_version.py"
 path_python() {
-  local c p
+  local c p rc first=""
   for c in python3 python; do
     while IFS= read -r p; do
-      usable_python "$p" && { echo "$p"; return; }
+      usable_python "$p" || continue
+      [ -n "$first" ] || first="$p"
+      rc=0; "$p" "$_PY_VERSION_HELPER" --usable </dev/null >/dev/null 2>&1 || rc=$?
+      [ "$rc" -eq 3 ] || { echo "$p"; return; }
     done < <(type -ap "$c" 2>/dev/null)
   done
+  [ -n "$first" ] && echo "$first"
 }
 
 # The configured interpreter, read in plain shell: it is how a machine whose only `python3` is that stub
