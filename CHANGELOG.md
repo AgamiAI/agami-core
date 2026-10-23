@@ -21,6 +21,20 @@ below corresponds to one such version.
   it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
   installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
+### Added
+
+- **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
+  of a metric's formula ("gives no value when the start date is missing") went into its description
+  or calculation, where it reads as part of the definition. A metric now takes an optional
+  `caveats` list, validated like a column's (no empty entries) and editable through `sm curate`
+  and the model explorer. It is served wherever the metric is: the metric's entry in
+  `get_datasource_schema`, metric search, the admin model page, the explorer's metric card and the
+  review queue. The validator reads it too: a metric caveat saying a missing value counts as 0
+  silences `metric_null_filled` the way the calculation saying so already did.
+
+  **Reading a model:** a metric that sets `caveats` is refused by a release older than this one,
+  which does not know the key.
+
 ## [0.9.18] — 2026-10-21
 
 ### Added
