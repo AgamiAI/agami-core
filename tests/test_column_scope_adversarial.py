@@ -208,12 +208,73 @@ BESIDE_A_SOURCE = [
     ("SELECT (SELECT secret_col) FROM orders", "secret_col"),
     ("SELECT id FROM orders WHERE EXISTS "
      "(SELECT 1 FROM (SELECT 1 AS n) z WHERE secret_col = 1)", "secret_col"),
+    # A CTE or derived body cannot see its owner's sources but does see the queries further out.
+    ("SELECT (WITH c AS (SELECT secret_col AS n) SELECT n FROM c) FROM orders", "secret_col"),
+    ("SELECT (SELECT n FROM (SELECT secret_col AS n) z) FROM orders", "secret_col"),
+    # An alias list renames by position: `x` supplies `n`, not the `secret_col` it renamed.
+    ("WITH c(secret_col) AS (SELECT 1) SELECT secret_col FROM orders, c AS x(n)", "secret_col"),
+    # A physical table in parentheses: its alias names the table, not a column it supplies.
+    ("SELECT secret_col FROM orders, (customers) AS secret_col", "secret_col"),
+    # An output alias names the select's result, not its input: everywhere but ORDER BY / GROUP BY
+    # / HAVING the engine reads the input column of that name.
+    ("SELECT secret_col AS secret_col FROM orders", "secret_col"),
+    ("SELECT max(secret_col) AS secret_col FROM orders", "secret_col"),
+    ("SELECT 1 AS secret_col FROM orders WHERE secret_col = 'x'", "secret_col"),
+    ("SELECT id, row_number() OVER (ORDER BY secret_col) AS secret_col FROM orders", "secret_col"),
+    ("SELECT secret_col FROM (SELECT secret_col AS secret_col FROM orders) d", "secret_col"),
+    ("SELECT max(id) AS secret_col FROM orders ORDER BY max(secret_col)", "secret_col"),
+    # A USING / NATURAL join merges the name with the physical table's column, and compares it.
+    ("SELECT secret_col FROM orders LEFT JOIN (SELECT 'x' AS secret_col) d USING (secret_col)",
+     "secret_col"),
+    ("SELECT secret_col FROM orders NATURAL LEFT JOIN (SELECT 'x' AS secret_col) d", "secret_col"),
+    ("WITH c(secret_col) AS (SELECT 'x') SELECT secret_col FROM orders LEFT JOIN c "
+     "USING (secret_col)", "secret_col"),
+    ("SELECT o.id FROM orders o JOIN (SELECT 'x' AS secret_col) d USING (secret_col)", "secret_col"),
+    ("SELECT id FROM orders NATURAL JOIN (SELECT 'x' AS secret_col) d", "secret_col"),
+    # Alias names past a CTE's outputs rename nothing (DuckDB ignores them).
+    ("WITH c(a, secret_col) AS (SELECT 1) SELECT secret_col FROM orders, c", "secret_col"),
+    # VALUES and a table function name their columns their own way, not after the alias.
+    ("SELECT secret_col FROM orders, (VALUES (1)) AS secret_col", "secret_col"),
 ]
 
 
 @pytest.mark.parametrize("sql,offender", BESIDE_A_SOURCE)
 def test_undeclared_column_beside_a_source_refused(sql, offender):
     _assert_columns_refused(rt.check_column_scope(sql, _scope_org()), offender)
+
+
+def _postgres_org():
+    org = _scope_org()
+    org.storage_connections = [m.StorageConnection(name="c", storage_type="PostgreSQL")]
+    return org
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT x FROM orders, (SELECT secret_col AS x) d",
+    "SELECT x FROM orders o JOIN (SELECT upper(secret_col) AS x) d ON true",
+])
+def test_duckdb_reads_an_earlier_from_item_inside_a_derived_table(sql):
+    """DuckDB makes a FROM / JOIN subquery lateral without the keyword."""
+    org = _scope_org()
+    org.storage_connections = [m.StorageConnection(name="c", storage_type="DuckDB")]
+    _assert_columns_refused(rt.check_column_scope(sql, org), "secret_col")
+
+
+def test_postgres_names_a_one_column_function_after_its_alias():
+    org = _postgres_org()
+    assert rt.check_column_scope(
+        "SELECT g, amount FROM generate_series(1, 3) AS g, orders", org) is None
+
+
+def test_a_quoted_source_output_is_not_the_unquoted_column_on_postgres():
+    """`"SECRET_COL"` keeps its case on Postgres, so the bare `secret_col` is `orders`' column."""
+    org = _postgres_org()
+    _assert_columns_refused(rt.check_column_scope(
+        'WITH c AS (SELECT 1 AS "SECRET_COL") SELECT secret_col FROM orders, c', org),
+        "secret_col")
+    assert rt.check_column_scope(
+        'WITH c AS (SELECT 1 AS "SECRET_COL") SELECT "SECRET_COL", amount FROM orders, c',
+        org) is None
 
 
 def test_refusal_beside_a_source_says_how_to_name_it():
@@ -236,8 +297,17 @@ NAMED_BY_A_SOURCE = [
     "SELECT a, amount FROM orders JOIN LATERAL (SELECT 1 AS a) l ON true",
     "SELECT a, amount FROM (VALUES (1)) AS v(a), orders",
     "WITH c(a) AS (VALUES (1)) SELECT a, amount FROM orders, c",
-    "SELECT g, amount FROM generate_series(1, 3) AS g, orders",
     "SELECT u, amount FROM orders o CROSS JOIN UNNEST(ARRAY[1]) AS t(u)",
+    # A partial alias list renames only its positions; the rest keep their names.
+    "WITH c(k) AS (SELECT id, region FROM customers) SELECT region, amount FROM orders, c",
+    "SELECT region, amount FROM orders, (SELECT id, region FROM customers) AS s(k)",
+    "WITH c(secret_col) AS (SELECT 1) SELECT n, amount FROM orders, c AS x(n)",
+    # Output aliases where the engine reads them, and USING / NATURAL on declared columns.
+    "SELECT amount AS a FROM orders ORDER BY a",
+    "SELECT status AS s, count(*) AS n FROM orders GROUP BY s HAVING n > 1",
+    "SELECT id FROM orders JOIN customers USING (id)",
+    "SELECT id FROM orders NATURAL JOIN customers",
+    "SELECT n FROM orders JOIN (SELECT 1 AS id, 2 AS n) d USING (id)",
     # A union's ORDER BY inside a derived table names the union's output, not the outer query's.
     "SELECT x.id FROM (SELECT id FROM orders UNION SELECT id FROM customers ORDER BY id) x",
 ]

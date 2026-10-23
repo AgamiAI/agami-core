@@ -61,6 +61,7 @@ import guardrail
 try:
     import sqlglot
     from sqlglot import expressions as exp
+    from sqlglot.dialects.dialect import Dialect, NormalizationStrategy
     from sqlglot.errors import ErrorLevel, ParseError, TokenError
 
     _HAVE_SQLGLOT = True
@@ -1843,10 +1844,8 @@ def check_column_scope(sql: str, org: Datasource,
     colidx = ctx.column_index if ctx is not None else _column_index(org)
     if not colidx:
         return None
-    if ctx is not None:
-        tree = ctx.tree
-    else:
-        tree = _parse_sql(sql, _dialect_of(org)[0])
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
+    tree = ctx.tree if ctx is not None else _parse_sql(sql, dialect)
     if tree is None or tree.find(exp.Select) is None:
         return None
 
@@ -1899,11 +1898,13 @@ def check_column_scope(sql: str, org: Datasource,
                 aliases[f"{tbl.db}.{name}".lower()] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
+    merged: dict[int, tuple[set[str], bool]] = {}   # id(select) -> (USING keys, has NATURAL)
     for sel in tree.find_all(exp.Select):
         for src in _from_sources(sel):
-            names = _source_column_names(src, cte_refs)
+            names = _source_column_names(src, cte_refs, dialect)
             if names is not None:
                 source_cols.setdefault(id(sel), set()).update(names)
+        merged[id(sel)] = _merged_columns(sel, dialect)
     for al in tree.find_all(exp.Alias):
         if not al.alias:
             continue
@@ -1923,6 +1924,7 @@ def check_column_scope(sql: str, org: Datasource,
         if not name:
             continue
         lname = name.lower()
+        ckey = _column_key(col.this, dialect)
         chain = _select_chain(col)
         sel = chain[0] if chain else None
         if col.table:
@@ -1948,12 +1950,16 @@ def check_column_scope(sql: str, org: Datasource,
         # supplies the name, then outward through correlation. It is refused at the first scope
         # with a declared table that could supply it instead: that table's physical columns are
         # not known, so an undeclared one of that name would be read (#339).
-        scopes = _column_scopes(col)
-        if scopes and lname in output_by_select.get(id(scopes[0]), set()):
+        scopes = _column_scopes(col, dialect)
+        if (scopes and lname in output_by_select.get(id(scopes[0]), set())
+                and _reads_output_alias(col, scopes[0])):
             continue  # a select-list output alias of THIS select, not a base column
         for s in scopes:
             local = {t for t in direct_phys.get(id(s), set()) if t in declared}
-            if any(lname in declared[t] for t in local) or lname in source_cols.get(id(s), set()):
+            using, natural = merged.get(id(s), (set(), False))
+            supplied = (ckey in source_cols.get(id(s), set())
+                        and not natural and ckey not in using)
+            if any(lname in declared[t] for t in local) or supplied:
                 break  # declared, or named by a CTE / derived source (possibly ambiguous — the DB's call)
             if local:
                 offending.add(name)
@@ -1961,6 +1967,18 @@ def check_column_scope(sql: str, org: Datasource,
                 if id(s) in source_cols:
                     beside_source.add(name)
                 break
+
+    # The names a join compares without a column reference: USING's list, and for NATURAL every
+    # name a CTE / derived source supplies. Each is read from the physical tables too, so each
+    # must be declared on all of them, or the join is an equality test on an undeclared column.
+    for sel in tree.find_all(exp.Select):
+        using, natural = merged.get(id(sel), (set(), False))
+        compared = using | (source_cols.get(id(sel), set()) if natural else set())
+        local = {t for t in direct_phys.get(id(sel), set()) if t in declared}
+        for key in sorted(compared):
+            if local and not all(key.lower() in declared[t] for t in local):
+                offending.add(key)
+                judged.setdefault(key, set()).update(local)
 
     if not offending:
         return None
@@ -4092,24 +4110,56 @@ def _enclosing_select(node: "exp.Expression") -> "exp.Select | None":
     return p
 
 
-def _column_scopes(node: "exp.Expression") -> list["exp.Select"]:
+def _column_scopes(node: "exp.Expression", dialect: "str | None" = None) -> list["exp.Select"]:
     """The SELECTs whose sources an unqualified column can bind to, innermost first.
 
-    `_enclosing_selects` stopped where SQL stops visibility: a CTE body and a derived table in
-    FROM / JOIN cannot see the query that reads them (a LATERAL one can, which is why only a
-    subquery sitting directly in FROM / JOIN ends the walk). Past that point a name the scope does
-    not supply is an error on the engine, not a correlated reference.
+    `_enclosing_selects` minus each query that owns a CTE or FROM / JOIN derived table the column
+    sits in: that body cannot see its owner's sources (a LATERAL one can, which is why only a
+    subquery sitting directly in FROM / JOIN counts), but it still sees every query further out, so
+    `SELECT (WITH c AS (SELECT secret_col AS n) SELECT n FROM c) FROM orders` binds to `orders`.
+    DuckDB makes every FROM / JOIN subquery lateral without the keyword, so there its owner stays.
     """
     scopes: list["exp.Select"] = []
+    hidden: set[int] = set()
     p = node.parent
     while p is not None:
-        if isinstance(p, exp.Select):
+        if isinstance(p, exp.Select) and id(p) not in hidden:
             scopes.append(p)
-        elif isinstance(p, exp.CTE) or (
-                isinstance(p, exp.Subquery) and isinstance(p.parent, (exp.From, exp.Join))):
-            break
+        if isinstance(p, exp.CTE) and p.parent is not None:
+            hidden.add(id(p.parent.parent))  # CTE -> With -> the query carrying it
+        elif (isinstance(p, exp.Subquery) and isinstance(p.parent, (exp.From, exp.Join))
+              and dialect != "duckdb"):
+            hidden.add(id(p.parent.parent))
         p = p.parent
     return scopes
+
+
+def _reads_output_alias(col: "exp.Column", sel: "exp.Select") -> bool:
+    """Whether an unqualified name in `sel` can mean one of `sel`'s own select-list aliases: only in
+    its ORDER BY, GROUP BY or HAVING, and not inside an aggregate or window there. Anywhere else,
+    the alias's own expression included, the engine reads the input column, so
+    `SELECT secret_col AS secret_col FROM orders` reads `orders.secret_col`."""
+    p = col.parent
+    while p is not None and p is not sel:
+        if isinstance(p, (exp.AggFunc, exp.Window)):
+            return False
+        if isinstance(p, (exp.Order, exp.Group, exp.Having)) and p.parent is sel:
+            return True
+        p = p.parent
+    return False
+
+
+def _merged_columns(sel: "exp.Select", dialect: "str | None") -> "tuple[set[str], bool]":
+    """The `_column_key`s a USING join merges in `sel`, and whether a NATURAL join merges more.
+
+    A merged column is the physical side's value, or COALESCE of both, so a CTE or derived source
+    naming it does not make it the source's."""
+    using: set[str] = set()
+    natural = False
+    for j in sel.args.get("joins") or []:
+        natural = natural or str(j.args.get("method") or "").upper() == "NATURAL"
+        using |= {k for k in (_column_key(u, dialect) for u in j.args.get("using") or []) if k}
+    return using, natural
 
 
 def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
@@ -4120,48 +4170,86 @@ def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
     return items + [j.this for j in sel.args.get("joins") or []]
 
 
-def _query_column_names(query: "exp.Expression") -> set[str]:
-    """The folded output names of a query a CTE or derived table wraps.
+def _column_key(ident: object, dialect: "str | None") -> Optional[str]:
+    """A column name as the engine resolves it, so two spellings compare equal exactly when the
+    engine reads them as one column; None for anything that is not a plain identifier.
+
+    sqlglot's per-dialect normalization: a quoted name keeps its case where the engine does
+    (Postgres, Snowflake, Oracle), so `"SECRET_COL"` is not `secret_col` there. MySQL's strategy is
+    case-sensitive because its TABLE names can be, but its column names never are, so they fold.
+    """
+    if not isinstance(ident, exp.Identifier) or not ident.name:
+        return None
+    d = Dialect.get_or_raise(dialect)
+    if d.NORMALIZATION_STRATEGY is NormalizationStrategy.CASE_SENSITIVE:
+        return ident.name.lower()
+    return d.normalize_identifier(ident.copy()).name
+
+
+def _renamed(names: "list[Optional[str]]", renames: "list[Optional[str]]") -> "list[Optional[str]]":
+    """`names` with an alias column list applied: by position, keeping any unrenamed suffix. Names
+    past the outputs rename nothing: DuckDB ignores them, so they must not vouch for a column."""
+    return renames[:len(names)] + names[len(renames):]
+
+
+def _query_column_names(query: "exp.Expression", dialect: "str | None") -> "list[Optional[str]]":
+    """The output names of a query a CTE or derived table wraps, in order, as `_column_key`s.
 
     The first arm of a set operation names its columns. An output with no readable name — an
-    unaliased expression, a star — is left out, so a column naming it is judged as though no
-    source supplied it: the fail-closed direction.
+    unaliased expression, a star — is None: it holds its position for an alias list to rename, and
+    unrenamed it vouches for no column, the fail-closed direction.
     """
     while isinstance(query, (exp.Subquery, exp.SetOperation)):
         query = query.this
-    names: set[str] = set()
+    names: list[Optional[str]] = []
     for e in query.expressions if isinstance(query, exp.Select) else ():
-        if isinstance(e, exp.Alias) and e.alias:
-            names.add(e.alias.lower())
-        elif isinstance(e, exp.Column) and not isinstance(e.this, exp.Star) and e.name:
-            names.add(e.name.lower())
+        if isinstance(e, exp.Alias):
+            names.append(_column_key(e.args.get("alias"), dialect))
+        elif isinstance(e, exp.Column) and not isinstance(e.this, exp.Star):
+            names.append(_column_key(e.this, dialect))
+        else:
+            names.append(None)
     return names
 
 
-def _source_column_names(src: "exp.Expression",
-                         cte_refs: "dict[int, exp.CTE]") -> Optional[set[str]]:
-    """The folded columns one FROM / JOIN item names, or None for a physical table — whose
-    columns are the model's to say, not the statement's."""
+def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
+                         dialect: "str | None") -> Optional[set[str]]:
+    """The `_column_key`s one FROM / JOIN item supplies, or None for a physical table, whose
+    columns are the model's to say, not the statement's.
+
+    Alias column lists rename by position: a CTE's own list over its body, then the reference's
+    (`FROM c AS x(n)`) over that, so `x` supplies `n` and not the name it renamed.
+    """
     alias = src.args.get("alias")
-    listed = ({c.name.lower() for c in alias.columns if c.name}
-              if isinstance(alias, exp.TableAlias) else set())
+    renames = ([_column_key(c, dialect) for c in alias.columns]
+               if isinstance(alias, exp.TableAlias) else [])
+    inner = src
+    while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
+        inner = inner.this
+    if isinstance(inner, exp.Table) and inner is not src:
+        return None  # `(customers) AS x` is a physical table in parentheses, not a derived one
+    names: Optional[list[Optional[str]]] = None
     if isinstance(src, exp.Table):
         cte = cte_refs.get(id(src))
+        if cte is None and src.name:
+            return None
         if cte is not None:
             cte_alias = cte.args.get("alias")
-            if isinstance(cte_alias, exp.TableAlias) and cte_alias.columns:
-                return {c.name.lower() for c in cte_alias.columns if c.name}
-            return listed or _query_column_names(cte.this)
-        if src.name:
-            return None
+            own = ([_column_key(c, dialect) for c in cte_alias.columns]
+                   if isinstance(cte_alias, exp.TableAlias) else [])
+            names = _renamed(_query_column_names(cte.this, dialect), own)
     elif isinstance(src, (exp.Subquery, exp.Lateral)) and isinstance(
             src.this, (exp.Subquery, exp.Query)):
-        return listed or _query_column_names(src.this)
-    # A table function, UNNEST or VALUES: only the alias says what it returns. Postgres names a
-    # one-column function's output after the table alias, so that counts too.
-    if isinstance(alias, exp.TableAlias) and alias.name and not listed:
-        return {alias.name.lower()}
-    return listed
+        names = _query_column_names(src.this, dialect)
+    if names is not None:
+        return {n for n in _renamed(names, renames) if n}
+    # A table function, UNNEST or VALUES: only an alias column list says what it returns. Postgres
+    # alone names a one-column FUNCTION's output after the table alias; VALUES is `column1` there,
+    # and other engines name a function's columns their own way (`value`, `generate_series`).
+    if (not renames and isinstance(alias, exp.TableAlias) and dialect == "postgres"
+            and not isinstance(src, exp.Values)):
+        renames = [_column_key(alias.this, dialect)]
+    return {n for n in renames if n}
 
 
 def _enclosing_selects(node: "exp.Expression") -> list["exp.Select"]:
