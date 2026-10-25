@@ -14,6 +14,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A join rejected at sign-off between two subject areas is no longer served (#543).** Rejected joins
+  inside one area were already dropped on load, but the cross-area loaders never applied the filter,
+  so a rejected cross-area join (often the single-column piece of a composite key, which repeats
+  rows) reached `sm context`, the schema reply and a deploy with no review status, and looked usable.
+  Rejected cross-area entities and metrics had the same gap. The curation views still see them. A
+  deployment keeps serving them until its model is redeployed.
+
 - **A statement the engine rejects for a known dialect gap comes back with the rule that fixes it
   (#566).** The engine rules (Redshift: no `STRING_AGG`, unit-first `DATEADD`, `LISTAGG` beside a
   `DISTINCT` aggregate, boolean casts, …) reached a client only through `list_datasources`, and a client
