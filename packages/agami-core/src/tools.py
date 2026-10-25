@@ -3149,7 +3149,9 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     needs, and it is the same text the in-process path surfaces from `ExecutorError.msg` — the two
     paths agreeing on it is a property this slice exists to keep.
 
-    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039).** For every code whose message
+    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with one exact-match exception: a
+    `syntax` failure whose line is exactly one of `sql_dialect_rules.FIX_MESSAGES` (#566), a fixed set
+    built from our own rules, so nothing else in the stream can pass. For every code whose message
     the child derives from `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the
     exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
     is a *shared* stream, and the child writes to it before the failure line. The concrete case was
@@ -3176,6 +3178,16 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     # the parent needs, and the child's stream never touches the caller's answer.
     kind = EXIT_TO_FAILURE_KIND.get(returncode)
     if returncode not in _AUTHORED_EXIT_CODES and kind in _ERROR_MESSAGES:
+        # One exception to rebuilding, and it relays nothing the child chose freely: a dialect
+        # rule's message (#566) is relayed only when a line is EXACTLY one of the messages built from
+        # our own rules. The parent cannot rebuild it from the code, since only the child saw which
+        # construct the database rejected; an exact match means no other byte of the stream passes.
+        if kind == "syntax":
+            from sql_dialect_rules import FIX_MESSAGES
+
+            fix = next((line.strip() for line in text.splitlines() if line.strip() in FIX_MESSAGES), None)
+            if fix is not None:
+                return fix
         return _ERROR_MESSAGES[kind]
     classified = returncode in EXIT_TO_FAILURE_KIND
     # `Traceback (most recent call last):` is the stable header of every Python traceback, and a
