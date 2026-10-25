@@ -18,6 +18,8 @@ every schema call.
 
 from __future__ import annotations
 
+import re
+
 _REDSHIFT = """\
 Amazon Redshift is PostgreSQL-derived but rejects several PostgreSQL features. Write these instead:
 - No FILTER on aggregates. COUNT(*) FILTER (WHERE c) -> COUNT(CASE WHEN c THEN 1 END); \
@@ -71,7 +73,15 @@ _REDSHIFT_FIXES: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Use SUBSTRING", ("function substr(",)),
-    ("A BOOLEAN cannot", ("cannot cast type boolean to", "function btrim(boolean")),
+    (
+        "A BOOLEAN cannot",
+        (
+            "cannot cast type boolean to character varying",
+            "cannot cast type boolean to varchar",
+            "cannot cast type boolean to text",
+            "function btrim(boolean",
+        ),
+    ),
     ("Many correlated subqueries", ("correlated subquery pattern is not supported",)),
     ("FULL JOIN", ("full join is only supported",)),
     ("No GENERATE_SERIES", ("function regexp_matches(",)),
@@ -114,6 +124,26 @@ _FIX_MESSAGE: dict[tuple[str, str], str] = {
 FIX_MESSAGES: frozenset[str] = frozenset(_FIX_MESSAGE.values())
 
 
+# The primary message of a Redshift driver error, which `redshift_connector` reports as a dict of
+# PostgreSQL error fields: `{'S': 'ERROR', 'C': '42883', 'M': '<message>', 'H': ..., 'P': ...}`.
+_PRIMARY_FIELD = re.compile(r"""'M':\s*(['"])(?P<message>.*?)(?<!\\)\1""", re.DOTALL)
+
+
+def primary_diagnostic(error_text: str) -> str:
+    """The database's own one-line diagnosis, without the fields that echo the statement.
+
+    A driver error carries more than the message: a HINT, the failing line of SQL, an internal query.
+    Those echo the caller's statement, so matching the whole text would let a column named like a
+    construct, or a literal in the SQL, pick a rule that has nothing to do with the failure. The `M`
+    field when the driver reports fields, and the first line otherwise (psycopg2 puts LINE and HINT on
+    the lines after it).
+    """
+    match = _PRIMARY_FIELD.search(error_text)
+    if match is not None:
+        return match.group("message")
+    return error_text.strip().splitlines()[0] if error_text.strip() else ""
+
+
 def dialect_fix_for(engine: str | None, error_text: str | None) -> str | None:
     """The caller-facing message for a database error one dialect rule explains, or None.
 
@@ -122,7 +152,7 @@ def dialect_fix_for(engine: str | None, error_text: str | None) -> str | None:
     None when the engine has no rules or no rule claims the error.
     """
     key = _engine_key(engine)
-    lowered = (error_text or "").lower()
+    lowered = primary_diagnostic(error_text or "").lower()
     if key is None or not lowered:
         return None
     for starts, fragments in _FIXES.get(key, ()):

@@ -340,9 +340,13 @@ _ERROR_MESSAGES: dict[str, str] = {
 }
 
 
-# The kinds a dialect rule may replace (#566): the ones the generic classifier gives a statement the
-# engine could not run. Never `permission`, `auth` or the rest, whose fix is not a rewrite.
-_FIXABLE_KINDS = frozenset({"syntax", "other", "column_not_found"})
+# The kinds a dialect rule may never replace (#566): failures whose fix is not a rewrite. Everything
+# else the classifier reads from an execution error is open to a rule matched on the primary message,
+# since the classifier reads the WHOLE text and an echoed statement can push a function error into
+# `table_not_found` or `column_not_found`.
+_NOT_A_REWRITE_KINDS = frozenset(
+    {"permission", "auth", "sign_in_required", "network", "dsn", "driver_missing"}
+)
 
 
 def _classify_db_error(text: str, code: int) -> FailureKind:
@@ -3188,7 +3192,7 @@ def execute_guarded(
         # connection failure is never reported as "rewrite your SQL".
         fix = (
             sql_dialect_rules.dialect_fix_for(engine, exc.msg)
-            if exc.code == 5 and kind in _FIXABLE_KINDS else None
+            if exc.code == 5 and kind not in _NOT_A_REWRITE_KINDS else None
         )
         if fix is not None:
             kind, message = "syntax", fix

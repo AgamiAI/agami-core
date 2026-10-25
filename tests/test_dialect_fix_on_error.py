@@ -201,3 +201,43 @@ def test_a_failure_whose_fix_is_not_a_rewrite_keeps_its_kind(text, code, redshif
     )
     assert env.failure.kind != "syntax"
     assert env.failure.message not in sql_dialect_rules.FIX_MESSAGES
+
+
+# --- Matching on the primary message only (Copilot review on #569) ----------------------------
+
+
+def test_a_construct_named_only_in_the_echoed_statement_claims_nothing(redshift):
+    # psycopg2 puts the failing line of SQL after the message; a literal there is not the failure.
+    text = "column \"amount\" does not exist\nLINE 1: SELECT string_agg(note, ',') FROM orders"
+    env = execute_sql.execute_guarded(
+        "SELECT 1", PROFILE, None, executor=_Raiser(text), no_safety=True
+    )
+    assert env.failure.kind == "column_not_found"
+    assert env.failure.message not in sql_dialect_rules.FIX_MESSAGES
+
+
+def test_a_real_function_error_keeps_its_rule_whatever_the_other_fields_say(redshift):
+    # The other fields mention a table, which the whole-text classifier reads as table_not_found.
+    text = (
+        "{'S': 'ERROR', 'C': '42883', 'M': 'function string_agg(character varying, \"unknown\") "
+        "does not exist', 'H': 'see the table sales_table', 'P': '8', 'R': 'ParseFuncOrColumn'}"
+    )
+    env = execute_sql.execute_guarded(
+        "SELECT 1", PROFILE, None, executor=_Raiser(text), no_safety=True
+    )
+    assert env.failure.kind == "syntax"
+    assert env.failure.message.endswith(_rule("No STRING_AGG"))
+
+
+def test_a_boolean_cast_to_a_number_is_not_given_the_text_rule():
+    # The rule rewrites a boolean into 'true'/'false' text, which does not fix a numeric cast.
+    assert (
+        sql_dialect_rules.dialect_fix_for("redshift", "cannot cast type boolean to numeric") is None
+    )
+
+
+def test_the_primary_message_is_the_m_field_or_the_first_line():
+    fields = "{'S': 'ERROR', 'C': '42883', 'M': 'function substr(text) does not exist', 'H': 'x'}"
+    assert sql_dialect_rules.primary_diagnostic(fields) == "function substr(text) does not exist"
+    assert sql_dialect_rules.primary_diagnostic("first line\nLINE 1: SELECT 1") == "first line"
+    assert sql_dialect_rules.primary_diagnostic("") == ""
