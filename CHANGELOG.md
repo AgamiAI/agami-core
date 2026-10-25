@@ -17,8 +17,8 @@ below corresponds to one such version.
 - **A refresh rewrites only the files whose content changed (#472).** `sm introspect --append --tables
   <one>` changed one table and re-dumped every file in the model, with keys reordered, empty defaults
   added and lines re-wrapped, so a one-table refresh was a whole-model diff. `write_tree` now compares
-  what it would write with what is on disk, as parsed data (a null value or an empty list counts as absent),
-  and leaves an equal file alone, keeping its line endings and formatting. The introspection report
+  what it would write with what is on disk, as parsed data (a null value or an empty list counts as
+  absent), and leaves an equal file alone, keeping its line endings and formatting. The introspection report
   says how many files were already up to date. On a real 87-file model, rewriting it unchanged now
   touches no files.
 - **Renaming a column group carries the ambiguity anchors that name it (#487).** An anchor such as
