@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.19] — 2026-10-25
+
 ### Fixed
 
 - **A local `get_prompt_examples` ranks and caps the library, as a served one does (#573).** It returned every
