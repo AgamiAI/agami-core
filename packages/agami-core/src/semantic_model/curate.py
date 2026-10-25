@@ -626,6 +626,8 @@ def _apply_one(root: Path, op: dict, signer, role,
         if op.get("op") == "edit" and op.get("field") == "column_groups" and not op.get("column"):
             _reconcile_expose_groups(root, area, name, doc.get("schema"), old_groups,
                                      doc.get("column_groups") or {}, backups)
+            _reconcile_ambiguity_groups(root, name, doc.get("schema"), old_groups,
+                                        doc.get("column_groups") or {}, backups)
         return path
 
     if kind == "entity":
@@ -758,6 +760,54 @@ def _reconcile_expose_groups(root: Path, area: str, table: str, schema: Optional
         if changed:
             _snapshot(backups, sap)
             _dump(sap, sa)
+
+
+def _reconcile_ambiguity_groups(root: Path, table: str, schema: Optional[str],
+                                old_groups: dict, new_groups: dict,
+                                backups: "dict[Path, Optional[str]]") -> None:
+    """After a table's `column_groups` are rewritten, move every ambiguity anchor that names a
+    RENAMED group of it to the new name (#487).
+
+    A rename is a new group holding exactly the old group's columns. Without this, an anchor like
+    `orders.dates` survived the rename of `dates` to `calendar` and failed validation, so the whole
+    edit rolled back. Anything that is not a rename (a group split, merged or emptied) is left as it
+    was: the anchor then fails validation and names the ambiguity, because which of several new groups
+    should open the entry is a person's call, not ours. An anchor qualified with another schema names a
+    different table and is left alone, unless the table itself is stored without a schema."""
+    def cols(names: Any) -> frozenset:
+        return frozenset(str(c).lower() for c in (names or []))
+
+    kept = {g.lower() for g in new_groups}
+    renamed: dict[str, str] = {}
+    for group, members in old_groups.items():
+        if group.lower() in kept:
+            continue
+        same = [g for g, m in new_groups.items() if cols(m) == cols(members)]
+        if len(same) == 1:
+            renamed[group.lower()] = same[0]
+    if not renamed:
+        return
+    path = root / "datasource.yaml"
+    if not path.exists():
+        return
+    doc = _load(path) or {}
+    changed = False
+    for amb in doc.get("ambiguities") or []:
+        refs = amb.get("column_groups") or []
+        for i, ref in enumerate(refs):
+            if not isinstance(ref, str) or "." not in ref:
+                continue
+            owner, group = ref.rsplit(".", 1)
+            ref_schema, _, bare = owner.rpartition(".")
+            # A qualified anchor matches a table stored without a schema, as the validator reads it.
+            if (bare.lower() != table.lower() or group.lower() not in renamed
+                    or (ref_schema and schema and ref_schema.lower() != schema.lower())):
+                continue
+            refs[i] = f"{owner}.{renamed[group.lower()]}"
+            changed = True
+    if changed:
+        _snapshot(backups, path)
+        _dump(path, doc)
 
 
 def _filter_columns(table_doc: dict, value: Any) -> list[str]:
