@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A statement the engine rejects for a known dialect gap comes back with the rule that fixes it
+  (#566).** The engine rules (Redshift: no `STRING_AGG`, unit-first `DATEADD`, `LISTAGG` beside a
+  `DISTINCT` aggregate, boolean casts, …) reached a client only through `list_datasources`, and a client
+  that already knew its datasource skipped that call and wrote the PostgreSQL the rules warn against.
+  The database's error is still never relayed; the classifier now recognises the constructs a rule
+  covers and answers with that rule as a `syntax` failure. Before, `function string_agg(...) does not
+  exist` read as a missing column (telling the client to re-introspect) or as an unclassified failure. The forked transport relays the
+  rule only as an exact match against the messages built from the rules themselves.
+
 ### Security
 
 - **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**
