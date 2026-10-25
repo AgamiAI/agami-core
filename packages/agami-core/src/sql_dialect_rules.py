@@ -138,10 +138,15 @@ def primary_diagnostic(error_text: str) -> str:
     field when the driver reports fields, and the first line otherwise (psycopg2 puts LINE and HINT on
     the lines after it).
     """
-    match = _PRIMARY_FIELD.search(error_text)
+    lines = error_text.strip().splitlines()
+    first = lines[0] if lines else ""
+    # Only the FIRST line: a later line can be the echoed statement, and a comment in it could spell
+    # `'M': '...'` too. The field dict is on the first line whether or not an executor prefixed it
+    # ("Redshift execution error: {'S': ...}").
+    match = _PRIMARY_FIELD.search(first)
     if match is not None:
         return match.group("message")
-    return error_text.strip().splitlines()[0] if error_text.strip() else ""
+    return first
 
 
 def dialect_fix_for(engine: str | None, error_text: str | None) -> str | None:

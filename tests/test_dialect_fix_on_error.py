@@ -241,3 +241,25 @@ def test_the_primary_message_is_the_m_field_or_the_first_line():
     assert sql_dialect_rules.primary_diagnostic(fields) == "function substr(text) does not exist"
     assert sql_dialect_rules.primary_diagnostic("first line\nLINE 1: SELECT 1") == "first line"
     assert sql_dialect_rules.primary_diagnostic("") == ""
+
+
+def test_a_field_spelled_inside_the_echoed_statement_is_not_the_primary_message(redshift):
+    # A later line can be the statement, and a comment in it can spell the driver's field syntax.
+    text = (
+        'column "amount" does not exist\n'
+        "LINE 1: SELECT amount /* 'M': 'function string_agg(' */ FROM orders"
+    )
+    assert sql_dialect_rules.primary_diagnostic(text) == 'column "amount" does not exist'
+    env = execute_sql.execute_guarded(
+        "SELECT 1", PROFILE, None, executor=_Raiser(text), no_safety=True
+    )
+    assert env.failure.message not in sql_dialect_rules.FIX_MESSAGES
+
+
+def test_an_executor_prefix_before_the_field_dict_still_finds_the_message():
+    text = (
+        "Redshift execution error: {'S': 'ERROR', 'C': '42883', 'M': 'function string_agg(text) "
+        "does not exist', 'H': 'cannot cast type boolean to text'}"
+    )
+    assert sql_dialect_rules.primary_diagnostic(text) == "function string_agg(text) does not exist"
+    assert sql_dialect_rules.dialect_fix_for("redshift", text).endswith(_rule("No STRING_AGG"))
