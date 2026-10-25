@@ -22,6 +22,18 @@ below corresponds to one such version.
   served deployment is unchanged. Measured on a large local library: about 52,000 characters a call
   became about 18,000.
 
+- **A refresh rewrites only the files whose content changed (#472).** `sm introspect --append --tables
+  <one>` changed one table and re-dumped every file in the model, with keys reordered, empty defaults
+  added and lines re-wrapped, so a one-table refresh was a whole-model diff. `write_tree` now compares
+  what it would write with what is on disk, as parsed data (a null value or an empty list counts as
+  absent), and leaves an equal file alone, keeping its line endings and formatting. The introspection report
+  says how many files were already up to date. On a real 87-file model, rewriting it unchanged now
+  touches no files.
+- **Renaming a column group carries the ambiguity anchors that name it (#487).** An anchor such as
+  `orders.dates` used to fail validation after `dates` was renamed, rolling the whole edit back. A
+  rename (a new group with exactly the old group's columns) now moves the anchor; a split or merged
+  group is still left for validation to reject, naming the ambiguity.
+
 - **A join rejected at sign-off between two subject areas is no longer served (#543).** Rejected joins
   inside one area were already dropped on load, but the cross-area loaders never applied the filter,
   so a rejected cross-area join (often the single-column piece of a composite key, which repeats
