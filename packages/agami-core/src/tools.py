@@ -3127,15 +3127,22 @@ def _model_area_order(root: Path) -> list[str]:
         import yaml
 
         doc = yaml.safe_load((root / "datasource.yaml").read_text(encoding="utf-8")) or {}
+        refs = doc.get("subject_areas") or [] if isinstance(doc, dict) else []
+        # A malformed entry (`2024`, `{path: null}`) is skipped, never a failure of the call.
+        return [
+            Path(ref if isinstance(ref, str) else str((ref or {}).get("path") or "")).name
+            for ref in refs
+            if isinstance(ref, (str, dict))
+        ]
     except Exception:  # noqa: BLE001 - an unreadable model only costs the ordering
         return []
-    refs = doc.get("subject_areas") or [] if isinstance(doc, dict) else []
-    return [Path(r if isinstance(r, str) else (r or {}).get("path", "")).name for r in refs]
 
 
 def _with_example_ids(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """`docs` with their `id`, the first of two equal ids kept: an id written into the file is kept,
     else the content-derived one, as `model_store.write_examples` stores them on a served deployment."""
+    if not docs:
+        return []
     from model_store import example_id
 
     seen: set[str] = set()

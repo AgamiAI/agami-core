@@ -482,7 +482,8 @@ def test_no_library_needs_no_model_dependencies(local_library, tmp_path, monkeyp
     real = builtins.__import__
 
     def _no_yaml(name, *a, **k):
-        if name.startswith("semantic_model.loader"):
+        # Neither the YAML loader nor the Pydantic-backed store: a bare install has neither.
+        if name.startswith(("semantic_model.loader", "model_store", "semantic_model.models")):
             raise ImportError(name)
         return real(name, *a, **k)
 
@@ -527,3 +528,12 @@ def test_an_id_two_areas_share_keeps_the_model_orders_copy_whatever_the_scope(
         tools.tool_get_prompt_examples({"datasource": local_library, "area": "assets"})
     )
     assert scoped["examples"] == []
+
+
+@pytest.mark.parametrize("bad", [[2024], [{"path": None}], "not a list", None])
+def test_a_malformed_area_list_only_costs_the_ordering(local_library, tmp_path, bad):
+    import yaml
+
+    (tmp_path / "main" / "datasource.yaml").write_text(yaml.safe_dump({"subject_areas": bad}))
+    out = tools.tool_get_prompt_examples({"datasource": local_library})
+    assert _areas(out) == {"sales", "assets"}
