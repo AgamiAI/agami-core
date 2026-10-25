@@ -3073,17 +3073,28 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 },
                 separators=REPLY_SEPARATORS,
             )
+        # The model's own area order first, as a deploy reads them, then any other folder; ids are
+        # resolved across the whole library in that order BEFORE `area` narrows it, so a scoped call
+        # and a served one keep the same copy of an id two areas share.
+        listed = _model_area_order(artifacts / profile)
+        files.sort(key=lambda f: (listed.index(f.parent.name) if f.parent.name in listed
+                                  else len(listed), f.parent.name))
         for ex_file in files:
             area = ex_file.parent.name
-            if wanted and area != wanted:
-                continue
             # One area's file that will not decode or parse costs that area, not the call (#236).
             try:
                 found = list_prompt_examples(ex_dir.parent, area)
             except Exception as e:  # noqa: BLE001 - any unreadable file is skipped the same way
                 _LOG.warning("examples for area %r unreadable: %s", area, type(e).__name__)
                 continue
-            docs += [{**e, "area": e.get("area") or area} for e in found if isinstance(e, dict)]
+            docs += [
+                {**e, "area": e.get("area") or area, "_dir": area} for e in found if isinstance(e, dict)
+            ]
+    docs = [
+        {k: v for k, v in d.items() if k != "_dir"}
+        for d in _with_example_ids(docs)
+        if not wanted or d["_dir"] == wanted
+    ]
     if not docs:
         return json.dumps(
             {
@@ -3109,6 +3120,35 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     )
 
 
+def _model_area_order(root: Path) -> list[str]:
+    """The subject areas `datasource.yaml` lists, in its order, by directory name; [] when it can't be
+    read (the examples are still served, alphabetically)."""
+    try:
+        import yaml
+
+        doc = yaml.safe_load((root / "datasource.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 - an unreadable model only costs the ordering
+        return []
+    refs = doc.get("subject_areas") or [] if isinstance(doc, dict) else []
+    return [Path(r if isinstance(r, str) else (r or {}).get("path", "")).name for r in refs]
+
+
+def _with_example_ids(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`docs` with their `id`, the first of two equal ids kept: an id written into the file is kept,
+    else the content-derived one, as `model_store.write_examples` stores them on a served deployment."""
+    from model_store import example_id
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for d in docs:
+        authored = d.get("id")
+        key = str(authored) if authored not in (None, "") else example_id(d)
+        if key not in seen:
+            seen.add(key)
+            out.append({**d, "id": key})
+    return out
+
+
 def _rank_local_examples(
     docs: list[dict[str, Any]], *, query: Any, top_k: int
 ) -> list[dict[str, Any]]:
@@ -3122,16 +3162,9 @@ def _rank_local_examples(
     ranks rows from the store, and reusing its tokenizer, id and budget here is what keeps the
     two from drifting.
     """
-    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens, example_id
+    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens
 
-    # An id written into the file is kept and the first of two equal ids wins, as `write_examples`
-    # stores them on a served deployment.
-    by_id: dict[str, dict[str, Any]] = {}
-    for d in docs:
-        authored = d.get("id")
-        key = str(authored) if authored not in (None, "") else example_id(d)
-        by_id.setdefault(key, {**d, "id": key})
-    rows = sorted(by_id.values(), key=lambda d: d["id"])
+    rows = sorted(docs, key=lambda d: d["id"])
     wanted = _tokens(query if isinstance(query, str) else None)
     if wanted:
         # `str`: a YAML question like `2024` loads as a number, and one entry must not fail the call.

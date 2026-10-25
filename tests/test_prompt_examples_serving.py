@@ -504,3 +504,26 @@ def test_a_library_without_the_model_dependencies_says_what_to_install(local_lib
     monkeypatch.setattr(builtins, "__import__", _no_yaml)
     out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
     assert out["error"]["kind"] == "driver_missing"
+
+
+def test_an_id_two_areas_share_keeps_the_model_orders_copy_whatever_the_scope(
+    local_library, tmp_path
+):
+    # The model lists `sales` before `assets`; a deploy keeps the first copy of a shared id in that
+    # order, before any area scope applies. A scoped local call must not serve the other copy.
+    import yaml
+
+    root = tmp_path / "main"
+    (root / "datasource.yaml").write_text(
+        yaml.safe_dump({"subject_areas": ["subject_areas/sales", "subject_areas/assets"]})
+    )
+    for area, sql in (("sales", "SELECT 1"), ("assets", "SELECT 2")):
+        (root / "prompt_examples" / area / "examples.yaml").write_text(
+            f"- id: shared\n  question: q\n  sql: {sql}\n"
+        )
+    whole = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert [(e["id"], e["sql"]) for e in whole["examples"]] == [("shared", "SELECT 1")]
+    scoped = json.loads(
+        tools.tool_get_prompt_examples({"datasource": local_library, "area": "assets"})
+    )
+    assert scoped["examples"] == []
