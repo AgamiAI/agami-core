@@ -3055,11 +3055,25 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     _area = args.get("area")
     # Always a string or None here: `_normalized_args` repaired or refused every other shape.
     wanted = _area.strip() if isinstance(_area, str) else ""
-    from semantic_model.loader import list_prompt_examples
-
+    files = sorted(ex_dir.glob("*/examples.yaml")) if ex_dir.is_dir() else []
     docs: list[dict[str, Any]] = []
-    if ex_dir.is_dir():
-        for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
+    if files:
+        # Only when there is a library to read: the empty reply needs no YAML parser, and a bare
+        # install without the model dependencies still answers it.
+        try:
+            from semantic_model.loader import list_prompt_examples
+        except ImportError:
+            return json.dumps(
+                {
+                    "error": {
+                        "kind": "driver_missing",
+                        "remediation": "semantic model deps not installed. Run: pip install -r "
+                        "plugins/agami/scripts/semantic_model/requirements.txt",
+                    }
+                },
+                separators=REPLY_SEPARATORS,
+            )
+        for ex_file in files:
             area = ex_file.parent.name
             if wanted and area != wanted:
                 continue
@@ -3120,7 +3134,10 @@ def _rank_local_examples(
     rows = sorted(by_id.values(), key=lambda d: d["id"])
     wanted = _tokens(query if isinstance(query, str) else None)
     if wanted:
-        rows = sorted(rows, key=lambda d: len(wanted & _tokens(d.get("question"))), reverse=True)
+        # `str`: a YAML question like `2024` loads as a number, and one entry must not fail the call.
+        rows = sorted(
+            rows, key=lambda d: len(wanted & _tokens(str(d.get("question") or ""))), reverse=True
+        )
     out: list[dict[str, Any]] = []
     used = 0
     for doc in rows[: max(top_k, 0)]:

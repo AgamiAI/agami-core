@@ -461,3 +461,46 @@ def test_an_authored_id_is_kept_and_duplicates_are_served_once(local_library, tm
     out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library, "area": "sales"}))
     ids = [e["id"] for e in out["examples"]]
     assert "my-example" in ids and len(ids) == len(set(ids)) == 2
+
+
+def test_a_numeric_question_does_not_fail_the_call(local_library, tmp_path):
+    path = tmp_path / "main" / "prompt_examples" / "sales" / "examples.yaml"
+    path.write_text(
+        "- question: 2024\n  sql: SELECT 1\n- question: orders in 2024\n  sql: SELECT 2\n"
+    )
+    out = json.loads(
+        tools.tool_get_prompt_examples({"datasource": local_library, "query": "orders 2024"})
+    )
+    assert out["examples"][0]["question"] == "orders in 2024"
+
+
+def test_no_library_needs_no_model_dependencies(local_library, tmp_path, monkeypatch):
+    import builtins
+    import shutil
+
+    shutil.rmtree(tmp_path / "main" / "prompt_examples")
+    real = builtins.__import__
+
+    def _no_yaml(name, *a, **k):
+        if name.startswith("semantic_model.loader"):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_yaml)
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert out["examples"] == [] and "note" in out
+
+
+def test_a_library_without_the_model_dependencies_says_what_to_install(local_library, monkeypatch):
+    import builtins
+
+    real = builtins.__import__
+
+    def _no_yaml(name, *a, **k):
+        if name.startswith("semantic_model.loader"):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_yaml)
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert out["error"]["kind"] == "driver_missing"
