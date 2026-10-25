@@ -82,7 +82,7 @@ def test_formatting_and_line_endings_of_an_equal_file_survive(model):
     import yaml
 
     doc = yaml.safe_load(customers.read_text())
-    doc = {k: doc[k] for k in reversed(list(doc)) if doc[k] not in ([], {})}
+    doc = {k: doc[k] for k in reversed(list(doc)) if doc[k] != []}
     hand_written = yaml.safe_dump(doc, sort_keys=False).replace("\n", "\r\n").encode()
     customers.write_bytes(hand_written)
 
@@ -103,6 +103,11 @@ def test_a_value_emptied_is_a_change(model):
     # Dropping empties applies to comparing two dumps of the same data, never to a real edit.
     assert build._meaningful({"caveats": ["x"]}) != build._meaningful({"caveats": []})
     assert build._meaningful({"caveats": [None]}) == {"caveats": [None]}
+
+
+def test_an_empty_mapping_is_not_the_same_as_none():
+    # `choice_field: {}` is a declared enum with no labels yet; no `choice_field` is not one.
+    assert build._meaningful({"choice_field": {}}) != build._meaningful({"choice_field": None})
 
 
 def test_a_dry_run_lists_only_what_would_change(model):

@@ -772,8 +772,9 @@ def _reconcile_ambiguity_groups(root: Path, table: str, schema: Optional[str],
     `orders.dates` survived the rename of `dates` to `calendar` and failed validation, so the whole
     edit rolled back. Anything that is not a rename (a group split, merged or emptied) is left as it
     was: the anchor then fails validation and names the ambiguity, because which of several new groups
-    should open the entry is a person's call, not ours. An anchor qualified with another schema names a
-    different table and is left alone, unless the table itself is stored without a schema."""
+    should open the entry is a person's call, not ours. An anchor moves only when it resolves, the way
+    the validator resolves it, to exactly the edited table: one naming another schema's table, or a
+    bare name two schemas share, is left alone."""
     def cols(names: Any) -> frozenset:
         return frozenset(str(c).lower() for c in (names or []))
 
@@ -790,6 +791,27 @@ def _reconcile_ambiguity_groups(root: Path, table: str, schema: Optional[str],
     path = root / "datasource.yaml"
     if not path.exists():
         return
+    from .models import table_key
+
+    # Every table the model defines, by identity, so an anchor resolves the way the validator
+    # resolves it: an exact qualified match, else a table stored without a schema, else by bare name.
+    defs = {
+        table_key(str(t.get("name") or tp.stem), t.get("schema"))
+        for tp in (root / "subject_areas").glob("*/tables/*.yaml")
+        for t in [_load(tp) or {}]
+    }
+    edited = table_key(table, schema)
+
+    def resolves_to_edited(owner: str) -> bool:
+        ref_schema, bare = table_key(owner)
+        if ref_schema:
+            found = {k for k in defs if k == (ref_schema, bare)} or {
+                k for k in defs if k == ("", bare)
+            }
+        else:
+            found = {k for k in defs if k[1] == bare}
+        return found == {edited}
+
     doc = _load(path) or {}
     changed = False
     for amb in doc.get("ambiguities") or []:
@@ -798,10 +820,7 @@ def _reconcile_ambiguity_groups(root: Path, table: str, schema: Optional[str],
             if not isinstance(ref, str) or "." not in ref:
                 continue
             owner, group = ref.rsplit(".", 1)
-            ref_schema, _, bare = owner.rpartition(".")
-            # A qualified anchor matches a table stored without a schema, as the validator reads it.
-            if (bare.lower() != table.lower() or group.lower() not in renamed
-                    or (ref_schema and schema and ref_schema.lower() != schema.lower())):
+            if group.lower() not in renamed or not resolves_to_edited(owner):
                 continue
             refs[i] = f"{owner}.{renamed[group.lower()]}"
             changed = True

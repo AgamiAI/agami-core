@@ -501,16 +501,17 @@ class WriteReport:
 
 
 def _meaningful(value: Any) -> Any:
-    """`value` with the empty and null entries of every mapping dropped, for comparing two dumps.
+    """`value` with the null and empty-list entries of every mapping dropped, for comparing two dumps.
 
     The serializer writes an empty default (`indexes: []`) that an older writer left out, and the two
-    mean the same thing to the loader. Only mapping entries are dropped: an empty item in a LIST is a
-    value someone wrote. The cost: a file that still carries an empty key the current serializer
+    mean the same thing to the loader. An empty MAPPING is kept: `choice_field: {}` is a declared enum
+    with no labels yet, which is not the same as no `choice_field`. Only mapping entries are dropped:
+    an empty item in a LIST is a value someone wrote. The cost: a file that still carries an empty key the current serializer
     omits (`ambiguities: []`) is no longer scrubbed by a refresh, since its data is unchanged.
     """
     if isinstance(value, dict):
         return {
-            k: _meaningful(v) for k, v in value.items() if v is not None and v != [] and v != {}
+            k: _meaningful(v) for k, v in value.items() if v is not None and v != []
         }
     if isinstance(value, list):
         return [_meaningful(v) for v in value]

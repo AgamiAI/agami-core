@@ -93,33 +93,48 @@ def test_a_split_group_is_left_for_validation_to_name(tmp_path):
     assert _anchors(root) == [["wide.dates"]]
 
 
-def test_an_anchor_on_another_schema_is_left_alone(tmp_path):
-    # `archive.wide` is a different table from the `wide` being regrouped, so its anchor stays.
-    root = tmp_path
-    anchors = ["wide.dates", "public.wide.dates", "archive.wide.dates"]
+def _defs(root, *tables):
+    """Table files on disk as (name, schema) pairs; the reconcile resolves anchors against them."""
+    for n, (name, schema) in enumerate(tables):
+        d = root / "subject_areas" / f"a{n}" / "tables"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{name.split('.')[-1]}.yaml").write_text(
+            yaml.safe_dump({"name": name, **({"schema": schema} if schema else {})})
+        )
+
+
+def _reconcile(root, anchors, table, schema):
     (root / "datasource.yaml").write_text(
         yaml.safe_dump({"ambiguities": [{"name": "which_date", "column_groups": list(anchors)}]})
     )
     C._reconcile_ambiguity_groups(
-        root,
-        "wide",
-        "public",
-        {"dates": NAMES[:10]},
-        {"calendar": NAMES[:10]},
-        {},
+        root, table, schema, {"dates": NAMES[:10]}, {"calendar": NAMES[:10]}, {}
     )
-    assert _anchors(root) == [["wide.calendar", "public.wide.calendar", "archive.wide.dates"]]
+    return _anchors(root)[0]
+
+
+def test_an_anchor_on_another_schema_is_left_alone(tmp_path):
+    _defs(tmp_path, ("wide", "public"), ("wide", "archive"))
+    got = _reconcile(
+        tmp_path, ["public.wide.dates", "archive.wide.dates", "wide.dates"], "wide", "public"
+    )
+    # `wide.dates` is ambiguous between the two schemas (the validator rejects it), so it stays too.
+    assert got == ["public.wide.calendar", "archive.wide.dates", "wide.dates"]
 
 
 def test_a_qualified_anchor_follows_a_table_stored_without_a_schema(tmp_path):
-    # The validator accepts `public.wide.dates` for a `wide` stored with no schema, so the rename must
-    # carry it too or the edit still rolls back.
-    (tmp_path / "datasource.yaml").write_text(
-        yaml.safe_dump(
-            {"ambiguities": [{"name": "which_date", "column_groups": ["public.wide.dates"]}]}
-        )
-    )
-    C._reconcile_ambiguity_groups(
-        tmp_path, "wide", None, {"dates": NAMES[:10]}, {"calendar": NAMES[:10]}, {}
-    )
-    assert _anchors(tmp_path) == [["public.wide.calendar"]]
+    # The validator falls back to the schema-less table when no exact qualified one exists.
+    _defs(tmp_path, ("wide", None))
+    assert _reconcile(tmp_path, ["public.wide.dates"], "wide", None) == ["public.wide.calendar"]
+
+
+def test_an_exact_qualified_table_wins_over_the_schema_less_one(tmp_path):
+    # With `wide` and `archive.wide` both defined, `archive.wide.dates` is the archive table's anchor.
+    _defs(tmp_path, ("wide", None), ("wide", "archive"))
+    assert _reconcile(tmp_path, ["archive.wide.dates"], "wide", None) == ["archive.wide.dates"]
+
+
+def test_a_table_stored_with_its_schema_in_the_name_is_matched(tmp_path):
+    _defs(tmp_path, ("public.wide", None))
+    got = _reconcile(tmp_path, ["wide.dates", "catalog.public.wide.dates"], "public.wide", None)
+    assert got == ["wide.calendar", "catalog.public.wide.calendar"]
