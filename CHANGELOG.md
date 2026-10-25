@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A local `get_prompt_examples` ranks and caps the library, as a served one does.** It returned every
+  area's examples file verbatim whatever the question (tens of thousands of characters a call on a
+  large library, rejected examples included), in a different shape from a served deployment. It now
+  ranks by word overlap with `query`, returns at most `top_k` (default 10) within the same character
+  budget, drops rejected examples, and replies in the served shape with each example's `id`. A
+  served deployment is unchanged. Measured on a large local library: about 52,000 characters a call
+  became about 18,000.
+
 - **A statement the engine rejects for a known dialect gap comes back with the rule that fixes it
   (#566).** The engine rules (Redshift: no `STRING_AGG`, unit-first `DATEADD`, `LISTAGG` beside a
   `DISTINCT` aggregate, boolean casts, …) reached a client only through `list_datasources`, and a client

@@ -998,8 +998,9 @@ def _count_local_examples(examples_dir: Path) -> int:
 
     Read through the loader's own `list_prompt_examples`, so a file is counted in whichever shape
     the loader accepts (a bare list, or `{examples: [...]}`) rather than a second copy of that rule.
-    Rejected examples count, because the local `get_prompt_examples` returns the file whole. A file
-    that cannot be read counts nothing: a pointer is not worth failing the schema call over."""
+    Rejected examples do not count, matching the served count and what the local
+    `get_prompt_examples` now returns. A file that cannot be read counts nothing: a pointer is not
+    worth failing the schema call over."""
     if not examples_dir.is_dir():
         return 0
     from semantic_model import loader as L
@@ -1009,7 +1010,7 @@ def _count_local_examples(examples_dir: Path) -> int:
         if not area_dir.is_dir():
             continue
         try:
-            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name, include_rejected=True))
+            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name))
         except Exception:
             continue
     return total
@@ -2986,8 +2987,8 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
 
     DB serving (hosted, AGAMI_DB_URL set): scope to the datasource, rank by word-overlap on
     `query`, and cap to `top_k` within a char budget — so a large library (e.g. accumulated
-    corrections) never floods the context. Local serving (files): returns the curated examples.yaml
-    verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
+    corrections) never floods the context. Local serving (files): the same ranking, cap and reply
+    shape over the curated examples.yaml files (`_rank_local_examples`).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
     _call_misses.set(None)
@@ -3054,16 +3055,22 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     _area = args.get("area")
     # Always a string or None here: `_normalized_args` repaired or refused every other shape.
     wanted = _area.strip() if isinstance(_area, str) else ""
-    blocks: list[str] = []
+    from semantic_model.loader import list_prompt_examples
+
+    docs: list[dict[str, Any]] = []
     if ex_dir.is_dir():
         for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
             area = ex_file.parent.name
             if wanted and area != wanted:
                 continue
-            text = _read_text(ex_file)
-            if text and text.strip():
-                blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
-    if not blocks:
+            # One area's file that will not decode or parse costs that area, not the call (#236).
+            try:
+                found = list_prompt_examples(ex_dir.parent, area)
+            except Exception as e:  # noqa: BLE001 - any unreadable file is skipped the same way
+                _LOG.warning("examples for area %r unreadable: %s", area, type(e).__name__)
+                continue
+            docs += [{**e, "area": e.get("area") or area} for e in found if isinstance(e, dict)]
+    if not docs:
         return json.dumps(
             {
                 "examples": [],
@@ -3072,12 +3079,57 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
             },
             separators=REPLY_SEPARATORS,
         )
-    header = (
-        f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
-        f"# Each block is one subject area's curated library. Match on the question, "
-        f"then reuse the tagged tables/columns/SQL shape.\n"
+    top_k = args.get("top_k")
+    examples = _rank_local_examples(
+        docs, query=args.get("query"), top_k=10 if top_k is None else int(top_k)
     )
-    return header + "\n" + "\n\n".join(blocks) + "\n"
+    return json.dumps(
+        {
+            "datasource": profile,
+            "examples": examples,
+            "count": len(examples),
+            "model_version": _model_version(profile),
+        },
+        separators=REPLY_SEPARATORS,
+        default=str,
+    )
+
+
+def _rank_local_examples(
+    docs: list[dict[str, Any]], *, query: Any, top_k: int
+) -> list[dict[str, Any]]:
+    """The local library ranked and capped exactly as `model_store.select_examples` ranks and caps
+    the served one: by word overlap with `query`, ties in id order, at most `top_k`, within the same
+    character budget, each with its content-derived `id`.
+
+    The local path used to return every area's file verbatim, so a library of a few hundred
+    examples sent tens of thousands of characters on every call whatever the question, and the
+    same client got a different shape locally than served. The served path is not touched: it
+    ranks rows from the store, and reusing its tokenizer, id and budget here is what keeps the
+    two from drifting.
+    """
+    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens, example_id
+
+    # An id written into the file is kept and the first of two equal ids wins, as `write_examples`
+    # stores them on a served deployment.
+    by_id: dict[str, dict[str, Any]] = {}
+    for d in docs:
+        authored = d.get("id")
+        key = str(authored) if authored not in (None, "") else example_id(d)
+        by_id.setdefault(key, {**d, "id": key})
+    rows = sorted(by_id.values(), key=lambda d: d["id"])
+    wanted = _tokens(query if isinstance(query, str) else None)
+    if wanted:
+        rows = sorted(rows, key=lambda d: len(wanted & _tokens(d.get("question"))), reverse=True)
+    out: list[dict[str, Any]] = []
+    used = 0
+    for doc in rows[: max(top_k, 0)]:
+        size = len(json.dumps(doc, default=str))
+        if out and used + size > _EXAMPLES_CHAR_BUDGET:
+            break
+        out.append(doc)
+        used += size
+    return out
 
 
 def _classify_exit(code: int) -> str:
@@ -5382,9 +5434,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         "handler": tool_get_prompt_examples,
         "read_only": True,
         "description": (
-            "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
+            "Fetch the curated few-shot NL→SQL examples for a datasource, ranked by the question and "
+            "capped (`top_k`, default 10), each with its `area`. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
-            "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
+            "then reuse the tagged tables/columns/SQL. Each example carries "
             "a stable `id` — send one of them as `example.id` on execute_sql, with `example.use` "
             "'followed' or 'shown_only' (a hosted deployment refuses a statement without it), and "
             "cite it as a `basis` ref too when you followed it. "
