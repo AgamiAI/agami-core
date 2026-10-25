@@ -17,7 +17,7 @@ below corresponds to one such version.
 - **A refresh rewrites only the files whose content changed (#472).** `sm introspect --append --tables
   <one>` changed one table and re-dumped every file in the model, with keys reordered, empty defaults
   added and lines re-wrapped, so a one-table refresh was a whole-model diff. `write_tree` now compares
-  what it would write with what is on disk, as parsed data (an empty or null value counts as absent),
+  what it would write with what is on disk, as parsed data (a null value or an empty list counts as absent),
   and leaves an equal file alone, keeping its line endings and formatting. The introspection report
   says how many files were already up to date. On a real 87-file model, rewriting it unchanged now
   touches no files.
@@ -25,6 +25,22 @@ below corresponds to one such version.
   `orders.dates` used to fail validation after `dates` was renamed, rolling the whole edit back. A
   rename (a new group with exactly the old group's columns) now moves the anchor; a split or merged
   group is still left for validation to reject, naming the ambiguity.
+
+- **A join rejected at sign-off between two subject areas is no longer served (#543).** Rejected joins
+  inside one area were already dropped on load, but the cross-area loaders never applied the filter,
+  so a rejected cross-area join (often the single-column piece of a composite key, which repeats
+  rows) reached `sm context`, the schema reply and a deploy with no review status, and looked usable.
+  Rejected cross-area entities and metrics had the same gap. The curation views still see them. A
+  deployment keeps serving them until its model is redeployed.
+
+- **A statement the engine rejects for a known dialect gap comes back with the rule that fixes it
+  (#566).** The engine rules (Redshift: no `STRING_AGG`, unit-first `DATEADD`, `LISTAGG` beside a
+  `DISTINCT` aggregate, boolean casts, …) reached a client only through `list_datasources`, and a client
+  that already knew its datasource skipped that call and wrote the PostgreSQL the rules warn against.
+  The database's error is still never relayed; the classifier now recognises the constructs a rule
+  covers and answers with that rule as a `syntax` failure. Before, `function string_agg(...) does not
+  exist` read as a missing column (telling the client to re-introspect) or as an unclassified failure. The forked transport relays the
+  rule only as an exact match against the messages built from the rules themselves.
 
 ### Security
 
