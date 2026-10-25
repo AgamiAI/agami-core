@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A local `get_prompt_examples` ranks and caps the library, as a served one does (#573).** It returned every
+  area's examples file verbatim whatever the question (tens of thousands of characters a call on a
+  large library, rejected examples included), in a different shape from a served deployment. It now
+  ranks by word overlap with `query`, returns at most `top_k` (default 10) within the same character
+  budget, drops rejected examples, and replies in the served shape with each example's `id`. A
+  served deployment is unchanged. Measured on a large local library: about 52,000 characters a call
+  became about 18,000.
+
 - **A refresh rewrites only the files whose content changed (#472).** `sm introspect --append --tables
   <one>` changed one table and re-dumped every file in the model, with keys reordered, empty defaults
   added and lines re-wrapped, so a one-table refresh was a whole-model diff. `write_tree` now compares
