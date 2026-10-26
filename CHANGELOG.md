@@ -19,6 +19,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A metric built on a rejected metric is no longer served (#571).** The loader left out a derived
+  metric whose base was dropped only when a table or column was also hidden, so with just a metric
+  rejected, a metric built on it stayed in the served model and validation reported "references
+  unknown base metric". It now runs on every load, per area and cross-area, and repeats down a
+  chain of derived metrics. Only a base that was rejected or hidden drops a metric: a base the model
+  never had is a mistake in the model, and stays for the validator to report. An ambiguity naming a
+  dropped metric loses that metric, as for any metric not served. The curation view is unchanged.
+
 - **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
   in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
   script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
