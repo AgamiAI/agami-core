@@ -83,6 +83,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import agami_paths
+import sql_dialect_rules
 from guardrail import (
     PRE_MODEL_RULES,
     RECEIPT_BEFORE_MODEL,
@@ -337,6 +338,15 @@ _ERROR_MESSAGES: dict[str, str] = {
         "Sign in again (reconnect the connector), then start a new conversation."
     ),
 }
+
+
+# The kinds a dialect rule may never replace (#566): failures whose fix is not a rewrite. Everything
+# else the classifier reads from an execution error is open to a rule matched on the primary message,
+# since the classifier reads the WHOLE text and an echoed statement can push a function error into
+# `table_not_found` or `column_not_found`.
+_NOT_A_REWRITE_KINDS = frozenset(
+    {"permission", "auth", "sign_in_required", "network", "dsn", "driver_missing"}
+)
 
 
 def _classify_db_error(text: str, code: int) -> FailureKind:
@@ -3029,6 +3039,9 @@ def execute_guarded(
     # that keeps it that way — a future rewrite would have to reintroduce the divergence past a name
     # that says what it is for.
     received_sql = sql
+    # The engine as the credentials name it, for answering a database error with the dialect rule
+    # that explains it (#566). Unknown until the credentials load, which is after the gates.
+    engine: str | None = None
     try:
         # FIRST, above the read-only gate, because principle 7 records "every call ... whether it
         # executed or was refused" — so gating only execution would leave the refusals unrecorded
@@ -3074,6 +3087,7 @@ def execute_guarded(
                 return _envelope("refused", refusal=verdict,
                                  receipt=_refusal_receipt(verdict, received_sql, profile))
         creds = _load_credentials(profile, org_id or "local")
+        engine = str(creds.get("type") or "") or None
         if not no_safety and not _model_pass_disabled():
             # The guard picked its grammar from the model's declared engine; the executor picks its
             # driver from these credentials. Two independent pieces of operator configuration with
@@ -3169,9 +3183,21 @@ def execute_guarded(
         # `_RAW_LOG` is the server-side trail everywhere else. Neither is the caller's channel.
         _last_error_detail.set(exc.msg)
         _RAW_LOG.error("database error (audit detail): %s", exc.msg)
-        return _envelope("failed", failure=Failure(
-            kind=kind, message=_ERROR_MESSAGES.get(kind, UNEXPECTED_FAILURE_MESSAGE),
-        ), receipt=_receipt_for(received_sql, profile, bounded=True))
+        message = _ERROR_MESSAGES.get(kind, UNEXPECTED_FAILURE_MESSAGE)
+        # A construct this engine rejects, named by its own dialect rule (#566). The rule is our
+        # text, chosen FROM the driver's, so the ACE-039 line holds. It is the statement's fault and
+        # a rewrite fixes it, which is what `syntax` says; read by the generic classifier,
+        # "function string_agg(...) does not exist" came out as a missing column or as unclassified.
+        # Only an execution error (code 5) of a kind that could be one, so a permission, sign-in or
+        # connection failure is never reported as "rewrite your SQL".
+        fix = (
+            sql_dialect_rules.dialect_fix_for(engine, exc.msg)
+            if exc.code == 5 and kind not in _NOT_A_REWRITE_KINDS else None
+        )
+        if fix is not None:
+            kind, message = "syntax", fix
+        return _envelope("failed", failure=Failure(kind=kind, message=message),
+                         receipt=_receipt_for(received_sql, profile, bounded=True))
     except Exception:
         # Unanticipated, so unreadable: nobody has vetted what this exception's text contains, and
         # `configparser.MissingSectionHeaderError` alone carries the absolute path of the
