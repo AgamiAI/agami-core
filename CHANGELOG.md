@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **The forked transport no longer relays a child's whole stderr on an `other` failure (#583).**
+  Every sanitized failure is rebuilt by the parent from the exit code, because stderr is shared with
+  anything a library logs during the run. `other` (exit 6) had no fixed sentence, so it fell through
+  to the relay meant for the authored configuration errors (exit 2 and 3), and a library's line,
+  values or paths included, reached `failure.message`. It now gets the generic sentence, or a
+  SQLSTATE sentence (#561) relayed only as an exact match; a stream holding neither goes to the
+  server log.
+
 - **A datasource.yaml key this agami-core does not read is reported, not silently dropped (#575).**
   The loader reads a fixed list of top-level keys, so a model written for a newer agami-core that
   declared a field the running one did not know lost it without a word, and a deploy fed by that
