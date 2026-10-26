@@ -753,8 +753,9 @@ def _find_join(root: Path, op: dict, area: Optional[str]) -> tuple:
             if path.exists():
                 doc = _load(path) or {}
                 rels = _entries(doc, key)
-                out += [(a or f"cross-area {hit.get('from_subject_area')}->{hit.get('to_subject_area')}",
-                         path, key, doc, rels, hit) for hit in _matching_joins(rels, frm, to, op)]
+                out += [(a or f"cross-area {hit.get('from_subject_area')}->{hit.get('to_subject_area')} "
+                         f"in {path.name}", path, key, doc, rels, hit)
+                        for hit in _matching_joins(rels, frm, to, op)]
         return out
 
     found = search([area]) if area else []

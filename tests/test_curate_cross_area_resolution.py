@@ -101,7 +101,7 @@ def test_two_matching_joins_fail_the_batch_and_write_nothing(tmp_path):
     msg = res.errors[0]
     assert "reject relationship" in msg and "2 joins match invoices->customers" in msg
     assert "invoices.customer_id -> customers.id" in msg and "invoices.payer_id -> customers.id" in msg
-    assert "cross-area billing->crm" in msg
+    assert "cross-area billing->crm in datasource.yaml" in msg
     assert _snapshot(tmp_path) == before   # the table edit earlier in the batch was rolled back too
 
 
