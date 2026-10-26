@@ -19,6 +19,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
+  in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
+  script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
+  source tables are not in the model is still an error.
+
+### Fixed
+
 ### Fixed
 
 - **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
