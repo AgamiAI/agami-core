@@ -19,6 +19,18 @@ below corresponds to one such version.
   script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
   source tables are not in the model is still an error.
 
+### Fixed
+
+- **A join only the metadata preset assumes is not engine-approved (#509).** `sm enrich-metadata`
+  adds reference joins from two sources: the database's own dictionary, and the preset's list of
+  standard joins for that platform. A standard join whose values overlapped in the data was written
+  confirmed and approved by the engine, although this database never declared it. Such a join is
+  now written inferred and unreviewed, says it is the preset's standard join and not declared, and
+  waits in the review queue. A reference the database's dictionary declares is still
+  engine-approved once its values overlap, as a declared foreign key is during introspection.
+  Introspection already wrote every join it inferred from names and values unreviewed. New tests
+  now pin that for a database with no declared foreign keys.
+
 ## [0.9.19] — 2026-10-25
 
 ### Fixed
