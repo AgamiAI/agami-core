@@ -146,6 +146,7 @@ class IntrospectReport:
     sensitive_columns: int = 0
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
+    files_unchanged: int = 0
     # On a refresh of an existing model: what changed structurally, per table. Empty on a first build.
     changes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     new_tables: list[str] = field(default_factory=list)
@@ -167,7 +168,7 @@ class IntrospectReport:
             f"sensitive columns: {self.sensitive_columns}",
             "## notes",
             *[f"  - {n}" for n in self.notes],
-            f"## files ({len(self.files_written)})",
+            f"## files ({len(self.files_written)} written, {self.files_unchanged} already up to date)",
             *[f"  {f}" for f in self.files_written[:60]],
         ]
         return "\n".join(lines)
@@ -483,6 +484,7 @@ def introspect(
         _remove_moved_table_files(org, out)
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
+    report.files_unchanged = len(wr.files_unchanged)
     return org, report
 
 
