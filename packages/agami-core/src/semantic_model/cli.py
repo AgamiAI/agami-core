@@ -775,17 +775,24 @@ def cmd_describe_file(args) -> int:
     fmt = DD.format_for(args.file, args.format)
     try:
         rows = DD.parse(text, fmt)
-    except ValueError as exc:  # bad JSON, a CSV without the needed header
+    except ValueError as exc:  # bad JSON or CSV quoting, a CSV without the needed header
         _print_json({"error": f"could not read the {fmt.upper()} file: {exc}"})
         return 2
-    m = DD.match(args.root, rows, source=args.source)
+    root = Path(args.root).expanduser()
+    if not (root / "datasource.yaml").is_file() or not (root / "subject_areas").is_dir():
+        # otherwise every row comes back no_table with exit 0, as if the dictionary were the problem
+        _print_json({"error": f"no semantic model at {root.resolve()} (needs datasource.yaml and "
+                              "subject_areas/)"})
+        return 2
+    m = DD.match(root, rows, source=args.source)
     report = {"unmatched": m["unmatched"], "kept_human": m["kept_human"],
-              "case_corrected": m["case_corrected"]}
+              "case_corrected": m["case_corrected"],
+              "schema_prefix_stripped": m["schema_prefix_stripped"]}
     if not m["ops"]:
         _print_json({"described": 0, "reason": "no row matched a column of the model", **report,
                      "skipped": [], "errors": []})
         return 0
-    res = curate.apply(args.root, m["ops"])
+    res = curate.apply(root, m["ops"])
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
     _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
@@ -1568,8 +1575,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--format", choices=["tsv", "csv", "json"], default=None,
                     help="override the format the file extension implies")
     sp.add_argument("--source", choices=["ai", "metadata"], default="ai",
-                    help="ai (default): generated text, stamped ai_unvalidated. metadata: the customer's "
-                         "own data dictionary, stamped metadata; never replaces a description a person wrote")
+                    help="ai (default): generated text, stamped ai_unvalidated. metadata: taken as written "
+                         "from the customer's dictionary, stamped metadata; not checked against the data "
+                         "(see #564); never replaces a description a person wrote")
     sp.set_defaults(func=cmd_describe_file)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")

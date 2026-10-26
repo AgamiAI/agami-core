@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .loader import _read_yaml
+from .models import bare_name, table_key
 
 FORMATS = ("tsv", "csv", "json")
 
@@ -58,18 +59,30 @@ def parse_tsv(text: str) -> list[dict]:
 
 def parse_csv(text: str) -> list[dict]:
     # The csv module, not a split on commas, so a quoted description may hold commas and newlines.
-    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")))
-    fields = {(f or "").strip().lower(): f for f in reader.fieldnames or []}
-    missing = [k for k in ("table", "column", "description") if k not in fields]
-    if missing:
-        raise ValueError(f"CSV header needs table, column and description (missing: {', '.join(missing)})")
+    # Strict, so an unterminated quote fails the file instead of swallowing the rows after it.
+    reader = csv.DictReader(io.StringIO(text.lstrip("﻿")), strict=True)
+    try:
+        fields = {(f or "").strip().lower(): f for f in reader.fieldnames or []}
+        missing = [k for k in ("table", "column", "description") if k not in fields]
+        if missing:
+            raise ValueError(f"CSV header needs table, column and description (missing: {', '.join(missing)})")
 
-    def get(rec: dict, key: str) -> Any:
-        return rec.get(fields[key]) if key in fields else None
+        def get(rec: dict, key: str) -> Any:
+            return rec.get(fields[key]) if key in fields else None
 
-    return [_row(f"line {reader.line_num}", get(r, "table"), get(r, "column"), get(r, "description"),
-                 area=get(r, "area"), schema=get(r, "schema"))
-            for r in reader]
+        rows = []
+        for r in reader:
+            at = f"line {reader.line_num}"
+            if None in r:  # DictReader's key for fields past the header
+                cells = [v for k, v in r.items() if k is not None] + r[None]
+                rows.append({"at": at, "entry": ",".join(str(v) for v in cells)[:80],
+                             "malformed": "more fields than the header — an unquoted comma?"})
+                continue
+            rows.append(_row(at, get(r, "table"), get(r, "column"), get(r, "description"),
+                             area=get(r, "area"), schema=get(r, "schema")))
+        return rows
+    except csv.Error as exc:
+        raise ValueError(f"after line {reader.line_num}: {exc}") from exc
 
 
 def parse_json(text: str) -> list[dict]:
@@ -96,14 +109,15 @@ def parse(text: str, fmt: str) -> list[dict]:
 
 
 def _tables(root: Path) -> list[dict]:
-    """Every table file of the model: its area, name (the file stem, as curate resolves it),
-    schema and columns."""
+    """Every table file of the model: its area, name (the file stem, as curate resolves it), the
+    bare table name and schema it declares (`name: public.orders` carries its schema), and columns."""
     out = []
     for p in sorted((root / "subject_areas").glob("*/tables/*.yaml")):
         doc = _read_yaml(p) or {}
         cols = [c for c in doc.get("columns", []) or [] if isinstance(c, dict) and c.get("name")]
-        out.append({"area": p.parent.parent.name, "name": p.stem,
-                    "schema": str(doc.get("schema") or ""), "columns": cols})
+        declared = str(doc.get("name") or p.stem)
+        out.append({"area": p.parent.parent.name, "name": p.stem, "bare": bare_name(declared),
+                    "schema": table_key(declared, doc.get("schema"))[0], "columns": cols})
     return out
 
 
@@ -122,14 +136,17 @@ def _entry(r: dict) -> str:
 def match(root: str | Path, rows: list[dict], *, source: str) -> dict:
     """Turn parsed rows into curate edit ops on the model's own spelling of each table and column.
 
-    Returns {"ops", "unmatched", "kept_human", "case_corrected"}. With source `metadata` a column
-    whose description a person wrote is left alone: a dictionary file fills in, it doesn't
-    overrule an edit someone made in the model."""
+    Returns {"ops", "unmatched", "kept_human", "case_corrected", "schema_prefix_stripped"}. With
+    source `metadata` a column whose description a person wrote is left alone: a dictionary file
+    fills in, it doesn't overrule an edit someone made in the model. A `SCHEMA.TABLE` in the table
+    column, with no schema column, is read as that schema's table when the model has the schema."""
     tables = _tables(Path(root))
+    schemas = {t["schema"] for t in tables if t["schema"]}
     ops: list[dict] = []
     unmatched: list[dict] = []
     kept_human: list[str] = []
     case_corrected: list[dict] = []
+    schema_prefix_stripped: list[dict] = []
 
     def miss(r: dict, reason: str, detail: str) -> None:
         unmatched.append({"at": r["at"], "entry": _entry(r), "reason": reason, "detail": detail})
@@ -147,9 +164,16 @@ def match(root: str | Path, rows: list[dict], *, source: str) -> dict:
         cands = tables
         if r["area"]:
             cands = _pick(cands, lambda t: t["area"], r["area"])
-        if r["schema"]:
-            cands = [t for t in cands if t["schema"].lower() == r["schema"].lower()]
-        cands = _pick(cands, lambda t: t["name"], r["table"])
+        want, schema, stripped = r["table"], r["schema"], False
+        if "." in want and not schema and not _pick(cands, lambda t: t["name"], want):
+            prefix, _, want = want.rpartition(".")
+            if prefix.lower() not in schemas:
+                miss(r, "no_table", f"schema {prefix!r} is not in the model")
+                continue
+            schema, stripped = prefix, True
+        if schema:
+            cands = [t for t in cands if t["schema"] == schema.lower()]
+        cands = _pick(cands, lambda t: t["name"], want) or _pick(cands, lambda t: t["bare"], want)
         if not cands:
             miss(r, "no_table", f"no table {r['table']!r} in the model")
             continue
@@ -171,10 +195,12 @@ def match(root: str | Path, rows: list[dict], *, source: str) -> dict:
                 and (col.get("description") or "").strip()):
             kept_human.append(loc)
             continue
-        if t["name"] != r["table"] or col["name"] != r["column"]:
+        if stripped:
+            schema_prefix_stripped.append({"entry": _entry(r), "applied_to": loc})
+        elif t["name"] != r["table"] or col["name"] != r["column"]:
             case_corrected.append({"entry": _entry(r), "applied_to": loc})
         ops.append({"op": "edit", "kind": "table", "area": t["area"], "name": t["name"],
                     "column": col["name"], "field": "description", "value": r["description"],
                     "source": source})
     return {"ops": ops, "unmatched": unmatched, "kept_human": kept_human,
-            "case_corrected": case_corrected}
+            "case_corrected": case_corrected, "schema_prefix_stripped": schema_prefix_stripped}

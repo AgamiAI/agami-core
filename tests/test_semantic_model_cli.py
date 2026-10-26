@@ -269,6 +269,72 @@ def test_describe_file_reports_a_csv_without_the_needed_header(tmp_path):
     assert rc == 2 and "missing: table, column, description" in json.loads(out)["error"]
 
 
+def test_describe_file_refuses_a_root_with_no_model(tmp_path):
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("orders.total\tTotal order value\n")
+    rc, out = _run(["describe-file", str(tmp_path / "missing"), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 2 and "no semantic model" in d["error"] and "unmatched" not in d
+
+
+@pytest.mark.parametrize("text, detail", [
+    ('table,column,description\norders,total,"never closed\norders,id,Order key\n', "unexpected end of data"),
+    ('table,column,description\norders,total,"quoted"tail\n', "expected after"),
+])
+def test_describe_file_refuses_a_csv_with_broken_quoting(tmp_path, text, detail):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text(text)
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 2 and "could not read the CSV file" in d["error"] and detail in d["error"], d
+    assert "description" not in _cols(tmp_path, "orders")["total"]
+
+
+def test_describe_file_reports_a_csv_row_with_more_fields_than_the_header(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text("table,column,description\norders,total,Order value, tax included\n"
+                        "orders,id,Order key\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1, d
+    [u] = d["unmatched"]
+    assert u["reason"] == "malformed" and "more fields than the header" in u["detail"]
+    assert "description" not in _cols(tmp_path, "orders")["total"]
+
+
+def test_describe_file_matches_a_table_that_carries_its_schema_in_its_name(tmp_path):
+    _model(tmp_path)
+    path = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    doc = yaml.safe_load(path.read_text())
+    doc.pop("schema")
+    doc["name"] = "public.orders"
+    path.write_text(yaml.safe_dump(doc))
+    from semantic_model import dictionary
+    m = dictionary.match(tmp_path, [{"at": "row 2", "area": "", "schema": "public", "table": "orders",
+                                     "column": "total", "description": "x"}], source="metadata")
+    assert not m["unmatched"], m["unmatched"]
+    assert [(o["name"], o["column"]) for o in m["ops"]] == [("orders", "total")]
+
+
+def test_describe_file_strips_a_schema_prefix_the_model_has(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text("table,column,description\nPUBLIC.ORDERS,TOTAL,Order value\n"
+                        "public.order_items,qty,Units ordered\nstaging.orders,id,Order key\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 2, d
+    assert d["schema_prefix_stripped"] == [
+        {"entry": "PUBLIC.ORDERS.TOTAL", "applied_to": "s.orders.total"},
+        {"entry": "public.order_items.qty", "applied_to": "s.order_items.qty"}]
+    assert d["case_corrected"] == []
+    [u] = d["unmatched"]
+    assert u["reason"] == "no_table" and u["detail"] == "schema 'staging' is not in the model"
+    assert _cols(tmp_path, "orders")["total"]["description_source"] == "metadata"
+
+
 def test_prepare_does_not_apply_default_filters(tmp_path):
     """ACE-042: `sm prepare` hands back the caller's statement. The model declares
     `{alias}.deleted_at IS NULL` on `orders` and it neither reaches the SQL nor comes back as an
