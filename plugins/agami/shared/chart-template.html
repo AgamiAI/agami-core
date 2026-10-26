@@ -858,7 +858,7 @@
     const SCALE_SUFFIX = { thousands:'K', millions:'M', billions:'B', lakhs:'L', crores:'Cr' };
     const PERIODS = ['hour', 'day', 'week', 'month', 'quarter', 'year'];
     function parseUnit(unit) {
-      const m = /^([A-Za-z]{3})(?:_([A-Za-z]+?)s?)?(?:\/([A-Za-z]+))?$/.exec((unit || '').trim());
+      const m = /^([A-Za-z]{3})(?:_([A-Za-z]+?)s?)?(?:\/([A-Za-z]+))?$/i.exec((unit || '').trim());
       if (!m || !CURRENCY_SYMBOLS[m[1].toUpperCase()]) return null;
       const scale = m[2] ? m[2].toLowerCase() + 's' : null;
       const period = m[3] ? m[3].toLowerCase() : null;

@@ -37,7 +37,7 @@ SCALES: dict[str, tuple[int, str]] = {
     "lakhs": (10**5, "L"), "crores": (10**7, "Cr"),
 }
 PERIODS = ("hour", "day", "week", "month", "quarter", "year")
-_UNIT_RE = re.compile(r"^([A-Za-z]{3})(?:_([A-Za-z]+?)s?)?(?:/([A-Za-z]+))?$")
+_UNIT_RE = re.compile(r"^([A-Za-z]{3})(?:_([A-Za-z]+?)s?)?(?:/([A-Za-z]+))?$", re.IGNORECASE)
 
 
 class CurrencyUnit(NamedTuple):

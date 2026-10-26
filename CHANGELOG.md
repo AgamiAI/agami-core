@@ -23,7 +23,8 @@ below corresponds to one such version.
   `points_balance` and `total_weight` are no longer taken for money, while `gross_usd`, `value_usd`
   and `fx_dollar` now are; each row gains a `suggested_unit` read from the name
   (`revenue_usd_millions` → `USD_millions`). `set-units` without `--columns` prints its plan and
-  writes nothing until `--yes`, and gives a column whose name states a currency that unit. A bare
+  writes nothing until `--yes`, and gives a column whose name states a currency that unit, with
+  `--columns` too (so a subset of the plan is written as planned). A bare
   `units` column (`reading_units`) is no longer classed additive at introspection; `units_sold` and
   the like still are, and classes already in a model are left as they are.
 

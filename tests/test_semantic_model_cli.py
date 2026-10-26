@@ -143,6 +143,22 @@ def test_set_units_columns_write_only_those(tmp_path):
     assert cols["total"]["unit"] == "USD" and "unit" not in cols["gross_usd"]
 
 
+def test_set_units_columns_keep_each_planned_unit(tmp_path):
+    # D11: applying a subset of a reviewed plan writes what the plan showed, not --currency
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "revenue_usd_millions", "type": "decimal"},
+                       {"name": "amount_total", "type": "decimal"})
+    plan = json.loads(_run(["set-units", str(tmp_path), "--currency", "EUR"])[1])["planned"]
+    planned = {p["column"]: p["unit"] for p in plan}
+    assert planned["revenue_usd_millions"] == "USD_millions" and planned["amount_total"] == "EUR"
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "EUR", "--columns",
+                    "orders.revenue_usd_millions", "orders.amount_total"])
+    assert rc == 0 and json.loads(out)["set"] == 2, out
+    cols = _orders_cols(tmp_path)
+    assert cols["revenue_usd_millions"]["unit"] == "USD_millions"
+    assert cols["amount_total"]["unit"] == "EUR" and "unit" not in cols["total"]
+
+
 def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path):
     _model(tmp_path)
     items = tmp_path / "subject_areas" / "s" / "tables" / "order_items.yaml"

@@ -207,9 +207,12 @@ def classify_aggregation(column_name: str, column_type: str, is_key: bool = Fals
         return "dimension"
     if column_type not in _NUMERIC_TYPES:
         return "dimension"
-    if _DIMENSION_RE.search(column_name):
+    # money detection reads camelCase / kebab words, so these checks must too, or `unitPrice`
+    # would skip the averageable test and be called additive
+    spelled = (column_name, "_".join(name_words(column_name)))
+    if any(_DIMENSION_RE.search(n) for n in spelled):
         return "dimension"
-    if _AVERAGEABLE_RE.search(column_name):
+    if any(_AVERAGEABLE_RE.search(n) for n in spelled):
         return "averageable"
     if detect_money_column(column_name) or _ADDITIVE_RE.search(column_name):
         return "additive"

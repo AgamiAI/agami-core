@@ -657,15 +657,12 @@ def cmd_set_units(args) -> int:
     script (the fragile glue that broke on empty stdin). Detects the same money columns (tested
     matcher); a detected column whose name states its currency gets that unit, the rest get
     `--currency`/`--unit`. Detection only PLANS: it writes nothing until `--yes`, so a guess is
-    always reviewed. `--columns` names the columns outright and applies the given unit to them;
-    `--area` scopes it."""
+    always reviewed. `--columns` names the columns outright (applying the reviewed plan to just
+    those): each keeps the unit its name states, the rest get the given unit; `--area` scopes it."""
     from . import build as B
     from . import curate
     unit = args.currency or args.unit
     explicit = set(args.columns or [])
-    if explicit and not unit:
-        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name> with --columns"})
-        return 1
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
     plan = []
@@ -679,7 +676,7 @@ def cmd_set_units(args) -> int:
                 if explicit:
                     if f"{t.name}.{c.name}" not in explicit and c.name not in explicit:
                         continue
-                    col_unit = unit
+                    col_unit = B.suggest_unit(c.name) or unit
                 elif not (c.type in numeric and B.detect_money_column(c.name)):
                     continue
                 else:
@@ -696,7 +693,8 @@ def cmd_set_units(args) -> int:
     if not (explicit or args.yes):
         _print_json({"set": 0, "planned": plan,
                      "next": "nothing written: show this plan, then re-run with --yes to apply "
-                             "it, or with --columns <table.col …> to apply only some"})
+                             "it, or with the same --currency/--unit plus --columns <table.col …> to apply "
+                             "only some (each keeps the unit planned for it)"})
         return 0
     ops = [{"op": "edit", "kind": "table", "area": p["area"], "name": p["table"],
             "column": p["column"], "field": "unit", "value": p["unit"]} for p in plan]
@@ -1578,7 +1576,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="apply the detected plan (without it, detection only prints the plan)")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--columns", nargs="*", default=None,
-                    help="explicit table.column (or bare column) list — overrides money detection")
+                    help="explicit table.column (or bare column) list — overrides money detection; a name that states its currency keeps that unit")
     sp.set_defaults(func=cmd_set_units)
 
     sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")

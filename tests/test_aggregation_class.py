@@ -59,6 +59,14 @@ from catalog_helpers import make_catalog_runner
     # a per-entity reading: the name doesn't settle that SUM means anything (#515)
     ("reading_units", "float", False, "unknown"),
     ("sensor_units", "float", False, "unknown"),
+    # camelCase / kebab spellings of a price or rate stay averageable, never additive
+    ("unitPrice", "decimal", False, "averageable"),
+    ("UnitPrice", "decimal", False, "averageable"),
+    ("costPerUnit", "decimal", False, "averageable"),
+    ("cost-per-hour", "decimal", False, "averageable"),
+    ("cost_per_hour", "decimal", False, "averageable"),
+    ("discountRate", "decimal", False, "averageable"),
+    ("customerId", "integer", False, "dimension"),
     # unrecognized numeric → unknown (safe; never enforced)
     ("xyz", "decimal", False, "unknown"),
     ("v_1", "float", False, "unknown"),
