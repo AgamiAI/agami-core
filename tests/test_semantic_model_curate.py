@@ -448,3 +448,27 @@ def test_a_profile_that_is_its_own_repository_commits_the_log_with_the_change(tm
     shown = subprocess.run(["git", "-C", str(tmp_path), "show", "--name-only", "HEAD"],
                            capture_output=True, text=True).stdout
     assert "curation_log.jsonl" in shown
+
+
+def test_an_enrichment_entity_is_unreviewed_until_approved_with_a_signer(tmp_path):
+    """#508: an entity written without a review_state (as enrichment does) is unreviewed and in the
+    review queue, not trusted unseen; approving it through the review flow stamps who and when."""
+    _write_model(tmp_path)
+    res = curate.write_items(tmp_path, "sales", "entity", [
+        {"name": "customer", "maps_to": [{"table": "customers", "column": "id", "primary": True}]}])
+    assert res.applied and not res.errors, (res.skipped, res.errors)
+    ent = loader.load_datasource(tmp_path).subject_areas[0].entities[0]
+    assert ent.review_state == "unreviewed" and ent.signed_off_by is None
+    queued = curate.review_queue(loader.load_datasource(tmp_path))["rule_2"]
+    assert [it["name"] for it in queued if it["kind"] == "entity"] == ["customer"]
+
+    res = curate.apply(tmp_path, [{"op": "approve", "kind": "entity", "area": "sales",
+                                   "name": "customer", "at": "2026-10-22T00:00:00Z"}],
+                       signer="you@example.com", role="analyst")
+    assert res.applied and not res.skipped, res.skipped
+    ent = loader.load_datasource(tmp_path).subject_areas[0].entities[0]
+    assert ent.review_state == "approved"
+    assert (ent.signed_off_by, ent.signed_off_role, ent.signed_off_at) == (
+        "you@example.com", "analyst", "2026-10-22T00:00:00Z")
+    assert not [it for it in curate.review_queue(loader.load_datasource(tmp_path))["rule_2"]
+                if it["kind"] == "entity"]

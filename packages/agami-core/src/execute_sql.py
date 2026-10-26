@@ -71,6 +71,7 @@ import csv
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import threading
@@ -232,10 +233,14 @@ class ExecutorError(Exception):
     the in-process caller gets a catchable error instead of a process exit. Replaces the old
     ``return _err(...)`` returns inside the per-engine run functions."""
 
-    def __init__(self, msg: str, *, code: int) -> None:
+    def __init__(self, msg: str, *, code: int, sqlstate: str | None = None) -> None:
         super().__init__(msg)
         self.msg = msg
         self.code = code
+        # The SQLSTATE the server sent, when the raise site knows it (#561). Optional because the
+        # built-in engines raise inside the `except` that caught the driver's exception, so the code
+        # is read from that instead; an injected executor that raises elsewhere passes it here.
+        self.sqlstate = sqlstate if _is_sqlstate(sqlstate) else None
 
 
 # The CLI exit-code contract in code, in both directions — the module docstring's table, executable.
@@ -338,6 +343,128 @@ _ERROR_MESSAGES: dict[str, str] = {
         "Sign in again (reconnect the connector), then start a new conversation."
     ),
 }
+
+
+# --- SQLSTATE (#561) -----------------------------------------------------------------------------
+#
+# An execution error no classifier arm reads used to reach the caller as `other` with the generic
+# sentence, so a client could not tell a statement it should rewrite from a broken server, and
+# guessed. The database's text still never travels (ACE-039): it can carry a value from a row, which
+# would reach the caller around the sensitive-column masking. The SQLSTATE can travel. It is five
+# characters from a fixed alphabet, carries no value, and its first two characters (the class) mean
+# the same on every engine that reports one, so one table keyed by class covers them all, vendor
+# codes included, without a rule per database. An engine that reports none is unchanged, and a class
+# the table does not name is returned as the bare code with the generic sentence.
+_SQLSTATE_RE = re.compile(r"[0-9A-Z]{5}")
+
+_SQLSTATE_CLASS_KIND: dict[str, FailureKind] = {
+    "42": "syntax",
+    "0A": "syntax",
+    "22": "syntax",
+    "08": "network",
+    "28": "auth",
+}
+_TOO_HEAVY = (
+    "The statement needed more than the database allows (SQLSTATE {code}). Simplify it or narrow "
+    "what it reads."
+)
+# Sentences that carry the code, so the caller can look it up. Classes whose kind already has a
+# fixed sentence in `_ERROR_MESSAGES` (network, auth) use that one unchanged.
+_SQLSTATE_MESSAGES: dict[str, str] = {
+    "42": (
+        "The database rejected the statement itself (SQLSTATE {code}): a name, function or rule in "
+        "it does not hold on this database. Rewrite the statement; running it unchanged fails again."
+    ),
+    "0A": (
+        "The database does not support something this statement uses (SQLSTATE {code}). Rewrite it "
+        "without that construct."
+    ),
+    "22": (
+        "A value did not fit an operation in the statement (SQLSTATE {code}), such as a division by "
+        "zero or a cast that fails. Rewrite the statement to guard against it."
+    ),
+    "53": _TOO_HEAVY,
+    "54": _TOO_HEAVY,
+    "40": (
+        "The database stopped the statement because of a conflict with other work (SQLSTATE {code}). "
+        "Running it again may succeed."
+    ),
+}
+_SQLSTATE_UNCLASSIFIED = (
+    "The statement could not be run because of an unexpected error on the server (SQLSTATE {code}). "
+    "The details are in the server log."
+)
+
+# Every sentence above with its code slot as a pattern. The forked transport relays a `syntax`
+# failure's line only when it matches one whole, because only our template and a valid code can.
+SQLSTATE_MESSAGE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(re.escape(template).replace(re.escape("{code}"), "[0-9A-Z]{5}"))
+    for template in (*set(_SQLSTATE_MESSAGES.values()), _SQLSTATE_UNCLASSIFIED)
+)
+
+
+def _is_sqlstate(value: object) -> bool:
+    return isinstance(value, str) and _SQLSTATE_RE.fullmatch(value) is not None
+
+
+def _code_on(exc: BaseException) -> str | None:
+    """The code one exception carries itself, as a plain `str`, or None. Never raises: a driver
+    attribute that throws must not turn a failure envelope into an exception."""
+    try:
+        for name in ("sqlstate", "sql_state", "pgcode"):
+            value = getattr(exc, name, None)
+            if _is_sqlstate(value):
+                return str.__str__(value)
+        for arg in getattr(exc, "args", ()):
+            if isinstance(arg, dict):
+                value = arg.get("C", arg.get(b"C"))
+                if isinstance(value, bytes):
+                    value = value.decode("ascii", "replace")
+                if _is_sqlstate(value):
+                    return str.__str__(value)
+    except Exception:  # noqa: BLE001 - a driver's property is not ours to trust
+        return None
+    return None
+
+
+def sqlstate_of(exc: BaseException | None) -> str | None:
+    """The SQLSTATE a driver exception carries, or None.
+
+    Read from the attribute each driver keeps it on, never parsed out of the message, so nothing a
+    statement can contain is mistaken for the server's code: `sqlstate` (psycopg 3, Snowflake,
+    PyMySQL, MySQL Connector, and `ExecutorError` itself), `sql_state` (the Databricks connector's
+    newer backend), `pgcode` (psycopg2), and the `C` field of the dict `redshift_connector` raises
+    with. Trino and the Databricks default backend expose none, and stay unclassified. Public so an
+    injected executor can fill `ExecutorError(sqlstate=…)` from the exception it caught.
+
+    Follows `__cause__` / `__context__`, because the built-in engines raise `ExecutorError` inside the
+    `except` that caught the driver's exception. A few links reach the driver's exception from any
+    raise site here; the bound is what keeps a hand-built cycle in the chain from spinning.
+    """
+    for _ in range(4):
+        if exc is None:
+            return None
+        code = _code_on(exc)
+        if code is not None:
+            return code
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def _sqlstate_failure(sqlstate: str) -> tuple[FailureKind, str]:
+    """The kind and value-free sentence for an execution error the text classifier could not read."""
+    if sqlstate == "42501":
+        # insufficient_privilege: class 42, but the fix is a GRANT, not a rewrite.
+        return "permission", _ERROR_MESSAGES["permission"]
+    klass = sqlstate[:2]
+    kind = _SQLSTATE_CLASS_KIND.get(klass, "other")
+    template = _SQLSTATE_MESSAGES.get(klass)
+    if template is not None:
+        return kind, template.format(code=sqlstate)
+    if kind in _ERROR_MESSAGES:
+        return kind, _ERROR_MESSAGES[kind]
+    return "other", _SQLSTATE_UNCLASSIFIED.format(code=sqlstate)
+
 
 
 # The kinds a dialect rule may never replace (#566): failures whose fix is not a rewrite. Everything
@@ -3196,6 +3323,14 @@ def execute_guarded(
         )
         if fix is not None:
             kind, message = "syntax", fix
+        elif kind == "other" and exc.code == 5:
+            # Nothing above could read it (#561). The server's SQLSTATE still says whose fault it
+            # was, without a word of its text: from the raise site, or from the driver's exception
+            # the built-in engines raised this inside. Only an execution error, as for the rule
+            # above: a connect failure or a deployment's own `other` is not the statement's fault.
+            sqlstate = sqlstate_of(exc)
+            if sqlstate is not None:
+                kind, message = _sqlstate_failure(sqlstate)
         return _envelope("failed", failure=Failure(kind=kind, message=message),
                          receipt=_receipt_for(received_sql, profile, bounded=True))
     except Exception:
