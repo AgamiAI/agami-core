@@ -12,6 +12,26 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+- **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
+  in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
+  script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
+  source tables are not in the model is still an error.
+
+### Fixed
+
+### Fixed
+
+- **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
+  `review_state: approved`, so an entity written during enrichment without the field came out
+  signed off, with no signer, and was trusted at query time although no one had looked at it. The
+  default is now `unreviewed`: such an entity waits in the review queue, and approving it in
+  `/agami-model` or with `sm approve-queue` records who signed it off and when. The shape reference
+  agami-connect follows showed `review_state: approved` in its entity example; it now shows
+  `unreviewed`.
+
+  **Existing models:** an entity file that states `review_state: approved` stays approved. Only one
+  that leaves the field out now loads as unreviewed and appears in the review queue.
+
 ### Fixed
 
 - **A join only the metadata preset assumes is not engine-approved (#509).** `sm enrich-metadata`
