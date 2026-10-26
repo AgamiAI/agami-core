@@ -381,8 +381,8 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
 
     **`tool_get_prompt_examples`'s local file-serving branch (no DB configured) is NOT handled, and
     this is not merely deferred scope — it is a mode where the gap cannot matter.** That branch
-    returns a whole area's curated library as one YAML/Markdown document with no leading JSON
-    object at all, so there is no prefix here to stamp. But "no `AGAMI_DB_URL`" is exactly the
+    now replies in the served JSON shape, but it is still never stamped, and the reason never
+    depended on the shape: "no `AGAMI_DB_URL`" is exactly the
     condition for the local single-player transport (`mcp_harness.py`), which has no authentication
     at all, by design — its own docs state the trust boundary is the OS user account, because there
     is nothing to authenticate to. `_actor_ctx` is only ever set inside this module's own
