@@ -1764,9 +1764,10 @@ def _nocase_columns(create_sql: str) -> set[str]:
     """Lowercased names of the columns a SQLite CREATE TABLE declares COLLATE NOCASE."""
     import sqlglot
     from sqlglot import exp
+    from sqlglot.errors import ErrorLevel
 
     try:
-        tree = sqlglot.parse_one(create_sql, dialect="sqlite")
+        tree = sqlglot.parse_one(create_sql, dialect="sqlite", error_level=ErrorLevel.RAISE)
     except Exception:
         return set()
     return {cd.name.lower() for cd in tree.find_all(exp.ColumnDef)
