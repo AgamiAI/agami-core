@@ -1520,7 +1520,7 @@ def _looks_time_named(name: str) -> bool:
 # A whole value that is an ISO date or timestamp, nothing before or after it.
 _STRICT_ISO_RE = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?"
-    r"(?:Z|[+-]\d{2}:?\d{2})?)?$")
+    r"(?:Z|[+-](\d{2}):?(\d{2}))?)?$")
 # A text column whose name says nothing about dates is claimed only on this much evidence.
 _ISO_TEXT_MIN_VALUES = 20
 
@@ -1529,11 +1529,13 @@ def _is_strict_iso(value: str) -> bool:
     m = _STRICT_ISO_RE.match(value)
     if not m:
         return False
-    y, mo, d, hh, mi, ss = m.groups()
+    y, mo, d, hh, mi, ss, oh, om = m.groups()
     try:
         date(int(y), int(mo), int(d))
     except ValueError:
         return False  # 2024-13-45 has the shape but is no date
+    if oh is not None and (int(oh) > 23 or int(om) > 59):
+        return False  # +25:00 / +05:99 is no UTC offset
     return hh is None or (int(hh) < 24 and int(mi) < 60 and (ss is None or int(ss) < 60))
 
 

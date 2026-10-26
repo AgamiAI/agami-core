@@ -1113,6 +1113,15 @@ def test_sniff_iso_text_needs_enough_values_that_all_are_real_dates():
     assert I._sniff_iso_text(dates + [None, ""]) == ("iso8601", None)  # nulls don't count against
 
 
+def test_strict_iso_range_checks_the_utc_offset():
+    assert I._is_strict_iso("2024-01-01 10:00:00+05:30")
+    assert I._is_strict_iso("2024-01-01T10:00:00-2359")
+    assert not I._is_strict_iso("2024-01-01 10:00:00+25:00")  # no such offset hour
+    assert not I._is_strict_iso("2024-01-01 10:00:00+05:99")  # no such offset minute
+    dates = [f"2024-01-{d:02d}" for d in range(1, 26)]
+    assert I._sniff_iso_text(dates + ["2024-01-01 10:00+25:00"]) == (None, None)
+
+
 def test_enrich_from_sample_dates_an_iso_text_column_with_a_plain_name():
     from semantic_model import dialects as D
 
