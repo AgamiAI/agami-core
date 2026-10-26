@@ -3242,10 +3242,10 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
 
     Relayed only when BOTH hold:
 
-      * the exit code is one the child's CLI contract produces from a `Failure`
-        (`execute_sql.EXIT_TO_FAILURE_KIND`, 2-11). Those are the codes `main` reaches by
-        writing `env.failure.message`, so the text is something the child classified and chose. Any
-        other code — a Python-level crash exiting 1, a signal, a code we do not know — means the
+      * the exit code is one of the AUTHORED configuration codes (2, 3), whose text is this
+        module's own remediation; every other code the child's contract produces (4-11) is rebuilt
+        from the code instead, below. Any other code — a Python-level crash exiting 1, a signal,
+        a code we do not know — means the
         child never got that far, so its stderr is whatever happened to be on the way out.
       * the text carries no Python traceback. Belt and braces on the rule above, and the concrete
         thing that used to land here: before `execute_guarded` was made total, a malformed
@@ -3258,11 +3258,11 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     needs, and it is the same text the in-process path surfaces from `ExecutorError.msg` — the two
     paths agreeing on it is a property this slice exists to keep.
 
-    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with one exact-match exception: a
+    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with exact-match exceptions: a
     `syntax` failure whose line is exactly one of `sql_dialect_rules.FIX_MESSAGES` (#566), a fixed set
-    built from our own rules, or a whole line matching one of
-    `execute_sql.SQLSTATE_MESSAGE_PATTERNS` (#561), our templates with a five-character code, so
-    nothing else in the stream can pass. For every code whose message the child derives from
+    built from our own rules, and a `syntax` or `other` failure whose line wholly matches one of
+    `execute_sql.SQLSTATE_MESSAGE_PATTERNS` (#561, #583), our templates with a five-character code,
+    so nothing else in the stream can pass. For every code whose message the child derives from
     `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
     is a *shared* stream, and the child writes to it before the failure line. The concrete case was
     `_model_safety`'s `[agami] applied default_filters: …` notice — it put a declared row-level
@@ -3312,6 +3312,27 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
             if coded is not None:
                 return coded
         return _ERROR_MESSAGES[kind]
+    if kind == "other":
+        # Rebuilt too (#583). `other` has no entry in `_ERROR_MESSAGES`, so it used to fall to the
+        # relay below with the authored codes, and the caller got the child's WHOLE stderr: any line a
+        # library logged before the failure line included. The child writes one of two kinds of
+        # sentence for it: the generic one, rebuilt here, or a SQLSTATE sentence (#561), relayed only
+        # as an exact match like the `syntax` ones above.
+        from execute_sql import SQLSTATE_MESSAGE_PATTERNS
+
+        coded = next(
+            (
+                line.strip()
+                for line in text.splitlines()
+                if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+            ),
+            None,
+        )
+        if coded is not None:
+            return coded
+        if text and text != UNEXPECTED_FAILURE_MESSAGE:
+            _LOG.error("forked executor exited %s (other); raw stderr: %s", returncode, text)
+        return UNEXPECTED_FAILURE_MESSAGE
     classified = returncode in EXIT_TO_FAILURE_KIND
     # `Traceback (most recent call last):` is the stable header of every Python traceback, and a
     # `  File "…", line N` frame is the line that carries the absolute path. Either one is enough.
