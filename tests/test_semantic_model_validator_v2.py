@@ -367,6 +367,29 @@ def test_two_areas_mapping_one_table_do_not_collide(lists):
     assert "cross_area_entity_collision" not in _codes(v.validate(org))
 
 
+def test_a_referenced_table_resolves_on_the_connection_the_area_lists_it_on():
+    # public.accounts exists on both connections; finance lists the one on c2
+    def area(name, conn):
+        t = m.Table(name="accounts", schema="public", storage_connection=conn, grain=["id"],
+                    description="d", columns=[_col("id")])
+        return m.SubjectArea(name=name, tables=[m.TableRef(storage_connection=conn, schema="public", table="accounts")],
+                             tables_defined=[t], entities=[m.Entity(name="Account", maps_to=[
+                                 m.EntityMapping(table="accounts", column="id", primary=True)])])
+    rev = m.Table(name="rev", schema="fin", storage_connection="c2", grain=["id"], description="d",
+                  columns=[_col("id")])
+    finance = m.SubjectArea(name="finance", tables=[
+        m.TableRef(storage_connection="c2", schema="fin", table="rev"),
+        m.TableRef(storage_connection="c2", schema="public", table="accounts")], tables_defined=[rev],
+        entities=[m.Entity(name="Account", maps_to=[m.EntityMapping(table="accounts", column="id", primary=True)])])
+    org = m.Datasource(datasource="O", storage_connections=[_conn("c1"), _conn("c2")],
+                       subject_areas=[area("crm", "c1"), area("crm2", "c2"), finance])
+    msgs = [f.message for f in v.validate(org).findings if f.code == "cross_area_entity_collision"]
+    pairs = {tuple(a for a in ("'crm'", "'crm2'", "'finance'") if a in msg) for msg in msgs}
+    assert ("'crm'", "'finance'") in pairs
+    assert ("'crm2'", "'finance'") not in pairs
+    assert any("public.accounts on c2" in msg for msg in msgs if "'finance'" in msg)
+
+
 # --- executable parity on cross-area edges ---
 
 

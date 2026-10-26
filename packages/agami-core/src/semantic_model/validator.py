@@ -1416,21 +1416,30 @@ def _binding_base_column_refs(sql: str, storage_type: str) -> set[str]:
     if not scopes:  # a bare expression such as `SUM(amount)`: no aliases to resolve
         return _binding_column_refs(sql)
 
-    def projected(src: Scope) -> set[str]:
-        return {n.lower() for n in getattr(src.expression, "named_selects", [])}
+    def derived_of(scope: Scope) -> list[Scope]:
+        # only the sources the SELECT reads: an unused CTE projecting `cst` must not hide a typo
+        return [src for _, src in scope.selected_sources.values() if isinstance(src, Scope)]
+
+    def projects(src: Scope, name: str) -> bool:
+        """Whether `src` makes `name` an alias. Through a star, only if a derived source of its own
+        does; a star over a base table passes the table's columns through, so those stay checked."""
+        selects = {n.lower() for n in getattr(src.expression, "named_selects", [])}
+        if name in selects:
+            return True
+        return "*" in selects and any(projects(inner, name) for inner in derived_of(src))
 
     out: set[str] = set()
     for scope in scopes:
-        derived = [s for s in scope.sources.values() if isinstance(s, Scope)]
+        derived = derived_of(scope)
         for col in scope.columns:
             name = col.name.lower()
             if not name:
                 continue
             if col.table:
-                src = scope.sources.get(col.table)
-                if isinstance(src, Scope) and (name in projected(src) or "*" in projected(src)):
+                _, src = scope.selected_sources.get(col.table, (None, None))
+                if isinstance(src, Scope) and projects(src, name):
                     continue
-            elif any(name in projected(s) for s in derived):
+            elif any(projects(s, name) for s in derived):
                 continue
             out.add(name)
     return out
@@ -1698,23 +1707,27 @@ def _entity_targets(org: Datasource, area_name: str, ent: Entity) -> dict[tuple,
     defined = _all_tables(sa)
     for mp in ent.maps_to:
         t = defined.get(mp.table)
+        ref_conn = ""
         if t is None:
             schema, bare = table_key(mp.table)
-            # the area's own TableRef settles which schema a bare name means
-            listed = [k for k in (table_key(r.table, r.schema_name) for r in sa.tables)
-                      if k[1] == bare and (not schema or k[0] in (schema, ""))]
-            if len(listed) == 1 and listed[0][0]:
-                schema = listed[0][0]
+            # the area's own TableRef settles which schema a bare name means, and which connection
+            listed = [r for r in sa.tables if (k := table_key(r.table, r.schema_name))[1] == bare
+                      and (not schema or k[0] in (schema, ""))]
+            if len(listed) == 1:
+                schema = table_key(listed[0].table, listed[0].schema_name)[0] or schema
+                ref_conn = listed[0].storage_connection
             hits = _tables_named(_table_defs(org), f"{schema}.{bare}" if schema else bare)
-            if len({table_key(h.name, h.schema_name) for h in hits}) == 1:
+            if ref_conn:
+                hits = [h for h in hits if h.storage_connection in (ref_conn, None)]
+            if len({(h.storage_connection, table_key(h.name, h.schema_name)) for h in hits}) == 1:
                 t = hits[0]
         if t is None:
             schema, bare = table_key(mp.table)
-            conn, shown = "", mp.table
+            conn, shown = ref_conn, mp.table
         else:
             schema, bare = table_key(t.name, t.schema_name)
             ref = next((r for r in sa.tables if table_key(r.table, r.schema_name) == (schema, bare)), None)
-            conn = t.storage_connection or (ref.storage_connection if ref else "")
+            conn = t.storage_connection or ref_conn or (ref.storage_connection if ref else "")
             shown = f"{t.schema_name}.{t.name}" if t.schema_name and "." not in t.name else t.name
         if several and conn:
             shown = f"{shown} on {conn}"

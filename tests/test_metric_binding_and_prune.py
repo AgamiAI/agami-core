@@ -69,6 +69,9 @@ def test_binding_column_check_catches_excluded_column_metric():
     "WITH per AS (SELECT id, SUM(cost) AS tot FROM orders GROUP BY id) SELECT AVG(per.tot) FROM per",
     # a select-list alias in the same SELECT's HAVING / ORDER BY
     "SELECT id, SUM(cost) AS total FROM orders GROUP BY id HAVING total > 0 ORDER BY total",
+    # an alias read through a star over a derived table that projects it
+    "SELECT SUM(s.r) FROM (SELECT * FROM (SELECT cost AS r FROM orders) x) s",
+    "SELECT SUM(s.cost) FROM (SELECT * FROM orders) s",
 ])
 def test_binding_column_check_ignores_aliases(sql):
     met = m.Metric(name="orders_avg", calculation="avg", source_tables=["orders"],
@@ -84,6 +87,21 @@ def test_binding_column_check_still_flags_a_typo_inside_a_subquery():
     res = V.ValidationResult()
     V._check_metric_binding_columns(_org(met), res)
     assert len(res.warnings) == 1 and "['cst']" in res.warnings[0]
+
+
+@pytest.mark.parametrize("sql", [
+    # a CTE the SELECT never reads doesn't make `cst` an alias
+    "WITH unused AS (SELECT 1 AS cst) SELECT SUM(cst) FROM orders",
+    # a star over a base table passes its columns through, so a typo read through it is still one
+    "SELECT SUM(s.cst) FROM (SELECT * FROM orders) s",
+    "SELECT SUM(cst) FROM (SELECT * FROM orders) s",
+])
+def test_binding_column_check_flags_a_typo_an_unused_cte_or_a_star_would_hide(sql):
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["orders"],
+                   bindings={"PostgreSQL": sql})
+    res = V.ValidationResult()
+    V._check_metric_binding_columns(_org(met), res)
+    assert len(res.warnings) == 1 and "['cst']" in res.warnings[0], res.warnings
 
 
 def test_loader_still_hides_a_metric_whose_subquery_reads_a_hidden_column(tmp_path):
