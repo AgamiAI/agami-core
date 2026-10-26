@@ -391,3 +391,12 @@ def test_a_table_named_with_its_schema_is_sized_and_listed_like_any_other():
     tree = rt._parse_sql("SELECT id FROM public.payments", "postgres")
     size = rt._table_sizes(tree, org)
     assert size(tree.find(rt.exp.Table)) == (t, 50_000_000)
+
+
+def test_a_qualifier_cannot_contradict_a_lone_table_that_records_no_schema():
+    """With one schemaless `orders`, `warehouse.orders` is that table: nothing says it lives
+    elsewhere. With a schema recorded, the same qualifier names another schema and finds nothing."""
+    org = m.Datasource(datasource="acme", subject_areas=[
+        m.SubjectArea(name="sales", tables_defined=[_table("orders", None)])])
+    assert [t.name for t in L._find_tables(org, "warehouse.orders")] == ["orders"]
+    assert L._find_tables(_two_schemas_org(), "warehouse.customers") == []
