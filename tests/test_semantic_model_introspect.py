@@ -349,6 +349,22 @@ def test_grouping_follows_joins_not_name_prefixes():
     assert area["misc0_log"] == "misc0"   # no joins: grouped by its whole first word
 
 
+def test_one_join_between_two_clusters_does_not_merge_them():
+    # connected components would make this one area: every table reaches every other
+    shop = ["orders", "order_items", "products", "payments", "returns", "promotions"]
+    people = ["staff", "departments", "projects", "pro_tasks", "timesheets", "payroll_runs"]
+    rels = [_j("order_items", "orders"), _j("order_items", "products"), _j("payments", "orders"),
+            _j("returns", "order_items"), _j("promotions", "products"),
+            _j("staff", "departments"), _j("pro_tasks", "projects"), _j("pro_tasks", "staff"),
+            _j("timesheets", "pro_tasks"), _j("timesheets", "staff"), _j("payroll_runs", "staff"),
+            _j("returns", "staff")]   # the one bridge
+    filler = [_t(f"x{i}_log") for i in range(15)]
+    area = _proposed([_t(n) for n in shop + people] + filler, rels)
+    assert len({area[t] for t in shop}) == 1 and len({area[t] for t in people}) == 1
+    assert area["orders"] != area["staff"]
+    assert (area["orders"], area["staff"]) == ("orders", "staff")
+
+
 def test_a_table_with_no_joins_goes_with_tables_sharing_its_first_word():
     names = ["orders", "order_lines", "order_notes", "suppliers", "supplier_ratings", "status",
              *(f"t{i}" for i in range(20))]

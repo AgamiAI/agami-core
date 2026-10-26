@@ -19,8 +19,8 @@ below corresponds to one such version.
   (`"schema"` too when two schemas share the name) moves the table and its area entry, and creates
   the target area when the model doesn't have it. A join that now spans two areas becomes a
   cross-area join, and a cross-area join whose two tables now share an area moves into it. Metrics
-  and entities that read only that table move with it; one that also reads another table stays,
-  and the result's `notes` names it. The batch is validated and undone on failure, logged with
+  and entities on that table move with it when every table they read is now in the new area; one
+  that also reads a table outside it stays, and the result's `notes` names it. The batch is validated and undone on failure, logged with
   both areas, and committed when the model is its own git repository. The model explorer has a
   **Move to area** control on every table that queues the op.
 
@@ -29,10 +29,12 @@ below corresponds to one such version.
 - **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
   single-schema database of more than 24 tables used to get one area per table-name prefix, with
   any name starting with a shorter one's prefix pulled in (`pro_x` with `products`) and names
-  singularised by dropping an "s" (`supplie`, `statu`). Tables that join each other now share an
-  area, with no target number of areas; a group that would pass the area size limit is cut at its
-  weakest joins. Tables with no joins go with tables sharing their whole first name word. Area
-  names are the tables' own words. Only new proposals change: an existing model is never regrouped.
+  singularised by dropping an "s" (`supplie`, `statu`). Tables are now grouped where they join each
+  other most densely (greedy modularity over the join graph), with no target number of areas, so a
+  hub table that half the database joins doesn't pull everything into one area; no group passes the
+  area size limit, and ties go to the tables sharing more words in their names and descriptions.
+  Tables with no joins go with tables sharing their whole first name word. Area names are the
+  tables' own words. Only new proposals change: an existing model is never regrouped.
 
 ### Fixed
 

@@ -139,7 +139,7 @@ It prints `{data, anomalies, needs_judgment}`:
 ]
 ```
 
-A `move` (the explorer's **Move to area**) gives the table a new owning area, created if the model doesn't have it yet. Its joins follow it (a join that now spans two areas becomes a cross-area join, and the reverse), and the metrics and entities that read only that table move with it. Ones that also read another table stay; the result's `notes` lists them (*"left in sales: metric units_per_order also reads orders"*). Pass `notes` on to the user verbatim.
+A `move` (the explorer's **Move to area**) gives the table a new owning area, created if the model doesn't have it yet. Its joins follow it (a join that now spans two areas becomes a cross-area join, and the reverse), and the metrics and entities on it move too once every table they read is in the new area. Ones that also read a table outside it stay; the result's `notes` lists them (*"left in sales: metric units_per_order also reads orders"*). Pass `notes` on to the user verbatim.
 
 (Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
 

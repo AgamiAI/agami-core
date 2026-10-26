@@ -341,13 +341,20 @@ def _words(t: Table) -> set[str]:
     return {w for w in re.split(r"[^a-z0-9]+", text) if len(w) > 2 and w not in _STOP_WORDS}
 
 
+# Below 1, modularity favours fewer, larger groups: at 1 it cuts a five-table chain in two.
+_RESOLUTION = 0.5
+
+
 def group_by_joins(tables: list[Table], rels: list[Relationship],
                    max_size: int = SINGLE_AREA_MAX) -> list[list[Table]]:
-    """Group tables by the joins between them: tables that join land together, with no target
-    number of groups. Links are taken strongest first (more joins between the two tables, then more
-    words shared in their names and descriptions), and a link that would grow a group past
-    `max_size` is skipped, so an oversized cluster is cut at its weakest links. Small pieces such a
-    cut leaves are pooled by first name word. A table with no joins goes with the group holding the
+    """Group tables by the joins between them, with no target number of groups.
+
+    Groups start as single tables and the two joined groups that most raise the graph's modularity
+    are merged, until no merge raises it. That keeps a connected database apart at its weakest links:
+    a hub that half the tables join (customers, staff) doesn't pull them all into one group, as plain
+    connected components would. A merge past `max_size` is never made. Ties go to the pair sharing
+    more words in their names and descriptions. A joined table left alone goes to the neighbouring
+    group it joins most that has room, else into a pool of such tables. A table with no joins goes with the group holding the
     most tables that share its whole first name word, else in a group of its own."""
     n = len(tables)
     index = {(t.schema_name, t.name): i for i, t in enumerate(tables)}
@@ -362,33 +369,52 @@ def group_by_joins(tables: list[Table], rels: list[Relationship],
         hits = by_bare.get(bare, [])
         return hits[0] if len(hits) == 1 else None
 
-    joins: dict[tuple[int, int], int] = defaultdict(int)
+    weight: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
     for r in rels:
         a, b = at(r.from_table, r.from_schema), at(r.to_table, r.to_schema)
         if a is not None and b is not None and a != b:
-            joins[(min(a, b), max(a, b))] += 1
+            weight[a][b] += 1
+            weight[b][a] += 1
+    joined = sorted(weight)
+    total = sum(sum(w.values()) for w in weight.values())   # 2m
     words = [_words(t) for t in tables]
     tokens = [_first_token(t.name) for t in tables]
 
-    parent, size = list(range(n)), [1] * n
+    groups: dict[int, list[int]] = {i: [i] for i in joined}
+    degree = {i: sum(weight[i].values()) for i in joined}
+    links = {i: dict(weight[i]) for i in joined}            # group -> {group: join weight}
 
-    def root(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
+    def shared(g: int, h: int) -> int:
+        return len(set().union(*(words[i] for i in groups[g])) & set().union(*(words[i] for i in groups[h])))
 
-    def union(a: int, b: int) -> bool:
-        ra, rb = root(a), root(b)
-        if ra == rb or size[ra] + size[rb] > max_size:
-            return False
-        if size[ra] < size[rb]:
-            ra, rb = rb, ra
-        parent[rb], size[ra] = ra, size[ra] + size[rb]
-        return True
+    while True:
+        best, best_key = None, None
+        for g in groups:
+            for h, w in links[g].items():
+                if h <= g or len(groups[g]) + len(groups[h]) > max_size:
+                    continue
+                gain = w / total - _RESOLUTION * degree[g] * degree[h] / (total * total)
+                if gain <= 1e-12:
+                    continue
+                key = (round(gain, 12), shared(g, h), -min(g, h))
+                if best_key is None or key > best_key:
+                    best, best_key = (g, h), key
+        if best is None:
+            break
+        g, h = best
+        groups[g] += groups.pop(h)
+        degree[g] += degree.pop(h)
+        for k, w in links.pop(h).items():
+            if k == g:
+                continue
+            links[g][k] = links[g].get(k, 0) + w
+            links[k][g] = links[k].get(g, 0) + w
+            links[k].pop(h, None)
+        links[g].pop(h, None)
 
-    # The uncapped components, to know which pieces a size cut came from.
-    comp = list(range(n))
+    # A joined table still alone was refused by the size limit or by every neighbour: put it with the
+    # neighbouring group it joins most that has room, else pool those of one cluster by name word.
+    comp = {i: i for i in joined}
 
     def croot(i: int) -> int:
         while comp[i] != i:
@@ -396,46 +422,40 @@ def group_by_joins(tables: list[Table], rels: list[Relationship],
             i = comp[i]
         return i
 
-    for a, b in joins:
-        comp[croot(a)] = croot(b)
-
-    order = sorted(joins, key=lambda p: (-joins[p], -len(words[p[0]] & words[p[1]]),
-                                         tables[p[0]].name, tables[p[1]].name))
-    for a, b in order:
-        union(a, b)
-
-    joined = {i for p in joins for i in p}
-    groups: dict[int, list[int]] = defaultdict(list)
-    for i in sorted(joined):
-        groups[root(i)].append(i)
-
-    # A joined table left on its own was cut off by the size limit (a leaf of a full hub); pool those
-    # of one cluster by name word instead of giving each its own area.
-    stranded: dict[int, list[int]] = defaultdict(list)
-    for r, members in list(groups.items()):
-        if len(members) == 1:
-            stranded[croot(r)].append(r)
-            del groups[r]
-    for members in stranded.values():
+    for a in joined:
+        for b in weight[a]:
+            comp[croot(a)] = croot(b)
+    owner = {i: g for g, members in groups.items() for i in members}
+    pooled: dict[int, list[int]] = defaultdict(list)
+    for i in [g for g, members in groups.items() if len(members) == 1]:
+        near = [(w, len(words[i] & set().union(*(words[m] for m in groups[owner[k]]))), -owner[k], owner[k])
+                for k, w in weight[i].items() if len(groups[owner[k]]) > 1 and len(groups[owner[k]]) < max_size]
+        del groups[i]
+        if near:
+            g = max(near)[3]
+            groups[g].append(i)
+            owner[i] = g
+        else:
+            pooled[croot(i)].append(i)
+    for members in pooled.values():
         members.sort(key=lambda i: (tokens[i], tables[i].name))
         for k in range(0, len(members), max_size):
-            chunk = members[k:k + max_size]
-            groups[chunk[0]] = chunk
+            groups[members[k]] = members[k:k + max_size]
 
-    for i in sorted(set(range(n)) - joined, key=lambda i: tables[i].name):
+    for i in sorted(set(range(n)) - set(joined), key=lambda i: tables[i].name):
         same = [r for r, members in groups.items()
                 if len(members) < max_size and any(tokens[m] == tokens[i] for m in members)]
         if same:
-            best = max(same, key=lambda r: (sum(tokens[m] == tokens[i] for m in groups[r]), r >= 0, -r))
-            groups[best].append(i)
+            best_group = max(same, key=lambda r: (sum(tokens[m] == tokens[i] for m in groups[r]), r >= 0, -r))
+            groups[best_group].append(i)
         else:
             groups[-1 - i] = [i]
-    return [[tables[i] for i in sorted(members)] for _r, members in sorted(groups.items(),
-                                                                           key=lambda kv: min(kv[1]))]
+    return [[tables[i] for i in sorted(members)] for members in sorted(groups.values(), key=min)]
 
 
 def _group_name(members: list[Table], rels: list[Relationship]) -> str:
-    """The first name word most of the group's tables share; on a tie, that of its most-joined table."""
+    """The first name word most of the group's tables share; on a tie, a one-word table's name (the
+    entity itself, `orders` over `order_items`), then that of its most-joined table."""
     names = {t.name for t in members}
     degree: dict[str, int] = defaultdict(int)
     for r in rels:
@@ -446,7 +466,8 @@ def _group_name(members: list[Table], rels: list[Relationship]) -> str:
     count: dict[str, int] = defaultdict(int)
     for t in members:
         count[_first_token(t.name)] += 1
-    hub = max(members, key=lambda t: (count[_first_token(t.name)], degree[t.name], [-ord(c) for c in t.name]))
+    hub = max(members, key=lambda t: (count[_first_token(t.name)], _first_token(t.name) == t.name.lower(),
+                                      degree[t.name], [-ord(c) for c in t.name]))
     return _first_token(hub.name)
 
 
@@ -529,8 +550,8 @@ def propose_subject_areas(
         by_area[name] = members
     areas = [make_area(a, members, rels, conn) for a, members in sorted(by_area.items())]
     notes.append(
-        f"{len(tables)} tables -> {len(areas)} areas by their joins (tables that join share an area; "
-        "one with no joins goes with tables sharing its first name word); cross-area joins become "
+        f"{len(tables)} tables -> {len(areas)} areas by their joins (grouped where tables join each other "
+        "most; one with no joins goes with tables sharing its first name word); cross-area joins become "
         "cross_subject_area_relationships. PROPOSAL — review."
     )
     return areas, notes

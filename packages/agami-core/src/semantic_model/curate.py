@@ -902,7 +902,7 @@ def _move_table(root: Path, op: dict, src: str, backups: "dict[Path, Optional[st
     owners = _owners(root)
     _replace_joins(root, src, me, owners, backups, notes)
     for kind in ("metric", "entity"):
-        _carry_items(root, kind, src, dst, me, backups, notes)
+        _carry_items(root, kind, src, dst, me, owners, backups, notes)
     return dst_tf
 
 
@@ -986,10 +986,11 @@ def _replace_joins(root: Path, src: str, me: tuple[str, str], owners: dict,
         _dump(xfile, {**(doc if isinstance(doc, dict) else {}), "edges": [*current, *into_cross]})
 
 
-def _carry_items(root: Path, kind: str, src: str, dst: str, me: tuple[str, str],
+def _carry_items(root: Path, kind: str, src: str, dst: str, me: tuple[str, str], owners: dict,
                  backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
-    """Move the old area's metrics (or entities) that read only the moved table; report the ones that
-    read it and another table, which stay where they are."""
+    """Move the old area's metrics (or entities) on the moved table whose every table is now in the
+    new area (only that table, or tables an earlier move put there); report the ones that also read a
+    table outside it, which stay where they are."""
     from .models import table_key
 
     sub = _KINDS[kind][0]
@@ -1004,7 +1005,7 @@ def _carry_items(root: Path, kind: str, src: str, dst: str, me: tuple[str, str],
         on_me = [t for t in tables if _same_table(table_key(t), me)]
         if not on_me:
             continue
-        others = sorted({t for t in tables if t not in on_me})
+        others = sorted({t for t in tables if t not in on_me and _owner_of(owners, table_key(t)) != dst})
         label = doc.get("name") or f.stem
         if others:
             notes.append(f"left in {src}: {kind} {label} also reads {', '.join(others)}")

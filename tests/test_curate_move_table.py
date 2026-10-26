@@ -149,8 +149,8 @@ def test_a_metric_filed_under_the_table_moves_with_it(tmp_path):
 
 def test_moving_back_restores_the_join_inside_the_area(tmp_path):
     root = _model(tmp_path)
-    assert _move(root, "order_items", "catalog").validated
-    assert _move(root, "order_items", "sales").validated
+    assert _move(root, "order_items", "catalog").applied
+    assert _move(root, "order_items", "sales").applied
     intra, cross = _joins(loader.load_datasource(root))
     assert ("sales", "order_items", "orders") in intra
     assert cross == {("sales", "catalog", "order_items", "products")}
@@ -221,3 +221,14 @@ def test_moving_to_the_same_area_or_an_unowned_table_is_skipped(tmp_path):
     assert "tables only" in curate.apply(
         root, [{"op": "move", "kind": "metric", "name": "units_sold", "area": "sales",
                 "to_area": "catalog"}]).skipped[0]["reason"]
+
+
+def test_a_metric_follows_once_every_table_it_reads_has_moved(tmp_path):
+    root = _model(tmp_path)
+    res = curate.apply(root, [{"op": "move", "kind": "table", "name": t, "to_area": "catalog"}
+                              for t in ("order_items", "orders")])
+    assert res.validated, res.as_dict()
+    catalog = loader.load_datasource(root).subject_area("catalog")
+    assert {"units_sold", "units_per_order"} <= {m.name for m in catalog.metrics}
+    assert {"line", "order"} <= {e.name for e in catalog.entities}
+    assert "left in sales: metric units_per_order also reads orders" in res.notes   # after the first move
