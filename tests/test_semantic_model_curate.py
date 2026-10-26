@@ -178,10 +178,10 @@ def test_approve_resolves_slugged_metric_name(tmp_path):
               if x.name == "total event sales")
     assert m2.review_state == "approved"
 
-    # a genuinely-missing metric fails the batch with a CLEAR reason (#538: never a silent skip)
+    # a genuinely-missing metric now fails with a CLEAR reason (not a cryptic FileNotFoundError)
     res2 = curate.apply(tmp_path, [{"op": "approve", "kind": "metric", "area": "sales",
                                     "name": "no such metric"}])
-    assert not res2.applied and "no metric named" in res2.errors[0]
+    assert res2.skipped and "no metric named" in res2.skipped[0]["reason"]
 
 
 def test_edit_op_auto_resolves_area_when_omitted(tmp_path):

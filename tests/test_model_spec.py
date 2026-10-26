@@ -657,7 +657,7 @@ def test_an_ambiguous_join_approval_is_refused_not_guessed(tmp_path):
         "at": "2026-01-01T00:00:00Z",
     }
     res = curate.apply(root, [op], signer="you@example.com", role="owner")
-    assert not res.applied and "3 joins match sales_f->customer_d" in res.errors[0]
+    assert not res.applied and "3 joins match sales_f->customer_d" in res.skipped[0]["reason"]
     assert all(r.review_state == "unreviewed" for r in _rels(root))
 
 
@@ -1142,7 +1142,7 @@ def test_a_join_matched_in_two_places_is_refused(tmp_path):
         "at": "2026-01-01T00:00:00Z",
     }
     res = curate.apply(root, [op], signer="you@example.com", role="owner")
-    assert not res.applied and "2 joins match" in res.errors[0]
+    assert not res.applied and "2 joins match" in res.skipped[0]["reason"]
 
 
 def test_workbook_keeps_a_qualified_table_name_as_written(tmp_path):

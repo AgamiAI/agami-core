@@ -502,7 +502,7 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
 
 
 class BatchError(ValueError):
-    """An op whose target is in the model but can't be pinned to one entry, or isn't anywhere. A skip
+    """An area-less op on a join, entity or metric that matches no entry, or more than one. A skip
     would let the batch report success with that change missing, so apply() refuses the batch (#538)."""
 
 
@@ -695,13 +695,15 @@ _CROSS_ITEMS = {"metric": ("cross_subject_area_metrics", "cross_subject_area_met
 
 
 def _find_item(root: Path, kind: str, name: str, area: Optional[str]) -> tuple:
-    """(path, list key or None, file doc, entry) of the one entity / metric an op names. A named area
-    holding it wins, as before; otherwise every area and the cross-area lists are searched."""
+    """(path, list key or None, file doc, entry) of the one entity / metric an op names. With an area,
+    only that area's file, as before; without one, every area and the cross-area lists."""
     # entities/metrics are stored under the SLUGGED name (write_items uses _slug) — a multi-word name
     # ("total event sales") must find total_event_sales.yaml. _slug is idempotent.
     sub, stem = _KINDS[kind][0], _slug(name)
-    if area and (_area_dir(root, area) / sub / f"{stem}.yaml").exists():
+    if area:
         path = _area_dir(root, area) / sub / f"{stem}.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"no {kind} named {name!r} in area {area!r}")
         doc = _load(path)
         return path, None, doc, doc
     found: list[tuple[str, Path, Optional[str], Any, dict]] = []
@@ -758,6 +760,14 @@ def _find_join(root: Path, op: dict, area: Optional[str]) -> tuple:
     found = search([area]) if area else []
     if not found:
         found = search(_area_names(root))
+    if area and len(found) != 1:
+        # An op naming an area keeps main's skip; only an area-less op fails the batch (#538).
+        if not found:
+            raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
+        raise ValueError(
+            f"{len(found)} joins match {name}; name the one you mean with from_column and "
+            "to_column, or its `on` condition, and from_schema / to_schema when the table "
+            "names repeat across schemas — the table pair alone would pick one at random")
     if not found:
         named = ", ".join(f"{k}={op[k]}" for k in ("from_column", "to_column", "on", "from_schema",
                                                     "to_schema") if op.get(k))

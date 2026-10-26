@@ -155,7 +155,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
 
 **Failure** (`validated: false`):
 - The engine already reverted via git. Surface: *"⚠ Validator rejected the batch — all changes reverted. No files were modified."* Show `errors` verbatim. Stop; don't re-render.
-- The same happens when an op names a join, entity or metric that isn't in the model, or one that matches more than one entry (e.g. two joins between the same tables): the error names the op and the candidates. Re-send the op with `from_column` / `to_column` (or `area` for an entity or metric), never drop it. An op without `area` is searched for in every subject area and in the cross-area joins, entities and metrics.
+- The same happens when an op with no `area` names a join, entity or metric that isn't in the model, or one that matches more than one entry (e.g. two joins between the same tables): the error names the op and the candidates. Re-send the op with `from_column` / `to_column` (or `area` for an entity or metric), never drop it. An op without `area` is searched for in every subject area and in the cross-area joins, entities and metrics; an op that names an area and misses its target is listed in `skipped[]` as before.
 
 Excluded entries vanish from the runtime model (the loader drops `review_state: rejected`) but stay visible in the explorer (which loads with `include_rejected=True`) so the user can re-include them.
 

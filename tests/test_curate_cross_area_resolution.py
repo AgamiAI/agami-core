@@ -189,3 +189,31 @@ def test_approve_queue_signs_off_a_cross_area_join_and_metric(tmp_path):
     assert org.cross_subject_area_relationships[0].review_state == "approved"
     assert org.cross_subject_area_metrics[0].review_state == "approved"
     assert curate.review_queue(org)["counts"]["total"] == 0
+
+
+def test_a_named_area_that_lacks_the_join_finds_it_in_another_area(tmp_path):
+    _model(tmp_path, cross=[])
+    (tmp_path / "subject_areas" / "billing" / "relationships.yaml").write_text(yaml.safe_dump({
+        "relationships": [{"from_table": "invoices", "from_column": "payer_id", "to_table": "invoices",
+                           "to_column": "id", "relationship": "many_to_one",
+                           "confidence": "inferred", "review_state": "unreviewed"}]}))
+    res = curate.apply(tmp_path, [{"op": "reject", "kind": "relationship", "area": "crm",
+                                   "name": "invoices->invoices"}])
+    assert res.applied and not res.errors, res.as_dict()
+    rel = loader.load_datasource(tmp_path, include_rejected=True).subject_area("billing").relationships[0]
+    assert rel.review_state == "rejected"
+
+
+def test_a_named_area_op_with_a_missing_target_is_still_a_skip(tmp_path):
+    # As on main: naming an area keeps the per-op skip, and the rest of the batch applies.
+    _model(tmp_path, cross=[_JOIN])
+    res = curate.apply(tmp_path, [
+        {"op": "approve", "kind": "metric", "area": "billing", "name": "no such metric"},
+        {"op": "reject", "kind": "relationship", "area": "billing", "name": "customers->invoices"},
+        {"op": "reject", "kind": "relationship", "name": "invoices->customers"},
+    ])
+    assert res.validated and not res.errors, res.as_dict()
+    assert res.applied == ["reject relationship /invoices->customers"]
+    assert [s["reason"] for s in res.skipped] == [
+        "no metric named 'no such metric' in area 'billing'",
+        "relationship customers->invoices not found in the area or the cross-area relationships"]
