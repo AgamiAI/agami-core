@@ -22,7 +22,13 @@ below corresponds to one such version.
   Postgres enum type, a MySQL/MariaDB `ENUM(...)` column, and a CHECK constraint that only lists one
   column's values (`col IN ('a','b')`, `col = 'a' OR col = 'b'`), read on Postgres, MySQL 8, SQL
   Server, Oracle, SQLite and DuckDB; a declared list is kept as declared, up to 200 values, integer
-  columns included. Postgres shows a CHECK's text only to the table's owner (the function that shows
+  columns included. Only a CHECK the engine enforces on every stored row counts (not Postgres `NOT
+  VALID`, MySQL `NOT ENFORCED`, a disabled or untrusted SQL Server CHECK, or an Oracle one that is
+  disabled or `NOVALIDATE`), a CHECK whose name another table also uses is skipped, and one that casts
+  the column to a non-string type declares nothing. A declared list that can't be kept (over 200
+  values, two CHECKs that disagree, or a value the column's type can't hold) gives the column no list
+  at all. On MySQL/MariaDB, SQL Server and a SQLite `COLLATE NOCASE` column a string list also gets a
+  caveat that the database compares values case-insensitively. Postgres shows a CHECK's text only to the table's owner (the function that shows
   it to any role is refused by the recon gate), so a SELECT-only role reads enums and no CHECKs. When nothing is declared, a small table (the same size rule as before) reads the
   list with one bounded `SELECT DISTINCT` per column, at most 1,000 in a run; more than 25 values
   gives no list rather than part of one. Keys (`*_key`, `*_sk`, `*_fk`), measures and years get no

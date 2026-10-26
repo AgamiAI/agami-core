@@ -118,7 +118,8 @@ def test_two_checks_that_disagree_on_a_column_declare_nothing():
         checks=["CHECK ((status = ANY (ARRAY['a'::text, 'b'::text])))",
                 "CHECK ((status = ANY (ARRAY['a'::text, 'c'::text])))"],
     )
-    assert I._declared_values(D.get_dialect("postgres"), runner, "public", "orders") == {}
+    got = I._declared_values(D.get_dialect("postgres"), runner, "public", "orders")
+    assert got.values == {} and got.rejected == {"status"}
 
 
 # --- declared values: the other engines ---------------------------------------------------------
@@ -136,7 +137,7 @@ def test_mysql_enum_column_type_is_parsed():
     sql = D.get_dialect("mysql").sql_enum_values("shop", "orders")
     assert "information_schema.columns" in sql and "table_name = 'orders'" in sql
     rows = lambda s: [I._Row(r) for r in runner(s)]  # noqa: E731 — MySQL answers in upper case
-    assert I._declared_values(D.get_dialect("mysql"), rows, "shop", "orders") == {"size": ["S", "M", "L"]}
+    assert I._declared_values(D.get_dialect("mysql"), rows, "shop", "orders").values == {"size": ["S", "M", "L"]}
 
 
 @pytest.mark.parametrize("db_type, clause, expected", [
@@ -359,3 +360,175 @@ def test_a_refresh_leaves_an_existing_list_alone_and_lists_a_new_column(tmp_path
     t = load_datasource(root).subject_areas[0].defined_table("orders")
     assert t.get_column("status").choice_field == labels
     assert t.get_column("channel").choice_field == {"store": "", "web": ""}
+
+
+# --- review fixes: only enforced, unambiguous CHECKs; rejected lists; exact parsing -------------
+
+
+def _sql(db_type):
+    return " ".join(D.get_dialect(db_type).sql_check_constraints("s", "orders").split())
+
+
+def test_postgres_reads_only_validated_checks_with_a_name_no_other_table_uses():
+    sql = _sql("postgres")
+    assert "con.convalidated" in sql
+    assert ("NOT EXISTS (SELECT 1 FROM pg_constraint o WHERE o.connamespace = con.connamespace "
+            "AND o.conname = con.conname AND o.oid <> con.oid)") in sql
+
+
+def test_mysql_reads_only_enforced_checks_with_a_name_unique_in_the_schema():
+    sql = _sql("mysql")
+    assert "tc.enforced = 'YES'" in sql
+    assert "SELECT COUNT(*) FROM information_schema.table_constraints t2" in sql and sql.endswith(") = 1")
+    fallback = D.get_dialect("mariadb").sql_check_constraints_fallback("s", "orders")
+    assert "cc.table_name = 'orders'" in fallback and "cc.constraint_schema = 's'" in fallback
+
+
+def test_sqlserver_and_oracle_read_only_enabled_trusted_checks():
+    assert "cc.is_disabled = 0 AND cc.is_not_trusted = 0" in _sql("sqlserver")
+    assert "status = 'ENABLED' AND validated = 'VALIDATED'" in _sql("oracle")
+
+
+@pytest.mark.parametrize("db_type", ["postgres", "mysql", "mariadb", "sqlserver", "oracle"])
+def test_the_filtered_check_reads_pass_the_always_on_gate(db_type):
+    import sql_guard
+
+    d = D.get_dialect(db_type)
+    for q in (d.sql_check_constraints("s", "t"), d.sql_check_constraints_fallback("s", "t")):
+        if q:
+            assert sql_guard.check_read_only(q) is None and sql_guard.check_no_recon(q) is None, q
+
+
+def _mysql_runner(*, mysql_form_fails: bool, mariadb_form_fails: bool = False):
+    def run(sql):
+        if "check_constraints" in sql:
+            if "tc.enforced" in sql:
+                if mysql_form_fails:
+                    raise RuntimeError("Unknown column 'tc.enforced'")
+                return [I._Row({"CHECK_CLAUSE": "(`status` in (_utf8mb4'open',_utf8mb4'closed'))"})]
+            if mariadb_form_fails:
+                raise RuntimeError("Unknown table 'check_constraints'")
+            return [I._Row({"CHECK_CLAUSE": "`status` in ('open','closed')"})]
+        return []
+    return run
+
+
+@pytest.mark.parametrize("mysql_fails, mariadb_fails, expected", [
+    (False, False, {"status": ["open", "closed"]}),   # MySQL 8.0.16+
+    (True, False, {"status": ["open", "closed"]}),    # MariaDB: the fallback form
+    (True, True, {}),                                 # older MySQL: no view, nothing declared
+])
+def test_mariadb_falls_back_to_its_own_check_read(mysql_fails, mariadb_fails, expected):
+    run = _mysql_runner(mysql_form_fails=mysql_fails, mariadb_form_fails=mariadb_fails)
+    assert I._declared_values(D.get_dialect("mariadb"), run, "shop", "orders").values == expected
+
+
+def test_a_declared_value_the_column_type_cant_hold_gives_no_list(tmp_path):
+    db = tmp_path / "lv.db"
+    con = sqlite3.connect(db)
+    con.executescript("CREATE TABLE orders(id INTEGER PRIMARY KEY, level INTEGER CHECK (level IN (1.0, 2.0)));")
+    con.executemany("INSERT INTO orders VALUES (?, ?)", [(i, 1 + i % 2) for i in range(40)])
+    con.commit()
+    con.close()
+    I.introspect("shop", "sqlite", runner=_sqlite_runner(db), artifacts_dir=tmp_path)
+    org = load_datasource(tmp_path / "shop")
+    assert _orders(org).get_column("level").choice_field is None
+    assert V.validate(org).ok
+
+
+def test_a_rejected_declaration_gets_no_list_from_the_data_either(tmp_path):
+    seen: list[str] = []
+    runner = make_catalog_runner(
+        tables=["orders"],
+        columns={"orders": [col("id", "integer", nullable=False), col("region", "USER-DEFINED"),
+                            col("status", "text")]},
+        enums=[{"column_name": "region", "enum_value": f"r{i:03d}"} for i in range(I.DECLARED_MAX_VALUES + 1)],
+        sample=lambda sql: [{"id": i, "region": ["r000", "r001"][i % 2], "status": "ab"[i % 2]} for i in range(60)],
+    )
+    org, _ = I.introspect("shop", "postgres", runner=_recording(runner, seen), artifacts_dir=tmp_path, dry_run=True)
+    t = _orders(org)
+    assert t.get_column("region").choice_field is None
+    assert not any('SELECT DISTINCT "region"' in s for s in seen)
+    assert t.get_column("status").choice_field == {"a": "", "b": ""}  # an undeclared column still is
+
+
+def test_mysql_enum_escapes_are_decoded():
+    assert I._enum_type_values(r"enum('a\nb','c\td','e\\f','it\'s','g\rh','z\0','q\Zr','\%')") == [
+        "a\nb", "c\td", "e\\f", "it's", "g\rh", "z\0", "q\x1ar", "%"]
+
+
+@pytest.mark.parametrize("db_type, clause, expected", [
+    # a cast to a string type on the column is Postgres's own spelling and changes nothing
+    ("postgres", "CHECK (((status)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[])))",
+     [("status", ["a", "b"])]),
+    ("postgres", "CHECK ((level = ANY (ARRAY[(1)::bigint, (2)::bigint])))", [("level", ["1", "2"])]),
+    # any other cast changes which stored values pass: no list
+    ("sqlite", "CREATE TABLE t (status TEXT CHECK (CAST(status AS INTEGER) IN (1, 2)))", []),
+    ("postgres", "CHECK (((status)::character varying(1) = ANY (ARRAY['a'::text])))", []),
+    ("postgres", "CHECK ((level = ANY (ARRAY['01'::integer, '2'::integer])))", []),
+])
+def test_only_casts_that_keep_the_values_are_unwrapped(db_type, clause, expected):
+    assert I._check_lists(clause, D.get_dialect(db_type)) == expected
+
+
+_CI = "this database compares values case-insensitively: 'open' also matches other capitalisations"
+
+
+def _ci(caveats):
+    return any(c.startswith("this database compares values case-insensitively: '") for c in caveats)
+
+
+def _declared_runner(enum_type=None, check=None):
+    def run(sql):
+        if "data_type = 'enum'" in sql:
+            return [I._Row({"COLUMN_NAME": "status", "COLUMN_TYPE": enum_type})] if enum_type else []
+        if "check_constraints" in sql:
+            return [I._Row({"check_clause": check})] if check else []
+        return []
+    return run
+
+
+@pytest.mark.parametrize("db_type, run, caveat", [
+    ("mysql", _declared_runner(check="(`status` in (_utf8mb4'open',_utf8mb4'closed'))"), True),
+    ("sqlserver", _declared_runner(check="([status]='open' OR [status]='closed')"), True),
+    ("mysql", _declared_runner(enum_type="enum('open','closed')"), False),   # an ENUM stores exactly
+    ("postgres", _declared_runner(check="CHECK ((status = ANY (ARRAY['open'::text, 'closed'::text])))"), False),
+])
+def test_a_check_list_on_a_case_insensitive_engine_gets_a_caveat(db_type, run, caveat):
+    status = I.Column(name="status", type="string", description="")
+    I._apply_declared_values(D.get_dialect(db_type), run, "s", "orders", [status])
+    assert list(status.choice_field) == ["open", "closed"]
+    assert (_CI in status.caveats) is caveat
+
+
+@pytest.mark.parametrize("db_type, caveat", [("mysql", True), ("sqlserver", True), ("postgres", False)])
+def test_a_data_list_on_a_case_insensitive_engine_gets_a_caveat(db_type, caveat):
+    status = I.Column(name="status", type="string", description="")
+    level = I.Column(name="level", type="integer", description="")
+
+    def run(sql):
+        if "DISTINCT" in sql:
+            return [{"v": "open"}, {"v": "closed"}] if "status" in sql else [{"v": "1"}, {"v": "2"}]
+        return [{"status": ["open", "closed"][i % 2], "level": str(1 + i % 2)} for i in range(40)]
+
+    I._enrich_from_sample(D.get_dialect(db_type), run, "s", "t", [status, level], est_rows=None)
+    assert set(status.choice_field) == {"open", "closed"} and _ci(status.caveats) is caveat
+    assert level.choice_field == {"1": "", "2": ""} and level.caveats == []  # numbers have no case
+
+
+def test_a_sqlite_nocase_column_gets_the_caveat(tmp_path):
+    db = tmp_path / "nc.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE orders(id INTEGER PRIMARY KEY,"
+        " status TEXT COLLATE NOCASE CHECK (status IN ('open','closed')),"
+        " channel TEXT COLLATE NOCASE, kind TEXT CHECK (kind IN ('open','x')));")
+    con.executemany("INSERT INTO orders VALUES (?,?,?,?)",
+                    [(i, "open", ["open", "store"][i % 2], "x") for i in range(40)])
+    con.commit()
+    con.close()
+    I.introspect("shop", "sqlite", runner=_sqlite_runner(db), artifacts_dir=tmp_path)
+    t = _orders(load_datasource(tmp_path / "shop"))
+    assert _CI in t.get_column("status").caveats            # a CHECK list on a NOCASE column
+    assert _ci(t.get_column("channel").caveats)             # a data list on a NOCASE column
+    assert not _ci(t.get_column("kind").caveats)          # SQLite compares exactly by default

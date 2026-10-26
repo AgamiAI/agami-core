@@ -969,8 +969,9 @@ def _build_table(
 
     # Value lists the catalog declares, on a table of any size; then one live sample → date
     # encoding/timezone, and value lists read from the data on a small table.
-    _apply_declared_values(dialect, runner, schema, table, cols)
-    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, reads=reads)
+    declared = _apply_declared_values(dialect, runner, schema, table, cols)
+    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, reads=reads,
+                        skip=declared.rejected, nocase=declared.nocase)
 
     column_groups = build.maybe_column_groups(cols)
     column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
@@ -1584,15 +1585,17 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
     *, est_rows: Optional[int] = None, reads: Optional[_ReadBudget] = None,
+    skip: frozenset[str] | set[str] = frozenset(), nocase: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
     (b) on a small table, a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns
     the catalog declared nothing for (the LLM enrichment fills the labels), read with one bounded
     DISTINCT per column — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
-    `severity`) never get an enum skeleton, so the decode can only ever live in prose."""
+    `severity`) never get an enum skeleton, so the decode can only ever live in prose. `skip` names
+    (lowercased) the columns whose declared list was rejected: they get no list at all."""
     date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
-    choice_cands = [c for c in cols if _data_choice_candidate(c)]
+    choice_cands = [c for c in cols if _data_choice_candidate(c) and c.name.lower() not in skip]
     if not date_cands and not choice_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
@@ -1619,7 +1622,7 @@ def _enrich_from_sample(
         ch = _maybe_choice([r.get("v") for r in rows], rows=seen)
         # only genuinely code-like: skip long free-text values (names, descriptions, ids).
         if ch and all(len(str(k)) <= 40 for k in ch):
-            _set_choice(c, ch)
+            _set_choice(c, ch, case_insensitive=dialect.case_insensitive_compare or c.name.lower() in nocase)
     # Deterministic descriptions for universal coded formats (currency/country/timezone/locale) —
     # fills a column the LLM would otherwise leave `ai_unknown`, on any database. Only when blank.
     for c in cols:
@@ -1648,11 +1651,23 @@ def _data_choice_candidate(c: Column) -> bool:
             and not _NOT_DATA_CHOICE_NAME_RE.search(c.name))
 
 
-def _set_choice(c: Column, choice: dict[str, str]) -> None:
+def _set_choice(c: Column, choice: dict[str, str], *, case_insensitive: bool = False) -> None:
     c.choice_field = choice
-    note = _lookalike_caveat(list(choice))
-    if note and note not in c.caveats:
-        c.caveats.append(note)
+    notes = [_lookalike_caveat(list(choice))]
+    if case_insensitive:
+        notes.append(_case_insensitive_caveat(list(choice)))
+    for note in notes:
+        if note and note not in c.caveats:
+            c.caveats.append(note)
+
+
+def _case_insensitive_caveat(values: list[str]) -> Optional[str]:
+    """On an engine that compares strings ignoring case, a listed value also finds its other
+    capitalisations (and DISTINCT returns only one of them), so the list is not every spelling."""
+    v = next((v for v in values if any(ch.isalpha() for ch in v)), None)
+    if v is None:
+        return None
+    return f"this database compares values case-insensitively: '{v}' also matches other capitalisations"
 
 
 def _lookalike_caveat(values: list[str]) -> Optional[str]:
@@ -1667,25 +1682,45 @@ def _lookalike_caveat(values: list[str]) -> Optional[str]:
     return f"values differ only by spacing or case: {'; '.join(clashes)} — match them exactly"
 
 
+@dataclass
+class _Declared:
+    values: dict[str, list[str]]  # lowercased column name -> the values declared for it
+    rejected: set[str]            # a declaration was found but no list can be kept: none at all
+    checked: set[str]             # the list came from a CHECK, so it compares as the column does
+    nocase: set[str]              # SQLite columns declared COLLATE NOCASE
+
+
 def _apply_declared_values(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-) -> None:
-    """A `choice_field` skeleton, in declared order, on each column whose values the catalog declares."""
+) -> _Declared:
+    """A `choice_field` skeleton, in declared order, on each column whose values the catalog declares.
+    A list with a value the column's type can't hold is rejected, so the model stays writable."""
+    from .validator import _value_matches_type
+
     declared = _declared_values(dialect, runner, schema, table)
     for c in cols:
-        values = declared.get(c.name.lower())
-        if values and c.choice_field is None:
-            _set_choice(c, {v: "" for v in values})
+        key = c.name.lower()
+        values = declared.values.get(key)
+        if not values or c.choice_field is not None:
+            continue
+        if not all(_value_matches_type(v, c.type) for v in values):
+            declared.rejected.add(key)
+            continue
+        _set_choice(c, {v: "" for v in values}, case_insensitive=key in declared.checked and (
+            dialect.case_insensitive_compare or key in declared.nocase))
+    return declared
 
 
-def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str) -> dict[str, list[str]]:
-    """Lowercased column name -> the values its enum type or a simple CHECK constraint allows.
+def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str) -> _Declared:
+    """The values each column's enum type or a simple CHECK constraint allows.
 
     Catalog reads only, so they run on a table of any size. A column two constraints give different
-    lists gets none: on MariaDB a CHECK's name is unique only per table, so the join that finds a
-    table's CHECKs can also return another table's of the same name."""
+    lists, or more than DECLARED_MAX_VALUES values, is rejected: it gets no list, not even one read
+    from the data, since the data would show only the values in use."""
     found: dict[str, list[str]] = {}
     clash: set[str] = set()
+    checked: set[str] = set()
+    nocase: set[str] = set()
 
     def put(name: str, values: list[str]) -> None:
         values = list(dict.fromkeys(v for v in values if v != ""))
@@ -1709,22 +1744,52 @@ def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], 
             put(name, values)
     q = dialect.sql_check_constraints(schema, table)
     if q:
-        for r in _try(runner, q) or []:
-            for name, values in _check_lists(str(r.get("check_clause") or ""), dialect):
+        rows = _try(runner, q)
+        fallback = dialect.sql_check_constraints_fallback(schema, table)
+        if rows is None and fallback:
+            rows = _try(runner, fallback)
+        for r in rows or []:
+            text = str(r.get("check_clause") or "")
+            for name, values in _check_lists(text, dialect):
                 put(name, values)
-    return {k: v for k, v in found.items() if k not in clash and 0 < len(v) <= DECLARED_MAX_VALUES}
+                checked.add(name.lower())
+            if dialect.name == "SQLite":
+                nocase |= _nocase_columns(text)
+    rejected = {k for k, v in found.items() if k in clash or len(v) > DECLARED_MAX_VALUES}
+    values = {k: v for k, v in found.items() if k not in rejected and v}
+    return _Declared(values, rejected, checked, nocase)
+
+
+def _nocase_columns(create_sql: str) -> set[str]:
+    """Lowercased names of the columns a SQLite CREATE TABLE declares COLLATE NOCASE."""
+    import sqlglot
+    from sqlglot import exp
+
+    try:
+        tree = sqlglot.parse_one(create_sql, dialect="sqlite")
+    except Exception:
+        return set()
+    return {cd.name.lower() for cd in tree.find_all(exp.ColumnDef)
+            for k in (con.kind for con in cd.constraints)
+            if isinstance(k, exp.CollateColumnConstraint) and k.this is not None
+            and k.this.name.upper() == "NOCASE"}
 
 
 _ENUM_TYPE_RE = re.compile(r"^\s*enum\s*\((.*)\)\s*$", re.IGNORECASE | re.DOTALL)
 _QUOTED_RE = re.compile(r"'((?:[^'\\]|''|\\.)*)'", re.DOTALL)
 
 
+# MySQL's string-literal escapes; any other `\x` stands for `x`.
+_MYSQL_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "Z": "\x1a", "\\": "\\", "'": "'"}
+
+
 def _enum_type_values(column_type: str) -> list[str]:
-    """The values of a MySQL/MariaDB `enum('a','b')` column type, quotes undone."""
+    """The values of a MySQL/MariaDB `enum('a','b')` column type, quotes and escapes undone."""
     m = _ENUM_TYPE_RE.match(column_type)
     if not m:
         return []
-    return [re.sub(r"\\(.)", r"\1", v.replace("''", "'")) for v in _QUOTED_RE.findall(m.group(1))]
+    return [re.sub(r"\\(.)", lambda e: _MYSQL_ESCAPES.get(e.group(1), e.group(1)), v.replace("''", "'"))
+            for v in _QUOTED_RE.findall(m.group(1))]
 
 
 _CHECK_WORD_RE = re.compile(r"^\s*CHECK\b", re.IGNORECASE)
@@ -1763,8 +1828,28 @@ def _check_lists(text: str, dialect: D.Dialect) -> list[tuple[str, list[str]]]:
 def _listed_values(e) -> Optional[tuple[str, list[str]]]:
     from sqlglot import exp
 
-    def bare(x):
+    def stringy(to) -> bool:  # a string type with no length, which can't truncate a value
+        return to.this in exp.DataType.TEXT_TYPES | {exp.DataType.Type.BPCHAR} and not to.expressions
+
+    def bare(x, literal_side: bool = False):
+        # Unwrap only casts that can't change which values match: to a string type (Postgres
+        # writes `(status)::text = ANY (...)`), or, for a literal, a number to a number type or an
+        # array to an array of either. CAST(status AS INTEGER) IN (1, 2) also admits '01'.
         while isinstance(x, (exp.Paren, exp.Cast)):
+            if isinstance(x, exp.Cast):
+                to, inner = x.to, x.this
+                while isinstance(inner, exp.Paren):
+                    inner = inner.this
+                ok = stringy(to)
+                if literal_side and not ok:
+                    if to.this == exp.DataType.Type.ARRAY:
+                        el = to.expressions[0] if to.expressions else None
+                        ok = el is not None and (stringy(el) or el.this in exp.DataType.NUMERIC_TYPES)
+                    elif to.this in exp.DataType.NUMERIC_TYPES:
+                        num = inner.this if isinstance(inner, exp.Neg) else inner
+                        ok = isinstance(num, exp.Literal) and not num.is_string
+                if not ok:
+                    return x
             x = x.this
         return x
 
@@ -1775,7 +1860,7 @@ def _listed_values(e) -> Optional[tuple[str, list[str]]]:
         return [x]
 
     def literal(x) -> Optional[str]:
-        x = bare(x)
+        x = bare(x, literal_side=True)
         if isinstance(x, exp.Introducer):  # MySQL's _utf8mb4'low'
             x = x.expression
         if isinstance(x, exp.Neg) and isinstance(x.this, exp.Literal) and not x.this.is_string:
@@ -1796,7 +1881,7 @@ def _listed_values(e) -> Optional[tuple[str, list[str]]]:
             if not isinstance(col, exp.Column):
                 col, rhs = rhs, col
             if isinstance(rhs, exp.Any):  # Postgres stores IN (...) as = ANY (ARRAY[...])
-                arr = bare(rhs.this)
+                arr = bare(rhs.this, literal_side=True)
                 if not isinstance(arr, exp.Array):
                     return None
                 lits = list(arr.expressions)

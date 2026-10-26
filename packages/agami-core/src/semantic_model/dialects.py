@@ -249,9 +249,17 @@ class Dialect:
         return None
 
     def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
-        """The text of each CHECK constraint on the table, one row each (`check_clause`). None where
-        the catalog keeps no CHECK constraints."""
+        """The text of each enforced CHECK constraint on the table, one row each (`check_clause`).
+        None where the catalog keeps no CHECK constraints."""
         return None
+
+    def sql_check_constraints_fallback(self, schema: str, table: str) -> Optional[str]:
+        """A second form of the CHECK read, tried when the first one fails (another engine sharing
+        this dialect lays out its catalog differently). None when there is none."""
+        return None
+
+    # The engine's default string comparison ignores case, so 'open' also matches 'Open'.
+    case_insensitive_compare = False
 
     def distinct_sql(self, schema: Optional[str], table: str, column: str, n: int) -> str:
         """Up to `n` distinct non-null values of one column, as `v`."""
@@ -346,7 +354,10 @@ class PostgreSQL(Dialect):
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "JOIN information_schema.check_constraints cc "
             "ON cc.constraint_schema = n.nspname AND cc.constraint_name = con.conname "
-            "WHERE con.contype = 'c' "
+            "WHERE con.contype = 'c' AND con.convalidated "
+            # a name is unique only per table: one another table also uses could join to its text
+            "AND NOT EXISTS (SELECT 1 FROM pg_constraint o WHERE o.connamespace = con.connamespace "
+            "AND o.conname = con.conname AND o.oid <> con.oid) "
             f"AND n.nspname = {self.quote_lit(schema)} "
             f"AND c.relname = {self.quote_lit(table)} "
             "ORDER BY con.conname"
@@ -450,17 +461,32 @@ class MySQL(Dialect):
             "AND data_type = 'enum' ORDER BY ordinal_position"
         )
 
+    case_insensitive_compare = True
+
     def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
-        # check_constraints names no table on MySQL 8, so the table comes from table_constraints.
-        # Before 8.0.16 the view doesn't exist; the read fails and nothing is declared.
+        # check_constraints names no table on MySQL 8, so the table comes from table_constraints;
+        # a name used by two of the schema's CHECKs is skipped rather than risk the other's text.
+        # MariaDB has no `enforced` column, so there this fails and the fallback runs. Before
+        # MySQL 8.0.16 the view doesn't exist; both fail and nothing is declared.
         return (
             "SELECT cc.check_clause FROM information_schema.check_constraints cc "
             "JOIN information_schema.table_constraints tc "
             "ON tc.constraint_schema = cc.constraint_schema "
             "AND tc.constraint_name = cc.constraint_name "
-            "WHERE tc.constraint_type = 'CHECK' "
+            "WHERE tc.constraint_type = 'CHECK' AND tc.enforced = 'YES' "
             f"AND tc.table_schema = {self.quote_lit(schema)} "
-            f"AND tc.table_name = {self.quote_lit(table)}"
+            f"AND tc.table_name = {self.quote_lit(table)} "
+            "AND (SELECT COUNT(*) FROM information_schema.table_constraints t2 "
+            "WHERE t2.constraint_schema = tc.constraint_schema "
+            "AND t2.constraint_name = tc.constraint_name AND t2.constraint_type = 'CHECK') = 1"
+        )
+
+    def sql_check_constraints_fallback(self, schema: str, table: str) -> Optional[str]:
+        # MariaDB's check_constraints names the table itself, and enforces every CHECK.
+        return (
+            "SELECT cc.check_clause FROM information_schema.check_constraints cc "
+            f"WHERE cc.constraint_schema = {self.quote_lit(schema)} "
+            f"AND cc.table_name = {self.quote_lit(table)}"
         )
 
 
@@ -527,6 +553,7 @@ class SQLServer(Dialect):
     name = "SQLServer"
     limit_style = "top"
     _SYS_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
+    case_insensitive_compare = True   # the default collations are *_CI_*
 
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
@@ -553,7 +580,9 @@ class SQLServer(Dialect):
             "SELECT cc.definition AS check_clause FROM sys.check_constraints cc "
             "JOIN sys.tables t ON t.object_id = cc.parent_object_id "
             "JOIN sys.schemas s ON s.schema_id = t.schema_id "
-            f"WHERE s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)}"
+            f"WHERE s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
+            # a disabled or NOCHECK-added constraint says nothing about the rows already stored
+            "AND cc.is_disabled = 0 AND cc.is_not_trusted = 0"
         )
 
 
@@ -776,7 +805,7 @@ class Oracle(Dialect):
         # Type 'C' also holds every NOT NULL ("COL" IS NOT NULL); the parser ignores those.
         return (
             "SELECT search_condition AS check_clause FROM all_constraints "
-            "WHERE constraint_type = 'C' "
+            "WHERE constraint_type = 'C' AND status = 'ENABLED' AND validated = 'VALIDATED' "
             f"AND owner = {self.quote_lit(schema)} "
             f"AND table_name = {self.quote_lit(table)}"
         )
