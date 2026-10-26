@@ -171,9 +171,22 @@ def test_usable_exit_codes(tmp_path):
     assert codes == {"bare": 3, "stale": 3, "current": 0, "pip": 0}
 
 
+def _tools_without_python(tmp_path: Path) -> Path:
+    """The shell tools from /usr/bin and /bin minus every Python, so the machine's own interpreter
+    (which may or may not have pip) can't become a candidate and decide the test."""
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    for d in (Path("/usr/bin"), Path("/bin")):
+        for exe in d.iterdir():
+            link = tools / exe.name
+            if not exe.name.startswith("python") and not link.exists():
+                link.symlink_to(exe)
+    return tools
+
+
 def _resolve_in_shell(tmp_path: Path, path_dirs: list[Path]) -> str:
     env = {k: v for k, v in os.environ.items() if k not in ("AGAMI_PYTHON", "VIRTUAL_ENV")}
-    env.update(PATH=os.pathsep.join([*map(str, path_dirs), "/usr/bin", "/bin"]),
+    env.update(PATH=os.pathsep.join([*map(str, path_dirs), str(_tools_without_python(tmp_path))]),
                AGAMI_ARTIFACTS_DIR=str(tmp_path / "art"), HOME=str(tmp_path))
     r = subprocess.run(["bash", "-c", f'. "{SCRIPTS / "_python.sh"}"; resolve_python'], env=env,
                        capture_output=True, text=True, check=True)
