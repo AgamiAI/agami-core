@@ -12,6 +12,23 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **The model explorer can reject in bulk, beside every bulk approve (#531).** Each "✓ Approve all N
+  proposed" and "✓ Approve N" now has a "✕ Reject all N proposed" / "✕ Reject N" next to it. It acts
+  on exactly the items shown (the sub-tab, kind group, status filter and search), skipping anything
+  already approved or rejected, confirms with the count and kind ("Reject 104 metrics?") and asks for
+  one reason, which is required. Each queued reject op carries that `reason`, which reaches
+  `curation_log.jsonl` with the op; the model itself does not store it. Like approvals, the rejects
+  are queued and applied only when the feedback block is submitted. A single reject still carries no
+  reason.
+
+### Fixed
+
+- **"Approve all" on the Metrics tab names the kind on each op (#531).** The Metrics tab's bulk
+  approve queued ops with no `kind`, so the Queued tab showed "approve undefined" and the curation
+  engine skipped them as "op needs kind + name". They now say `metric`, as the Review tab's do.
+
 ## [0.9.19] — 2026-10-25
 
 ### Fixed
