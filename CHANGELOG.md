@@ -12,11 +12,6 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
-  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
-  areas, which reads as database schemas. Labels that really are about database schemas, such as a
-  cross-schema join, are unchanged.
-
 ### Fixed
 
 - **On Redshift, discovery finds the tables of a read-only user (#558).** `sm discover`, and an
@@ -25,6 +20,68 @@ below corresponds to one such version.
   "no tables discovered" for a catalog it could read in full; passing `--tables` worked, which hid
   it. Redshift now lists the schemas the user has USAGE on (`pg_namespace` with
   `has_schema_privilege`), leaving out the system schemas. Other engines are unchanged.
+
+## [0.9.20] — 2026-10-26
+
+### Changed
+
+- **Units can carry a scale and a rate, and a guessed currency is never applied without review
+  (#515).** A `unit` now reads `<ISO code>[_<scale>][/<period>]`: `USD_millions` shows 12.5 as
+  `$12.5M` (scales `thousands`, `millions`, `billions`, `lakhs`, `crores`), `USD/day` shows 120 as
+  `$120.00/day`, and `USD_millions/year` combines both, in answers and charts alike. There is no new
+  field: a release older than this one reads these strings as a plain label, so the model still loads
+  everywhere. `suggest-units` now splits a name into whole words, so `total_minutes`, `credit_hours`,
+  `points_balance` and `total_weight` are no longer taken for money, while `gross_usd`, `value_usd`
+  and `fx_dollar` now are; each row gains a `suggested_unit` read from the name
+  (`revenue_usd_millions` → `USD_millions`). `set-units` without `--columns` prints its plan and
+  writes nothing until `--yes`, and gives a column whose name states a currency that unit, with
+  `--columns` too (so a subset of the plan is written as planned). A bare
+  `units` column (`reading_units`) is no longer classed additive at introspection; `units_sold` and
+  the like still are, and classes already in a model are left as they are.
+
+### Fixed
+
+- **A model outside git keeps a reviewable history of its edits (#528).** agami commits a curation
+  only when the profile folder is its own git repository, and it never creates one, so on a fresh
+  artifacts folder an edit left nothing a reviewer could compare: `curation_log.jsonl` listed the ops
+  with no time and no prior value, and the datasource description and glossary writes weren't logged
+  at all. Every model write now logs each change with its UTC time (`at`), the model version it
+  produced (`version`) and, for an edit or a review-state change, the value it replaced (`before`)
+  beside the new one. The description and glossary writes are logged too, and a curate batch logs
+  only the ops that took, not the ones it skipped. A new `sm history <root> [--limit N]` prints the
+  log newest first, and a curate result outside git points to it. Older log lines without the new
+  keys read as before. The docs no longer say onboarding runs `git init` or that a failed edit is
+  reverted through git; it is restored from backups.
+
+### Fixed
+
+- **A column's `value_transform` and a join's `on:` parse in the datasource's own SQL dialect, and a
+  text column of ISO dates gets a date format whatever it is called (#518).** Both fragments were
+  parsed with sqlglot's generic grammar, so a valid Postgres transform such as
+  `CASE WHEN code ~ '^[0-9]+$' THEN code::int END` failed validation. A fragment is now accepted when
+  it parses in the engine's dialect or in the generic grammar, so nothing that validated before
+  starts failing; a datasource whose engine can't be resolved keeps the generic parse, and the
+  incremental validation cache includes the dialect. A field inside a JSON column is reached by a
+  transform on the JSON column that extracts the key itself (`(profile->>'signup_date')::date` on
+  Postgres, `json_extract(profile, '$.signup_date')` on SQLite); agami-connect now says so.
+  Introspection set `iso8601` only on columns with a date-like name; it now also sets it on a text
+  column with any name when at least 20 sampled values are present and every one is a real ISO date
+  or timestamp. Such a column no longer gets a `choice_field` skeleton.
+
+- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
+  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
+  areas, which reads as database schemas. Labels that really are about database schemas, such as a
+  cross-schema join, are unchanged.
+
+### Fixed
+
+- **A metric built on a rejected metric is no longer served (#571).** The loader left out a derived
+  metric whose base was dropped only when a table or column was also hidden, so with just a metric
+  rejected, a metric built on it stayed in the served model and validation reported "references
+  unknown base metric". It now runs on every load, per area and cross-area, and repeats down a
+  chain of derived metrics. Only a base that was rejected or hidden drops a metric: a base the model
+  never had is a mistake in the model, and stays for the validator to report. An ambiguity naming a
+  dropped metric loses that metric, as for any metric not served. The curation view is unchanged.
 
 - **A statement the database rejected says so, by its SQLSTATE (#561).** An execution error none of
   the classifier's patterns read came back as `other` with "an unexpected error on the server", so a

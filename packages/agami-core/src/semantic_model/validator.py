@@ -121,10 +121,11 @@ class ValidationResult:
 
 
 # An incremental-validation cache (ACE-046): per-area findings keyed by everything a per-area rule
-# reads — the area's own content AND the org-wide table registry. An enrichment run passes one of
-# these across edits so only the edited area's rules re-run; a normal `validate(org)` (cache=None)
-# is unchanged. Because the key pins every input, a cache hit is byte-identical to recomputing.
-# Key = (area name, area content sha, org-table-registry sha) → that area's findings.
+# reads — the area's own content, the org-wide table registry and the engine's dialect. An
+# enrichment run passes one of these across edits so only the edited area's rules re-run; a normal
+# `validate(org)` (cache=None) is unchanged. Because the key pins every input, a cache hit is
+# byte-identical to recomputing.
+# Key = (area name, area content sha, "<org-table-registry sha>:<dialect>") → that area's findings.
 ValidationCache = dict[tuple[str, str, str], "list[Finding]"]
 
 # Hard ceiling so a long-lived process (e.g. the HTTP server) that validates many distinct models
@@ -176,16 +177,17 @@ def _validate_area(
     # (entity mappings + each relationship's FK-type check), instead of rebuilding it per
     # relationship — that per-rel rebuild was the O(R×T) cost this pass eliminates (ACE-046).
     defined = _all_tables(sa)
+    dialect = _model_dialect(org)
     _check_subject_area_sizing(sa, ares)
     _check_table_refs_resolve(sa, ares, org_tables)
     _check_expose_column_groups(sa, ares, org_tables)
     _check_deep_table_column_groups(sa, ares)
     _check_default_filters_columns(sa, ares)
-    _check_value_transforms(sa, ares)
+    _check_value_transforms(sa, ares, dialect)
     _check_choice_fields(sa, ares)
     _check_entity_mappings(sa, ares, defined)
     for rel in sa.relationships:
-        _check_relationship(rel, sa, org, ares, cross=False, defined=defined)
+        _check_relationship(rel, sa, org, ares, cross=False, defined=defined, dialect=dialect)
         _check_relationship_served(rel, sa, ares, defined)
     return ares.findings
 
@@ -311,7 +313,8 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     # defined in another area (multi-membership without duplication — the design
     # doc's "defined once, TableRef'd from each subject area" pattern).
     org_tables = _org_tables(org)
-    reg_sig = _org_tables_sig(org_tables) if cache is not None else ""
+    # The dialect the area's SQL fragments parse in is an input too, so a storage-type edit misses.
+    reg_sig = f"{_org_tables_sig(org_tables)}:{_model_dialect(org)}" if cache is not None else ""
     for sa in org.subject_areas:
         if cache is not None:
             key = (sa.name, _sig(sa), reg_sig)
@@ -790,11 +793,11 @@ def _check_default_filters_columns(sa: SubjectArea, res: ValidationResult) -> No
                     )
 
 
-def _check_value_transforms(sa: SubjectArea, res: ValidationResult) -> None:
+def _check_value_transforms(sa: SubjectArea, res: ValidationResult, dialect: Optional[str]) -> None:
     for table in sa.tables_defined:
         for col in table.columns:
             if col.value_transform:
-                err = _sqlparse_error(col.value_transform)
+                err = _sqlparse_error(col.value_transform, dialect=dialect)
                 if err:
                     res.error(
                         "value_transform_unparseable",
@@ -846,6 +849,7 @@ def _check_relationship(
     *,
     cross: bool,
     defined: dict[str, Table],
+    dialect: Optional[str] = None,
 ) -> None:
     # cardinality required (structural gate, check #17) — models enforces non-null,
     # re-assert the value domain here for a clear validator-level error too.
@@ -872,7 +876,7 @@ def _check_relationship(
 
     # on: must parse if present
     if rel.on:
-        err = _sqlparse_error(rel.on, as_condition=True)
+        err = _sqlparse_error(rel.on, as_condition=True, dialect=dialect or _model_dialect(org))
         if err:
             res.error(
                 "relationship_on_unparseable",
@@ -1658,16 +1662,37 @@ def _columns_referenced(expr: str, table_name: str) -> set[str]:
     return cols
 
 
-def _sqlparse_error(expr: str, *, as_condition: bool = False) -> Optional[str]:
-    """Return None if `expr` parses as SQL, else a short error string."""
+def _model_dialect(org: Datasource) -> Optional[str]:
+    """The sqlglot dialect of the datasource's engine, or None when it can't be resolved."""
+    from .sql_dialect import DialectUnresolved, resolve_datasource_dialect
+    try:
+        return resolve_datasource_dialect(org)
+    except DialectUnresolved:
+        return None
+
+
+def _sqlparse_error(
+    expr: str, *, as_condition: bool = False, dialect: Optional[str] = None
+) -> Optional[str]:
+    """Return None if `expr` parses as SQL, else a short error string.
+
+    A fragment is accepted when it parses in the engine's dialect (Postgres `~`, T-SQL brackets)
+    or in the generic grammar, which is what every model was checked against before (#518), so
+    no fragment that used to pass starts failing."""
     if not _HAVE_SQLGLOT:
         return None  # can't check; treat as ok (sqlglot optional, like legacy)
     candidate = f"SELECT 1 WHERE {expr}" if as_condition else f"SELECT {expr}"
-    try:
-        parsed = sqlglot.parse_one(candidate, error_level=_ErrorLevel.RAISE)
-        return None if parsed is not None else "empty parse"
-    except Exception as e:  # sqlglot.errors.ParseError and friends
-        return str(e).splitlines()[0][:160]
+    first_err = None
+    for read in ([dialect] if dialect else []) + [None]:
+        try:
+            parsed = sqlglot.parse_one(candidate, read=read, error_level=_ErrorLevel.RAISE)
+        except Exception as e:  # sqlglot.errors.ParseError and friends
+            first_err = first_err or str(e).splitlines()[0][:160]
+            continue
+        if parsed is not None:
+            return None
+        first_err = first_err or "empty parse"
+    return first_err
 
 
 def _value_matches_type(value: str, ctype: str) -> bool:

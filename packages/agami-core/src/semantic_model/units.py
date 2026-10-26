@@ -5,13 +5,18 @@ A column or metric's `unit` (an ISO currency code like INR/USD, or a plain unit 
 decimals — WITHOUT the LLM re-interpreting a prose caveat each query. The chart
 renderer and the query result formatter both call `format_value` so a number renders
 identically everywhere.
+
+A currency unit may carry a scale and a rate: `<CODE>[_<scale>][/<period>]`, e.g.
+`USD_millions` (12.5 means $12.5M), `INR_crores`, `USD/day`, `USD_millions/year`.
+Scales: thousands, millions, billions, lakhs, crores (singular or plural). Periods: hour,
+day, week, month, quarter, year. Any other text is shown as a plain label.
 """
 
 from __future__ import annotations
 
 import datetime as _dt
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # ISO code -> symbol. Extend freely; unknown codes fall back to the bare code.
 CURRENCY_SYMBOLS: dict[str, str] = {
@@ -26,17 +31,43 @@ CURRENCY_SYMBOLS: dict[str, str] = {
 _ZERO_DECIMAL = {"JPY", "KRW", "VND", "IDR"}
 
 
-def _norm(unit: Optional[str]) -> str:
-    return (unit or "").strip().upper()
+# scale word -> (multiplier, suffix shown after the number)
+SCALES: dict[str, tuple[int, str]] = {
+    "thousands": (10**3, "K"), "millions": (10**6, "M"), "billions": (10**9, "B"),
+    "lakhs": (10**5, "L"), "crores": (10**7, "Cr"),
+}
+PERIODS = ("hour", "day", "week", "month", "quarter", "year")
+_UNIT_RE = re.compile(r"^([A-Za-z]{3})(?:_([A-Za-z]+?)s?)?(?:/([A-Za-z]+))?$", re.IGNORECASE)
+
+
+class CurrencyUnit(NamedTuple):
+    code: str              # ISO code, upper case
+    scale: Optional[str]   # a SCALES key, or None
+    period: Optional[str]  # one of PERIODS, or None
+
+
+def parse_unit(unit: Optional[str]) -> Optional[CurrencyUnit]:
+    """`USD_millions/year` -> CurrencyUnit("USD", "millions", "year"); None when `unit` is not
+    a known currency in this grammar (then it is a plain label)."""
+    m = _UNIT_RE.match((unit or "").strip())
+    if not m or m.group(1).upper() not in CURRENCY_SYMBOLS:
+        return None
+    scale = (m.group(2) or "").lower()
+    scale = scale + "s" if scale else None
+    period = (m.group(3) or "").lower() or None
+    if (scale and scale not in SCALES) or (period and period not in PERIODS):
+        return None
+    return CurrencyUnit(m.group(1).upper(), scale, period)
 
 
 def is_currency(unit: Optional[str]) -> bool:
-    return _norm(unit) in CURRENCY_SYMBOLS
+    return parse_unit(unit) is not None
 
 
 def currency_symbol(unit: Optional[str]) -> Optional[str]:
-    """Symbol for an ISO currency code, or None if `unit` isn't a known currency."""
-    return CURRENCY_SYMBOLS.get(_norm(unit))
+    """Symbol for a currency unit (`USD`, `USD_millions`, …), or None if it isn't one."""
+    cu = parse_unit(unit)
+    return CURRENCY_SYMBOLS[cu.code] if cu else None
 
 
 def _group_western(int_part: str) -> str:
@@ -100,7 +131,9 @@ def format_value(value, unit: Optional[str]) -> str:
 
     - a date encoding (epoch_s/ms/us/ns, yyyymmdd) → human-readable date via `format_date`.
     - currency → `<symbol><grouped number>` (Indian grouping for INR, western else;
-      2 decimals, or 0 for zero-decimal currencies like JPY).
+      2 decimals, or 0 for zero-decimal currencies like JPY). A scaled currency keeps the
+      value's own decimals and adds the scale suffix (`USD_millions`: 12.5 → `$12.5M`); a
+      rate adds its period (`USD/day`: 120 → `$120.00/day`).
     - `percent`/`%` → `<n>%`.
     - any other unit → `<grouped number> <unit>` (e.g. `1,234 days`).
     - unknown/None unit, or non-numeric value → `str(value)` unchanged.
@@ -114,15 +147,9 @@ def format_value(value, unit: Optional[str]) -> str:
     except (TypeError, ValueError):
         return str(value)
 
-    code = _norm(unit)
-    if code in CURRENCY_SYMBOLS:
-        decimals = 0 if code in _ZERO_DECIMAL else 2
-        neg = num < 0
-        n = abs(num)
-        int_part = str(int(round(n))) if decimals == 0 else f"{n:.{decimals}f}".split(".")[0]
-        frac = "" if decimals == 0 else "." + f"{n:.{decimals}f}".split(".")[1]
-        grouped = _group_indian(int_part) if code == "INR" else _group_western(int_part)
-        return f"{'-' if neg else ''}{CURRENCY_SYMBOLS[code]}{grouped}{frac}"
+    cu = parse_unit(unit)
+    if cu:
+        return _format_currency(num, cu)
 
     lower = (unit or "").strip().lower()
     if lower in ("percent", "%", "pct"):
@@ -136,6 +163,21 @@ def format_value(value, unit: Optional[str]) -> str:
     else:
         grouped = str(num)
     return f"{grouped} {unit}"
+
+
+def _format_currency(num: float, cu: CurrencyUnit) -> str:
+    n = abs(num)
+    if cu.scale:
+        # a scaled figure is already rounded by its source: show its digits, don't pad to cents
+        text = f"{n:.6f}".rstrip("0").rstrip(".")
+        suffix = SCALES[cu.scale][1]
+    else:
+        text = f"{n:.{0 if cu.code in _ZERO_DECIMAL else 2}f}"
+        suffix = ""
+    int_part, _, frac = text.partition(".")
+    grouped = _group_indian(int_part) if cu.code == "INR" else _group_western(int_part)
+    rate = f"/{cu.period}" if cu.period else ""
+    return f"{'-' if num < 0 else ''}{CURRENCY_SYMBOLS[cu.code]}{grouped}{'.' + frac if frac else ''}{suffix}{rate}"
 
 
 def _looks_numeric(s: str) -> bool:
@@ -226,5 +268,5 @@ def format_table(headers: list[str], rows: list[list], units: Optional[dict] = N
     return "\n".join([head, sep, body]) if body else "\n".join([head, sep])
 
 
-__all__ = ["CURRENCY_SYMBOLS", "is_currency", "currency_symbol", "is_date_format",
+__all__ = ["CURRENCY_SYMBOLS", "SCALES", "PERIODS", "CurrencyUnit", "parse_unit", "is_currency", "currency_symbol", "is_date_format",
            "format_value", "format_date", "format_cell", "format_rows", "format_table"]
