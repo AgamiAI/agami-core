@@ -22,8 +22,12 @@ below corresponds to one such version.
   written with. A qualifier is resolved in the query it was written in, so an alias reused in a
   nested query no longer borrows the other query's table. An aggregate's `FILTER (WHERE …)` columns
   count as columns it reads, the same as a `CASE` inside it, so a single-table `COUNT(*) FILTER (…)`
-  is resolved and one over a join can report a fan. What the scope gate refuses is unchanged, and a
-  value read from a subquery is still not matched to a metric.
+  is resolved and one over a join can report a fan. A CTE name binds as the scope gate binds it (a
+  schema-qualified table, a later sibling or a non-recursive self-reference is the table), and a
+  column list (`WITH s(y, x)`, `AS s(y, x)`) renames outputs by position. A subquery's columns are
+  not credited to the outer query's aliases: a `FILTER` holding a subquery reports `undetermined`.
+  What the scope gate refuses is unchanged, and a value read from a subquery is still not matched to
+  a metric.
 
 ## [0.9.19] — 2026-10-25
 

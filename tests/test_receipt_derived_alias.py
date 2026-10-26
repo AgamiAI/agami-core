@@ -145,3 +145,63 @@ def test_the_scope_gate_still_refuses_an_undeclared_column(org, sql):
     refusal = rt.check_column_scope(sql, org)
     assert refusal is not None
     assert refusal.rule == "column_scope"
+
+
+QUALIFIED_TABLE_NAMED_LIKE_A_CTE = "WITH t AS (SELECT u.y AS x FROM public.u u) SELECT p.x FROM public.t p"
+LATER_SIBLING = "WITH a AS (SELECT s.x FROM s), s AS (SELECT u.y AS x FROM public.u u) SELECT a.x FROM a"
+SELF_REFERENCE = "WITH t AS (SELECT t.x FROM t) SELECT t.x FROM t"
+CTE_COLUMN_LIST = "WITH s(y, x) AS (SELECT t.x, t.id + 1 FROM public.t t) SELECT s.x, s.y FROM s"
+DERIVED_COLUMN_LIST = "SELECT s.x, s.y FROM (SELECT t.x, t.id + 1 FROM public.t t) AS s(y, x)"
+FILTER_EXISTS = ("SELECT COUNT(*) FILTER (WHERE EXISTS (SELECT 1 FROM public.u u WHERE u.y > 0)) AS n "
+                 "FROM public.t t JOIN public.u u ON u.t_id = t.id")
+CASE_EXISTS = ("SELECT COUNT(CASE WHEN EXISTS (SELECT 1 FROM public.u u WHERE u.y > 0) THEN 1 END) AS n "
+               "FROM public.t t JOIN public.u u ON u.t_id = t.id")
+
+
+def test_a_schema_qualified_table_is_not_the_cte_of_the_same_name(org):
+    # `public.t` is the table, so `p.x` is `t.x`, not the CTE's `u.y`.
+    assert _references(org, QUALIFIED_TABLE_NAMED_LIKE_A_CTE) == ["t.x", "public.u.y"]
+
+
+def test_a_cte_body_does_not_read_a_later_sibling(org):
+    # `s` inside `a` is the physical table `s`, so `a.x` is not traced to `u.y`.
+    assert _references(org, LATER_SIBLING) == ["s.x", "public.u.y"]
+
+
+def test_a_non_recursive_cte_reading_its_own_name_reads_the_table(org):
+    assert _references(org, SELF_REFERENCE) == ["t.x"]
+
+
+@pytest.mark.parametrize("sql", [CTE_COLUMN_LIST, DERIVED_COLUMN_LIST], ids=["cte", "derived"])
+def test_a_column_list_renames_the_outputs_by_position(org, sql):
+    refs = _references(org, sql)
+    # `y` is the first output, `t.x`; `x` is the computed `t.id + 1` and keeps its alias.
+    assert "s.x" in refs
+    assert "public.t.x" in refs
+    assert "s.y" not in refs
+
+
+@pytest.mark.parametrize("sql", [FILTER_EXISTS, CASE_EXISTS], ids=["filter", "case"])
+def test_a_subquery_in_an_aggregate_does_not_lend_the_outer_query_its_columns(org, sql):
+    # The inner `u.y` names no outer column, so nothing establishes which rows are counted.
+    (item,) = rt.assemble_receipt(org, sql)["aggregates"]["items"]
+    assert item["status"] == "undetermined"
+
+
+def test_a_filter_subquery_marks_the_aggregate_undetermined_with_a_reason(org):
+    (item,) = rt.assemble_receipt(org, FILTER_EXISTS)["aggregates"]["items"]
+    assert "FILTER clause holds a subquery" in item["reason"]
+
+
+def test_a_subquery_beside_an_outer_column_keeps_the_fan(org):
+    sql = ("SELECT SUM(t.x + (SELECT MAX(u.y) FROM public.u u)) AS n "
+           "FROM public.t t JOIN public.u u ON u.t_id = t.id")
+    items = rt.assemble_receipt(org, sql)["aggregates"]["items"]
+    assert items[0]["status"] == "multiplied"
+
+
+@pytest.mark.parametrize("sql", [QUALIFIED_TABLE_NAMED_LIKE_A_CTE, LATER_SIBLING, SELF_REFERENCE,
+                                 CTE_COLUMN_LIST, DERIVED_COLUMN_LIST, FILTER_EXISTS, CASE_EXISTS])
+def test_the_scope_gate_verdict_is_unchanged_for_the_review_statements(org, sql):
+    # Admitted before these receipt fixes too: the gate is not touched.
+    assert rt.check_column_scope(sql, org) is None
