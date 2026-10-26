@@ -111,7 +111,7 @@ def test_a_metric_caveat_saying_missing_is_zero_silences_the_null_fill_warning()
     assert not warnings(["Following the support KB formula, a missing duration counts as 0."])
 
 
-def test_curate_edits_metric_caveats_and_the_explorer_shows_them(tmp_path):
+def _write_model(tmp_path) -> Path:
     root = tmp_path / "demo"
     (root / "datasources" / "c").mkdir(parents=True)
     (root / "subject_areas" / "support" / "tables").mkdir(parents=True)
@@ -128,7 +128,11 @@ def test_curate_edits_metric_caveats_and_the_explorer_shows_them(tmp_path):
         _org(_metric()).subject_areas[0].tables_defined[0].model_dump(by_alias=True, exclude_none=True)))
     (root / "subject_areas" / "support" / "metrics" / "avg_resolution_days.yaml").write_text(
         yaml.safe_dump(_metric().model_dump(exclude_none=True)))
+    return root
 
+
+def test_curate_edits_metric_caveats_and_the_explorer_shows_them(tmp_path):
+    root = _write_model(tmp_path)
     res = curate.apply(root, [{"op": "edit", "kind": "metric", "area": "support",
                                "name": "avg_resolution_days", "field": "caveats", "value": [CAVEAT]}])
     assert not res.errors, res.errors
@@ -138,3 +142,50 @@ def test_curate_edits_metric_caveats_and_the_explorer_shows_them(tmp_path):
     from render_model_explorer import build_manifest
     manifest = build_manifest(root, "demo")
     assert json.loads(json.dumps(manifest))["metrics"][0]["caveats"] == [CAVEAT]
+
+
+def _older_metric_model():
+    # what a release before #524 reads a metric file with: the same fields minus `caveats`, unknown
+    # keys forbidden
+    from pydantic import ConfigDict, create_model
+    fields = {k: (f.annotation, f) for k, f in m.Metric.model_fields.items() if k != "caveats"}
+    return create_model("OlderMetric", __config__=ConfigDict(extra="forbid"), **fields)
+
+
+def test_a_metric_without_caveats_is_written_without_the_key():
+    from semantic_model.build import _model_dump
+    doc = _model_dump(_metric())
+    assert "caveats" not in doc
+    assert "caveats" not in _metric().model_dump(mode="json", exclude_none=True)
+    assert m.Metric(**doc).caveats == []
+    _older_metric_model().model_validate(doc)
+    with_caveats = _model_dump(_metric(caveats=[CAVEAT]))
+    assert m.Metric(**with_caveats).caveats == [CAVEAT]
+
+
+def test_write_items_leaves_caveats_out_of_the_file_when_empty(tmp_path):
+    root = _write_model(tmp_path)
+    res = curate.write_items(root, "support", "metric", [
+        {"name": "tickets_opened", "calculation": "Count of tickets.",
+         "source_tables": ["tickets"], "bindings": {"PostgreSQL": "COUNT(*)"}},
+        {"name": "tickets_resolved", "calculation": "Count of resolved tickets.", "caveats": [CAVEAT],
+         "source_tables": ["tickets"], "bindings": {"PostgreSQL": "COUNT(resolved_at)"}}])
+    assert not res.errors and not res.skipped, (res.errors, res.skipped)
+    metrics = root / "subject_areas" / "support" / "metrics"
+    plain = yaml.safe_load((metrics / "tickets_opened.yaml").read_text())
+    assert "caveats" not in plain
+    _older_metric_model().model_validate(plain)
+    assert yaml.safe_load((metrics / "tickets_resolved.yaml").read_text())["caveats"] == [CAVEAT]
+    loaded = {mm.name: mm for mm in loader.load_datasource(root).subject_areas[0].metrics}
+    assert loaded["tickets_opened"].caveats == [] and loaded["tickets_resolved"].caveats == [CAVEAT]
+
+
+def test_clearing_a_metrics_caveats_removes_the_key(tmp_path):
+    root = _write_model(tmp_path)
+    path = root / "subject_areas" / "support" / "metrics" / "avg_resolution_days.yaml"
+    for value in ([CAVEAT], []):
+        res = curate.apply(root, [{"op": "edit", "kind": "metric", "area": "support",
+                                   "name": "avg_resolution_days", "field": "caveats", "value": value}])
+        assert not res.errors, res.errors
+    assert "caveats" not in yaml.safe_load(path.read_text())
+    assert loader.load_datasource(root).subject_areas[0].metrics[0].caveats == []

@@ -584,6 +584,15 @@ class Metric(_Base):
                 raise ValueError("caveats entries must be non-empty strings")
         return v
 
+    @model_serializer(mode="wrap")
+    def _omit_empty_caveats(self, handler: Any) -> Any:
+        # A metric without caveats dumps as before the field existed, so the file still loads on an
+        # older agami-core, which forbids unknown keys.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("caveats"):
+            data.pop("caveats", None)
+        return data
+
     @model_validator(mode="after")
     def _semi_additive_coherent(self) -> "Metric":
         # "how to collapse over a non-additive dimension" is meaningless without naming

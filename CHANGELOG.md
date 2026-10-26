@@ -23,8 +23,10 @@ below corresponds to one such version.
   review queue. The validator reads it too: a metric caveat saying a missing value counts as 0
   silences `metric_null_filled` the way the calculation saying so already did.
 
-  **Reading a model:** a metric that sets `caveats` is refused by a release older than this one,
-  which does not know the key.
+  **Reading a model:** a metric file that sets `caveats` is refused by a release older than this
+  one, which does not know the key; files with no caveats stay readable, because the key is left
+  out of a metric file when the list is empty. Upgrade every server that reads the model (including
+  deploy images) before writing metric caveats.
 
 ## [0.9.19] — 2026-10-25
 

@@ -653,6 +653,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         _snapshot(backups, path)
         doc = _load(path)
         _set_trust(doc, op, new_state, signer, role)
+        if not doc.get("caveats"):
+            # clearing the caveats removes the key, so the file stays readable by an older release
+            doc.pop("caveats", None)
         _dump(path, doc)
         return path
 
