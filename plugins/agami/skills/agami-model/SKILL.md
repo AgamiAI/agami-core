@@ -111,7 +111,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_model_feedback.py --block-file <paste
 
 It prints `{data, anomalies, needs_judgment}`:
 - `data.profile` — the dashboard's target model. **Use it, overriding the active-profile default** (a block was rendered for THAT model; never apply it to whatever's active).
-- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit verbatim). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
+- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
 - `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
@@ -134,9 +134,12 @@ It prints `{data, anomalies, needs_judgment}`:
   {"op": "exclude", "kind": "table", "area": "sales", "name": "CUSTOMERS", "column": "EMAIL"},
   {"op": "approve", "kind": "metric", "area": "sales", "name": "total_revenue", "at": "2026-06-10T17:51:41Z"},
   {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
-  {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"}
+  {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"},
+  {"op": "move",    "kind": "table", "area": "sales", "name": "shipments", "to_area": "fulfilment"}
 ]
 ```
+
+A `move` (the explorer's **Move to area**) gives the table a new owning area, created if the model doesn't have it yet. Its joins follow it (a join that now spans two areas becomes a cross-area join, and the reverse), and the metrics and entities that read only that table move with it. Ones that also read another table stay; the result's `notes` lists them (*"left in sales: metric units_per_order also reads orders"*). Pass `notes` on to the user verbatim.
 
 (Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
 

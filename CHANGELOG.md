@@ -12,6 +12,37 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A table can move to another subject area, keeping its joins, metrics and entities (#513).**
+  The curate op `{"op":"move","kind":"table","name":"<table>","area":"<from>","to_area":"<to>"}`
+  (`"schema"` too when two schemas share the name) moves the table and its area entry, and creates
+  the target area when the model doesn't have it. A join that now spans two areas becomes a
+  cross-area join, and a cross-area join whose two tables now share an area moves into it. Metrics
+  and entities that read only that table move with it; one that also reads another table stays,
+  and the result's `notes` names it. The batch is validated and undone on failure, logged with
+  both areas, and committed when the model is its own git repository. The model explorer has a
+  **Move to area** control on every table that queues the op.
+
+### Changed
+
+- **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
+  single-schema database of more than 24 tables used to get one area per table-name prefix, with
+  any name starting with a shorter one's prefix pulled in (`pro_x` with `products`) and names
+  singularised by dropping an "s" (`supplie`, `statu`). Tables that join each other now share an
+  area, with no target number of areas; a group that would pass the area size limit is cut at its
+  weakest joins. Tables with no joins go with tables sharing their whole first name word. Area
+  names are the tables' own words. Only new proposals change: an existing model is never regrouped.
+
+### Fixed
+
+- **`sm add` refuses a subject area the model doesn't list, and takes `--area _cross` (#513).**
+  The loader reads only the areas `datasource.yaml` lists, so a metric added under any other name
+  was reported applied and validated and then never served. The error now lists the model's areas.
+  `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
+  `_entities.yaml`), validated like any other add, and those items can be signed off through
+  `sm curate`.
+
 ### Security
 
 - **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**

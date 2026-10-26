@@ -397,11 +397,14 @@ class ApplyResult:
     committed: bool = False
     # Why nothing was committed, in a sentence the skill can pass on; empty when it was.
     commit_note: str = ""
+    # What an op did beyond its target, or left alone, for the person to see (a moved table's joins).
+    notes: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
                 "validated": self.validated, "committed": self.committed,
-                **({"commit_note": self.commit_note} if self.commit_note else {})}
+                **({"commit_note": self.commit_note} if self.commit_note else {}),
+                **({"notes": self.notes} if self.notes else {})}
 
 
 def _area_dir(root: Path, area: str) -> Path:
@@ -501,8 +504,13 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
     return res
 
 
-_VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
+_VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move"}
 # exclude == reject; include == set unreviewed + clear sign-off (model-explorer verbs)
+# move == {op:move, kind:table, name, area, to_area}: the table changes owning area (see _move_table)
+
+# The `area` that names the datasource-level lists (cross_subject_area_metrics / _entities) rather
+# than a subject area. Introspection never names an area like this (`build._area_key` strips "_").
+CROSS_AREA = "_cross"
 
 
 def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
@@ -512,10 +520,15 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
     root = Path(root)
     res = ApplyResult()
     backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)
+    logged: list[dict] = []
 
     for op in ops:
+        logged.append(op)
         try:
-            path = _apply_one(root, op, signer, role, backups)
+            if op.get("op") == "move" and not op.get("area"):
+                # Resolved now, so the log records the area the table left as well as the one it joined.
+                op = logged[-1] = {**op, "area": _resolve_area(root, op)}
+            path = _apply_one(root, op, signer, role, backups, res.notes)
             if path is not None:
                 res.applied.append(_op_label(op))
         except Exception as e:
@@ -529,16 +542,16 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
         if not vres.ok:
             res.errors = vres.errors
             _restore(list(backups.items()))   # git-independent revert
-            res.applied = []  # nothing stuck
+            res.applied, res.notes = [], []  # nothing stuck
             return res
     except Exception as e:
         res.errors.append(f"validation failed to run: {e}")
         _restore(list(backups.items()))
-        res.applied = []
+        res.applied, res.notes = [], []
         return res
 
     if res.applied:
-        _append_curation_log(root, ops, signer, role)
+        _append_curation_log(root, logged, signer, role)
         res.committed, res.commit_note = _git_commit(root, f"curation: {len(res.applied)} change(s)")
     return res
 
@@ -547,7 +560,8 @@ def _op_label(op: dict) -> str:
     t = op.get("name", "?")
     if op.get("column"):
         t += f".{op['column']}"
-    return f"{op.get('op')} {op.get('kind')} {op.get('area','')}/{t}".strip()
+    label = f"{op.get('op')} {op.get('kind')} {op.get('area') or ''}/{t}".strip()
+    return f"{label} -> {op.get('to_area')}" if op.get("op") == "move" else label
 
 
 def _resolve_area(root: Path, op: dict) -> str:
@@ -565,7 +579,9 @@ def _resolve_area(root: Path, op: dict) -> str:
         d = sa_root / area
         found = False
         if kind == "table":
-            found = (d / "tables" / f"{name}.yaml").exists()
+            tf = d / "tables" / f"{name}.yaml"
+            found = tf.exists() and (not op.get("schema") or (
+                str((_load(tf) or {}).get("schema") or "").lower() == str(op["schema"]).lower()))
         elif kind == "entity":
             found = (d / "entities" / f"{_slug(name)}.yaml").exists()
         elif kind == "metric":
@@ -581,6 +597,8 @@ def _resolve_area(root: Path, op: dict) -> str:
             hits.append(area)
     if len(hits) == 1:
         return hits[0]
+    if not hits and kind in _KINDS and _find_cross_item(root, kind, name) is not None:
+        return CROSS_AREA
     if not hits:
         raise FileNotFoundError(
             f"no {kind} named {name!r} in any subject area (looked in: {', '.join(areas) or 'none'})")
@@ -590,7 +608,8 @@ def _resolve_area(root: Path, op: dict) -> str:
 
 
 def _apply_one(root: Path, op: dict, signer, role,
-               backups: "Optional[dict[Path, Optional[str]]]" = None) -> Optional[Path]:
+               backups: "Optional[dict[Path, Optional[str]]]" = None,
+               notes: Optional[list[str]] = None) -> Optional[Path]:
     if backups is None:
         backups = {}
     action = op.get("op")
@@ -605,6 +624,21 @@ def _apply_one(root: Path, op: dict, signer, role,
 
     new_state = {"approve": "approved", "include": "unreviewed",
                  "reject": "rejected", "exclude": "rejected"}.get(action)
+
+    if action == "move":
+        if kind != "table":
+            raise ValueError("move applies to tables only (kind: table)")
+        return _move_table(root, op, area, backups, notes if notes is not None else [])
+
+    if area == CROSS_AREA and kind in _KINDS:
+        hit = _find_cross_item(root, kind, name)
+        if hit is None:
+            raise FileNotFoundError(f"no cross-area {kind} named {name!r}")
+        path, key, doc, item = hit
+        _snapshot(backups, path)
+        _set_trust(item, op, new_state, signer, role)
+        _dump(path, doc)
+        return path
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -722,6 +756,268 @@ def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
     if op.get("on"):
         out = [r for r in out if norm(r.get("on")) == norm(op["on"])]
     return out
+
+
+def _listed_areas(root: Path) -> list[str]:
+    """The subject areas datasource.yaml lists, by the directory name the writers use. The loader reads
+    only these, so a file written under any other `subject_areas/<name>/` is never served."""
+    doc = _load(root / "datasource.yaml") or {}
+    out = []
+    for ref in doc.get("subject_areas", []) or []:
+        rel = ref if isinstance(ref, str) else (ref or {}).get("path", "")
+        d = root / str(rel)
+        if not d.exists():
+            d = root / "subject_areas" / str(rel)
+        if d.parent == root / "subject_areas":
+            out.append(d.name)
+    return out
+
+
+def _cross_places(root: Path, kind: str) -> list[tuple[Path, str]]:
+    """Where the datasource-level metrics / entities live: their own file, then datasource.yaml."""
+    sub = _KINDS[kind][0]
+    return [(root / f"cross_subject_area_{sub}.yaml", sub),
+            (root / "datasource.yaml", f"cross_subject_area_{sub}")]
+
+
+def _find_cross_item(root: Path, kind: str, name: str):
+    """(path, key, doc, item) for the cross-area metric / entity named `name`, else None."""
+    for path, key in _cross_places(root, kind):
+        if not path.exists():
+            continue
+        doc = _load(path) or {}
+        items = doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
+        for it in items or []:
+            if isinstance(it, dict) and _slug(str(it.get("name") or "")) == _slug(name):
+                return path, key, (doc if isinstance(doc, dict) else {key: items}), it
+    return None
+
+
+def _same_table(ref: tuple[str, str], table: tuple[str, str]) -> bool:
+    # A reference without a schema means the table of that name, as the loader reads it.
+    return ref[1] == table[1] and (not ref[0] or not table[0] or ref[0] == table[0])
+
+
+def _owners(root: Path) -> dict[tuple[str, str], str]:
+    """(schema, table) -> the area whose tables/ folder holds it, over the areas the model lists."""
+    from .models import table_key
+
+    out: dict[tuple[str, str], str] = {}
+    for area in _listed_areas(root):
+        for tf in sorted((_area_dir(root, area) / "tables").glob("*.yaml")):
+            doc = _load(tf) or {}
+            out.setdefault(table_key(str(doc.get("name") or tf.stem), doc.get("schema")), area)
+    return out
+
+
+def _owner_of(owners: dict, ref: tuple[str, str]) -> Optional[str]:
+    if ref in owners:
+        return owners[ref]
+    hits = {a for k, a in owners.items() if _same_table(ref, k)}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _new_area(root: Path, area: str, backups: "dict[Path, Optional[str]]") -> None:
+    """Create an empty subject area and list it in datasource.yaml, so a table can move into it."""
+    from .build import _area_key
+
+    if area == CROSS_AREA or _area_key(area) != area:
+        raise ValueError(f"{area!r} can't name a new subject area: use lowercase letters, digits and _")
+    d = _area_dir(root, area)
+    if d.exists() and any(d.iterdir()):
+        raise ValueError(f"subject_areas/{area} exists but datasource.yaml doesn't list it; list it there "
+                         "or move the table to another name")
+    sap = d / "subject_area.yaml"
+    _snapshot(backups, sap)
+    d.mkdir(parents=True, exist_ok=True)
+    _dump(sap, {"name": area, "description": "", "tables": []})
+    dsp = root / "datasource.yaml"
+    _snapshot(backups, dsp)
+    ds = _load(dsp) or {}
+    ds["subject_areas"] = [*(ds.get("subject_areas") or []), f"subject_areas/{area}"]
+    _dump(dsp, ds)
+
+
+def _move_table(root: Path, op: dict, src: str, backups: "dict[Path, Optional[str]]",
+                notes: list[str]) -> Path:
+    """Move a table to another subject area, taking what is only about it along (#513).
+
+    The table file and its subject_area.yaml entry move. Each join on it is placed again by the areas
+    that now own its two ends: inside one area, or a cross-area join between two. A metric or entity
+    that reads only this table moves with it; one that also reads another table stays and is listed
+    in `notes`. The caller validates the whole model and restores every file on failure."""
+    from .models import table_key
+
+    name, dst = op["name"], op.get("to_area")
+    if not dst:
+        raise ValueError("move needs to_area (the area the table moves to)")
+    if dst == src:
+        raise ValueError(f"table {name!r} is already in area {src!r}")
+    listed = _listed_areas(root)
+    if src not in listed:
+        raise ValueError(f"{src!r} is not a subject area of this model (it lists: {', '.join(listed)})")
+    src_tf = _area_dir(root, src) / "tables" / f"{name}.yaml"
+    if not src_tf.exists():
+        raise FileNotFoundError(f"area {src!r} doesn't own a table named {name!r}")
+    tdoc = _load(src_tf) or {}
+    if op.get("schema") and str(tdoc.get("schema") or "").lower() != str(op["schema"]).lower():
+        raise ValueError(f"{src}/{name} is in schema {tdoc.get('schema')!r}, not {op['schema']!r}")
+    if dst not in listed:
+        _new_area(root, dst, backups)
+        notes.append(f"created subject area {dst!r}")
+    dst_tf = _area_dir(root, dst) / "tables" / f"{name}.yaml"
+    if dst_tf.exists():
+        raise ValueError(f"area {dst!r} already owns a table named {name!r}")
+    me = table_key(str(tdoc.get("name") or name), tdoc.get("schema"))
+
+    _snapshot(backups, src_tf)
+    _snapshot(backups, dst_tf)
+    dst_tf.parent.mkdir(parents=True, exist_ok=True)
+    dst_tf.write_text(src_tf.read_text(encoding="utf-8"), encoding="utf-8")
+    src_tf.unlink()
+
+    # The subject_area.yaml entry: out of the old area, into the new one unless it already lists it.
+    def is_me(tr: dict) -> bool:
+        return _same_table(table_key(str(tr.get("table") or ""), tr.get("schema")), me)
+
+    sap = _area_dir(root, src) / "subject_area.yaml"
+    sa = _load(sap) or {}
+    mine = [tr for tr in sa.get("tables") or [] if isinstance(tr, dict) and is_me(tr)]
+    if mine:
+        _snapshot(backups, sap)
+        sa["tables"] = [tr for tr in sa.get("tables") or [] if tr not in mine]
+        _dump(sap, sa)
+    ref = mine[0] if mine else {k: v for k, v in (("storage_connection", tdoc.get("storage_connection")),
+                                                  ("schema", tdoc.get("schema")), ("table", name)) if v}
+    dap = _area_dir(root, dst) / "subject_area.yaml"
+    da = _load(dap) or {"name": dst}
+    if not any(isinstance(tr, dict) and is_me(tr) for tr in da.get("tables") or []):
+        _snapshot(backups, dap)
+        da["tables"] = [*(da.get("tables") or []), ref]
+        _dump(dap, da)
+
+    owners = _owners(root)
+    _replace_joins(root, src, me, owners, backups, notes)
+    for kind in ("metric", "entity"):
+        _carry_items(root, kind, src, dst, me, backups, notes)
+    return dst_tf
+
+
+def _join_ends(r: dict) -> tuple[tuple[str, str], tuple[str, str]]:
+    from .models import table_key
+
+    return (table_key(str(r.get("from_table") or ""), r.get("from_schema")),
+            table_key(str(r.get("to_table") or ""), r.get("to_schema")))
+
+
+def _replace_joins(root: Path, src: str, me: tuple[str, str], owners: dict,
+                   backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
+    """Re-place every join on the moved table that sat in its old area or between areas, by the areas
+    that own its two ends now. A join whose end no area owns stays where it is."""
+    xfile = root / "cross_subject_area_relationships.yaml"
+    cross_places = [(xfile, "edges"), (root / "datasource.yaml", "cross_subject_area_relationships")]
+    into_area: dict[str, list[dict]] = {}
+    into_cross: list[dict] = []
+
+    def label(r: dict) -> str:
+        return f"{r.get('from_table')}->{r.get('to_table')}"
+
+    def touches(r: dict) -> bool:
+        return isinstance(r, dict) and any(_same_table(e, me) for e in _join_ends(r))
+
+    srel = _area_dir(root, src) / "relationships.yaml"
+    if srel.exists():
+        doc = _load(srel) or {}
+        rels = (doc.get("relationships") or []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
+        keep = []
+        for r in rels:
+            fa, ta = (_owner_of(owners, e) for e in _join_ends(r)) if touches(r) else (src, src)
+            if fa is None or ta is None or (fa == ta == src):
+                keep.append(r)
+            elif fa == ta:
+                into_area.setdefault(fa, []).append(r)
+            else:
+                into_cross.append({**r, "from_subject_area": fa, "to_subject_area": ta})
+                notes.append(f"join {label(r)} is now a cross-area join ({fa} -> {ta})")
+        if len(keep) != len(rels):
+            _snapshot(backups, srel)
+            _dump(srel, {**doc, "relationships": keep} if isinstance(doc, dict) else {"relationships": keep})
+
+    for path, key in cross_places:
+        if not path.exists():
+            continue
+        doc = _load(path) or {}
+        rels = (doc.get(key) or []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
+        keep, changed = [], False
+        for r in rels:
+            if not touches(r):
+                keep.append(r)
+                continue
+            fa, ta = (_owner_of(owners, e) for e in _join_ends(r))
+            if fa is None or ta is None:
+                keep.append(r)
+            elif fa == ta:
+                into_area.setdefault(fa, []).append(
+                    {k: v for k, v in r.items() if k not in ("from_subject_area", "to_subject_area")})
+                notes.append(f"cross-area join {label(r)} is now inside area {fa!r}")
+                changed = True
+            else:
+                if (r.get("from_subject_area"), r.get("to_subject_area")) != (fa, ta):
+                    r = {**r, "from_subject_area": fa, "to_subject_area": ta}
+                    changed = True
+                keep.append(r)
+        if changed:
+            _snapshot(backups, path)
+            _dump(path, {**doc, key: keep} if isinstance(doc, dict) else {key: keep})
+
+    for area, rels in into_area.items():
+        path = _area_dir(root, area) / "relationships.yaml"
+        doc = _load(path) if path.exists() else None
+        _snapshot(backups, path)
+        current = (doc.get("relationships") or []) if isinstance(doc, dict) else (doc or [])
+        _dump(path, {**(doc if isinstance(doc, dict) else {}), "relationships": [*current, *rels]})
+    if into_cross:
+        doc = _load(xfile) if xfile.exists() else None
+        _snapshot(backups, xfile)
+        current = (doc.get("edges") or []) if isinstance(doc, dict) else (doc or [])
+        _dump(xfile, {**(doc if isinstance(doc, dict) else {}), "edges": [*current, *into_cross]})
+
+
+def _carry_items(root: Path, kind: str, src: str, dst: str, me: tuple[str, str],
+                 backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
+    """Move the old area's metrics (or entities) that read only the moved table; report the ones that
+    read it and another table, which stay where they are."""
+    from .models import table_key
+
+    sub = _KINDS[kind][0]
+    for f in sorted((_area_dir(root, src) / sub).glob("*.yaml")):
+        doc = _load(f) or {}
+        if kind == "metric":
+            tables = [str(t) for t in doc.get("source_tables") or []]
+        else:
+            tables = [str(m.get("table") or "") for m in doc.get("maps_to") or [] if isinstance(m, dict)]
+        if not tables and doc.get("primary_table"):
+            tables = [str(doc["primary_table"])]
+        on_me = [t for t in tables if _same_table(table_key(t), me)]
+        if not on_me:
+            continue
+        others = sorted({t for t in tables if t not in on_me})
+        label = doc.get("name") or f.stem
+        if others:
+            notes.append(f"left in {src}: {kind} {label} also reads {', '.join(others)}")
+            continue
+        target = _area_dir(root, dst) / sub / f.name
+        if target.exists():
+            notes.append(f"left in {src}: {kind} {label} (area {dst!r} already has one by that name)")
+            continue
+        if src in (doc.get("subject_areas") or []):
+            doc["subject_areas"] = [dst if a == src else a for a in doc["subject_areas"]]
+        _snapshot(backups, f)
+        _snapshot(backups, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _dump(target, doc)
+        f.unlink()
+        notes.append(f"{kind} {label} moved with it")
 
 
 def _reconcile_expose_groups(root: Path, area: str, table: str, schema: Optional[str],
@@ -859,11 +1155,24 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     hand-writes YAML file-by-file or authors a throwaway script to loop. Each item
     is structurally validated against its Pydantic model; the whole model is then
     validated and the batch is reverted (new files removed, overwritten files
-    restored) if it fails — no git dependency for the revert."""
+    restored) if it fails — no git dependency for the revert.
+
+    `area` is a subject area datasource.yaml lists, or `CROSS_AREA` for the datasource-level list of
+    items that span areas. Any other name is refused: the loader reads only listed areas, so the
+    files would be written, validated against a model that doesn't contain them, and never served."""
     root = Path(root)
     res = ApplyResult()
     if kind not in _KINDS:
         res.errors.append(f"unknown kind {kind!r} (expected metric|entity)")
+        return res
+    if area == CROSS_AREA:
+        return _write_cross_items(root, kind, items, signer, role)
+    listed = _listed_areas(root) if (root / "datasource.yaml").exists() else []
+    if area not in listed:
+        res.errors.append(
+            f"{area!r} is not a subject area of this model; datasource.yaml lists: "
+            f"{', '.join(listed) or 'none'}. Use one of those, or --area {CROSS_AREA} for a {kind} "
+            "that spans subject areas.")
         return res
     subdir, Model = _KINDS[kind]
     dest = _area_dir(root, area) / subdir
@@ -908,6 +1217,46 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
         root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
                for a in res.applied], signer, role)
     res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    return res
+
+
+def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -> ApplyResult:
+    """`write_items` for the datasource-level list: append to cross_subject_area_<kind>s.yaml (the file
+    the loader merges with datasource.yaml's own list), replacing an item of the same name there."""
+    res = ApplyResult()
+    sub, Model = _KINDS[kind]
+    path = root / f"cross_subject_area_{sub}.yaml"
+    backups = [(path, path.read_text(encoding="utf-8") if path.exists() else None)]
+    doc = _load(path) if path.exists() else None
+    current = (doc.get(sub) or []) if isinstance(doc, dict) else (doc or [])
+    for item in items:
+        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
+        try:
+            obj = Model(**clean)
+        except Exception as e:
+            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
+            continue
+        current = [c for c in current if _slug(str((c or {}).get("name") or "")) != _slug(obj.name)]
+        current.append(obj.model_dump(mode="json", exclude_none=True))
+        res.applied.append(f"{kind} {CROSS_AREA}/{obj.name}")
+    if not res.applied:
+        return res
+    _dump(path, {**(doc if isinstance(doc, dict) else {}), sub: current})
+    try:
+        vres = V.validate(load_datasource(root, include_rejected=True), cache=_VALIDATION_CACHE)
+        res.validated = vres.ok
+        if not vres.ok:
+            res.errors = vres.errors
+    except Exception as e:
+        res.errors.append(f"validation failed to run: {e}")
+    if res.errors:
+        _restore(backups)
+        res.applied, res.validated = [], False
+        return res
+    _append_curation_log(
+        root, [{"op": "add", "kind": kind, "area": CROSS_AREA, "name": a.split("/", 1)[-1]}
+               for a in res.applied], signer, role)
+    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} cross-area {kind}(s)")
     return res
 
 
@@ -1176,5 +1525,5 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
 
 
 __all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
-           "write_items", "add_examples", "validate_seeds", "set_key_terminology",
+           "write_items", "CROSS_AREA", "add_examples", "validate_seeds", "set_key_terminology",
            "ApplyResult"]

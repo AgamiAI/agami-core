@@ -302,13 +302,85 @@ def test_legacy_model_backed_up_on_reonboard(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_cluster_by_family_merges_plural_and_prefix():
-    mapping = build.cluster_by_family(["events", "event_types", "event_registrations",
-                                       "members", "membership_plans", "member_visits", "sales", "sale_items"])
-    # event* collapse together; member*/membership* collapse; sale*/sale_items collapse
-    assert mapping["events"] == mapping["event_types"] == mapping["event_registrations"]
-    assert mapping["members"] == mapping["membership_plans"] == mapping["member_visits"]
-    assert mapping["sales"] == mapping["sale_items"]
+def test_cluster_by_family_groups_by_the_whole_first_word():
+    mapping = build.cluster_by_family(["events", "event_types", "pro_x", "products", "projects",
+                                       "promotions", "member_visits", "member_plans"])
+    # one name starting with another's word is not a family (#513): pro_x isn't products
+    assert len({mapping[n] for n in ("pro_x", "products", "projects", "promotions")}) == 4
+    assert mapping["events"] != mapping["event_types"]
+    assert mapping["member_visits"] == mapping["member_plans"] == "member"
+
+
+def test_area_names_keep_the_plural():
+    # stripping a trailing "s" made supplie, facilitie, statu, analysi, new (#513)
+    names = ["supplies", "facilities", "status", "analysis", "news", "series"]
+    assert build.cluster_by_family(names) == {n: n for n in names}
+
+
+def _t(name: str, description: str = "") -> m.Table:
+    return m.Table(name=name, description=description,
+                   columns=[m.Column(name="id", type="integer", primary_key=True)])
+
+
+def _j(frm: str, to: str) -> m.Relationship:
+    return m.Relationship(from_table=frm, from_column=f"{to}_id", to_table=to, to_column="id",
+                          relationship="many_to_one")
+
+
+def _proposed(tables, rels):
+    areas, _ = build.propose_subject_areas(tables, rels, "c", "demo")
+    return {t.name: sa.name for sa in areas for t in sa.tables_defined}
+
+
+def test_grouping_follows_joins_not_name_prefixes():
+    # pro_tasks joins projects' world, products joins orders': a shared prefix doesn't decide it,
+    # and joined tables with different names land together
+    names = ["orders", "order_lines", "products", "customers", "invoices",
+             "projects", "pro_tasks", "timesheets", "staff",
+             *(f"misc{i}_log" for i in range(20))]
+    rels = [_j("order_lines", "orders"), _j("order_lines", "products"), _j("orders", "customers"),
+            _j("invoices", "orders"), _j("pro_tasks", "projects"), _j("timesheets", "pro_tasks"),
+            _j("timesheets", "staff")]
+    area = _proposed([_t(n) for n in names], rels)
+    assert area["orders"] == area["order_lines"] == area["products"] == area["customers"] == area["invoices"]
+    assert area["projects"] == area["pro_tasks"] == area["timesheets"] == area["staff"]
+    assert area["products"] != area["pro_tasks"]
+    assert area["orders"] == "orders"   # named by its most-joined table, in the plural
+    assert area["misc0_log"] == "misc0"   # no joins: grouped by its whole first word
+
+
+def test_a_table_with_no_joins_goes_with_tables_sharing_its_first_word():
+    names = ["orders", "order_lines", "order_notes", "suppliers", "supplier_ratings", "status",
+             *(f"t{i}" for i in range(20))]
+    rels = [_j("order_lines", "orders"), *(_j(f"t{i}", "suppliers") for i in range(3))]
+    area = _proposed([_t(n) for n in names], rels)
+    assert area["order_notes"] == area["order_lines"]       # joinless, same whole first word
+    assert area["supplier_ratings"] != area["suppliers"]    # "supplier" is not "suppliers"
+    assert area["status"] == "status" and "suppliers" in set(area.values())
+
+
+def test_an_oversized_join_cluster_is_split_below_the_area_limit():
+    hub = [_t("customers")]
+    leaves = [_t(f"leaf{i}_events") for i in range(40)]
+    pairs = [_t(f"orders{i}") for i in range(5)]
+    rels = [*(_j(t.name, "customers") for t in leaves), *(_j(t.name, "customers") for t in pairs),
+            *(_j(t.name, "customers") for t in pairs)]   # two joins each: the strongest links
+    areas, _ = build.propose_subject_areas(hub + leaves + pairs, rels, "c", "demo")
+    assert all(len(sa.tables) <= build.SINGLE_AREA_MAX for sa in areas)
+    owner = {t.name: sa.name for sa in areas for t in sa.tables_defined}
+    assert all(owner[f"orders{i}"] == owner["customers"] for i in range(5))
+    assert len(areas) == 2   # the leaves cut off by the limit are pooled, not one area each
+    org = m.Datasource(datasource="demo", storage_connections=[m.StorageConnection(
+        name="c", storage_type="PostgreSQL")], subject_areas=areas,
+        cross_subject_area_relationships=build.extract_cross_area_relationships(areas, rels))
+    assert V.validate(org).ok
+
+
+def test_shared_words_break_ties_between_equally_joined_links():
+    tables = [_t("a_hub", "warehouse stock"), _t("b_x", "warehouse bins"), _t("c_y", "invoice lines")]
+    rels = [_j("b_x", "a_hub"), _j("c_y", "a_hub")]
+    groups = build.group_by_joins(tables, rels, max_size=2)
+    assert sorted(sorted(t.name for t in g) for g in groups) == [["a_hub", "b_x"], ["c_y"]]
 
 
 def test_deep_table_column_groups_no_orphans():
