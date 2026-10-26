@@ -31,7 +31,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -1517,6 +1517,38 @@ def _looks_time_named(name: str) -> bool:
     return bool(_DATE_NAME_RE.search(name or ""))
 
 
+# A whole value that is an ISO date or timestamp, nothing before or after it.
+_STRICT_ISO_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-](\d{2}):?(\d{2}))?)?$")
+# A text column whose name says nothing about dates is claimed only on this much evidence.
+_ISO_TEXT_MIN_VALUES = 20
+
+
+def _is_strict_iso(value: str) -> bool:
+    m = _STRICT_ISO_RE.match(value)
+    if not m:
+        return False
+    y, mo, d, hh, mi, ss, oh, om = m.groups()
+    try:
+        date(int(y), int(mo), int(d))
+    except ValueError:
+        return False  # 2024-13-45 has the shape but is no date
+    if oh is not None and (int(oh) > 23 or int(om) > 59):
+        return False  # +25:00 / +05:99 is no UTC offset
+    return hh is None or (int(hh) < 24 and int(mi) < 60 and (ss is None or int(ss) < 60))
+
+
+def _sniff_iso_text(values: list) -> tuple[Optional[str], Optional[str]]:
+    """(date_format, timezone) for a text column whose name is not date-like: iso8601 only when
+    at least _ISO_TEXT_MIN_VALUES sampled values are present and every one is a real ISO date or
+    timestamp. Without the name to go on, a single version string or note rules the column out."""
+    vals = [str(v).strip() for v in values if v not in (None, "")]
+    if len(vals) < _ISO_TEXT_MIN_VALUES or not all(_is_strict_iso(v) for v in vals):
+        return (None, None)
+    return ("iso8601", "offset-aware" if any(_OFFSET_RE.search(v) for v in vals) else None)
+
+
 def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Optional[str]]:
     """Sniff a column's date storage encoding + timezone from sample values, returning
     (date_format, timezone). Conservative — an encoded date (epoch/yyyymmdd/iso) is only
@@ -1575,6 +1607,7 @@ def _enrich_from_sample(
     `severity`) never get an enum skeleton, so the decode can only ever live in prose."""
     date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
+    iso_text_cands = [c for c in cols if c.type == "string" and not _looks_time_named(c.name)]
     # choice candidates: codeable columns with no choice_field yet, that aren't keys, dates,
     # or free-text-ish. A short integer/string column with few distinct values is an enum.
     # Exclude reference-named `*_id`/`sys_id` columns by NAME: introspection never populates
@@ -1584,7 +1617,7 @@ def _enrich_from_sample(
                     if c.choice_field is None and not c.primary_key and c.foreign_key is None
                     and c.type in ("integer", "string") and not _looks_time_named(c.name)
                     and not _NOT_CHOICE_NAME_RE.search(c.name)]
-    if not date_cands and not choice_cands:
+    if not date_cands and not choice_cands and not iso_text_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
@@ -1595,6 +1628,14 @@ def _enrich_from_sample(
             c.date_format = df
         if tz:
             c.timezone = tz
+    for c in iso_text_cands:
+        df, tz = _sniff_iso_text([row.get(c.name) for row in sample])
+        if df:
+            c.date_format = df
+        if tz:
+            c.timezone = tz
+    # a column of dates is a date, not a list of codes to decode
+    choice_cands = [c for c in choice_cands if not c.date_format]
     if not _sample_covers_values(sample, est_rows):
         choice_cands = []  # first rows of a big table: a list here would state values it never saw
     for c in choice_cands:
