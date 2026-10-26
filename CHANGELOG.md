@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A curate op on a join, entity or metric between subject areas applies without naming an area, and one that can't be resolved fails the batch (#538).**
+  An op on a join between two subject areas was skipped unless it named one side's area, so the batch
+  reported success with that change missing. The same held for a cross-area metric, which `sm
+  approve-queue` could never sign off, and a cross-area entity. Such an op is now searched for in every
+  area's files and in the cross-area joins, entities and metrics. Exactly one match is applied. No
+  match, or more than one (two joins between the same tables), fails the whole batch with an error
+  naming the op and the candidates, and nothing in the batch is written; `from_column` / `to_column`
+  (or `area`) picks one. An op that names the area holding its target works as before.
+
 ## [0.9.19] — 2026-10-25
 
 ### Fixed
