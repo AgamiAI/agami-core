@@ -998,8 +998,9 @@ def _count_local_examples(examples_dir: Path) -> int:
 
     Read through the loader's own `list_prompt_examples`, so a file is counted in whichever shape
     the loader accepts (a bare list, or `{examples: [...]}`) rather than a second copy of that rule.
-    Rejected examples count, because the local `get_prompt_examples` returns the file whole. A file
-    that cannot be read counts nothing: a pointer is not worth failing the schema call over."""
+    Rejected examples do not count, matching the served count and what the local
+    `get_prompt_examples` now returns. A file that cannot be read counts nothing: a pointer is not
+    worth failing the schema call over."""
     if not examples_dir.is_dir():
         return 0
     from semantic_model import loader as L
@@ -1009,7 +1010,7 @@ def _count_local_examples(examples_dir: Path) -> int:
         if not area_dir.is_dir():
             continue
         try:
-            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name, include_rejected=True))
+            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name))
         except Exception:
             continue
     return total
@@ -2986,8 +2987,8 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
 
     DB serving (hosted, AGAMI_DB_URL set): scope to the datasource, rank by word-overlap on
     `query`, and cap to `top_k` within a char budget — so a large library (e.g. accumulated
-    corrections) never floods the context. Local serving (files): returns the curated examples.yaml
-    verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
+    corrections) never floods the context. Local serving (files): the same ranking, cap and reply
+    shape over the curated examples.yaml files (`_rank_local_examples`).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
     _call_misses.set(None)
@@ -3054,16 +3055,47 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     _area = args.get("area")
     # Always a string or None here: `_normalized_args` repaired or refused every other shape.
     wanted = _area.strip() if isinstance(_area, str) else ""
-    blocks: list[str] = []
-    if ex_dir.is_dir():
-        for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
+    files = sorted(ex_dir.glob("*/examples.yaml")) if ex_dir.is_dir() else []
+    docs: list[dict[str, Any]] = []
+    if files:
+        # Only when there is a library to read: the empty reply needs no YAML parser, and a bare
+        # install without the model dependencies still answers it.
+        try:
+            from semantic_model.loader import list_prompt_examples
+        except ImportError:
+            return json.dumps(
+                {
+                    "error": {
+                        "kind": "driver_missing",
+                        "remediation": "semantic model deps not installed. Run: pip install -r "
+                        "plugins/agami/scripts/semantic_model/requirements.txt",
+                    }
+                },
+                separators=REPLY_SEPARATORS,
+            )
+        # The model's own area order first, as a deploy reads them, then any other folder; ids are
+        # resolved across the whole library in that order BEFORE `area` narrows it, so a scoped call
+        # and a served one keep the same copy of an id two areas share.
+        listed = _model_area_order(artifacts / profile)
+        files.sort(key=lambda f: (listed.index(f.parent.name) if f.parent.name in listed
+                                  else len(listed), f.parent.name))
+        for ex_file in files:
             area = ex_file.parent.name
-            if wanted and area != wanted:
+            # One area's file that will not decode or parse costs that area, not the call (#236).
+            try:
+                found = list_prompt_examples(ex_dir.parent, area)
+            except Exception as e:  # noqa: BLE001 - any unreadable file is skipped the same way
+                _LOG.warning("examples for area %r unreadable: %s", area, type(e).__name__)
                 continue
-            text = _read_text(ex_file)
-            if text and text.strip():
-                blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
-    if not blocks:
+            docs += [
+                {**e, "area": e.get("area") or area, "_dir": area} for e in found if isinstance(e, dict)
+            ]
+    docs = [
+        {k: v for k, v in d.items() if k != "_dir"}
+        for d in _with_example_ids(docs)
+        if not wanted or d["_dir"] == wanted
+    ]
+    if not docs:
         return json.dumps(
             {
                 "examples": [],
@@ -3072,12 +3104,89 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
             },
             separators=REPLY_SEPARATORS,
         )
-    header = (
-        f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
-        f"# Each block is one subject area's curated library. Match on the question, "
-        f"then reuse the tagged tables/columns/SQL shape.\n"
+    top_k = args.get("top_k")
+    examples = _rank_local_examples(
+        docs, query=args.get("query"), top_k=10 if top_k is None else int(top_k)
     )
-    return header + "\n" + "\n\n".join(blocks) + "\n"
+    return json.dumps(
+        {
+            "datasource": profile,
+            "examples": examples,
+            "count": len(examples),
+            "model_version": _model_version(profile),
+        },
+        separators=REPLY_SEPARATORS,
+        default=str,
+    )
+
+
+def _model_area_order(root: Path) -> list[str]:
+    """The subject areas `datasource.yaml` lists, in its order, by directory name; [] when it can't be
+    read (the examples are still served, alphabetically)."""
+    try:
+        import yaml
+
+        doc = yaml.safe_load((root / "datasource.yaml").read_text(encoding="utf-8")) or {}
+        refs = doc.get("subject_areas") or [] if isinstance(doc, dict) else []
+        # A malformed entry (`2024`, `{path: null}`) is skipped, never a failure of the call.
+        return [
+            Path(ref if isinstance(ref, str) else str((ref or {}).get("path") or "")).name
+            for ref in refs
+            if isinstance(ref, (str, dict))
+        ]
+    except Exception:  # noqa: BLE001 - an unreadable model only costs the ordering
+        return []
+
+
+def _with_example_ids(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`docs` with their `id`, the first of two equal ids kept: an id written into the file is kept,
+    else the content-derived one, as `model_store.write_examples` stores them on a served deployment."""
+    if not docs:
+        return []
+    from model_store import example_id
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for d in docs:
+        authored = d.get("id")
+        key = str(authored) if authored not in (None, "") else example_id(d)
+        if key not in seen:
+            seen.add(key)
+            out.append({**d, "id": key})
+    return out
+
+
+def _rank_local_examples(
+    docs: list[dict[str, Any]], *, query: Any, top_k: int
+) -> list[dict[str, Any]]:
+    """The local library ranked and capped exactly as `model_store.select_examples` ranks and caps
+    the served one: by word overlap with `query`, ties in id order, at most `top_k`, within the same
+    character budget, each with its content-derived `id`.
+
+    The local path used to return every area's file verbatim, so a library of a few hundred
+    examples sent tens of thousands of characters on every call whatever the question, and the
+    same client got a different shape locally than served. The served path is not touched: it
+    ranks rows from the store, and reusing its tokenizer, id and budget here is what keeps the
+    two from drifting.
+    """
+    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens
+
+    rows = sorted(docs, key=lambda d: d["id"])
+    wanted = _tokens(query if isinstance(query, str) else None)
+    if wanted:
+        # `str`: a YAML question like `2024` loads as a number, and one entry must not fail the call.
+        rows = sorted(
+            rows, key=lambda d: len(wanted & _tokens(str(d.get("question") or ""))), reverse=True
+        )
+    out: list[dict[str, Any]] = []
+    used = 0
+    for doc in rows[: max(top_k, 0)]:
+        size = len(json.dumps(doc, default=str))
+        if out and used + size > _EXAMPLES_CHAR_BUDGET:
+            break
+        out.append(doc)
+        used += size
+    return out
 
 
 def _classify_exit(code: int) -> str:
@@ -3149,7 +3258,9 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     needs, and it is the same text the in-process path surfaces from `ExecutorError.msg` — the two
     paths agreeing on it is a property this slice exists to keep.
 
-    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039).** For every code whose message
+    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with one exact-match exception: a
+    `syntax` failure whose line is exactly one of `sql_dialect_rules.FIX_MESSAGES` (#566), a fixed set
+    built from our own rules, so nothing else in the stream can pass. For every code whose message
     the child derives from `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the
     exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
     is a *shared* stream, and the child writes to it before the failure line. The concrete case was
@@ -3176,6 +3287,16 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     # the parent needs, and the child's stream never touches the caller's answer.
     kind = EXIT_TO_FAILURE_KIND.get(returncode)
     if returncode not in _AUTHORED_EXIT_CODES and kind in _ERROR_MESSAGES:
+        # One exception to rebuilding, and it relays nothing the child chose freely: a dialect
+        # rule's message (#566) is relayed only when a line is EXACTLY one of the messages built from
+        # our own rules. The parent cannot rebuild it from the code, since only the child saw which
+        # construct the database rejected; an exact match means no other byte of the stream passes.
+        if kind == "syntax":
+            from sql_dialect_rules import FIX_MESSAGES
+
+            fix = next((line.strip() for line in text.splitlines() if line.strip() in FIX_MESSAGES), None)
+            if fix is not None:
+                return fix
         return _ERROR_MESSAGES[kind]
     classified = returncode in EXIT_TO_FAILURE_KIND
     # `Traceback (most recent call last):` is the stable header of every Python traceback, and a
@@ -5370,9 +5491,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         "handler": tool_get_prompt_examples,
         "read_only": True,
         "description": (
-            "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
+            "Fetch the curated few-shot NL→SQL examples for a datasource, ranked by the question and "
+            "capped (`top_k`, default 10), each with its `area`. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
-            "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
+            "then reuse the tagged tables/columns/SQL. Each example carries "
             "a stable `id` — send one of them as `example.id` on execute_sql, with `example.use` "
             "'followed' or 'shown_only' (a hosted deployment refuses a statement without it), and "
             "cite it as a `basis` ref too when you followed it. "
