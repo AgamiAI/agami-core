@@ -1881,17 +1881,22 @@ class _ModelNames(NamedTuple):
     # area -> its own tables like its name (#567). Filled on first use: one call can pass the same
     # area in thousands of spellings, and each would otherwise run the matcher again.
     area_guesses: dict[str, list[str]]
+    # area -> every table it defines. `tables` keeps only the FIRST defining area per name (it is
+    # what `area_of` answers), so a table two areas define would vanish from the second's guesses.
+    area_tables: dict[str, list[str]]
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
         from semantic_model import loader as L
 
         tables: dict[str, str] = {}
+        area_tables: dict[str, list[str]] = {}
         columns: dict[str, list[str]] = {}
         for sa in org.subject_areas:
             for t in sa.tables_defined:
                 bare = _bare_name(t.name)
                 tables.setdefault(bare, sa.name)
+                area_tables.setdefault(sa.name, []).append(bare)
                 # Only the columns `get_datasource_schema` would show: a table read in its owning
                 # area exposes the column groups that area's TableRef names, and a hint naming a
                 # column outside them would disclose what the schema response deliberately hides.
@@ -1906,6 +1911,7 @@ class _ModelNames(NamedTuple):
             metric_keys,
             frozenset(t.casefold() for t in tables),
             {},
+            area_tables,
         )
 
     def area_of(self, table: str) -> "str | None":
@@ -1917,12 +1923,15 @@ class _ModelNames(NamedTuple):
         """
         return self.tables.get(_bare_name(table))
 
-    def table_hint(self, name: str) -> "str | None":
+    def table_hint(self, name: str, *, suggest: bool = True) -> "str | None":
         """Why `name` is not a table, when it is a real name of another kind.
 
         Only when no table answers to it in any case: a name can be an area AND a table
         (`payments`), and there `Payments` is a case typo of the table — telling the caller it "is a
         subject area, not a table" would be false.
+
+        `suggest=False` keeps the hint plain: past `_SUGGESTED_MISSES` nothing is searched, so the
+        prose must not offer a table the structured `did_you_mean` and the activity log never got.
         """
         folded = name.casefold()
         if _bare_name(folded) in self.folded_tables:
@@ -1930,7 +1939,7 @@ class _ModelNames(NamedTuple):
         area = next((a for a in self.areas if a.casefold() == folded), None)
         if area:
             lead = f"{area!r} is a subject area, not a table: pass it as `area`"
-            if near := self.area_table_guesses(name):
+            if suggest and (near := self.area_table_guesses(name)):
                 return f"{lead}, or did you mean {', '.join(repr(g) for g in near)}?"
             return f"{lead}."
         holders = self.columns.get(_bare_name(name).casefold())
@@ -1953,7 +1962,11 @@ class _ModelNames(NamedTuple):
         """The refusal for a table scope in which no named table exists."""
         # A name past the cap is left out rather than given `[]`: an empty list says "searched,
         # nothing close", and these were not searched.
-        hints = {n: h for n in names if (h := self.table_hint(n))}
+        hints = {
+            n: h
+            for i, n in enumerate(names)
+            if (h := self.table_hint(n, suggest=i < _SUGGESTED_MISSES))
+        }
         # A hinted name gets a list only when its own area holds a table like it (#567); otherwise it
         # stays out, as before, and its hint stands alone.
         guesses = {
@@ -2093,8 +2106,7 @@ class _ModelNames(NamedTuple):
         if area is None:
             return []
         if area not in self.area_guesses:
-            own = [t for t, owner in self.tables.items() if owner == area]
-            self.area_guesses[area] = _did_you_mean(area, own)
+            self.area_guesses[area] = _did_you_mean(area, self.area_tables.get(area, []))
         return list(self.area_guesses[area])
 
 

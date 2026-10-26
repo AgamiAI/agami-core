@@ -173,3 +173,23 @@ def test_the_flag_survives_the_bound_and_the_prose_does_not():
     )
     [entry] = stored["entries"]
     assert entry["hinted"] is True and "hint" not in entry
+
+
+def test_a_table_two_areas_define_is_suggested_for_either(tmp_path, monkeypatch):
+    # `archive` comes first and also defines `orders_v`; `orders` must still be offered it.
+    art = tmp_path / "art"
+    _write(art / "acme", {"archive": ["orders_v"], "orders": ["orders_v", "orders_line_v"]})
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    reply, _misses = _call("acme", dataset_names=["orders"])
+    assert reply["error"]["did_you_mean"]["orders"][0] == "orders_v"
+
+
+def test_past_the_cap_an_area_hint_offers_no_table(profile):
+    # Nothing past `_SUGGESTED_MISSES` is searched, so its hint must not name a table that the
+    # structured suggestions and the log never got.
+    fillers = [f"nope{i}" for i in range(tools._SUGGESTED_MISSES)]
+    reply, misses = _call(profile, dataset_names=[*fillers, "orders"])
+    err = reply["error"]
+    assert err["hints"]["orders"].endswith("pass it as `area`.")
+    assert "orders" not in err["did_you_mean"]
+    assert "did_you_mean" not in [m for m in misses if m["name"] == "orders"][0]
