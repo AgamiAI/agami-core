@@ -205,3 +205,45 @@ def test_path_fallback_passes_over_a_pipless_venv_for_one_that_can_be_brought_cu
 def test_path_fallback_keeps_the_first_when_none_can_be_brought_current(tmp_path):
     bad = _pipless_venv(tmp_path / "bad", None)
     assert _resolve_in_shell(tmp_path, [bad.parent]) == str(bad.parent / "python3")
+
+
+def _configure(tmp_path: Path, py: Path) -> None:
+    cfg = tmp_path / "art" / "local" / ".config"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"tool_paths": {"python3": str(py)}}), encoding="utf-8")
+
+
+@POSIX
+def test_a_configured_pipless_python_gives_way_to_a_path_one_that_can_be_brought_current(tmp_path):
+    stale = _pipless_venv(tmp_path / "stale", "0.9.11")
+    good = _with_fake_pip(_pipless_venv(tmp_path / "good", None))
+    _configure(tmp_path, stale)
+    assert _resolve_in_shell(tmp_path, [good.parent]) == str(good.parent / "python3")
+
+
+@POSIX
+def test_a_configured_pipless_python_is_kept_when_nothing_better_is_on_path(tmp_path):
+    stale = _pipless_venv(tmp_path / "stale", "0.9.11")
+    other = _pipless_venv(tmp_path / "other", None)
+    _configure(tmp_path, stale)
+    assert _resolve_in_shell(tmp_path, []) == str(stale)
+    assert _resolve_in_shell(tmp_path, [other.parent]) == str(stale)
+
+
+@POSIX
+def test_a_configured_python_that_can_be_brought_current_is_kept(tmp_path):
+    configured = _with_fake_pip(_pipless_venv(tmp_path / "configured", None))
+    good = _with_fake_pip(_pipless_venv(tmp_path / "good", None))
+    _configure(tmp_path, configured)
+    assert _resolve_in_shell(tmp_path, [good.parent]) == str(configured)
+
+
+@POSIX
+@pytest.mark.parametrize("script", ["sm", "py"])
+def test_no_python_anywhere_is_explained_not_a_silent_exit(tmp_path, script):
+    env = {k: v for k, v in os.environ.items() if k not in ("AGAMI_PYTHON", "VIRTUAL_ENV")}
+    env.update(PATH=str(_tools_without_python(tmp_path)), AGAMI_ARTIFACTS_DIR=str(tmp_path / "art"),
+               HOME=str(tmp_path))
+    r = subprocess.run(["bash", str(SCRIPTS / script), "validate"], env=env, capture_output=True, text=True)
+    assert r.returncode == 3
+    assert "agami: no Python interpreter found" in r.stderr

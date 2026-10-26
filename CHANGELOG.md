@@ -19,8 +19,9 @@ below corresponds to one such version.
   from installed metadata. A candidate with no pip and an agami-core that is missing or older than the
   plugin is skipped, with a `reason` in `candidates_scored`; a pip-less one whose library is current is
   still chosen, and `$AGAMI_PYTHON` is never skipped but gets a warning. The output says
-  `chosen_because`. `sm` and `py`, before agami-connect has recorded an interpreter, apply the same
-  rule to the Pythons on PATH, so an activated pip-less venv no longer shadows a working one. When the library a Python runs is older than the plugin, `connect_resolve`
+  `chosen_because`. `sm` and `py` apply the same rule to the Pythons on PATH, so an activated
+  pip-less venv no longer shadows a working one; a configured interpreter that fails it gives way to
+  a PATH one that passes, and is kept (so `sm` can say what is wrong) when none does. When the library a Python runs is older than the plugin, `connect_resolve`
   (as a `library_older_than_plugin` anomaly), `py` and the scripts' library loader warn on stderr,
   naming both versions, the interpreter and the fix (`sm install`, or `AGAMI_PYTHON`). `sm` says
   "<python> has no pip" instead of a bare "couldn't install". The plugin version is read from
