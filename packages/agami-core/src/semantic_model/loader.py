@@ -76,6 +76,27 @@ def _read_yaml(path: Path) -> Any:
         return yaml.safe_load(fh)
 
 
+# The top-level keys `load_datasource` reads, which are exactly `Datasource`'s fields. Every other
+# key in datasource.yaml is dropped by that read, so a model written for a newer agami-core lost a
+# field it declared without a word, and a deploy fed by that load stored a model without it (#575).
+# Reported by the callers a person reads (`sm validate`, the deploy), never from the load itself: the
+# executor loads the model in a child process whose stderr is its output contract.
+_DATASOURCE_KEYS = frozenset(Datasource.model_fields)
+
+
+def unknown_datasource_keys(root: str | Path) -> list[str]:
+    """The top-level keys in `<root>/datasource.yaml` this agami-core does not read, sorted."""
+    doc = _read_yaml(Path(root) / "datasource.yaml")
+    if not isinstance(doc, dict):
+        return []  # malformed: `load_datasource` reports it
+    return sorted(k for k in doc if isinstance(k, str) and k not in _DATASOURCE_KEYS)
+
+
+def unknown_keys_message(keys: list[str]) -> str:
+    return (f"datasource.yaml has keys this agami-core does not read, so they are ignored: "
+            f"{', '.join(keys)}. The model may need a newer agami-core.")
+
+
 def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Datasource:
     """Parse a v2 profile directory into a Datasource model.
 
