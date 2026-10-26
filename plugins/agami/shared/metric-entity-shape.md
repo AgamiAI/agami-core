@@ -154,9 +154,13 @@ maps_to:
     primary: true
   - table: orders
     column: customer_id
-confidence: confirmed
-review_state: approved
+confidence: inferred
+review_state: unreviewed
 ```
+
+An entity is written `unreviewed`, which is also the default when `review_state` is left out. It
+waits in the review queue until a person approves it in `/agami-model` (or `sm approve-queue`),
+which records who signed it off and when.
 
 ## How to write them
 

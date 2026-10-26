@@ -328,7 +328,7 @@ def main() -> int:
     manifest["initial_tab"] = initial
     if not manifest["schemas"]:
         sys.stderr.write(
-            f"agami: no schemas found in {profile_dir}. Run /agami-connect first.\n"
+            f"agami: no subject areas found in {profile_dir}. Run /agami-connect first.\n"
         )
         return 1
 
@@ -349,7 +349,7 @@ def main() -> int:
 
     print(
         f"Wrote {out_path} "
-        f"({_plural(t['schemas'], 'schema')} · {_plural(t['tables'], 'table')} · "
+        f"({_plural(t['schemas'], 'subject area')} · {_plural(t['tables'], 'table')} · "
         f"{_plural(t['fields'], 'field')}; "
         f"{t['excluded_tables']} tables + {t['excluded_fields']} columns currently excluded)"
     )
