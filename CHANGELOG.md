@@ -14,6 +14,20 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A model outside git keeps a reviewable history of its edits (#528).** agami commits a curation
+  only when the profile folder is its own git repository, and it never creates one, so on a fresh
+  artifacts folder an edit left nothing a reviewer could compare: `curation_log.jsonl` listed the ops
+  with no time and no prior value, and the datasource description and glossary writes weren't logged
+  at all. Every model write now logs each change with its UTC time (`at`), the model version it
+  produced (`version`) and, for an edit or a review-state change, the value it replaced (`before`)
+  beside the new one. The description and glossary writes are logged too, and a curate batch logs
+  only the ops that took, not the ones it skipped. A new `sm history <root> [--limit N]` prints the
+  log newest first, and a curate result outside git points to it. Older log lines without the new
+  keys read as before. The docs no longer say onboarding runs `git init` or that a failed edit is
+  reverted through git; it is restored from backups.
+
+### Fixed
+
 - **A column's `value_transform` and a join's `on:` parse in the datasource's own SQL dialect, and a
   text column of ISO dates gets a date format whatever it is called (#518).** Both fragments were
   parsed with sqlglot's generic grammar, so a valid Postgres transform such as

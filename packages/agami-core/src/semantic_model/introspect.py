@@ -578,7 +578,8 @@ def _areas_untouched(prev: Datasource, root: Path) -> bool:
         return False
     # Saved examples live under their area's name, and any curation leaves a log or a description:
     # a batched first build has none of these until it finishes, so their presence means "curated".
-    if (root / "curation_log.jsonl").exists() or any((root / "prompt_examples").rglob("*.yaml")):
+    from .curate import has_model_curation
+    if has_model_curation(root) or any((root / "prompt_examples").rglob("*.yaml")):
         return False
     if any(t.description or any(c.description for c in t.columns)
            for sa in prev.subject_areas for t in sa.tables_defined):
