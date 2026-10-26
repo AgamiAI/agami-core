@@ -1301,7 +1301,8 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role,
 def _read_log_lines(root: Path) -> list[Optional[dict]]:
     """Each line of the curation log, parsed; None for a line that isn't a JSON object."""
     try:
-        lines = (root / CURATION_LOG).read_text(encoding="utf-8").splitlines()
+        # bytes, so one undecodable line is that line's problem, not the whole log's
+        lines = (root / CURATION_LOG).read_bytes().splitlines()
     except OSError:
         return []
     out: list[Optional[dict]] = []
@@ -1310,7 +1311,7 @@ def _read_log_lines(root: Path) -> list[Optional[dict]]:
             continue
         try:
             entry = json.loads(line)
-        except ValueError:
+        except ValueError:  # UnicodeDecodeError included
             entry = None
         out.append(entry if isinstance(entry, dict) else None)
     return out

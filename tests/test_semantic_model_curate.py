@@ -413,6 +413,17 @@ def test_history_reads_older_entries_and_skips_unreadable_lines(tmp_path):
     assert curate.history(tmp_path / "missing") == []
 
 
+def test_a_line_that_is_not_utf8_is_skipped_not_fatal(tmp_path):
+    (tmp_path / "curation_log.jsonl").write_bytes(
+        b'{"op": "exclude", "kind": "table", "name": "a"}\n'
+        b"\xff\n"
+        b'{"op": "edit", "kind": "table", "name": "b"}\n')
+    assert [e["name"] for e in curate.history(tmp_path)] == ["b", "a"]
+    assert curate.has_model_curation(tmp_path)
+    (tmp_path / "curation_log.jsonl").write_bytes(b'{"op": "edit", "kind": "datasource"}\n\xff\n')
+    assert curate.has_model_curation(tmp_path)  # the unreadable line counts as curation
+
+
 def test_sm_history_prints_the_log_newest_first(tmp_path, capsys):
     import json
 
