@@ -86,6 +86,10 @@ def cmd_validate(args) -> int:
     # exists for it even with rejected included.
     org = L.load_datasource(args.root, include_rejected=True)
     res = V.validate(org)
+    unknown = L.unknown_datasource_keys(args.root)
+    if unknown:
+        # A warning, not an error (#575): the model still loads, but those fields are not served.
+        res.warn("unknown_datasource_key", L.unknown_keys_message(unknown))
     print(V.format_result(res))
     ok = res.ok
     # Deployment-level pass (F16 / ACE-072): when the profile sits under a deployment with an
