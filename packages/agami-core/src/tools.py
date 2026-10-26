@@ -3260,9 +3260,10 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
 
     **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with one exact-match exception: a
     `syntax` failure whose line is exactly one of `sql_dialect_rules.FIX_MESSAGES` (#566), a fixed set
-    built from our own rules, so nothing else in the stream can pass. For every code whose message
-    the child derives from `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the
-    exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
+    built from our own rules, or a whole line matching one of
+    `execute_sql.SQLSTATE_MESSAGE_PATTERNS` (#561), our templates with a five-character code, so
+    nothing else in the stream can pass. For every code whose message the child derives from
+    `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
     is a *shared* stream, and the child writes to it before the failure line. The concrete case was
     `_model_safety`'s `[agami] applied default_filters: …` notice — it put a declared row-level
     predicate, which the caller never sent, into `failure.message` on the DEFAULT transport, while
@@ -3292,11 +3293,24 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
         # our own rules. The parent cannot rebuild it from the code, since only the child saw which
         # construct the database rejected; an exact match means no other byte of the stream passes.
         if kind == "syntax":
+            from execute_sql import SQLSTATE_MESSAGE_PATTERNS
             from sql_dialect_rules import FIX_MESSAGES
 
             fix = next((line.strip() for line in text.splitlines() if line.strip() in FIX_MESSAGES), None)
             if fix is not None:
                 return fix
+            # The same exactness for a SQLSTATE sentence (#561): a whole line built from one of our
+            # templates and a five-character code, which is all the parent cannot rebuild.
+            coded = next(
+                (
+                    line.strip()
+                    for line in text.splitlines()
+                    if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+                ),
+                None,
+            )
+            if coded is not None:
+                return coded
         return _ERROR_MESSAGES[kind]
     classified = returncode in EXIT_TO_FAILURE_KIND
     # `Traceback (most recent call last):` is the stable header of every Python traceback, and a
