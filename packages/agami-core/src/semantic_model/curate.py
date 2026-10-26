@@ -627,6 +627,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         if op.get("op") == "edit" and op.get("field") == "column_groups" and not op.get("column"):
             _reconcile_expose_groups(root, area, name, doc.get("schema"), old_groups,
                                      doc.get("column_groups") or {}, backups)
+            # The file's own `name`: it can carry the schema (`public.wide`) the op's name leaves out.
+            _reconcile_ambiguity_groups(root, path, str(doc.get("name") or name), doc.get("schema"),
+                                        old_groups, doc.get("column_groups") or {}, backups)
         return path
 
     if kind == "entity":
@@ -759,6 +762,96 @@ def _reconcile_expose_groups(root: Path, area: str, table: str, schema: Optional
         if changed:
             _snapshot(backups, sap)
             _dump(sap, sa)
+
+
+def _reconcile_ambiguity_groups(root: Path, table_path: Path, table: str, schema: Optional[str],
+                                old_groups: dict, new_groups: dict,
+                                backups: "dict[Path, Optional[str]]") -> None:
+    """After a table's `column_groups` are rewritten, move every ambiguity anchor that names a
+    RENAMED group of it to the new name (#487).
+
+    A rename is a new group holding exactly the old group's columns. Without this, an anchor like
+    `orders.dates` survived the rename of `dates` to `calendar` and failed validation, so the whole
+    edit rolled back. Anything that is not a rename (a group split, merged or emptied) is left as it
+    was: the anchor then fails validation and names the ambiguity, because which of several new groups
+    should open the entry is a person's call, not ours. An anchor moves only when it resolves, the way
+    the validator resolves it, to exactly the edited table: one naming another schema's table, or a
+    bare name two schemas share, is left alone."""
+    def cols(names: Any) -> frozenset:
+        return frozenset(str(c).lower() for c in (names or []))
+
+    kept = {g.lower() for g in new_groups}
+    renamed: dict[str, str] = {}
+    for group, members in old_groups.items():
+        if group.lower() in kept:
+            continue
+        same = [g for g, m in new_groups.items() if cols(m) == cols(members)]
+        if len(same) == 1:
+            renamed[group.lower()] = same[0]
+    if not renamed:
+        return
+    path = root / "datasource.yaml"
+    if not path.exists():
+        return
+    from .models import table_key
+
+    # Every table the model serves, by identity, so an anchor resolves the way the validator resolves
+    # it: an exact qualified match, else a table stored without a schema, else by bare name. Only the
+    # areas datasource.yaml lists, as the loader reads them: an unreferenced directory is not served.
+    ds = _load(path) or {}
+    area_dirs = []
+    for ref in ds.get("subject_areas") or []:
+        rel = ref if isinstance(ref, str) else (ref or {}).get("path", "")
+        d = root / rel
+        area_dirs.append(d if d.is_dir() else root / "subject_areas" / str(rel))
+    tables = [
+        (table_key(str(t.get("name") or tp.stem), t.get("schema")), tp, t.get("column_groups") or {})
+        for d in area_dirs
+        for tp in sorted(d.glob("tables/*.yaml"))
+        for t in [_load(tp) or {}]
+    ]
+    defs = {k for k, _tp, _g in tables}
+    edited = table_key(table, schema)
+    # Another area's own copy of the same table that still has a group keeps its anchor working.
+    elsewhere = {
+        g.lower()
+        for k, tp, groups in tables
+        if k == edited and tp.resolve() != table_path.resolve()
+        for g in groups
+    }
+
+    def resolves_to_edited(owner: str) -> bool:
+        ref_schema, bare = table_key(owner)
+        if ref_schema:
+            found = {k for k in defs if k == (ref_schema, bare)} or {
+                k for k in defs if k == ("", bare)
+            }
+        else:
+            found = {k for k in defs if k[1] == bare}
+        return found == {edited}
+
+    doc = _load(path) or {}
+    changed = False
+    for amb in doc.get("ambiguities") or []:
+        refs = amb.get("column_groups") or []
+        for i, ref in enumerate(refs):
+            if not isinstance(ref, str) or "." not in ref:
+                continue
+            owner, group = ref.rsplit(".", 1)
+            if group.lower() not in renamed or not resolves_to_edited(owner):
+                continue
+            moved = f"{owner}.{renamed[group.lower()]}"
+            if group.lower() in elsewhere:
+                # The other copy still exposes the old group: keep that anchor, add the new one.
+                if moved not in refs:
+                    refs.append(moved)
+                    changed = True
+                continue
+            refs[i] = moved
+            changed = True
+    if changed:
+        _snapshot(backups, path)
+        _dump(path, doc)
 
 
 def _filter_columns(table_doc: dict, value: Any) -> list[str]:

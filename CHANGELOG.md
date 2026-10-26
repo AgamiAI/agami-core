@@ -12,15 +12,6 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-### Security
-
-- **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**
-  Their private keys were weak enough to forge a certificate for any host, which opens the server's
-  outbound HTTPS (OIDC discovery and token exchange) to a man-in-the-middle. The `server` extra now
-  requires `certifi>=2026.10.19`, so every install resolves the fixed bundle rather than whichever one
-  it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
-  installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
-
 ### Added
 
 - **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
@@ -34,6 +25,55 @@ below corresponds to one such version.
 
   **Reading a model:** a metric that sets `caveats` is refused by a release older than this one,
   which does not know the key.
+
+## [0.9.19] — 2026-10-25
+
+### Fixed
+
+- **A local `get_prompt_examples` ranks and caps the library, as a served one does (#573).** It returned every
+  area's examples file verbatim whatever the question (tens of thousands of characters a call on a
+  large library, rejected examples included), in a different shape from a served deployment. It now
+  ranks by word overlap with `query`, returns at most `top_k` (default 10) within the same character
+  budget, drops rejected examples, and replies in the served shape with each example's `id`. A
+  served deployment is unchanged. Measured on a large local library: about 52,000 characters a call
+  became about 18,000.
+
+- **A refresh rewrites only the files whose content changed (#472).** `sm introspect --append --tables
+  <one>` changed one table and re-dumped every file in the model, with keys reordered, empty defaults
+  added and lines re-wrapped, so a one-table refresh was a whole-model diff. `write_tree` now compares
+  what it would write with what is on disk, as parsed data (a null value or an empty list counts as
+  absent), and leaves an equal file alone, keeping its line endings and formatting. The introspection report
+  says how many files were already up to date. On a real 87-file model, rewriting it unchanged now
+  touches no files.
+- **Renaming a column group carries the ambiguity anchors that name it (#487).** An anchor such as
+  `orders.dates` used to fail validation after `dates` was renamed, rolling the whole edit back. A
+  rename (a new group with exactly the old group's columns) now moves the anchor; a split or merged
+  group is still left for validation to reject, naming the ambiguity.
+
+- **A join rejected at sign-off between two subject areas is no longer served (#543).** Rejected joins
+  inside one area were already dropped on load, but the cross-area loaders never applied the filter,
+  so a rejected cross-area join (often the single-column piece of a composite key, which repeats
+  rows) reached `sm context`, the schema reply and a deploy with no review status, and looked usable.
+  Rejected cross-area entities and metrics had the same gap. The curation views still see them. A
+  deployment keeps serving them until its model is redeployed.
+
+- **A statement the engine rejects for a known dialect gap comes back with the rule that fixes it
+  (#566).** The engine rules (Redshift: no `STRING_AGG`, unit-first `DATEADD`, `LISTAGG` beside a
+  `DISTINCT` aggregate, boolean casts, …) reached a client only through `list_datasources`, and a client
+  that already knew its datasource skipped that call and wrote the PostgreSQL the rules warn against.
+  The database's error is still never relayed; the classifier now recognises the constructs a rule
+  covers and answers with that rule as a `syntax` failure. Before, `function string_agg(...) does not
+  exist` read as a missing column (telling the client to re-introspect) or as an unclassified failure. The forked transport relays the
+  rule only as an exact match against the messages built from the rules themselves.
+
+### Security
+
+- **The server's CA bundle no longer trusts the compromised eMudhra (emSign) intermediates (#504).**
+  Their private keys were weak enough to forge a certificate for any host, which opens the server's
+  outbound HTTPS (OIDC discovery and token exchange) to a man-in-the-middle. The `server` extra now
+  requires `certifi>=2026.10.19`, so every install resolves the fixed bundle rather than whichever one
+  it happened to get. The image upgrades pip to 26.2.2 from a hash-pinned requirement before
+  installing, because the pip bundled with `python:3.12-slim` vendors an affected certifi of its own.
 
 ## [0.9.18] — 2026-10-21
 
