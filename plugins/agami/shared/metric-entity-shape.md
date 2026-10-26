@@ -121,8 +121,9 @@ A base metric over several tables works too: the engine joins its `primary_table
 source table) to each other source table by the one relationship declared directly between them,
 and refuses the metric when there is no such edge, more than one, or a join that fans out the
 anchor's rows. With several tables, write each `inner_grain` entry as a column only one of them
-declares, or as `table.column`. Table and column names are quoted where the engine needs it, so a
-mixed-case table such as `"OrderLines"` works on PostgreSQL.
+declares, or as `table.column`; the tables must not share a name across schemas. Table and column
+names are quoted where the engine needs it, so a mixed-case table such as `"OrderLines"` works on
+PostgreSQL.
 
 ## Entity
 

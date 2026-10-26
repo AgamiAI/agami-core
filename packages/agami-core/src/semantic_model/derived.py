@@ -145,6 +145,39 @@ _RESERVED_WORDS = frozenset({
     "select", "session_user", "table", "then", "to", "true", "union", "unique", "update", "user",
     "using", "values", "when", "where", "window", "with",
 })
+# Reserved on one engine beyond the list above. SQLite's are the keywords it refuses as a bare
+# table or column name (measured on 3.45). Not listed for an engine that folds unquoted names to
+# upper case: quoting a lower-case name there would change which object it names.
+_ENGINE_RESERVED_WORDS = {
+    "SQLite": frozenset({
+        "add", "alter", "autoincrement", "collate", "commit", "deferrable", "escape", "index",
+        "isnull", "nothing", "notnull", "raise", "returning", "set", "transaction",
+    }),
+    "MySQL": frozenset({
+        "analyze", "both", "call", "cascade", "change", "char", "character", "condition",
+        "cume_dist", "database", "databases", "decimal", "dense_rank", "describe", "div", "double",
+        "dual", "empty", "explain", "first_value", "float", "fulltext", "function", "generated",
+        "groups", "if", "index", "int", "integer", "interval", "iterate", "key", "keys", "lag",
+        "last_value", "lateral", "lead", "leading", "leave", "linear", "load", "lock", "long",
+        "loop", "match", "maxvalue", "mod", "nth_value", "ntile", "numeric", "of", "option",
+        "over", "percent_rank", "procedure", "range", "rank", "read", "real", "recursive",
+        "release", "rename", "repeat", "replace", "require", "restrict", "return", "row",
+        "row_number", "rows", "schema", "schemas", "separator", "set", "show", "signal",
+        "spatial", "sql", "stored", "system", "trailing", "trigger", "unlock", "unsigned",
+        "usage", "use", "varchar", "virtual", "while", "write", "zerofill",
+    }),
+    "SQLServer": frozenset({
+        "backup", "browse", "close", "file", "identity", "index", "key", "open", "percent",
+        "pivot", "plan", "proc", "procedure", "rule", "schema", "set", "top", "tran", "unpivot",
+    }),
+    "PostgreSQL": frozenset({
+        "analyse", "analyze", "array", "asymmetric", "authorization", "both", "collate",
+        "collation", "concurrently", "current_catalog", "current_role", "current_schema",
+        "deferrable", "do", "freeze", "ilike", "initially", "isnull", "lateral", "leading",
+        "localtime", "localtimestamp", "notnull", "only", "overlaps", "placing", "returning",
+        "similar", "some", "symmetric", "tablesample", "trailing", "variadic", "verbose",
+    }),
+}
 _PLAIN_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _DOTTED_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")
 
@@ -160,11 +193,35 @@ def _ident(name: str, storage_type: str) -> str:
         dialect = get_dialect(storage_type)
     except ValueError:
         return name
-    if not _PLAIN_IDENT_RE.match(name) or name.lower() in _RESERVED_WORDS:
+    if not _PLAIN_IDENT_RE.match(name) or _is_reserved(name.lower(), storage_type):
         return dialect.quote_ident(name)
     if name != name.lower() and _engine_folds(name, storage_type):
         return dialect.quote_ident(name)
     return name
+
+
+def _is_reserved(word: str, storage_type: str) -> bool:
+    """A word the engine reserves: the shared list, then (on an engine that does not fold
+    unquoted names to upper case) its own list and the installed sqlglot's list for it."""
+    if word in _RESERVED_WORDS:
+        return True
+    if _engine_folds("a", storage_type):
+        return False
+    return word in _ENGINE_RESERVED_WORDS.get(storage_type, ()) or word in _sqlglot_reserved(storage_type)
+
+
+def _sqlglot_reserved(storage_type: str) -> frozenset:
+    """The installed sqlglot's reserved words for the engine; older releases list few or none."""
+    try:
+        from sqlglot.dialects.dialect import Dialect
+
+        from .sql_dialect import sqlglot_dialect
+
+        dialect = Dialect.get_or_raise(sqlglot_dialect(storage_type))
+        generator = getattr(dialect, "generator_class", None) or dialect.Generator
+        return frozenset(w.lower() for w in getattr(generator, "RESERVED_KEYWORDS", ()) or ())
+    except Exception:
+        return frozenset()
 
 
 def _engine_folds(name: str, storage_type: str) -> bool:
@@ -245,26 +302,33 @@ def _join_sql(rel, other: str, storage_type: str) -> str:
     return f" INNER JOIN {_table_ref(other, storage_type)} ON {cond}"
 
 
-def _table_def(name: str, org):
-    for sa in org.subject_areas:
+def _table_def(name: str, org, base=None):
+    """The table's definition, from the base metric's own area first: an area can keep its own
+    curated copy of a table another area also defines."""
+    home = _owning_area(base, org) if base is not None else None
+    areas = ([home] if home else []) + [sa for sa in org.subject_areas if sa is not home]
+    for sa in areas:
         for t in sa.tables_defined:
             if _same_table(t.name, t.schema_name, name, None):
                 return t
     return None
 
 
-def _qualified_grain(metric_name: str, col: str, froms: list[str], org, storage_type: str) -> str:
+def _declares(table, col: str) -> bool:
+    return table is not None and any(c.name.lower() == col.lower() for c in table.columns)
+
+
+def _qualified_grain(metric_name: str, col: str, froms: list[str], org, storage_type: str,
+                     base=None) -> str:
     """A bare `inner_grain` column qualified by the one source table that declares it."""
     if _DOTTED_IDENT_RE.match(col):
         return _table_ref(col, storage_type)
-    if not _PLAIN_IDENT_RE.match(col):
+    owners = [t for t in froms if _declares(_table_def(t, org, base), col)]
+    if not owners and not _PLAIN_IDENT_RE.match(col):
         raise DerivedError(
             f"second-order metric {metric_name!r}: inner_grain {col!r} must name a column "
             "when the base metric spans several tables"
         )
-    owners = [t for t in froms
-              if (td := _table_def(t, org)) is not None
-              and any(c.name.lower() == col.lower() for c in td.columns)]
     if not owners:
         raise DerivedError(
             f"second-order metric {metric_name!r}: inner_grain column {col!r} is not declared "
@@ -278,10 +342,13 @@ def _qualified_grain(metric_name: str, col: str, froms: list[str], org, storage_
     return f"{_ident(bare_name(owners[0]), storage_type)}.{_ident(col, storage_type)}"
 
 
-def _grain_sql(col: str, storage_type: str) -> str:
-    """A single-table grain entry: a column name is quoted as it needs, anything else verbatim."""
+def _grain_sql(col: str, storage_type: str, table=None) -> str:
+    """A single-table grain entry: a column name (or a column `table` declares) is quoted as it
+    needs, anything else verbatim."""
     if _PLAIN_IDENT_RE.match(col) or _DOTTED_IDENT_RE.match(col):
         return _table_ref(col, storage_type)
+    if _declares(table, col):
+        return _ident(col, storage_type)
     return col
 
 
@@ -291,6 +358,14 @@ def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: st
         raise DerivedError(
             f"second-order metric {metric_name!r}: its base spans {froms}, and joining them "
             "needs the model's relationships"
+        )
+    bare = [table_key(t, None)[1] for t in froms]
+    clash = sorted({t for t, b in zip(froms, bare) if bare.count(b) > 1})
+    if clash:
+        # The join and the grain qualify columns by bare table name, which would be ambiguous.
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: its base reads tables with the same name "
+            f"from different schemas ({clash}); synthesis can't tell them apart"
         )
     anchor = base.primary_table if base.primary_table in froms else froms[0]
     sql = _table_ref(anchor, storage_type)
@@ -347,11 +422,13 @@ def synthesize_second_order(metric, storage_type: str, idx: dict, org=None) -> s
         )
     if len(froms) == 1:
         from_sql = _table_ref(froms[0], storage_type)
-        grain = ", ".join(_grain_sql(g, storage_type) for g in metric.inner_grain)
+        table = _table_def(froms[0], org, base) if org is not None else None
+        grain = ", ".join(_grain_sql(g, storage_type, table) for g in metric.inner_grain)
     else:
         from_sql = _from_clause(metric.name, base, froms, org, storage_type)
         grain = ", ".join(
-            _qualified_grain(metric.name, g, froms, org, storage_type) for g in metric.inner_grain
+            _qualified_grain(metric.name, g, froms, org, storage_type, base)
+            for g in metric.inner_grain
         )
     alias = _ident(_slug(base_name), storage_type)
     return (

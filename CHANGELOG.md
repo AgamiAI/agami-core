@@ -22,8 +22,11 @@ below corresponds to one such version.
   relationship declared directly between them. It is still refused, with the reason, when there is
   no such edge, more than one, or the join would fan out the base aggregate's rows; a bare
   `inner_grain` column must be declared by exactly one of the tables (or written `table.column`).
-  Identifiers are quoted only where the engine needs it, so a plain lower-case name is emitted as
-  before.
+  Identifiers are quoted only where the engine needs it (including words one engine reserves,
+  such as `index` on SQLite or `key` on MySQL), so a plain lower-case name is emitted as before.
+  Tables with the same name from different schemas in one base are refused. An `inner_grain` entry
+  naming a declared column (`order date`) is that column, quoted; the base metric's own subject
+  area is read first for the table's columns.
 
 ## [0.9.19] — 2026-10-25
 

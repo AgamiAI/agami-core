@@ -283,3 +283,66 @@ def test_single_table_base_quotes_a_mixed_case_table_and_reserved_grain():
         '(SELECT AVG(daily_revenue) FROM (SELECT "order", SUM(amount) AS daily_revenue '
         'FROM "Sales"."Orders" GROUP BY "order") _inner)'
     )
+
+
+@pytest.mark.parametrize("name, stype, expected", [
+    ("index", "SQLite", '"index"'),
+    ("key", "MySQL", "`key`"),
+    ("rank", "MySQL", "`rank`"),
+    ("lateral", "PostgreSQL", '"lateral"'),
+    # Upper-folding engines keep today's output: quoting would pin the lower-case name.
+    ("index", "Snowflake", "index"),
+    ("INDEX", "Snowflake", "INDEX"),
+    ("index", "Oracle", "index"),
+])
+def test_engine_specific_reserved_words_are_quoted(name, stype, expected):
+    assert D._table_ref(name, stype) == expected
+
+
+def test_a_table_named_like_a_sqlite_keyword_runs():
+    import sqlite3
+
+    rev = m.Metric(name="daily_hits", calculation="c", bindings={"SQLite": "COUNT(*)"},
+                   source_tables=["index"])
+    avg = m.Metric(name="avg_daily_hits", calculation="c", bindings={"SQLite": "AVG({daily_hits})"},
+                   base_metrics=["daily_hits"], inner_grain=["day"], source_tables=["index"])
+    sql = D.resolve_metric_sql(avg, "SQLite", D.metric_index(_org([rev, avg])))
+    con = sqlite3.connect(":memory:")
+    con.executescript('CREATE TABLE "index" (day TEXT); INSERT INTO "index" VALUES (1), (1), (2);')
+    assert con.execute(f"SELECT {sql}").fetchone()[0] == 1.5
+
+
+def test_same_named_tables_from_two_schemas_are_refused():
+    org, avg = _two_table_org(items_table="archive.orders")
+    org.subject_areas[0].metrics[0].source_tables = ["archive.orders", "sales.orders"]
+    avg.source_tables = ["archive.orders", "sales.orders"]
+    with pytest.raises(D.DerivedError, match="same name from different schemas"):
+        _sql(org, avg)
+
+
+def test_the_base_metrics_own_area_defines_the_grain_column():
+    org, avg = _two_table_org()
+    # An earlier area keeps its own copy of `orders` without `placed_at`.
+    other = m.SubjectArea(name="ops", description="d", tables_defined=[
+        m.Table(name="orders", grain=["id"], columns=[_col("id", "integer")])])
+    org = m.Datasource(datasource="o", version=1, subject_areas=[other, *org.subject_areas])
+    assert "SELECT orders.placed_at, SUM(quantity)" in _sql(org, avg)
+
+
+def test_a_declared_grain_column_with_a_space_is_quoted():
+    org, avg = _two_table_org(grain=("order date",))
+    org.subject_areas[0].tables_defined[1].columns.append(_col("order date", "date"))
+    assert 'SELECT orders."order date", SUM(quantity)' in _sql(org, avg)
+    assert 'GROUP BY orders."order date"' in _sql(org, avg)
+
+
+def test_a_single_table_grain_column_with_a_space_is_quoted():
+    rev = _metric("daily_revenue", "SUM(amount)")
+    avg = _metric("avg_daily_revenue", "AVG({daily_revenue})",
+                  base=["daily_revenue"], inner_grain=["order date", "DATE(placed_at)"])
+    sa = m.SubjectArea(name="sales", description="d", metrics=[rev, avg], tables_defined=[
+        m.Table(name="orders", grain=["id"], columns=[_col("order date", "date")])])
+    org = m.Datasource(datasource="o", version=1, subject_areas=[sa])
+    sql = _sql(org, avg)
+    # The declared column is quoted; an expression is still passed through as written.
+    assert 'SELECT "order date", DATE(placed_at), SUM(amount)' in sql
