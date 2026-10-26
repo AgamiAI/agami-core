@@ -161,7 +161,7 @@ The validator combines Pydantic structural validation (required fields, enums, r
 2. **FK type-compatibility** — a simple-FK join with mismatched column types caps `confidence` at `proposed` and suggests a `CAST` in `on:` (BigQuery `INT64 = STRING` class of bug).
 3. **Subject-area sizing** — warn at 25 tables, error at 30.
 4. **Deep-table column_groups** — tables ≥ 30 columns must declare `column_groups`; no column may be orphaned; `expose_column_groups` must reference declared groups; every `TableRef.table` resolves to a `tables_defined` entry (org-wide, for multi-membership).
-5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot; **caveats** non-empty; **choice_field** keys match the column type.
+5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot, in the datasource's dialect (or the generic grammar); **caveats** non-empty; **choice_field** keys match the column type.
 6. **Cross-area entity name-collision** → warning + a suggested cross-cutting unification.
 
 The verdict is **binding**: `cli validate` exits 0 → ok, 1 → errors. `cli curate` and the introspection engine refuse / revert on a non-zero verdict.

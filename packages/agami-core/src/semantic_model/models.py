@@ -486,9 +486,11 @@ class Entity(_Base):
     caveats: list[str] = Field(default_factory=list)
     # rare override: force a clarifying question even when resolution is confident
     clarification_strictness: Optional[Literal["normal", "high"]] = None
-    # curation/trust — LLM-proposed entities default approved; reject to drop.
+    # curation/trust — entities are proposed by enrichment, so one waits in the review queue until
+    # a person approves it (which stamps the signer); an omitted review_state must not read as
+    # signed off (#508). Entities usable while unreviewed (Rule 2); reject to drop.
     confidence: Confidence = "confirmed"
-    review_state: ReviewState = "approved"
+    review_state: ReviewState = "unreviewed"
     signed_off_by: Optional[str] = None
     signed_off_at: Optional[str] = None
     signed_off_role: Optional[str] = None

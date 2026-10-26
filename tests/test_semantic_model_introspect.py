@@ -1115,3 +1115,61 @@ def test_engines_without_a_native_bound_are_not_counted(dialect):
     from semantic_model import dialects as D
 
     assert D.get_dialect(dialect).sql_row_count("s", "t") is None
+
+
+# ---------------------------------------------------------------------------
+# ISO dates kept as text under a name that says nothing about dates (#518)
+# ---------------------------------------------------------------------------
+
+
+def _iso_rows(n=25, **extra):
+    return [{"id": i, "period": f"2024-01-{i % 28 + 1:02d}", **{k: v(i) for k, v in extra.items()}}
+            for i in range(n)]
+
+
+def test_sniff_iso_text_needs_enough_values_that_all_are_real_dates():
+    dates = [f"2024-02-{d:02d}" for d in range(1, 26)]
+    assert I._sniff_iso_text(dates) == ("iso8601", None)
+    assert I._sniff_iso_text([f"{d} 10:00:00+05:30" for d in dates]) == ("iso8601", "offset-aware")
+    assert I._sniff_iso_text([f"{d}T10:00:00.123Z" for d in dates]) == ("iso8601", "offset-aware")
+    assert I._sniff_iso_text(dates[:19]) == (None, None)  # too few to claim without a date name
+    assert I._sniff_iso_text(dates + ["2024-13-45"]) == (None, None)  # the shape, not a date
+    assert I._sniff_iso_text(dates + ["2024-01-01 25:00"]) == (None, None)
+    assert I._sniff_iso_text(dates + ["2024-01-01 shipped late"]) == (None, None)
+    assert I._sniff_iso_text([f"2024.1.{d}" for d in range(1, 26)]) == (None, None)  # versions
+    assert I._sniff_iso_text(dates + [None, ""]) == ("iso8601", None)  # nulls don't count against
+
+
+def test_strict_iso_range_checks_the_utc_offset():
+    assert I._is_strict_iso("2024-01-01 10:00:00+05:30")
+    assert I._is_strict_iso("2024-01-01T10:00:00-2359")
+    assert not I._is_strict_iso("2024-01-01 10:00:00+25:00")  # no such offset hour
+    assert not I._is_strict_iso("2024-01-01 10:00:00+05:99")  # no such offset minute
+    dates = [f"2024-01-{d:02d}" for d in range(1, 26)]
+    assert I._sniff_iso_text(dates + ["2024-01-01 10:00+25:00"]) == (None, None)
+
+
+def test_enrich_from_sample_dates_an_iso_text_column_with_a_plain_name():
+    from semantic_model import dialects as D
+
+    sample = _iso_rows(release=lambda i: f"2024.1.{i}", note=lambda i: f"2024-01-01 note {i}")
+    cols = [m.Column(name="id", type="integer", primary_key=True),
+            m.Column(name="period", type="string"), m.Column(name="release", type="string"),
+            m.Column(name="note", type="string")]
+    I._enrich_from_sample(D.get_dialect("sqlite"), lambda sql: sample, None, "t", cols)
+    by = {c.name: c for c in cols}
+    assert by["period"].date_format == "iso8601"
+    assert by["period"].choice_field is None  # a column of dates is not a list of codes
+    assert by["release"].date_format is None and by["note"].date_format is None
+
+
+def test_enrich_from_sample_samples_a_table_whose_only_text_column_is_a_key():
+    from semantic_model import dialects as D
+
+    # No date-named or code-like column here, which used to skip the sample altogether.
+    sample = [{"period_id": f"2024-03-{d:02d}"} for d in range(1, 26)]
+    calls = []
+    cols = [m.Column(name="period_id", type="string")]
+    I._enrich_from_sample(D.get_dialect("sqlite"), lambda sql: calls.append(sql) or sample,
+                          None, "t", cols)
+    assert len(calls) == 1 and cols[0].date_format == "iso8601"

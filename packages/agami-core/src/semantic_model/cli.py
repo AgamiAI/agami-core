@@ -463,6 +463,14 @@ def cmd_review_items(args) -> int:
     return 0
 
 
+def cmd_history(args) -> int:
+    """The model's curation log, newest first: each change with when it was made, who made it, the
+    value it replaced and the model version it produced — the history a profile outside git keeps (#528)."""
+    from . import curate
+    _print_json(curate.history(args.root, limit=args.limit))
+    return 0
+
+
 def cmd_curate_gate(args) -> int:
     """The Phase-4 curate gate decision in ONE call: count still-queryable PII columns
     + pending pre-seed sign-offs, and say whether to open the explorer. Replaces the
@@ -1078,8 +1086,11 @@ def cmd_enrich_metadata(args) -> int:
 
     preset = args.preset or MS.detect_preset(model_tables)
     if not preset:
-        _print_json({"enriched": False, "reason": "no metadata preset detected — pass --preset"})
-        return 1
+        # most databases carry no in-DB dictionary; that is nothing to do, not a failure (#526)
+        _print_json({"enriched": False,
+                     "reason": "no metadata preset applies to this database — nothing to do "
+                               "(pass --preset to name one)"})
+        return 0
     sources = MS.usable_sources(preset, model_tables)
     if not sources:
         _print_json({"enriched": False, "preset": preset,
@@ -1158,7 +1169,7 @@ def cmd_enrich_metadata(args) -> int:
         refs_declared = len(ref_map)
         if ref_map:
             intra, cross, refs_skipped_target, refs_unverified = _build_verified_references(
-                org, runner, dialect, ref_map)
+                org, runner, dialect, ref_map, declared=set(decls))
             if intra or cross:
                 rres = curate.add_relationships(root, intra=intra, cross=cross)
                 refs_added = len(rres.applied)
@@ -1180,11 +1191,15 @@ def cmd_enrich_metadata(args) -> int:
     return 0 if not errors else 1
 
 
-def _build_verified_references(org, runner, dialect, ref_map: dict) -> tuple[dict, list, int, int]:
+def _build_verified_references(org, runner, dialect, ref_map: dict,
+                                declared: Optional[set[str]] = None) -> tuple[dict, list, int, int]:
     """Turn a `field → target` map (preset known graph ∪ dictionary declarations) into reference
     relationships, applied to EVERY modelled column with that name (inheritance-aware), and VERIFY
     each candidate by value-overlap against the live data before keeping it:
-      overlap holds            → confirmed + system-approved (the standard join matches THIS data),
+      overlap holds            → confirmed + system-approved when THIS database's dictionary declares
+                                 the reference (`declared`, its own foreign key); a reference only the
+                                 preset assumes stays inferred/unreviewed — matching values are
+                                 evidence, not a declaration (#509),
       overlap can't be checked → inferred/unreviewed (target/from too big to scan, or probe cap hit),
       overlap FAILS            → DROPPED (the standard join doesn't apply to this export — never
                                  blindly trust the preset).
@@ -1215,11 +1230,16 @@ def _build_verified_references(org, runner, dialect, ref_map: dict) -> tuple[dic
                 if verified is False:
                     continue  # standard join doesn't hold in this data → drop
                 spec = {"from_table": t.name, "from_column": c.name, "to_table": ttab.name}
-                if verified:
+                if verified and c.name.lower() in (declared or set()):
                     spec.update(confidence="confirmed", review_state="approved",
                                 signed_off_by="agami_enrich", signed_off_role="system",
                                 signed_off_at=INTRO._NOW,
                                 description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (value-overlap verified)")
+                elif verified:
+                    spec.update(confidence="inferred", review_state="unreviewed",
+                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} "
+                                            "(preset's standard join, values overlap; not declared "
+                                            "by this database — confirm)")
                 else:
                     unverified += 1
                     spec["description"] = f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (not overlap-verified — confirm)"
@@ -1513,6 +1533,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
     sp.set_defaults(func=cmd_curate)
+
+    sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
+    sp.add_argument("root")
+    sp.add_argument("--limit", type=int, default=None, help="show only the newest N entries")
+    sp.set_defaults(func=cmd_history)
 
     sp = sub.add_parser("approve-queue",
                         help="sign off the whole pending review queue in one call (no-browser path)")
