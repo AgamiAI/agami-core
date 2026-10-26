@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.20] — 2026-10-26
+
 ### Changed
 
 - **Units can carry a scale and a rate, and a guessed currency is never applied without review
