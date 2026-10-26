@@ -27,6 +27,76 @@ below corresponds to one such version.
   column with any name when at least 20 sampled values are present and every one is a real ISO date
   or timestamp. Such a column no longer gets a `choice_field` skeleton.
 
+- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
+  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
+  areas, which reads as database schemas. Labels that really are about database schemas, such as a
+  cross-schema join, are unchanged.
+
+### Fixed
+
+- **A metric built on a rejected metric is no longer served (#571).** The loader left out a derived
+  metric whose base was dropped only when a table or column was also hidden, so with just a metric
+  rejected, a metric built on it stayed in the served model and validation reported "references
+  unknown base metric". It now runs on every load, per area and cross-area, and repeats down a
+  chain of derived metrics. Only a base that was rejected or hidden drops a metric: a base the model
+  never had is a mistake in the model, and stays for the validator to report. An ambiguity naming a
+  dropped metric loses that metric, as for any metric not served. The curation view is unchanged.
+
+- **A statement the database rejected says so, by its SQLSTATE (#561).** An execution error none of
+  the classifier's patterns read came back as `other` with "an unexpected error on the server", so a
+  client could not tell a statement it should rewrite from a broken server, and guessed. The
+  database's own text still never travels, since it can carry a value from a row. Its SQLSTATE now
+  does: five characters, no values, and a class that means the same on every engine that reports
+  one, so one table covers them all without a rule per database. Class `42` (the statement broke a
+  rule), `0A` (unsupported feature) and `22` (a value did not fit an operation) come back as `syntax`
+  with the code and "rewrite it"; `53`/`54` (too heavy) and `40` (a conflict, retry) with the code
+  and what to do; `42501` as `permission`, `08` as `network` and `28` as `auth` with their usual
+  sentences; any other class as the code beside the usual sentence. The
+  code is read from the driver's exception (`sqlstate`, `pgcode`, or `redshift_connector`'s `C`
+  field), never from its message, and an injected executor can pass it as
+  `ExecutorError(sqlstate=…)`. An engine that reports no code is unchanged, and a dialect rule (#566)
+  still answers first. On the forked transport a `syntax` sentence is relayed only as an exact match;
+  the others travel as every `other` failure does today.
+
+- **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
+  in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
+  script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
+  source tables are not in the model is still an error.
+
+### Fixed
+
+- **A SUM with a zero fallback on the many side no longer reads as a fan trap (#579).** The
+  receipt flagged `SUM(CASE WHEN orders.status = 'shipped' THEN COALESCE(order_items.quantity, 0)
+  END)` over `orders JOIN order_items` as multiplied: the `0` belongs to no table, so the check that
+  decides which table the summed value comes from found none, and the `orders` column in the
+  condition made the join look like it repeated the value. A `0` or `NULL` adds nothing to a sum
+  however often its row repeats, so directly under a `SUM` (through `CASE`, `COALESCE`, `IF`,
+  parentheses and casts) it is now left out. `COUNT`, `AVG` and arithmetic are unchanged, and
+  `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, which counts the joined rows, is still reported.
+
+- **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
+  `review_state: approved`, so an entity written during enrichment without the field came out
+  signed off, with no signer, and was trusted at query time although no one had looked at it. The
+  default is now `unreviewed`: such an entity waits in the review queue, and approving it in
+  `/agami-model` or with `sm approve-queue` records who signed it off and when. The shape reference
+  agami-connect follows showed `review_state: approved` in its entity example; it now shows
+  `unreviewed`.
+
+  **Existing models:** an entity file that states `review_state: approved` stays approved. Only one
+  that leaves the field out now loads as unreviewed and appears in the review queue.
+
+### Fixed
+
+- **A join only the metadata preset assumes is not engine-approved (#509).** `sm enrich-metadata`
+  adds reference joins from two sources: the database's own dictionary, and the preset's list of
+  standard joins for that platform. A standard join whose values overlapped in the data was written
+  confirmed and approved by the engine, although this database never declared it. Such a join is
+  now written inferred and unreviewed, says it is the preset's standard join and not declared, and
+  waits in the review queue. A reference the database's dictionary declares is still
+  engine-approved once its values overlap, as a declared foreign key is during introspection.
+  Introspection already wrote every join it inferred from names and values unreviewed. New tests
+  now pin that for a database with no declared foreign keys.
+
 ## [0.9.19] — 2026-10-25
 
 ### Fixed
