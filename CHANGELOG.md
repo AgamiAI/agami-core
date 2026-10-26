@@ -12,12 +12,25 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-### Fixed
-
 - **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
   line at the top of the page and the line the renderer prints said "3 schemas" for three subject
   areas, which reads as database schemas. Labels that really are about database schemas, such as a
   cross-schema join, are unchanged.
+
+### Fixed
+
+### Fixed
+
+- **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
+  `review_state: approved`, so an entity written during enrichment without the field came out
+  signed off, with no signer, and was trusted at query time although no one had looked at it. The
+  default is now `unreviewed`: such an entity waits in the review queue, and approving it in
+  `/agami-model` or with `sm approve-queue` records who signed it off and when. The shape reference
+  agami-connect follows showed `review_state: approved` in its entity example; it now shows
+  `unreviewed`.
+
+  **Existing models:** an entity file that states `review_state: approved` stays approved. Only one
+  that leaves the field out now loads as unreviewed and appears in the review queue.
 
 ### Fixed
 
