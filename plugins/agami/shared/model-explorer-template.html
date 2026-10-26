@@ -2784,7 +2784,8 @@
     function renderMeta() {
       const t = manifest.totals || {};
       const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-      const parts = [plural(t.schemas || 0, 'schema'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
+      // the manifest's `schemas` key holds subject areas, not database schemas
+      const parts = [plural(t.schemas || 0, 'subject area'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
       if (t.metrics) parts.push(plural(t.metrics, 'metric'));
       if (t.relationships) parts.push(plural(t.relationships, 'join'));
       if (t.entities) parts.push(plural(t.entities, 'entity').replace('entitys', 'entities'));
