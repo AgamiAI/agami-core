@@ -221,8 +221,8 @@ class DatasourceSchemaResult(_Contract):
 
 
 # ---------------------------------------------------------------------------
-# get_prompt_examples — structured payload (the tool returns Markdown text when
-# examples exist; the no-examples case is this JSON).
+# get_prompt_examples — structured payload. Served and local both reply in JSON: the ranked
+# examples with `datasource`, `count` and `model_version`, or the no-examples note.
 # ---------------------------------------------------------------------------
 
 
