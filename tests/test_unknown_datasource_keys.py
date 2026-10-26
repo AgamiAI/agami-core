@@ -48,23 +48,81 @@ def test_a_written_model_has_no_unknown_keys(root):
     assert loader.unknown_datasource_keys(root) == []
 
 
-def test_every_field_the_model_declares_survives_a_write_and_a_load(root):
-    # The known set is the model's fields, which is only right while the loader reads every one of
-    # them: set each to a non-default value, and each must come back.
+def _table(name: str) -> m.Table:
+    return m.Table(
+        name=name,
+        schema="public",
+        storage_connection="c",
+        grain=["id"],
+        description=name,
+        columns=[m.Column(name="id", type="integer", primary_key=True)],
+    )
+
+
+def test_every_field_the_model_declares_is_read_back(tmp_path, monkeypatch):
+    """The known keys ARE the model's fields, which is only right while the loader reads every one.
+    Each field gets a non-default value, and each must come back non-default: a field added to the
+    model that the loader never reads comes back as its default, and fails here by name."""
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    root = tmp_path / "shop_dir"
+    build.write_tree(
+        m.Datasource(
+            datasource="shop",
+            description="a shop",
+            storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
+            subject_areas=[
+                m.SubjectArea(name="sales", tables_defined=[_table("orders")]),
+                m.SubjectArea(name="people", tables_defined=[_table("customers")]),
+            ],
+        ),
+        root,
+    )
     _add(
         root,
         org_id="00000000-0000-0000-0000-000000000001",
         version=3,
         fiscal_year_start_month=9,
         key_terminology={"order": "a purchase"},
+        ambiguities=[
+            {
+                "name": "which_date",
+                "when": "a date without saying which",
+                "options": [{"label": "A", "how": "use a"}, {"label": "B", "how": "use b"}],
+            }
+        ],
+        cross_subject_area_relationships=[
+            {
+                "from_subject_area": "sales",
+                "to_subject_area": "people",
+                "from_table": "orders",
+                "to_table": "customers",
+                "from_column": "id",
+                "to_column": "id",
+                "relationship": "many_to_one",
+            }
+        ],
+        cross_subject_area_entities=[
+            {"name": "buyer", "maps_to": [{"table": "orders", "column": "id"}]}
+        ],
+        cross_subject_area_metrics=[
+            {
+                "name": "order_count",
+                "calculation": "count",
+                "bindings": {"PostgreSQL": "COUNT(*)"},
+                "source_tables": ["orders"],
+            }
+        ],
     )
     org = loader.load_datasource(root)
-    assert (org.org_id, org.version, org.fiscal_year_start_month) == (
-        "00000000-0000-0000-0000-000000000001",
-        3,
-        9,
-    )
-    assert org.key_terminology == {"order": "a purchase"}
+    defaults = {
+        name: f.get_default(call_default_factory=True)
+        for name, f in m.Datasource.model_fields.items()
+    }
+    # `datasource` defaults to the folder name, which the file's value differs from here.
+    defaults["datasource"] = root.name
+    unread = [name for name, default in defaults.items() if getattr(org, name) == default]
+    assert unread == []
     assert loader.unknown_datasource_keys(root) == []
 
 
