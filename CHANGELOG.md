@@ -14,6 +14,16 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A subject area named where a table was wanted also names that area's tables like it (#567).**
+  `get_datasource_schema(dataset_names=["orders"])` answered "'orders' is a subject area, not a
+  table: pass it as `area`" and nothing else, so in a model whose tables carry a suffix (`orders_v`)
+  the agent spent a second call finding the table. The hint now ends "or did you mean 'orders_v'?"
+  with the same names in `did_you_mean`, matched against that area's own tables only, so a
+  like-named table elsewhere is never guessed and never crowds the area's own out. The activity
+  log's `missed` entry for a name answered with any wrong-kind hint (an area or a column) now
+  carries `hinted: true`, so an empty suggestion list no longer reads as "the caller was given
+  nothing".
+
 - **On Redshift, discovery finds the tables of a read-only user (#558).** `sm discover`, and an
   introspection run without a table list, listed schemas from `information_schema.schemata`, which on
   Redshift shows only the schemas the user owns. A read-only role owns none, so discovery reported
