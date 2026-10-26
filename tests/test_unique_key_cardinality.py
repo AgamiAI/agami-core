@@ -99,12 +99,13 @@ def _table(org: m.Datasource, name: str) -> m.Table:
 
 @pytest.mark.parametrize("db_type, needles", [
     ("postgres", ["pg_constraint", "contype = 'u'", "pg_index", "indisunique", "NOT i.indisprimary",
-                  "indpred IS NULL", "'public'", "'users'"]),
+                  "indpred IS NULL", "i.indisvalid", "i.indisready", "'public'", "'users'"]),
     ("mysql", ["information_schema.statistics", "non_unique = 0", "index_name <> 'PRIMARY'", "sub_part"]),
     ("sqlite", ["pragma_index_list('users')", "pragma_index_info(il.name)", "origin <> 'pk'", "partial = 0"]),
     ("sqlserver", ["sys.indexes", "is_unique = 1", "is_primary_key = 0", "has_filter = 0",
-                   "is_included_column = 0"]),
-    ("oracle", ["all_constraints", "constraint_type = 'U'", "all_cons_columns"]),
+                   "is_included_column = 0", "i.is_disabled = 0", "i.is_hypothetical = 0"]),
+    ("oracle", ["all_constraints", "constraint_type = 'U'", "all_cons_columns",
+                "ac.status = 'ENABLED'", "ac.validated = 'VALIDATED'"]),
     ("duckdb", ["duckdb_constraints()", "constraint_type = 'UNIQUE'"]),
     ("snowflake", ["information_schema.table_constraints", "constraint_type = 'UNIQUE'"]),
     ("redshift", ["information_schema.table_constraints", "constraint_type = 'UNIQUE'"]),
@@ -298,7 +299,7 @@ def _as_an_older_release_wrote_it(root: Path) -> None:
             r.update(signed_off_by="you@example.com", signed_off_role="data_owner")
         if r["from_table"] == "subscriptions":
             r.update(review_state="approved", signed_off_by="agami_introspect",
-                     signed_off_role="system", description="")
+                     signed_off_role="system", signed_off_at="2026-01-01T00:00:00Z", description="")
     path.write_text(yaml.safe_dump(doc, sort_keys=False))
 
 
@@ -378,3 +379,177 @@ def test_reconcile_reads_a_unique_key_as_unique_and_plans_no_cardinality_probe_f
     plan = P.join_probes(built, "SELECT a.balance FROM accounts a JOIN users u ON a.owner_email = u.email")
     assert plan["unique_by_model"] == {"accounts.owner_email": True, "users.email": True}
     assert plan["cardinality"] == {"accounts.owner_email": None, "users.email": None}
+
+
+# --- review fixes --------------------------------------------------------------------------------
+
+
+def _sqlite_runner(con: sqlite3.Connection):
+    con.row_factory = sqlite3.Row
+
+    def run(sql: str) -> list[dict]:
+        return [dict(r) for r in con.execute(sql)]
+    return run
+
+
+def test_a_sqlite_unique_index_over_an_expression_is_not_kept_as_its_plain_columns(tmp_path):
+    con = sqlite3.connect(tmp_path / "x.db")
+    con.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, a INT, b TEXT, c INT UNIQUE);"
+                      "CREATE UNIQUE INDEX t_ab ON t(a, lower(b));")
+    keys = I._unique_keys(D.SQLite(), _sqlite_runner(con), "main", "t", _cols("id", "a", "b", "c"), ["id"])
+    assert keys == [["c"]]
+
+
+def _two_composite_keyed_tables(tmp_path) -> m.Datasource:
+    path = tmp_path / "ck.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE a(id INTEGER PRIMARY KEY, x INT, y INT, UNIQUE(x, y));"
+        "CREATE TABLE b(id INTEGER PRIMARY KEY, x INT, y INT, amount NUMERIC, UNIQUE(x, y));")
+    con.commit()
+    con.close()
+    I.introspect("acme", "sqlite", runner=_runner(path), artifacts_dir=tmp_path / "art")
+    return L.load_datasource(tmp_path / "art" / "acme")
+
+
+def test_a_join_that_compares_each_table_with_itself_is_not_keyed_one_to_one(tmp_path):
+    org = _two_composite_keyed_tables(tmp_path)
+    keyed = "SELECT SUM(b.amount) AS s FROM a JOIN b ON a.x = b.x AND a.y = b.y"
+    assert _statuses(org, keyed) == [(rt.NOT_MULTIPLIED, [])]
+    cartesian = "SELECT SUM(b.amount) AS s FROM a JOIN b ON a.x = a.y AND b.x = b.y"
+    assert _statuses(org, cartesian)[0][0] != rt.NOT_MULTIPLIED
+
+
+def _write_two_schema_model(root: Path) -> m.Datasource:
+    """`accounts` in two schemas: only the crm one has a unique owner_email."""
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/crm", "subject_areas/legacy"]}))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    for area, unique in (("crm", [["owner_email"]]), ("legacy", [])):
+        tables = root / "subject_areas" / area / "tables"
+        tables.mkdir(parents=True)
+        refs = [{"storage_connection": "c", "schema": area, "table": "accounts"}]
+        if area == "crm":
+            refs.append({"storage_connection": "c", "schema": "public", "table": "users"})
+            (tables / "users.yaml").write_text(yaml.safe_dump({
+                "name": "users", "schema": "public", "storage_connection": "c", "grain": ["id"],
+                "description": "u", "unique_keys": [["email"]],
+                "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                            {"name": "email", "type": "string"}]}))
+        (root / "subject_areas" / area / "subject_area.yaml").write_text(
+            yaml.safe_dump({"name": area, "tables": refs}))
+        doc = {"name": "accounts", "schema": area, "storage_connection": "c", "grain": ["id"],
+               "description": "a", "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                                               {"name": "owner_email", "type": "string"},
+                                               {"name": "balance", "type": "decimal"}]}
+        if unique:
+            doc["unique_keys"] = unique
+        (tables / "accounts.yaml").write_text(yaml.safe_dump(doc))
+    return L.load_datasource(root)
+
+
+def test_a_bare_name_two_schemas_define_does_not_borrow_a_key_at_query_time(tmp_path):
+    org = _write_two_schema_model(tmp_path / "p")
+    sql = ("SELECT SUM(a.balance) AS b FROM legacy.accounts a "
+           "JOIN public.users u ON a.owner_email = u.email")
+    assert _statuses(org, sql)[0][0] != rt.NOT_MULTIPLIED
+
+
+def test_a_join_end_reads_only_its_own_schemas_table():
+    crm = m.Table(name="users", schema="crm", columns=_cols("id"), grain=["id"])
+    legacy = m.Table(name="users", schema="legacy", columns=_cols("id"), grain=["id"])
+    plain = m.Table(name="cards", columns=_cols("id"), grain=["id"])
+    tables = [crm, legacy, plain]
+    assert I._endpoint(tables, "legacy.users", None) is legacy
+    assert I._endpoint(tables, "users", "legacy") is legacy
+    assert I._endpoint(tables, "users", "archive") is None     # no fallback to another schema
+    assert I._endpoint(tables, "users", None) is None          # two schemas, none named
+    assert I._endpoint(tables, "cards", "crm") is plain        # a schema-less table still matches
+    assert I._endpoint([crm], "users", None) is crm
+
+
+def _reset_subscriptions(rels: list[m.Relationship]) -> list[m.Relationship]:
+    out = []
+    for r in rels:
+        if r.from_table == "subscriptions":
+            out.append(r.model_copy(update={"review_state": "approved", "description": "",
+                                            "signed_off_by": "agami_introspect",
+                                            "signed_off_role": "system"}))
+    return out
+
+
+def test_the_uniqueness_probe_cap_is_shared_across_passes(db, tmp_path):
+    org, _ = _build(db, tmp_path / "art", dry_run=True)
+    tables = [t for sa in org.subject_areas for t in sa.tables_defined]
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    probes = []
+    base = _runner(db)
+
+    def counting(sql: str) -> list[dict]:
+        if "COUNT(DISTINCT" in sql.upper():
+            probes.append(sql)
+        return base(sql)
+
+    report = I.IntrospectReport(profile="acme", db_type="sqlite", out_dir="", dry_run=True)
+    budget = I._ProbeBudget(left=1)
+    I._suggest_data_unique(D.SQLite(), counting, _reset_subscriptions(rels), tables, report, budget)
+    I._suggest_data_unique(D.SQLite(), counting, _reset_subscriptions(rels), tables, report, budget)
+    assert len(probes) == 1
+    assert sum("stopped checking joins' values" in n for n in report.notes) == 1
+
+
+def test_a_refresh_spends_one_budget_on_both_passes(db, tmp_path, monkeypatch):
+    art = tmp_path / "art"
+    _build(db, art)
+    _as_an_older_release_wrote_it(art / "acme")
+    made = []
+    real = I._ProbeBudget
+
+    def tracking(*a, **kw):
+        made.append(real(*a, **kw))
+        return made[-1]
+    monkeypatch.setattr(I, "_ProbeBudget", tracking)
+    _build(db, art, append=True, dry_run=True)
+    assert len(made) == 1 and made[0].left < I._UNIQUE_PROBE_CAP
+
+
+def _edit_join(root: Path, value: str, **kw):
+    from semantic_model import curate
+    op = {"op": "edit", "kind": "relationship", "area": "acme", "name": "passports->users",
+          "field": "relationship", "value": value, "at": "2026-10-26T00:00:00Z"}
+    return curate.apply(root, [op], **kw)
+
+
+@pytest.mark.parametrize("signer", ["you@example.com", None], ids=["signed", "unsigned"])
+def test_a_persons_edit_of_an_engine_join_survives_a_refresh(db, tmp_path, signer):
+    art = tmp_path / "art"
+    _build(db, art)
+    root = art / "acme"
+    _as_an_older_release_wrote_it(root)
+    res = _edit_join(root, "many_to_one", signer=signer, role="data_owner" if signer else None)
+    assert res.validated and res.applied, res
+    edited = _rels(L.load_datasource(root))[("passports", "users")]
+    if signer:
+        assert (edited.review_state, edited.signed_off_by, edited.signed_off_role) == \
+            ("approved", "you@example.com", "data_owner")
+    else:
+        assert edited.review_state == "unreviewed" and edited.signed_off_by is None
+
+    _build(db, art, append=True)
+    after = _rels(L.load_datasource(root))[("passports", "users")]
+    assert after.relationship == "many_to_one"
+
+
+def test_a_description_edit_keeps_the_engine_sign_off(db, tmp_path):
+    from semantic_model import curate
+    art = tmp_path / "art"
+    _build(db, art)
+    root = art / "acme"
+    op = {"op": "edit", "kind": "relationship", "area": "acme", "name": "passports->users",
+          "field": "description", "value": "each person has one passport"}
+    assert curate.apply(root, [op]).validated
+    assert _rels(L.load_datasource(root))[("passports", "users")].signed_off_by == "agami_introspect"

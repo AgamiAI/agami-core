@@ -291,7 +291,8 @@ class PostgreSQL(Dialect):
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         # Unique constraints and unique indexes (a unique index with no constraint enforces the same
         # thing). Partial and expression indexes are left out: neither makes the column unique.
-        # indnkeyatts leaves out a covering index's INCLUDE columns.
+        # indnkeyatts leaves out a covering index's INCLUDE columns. An index a failed CREATE INDEX
+        # CONCURRENTLY left invalid may sit over duplicates.
         return (
             "SELECT con.conname AS constraint_name, a.attname AS column_name, k.ord "
             "FROM pg_constraint con "
@@ -310,7 +311,7 @@ class PostgreSQL(Dialect):
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
             "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
-            "WHERE i.indisunique AND NOT i.indisprimary "
+            "WHERE i.indisunique AND NOT i.indisprimary AND i.indisvalid AND i.indisready "
             "AND i.indpred IS NULL AND i.indexprs IS NULL AND k.ord <= i.indnkeyatts "
             f"AND n.nspname = {self.quote_lit(schema)} "
             f"AND c.relname = {self.quote_lit(table)} "
@@ -530,7 +531,7 @@ class SQLServer(Dialect):
 
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         # Unique constraints and unique indexes alike; a filtered index is unique only over its
-        # filter, and an INCLUDE column is not part of the key.
+        # filter, and an INCLUDE column is not part of the key. A disabled index enforces nothing.
         return (
             "SELECT i.name AS constraint_name, col.name AS column_name "
             "FROM sys.indexes i "
@@ -539,7 +540,7 @@ class SQLServer(Dialect):
             "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
             "JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id "
             "WHERE i.is_unique = 1 AND i.is_primary_key = 0 AND i.has_filter = 0 "
-            "AND ic.is_included_column = 0 "
+            "AND i.is_disabled = 0 AND i.is_hypothetical = 0 AND ic.is_included_column = 0 "
             f"AND s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
             "ORDER BY i.name, ic.key_ordinal"
         )
@@ -765,11 +766,12 @@ class Oracle(Dialect):
         )
 
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # A disabled or NOVALIDATE constraint does not vouch for the rows already there.
         return (
             "SELECT ac.constraint_name, acc.column_name FROM all_constraints ac "
             "JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name "
             "AND ac.owner = acc.owner "
-            "WHERE ac.constraint_type = 'U' "
+            "WHERE ac.constraint_type = 'U' AND ac.status = 'ENABLED' AND ac.validated = 'VALIDATED' "
             f"AND ac.owner = {self.quote_lit(schema)} "
             f"AND ac.table_name = {self.quote_lit(table)} "
             "ORDER BY ac.constraint_name, acc.position"

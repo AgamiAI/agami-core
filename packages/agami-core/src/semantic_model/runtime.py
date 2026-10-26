@@ -79,6 +79,7 @@ from .models import (
 from .models import (
     bare_name as _bare,
 )
+from .models import table_key as _table_key
 from .sql_dialect import DialectUnresolved, engines_disagree, resolve_datasource_dialect
 from .suggest import did_you_mean
 
@@ -2179,7 +2180,7 @@ def _aggregate_reports(tree, org: Datasource,
         sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
         declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
                     if sites else [])
-        join_statuses = ([(js.scope, _weighed_status(js, _join_site_status(js, declared)[0], tidx),
+        join_statuses = ([(js.scope, _weighed_status(js, _join_site_status(js, declared)[0], tidx, org),
                            f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
                           for js in sites], written - len(sites))
     return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
@@ -2190,18 +2191,30 @@ _UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat ro
 _KEYED_ONE_TO_ONE = "keyed_one_to_one"
 
 
-def _weighed_status(js: "_JoinSite", status: str, tidx: dict[str, tuple]) -> str:
+def _names_in_several_schemas(org: Datasource) -> set[str]:
+    """Bare table names (folded) that the model defines in more than one schema."""
+    seen: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, name = _table_key(t.name, t.schema_name)
+            seen.setdefault(name, set()).add(schema)
+    return {name for name, schemas in seen.items() if len(schemas) > 1}
+
+
+def _weighed_status(js: "_JoinSite", status: str, tidx: dict[str, tuple], org: Datasource) -> str:
     """`status`, unless the model declares no such join but its columns are the whole of a key on
     both sides: one row meets at most one row, so it repeats nothing and the number stays clean."""
     if status != UNDECLARED or not js.pairs:
         return status
     cols: dict[str, list[str]] = {}
     for pair in js.pairs:
-        if len(pair) != 2:
+        # `a.x = a.y` compares a table with itself and constrains nothing between the two.
+        if len(pair) != 2 or len({key for key, _ in pair}) != 2:
             return status
         for table_key, column in pair:
             cols.setdefault(table_key, []).append(column)
-    if len(cols) != 2:
+    if len(cols) != 2 or set(cols) & _names_in_several_schemas(org):
+        # The pairs carry bare names, and a name two schemas define could borrow the other's key.
         return status
     for table_key, columns in cols.items():
         hit = tidx.get(table_key)
@@ -3915,7 +3928,7 @@ def assemble_receipt(
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
     reports = _aggregate_reports(
         tree, org, ctx=None, visible=visible, tidx=tidx,
-        join_statuses=([(it["scope"], _weighed_status(js, it["status"], tidx), it["from_to"])
+        join_statuses=([(it["scope"], _weighed_status(js, it["status"], tidx, org), it["from_to"])
                         for js, it in zip(join_sites, join_items)], dropped_joins),
     )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)

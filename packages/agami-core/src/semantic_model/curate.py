@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -701,10 +702,35 @@ def _apply_one(root: Path, op: dict, signer, role,
         path, key, doc, rels, hit = found[0]
         _snapshot(backups, path)
         _set_trust(hit, op, new_state, signer, role)
+        _restamp_join_edit(hit, op, signer, role)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
         return path
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+# The fields that say which rows a join meets; a description edit changes none of them.
+_JOIN_STRUCTURE_FIELDS = frozenset({
+    "relationship", "from_column", "to_column", "on", "from_schema", "to_schema",
+    "from_table", "to_table",
+})
+
+
+def _restamp_join_edit(doc: dict, op: dict, signer: Optional[str], role: Optional[str]) -> None:
+    """A person's edit of an approved join's structure makes the sign-off theirs, so a refresh,
+    which relabels only the joins introspection approved itself, leaves the edit alone (#511).
+    With no signer to stamp, an engine sign-off is cleared and the join waits for review."""
+    if op.get("op") != "edit" or op.get("field") not in _JOIN_STRUCTURE_FIELDS:
+        return
+    if doc.get("review_state", "unreviewed") != "approved":
+        return
+    if signer and role:
+        doc["signed_off_by"], doc["signed_off_role"] = signer, role
+        doc["signed_off_at"] = op.get("at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif doc.get("signed_off_by") == "agami_introspect" or doc.get("signed_off_role") == "system":
+        doc["review_state"] = "unreviewed"
+        for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+            doc.pop(k, None)
 
 
 def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:

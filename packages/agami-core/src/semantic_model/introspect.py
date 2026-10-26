@@ -66,6 +66,7 @@ from .models import (
     StorageConnection,
     Table,
     bare_name,
+    table_key,
 )
 
 Runner = Callable[[str], list[dict]]
@@ -312,6 +313,7 @@ def introspect(
     # sign-offs survive (#437). Runs on a dry run too, which is how a refresh is previewed.
     prev: Optional[Datasource] = None
     prev_rels: list[Relationship] = []
+    probe_budget = _ProbeBudget()   # one cap across the refresh's recheck and the new joins
     skip_keys: set = set()
     fresh_keys: set[tuple] = set()   # (schema, name): a bare name can exist in two schemas
     if refreshing:
@@ -407,7 +409,7 @@ def introspect(
                 r.confidence, r.review_state = "proposed", "unreviewed"
                 report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(
                     f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
-        _recheck_engine_joins(dialect, runner, prev_rels, built, report)
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget)
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
             f"{len(built)} total")
@@ -420,7 +422,7 @@ def introspect(
     rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp)
     if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = [r for r in rels if not any(_same_join(r, p) for p in prev_rels)]
-    _suggest_data_unique(dialect, runner, rels, built, report)
+    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
     if prev_rels:
         rels = list(prev_rels) + rels
     report.table_count = len(built)
@@ -1168,9 +1170,11 @@ def _unique_keys(
     named: dict[str, list[str]] = {}
     for r in rows:
         name, col = r.get("constraint_name"), r.get("column_name")
-        if name in (None, "") or col in (None, ""):
+        if name in (None, ""):
             continue
-        named.setdefault(str(name), []).append(by_lower.get(str(col).lower(), ""))
+        # An expression part has no column name; "" keeps the whole key out, not a shortened one.
+        named.setdefault(str(name), []).append(
+            "" if col in (None, "") else by_lower.get(str(col).lower(), ""))
     grain_set = {g.lower() for g in grain}
     keys: list[list[str]] = []
     for key in named.values():
@@ -1205,32 +1209,43 @@ def _distinct_rows(
 
 
 def _endpoint(tables: list[Table], name: str, schema: Optional[str]) -> Optional[Table]:
-    """The modelled table a join end names: the one in `schema` when the join states one."""
-    cands = [t for t in tables if t.name == name]
-    if schema:
-        same = [t for t in cands if t.schema_name in (schema, None)]
-        cands = same or cands
-    return _pick_target(cands, prefer=schema)
+    """The modelled table a join end names. `name` may embed its schema (`legacy.users`); a join
+    that states a schema reads only that schema's table (or a schema-less one), never another's;
+    a name two schemas share, written with none, reads neither."""
+    want_schema, want = table_key(name, schema)
+    cands = [t for t in tables if table_key(t.name, t.schema_name)[1] == want]
+    if want_schema:
+        cands = [t for t in cands if table_key(t.name, t.schema_name)[0] in (want_schema, "")]
+    return cands[0] if len(cands) == 1 else None
+
+
+@dataclass
+class _ProbeBudget:
+    """The uniqueness probes left for one run, shared by every pass that spends them."""
+    left: int = _UNIQUE_PROBE_CAP
+    noted: bool = False
 
 
 def _suggest_data_unique(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
-    report: IntrospectReport,
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
 ) -> None:
     """Check each join's many side on the data when no key settles it, and flag a join whose
     values turn out unique for review. The label is left as it is: data that is unique today is not
     a promise, so a person confirms the join is one-to-one (#511)."""
-    probes = 0
+    budget = budget if budget is not None else _ProbeBudget()
     for r in rels:
-        if probes >= _UNIQUE_PROBE_CAP:
-            report.notes.append(
-                f"stopped checking joins' values for uniqueness after {_UNIQUE_PROBE_CAP} probes")
-            return
         hit = _many_side(r, tables)
         if hit is None:
             continue
+        if budget.left <= 0:
+            if not budget.noted:
+                budget.noted = True
+                report.notes.append(
+                    f"stopped checking joins' values for uniqueness after {_UNIQUE_PROBE_CAP} probes")
+            return
         table, column = hit
-        probes += 1
+        budget.left -= 1
         rows = _distinct_rows(dialect, runner, table.schema_name, table.name, column)
         if rows is not None:
             _flag_one_to_one(r, table, column, rows)
@@ -1243,8 +1258,8 @@ def _many_side(r: Relationship, tables: list[Table]) -> Optional[tuple[Table, st
         return None
     if _DATA_UNIQUE_NOTE in (r.description or ""):
         return None
-    ft = _endpoint(tables, bare_name(r.from_table), r.from_schema)
-    tt = _endpoint(tables, bare_name(r.to_table), r.to_schema)
+    ft = _endpoint(tables, r.from_table, r.from_schema)
+    tt = _endpoint(tables, r.to_table, r.to_schema)
     if ft is None or tt is None:
         return None
     one, many, col = (tt, ft, r.from_column) if r.relationship == "many_to_one" else (ft, tt, r.to_column)
@@ -1276,7 +1291,7 @@ def _key_reason(t: Table, col: str) -> str:
 
 def _recheck_engine_joins(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
-    report: IntrospectReport,
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
 ) -> None:
     """On a refresh, label each join the engine approved itself from the database's keys as they
     are now, and list every one whose label that changes. A join a person signed off or edited is
@@ -1284,8 +1299,8 @@ def _recheck_engine_joins(
     for r in rels:
         if not _engine_approved(r) or r.on or not (r.from_column and r.to_column):
             continue
-        ft = _endpoint(tables, bare_name(r.from_table), r.from_schema)
-        tt = _endpoint(tables, bare_name(r.to_table), r.to_schema)
+        ft = _endpoint(tables, r.from_table, r.from_schema)
+        tt = _endpoint(tables, r.to_table, r.to_schema)
         if ft is None or tt is None:
             continue
         card = build.infer_cardinality(ft, tt, [r.from_column], [r.to_column])
@@ -1299,10 +1314,10 @@ def _recheck_engine_joins(
             f"{r.relationship} → {card} ({why})")
         r.relationship = card
     engine = [r for r in rels if _engine_approved(r)]
-    _suggest_data_unique(dialect, runner, engine, tables, report)
+    _suggest_data_unique(dialect, runner, engine, tables, report, budget)
     for r in engine:
         if not _engine_approved(r):
-            ft = _endpoint(tables, bare_name(r.from_table), r.from_schema)
+            ft = _endpoint(tables, r.from_table, r.from_schema)
             report.changes.setdefault(_qualified(ft) if ft else r.from_table, {}).setdefault(
                 "joins to review", []).append(
                 f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column} (values unique; looks one-to-one)")

@@ -27,11 +27,18 @@ below corresponds to one such version.
   label is kept and the join waits for review with a note saying so, since data that is unique
   today is not a promise. A refresh relabels each join introspection approved itself from the
   database's keys and lists it under `joins corrected from the database's constraints`; a join a
-  person signed off is never changed. Labelling reads each table's own keys, so two tables of one
-  name in two schemas no longer lend each other a key.
+  person signed off is never changed, and a person's edit of a join's cardinality, columns, `on` or
+  tables in the explorer makes the sign-off theirs (with no signer recorded, the engine's sign-off
+  is cleared and the join waits for review), so a refresh leaves the edit alone. Only enabled,
+  valid keys count: an invalid PostgreSQL index, a disabled SQL Server index and a disabled or
+  unvalidated Oracle constraint are not read, and a SQLite unique index over an expression is not
+  shortened to its plain columns. Labelling reads each table's own keys, so two tables of one name
+  in two schemas no longer lend each other a key, at introspection or at query time.
 
   **Reading a model:** a table that sets `unique_keys` is refused by a release older than this
-  one, which does not know the key — upgrade the server before the plugin.
+  one, which does not know the key. Upgrade every server that reads the model (including deploy
+  images) before re-introspecting with this release. A model with no unique keys stays readable by
+  older releases. CI that validates the model with a newer release won't catch this.
 
 ## [0.9.19] — 2026-10-25
 
