@@ -26,7 +26,14 @@ below corresponds to one such version.
 
 ### Fixed
 
-### Fixed
+- **A SUM with a zero fallback on the many side no longer reads as a fan trap (#579).** The
+  receipt flagged `SUM(CASE WHEN orders.status = 'shipped' THEN COALESCE(order_items.quantity, 0)
+  END)` over `orders JOIN order_items` as multiplied: the `0` belongs to no table, so the check that
+  decides which table the summed value comes from found none, and the `orders` column in the
+  condition made the join look like it repeated the value. A `0` or `NULL` adds nothing to a sum
+  however often its row repeats, so directly under a `SUM` (through `CASE`, `COALESCE`, `IF`,
+  parentheses and casts) it is now left out. `COUNT`, `AVG` and arithmetic are unchanged, and
+  `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, which counts the joined rows, is still reported.
 
 - **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
   `review_state: approved`, so an entity written during enrichment without the field came out
