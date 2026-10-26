@@ -427,7 +427,7 @@ def _relationships_text(bundles: list[dict]) -> str:
     the number. The generator cannot infer it from column names.
     """
     lines: list[str] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
     for bundle in bundles:
         for rel in bundle.get("relationships") or []:
             left, right = rel.get("from_table"), rel.get("to_table")
@@ -442,9 +442,12 @@ def _relationships_text(bundles: list[dict]) -> str:
                 right = f"{rel['to_schema']}.{right}"
             # A composite key is an `on:` join with no from/to column (#510).
             on = rel.get("on") or f"{left}.{rel.get('from_column')} = {right}.{rel.get('to_column')}"
-            if on in seen:
+            # Keyed on the qualified ends too: introspection writes a composite `on:` on bare table
+            # names, so the same key in two schemas is the same text.
+            key = (left, right, on)
+            if key in seen:
                 continue
-            seen.add(on)
+            seen.add(key)
             parts = [f"{left} -> {right}", f"on {on}"]
             for field in ("relationship", "join_type"):
                 value = rel.get(field)

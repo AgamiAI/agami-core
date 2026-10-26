@@ -560,23 +560,41 @@ class BigQuery(Dialect):
 
     def sql_foreign_keys(self, schema: str) -> str:
         # No REFERENTIAL_CONSTRAINTS here, so the referenced column is found among the referenced
-        # table's own key columns (rk) at the FK column's position_in_unique_constraint; matching
-        # CONSTRAINT_COLUMN_USAGE on the constraint name alone crossed a composite key's columns.
+        # table's own primary-key columns (rk) at the FK column's position_in_unique_constraint;
+        # matching CONSTRAINT_COLUMN_USAGE on the constraint name alone crossed a composite key's
+        # columns. Only this dataset's keys are readable: a single-column key (kn.n = 1) keeps the
+        # name-only pairing, which is exact for one column, so a key into another dataset is kept;
+        # a composite key there has no positions, so its rows come back with no constraint name
+        # and are left ungrouped for review.
+        ds = f"`{schema}`.INFORMATION_SCHEMA"
         return (
             "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
+            "kcu.table_schema AS from_schema, "
             "ccu.table_name AS to_table, ccu.column_name AS to_column, "
-            "kcu.constraint_name AS constraint_name, kcu.ordinal_position AS key_ordinal "
-            f"FROM `{schema}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
-            f"JOIN `{schema}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu "
+            "ccu.table_schema AS to_schema, "
+            "CASE WHEN kn.n = 1 OR rk.column_name IS NOT NULL THEN kcu.constraint_name END AS constraint_name, "
+            "kcu.ordinal_position AS key_ordinal "
+            f"FROM {ds}.TABLE_CONSTRAINTS tc "
+            f"JOIN {ds}.KEY_COLUMN_USAGE kcu "
             "ON tc.constraint_name = kcu.constraint_name "
-            f"JOIN `{schema}`.INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu "
+            f"JOIN {ds}.CONSTRAINT_COLUMN_USAGE ccu "
             "ON tc.constraint_name = ccu.constraint_name "
-            f"JOIN `{schema}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE rk "
-            "ON rk.table_name = ccu.table_name AND rk.column_name = ccu.column_name "
+            f"JOIN (SELECT table_name, constraint_name, COUNT(*) AS n FROM {ds}.KEY_COLUMN_USAGE "
+            "GROUP BY table_name, constraint_name) kn "
+            "ON kn.table_name = kcu.table_name AND kn.constraint_name = kcu.constraint_name "
+            "LEFT JOIN (SELECT k.table_schema, k.table_name, k.column_name, k.ordinal_position "
+            f"FROM {ds}.KEY_COLUMN_USAGE k JOIN {ds}.TABLE_CONSTRAINTS c "
+            "ON c.constraint_name = k.constraint_name AND c.table_name = k.table_name "
+            "AND c.constraint_type <> 'FOREIGN KEY') rk "
+            "ON rk.table_schema = ccu.table_schema AND rk.table_name = ccu.table_name "
+            "AND rk.column_name = ccu.column_name "
             "AND rk.ordinal_position = kcu.position_in_unique_constraint "
-            f"JOIN `{schema}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS rtc "
-            "ON rtc.constraint_name = rk.constraint_name AND rtc.constraint_type <> 'FOREIGN KEY' "
+            f"LEFT JOIN (SELECT DISTINCT table_schema, table_name FROM {ds}.TABLE_CONSTRAINTS "
+            "WHERE constraint_type <> 'FOREIGN KEY') rpk "
+            "ON rpk.table_schema = ccu.table_schema AND rpk.table_name = ccu.table_name "
+            # a composite key whose referenced key is readable keeps only its position-matched rows
             "WHERE tc.constraint_type = 'FOREIGN KEY' "
+            "AND (kn.n = 1 OR rk.column_name IS NOT NULL OR rpk.table_name IS NULL) "
             "ORDER BY kcu.table_name, kcu.constraint_name, kcu.ordinal_position"
         )
 
@@ -705,7 +723,8 @@ class Oracle(Dialect):
     def sql_foreign_keys(self, schema: str) -> str:
         return (
             "SELECT ac.table_name AS from_table, acc.column_name AS from_column, "
-            "rcc.table_name AS to_table, rcc.column_name AS to_column, "
+            "ac.owner AS from_schema, "
+            "rcc.table_name AS to_table, rcc.column_name AS to_column, rcc.owner AS to_schema, "
             "ac.constraint_name AS constraint_name, acc.position AS key_ordinal "
             "FROM all_constraints ac "
             "JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name "

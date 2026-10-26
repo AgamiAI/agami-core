@@ -28,7 +28,14 @@ below corresponds to one such version.
   makes an aggregate on either side `multiplied`, with a `fan_trap` naming the missing columns; the
   query still runs. Code that read only `from_column`/`to_column` now reads every column of an
   `on:` join too (adding reference joins no longer raises on one), and the validator warns when an
-  `on:` names a column its table doesn't define.
+  `on:` names a column its table doesn't define. A join that is a key equality plus a fixed value
+  (`... AND customers_curr.current_flag = 'Y'`) is not a composite key: its receipt and refresh are
+  as before, its key column counts as a referenced column, and hiding that column now hides the
+  join. BigQuery and Oracle keys are kept apart per dataset/owner, a BigQuery key into another
+  dataset keeps its single-column join, and an `on:` now also parses in the engine's own grammar
+  (`` `OrderId` ``). A refresh keeps a single-column FK the catalog declares beside a composite
+  one, and only an `on:` join introspection signed goes back to review when a column is retyped.
+  The partial-key check reads each join on its own and skips SEMI/ANTI joins.
 
 ## [0.9.19] — 2026-10-25
 

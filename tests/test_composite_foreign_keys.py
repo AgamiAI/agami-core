@@ -87,6 +87,64 @@ def _between(org: m.Datasource, ft: str, tt: str) -> list[m.Relationship]:
 def test_every_fk_query_returns_the_key_name_and_column_position(key):
     sql = D.get_dialect(key).sql_foreign_keys("s")
     assert "AS constraint_name" in sql and "AS key_ordinal" in sql
+    # the schema of both ends too: a key is grouped per (from_schema, from_table, constraint_name), so
+    # same-named keys on same-named tables in two schemas would fuse without it (Trino lists none)
+    if key != "trino":
+        assert "AS from_schema" in sql and "AS to_schema" in sql
+    if key == "bigquery":
+        assert "kcu.table_schema AS from_schema" in sql and "ccu.table_schema AS to_schema" in sql
+    if key == "oracle":
+        assert "ac.owner AS from_schema" in sql and "rcc.owner AS to_schema" in sql
+
+
+def _bigquery_catalog() -> sqlite3.Connection:
+    """BigQuery's dataset `d1` INFORMATION_SCHEMA as canned rows: a composite key into its own
+    `order_lines`, a single-column key into `d2.customers`, a composite key into `d2.parts`, and a
+    local `d1.parts` whose own key must not lend `d2.parts` its positions."""
+    con = sqlite3.connect(":memory:")
+    con.executescript(
+        "CREATE TABLE TABLE_CONSTRAINTS(constraint_name, table_schema, table_name, constraint_type);"
+        "CREATE TABLE KEY_COLUMN_USAGE(constraint_name, table_schema, table_name, column_name,"
+        " ordinal_position, position_in_unique_constraint);"
+        "CREATE TABLE CONSTRAINT_COLUMN_USAGE(constraint_name, table_schema, table_name, column_name);")
+    tc = [("pk_ol", "d1", "order_lines", "PRIMARY KEY"), ("pk_parts", "d1", "parts", "PRIMARY KEY"),
+          ("fk_lines", "d1", "shipments", "FOREIGN KEY"), ("fk_cust", "d1", "shipments", "FOREIGN KEY"),
+          ("fk_parts", "d1", "shipments", "FOREIGN KEY")]
+    kcu = [("pk_ol", "d1", "order_lines", "order_id", 1, None), ("pk_ol", "d1", "order_lines", "line_no", 2, None),
+           ("pk_parts", "d1", "parts", "b", 1, None), ("pk_parts", "d1", "parts", "a", 2, None),
+           ("fk_lines", "d1", "shipments", "order_id", 1, 1), ("fk_lines", "d1", "shipments", "line_no", 2, 2),
+           ("fk_cust", "d1", "shipments", "customer_id", 1, 1),
+           ("fk_parts", "d1", "shipments", "part_a", 1, 1), ("fk_parts", "d1", "shipments", "part_b", 2, 2)]
+    ccu = [("fk_lines", "d1", "order_lines", "order_id"), ("fk_lines", "d1", "order_lines", "line_no"),
+           ("fk_cust", "d2", "customers", "id"),
+           ("fk_parts", "d2", "parts", "a"), ("fk_parts", "d2", "parts", "b")]
+    con.executemany("INSERT INTO TABLE_CONSTRAINTS VALUES (?,?,?,?)", tc)
+    con.executemany("INSERT INTO KEY_COLUMN_USAGE VALUES (?,?,?,?,?,?)", kcu)
+    con.executemany("INSERT INTO CONSTRAINT_COLUMN_USAGE VALUES (?,?,?,?)", ccu)
+    return con
+
+
+def test_bigquery_keeps_cross_dataset_single_keys_and_pairs_local_composite_keys_by_position():
+    sql = D.get_dialect("bigquery").sql_foreign_keys("d1").replace("`d1`.INFORMATION_SCHEMA.", "")
+    cur = _bigquery_catalog().execute(sql)
+    names = [d[0] for d in cur.description]
+    rows = [dict(zip(names, r)) for r in cur.fetchall()]
+
+    def of(to_table):
+        return sorted((r["from_column"], r["to_schema"], r["to_column"], r["constraint_name"])
+                      for r in rows if r["to_table"] == to_table)
+
+    assert of("order_lines") == [("line_no", "d1", "line_no", "fk_lines"), ("order_id", "d1", "order_id", "fk_lines")]
+    # a single-column key into another dataset is kept exactly as the name-only pairing gave it
+    assert of("customers") == [("customer_id", "d2", "id", "fk_cust")]
+    # a composite key into another dataset has no positions here: its rows come back unnamed, so
+    # they are left ungrouped and unreviewed rather than paired by guesswork
+    parts = [r for r in rows if r["to_table"] == "parts"]
+    assert len(parts) == 4 and all(r["constraint_name"] is None for r in parts)
+    assert all(r["from_schema"] == "d1" for r in rows)
+    groups = I._fk_groups(rows)
+    assert [grouped for g, grouped in groups if g[0]["to_table"] == "parts"] == [False] * 4
+    assert [len(g) for g, grouped in groups if g[0]["to_table"] == "order_lines"] == [2]
 
 
 def test_sqlite_fk_query_returns_the_key_name_and_column_position():
@@ -237,6 +295,8 @@ def test_join_key_pairs_reads_both_forms():
     "shipments.order_id = customers.id",
     "shipments.order_id = :order",
     "not sql at all (",
+    # a key equality plus a filter on the far table: not a key, as on main (see the parity tests below)
+    "orders.customer_ntrl_key = customers_curr.customer_natural_key AND customers_curr.current_flag = 'Y'",
 ])
 def test_join_key_pairs_is_none_for_anything_but_column_equalities(text):
     assert R.join_key_pairs(_on(text)) is None
@@ -421,3 +481,273 @@ def test_a_refresh_leaves_a_split_key_a_person_signed_off(shop):
     assert "composite foreign key not applied" in done.stdout
     assert "not changed: signed off by you@example.com" in done.stdout
     assert _between(L.load_datasource(shop["root"]), "shipments", "order_lines") == before
+
+
+# --- review fixes -----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("key, storage", [("mysql", "MySQL"), ("sqlserver", "SQLServer")])
+def test_a_generated_quoted_composite_key_validates_in_its_engines_grammar(key, storage):
+    on = I._composite_on(D.get_dialect(key), "Shipments", ["OrderId", "LineNo"], "OrderLines", ["OrderId", "LineNo"])
+    assert "OrderId" in on and on != on.replace("`", "").replace("[", "")   # quoted the engine's way
+    assert V._sqlparse_error(on, as_condition=True) is not None             # the generic grammar refuses it
+
+    def t(name, cols, grain):
+        return m.Table(name=name, schema="s", storage_connection="c", grain=grain, description=name,
+                       columns=[m.Column(name=c, type="integer") for c in cols])
+    rel = m.Relationship(from_table="Shipments", to_table="OrderLines", on=on, relationship="many_to_one")
+    org = m.Datasource(datasource="Shop", storage_connections=[m.StorageConnection(name="c", storage_type=storage)],
+                       subject_areas=[m.SubjectArea(name="sales", relationships=[rel], tables_defined=[
+                           t("Shipments", ["Id", "OrderId", "LineNo"], ["Id"]),
+                           t("OrderLines", ["OrderId", "LineNo"], ["OrderId", "LineNo"])])])
+    res = V.validate(org)
+    assert res.ok, V.format_result(res)
+    assert not any(f.code in ("relationship_on_unparseable", "relationship_on_unknown_column") for f in res.findings)
+
+
+def _partial_findings(org: m.Datasource, sql: str) -> list:
+    return [f for a in R.pre_flight_check(sql, org).aggregates for f in a.findings
+            if any("(partial key)" in j for j in f.triggering_joins)]
+
+
+@pytest.mark.parametrize("sql", [
+    # two aliases, each on half the key: together they name all of it, yet each join repeats rows
+    "SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines a ON s.order_id = a.order_id "
+    "JOIN order_lines b ON s.line_no = b.line_no",
+    # a whole-key join does not cover a second, partial one
+    "SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines a ON s.order_id = a.order_id "
+    "AND s.line_no = a.line_no JOIN order_lines b ON s.order_id = b.order_id",
+])
+def test_each_join_is_checked_against_the_key_on_its_own(shop_org, sql):
+    (finding,) = _partial_findings(shop_org, sql)
+    assert finding.risk == "fan_trap"
+
+
+def test_a_semi_or_anti_join_on_part_of_the_key_repeats_nothing(shop_org):
+    for kind in ("SEMI", "ANTI"):
+        sql = f"SELECT SUM(s.shipped_qty) FROM shipments s LEFT {kind} JOIN order_lines ol ON s.order_id = ol.order_id"
+        assert _partial_findings(shop_org, sql) == [], kind
+    # an ordinary join between the same tables is still checked
+    sql = ("SELECT SUM(s.shipped_qty) FROM shipments s LEFT SEMI JOIN order_lines a ON s.order_id = a.order_id "
+           "JOIN order_lines b ON s.order_id = b.order_id")
+    assert len(_partial_findings(shop_org, sql)) == 1
+
+
+def test_a_cross_area_on_join_checks_its_target_against_the_target_area():
+    def t(name, cols):
+        return m.Table(name=name, schema="s", storage_connection="c", grain=[cols[0]], description=name,
+                       columns=[m.Column(name=c, type="integer") for c in cols])
+
+    def org(on):
+        rel = m.CrossSubjectAreaRelationship(from_subject_area="ship", to_subject_area="sales",
+                                             from_table="shipments", to_table="order_lines", on=on,
+                                             relationship="many_to_one")
+        return m.Datasource(
+            datasource="Shop", storage_connections=[m.StorageConnection(name="c", storage_type="SQLite")],
+            subject_areas=[m.SubjectArea(name="ship", tables_defined=[t("shipments", ["id", "order_id", "line_no"])]),
+                           m.SubjectArea(name="sales", tables_defined=[t("order_lines", ["order_id", "line_no"])])],
+            cross_subject_area_relationships=[rel])
+
+    def warned(o):
+        return [f.message for f in V.validate(o).findings if f.code == "relationship_on_unknown_column"]
+
+    assert warned(org(_COMPOSITE_ON)) == []
+    (msg,) = warned(org("shipments.order_id = order_lines.order_id AND shipments.line_no = order_lines.line_number"))
+    assert "line_number" in msg and "order_lines" in msg
+
+
+def test_the_golden_eval_keeps_the_same_key_in_two_schemas_apart():
+    sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
+    import run_golden_eval
+
+    rel = {"from_table": "shipments", "to_table": "order_lines", "on": _COMPOSITE_ON, "relationship": "many_to_one"}
+    text = run_golden_eval._relationships_text([{"relationships": [
+        {**rel, "from_schema": "billing", "to_schema": "billing"},
+        {**rel, "from_schema": "crm", "to_schema": "crm"},
+        {**rel, "from_schema": "crm", "to_schema": "crm"}]}])
+    assert [line.split(" -- ")[0] for line in text.splitlines()] == [
+        "billing.shipments -> billing.order_lines", "crm.shipments -> crm.order_lines"]
+
+
+# --- a key equality plus a filter on the far table (ashwin's case) ---------------------------------
+#
+# `on: orders.customer_ntrl_key = customers_curr.customer_natural_key AND customers_curr.current_flag = 'Y'`
+# is not a composite key. Wherever this PR reads join keys it must behave as main does, except the
+# loader, which now hides it with its key column (D12).
+
+_FILTERED_ON = ("orders.customer_ntrl_key = customers_curr.customer_natural_key "
+                "AND customers_curr.current_flag = 'Y'")
+_PERSON = {"confidence": "confirmed", "review_state": "approved", "signed_off_by": "you@example.com",
+           "signed_off_role": "owner", "signed_off_at": "2026-01-01T00:00:00Z"}
+
+
+def _filtered_org(on: str = _FILTERED_ON, extra_cols: tuple = ()) -> m.Datasource:
+    orders = m.Table(name="orders", schema="public", storage_connection="c", grain=["order_id"], description="o",
+                     columns=[m.Column(name="order_id", type="integer"),
+                              m.Column(name="customer_ntrl_key", type="string"),
+                              m.Column(name="amount", type="decimal", aggregation="additive"),
+                              *[m.Column(name=c, type="string") for c in extra_cols]])
+    cust = m.Table(name="customers_curr", schema="public", storage_connection="c", grain=["customer_sk"],
+                   description="c",
+                   columns=[m.Column(name="customer_sk", type="integer"),
+                            m.Column(name="customer_natural_key", type="string"),
+                            m.Column(name="current_flag", type="string"), m.Column(name="segment", type="string"),
+                            *[m.Column(name=c, type="string") for c in extra_cols]])
+    rel = m.Relationship(from_table="orders", to_table="customers_curr", on=on, relationship="many_to_one",
+                         join_type="LEFT", **_PERSON)
+    return m.Datasource(datasource="Shop", storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
+                        subject_areas=[m.SubjectArea(name="sales", tables_defined=[orders, cust], relationships=[rel])])
+
+
+_SUM_BY_SEGMENT = ("SELECT c.segment, SUM(o.amount) AS total FROM orders o JOIN customers_curr c "
+                   "ON o.customer_ntrl_key = c.customer_natural_key{flag} GROUP BY c.segment")
+
+
+def _verdict(org: m.Datasource, sql: str) -> dict:
+    receipt = R.assemble_receipt(org, sql)
+    return {
+        "aggregates": [(a.aggregate, a.status, sorted((f.risk, tuple(f.triggering_joins)) for f in a.findings))
+                       for a in R.pre_flight_check(sql, org).aggregates],
+        "joins": [(j.get("status"), j.get("review_state")) for j in receipt["joins"]["items"]],
+        "receipt_aggregates": [(a["status"], sorted(f["risk"] for f in a["findings"]))
+                               for a in receipt["aggregates"]["items"]],
+    }
+
+
+@pytest.mark.parametrize("flag, on_main", [
+    # what origin/main (63e64317) gives for the same model and statement, read off a checkout of it
+    (" AND c.current_flag = 'Y'", {"aggregates": [("SUM(o.amount)", "not_multiplied", [])],
+                                   "joins": [("declared", "approved")],
+                                   "receipt_aggregates": [("not_multiplied", [])]}),
+    ("", {"aggregates": [("SUM(o.amount)", "undetermined", [])],
+          "joins": [("undetermined", None)],
+          "receipt_aggregates": [("undetermined", [])]}),
+])
+def test_a_filtered_join_gets_the_receipt_main_gives(flag, on_main):
+    assert _verdict(_filtered_org(), _SUM_BY_SEGMENT.format(flag=flag)) == on_main
+
+
+def test_a_composite_key_with_a_filter_written_on_one_key_column_is_a_partial_join():
+    on = ("orders.customer_ntrl_key = customers_curr.customer_natural_key AND orders.region = customers_curr.region "
+          "AND customers_curr.current_flag = 'Y'")
+    sql = ("SELECT SUM(o.amount) FROM orders o JOIN customers_curr c "
+           "ON o.customer_ntrl_key = c.customer_natural_key AND c.current_flag = 'Y'")
+    (finding,) = _partial_findings(_filtered_org(on, extra_cols=("region",)), sql)
+    assert finding.risk == "fan_trap" and "the declared join needs customer_ntrl_key AND region" in finding.reason
+
+
+def test_the_loose_reader_keeps_the_key_of_a_filtered_join():
+    rel = _filtered_org().subject_areas[0].relationships[0]
+    assert R.join_key_pairs(rel) is None
+    assert R.join_column_pairs(rel) == [("customer_ntrl_key", "customer_natural_key")]
+
+
+def test_the_validator_accepts_a_filtered_join():
+    res = V.validate(_filtered_org())
+    assert res.ok, V.format_result(res)
+    assert not any(f.code in ("relationship_on_unknown_column", "relationship_on_unparseable") for f in res.findings)
+
+
+def test_route_references_reads_a_filtered_join_without_proposing_it_again():
+    specs = [{"from_table": "orders", "from_column": "customer_ntrl_key", "to_table": "customers_curr"}]
+    intra, cross, skipped = cli._route_references(_filtered_org(), specs)   # main raised AttributeError here
+    assert intra == {} and cross == [] and skipped == 0
+
+
+_CUSTOMERS_SCHEMA = (
+    "CREATE TABLE customers_curr(customer_sk INTEGER PRIMARY KEY, customer_natural_key {key_type},"
+    " region TEXT, current_flag TEXT, UNIQUE(customer_natural_key), UNIQUE(customer_natural_key, region));"
+    "CREATE TABLE orders(order_id INTEGER PRIMARY KEY, customer_ntrl_key {key_type}, region TEXT, amount REAL,"
+    " FOREIGN KEY(customer_ntrl_key) REFERENCES customers_curr(customer_natural_key),"
+    " FOREIGN KEY(customer_ntrl_key, region) REFERENCES customers_curr(customer_natural_key, region));"
+    "INSERT INTO customers_curr VALUES (1, 'k1', 'eu', 'Y'), (2, 'k2', 'us', 'Y');"
+    "INSERT INTO orders VALUES (1, 'k1', 'eu', 5), (2, 'k2', 'us', 7);"
+)
+
+
+@pytest.fixture
+def customers(tmp_path, monkeypatch):
+    db = tmp_path / "cust.db"
+
+    def build(key_type: str) -> None:
+        db.unlink(missing_ok=True)
+        con = sqlite3.connect(db)
+        con.executescript(_CUSTOMERS_SCHEMA.format(key_type=key_type))
+        con.commit()
+        con.close()
+
+    build("TEXT")
+    art = tmp_path / "art"
+    (art / "local").mkdir(parents=True)
+    creds = art / "local" / "credentials"
+    creds.write_text(f"[shop]\ntype = sqlite\npath = {db}\n", encoding="utf-8")
+    creds.chmod(0o600)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
+    return {"art": art, "root": art / "shop", "rebuild": build}
+
+
+def _filtered_entry(path: Path) -> dict:
+    doc = yaml.safe_load(path.read_text())
+    (entry,) = [r for r in doc["relationships"] if r.get("on") == _FILTERED_ON]
+    return entry
+
+
+def _entry_text(path: Path) -> str:
+    """The filtered join's lines as written, to compare byte for byte."""
+    text = path.read_text()
+    start = text.index("- ", text.rfind("\n- ", 0, text.index("customer_natural_key AND")) + 1)
+    end = text.find("\n- ", start + 1)
+    return text[start:] if end < 0 else text[start:end]
+
+
+def _sign_a_filtered_join(shop) -> Path:
+    """The model's orders -> customers_curr joins replaced by the one filtered join a person signed."""
+    path = next(shop["root"].glob("subject_areas/*/relationships.yaml"))
+    doc = yaml.safe_load(path.read_text())
+    keep = [r for r in doc["relationships"] if r["to_table"] != "customers_curr"]
+    first = next(r for r in doc["relationships"] if r["to_table"] == "customers_curr")
+    filtered = {k: v for k, v in first.items() if k not in ("from_column", "to_column", "on", "description")}
+    doc["relationships"] = keep + [{**filtered, "on": _FILTERED_ON, "relationship": "many_to_one",
+                                   "description": "the current row of each customer", **_PERSON}]
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    return path
+
+
+def test_a_refresh_leaves_a_person_signed_filtered_join_alone(customers):
+    assert _introspect(customers).returncode == 0
+    path = _sign_a_filtered_join(customers)
+    before = _filtered_entry(path)
+
+    done = _introspect(customers, "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert _filtered_entry(path) == before          # every field as the person left it
+    assert "joins merged into one composite join" not in done.stdout
+    assert "composite foreign key not applied" not in done.stdout
+    written = _entry_text(path)
+    # the single-column FK the catalog also declares is its own join, not a split of the composite
+    # one: a second refresh merges nothing and keeps both
+    again = _introspect(customers, "--append")
+    assert again.returncode == 0 and _entry_text(path) == written
+    assert "composite" not in again.stdout, again.stdout
+    pairs = sorted(r.from_column or r.on for r in _between(L.load_datasource(customers["root"]), "orders", "customers_curr"))
+    assert pairs == sorted(["customer_ntrl_key", _FILTERED_ON,
+                            "orders.customer_ntrl_key = customers_curr.customer_natural_key AND orders.region = customers_curr.region"])
+
+    # a retype of its key column leaves its sign-off as it is, as on main
+    customers["rebuild"]("INTEGER")
+    retyped = _introspect(customers, "--append")
+    assert retyped.returncode == 0, retyped.stdout + retyped.stderr
+    assert _entry_text(path) == written and _filtered_entry(path)["confidence"] == "confirmed"
+    assert "composite foreign key not applied" not in retyped.stdout
+
+
+def test_hiding_the_key_column_hides_a_filtered_join(customers):
+    # D12, and a change from main: main never hid a filtered join, whatever its columns
+    assert _introspect(customers).returncode == 0
+    _sign_a_filtered_join(customers)
+    tpath = next(customers["root"].glob("subject_areas/*/tables/orders.yaml"))
+    doc = yaml.safe_load(tpath.read_text())
+    next(c for c in doc["columns"] if c["name"] == "customer_ntrl_key")["review_state"] = "rejected"
+    tpath.write_text(yaml.safe_dump(doc, sort_keys=False))
+    served = L.load_datasource(customers["root"])
+    assert not [r for r in _between(served, "orders", "customers_curr") if r.on == _FILTERED_ON]

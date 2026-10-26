@@ -402,10 +402,12 @@ def introspect(
         # Joins on a column whose type changed go back to review: a confirmed join on mismatched
         # types is refused by the validator, which would make the refresh impossible to write.
         for r in prev_rels:
-            hit = next((h for fc, tc in _key_pairs(r, sg) or []
+            hit = next((h for fc, tc in _column_pairs(r, sg) or []
                         for h in (_retyped_end(retyped, r.from_schema, r.from_table, fc),
                                   _retyped_end(retyped, r.to_schema, r.to_table, tc)) if h), None)
-            if hit and r.confidence == "confirmed":
+            # The validator type-checks only the column-pair form; an `on:` join someone wrote or
+            # signed is theirs, so only one introspection itself signed goes back to review.
+            if hit and r.confidence == "confirmed" and (not r.on or r.signed_off_role == "system"):
                 r.confidence, r.review_state = "proposed", "unreviewed"
                 report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(_join_label(r, sg))
         report.notes.append(
@@ -533,6 +535,12 @@ def _key_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[s
     return join_key_pairs(r, dialect)
 
 
+def _column_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[str, str]]]:
+    """The columns a join is keyed on, passing over a fixed-value condition (`x.flag = 'Y'`)."""
+    from .runtime import join_column_pairs
+    return join_column_pairs(r, dialect)
+
+
 def _sqlglot_name(dialect: D.Dialect) -> Optional[str]:
     """The sqlglot grammar for this engine's model text (an `on:` join), or None when unmapped."""
     from .sql_dialect import DialectUnresolved, sqlglot_dialect
@@ -570,9 +578,12 @@ def _merge_split_joins(
     for c in fresh:
         pairs = _key_pairs(c, dialect) if c.on else None
         want = {(f.lower(), t.lower()) for f, t in pairs or []}
+        # A join the catalog still declares on its own (a single-column FK beside the composite
+        # one) is not a split of this key: it stays.
         covered = [p for p in prev_rels
                    if len(want) > 1 and id(p) not in dropped and _same_tables(c, p)
-                   and (got := _pair_set(p, dialect)) and got < want]
+                   and (got := _pair_set(p, dialect)) and got < want
+                   and not any(_same_join(p, f, dialect) for f in fresh)]
         if not covered:
             kept.append(c)
             continue
@@ -1414,7 +1425,7 @@ def _regroup_columns_with_references(
     borrow the wrong references."""
     ref_by_table: dict[tuple, set[str]] = {}
     for r in rels:
-        for fc, _tc in _key_pairs(r, dialect) or []:   # an `on:` on an expression names no column
+        for fc, _tc in _column_pairs(r, dialect) or []:   # an `on:` on an expression names no column
             ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(fc)
     for t in tables:
         if not t.column_groups:   # only deep tables carry groups
@@ -1464,7 +1475,7 @@ def _promote_reference_fields(
         by_name.setdefault(t.name.lower(), []).append(t)
     # schema-aware key so a same-named table in another schema doesn't suppress promotion here; every
     # column of a composite key counts, or one of them would be promoted to a join of its own
-    seen = {(r.from_schema, r.from_table, fc) for r in existing for fc, _tc in _key_pairs(r, dialect) or []}
+    seen = {(r.from_schema, r.from_table, fc) for r in existing for fc, _tc in _column_pairs(r, dialect) or []}
     out: list[Relationship] = []
     for t in tables:
         grain = set(t.grain)   # THIS table's key (grain_by_table is keyed by bare name → ambiguous)

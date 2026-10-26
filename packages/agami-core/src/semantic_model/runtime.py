@@ -4780,8 +4780,21 @@ def join_key_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tup
     return list(pairs) if pairs is not None else None
 
 
+def join_column_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tuple[str, str]] | None":
+    """`join_key_pairs`, but a fixed-value condition such as `customers_curr.current_flag = 'Y'` is
+    passed over rather than making the answer None: the columns a join is keyed on, for callers that
+    only ask which columns it uses (hidden columns, reference grouping, retyped columns). The ones
+    that compare joins for identity keep the strict reading."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return [(rel.from_column, rel.to_column)]
+    pairs = _on_key_pairs(rel.on or "", _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table)), dialect,
+                          skip_fixed=True)
+    return list(pairs) if pairs is not None else None
+
+
 @functools.lru_cache(maxsize=1024)
-def _on_key_pairs(text: str, ft: str, tt: str, dialect: "str | None") -> "tuple[tuple[str, str], ...] | None":
+def _on_key_pairs(text: str, ft: str, tt: str, dialect: "str | None",
+                  skip_fixed: bool = False) -> "tuple[tuple[str, str], ...] | None":
     """The `on:` half of `join_key_pairs`, remembered like `_reduced_on`: model text, one parse each."""
     if not _HAVE_SQLGLOT or _BIND_MARKER.search(text):
         return None
@@ -4791,6 +4804,10 @@ def _on_key_pairs(text: str, ft: str, tt: str, dialect: "str | None") -> "tuple[
     out: list[tuple[str, str]] = []
     for conj in _and_conjuncts(predicate):
         lhs, rhs = (conj.this, conj.expression) if isinstance(conj, exp.EQ) else (None, None)
+        if skip_fixed and lhs is not None and (
+                (isinstance(lhs, exp.Column) and _literal_key(rhs) is not None)
+                or (isinstance(rhs, exp.Column) and _literal_key(lhs) is not None)):
+            continue
         if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column)):
             return None
         sides = (_tkey(lhs.table), _tkey(rhs.table))
@@ -5461,6 +5478,18 @@ def _written_join_pairs(
     same pinning rule too: only an ON that names its own join's two relations counts, and a pair an
     unqualified column kept this layer from resolving contributes nothing."""
     out: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+    for tables, pairs, _kind in _each_written_join(tree, scope_map):
+        out.setdefault(tables, set()).update(pairs)
+    return {tables: frozenset(pairs) for tables, pairs in out.items()}
+
+
+def _each_written_join(
+    tree: "exp.Select", scope_map: dict[str, str]
+) -> "list[tuple[frozenset[str], frozenset[frozenset[tuple[str, str]]], str]]":
+    """`_written_join_pairs` one join at a time: (tables, the pairs that join wrote, its kind such as
+    SEMI or ANTI, '' for a plain join). Kept apart so two joins to two aliases of a table, each on
+    half a key, aren't read as one join on all of it."""
+    out = []
     for join in tree.args.get("joins") or ():
         on = join.args.get("on")
         if on is None:
@@ -5472,11 +5501,14 @@ def _written_join_pairs(
         # This join's fixed-value conditions on its own alias travel with its key, so a declared
         # condition join compares whole here too (see `_fixed_value_pairs`).
         fixed = _fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+        per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
         for pair in _predicate_pairs(on, scope_map):
             tables = frozenset(table for table, _column in pair)
             if len(tables) == 2:
-                out.setdefault(tables, set()).update({pair, *fixed})
-    return {tables: frozenset(pairs) for tables, pairs in out.items()}
+                per.setdefault(tables, set()).update({pair, *fixed})
+        kind = str(join.args.get("kind") or "").upper()
+        out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
+    return out
 
 
 def _edges_as_written(
@@ -5534,18 +5566,24 @@ def _partial_key_joins(
     Matched on the written column pairs as `_edges_as_written` matches, after it ran: an edge another
     declaration matched whole is already gone from `rels`, so what remains here is a join on some but
     not all of a key whose other columns are what keep it to one row."""
-    written = _written_join_pairs(tree, scope_map)
-    if not written:
+    # One join at a time, so a full-key join elsewhere (or another alias's half) hides nothing. A
+    # SEMI or ANTI join returns each row at most once, so it can't repeat one.
+    joins = [(tables, pairs) for tables, pairs, kind in _each_written_join(tree, scope_map)
+             if kind not in ("SEMI", "ANTI")]
+    if not joins:
         return {}
     out: dict[int, tuple[Relationship, list[str], list[str]]] = {}
     for rel in rels:
-        pairs_written = written.get(_rel_tables(rel))
-        declared = _declared_pairs(rel, dialect) if rel.on and pairs_written else None
+        tables = _rel_tables(rel)
+        written = [pairs for t, pairs in joins if t == tables]
+        declared = _declared_pairs(rel, dialect) if rel.on and written else None
         if declared is None:
             continue
         keys = {p for p in declared if not _is_fixed_value(p)}
-        used = keys & pairs_written
-        if len(keys) < 2 or not used or used == keys:
+        if len(keys) < 2:
+            continue
+        used = next((keys & pairs for pairs in written if keys & pairs and keys & pairs != keys), None)
+        if not used:
             continue
         ft, tt = _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table))
         named = [(f, frozenset({(ft, f.lower()), (tt, t.lower())})) for f, t in join_key_pairs(rel, dialect) or []]
@@ -6608,6 +6646,7 @@ __all__ = [
     "assemble_receipt",
     "assemble_refusal_receipt",
     "join_key_pairs",
+    "join_column_pairs",
     "model_dialect",
     # Re-exported for the chokepoint, which reaches them through this module rather than
     # importing `sql_dialect` directly: `execute_sql` is vendored into the plugin while this

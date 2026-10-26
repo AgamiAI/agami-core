@@ -846,6 +846,7 @@ def _check_relationship(
     *,
     cross: bool,
     defined: dict[str, Table],
+    defined_to: Optional[dict[str, Table]] = None,
 ) -> None:
     # cardinality required (structural gate, check #17) — models enforces non-null,
     # re-assert the value domain here for a clear validator-level error too.
@@ -872,7 +873,10 @@ def _check_relationship(
 
     # on: must parse if present
     if rel.on:
-        err = _sqlparse_error(rel.on, as_condition=True)
+        from .runtime import model_dialect
+
+        # in the engine's grammar too: a generated composite key quotes `OrderId` as that engine does
+        err = _sqlparse_error(rel.on, as_condition=True, dialect=model_dialect(org))
         if err:
             res.error(
                 "relationship_on_unparseable",
@@ -880,21 +884,26 @@ def _check_relationship(
                 f"({err}): {rel.on!r}",
             )
         else:
-            _check_on_columns(rel, org, res, defined)
+            _check_on_columns(rel, org, res, defined, defined if defined_to is None else defined_to)
         return  # user took explicit ownership; skip simple-form type check
 
     # FK type-compatibility on the simple form (Gap 3)
     _check_fk_type_compat(rel, res, defined)
 
 
-def _check_on_columns(rel: Relationship, org: Datasource, res: ValidationResult, defined: dict[str, Table]) -> None:
+def _check_on_columns(
+    rel: Relationship, org: Datasource, res: ValidationResult, defined: dict[str, Table],
+    defined_to: dict[str, Table],
+) -> None:
     """Warn when an `on:` join of column equalities names a column its table doesn't have. A
-    warning, not an error: hand-written `on:` joins validated before this check existed."""
+    warning, not an error: hand-written `on:` joins validated before this check existed. Each end is
+    looked up among its own area's tables (`defined_to` for the TO end of a cross-area join)."""
     from .runtime import join_key_pairs, model_dialect
 
     pairs = join_key_pairs(rel, model_dialect(org)) or []
-    for table, cols in ((rel.from_table, [f for f, _ in pairs]), (rel.to_table, [t for _, t in pairs])):
-        t = defined.get(table) or defined.get(bare_name(table))
+    for table, cols, tables in ((rel.from_table, [f for f, _ in pairs], defined),
+                                (rel.to_table, [t for _, t in pairs], defined_to)):
+        t = tables.get(table) or tables.get(bare_name(table))
         names = {c.name.lower() for c in t.columns} if t is not None else set()
         missing = [c for c in cols if t is not None and c.lower() not in names]
         if missing:
@@ -927,7 +936,8 @@ def _check_cross_relationship(
     # against the FROM area's tables, exactly as before — the cross edge's to_table lives in another
     # area, so it stays unresolved here (unchanged behaviour).
     sa_for_rel = sa_from or SubjectArea(name="<unknown>")
-    _check_relationship(rel, sa_for_rel, org, res, cross=True, defined=_all_tables(sa_for_rel))
+    _check_relationship(rel, sa_for_rel, org, res, cross=True, defined=_all_tables(sa_for_rel),
+                        defined_to=_all_tables(sa_to) if sa_to else {})
 
     # executable must match the endpoints' storage connections
     conn_from = _table_connection(sa_from, rel.from_table) if sa_from else None
@@ -1678,16 +1688,22 @@ def _columns_referenced(expr: str, table_name: str) -> set[str]:
     return cols
 
 
-def _sqlparse_error(expr: str, *, as_condition: bool = False) -> Optional[str]:
-    """Return None if `expr` parses as SQL, else a short error string."""
+def _sqlparse_error(expr: str, *, as_condition: bool = False, dialect: Optional[str] = None) -> Optional[str]:
+    """Return None if `expr` parses as SQL — in the generic grammar or in `dialect` (a sqlglot
+    name), so nothing that parsed before is refused now — else a short error string."""
     if not _HAVE_SQLGLOT:
         return None  # can't check; treat as ok (sqlglot optional, like legacy)
     candidate = f"SELECT 1 WHERE {expr}" if as_condition else f"SELECT {expr}"
-    try:
-        parsed = sqlglot.parse_one(candidate, error_level=_ErrorLevel.RAISE)
-        return None if parsed is not None else "empty parse"
-    except Exception as e:  # sqlglot.errors.ParseError and friends
-        return str(e).splitlines()[0][:160]
+    err: Optional[str] = None
+    for read in (None, dialect) if dialect else (None,):
+        try:
+            parsed = sqlglot.parse_one(candidate, read=read, error_level=_ErrorLevel.RAISE)
+            if parsed is not None:
+                return None
+            err = err or "empty parse"
+        except Exception as e:  # sqlglot.errors.ParseError and friends
+            err = err or str(e).splitlines()[0][:160]
+    return err
 
 
 def _value_matches_type(value: str, ctype: str) -> bool:
