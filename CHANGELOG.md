@@ -19,6 +19,22 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A statement the database rejected says so, by its SQLSTATE (#561).** An execution error none of
+  the classifier's patterns read came back as `other` with "an unexpected error on the server", so a
+  client could not tell a statement it should rewrite from a broken server, and guessed. The
+  database's own text still never travels, since it can carry a value from a row. Its SQLSTATE now
+  does: five characters, no values, and a class that means the same on every engine that reports
+  one, so one table covers them all without a rule per database. Class `42` (the statement broke a
+  rule), `0A` (unsupported feature) and `22` (a value did not fit an operation) come back as `syntax`
+  with the code and "rewrite it"; `53`/`54` (too heavy) and `40` (a conflict, retry) with the code
+  and what to do; `42501` as `permission`, `08` as `network` and `28` as `auth` with their usual
+  sentences; any other class as the code beside the usual sentence. The
+  code is read from the driver's exception (`sqlstate`, `pgcode`, or `redshift_connector`'s `C`
+  field), never from its message, and an injected executor can pass it as
+  `ExecutorError(sqlstate=…)`. An engine that reports no code is unchanged, and a dialect rule (#566)
+  still answers first. On the forked transport a `syntax` sentence is relayed only as an exact match;
+  the others travel as every `other` failure does today.
+
 - **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
   in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
   script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
