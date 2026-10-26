@@ -19,6 +19,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **On Redshift, discovery finds the tables of a read-only user (#558).** `sm discover`, and an
+  introspection run without a table list, listed schemas from `information_schema.schemata`, which on
+  Redshift shows only the schemas the user owns. A read-only role owns none, so discovery reported
+  "no tables discovered" for a catalog it could read in full; passing `--tables` worked, which hid
+  it. Redshift now lists the schemas the user has USAGE on (`pg_namespace` with
+  `has_schema_privilege`), leaving out the system schemas. Other engines are unchanged.
+
 - **A statement the database rejected says so, by its SQLSTATE (#561).** An execution error none of
   the classifier's patterns read came back as `other` with "an unexpected error on the server", so a
   client could not tell a statement it should rewrite from a broken server, and guessed. The
