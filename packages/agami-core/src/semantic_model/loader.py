@@ -130,6 +130,18 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
     )
     if not include_rejected:
         before = _metric_names(org)
+        # The cross-area joins, entities and metrics need the same filter the per-area loader applies
+        # (#543): without it a join rejected at sign-off between two areas reached `sm context`, the
+        # schema reply and a deploy with no review status, and looked usable.
+        org.cross_subject_area_relationships = [
+            r for r in org.cross_subject_area_relationships if not _rejected(r)
+        ]
+        org.cross_subject_area_entities = [
+            e for e in org.cross_subject_area_entities if not _rejected(e)
+        ]
+        org.cross_subject_area_metrics = [
+            mm for mm in org.cross_subject_area_metrics if not _rejected(mm)
+        ]
         _drop_uses_of_unserved(org, hidden)
         hidden.metrics_removed |= before - _metric_names(org)
         # Two areas may share a metric name: rejecting one copy doesn't remove the name.

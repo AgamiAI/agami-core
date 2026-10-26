@@ -495,6 +495,45 @@ class WriteReport:
     out_dir: str
     dry_run: bool
     files_written: list[str] = field(default_factory=list)
+    # Files whose content was already on disk and were left as they are (#472).
+    files_unchanged: list[str] = field(default_factory=list)
+
+
+def _meaningful(value: Any) -> Any:
+    """`value` with the null and empty-list entries of every mapping dropped, for comparing two dumps.
+
+    The serializer writes an empty default (`indexes: []`) that an older writer left out, and the two
+    mean the same thing to the loader. An empty MAPPING is kept: `choice_field: {}` is a declared enum
+    with no labels yet, which is not the same as no `choice_field`. Only mapping entries are dropped:
+    an empty item in a LIST is a value someone wrote. The cost: a file that still carries an empty key the current serializer
+    omits (`ambiguities: []`) is no longer scrubbed by a refresh, since its data is unchanged.
+    """
+    if isinstance(value, dict):
+        return {
+            k: _meaningful(v) for k, v in value.items() if v is not None and v != []
+        }
+    if isinstance(value, list):
+        return [_meaningful(v) for v in value]
+    return value
+
+
+def _same_content(path: Path, content: str) -> bool:
+    """Whether the file at `path` already says what `content` says, compared as parsed YAML (#472).
+
+    A refresh of one table re-dumped every file in the model, and a file whose values had not changed
+    still came out with its keys reordered, an empty default added or its lines re-wrapped, so a
+    one-table refresh was a whole-model diff and the real change was lost in it. Equal data means the
+    file is left alone, which also keeps its line endings and formatting. A file that does not parse is
+    never equal: rewriting it is the fix.
+    """
+    if not path.is_file():
+        return False
+    try:
+        old = yaml.safe_load(path.read_text(encoding="utf-8"))
+        new = yaml.safe_load(content)
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return False
+    return _meaningful(old) == _meaningful(new)
 
 
 def ensure_org_id(out: Path, existing: Optional[str] = None, *, dry_run: bool = False) -> str:
@@ -579,11 +618,15 @@ def write_tree(
     dry_run: bool = False,
 ) -> WriteReport:
     """Write the canonical on-disk tree (datasource.yaml + datasources + subject_areas +
-    optional prompt_examples). Returns the list of files (would-be on dry_run)."""
+    optional prompt_examples). Returns the list of files (would-be on dry_run). A file whose content
+    is already on disk is left untouched and listed under `files_unchanged` (#472)."""
     examples_by_area = examples_by_area or {}
     rep = WriteReport(out_dir=str(out), dry_run=dry_run)
 
     def write(rel: str, content: str) -> None:
+        if _same_content(out / rel, content):
+            rep.files_unchanged.append(rel)
+            return
         rep.files_written.append(rel)
         if dry_run:
             return
