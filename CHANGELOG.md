@@ -12,6 +12,16 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A datasource.yaml key this agami-core does not read is reported, not silently dropped (#575).**
+  The loader reads a fixed list of top-level keys, so a model written for a newer agami-core that
+  declared a field the running one did not know lost it without a word, and a deploy fed by that
+  load stored the model without it. The model still loads and the field is still ignored, but `sm
+  validate` lists the keys as an `unknown_datasource_key` warning and the deploy prints them, saying
+  the model may need a newer agami-core. The load itself stays silent, since the executor loads the
+  model in a child process whose stderr is its output.
+
 ## [0.9.20] — 2026-10-26
 
 ### Changed
