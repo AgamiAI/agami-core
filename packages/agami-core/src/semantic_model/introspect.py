@@ -56,7 +56,7 @@ _MAX_DATE_FILTER_COLS = 6
 # ordinary dimension/operational tables while catching the giant fact tables.
 _GRAIN_PROBE_MAX_ROWS = 5_000_000
 
-from . import build
+from . import build, pii
 from . import dialects as D
 from .models import (
     Column,
@@ -144,6 +144,8 @@ class IntrospectReport:
     # a warehouse that is often load timestamps nobody asks a question about.
     large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
+    # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
+    suspected_columns: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
     files_unchanged: int = 0
@@ -166,6 +168,8 @@ class IntrospectReport:
             *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
+            *([f"suspected personal data (review): {', '.join(self.suspected_columns)}"]
+              if self.suspected_columns else []),
             "## notes",
             *[f"  - {n}" for n in self.notes],
             f"## files ({len(self.files_written)} written, {self.files_unchanged} already up to date)",
@@ -337,6 +341,7 @@ def introspect(
                 report.new_tables.append(_qualified(t))
                 continue
             m, change = _merge_table(old, t)
+            _drop_sample_findings(report, t.name, {c.name for c in old.columns})
             # Already large, so its filters were settled when the seed was first offered and the
             # merge keeps them: listing the fresh seed would ask again about a table already answered.
             if old.performance_hints and (old.performance_hints.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
@@ -650,6 +655,14 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
     return merged, {k: v for k, v in change.items() if v}
 
 
+def _drop_sample_findings(report: IntrospectReport, table: str, kept: set[str]) -> None:
+    """A refresh keeps an existing column as it was, so what the sample found on it was not applied."""
+    heads = {f"{table}.{c}" for c in kept}
+    report.suspected_columns = [s for s in report.suspected_columns if s.split(" (", 1)[0] not in heads]
+    report.notes = [n for n in report.notes
+                    if not (": flagged sensitive" in n and n.split(":", 1)[0] in heads)]
+
+
 def _retyped(c: Column, f: Column, change: dict) -> Column:
     """Column `c` at the database's new type, with what was derived from the old type re-derived.
 
@@ -958,7 +971,10 @@ def _build_table(
     # One live sample → date encoding/timezone AND choice_field skeletons for low-cardinality
     # coded columns (so catalog-mode coded columns get an enum skeleton the LLM labels, not
     # just the probe-mode path).
-    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows)
+    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, report=report)
+    for c in cols:
+        if c.sensitive:
+            c.choice_field = None  # its keys would be personal values written into the model
 
     column_groups = build.maybe_column_groups(cols)
     column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
@@ -1566,7 +1582,7 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None,
+    *, est_rows: Optional[int] = None, report: Optional[IntrospectReport] = None,
 ) -> None:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
     (b) a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns (the LLM
@@ -1584,11 +1600,13 @@ def _enrich_from_sample(
                     if c.choice_field is None and not c.primary_key and c.foreign_key is None
                     and c.type in ("integer", "string") and not _looks_time_named(c.name)
                     and not _NOT_CHOICE_NAME_RE.search(c.name)]
-    if not date_cands and not choice_cands:
+    pii_cands = [c for c in cols if c.type in ("string", "json", "date", "timestamp")]
+    if not date_cands and not choice_cands and not pii_cands:
         return
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
         return
+    _pii_from_sample(table, pii_cands, sample, report)
     for c in date_cands:
         df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
         if df:
@@ -1611,6 +1629,41 @@ def _enrich_from_sample(
         if cd:
             c.description = cd
             c.description_source = "metadata"  # authoritative deterministic fact (not an LLM guess)
+
+
+def _pii_from_sample(
+    table: str, cols: list[Column], sample: list[dict], report: Optional[IntrospectReport],
+) -> None:
+    """Flag or list personal data from the sampled VALUES: email-shaped values and JSON keys
+    flag the column, phone- and birth-date-shaped values list it as suspected. Only reasons
+    and key paths are recorded — never a sampled value."""
+    for c in cols:
+        values = [row.get(c.name) for row in sample]
+        paths = pii.json_pii_paths(table, values) if c.type in ("string", "json") else []
+        flag_note = None
+        if paths:
+            caveat = pii.json_pii_caveat(paths)
+            if caveat not in c.caveats:
+                c.caveats = [*c.caveats, caveat]
+            flag_note = f"{table}.{c.name}: flagged sensitive — JSON keys hold personal data ({', '.join(paths)})"
+        elif c.type == "string" and not c.sensitive and pii.looks_like_emails(values):
+            flag_note = f"{table}.{c.name}: flagged sensitive — its sampled values are email addresses"
+        if flag_note:
+            if not c.sensitive:
+                c.sensitive = True
+                if report is not None:
+                    report.sensitive_columns += 1
+            if report is not None:
+                report.notes.append(flag_note)
+            continue
+        if c.sensitive:
+            continue
+        caveat = pii.value_suspect_caveat(c.name, c.type, values)
+        if caveat:
+            if caveat not in c.caveats:
+                c.caveats = [*c.caveats, caveat]
+            if report is not None:
+                report.suspected_columns.append(f"{table}.{c.name} ({pii.VALUE_SUSPECT_CAVEATS[caveat]})")
 
 
 def _infer_value_type(values: list) -> str:
@@ -1637,6 +1690,9 @@ def _maybe_choice(values: list) -> Optional[dict[str, str]]:
     # so one value seen there says nothing about the column — and a list of one ("current_flag: N"
     # on a table that is mostly Y) is worse than none: whoever writes the SQL filters on it.
     if not (1 < len(distinct) <= ENUM_MAX_DISTINCT and len(vals) >= max(10, 2 * len(distinct))):
+        return None
+    # A list key is written into the model, so a column holding emails or phone numbers gets none.
+    if any(pii.personal_value(v) for v in distinct):
         return None
     # GUID/UUID-valued columns are join keys, not enums — a real enum (severity 1/2/3, status
     # open/closed) never holds identifier values. One such distinct value disqualifies the column.

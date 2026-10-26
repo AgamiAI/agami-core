@@ -19,6 +19,19 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Sensitive-column detection reads whole words, checks sampled values and looks inside JSON
+  (#516).** A new build split column names into words, so `phoneme_error_rate`, `mobile_sessions`,
+  `headphones_sold`, `adobe_campaign_id` and `ip_address` are no longer flagged (they stay in the
+  suspected list), while `customer_name`, `contact_name`, `first_name`, `customer_ssn`, `zip_code`,
+  `pan_number` and `e_mail` now are. Every other name the old rule flagged is still flagged. The
+  table's one sample (now taken for any table with text or JSON columns) also flags a column whose
+  values are mostly email addresses, lists phone-number-shaped and birth-date-shaped columns as
+  suspected (with a caveat on the column, shown by `sm sensitive` and the explorer's PII tab), and
+  flags a JSON column whose keys hold personal data, with a caveat naming the key paths
+  (`Contains personal data at: email, contact.phone`). A column holding emails or phone numbers no
+  longer gets a value list. No sampled value is written to the model or the report. An existing
+  model keeps its flags on refresh; no model field is added.
+
 - **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
   in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
   script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
