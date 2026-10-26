@@ -730,7 +730,7 @@ def _redshift_fk_runner(overlap_matches: bool):
     which is what the value-overlap probe decides."""
     def run(sql):
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        if "FROM pg_namespace" in s:  # Redshift's schema list (#558)
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"},
@@ -793,7 +793,7 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
 
     def runner(sql):
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        if "FROM pg_namespace" in s:  # Redshift's schema list (#558)
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             rows = [{"schema_name": "public", "table_name": "parent", "table_type": "BASE TABLE"}]
