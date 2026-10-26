@@ -1,0 +1,304 @@
+"""suggest-metrics proposes bindings that run and mean what they say (#514): identifiers quoted
+for the dialect, date arithmetic by column type, NULL-safe flag rates, durations that leave out
+rows ending before they start, no audit or planned/actual cross pairings — and the command prints
+before it writes, test-runs only with --profile, and keeps degenerate results out of the model."""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pydantic")
+pytest.importorskip("sqlglot")
+yaml = pytest.importorskip("yaml")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
+
+from semantic_model import build, cli  # noqa: E402
+from semantic_model import dialects as D  # noqa: E402
+from semantic_model import models as m  # noqa: E402
+
+
+def _table(*cols, rows=None, name="tickets"):
+    hints = m.PerformanceHints(estimated_row_count=rows) if rows is not None else None
+    return m.Table(name=name, schema="public", storage_connection="c", grain=["id"],
+                   description="t", performance_hints=hints,
+                   columns=[m.Column(name="id", type="integer", primary_key=True), *cols])
+
+
+def _mets(table, db="postgresql"):
+    return {x["name"]: x for x in build.suggest_metrics(table, D.get_dialect(db))}
+
+
+def _binding(met):
+    return next(iter(met["bindings"].values()))
+
+
+# --- the SQL each dialect gets ------------------------------------------------
+
+@pytest.mark.parametrize("db, expected", [
+    ("postgresql", '"IsActive"'), ("redshift", '"IsActive"'), ("snowflake", '"IsActive"'),
+    ("oracle", '"IsActive"'), ("mysql", "IsActive"), ("sqlite", "IsActive"),
+    ("duckdb", "IsActive"), ("bigquery", "IsActive"), ("sqlserver", "IsActive"),
+])
+def test_a_mixed_case_column_is_quoted_where_the_engine_folds_it(db, expected):
+    met = _mets(_table(m.Column(name="IsActive", type="boolean")), db)["tickets_IsActive_rate"]
+    assert _binding(met).startswith(f"AVG(CASE WHEN {expected} ")
+
+
+@pytest.mark.parametrize("name, db, expected", [
+    ("is_open", "postgresql", "is_open"), ("ORDERS", "snowflake", "ORDERS"),
+    ("orders", "snowflake", "orders"), ("order", "postgresql", '"order"'),
+    ("line items", "postgresql", '"line items"'), ("OrderItems", "mysql", "OrderItems"),
+])
+def test_identifiers_are_quoted_only_when_needed(name, db, expected):
+    assert D.get_dialect(db).ident(name) == expected
+
+
+_DATE_PAIR = (m.Column(name="opened_on", type="date"), m.Column(name="closed_on", type="date"))
+_TS_PAIR = (m.Column(name="opened_at", type="timestamp"),
+            m.Column(name="closed_at", type="timestamp"))
+
+
+@pytest.mark.parametrize("db, pair, days", [
+    # DATE minus DATE is already days on these engines; EXTRACT(EPOCH FROM <integer>) fails.
+    ("postgresql", _DATE_PAIR, "(closed_on - opened_on)"),
+    ("supabase", _DATE_PAIR, "(closed_on - opened_on)"),
+    ("duckdb", _DATE_PAIR, "(closed_on - opened_on)"),
+    ("postgresql", _TS_PAIR, "EXTRACT(EPOCH FROM (closed_at - opened_at)) / 86400.0"),
+    ("duckdb", _TS_PAIR, "EXTRACT(EPOCH FROM (closed_at - opened_at)) / 86400.0"),
+    ("bigquery", _DATE_PAIR, "DATE_DIFF(closed_on, opened_on, DAY)"),
+    ("bigquery", _TS_PAIR,
+     "TIMESTAMP_DIFF(CAST(closed_at AS TIMESTAMP), CAST(opened_at AS TIMESTAMP), DAY)"),
+    ("oracle", _DATE_PAIR, "(closed_on - opened_on)"),
+    ("oracle", _TS_PAIR, "(CAST(closed_at AS DATE) - CAST(opened_at AS DATE))"),
+    ("redshift", _DATE_PAIR, "DATEDIFF('day', opened_on, closed_on)"),
+    ("snowflake", _TS_PAIR, "DATEDIFF('day', opened_at, closed_at)"),
+    ("sqlite", _DATE_PAIR, "julianday(closed_on) - julianday(opened_on)"),
+])
+def test_durations_use_the_dialects_date_arithmetic_for_the_column_types(db, pair, days):
+    met = _mets(_table(*pair), db)["tickets_avg_duration_days"]
+    assert _binding(met) == f"AVG(CASE WHEN {days} >= 0 THEN {days} END)"
+
+
+def test_a_duration_leaves_out_rows_ending_before_they_start_and_says_so():
+    met = _mets(_table(*_DATE_PAIR))["tickets_avg_duration_days"]
+    assert "rows where closed_on is before opened_on are left out" in met["calculation"]
+    assert met["unit"] == "days"
+
+
+@pytest.mark.parametrize("col, db, expected", [
+    (m.Column(name="is_urgent", type="boolean"), "postgresql",
+     "AVG(CASE WHEN is_urgent THEN 1.0 WHEN NOT is_urgent THEN 0.0 END)"),
+    (m.Column(name="is_urgent", type="integer"), "postgresql",
+     "AVG(CASE WHEN is_urgent <> 0 THEN 1.0 WHEN is_urgent = 0 THEN 0.0 END)"),
+    # a BIT is not a predicate in T-SQL
+    (m.Column(name="is_urgent", type="boolean"), "sqlserver",
+     "AVG(CASE WHEN is_urgent <> 0 THEN 1.0 WHEN is_urgent = 0 THEN 0.0 END)"),
+])
+def test_flag_rates_leave_null_out_instead_of_counting_it_false(col, db, expected):
+    met = _mets(_table(col), db)["tickets_is_urgent_rate"]
+    assert _binding(met) == expected
+    assert "NULL are left out" in met["calculation"]
+
+
+def test_a_nullable_flag_rate_is_the_rate_among_rows_where_it_is_set():
+    """On a real engine: 16 true, 9 false, 25 NULL is 0.64 of the rows the flag applies to; the
+    old ELSE 0.0 binding gave 0.32, counting every NULL as false."""
+    met = _mets(_table(m.Column(name="is_urgent", type="boolean")), "sqlite")
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE tickets (id INTEGER, is_urgent BOOLEAN)")
+    con.executemany("INSERT INTO tickets VALUES (?, ?)",
+                    [(i, 1 if i < 16 else 0 if i < 25 else None) for i in range(50)])
+    sql = f"SELECT {_binding(met['tickets_is_urgent_rate'])} FROM tickets"
+    assert con.execute(sql).fetchone()[0] == pytest.approx(0.64)
+
+
+def test_a_sqlite_duration_runs_and_skips_negative_rows():
+    met = _mets(_table(*_DATE_PAIR), "sqlite")["tickets_avg_duration_days"]
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE tickets (id INTEGER, opened_on DATE, closed_on DATE)")
+    con.executemany("INSERT INTO tickets VALUES (?, ?, ?)", [
+        (1, "2024-01-01", "2024-01-03"), (2, "2024-01-01", "2024-01-05"),
+        (3, "2024-01-10", "2024-01-01")])   # ends before it starts → left out
+    assert con.execute(f"SELECT {_binding(met)} FROM tickets").fetchone()[0] == 3.0
+
+
+def test_duckdb_runs_the_date_pair_that_the_epoch_form_broke():
+    duckdb = pytest.importorskip("duckdb")
+    met = _mets(_table(*_DATE_PAIR), "duckdb")["tickets_avg_duration_days"]
+    con = duckdb.connect()
+    con.execute("CREATE TABLE tickets (id INTEGER, opened_on DATE, closed_on DATE)")
+    con.execute("INSERT INTO tickets VALUES (1, DATE '2024-01-01', DATE '2024-01-03'), "
+                "(2, DATE '2024-01-01', DATE '2024-01-05'), (3, DATE '2024-01-10', DATE '2024-01-01')")
+    assert con.execute(f"SELECT {_binding(met)} FROM tickets").fetchone()[0] == 3.0
+
+
+# --- which columns pair -------------------------------------------------------
+
+def test_an_audit_column_is_not_paired_when_a_real_start_exists():
+    mets = _mets(_table(m.Column(name="sys_created_on", type="timestamp"),
+                        m.Column(name="created_at", type="timestamp"),
+                        m.Column(name="opened_at", type="timestamp"),
+                        m.Column(name="resolved_at", type="timestamp")))
+    assert list(mets) == ["tickets_avg_duration_days"]
+    met = mets["tickets_avg_duration_days"]
+    assert "from opened_at to resolved_at" in met["calculation"]
+    assert met["_proposal"]["flags"] == []
+
+
+def test_an_audit_only_pairing_is_offered_flagged():
+    met = _mets(_table(m.Column(name="sys_created_on", type="timestamp"),
+                       m.Column(name="resolved_at", type="timestamp")))["tickets_avg_duration_days"]
+    assert [f["flag"] for f in met["_proposal"]["flags"]] == ["audit_column"]
+
+
+def test_planned_pairs_with_planned_and_actual_with_actual():
+    mets = _mets(_table(m.Column(name="planned_start", type="timestamp"),
+                        m.Column(name="planned_end", type="timestamp"),
+                        m.Column(name="actual_start", type="timestamp"),
+                        m.Column(name="actual_end", type="timestamp")))
+    assert set(mets) == {"tickets_avg_planned_duration_days", "tickets_avg_actual_duration_days"}
+    assert "from planned_start to planned_end" in mets["tickets_avg_planned_duration_days"]["calculation"]
+    assert "from actual_start to actual_end" in mets["tickets_avg_actual_duration_days"]["calculation"]
+    # a planned start with only an actual end is no duration at all
+    assert _mets(_table(m.Column(name="planned_start", type="timestamp"),
+                        m.Column(name="actual_end", type="timestamp"))) == {}
+
+
+def test_an_ambiguous_pairing_is_offered_flagged_not_picked():
+    mets = _mets(_table(m.Column(name="opened_at", type="timestamp"),
+                        m.Column(name="resolved_at", type="timestamp"),
+                        m.Column(name="closed_at", type="timestamp")))
+    assert set(mets) == {"tickets_avg_days_opened_at_to_resolved_at",
+                         "tickets_avg_days_opened_at_to_closed_at"}
+    for met in mets.values():
+        assert [f["flag"] for f in met["_proposal"]["flags"]] == ["ambiguous_pairing"]
+
+
+def test_a_tiny_table_flags_its_proposals_low_confidence():
+    col = m.Column(name="is_urgent", type="boolean")
+    assert _mets(_table(col, rows=12))["tickets_is_urgent_rate"]["_proposal"]["flags"][0]["flag"] \
+        == "low_confidence"
+    assert _mets(_table(col, rows=5000))["tickets_is_urgent_rate"]["_proposal"]["flags"] == []
+
+
+# --- the command: dry run, --write, --profile -----------------------------------
+
+def _model(root: Path, storage_type: str = "SQLite") -> None:
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (root / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "p", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": storage_type}))
+    (root / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": "main", "table": "tickets"}]}))
+    (root / "subject_areas" / "s" / "tables" / "tickets.yaml").write_text(yaml.safe_dump({
+        "name": "tickets", "schema": "main", "storage_connection": "c", "grain": ["id"],
+        "description": "t",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "is_urgent", "type": "boolean"},
+                    {"name": "is_test", "type": "boolean"},      # constant in the data
+                    {"name": "is_gone", "type": "boolean"}]}))   # dropped from the database
+
+
+def _db(path: Path) -> None:
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE tickets (id INTEGER PRIMARY KEY, is_urgent BOOLEAN, is_test BOOLEAN)")
+    con.executemany("INSERT INTO tickets VALUES (?, ?, 0)",
+                    [(i, 1 if i % 3 == 0 else None if i % 3 == 1 else 0) for i in range(90)])
+    con.commit()
+    con.close()
+
+
+def _run(args):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cli.main(args)
+    return rc, json.loads(buf.getvalue())
+
+
+def _canned_runner(db: Path, seen: list[str]):
+    def run(sql: str) -> list[dict]:
+        seen.append(sql)
+        con = sqlite3.connect(db)
+        try:
+            cur = con.execute(sql)
+            names = [d[0] for d in cur.description]
+            return [{k: "" if v is None else str(v) for k, v in zip(names, r)} for r in cur]
+        finally:
+            con.close()
+    return run
+
+
+def _metrics_dir(root: Path) -> Path:
+    return root / "subject_areas" / "s" / "metrics"
+
+
+def test_the_default_is_a_dry_run_that_writes_nothing(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert rc == 0 and out["dry_run"] and out["written"] == 0, out
+    assert not _metrics_dir(tmp_path).exists()
+    assert {p["name"] for p in out["proposals"]} == {
+        "tickets_is_urgent_rate", "tickets_is_test_rate", "tickets_is_gone_rate"}
+    p = out["proposals"][0]
+    assert {"binding", "calculation", "source_table", "flags"} <= set(p)
+    assert "NOT test-run" in out["note"] and not out["test_run"]
+
+
+def test_write_saves_the_proposals_without_the_proposal_details(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write"])
+    assert rc == 0 and out["written"] == 3, out
+    met = yaml.safe_load((_metrics_dir(tmp_path) / "tickets_is_urgent_rate.yaml").read_text())
+    assert "_proposal" not in met and met["review_state"] == "unreviewed"
+
+
+def test_profile_test_runs_and_keeps_broken_and_degenerate_bindings_out(tmp_path, monkeypatch):
+    from semantic_model import introspect
+    _model(tmp_path / "m")
+    _db(tmp_path / "db.sqlite")
+    seen: list[str] = []
+    monkeypatch.setattr(introspect, "make_execute_sql_runner",
+                        lambda profile, **kw: _canned_runner(tmp_path / "db.sqlite", seen))
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", "--write"])
+    assert rc == 0 and out["test_run"], out
+    by = {p["name"]: p for p in out["proposals"]}
+    assert "is_gone" in by["tickets_is_gone_rate"]["error"]            # the binding errors
+    assert [f["flag"] for f in by["tickets_is_test_rate"]["flags"]] == ["degenerate"]
+    assert by["tickets_is_urgent_rate"]["test_run"]["value"] == pytest.approx(0.5)
+    assert sorted(f.name for f in _metrics_dir(tmp_path / "m").iterdir()) == [
+        "tickets_is_urgent_rate.yaml"]
+    # bounded: the statement reads a capped sample of only the columns the bindings need
+    assert "LIMIT 10000" in seen[0] and "SELECT *" not in seen[0]
+
+
+def test_a_named_flagged_proposal_is_written_but_a_named_broken_one_never(tmp_path, monkeypatch):
+    from semantic_model import introspect
+    _model(tmp_path / "m")
+    _db(tmp_path / "db.sqlite")
+    monkeypatch.setattr(introspect, "make_execute_sql_runner",
+                        lambda profile, **kw: _canned_runner(tmp_path / "db.sqlite", []))
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", "--write",
+                    "--names", "tickets_is_test_rate", "tickets_is_gone_rate"])
+    assert rc == 0, out
+    assert sorted(f.name for f in _metrics_dir(tmp_path / "m").iterdir()) == [
+        "tickets_is_test_rate.yaml"]
+
+
+def test_a_storage_type_with_no_dialect_fails_instead_of_using_postgres(tmp_path, monkeypatch):
+    _model(tmp_path)
+    monkeypatch.delitem(D._REGISTRY, "sqlite")
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert rc == 2 and "SQLite" in out["error"], out

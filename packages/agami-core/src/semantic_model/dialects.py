@@ -32,6 +32,7 @@ NOT live-verified — treat them as such until exercised against a real instance
 
 from __future__ import annotations
 
+import re
 from typing import Callable, Optional
 
 from .models import ColumnType, StorageType
@@ -80,6 +81,20 @@ def normalize_type(raw: str, *, numeric_scale: Optional[int] = None) -> ColumnTy
     return "string"
 
 
+# Words most engines reserve, so a column named after one must be quoted.
+_RESERVED_WORDS = frozenset({
+    "all", "and", "any", "as", "asc", "between", "by", "case", "cast", "check", "column",
+    "constraint", "create", "cross", "current_date", "current_time", "current_timestamp",
+    "current_user", "default", "delete", "desc", "distinct", "drop", "else", "end", "except",
+    "exists", "false", "fetch", "for", "foreign", "from", "full", "grant", "group", "having", "in",
+    "inner", "insert", "intersect", "into", "is", "join", "left", "like", "limit", "natural",
+    "not", "null", "offset", "on", "or", "order", "outer", "primary", "references", "right",
+    "select", "session_user", "table", "then", "to", "true", "union", "unique", "update", "user",
+    "using", "values", "when", "where", "window", "with",
+})
+_PLAIN_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _esc(s: str) -> str:
     """Escape a string literal for embedding in SQL (single-quote doubling)."""
     return s.replace("'", "''")
@@ -98,11 +113,27 @@ class Dialect:
     # would end the literal early (#439). Introspection reads skip the model pass, so this escaping
     # is their remaining defence.
     backslash_escapes: bool = False
+    # How the engine folds an unquoted identifier: "lower", "upper", or None where it matches
+    # names case-insensitively as written.
+    folds_unquoted: Optional[str] = None
 
     # --- identifier / literal helpers ---
 
     def quote_ident(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
+
+    def ident(self, name: str) -> str:
+        """`name` for an expression, quoted only when this engine needs it: special characters, a
+        reserved word, or a case the engine would fold away. A plain name stays bare, so a binding
+        reads the way a person would write it. On an upper-folding engine an all-lower name stays
+        bare too, as hand-written models spell upper-case catalog names that way."""
+        if not _PLAIN_IDENT_RE.match(name) or name.lower() in _RESERVED_WORDS:
+            return self.quote_ident(name)
+        if self.folds_unquoted == "lower" and name != name.lower():
+            return self.quote_ident(name)
+        if self.folds_unquoted == "upper" and name not in (name.lower(), name.upper()):
+            return self.quote_ident(name)
+        return name
 
     def quote_lit(self, s: str) -> str:
         if self.backslash_escapes:
@@ -114,11 +145,22 @@ class Dialect:
             return f"{self.quote_ident(schema)}.{self.quote_ident(table)}"
         return self.quote_ident(table)
 
-    def duration_days_expr(self, start: str, end: str) -> str:
-        """Per-row 'days between two timestamps' (bare column names) for an avg-duration metric.
-        Postgres-family default (interval epoch); overridden where the dialect needs a
-        DATEDIFF / TIMESTAMP_DIFF form."""
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
+        """Per-row 'days between two columns' (identifiers as written) for an avg-duration metric.
+        `start_type`/`end_type` are the columns' ColumnTypes. Postgres-family default: DATE minus
+        DATE is already a whole number of days, and EXTRACT(EPOCH ...) of that integer fails, so
+        only a pair with a timestamp goes through the interval's epoch."""
+        if start_type == end_type == "date":
+            return f"({end} - {start})"
         return f"EXTRACT(EPOCH FROM ({end} - {start})) / 86400.0"
+
+    def flag_rate_expr(self, col: str, *, boolean: bool) -> str:
+        """Per-row 1.0 / 0.0 for a flag column, NULL where the flag is NULL, so AVG of it is the
+        rate among the rows the flag applies to rather than counting a NULL as false."""
+        if boolean:
+            return f"CASE WHEN {col} THEN 1.0 WHEN NOT {col} THEN 0.0 END"
+        return f"CASE WHEN {col} <> 0 THEN 1.0 WHEN {col} = 0 THEN 0.0 END"
 
     # --- row-limit syntax (probe mode) ---
 
@@ -252,6 +294,7 @@ class Dialect:
 
 class PostgreSQL(Dialect):
     name = "PostgreSQL"
+    folds_unquoted = "lower"
 
     # Keys come from pg_constraint, not information_schema: Postgres shows a constraint in
     # table_constraints only to the table's owner or a role holding a privilege other than SELECT,
@@ -341,7 +384,8 @@ class Redshift(PostgreSQL):
             "ORDER BY table_schema, table_name, ordinal_position"
         )
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -366,7 +410,8 @@ class MySQL(Dialect):
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF({end}, {start})"
 
     def sql_foreign_keys(self, schema: str) -> str:
@@ -391,10 +436,12 @@ class MySQL(Dialect):
 
 class Snowflake(Dialect):
     name = "Snowflake"
+    folds_unquoted = "upper"
     backslash_escapes = True
     _SYS_SCHEMAS = ("INFORMATION_SCHEMA",)
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -417,7 +464,8 @@ class Databricks(Dialect):
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"datediff({end}, {start})"
 
 
@@ -425,7 +473,8 @@ class Trino(Dialect):
     name = "Trino"
     fk_enforced = False  # Trino generally has no constraints -> probe FKs
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"date_diff('day', {start}, {end})"
 
     def sql_primary_keys(self, schema: str, table: str) -> str:
@@ -448,8 +497,13 @@ class SQLServer(Dialect):
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF(day, {start}, {end})"
+
+    def flag_rate_expr(self, col: str, *, boolean: bool) -> str:
+        # A BIT is not a predicate in T-SQL: `CASE WHEN flag THEN` is a syntax error.
+        return super().flag_rate_expr(col, boolean=False)
 
     def sql_foreign_keys(self, schema: str) -> str:
         # SQL Server's constraint_column_usage works for FK targets.
@@ -482,8 +536,13 @@ class BigQuery(Dialect):
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "") + "`"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
-        return f"TIMESTAMP_DIFF({end}, {start}, DAY)"
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
+        if start_type == end_type == "date":
+            return f"DATE_DIFF({end}, {start}, DAY)"
+        # TIMESTAMP_DIFF takes neither a DATE nor a DATETIME (both normalize to these types), and
+        # a CAST of a TIMESTAMP to TIMESTAMP is a no-op.
+        return f"TIMESTAMP_DIFF(CAST({end} AS TIMESTAMP), CAST({start} AS TIMESTAMP), DAY)"
 
     def qualified(self, schema: Optional[str], table: str) -> str:
         # BigQuery: dataset.table, backtick-wrapped as one path.
@@ -554,7 +613,8 @@ class BigQuery(Dialect):
 class SQLite(Dialect):
     name = "SQLite"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"julianday({end}) - julianday({start})"
 
     def sql_schemas(self) -> str:
@@ -609,9 +669,14 @@ class SQLite(Dialect):
 class Oracle(Dialect):
     name = "Oracle"
     limit_style = "fetch"
+    folds_unquoted = "upper"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
-        return f"({end} - {start})"  # Oracle DATE subtraction yields days
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
+        if start_type == end_type == "date":
+            return f"({end} - {start})"  # Oracle DATE subtraction yields days
+        # TIMESTAMP minus TIMESTAMP is an INTERVAL, which AVG rejects.
+        return f"(CAST({end} AS DATE) - CAST({start} AS DATE))"
 
     def sql_schemas(self) -> str:
         return (
