@@ -392,6 +392,20 @@ def test_an_oversized_join_cluster_is_split_below_the_area_limit():
     assert V.validate(org).ok
 
 
+def test_two_hubs_beside_full_clusters_do_not_raise():
+    # Both hubs end up alone with every neighbour group full; the first is pooled (its group
+    # removed) before the second looks at it as a neighbour.
+    clusters = [[f"c{k}_t{i}" for i in range(build.SINGLE_AREA_MAX)] for k in range(3)]
+    rels = [_j("hub_a", "hub_b")]
+    for names in clusters:
+        rels += [_j(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+        rels += [_j(n, h) for n in names for h in ("hub_a", "hub_b")]
+    tables = [_t("hub_a"), _t("hub_b"), *(_t(n) for names in clusters for n in names)]
+    groups = build.group_by_joins(tables, rels)
+    assert sum(len(g) for g in groups) == len(tables)
+    assert all(len(g) <= build.SINGLE_AREA_MAX for g in groups)
+
+
 def test_shared_words_break_ties_between_equally_joined_links():
     tables = [_t("a_hub", "warehouse stock"), _t("b_x", "warehouse bins"), _t("c_y", "invoice lines")]
     rels = [_j("b_x", "a_hub"), _j("c_y", "a_hub")]

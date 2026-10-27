@@ -20,7 +20,11 @@ below corresponds to one such version.
   the target area when the model doesn't have it. A join that now spans two areas becomes a
   cross-area join, and a cross-area join whose two tables now share an area moves into it. Metrics
   and entities on that table move with it when every table they read is now in the new area; one
-  that also reads a table outside it stays, and the result's `notes` names it. The batch is validated and undone on failure, logged with
+  that also reads a table outside it stays, and the result's `notes` names it; one left in another
+  area moves too once all its tables have reached the new area by separate moves. A join that names
+  its table by a bare name shared by two schemas is resolved by the area it sits in and gets the
+  schema written; a move with a join on the table that can't be resolved is refused, with nothing
+  written. The batch is validated and undone on failure (folders it created included), logged with
   both areas, and committed when the model is its own git repository. The model explorer has a
   **Move to area** control on every table that queues the op.
 
@@ -43,7 +47,8 @@ below corresponds to one such version.
   was reported applied and validated and then never served. The error now lists the model's areas.
   `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
   `_entities.yaml`), validated like any other add, and those items can be signed off through
-  `sm curate`.
+  `sm curate`. Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
+  never defined twice.
 
 ### Added
 

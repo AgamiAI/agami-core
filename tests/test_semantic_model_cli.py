@@ -1035,6 +1035,37 @@ def test_add_to_the_cross_cutting_area_is_loaded_and_served(tmp_path, monkeypatc
     assert load_datasource(root).cross_subject_area_metrics[0].review_state == "approved"
 
 
+def test_re_adding_an_inline_cross_cutting_item_replaces_it_in_place(tmp_path):
+    from semantic_model import curate
+    from semantic_model.loader import load_datasource
+
+    _model(tmp_path)
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [{**_SPANNING, "description": "old"}]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [{**_SPANNING, "description": "new"}])
+    assert res.validated and res.applied, res.as_dict()
+    assert not (tmp_path / "cross_subject_area_metrics.yaml").exists()
+    assert [m.description for m in load_datasource(tmp_path).cross_subject_area_metrics] == ["new"]
+
+
+def test_a_failed_cross_cutting_write_restores_both_files(tmp_path, monkeypatch):
+    import types
+
+    from semantic_model import curate
+
+    _model(tmp_path)
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [_SPANNING]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    (tmp_path / "cross_subject_area_metrics.yaml").write_text(yaml.safe_dump({"metrics": [_SPANNING]}))
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.yaml")}
+    monkeypatch.setattr(curate.V, "validate", lambda *a, **k: types.SimpleNamespace(ok=False, errors=["forced"]))
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [{**_SPANNING, "description": "new"}])
+    assert res.errors == ["forced"] and not res.applied
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.yaml")} == before
+
+
 def test_add_refuses_a_cross_cutting_item_that_breaks_the_model(tmp_path):
     _model(tmp_path)
     before = (tmp_path / "datasource.yaml").read_text()

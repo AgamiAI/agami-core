@@ -509,7 +509,8 @@ def group_by_joins(tables: list[Table], rels: list[Relationship],
     pooled: dict[int, list[int]] = defaultdict(list)
     for i in [g for g, members in groups.items() if len(members) == 1]:
         near = [(w, len(words[i] & set().union(*(words[m] for m in groups[owner[k]]))), -owner[k], owner[k])
-                for k, w in weight[i].items() if len(groups[owner[k]]) > 1 and len(groups[owner[k]]) < max_size]
+                for k, w in weight[i].items()
+                if owner[k] in groups and 1 < len(groups[owner[k]]) < max_size]  # a pooled one's is gone
         del groups[i]
         if near:
             g = max(near)[3]

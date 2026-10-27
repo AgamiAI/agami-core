@@ -232,3 +232,72 @@ def test_a_metric_follows_once_every_table_it_reads_has_moved(tmp_path):
     assert {"units_sold", "units_per_order"} <= {m.name for m in catalog.metrics}
     assert {"line", "order"} <= {e.name for e in catalog.entities}
     assert "left in sales: metric units_per_order also reads orders" in res.notes   # after the first move
+
+
+def _with_archive(root: Path, *, cross_from: str = "archive") -> Path:
+    """An `archive` area with its own `orders` (schema archive), joined to `buyers` by bare name."""
+    _area(root, "archive", ["orders", "buyers"], schema="archive")
+    _table(root, "archive", "orders", ["buyer_id"], schema="archive")
+    _table(root, "archive", "buyers", [], schema="archive")
+    (root / "subject_areas" / "archive" / "relationships.yaml").write_text(yaml.safe_dump({
+        "relationships": [_join("orders", "buyer_id", "buyers")]}))
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/archive")
+    ds["cross_subject_area_relationships"].append(
+        _join("orders", "product_id", "products", from_subject_area=cross_from, to_subject_area="catalog"))
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    return root
+
+
+def test_a_bare_join_follows_the_table_when_two_schemas_share_its_name(tmp_path):
+    root = _with_archive(_model(tmp_path))
+    res = _move(root, "orders", "catalog", area="archive", schema="archive")
+    assert res.validated and res.applied, res.as_dict()
+    org = loader.load_datasource(root)
+    intra, cross = _joins(org)
+    assert ("catalog", "archive", "orders", "buyers") in cross
+    edge = next(r for r in org.cross_subject_area_relationships if r.to_table == "buyers")
+    assert edge.from_schema == "archive"   # written, so the join keeps meaning this orders
+    # the cross-area edge declared from archive is now inside catalog
+    assert ("catalog", "orders", "products") in intra
+    assert next(r for r in org.subject_area("catalog").relationships if r.to_table == "products").from_schema == "archive"
+    assert ("sales", "orders", "customers") in intra   # the other schema's orders is untouched
+    assert not org.subject_area("archive").relationships
+
+
+def test_a_move_is_refused_when_a_join_on_the_table_cannot_be_resolved(tmp_path):
+    # the cross-area edge says its `orders` is in catalog, which has none, and two schemas have one
+    root = _with_archive(_model(tmp_path), cross_from="catalog")
+    before = {p: p.read_bytes() for p in root.rglob("*.yaml")}
+    res = _move(root, "orders", "people", area="archive", schema="archive")
+    assert not res.applied and "can't move 'orders'" in res.skipped[0]["reason"], res.as_dict()
+    assert {p: p.read_bytes() for p in root.rglob("*.yaml")} == before
+    assert not (root / "subject_areas" / "people").exists()
+
+
+def test_a_failed_move_into_a_new_area_can_be_retried(tmp_path, monkeypatch):
+    import types
+
+    root = _model(tmp_path)
+    real = curate.V.validate
+    monkeypatch.setattr(curate.V, "validate", lambda *a, **k: types.SimpleNamespace(ok=False, errors=["forced"]))
+    assert not _move(root, "customers", "people").applied
+    assert not (root / "subject_areas" / "people").exists()   # its folders are removed too
+    (root / "subject_areas" / "people" / "metrics").mkdir(parents=True)   # an empty leftover doesn't block
+    monkeypatch.setattr(curate.V, "validate", real)
+    res = _move(root, "customers", "people")
+    assert res.validated and res.applied, res.as_dict()
+    assert _where(loader.load_datasource(root), "customers") == ["people"]
+
+
+def test_a_metric_follows_its_tables_when_they_arrive_by_separate_moves(tmp_path):
+    root = _model(tmp_path)
+    assert _move(root, "order_items", "catalog").applied
+    assert _move(root, "orders", "fulfilment").applied
+    res = _move(root, "order_items", "fulfilment")
+    assert res.validated, res.as_dict()
+    org = loader.load_datasource(root)
+    assert "units_per_order" in {m.name for m in org.subject_area("fulfilment").metrics}
+    assert "order" in {e.name for e in org.subject_area("fulfilment").entities}
+    assert "units_per_order" not in {m.name for m in org.subject_area("sales").metrics}
+    assert "metric units_per_order moved from sales: every table it reads is now in fulfilment" in res.notes
