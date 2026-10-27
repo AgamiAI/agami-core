@@ -129,6 +129,28 @@ across schemas. Table and column
 names are quoted where the engine needs it, so a mixed-case table such as `"OrderLines"` works on
 PostgreSQL.
 
+`sm add` and `sm curate` refuse a new or edited binding that puts an aggregate inside another in
+the same SELECT, including in a `WITHIN GROUP (ORDER BY ...)` or `FILTER (WHERE ...)` clause
+(`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount))`), because the database refuses every
+query that uses it. An aggregate over a subquery that groups first is fine. A metric already in the
+model that nests aggregates gets a `metric_binding_nested_aggregate` warning instead.
+
+**An average of the values that exist.** A missing value is not a zero, so don't fill it before
+averaging. For one column write `AVG(col)`: it already leaves missing values out. For several
+columns, divide the sum of the present values by the count of the present values, without a
+`VALUES` list or a per-row subquery:
+
+```yaml
+bindings:
+  PostgreSQL: "SUM(COALESCE(score_a, 0) + COALESCE(score_b, 0)) / NULLIF(COUNT(score_a) + COUNT(score_b), 0)"
+```
+
+The zero added for a missing score is not counted in the denominator, so it changes nothing, and
+`metric_null_filled` does not warn on this shape: a `COALESCE` in the numerator whose denominator
+counts only the present values of the same columns (`COUNT(col)`, or
+`SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`). `AVG(COALESCE(col, 0))` still warns: it
+averages the invented zeros.
+
 ## Entity
 
 Fields: `name`, `plural`, `other_names`, `description`, `maps_to` (one entry per

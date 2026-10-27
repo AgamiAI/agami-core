@@ -3358,10 +3358,11 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
         # our own rules. The parent cannot rebuild it from the code, since only the child saw which
         # construct the database rejected; an exact match means no other byte of the stream passes.
         if kind == "syntax":
-            from execute_sql import SQLSTATE_MESSAGE_PATTERNS
+            from execute_sql import NESTED_AGGREGATE_MESSAGE, SQLSTATE_MESSAGE_PATTERNS
             from sql_dialect_rules import FIX_MESSAGES
 
-            fix = next((line.strip() for line in text.splitlines() if line.strip() in FIX_MESSAGES), None)
+            fixed = FIX_MESSAGES | {NESTED_AGGREGATE_MESSAGE}
+            fix = next((line.strip() for line in text.splitlines() if line.strip() in fixed), None)
             if fix is not None:
                 return fix
             # The same exactness for a SQLSTATE sentence (#561): a whole line built from one of our
@@ -3383,13 +3384,14 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
         # library logged before the failure line included. The child writes one of two kinds of
         # sentence for it: the generic one, rebuilt here, or a SQLSTATE sentence (#561), relayed only
         # as an exact match like the `syntax` ones above.
-        from execute_sql import SQLSTATE_MESSAGE_PATTERNS
+        from execute_sql import NESTED_AGGREGATE_MESSAGE, SQLSTATE_MESSAGE_PATTERNS
 
         coded = next(
             (
                 line.strip()
                 for line in text.splitlines()
-                if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+                if line.strip() == NESTED_AGGREGATE_MESSAGE
+                or any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
             ),
             None,
         )

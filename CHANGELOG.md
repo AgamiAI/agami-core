@@ -12,6 +12,21 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+- **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
+  query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
+  every query that used it, while the check for derived metrics refused a legal aggregate over a
+  subquery and missed a `SUM` inside a percentile's `WITHIN GROUP`. The rule is now judged per
+  SELECT: an aggregate directly inside another, or in its `WITHIN GROUP` or `FILTER` clause, is
+  refused; an aggregate over a derived table or a scalar subquery is not. `sm add` and a `curate`
+  edit of a metric's `bindings` refuse such a binding with the reason, and write nothing for it.
+  A metric already in a model gets a `metric_binding_nested_aggregate` warning, never an error, so
+  no model that validated before stops validating; a derived metric nested in its argument is still
+  the `derived_metric` error it was. `resolve_metrics` names why a matched metric will not run, and
+  a database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
+  Snowflake, BigQuery, Databricks, SQL Server and MySQL) is answered with a sentence naming the
+  rewrite, with the same failure kind and exit code as before. `metric_null_filled` no longer warns
+  on an average of the values present, `SUM(COALESCE(score, 0)) / NULLIF(COUNT(score), 0)`, and the
+  metric guidance shows that form for several columns.
 - **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
   fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
   alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out

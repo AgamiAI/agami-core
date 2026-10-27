@@ -182,3 +182,36 @@ def test_a_qualifier_in_the_sql_picks_its_table():
 def test_the_query_time_rule_carries_the_sourced_definition_exception():
     text = OD.derived_context(_org("AVG(staff_count)"))
     assert "or the metric's calculation says the definition it follows counts it as 0" in text
+
+
+# --- An average of the values that exist (#519) ---------------------------------------------
+
+
+@pytest.mark.parametrize("binding", [
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(staff_count), 0)",
+    "SUM(COALESCE(staff_count, 0) + COALESCE(volunteers, 0)) "
+    "/ NULLIF(COUNT(staff_count) + COUNT(volunteers), 0)",
+    "SUM(COALESCE(staff_count, 0)) "
+    "/ NULLIF(SUM(CASE WHEN staff_count IS NOT NULL THEN 1 ELSE 0 END), 0)",
+])
+def test_a_fill_divided_by_the_count_of_present_values_is_left_alone(binding):
+    # the zero adds to neither side, so the result is the average of the values that exist
+    assert _warnings(_org(binding)) == []
+
+
+@pytest.mark.parametrize("binding", [
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(*), 0)",  # counts the missing rows too
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(DISTINCT staff_count), 0)",
+    "SUM(COALESCE(staff_count, 0) + COALESCE(volunteers, 0)) / NULLIF(COUNT(volunteers), 0)",
+    "COUNT(staff_count) / SUM(COALESCE(staff_count, 0))",  # the fill is the denominator
+])
+def test_a_denominator_that_does_not_count_only_present_values_still_warns(binding):
+    assert len(_warnings(_org(binding))) == 1
+
+
+def test_the_skill_and_the_shape_doc_show_the_present_values_form():
+    shape = (REPO_ROOT / "plugins" / "agami" / "shared" / "metric-entity-shape.md").read_text(
+        encoding="utf-8")
+    for text in (SKILL, shape):
+        assert "COUNT(a) + COUNT(b)" in text or "COUNT(score_a) + COUNT(score_b)" in text
+        assert "`VALUES` list" in text

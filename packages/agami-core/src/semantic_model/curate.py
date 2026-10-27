@@ -661,6 +661,10 @@ def _apply_one(root: Path, op: dict, signer, role,
         path, key, doc, item = _find_item(root, kind, name, area)
         _snapshot(backups, path)
         before = _set_trust(item, op, new_state, signer, role)
+        if kind == "metric" and action == "edit" and op.get("field") == "bindings":
+            reason = _nested_aggregate_refusal(root, item)
+            if reason:
+                raise ValueError(reason)  # before the dump: nothing is written for this op
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
         return path, before
 
@@ -1067,6 +1071,28 @@ def _slug(name: str) -> str:
     return item_file_stem(name)
 
 
+def _nested_aggregate_refusal(root: Path, metric: "Metric | dict") -> Optional[str]:
+    """Why a new or edited metric binding is refused for nesting aggregates (#519), or None.
+
+    The validator only warns on this, so an existing model keeps validating; a binding being
+    written now is refused, since the database would refuse every query that uses it."""
+    from . import derived as D
+
+    try:
+        met = metric if isinstance(metric, Metric) else Metric.model_validate(metric)
+    except Exception:
+        return None  # a structural problem is the validator's to report
+    org, idx = None, {}
+    if D.is_derived(met) or D.is_second_order(met):
+        try:
+            org = load_datasource(root, include_rejected=True)
+            idx = D.metric_index(org)
+        except Exception:
+            pass
+    problems = D.metric_binding_problems(met, {**idx, met.name: met}, org)
+    return D.nested_aggregate_reason(met.name, problems) if problems else None
+
+
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
                 *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
     """Create metric/entity YAML files from structured dicts — one validated,
@@ -1095,6 +1121,10 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
             obj = Model(**clean)  # structural validation (required fields, enums, …)
         except Exception as e:
             res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
+            continue
+        reason = _nested_aggregate_refusal(root, obj) if kind == "metric" else None
+        if reason:
+            res.skipped.append({"item": obj.name, "reason": reason})
             continue
         path = dest / f"{_slug(obj.name)}.yaml"
         backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))

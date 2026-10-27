@@ -23,7 +23,7 @@ declared is still refused — illegal `AVG(SUM(...))` is never emitted.
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .models import bare_name, table_key
 
@@ -87,36 +87,156 @@ def expand_binding(metric, storage_type: str, idx: dict, *, _stack: Optional[lis
         return "(" + inner + ")"
 
     expanded = PLACEHOLDER_RE.sub(_sub, binding)
-    if _has_nested_aggregate(expanded):
-        raise DerivedError(
+    problems = binding_problems(expanded, storage_type)
+    if problems:
+        raise NestedAggregateError(
             f"metric {metric.name!r} composes an aggregate of an aggregate "
-            "(second-order statistic) but has no `inner_grain` declared. To support it, set "
-            "`inner_grain` (the dimension the base is grouped by) and bind it as "
-            "OUTERAGG({base}) — the CTE is then synthesized (see synthesize_second_order)."
+            f"({problems[0]}; a second-order statistic) but has no `inner_grain` declared. To "
+            "support it, set `inner_grain` (the dimension the base is grouped by) and bind it as "
+            "OUTERAGG({base}) — the CTE is then synthesized (see synthesize_second_order).",
+            problems,
         )
     return expanded
 
 
-def _has_nested_aggregate(sql_fragment: str) -> bool:
-    """True if `sql_fragment` contains an aggregate inside another aggregate
-    (e.g. AVG(SUM(x))) — illegal SQL and the signature of a case-(b) second-order
-    statistic. Best-effort via sqlglot; if it can't parse, don't block."""
+class BindingProblem(NamedTuple):
+    """One aggregate written inside another aggregate of the same SELECT."""
+
+    outer: str    # the enclosing aggregate's name, e.g. "AVG"
+    inner: str    # the nested aggregate's name, e.g. "SUM"
+    clause: str   # where it sits: "argument", "within_group" or "filter"
+
+    def __str__(self) -> str:
+        where = {"within_group": " WITHIN GROUP (ORDER BY ...)",
+                 "filter": " FILTER (WHERE ...)"}.get(self.clause, "")
+        return f"{self.inner}(...) is nested inside {self.outer}(...){where}"
+
+
+def _aggregate_unit(agg):
+    """The aggregate together with its WITHIN GROUP / FILTER / IGNORE NULLS wrappers. The database
+    reads those clauses in the aggregate's own scope, so an aggregate written in one is nested just
+    like one in the argument."""
+    from sqlglot import expressions as exp
+
+    unit = agg
+    while isinstance(unit.parent, (exp.WithinGroup, exp.Filter, exp.IgnoreNulls, exp.RespectNulls)):
+        unit = unit.parent
+    return unit
+
+
+def _is_aggregate(node) -> bool:
+    """An aggregate call of this SELECT: not a window function, and not the two-argument scalar
+    MAX(a, b) / MIN(a, b) some engines have."""
+    from sqlglot import expressions as exp
+
+    if not isinstance(node, exp.AggFunc):
+        return False
+    if isinstance(node, (exp.Max, exp.Min)) and node.expressions:
+        return False
+    return not isinstance(_aggregate_unit(node).parent, exp.Window)
+
+
+def _nested_in(unit, agg):
+    """The aggregates directly inside `unit` in the same SELECT. A subquery is a scope of its own
+    and is not entered, and neither is a window function: an aggregate over a derived table or a
+    scalar subquery is legal SQL."""
+    from sqlglot import expressions as exp
+
+    for child in unit.iter_expressions():
+        if isinstance(child, (exp.Query, exp.Window)):
+            continue
+        if child is not agg and _is_aggregate(child):
+            yield child
+            continue
+        yield from _nested_in(child, agg)
+
+
+def _clause_of(inner, agg) -> str:
+    """Whether `inner` sits in `agg`'s argument or in its WITHIN GROUP / FILTER clause."""
+    from sqlglot import expressions as exp
+
+    node = inner.parent
+    while node is not None and node is not agg:
+        if isinstance(node, exp.WithinGroup):
+            return "within_group"
+        if isinstance(node, exp.Filter):
+            return "filter"
+        node = node.parent
+    return "argument"
+
+
+def binding_problems(sql: str, storage_type: str) -> list[BindingProblem]:
+    """The one rule for whether a metric binding nests aggregates (#519), judged per SELECT.
+
+    An aggregate directly inside another aggregate of the same SELECT is refused by every engine
+    (`AVG(SUM(a))`), and so is one in the aggregate's WITHIN GROUP or FILTER clause
+    (`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(a))`). An aggregate over a derived table or a
+    scalar subquery is legal and is not a problem. Parsed in the binding's own engine; a binding
+    that does not parse (a `{placeholder}`, an engine with no grammar) yields nothing, so this never
+    blocks on what it cannot read."""
     try:
         import sqlglot
-        from sqlglot import expressions as exp
+        from sqlglot.errors import ErrorLevel
+
+        from .sql_dialect import sqlglot_dialect
+
+        dialect = sqlglot_dialect(storage_type)
+        tree = sqlglot.parse_one(sql, dialect=dialect, error_level=ErrorLevel.RAISE)
     except Exception:
-        return False
-    try:
-        tree = sqlglot.parse_one(sql_fragment, error_level="ignore")
-    except Exception:
-        return False
+        return []
     if tree is None:
-        return False
-    for agg in tree.find_all(exp.AggFunc):
-        for inner in agg.find_all(exp.AggFunc):
-            if inner is not agg:
-                return True
-    return False
+        return []
+    problems: list[BindingProblem] = []
+    for agg in [n for n in tree.walk() if _is_aggregate(n)]:
+        unit = _aggregate_unit(agg)
+        for inner in _nested_in(unit, agg):
+            problems.append(BindingProblem(agg.sql_name(), inner.sql_name(), _clause_of(inner, agg)))
+    return problems
+
+
+class NestedAggregateError(DerivedError):
+    """A metric's SQL, once expanded, nests an aggregate inside another (`binding_problems`)."""
+
+    def __init__(self, message: str, problems: list[BindingProblem]) -> None:
+        super().__init__(message)
+        self.problems = problems
+
+
+def _has_nested_aggregate(sql_fragment: str, storage_type: str) -> bool:
+    """True if `sql_fragment` nests an aggregate inside another (see `binding_problems`)."""
+    return bool(binding_problems(sql_fragment, storage_type))
+
+
+def metric_binding_problems(metric, idx: dict, org=None) -> dict[str, list[BindingProblem]]:
+    """{storage type: problems} for each binding of `metric` that nests aggregates. A plain
+    binding is judged as written; a derived or second-order one as it expands. Any other
+    composition failure is not reported here: `_check_derived_metrics` owns those."""
+    out: dict[str, list[BindingProblem]] = {}
+    for stype, sql in (getattr(metric, "bindings", None) or {}).items():
+        if not (is_derived(metric) or is_second_order(metric)):
+            problems = binding_problems(sql or "", stype)
+        else:
+            try:
+                resolve_metric_sql(metric, stype, idx, org)
+                problems = []
+            except NestedAggregateError as e:
+                problems = e.problems
+            except DerivedError:
+                problems = []
+        if problems:
+            out[stype] = problems
+    return out
+
+
+def nested_aggregate_reason(metric_name: str, problems: dict[str, list[BindingProblem]]) -> str:
+    """One sentence naming each nested aggregate and the forms that do run."""
+    found = "; ".join(f"{stype}: {p}" for stype, ps in problems.items() for p in ps)
+    return (
+        f"metric {metric_name!r} nests an aggregate inside another ({found}), which the database "
+        "refuses. Write a plain aggregate (AVG(col) already ignores missing values), aggregate "
+        "over a subquery that groups first, or, for an average of per-group totals, declare a "
+        "second-order metric: bind OUTERAGG({base metric}) and set inner_grain."
+    )
 
 
 # A second-order metric's binding is exactly OUTERAGG({base metric}) — e.g. "AVG({daily_revenue})".
@@ -495,7 +615,7 @@ def synthesize_second_order(metric, storage_type: str, idx: dict, org=None) -> s
     # The inner aggregate is the base's own (first-order) binding — expand_binding refuses a
     # base that is itself nested, so we never double-nest.
     inner_sql = expand_binding(base, storage_type, idx)
-    if _has_nested_aggregate(inner_sql):
+    if _has_nested_aggregate(inner_sql, storage_type):
         raise DerivedError(
             f"second-order metric {metric.name!r}: base {base_name!r} is itself a "
             "second-order statistic — only one level of nesting is synthesized"

@@ -343,6 +343,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_descriptions(org, res)
     _check_measured_figures(org, res)
     _check_derived_metrics(org, res)
+    _check_metric_nested_aggregates(org, res)
     _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
     _check_metric_avg_of_ratio(org, res)
@@ -1232,6 +1233,13 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
         for stype in (met.bindings or {}):
             try:
                 D.resolve_metric_sql(met, stype, idx, org)
+            except D.NestedAggregateError as e:
+                # Nesting in a WITHIN GROUP / FILTER clause is refused since #519. A model that
+                # validated before must keep validating, so that alone is a warning.
+                if all(p.clause != "argument" for p in e.problems):
+                    res.warn("metric_binding_nested_aggregate", str(e))
+                else:
+                    res.error("derived_metric", str(e))
             except D.DerivedError as e:
                 res.error("derived_metric", str(e))
         # grain sanity (first-order case-a only): a base sharing no source_table may be a
@@ -1250,6 +1258,24 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
                         "table — verify they're at the same grain (cross-grain composition "
                         "needs the grain-attributed planner, #4)",
                     )
+
+
+def _check_metric_nested_aggregates(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a plain metric's binding nests an aggregate inside another (#519), by the same
+    rule `sm add` and `curate` refuse a new or edited binding with. A warning, not an error, so a
+    model that validated before keeps validating; the database refuses the binding either way."""
+    from . import derived as D
+
+    idx = D.metric_index(org)
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or D.is_second_order(met):
+            continue  # `_check_derived_metrics` judges the expanded SQL
+        problems = D.metric_binding_problems(met, idx, org)
+        if problems:
+            res.warn("metric_binding_nested_aggregate", D.nested_aggregate_reason(met.name, problems))
 
 
 # Words that tell the reader a missing value really means zero, so filling it with a constant is
@@ -1336,8 +1362,57 @@ def _null_filled_columns(sql: str, storage_type: str) -> list:
         )
         if not constant or next(fill.this.find_all(exp.AggFunc), None) is not None:
             continue
+        if _averages_present_values(fill):
+            continue
         found.extend(fill.this.find_all(exp.Column))
     return found
+
+
+def _present_counted(node) -> set[str]:
+    """The columns `node` counts the present values of, through `COUNT(col)` or
+    `CASE WHEN col IS NOT NULL THEN 1 [ELSE 0] END`; empty when it reads any column another way."""
+    from sqlglot import expressions as exp
+
+    counted: set[str] = set()
+    for count in node.find_all(exp.Count):
+        if isinstance(count.this, exp.Column):
+            counted.add(count.this.name.lower())
+    for case in node.find_all(exp.Case):
+        ifs = case.args.get("ifs") or []
+        default = case.args.get("default")
+        if len(ifs) != 1 or not (default is None or isinstance(default, exp.Literal) and default.name == "0"):
+            continue
+        cond, then = ifs[0].this, ifs[0].args.get("true")
+        if not (isinstance(then, exp.Literal) and then.name == "1"):
+            continue
+        # `col IS NOT NULL` parses as Is(negate=True) in some dialects and Not(Is) in others.
+        if isinstance(cond, exp.Not):
+            cond = cond.this if isinstance(cond.this, exp.Is) else None
+        elif not (isinstance(cond, exp.Is) and cond.args.get("negate")):
+            cond = None
+        if cond is not None and isinstance(cond.this, exp.Column) and isinstance(cond.expression, exp.Null):
+            counted.add(cond.this.name.lower())
+    read = {c.name.lower() for c in node.find_all(exp.Column)}
+    return counted if read <= counted else set()
+
+
+def _averages_present_values(fill) -> bool:
+    """True when the fill sits in the numerator of a division whose denominator counts only the
+    present values of the filled column(s), as in `SUM(COALESCE(score, 0)) / NULLIF(COUNT(score), 0)`.
+    The zero then adds nothing to either side: the result is the average of the values that exist,
+    not an invented one (#519)."""
+    from sqlglot import expressions as exp
+
+    node = fill
+    while node.parent is not None and not isinstance(node.parent, exp.Query):
+        parent = node.parent
+        if isinstance(parent, exp.Div) and node.arg_key == "this":
+            # every column the numerator fills, so a second filled column the denominator does not
+            # count keeps the warning on both
+            filled = {c.name.lower() for f in node.find_all(exp.Coalesce) for c in f.this.find_all(exp.Column)}
+            return bool(filled) and filled <= _present_counted(parent.expression)
+        node = parent
+    return False
 
 
 def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
