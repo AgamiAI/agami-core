@@ -351,3 +351,14 @@ def test_probe_mode_reads_one_sample_per_table(tmp_path):
     t, _ = _events(tmp_path, runner)
     assert next(c for c in t.columns if c.name == "status").choice_field  # the probe's list
     assert len(seen) == 1
+
+
+def test_ip_address_values_are_not_read_as_phone_numbers():
+    # Dots are allowed in a phone number, so 192.168.1.10 used to pass as one and an ip_address column
+    # was suspected for the wrong reason; four dotted groups is an address, three is still a phone.
+    ips = ["192.168.1.10", "10.20.30.40", "172.16.254.1", "192.168.100.200"] * 5
+    assert not pii.looks_like_phones("source", ips)
+    assert pii.value_suspect_caveat("source", "string", ips) is None
+    assert not any(pii.personal_value(v) for v in ips)
+    phones = ["555.123.4567", "555.987.6543", "+1 555 0100 222", "(555) 010-0199"] * 5
+    assert pii.looks_like_phones("source", phones)

@@ -191,6 +191,8 @@ _EMAIL_VALUE_RE = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+
 _PHONE_VALUE_RE = re.compile(r"^\+?[\d\s().-]{7,24}$")
 _DIGITS_RE = re.compile(r"\d")
 _NUMBER_VALUE_RE = re.compile(r"^-?\d+\.\d+$")
+# Four dot-separated groups is an IPv4 address; a dotted phone number (555.123.4567) has three.
+_IPV4_VALUE_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 _DATE_ONLY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T]00:00(?::00(?:\.0+)?)?)?$")
 _ID_NAME_RE = re.compile(r"(^|_)(id|key|sk|code|hash|uuid|guid)s?$", re.IGNORECASE)
 _BIRTH_HINT_WORDS = frozenset({"born", "bday", "birth", "birthday", "birthdate", "dob", "dateofbirth"})
@@ -224,7 +226,8 @@ def looks_like_emails(values: Iterable[Any]) -> bool:
 
 
 def _phone_like(v: str, digits_only_ok: bool) -> bool:
-    if not _PHONE_VALUE_RE.match(v) or _DATE_ONLY_RE.match(v) or _NUMBER_VALUE_RE.match(v):
+    if (not _PHONE_VALUE_RE.match(v) or _DATE_ONLY_RE.match(v) or _NUMBER_VALUE_RE.match(v)
+            or _IPV4_VALUE_RE.match(v)):
         return False
     n = len(_DIGITS_RE.findall(v))
     if not 7 <= n <= 15:
