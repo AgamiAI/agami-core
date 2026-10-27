@@ -371,28 +371,27 @@ def maybe_column_groups(
 
 
 def infer_cardinality(
-    from_table: str,
-    to_table: str,
+    from_table: Optional[Table],
+    to_table: Optional[Table],
     from_cols: list[str],
     to_cols: list[str],
-    grain_by_table: dict[str, set[str]],
 ) -> str:
-    """Infer join cardinality from declared/inferred grain.
+    """Infer join cardinality from each side's keys: its grain (primary key) and unique keys.
 
-    to-side == to PK & from-side == from PK -> one_to_one
-    to-side == to PK (unique), from not      -> many_to_one
-    from-side == from PK, to not             -> one_to_many
-    else                                     -> many_to_one (default; review)
+    A side is "one" when the join's columns are exactly one of its keys; a multi-column key counts
+    only when the join uses all of it. A nullable unique column still counts: NULL never joins.
+    Tables, not names, so two same-named tables in two schemas don't lend each other a key.
+
+    both sides keyed  -> one_to_one
+    to side keyed     -> many_to_one
+    from side keyed   -> one_to_many
+    neither           -> many_to_one (default; review)
     """
-    from_pk = grain_by_table.get(from_table, set())
-    to_pk = grain_by_table.get(to_table, set())
-    from_is_pk = bool(from_pk) and set(from_cols) == from_pk
-    to_is_pk = bool(to_pk) and set(to_cols) == to_pk
-    if from_is_pk and to_is_pk:
+    from_one = from_table is not None and from_table.unique_on(from_cols)
+    to_one = to_table is not None and to_table.unique_on(to_cols)
+    if from_one and to_one:
         return "one_to_one"
-    if to_is_pk and not from_is_pk:
-        return "many_to_one"
-    if from_is_pk and not to_is_pk:
+    if from_one:
         return "one_to_many"
     return "many_to_one"
 

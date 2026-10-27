@@ -109,6 +109,7 @@ class Dialect:
     name: StorageType = "PostgreSQL"
     limit_style: str = "limit"  # "limit" | "top" | "fetch"
     fk_enforced: bool = True    # False => always confirm inferred FKs by overlap
+    unique_enforced: bool = True  # False => a declared unique key is confirmed on the data first
     # True where a backslash escapes inside a string literal by default, so a name ending in one
     # would end the literal early (#439). Introspection reads skip the model pass, so this escaping
     # is their remaining defence.
@@ -269,6 +270,20 @@ class Dialect:
             "ORDER BY kcu.ordinal_position"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        """Each unique key other than the primary key, one row per column: `constraint_name`,
+        `column_name`, in key order. None where the engine has no catalog of them."""
+        return (
+            "SELECT tc.constraint_name, kcu.column_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON tc.constraint_name = kcu.constraint_name "
+            "AND tc.table_schema = kcu.table_schema AND tc.table_name = kcu.table_name "
+            "WHERE tc.constraint_type = 'UNIQUE' "
+            f"AND tc.table_schema = {self.quote_lit(schema)} "
+            f"AND tc.table_name = {self.quote_lit(table)} "
+            "ORDER BY tc.constraint_name, kcu.ordinal_position"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # Also returns from_schema / to_schema so introspect can flag cross-schema joins and
         # resolve a target unambiguously when two schemas share a table name. ccu.table_schema
@@ -296,6 +311,36 @@ class Dialect:
         """An exact count, for when the catalog keeps no usable estimate (a view, or a table the
         engine has never analysed). Read-only, and bounded like every other introspection read."""
         return f"SELECT COUNT(*) AS estimated_rows FROM {self.qualified(schema, table)}"
+
+    # --- declared value lists (#517) ---
+
+    def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
+        """The table's enum-typed columns and their declared values: one row per value
+        (`column_name`, `enum_value`) in declaration order, or one row per column holding its type
+        text (`column_name`, `column_type`, e.g. `enum('a','b')`). None where the engine has no
+        enum type."""
+        return None
+
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        """The text of each enforced CHECK constraint on the table, one row each (`check_clause`).
+        None where the catalog keeps no CHECK constraints."""
+        return None
+
+    def sql_check_constraints_fallback(self, schema: str, table: str) -> Optional[str]:
+        """A second form of the CHECK read, tried when the first one fails (another engine sharing
+        this dialect lays out its catalog differently). None when there is none."""
+        return None
+
+    # The engine's default string comparison ignores case, so 'open' also matches 'Open'.
+    case_insensitive_compare = False
+    # ... and ignores accents too (MySQL/MariaDB's default *_ci collations).
+    accent_insensitive_compare = False
+
+    def distinct_sql(self, schema: Optional[str], table: str, column: str, n: int) -> str:
+        """Up to `n` distinct non-null values of one column, as `v`."""
+        c = self.quote_ident(column)
+        return self.limited(
+            f"SELECT DISTINCT {c} AS v FROM {self.qualified(schema, table)} WHERE {c} IS NOT NULL", n)
 
     # --- type mapping ---
 
@@ -332,6 +377,36 @@ class PostgreSQL(Dialect):
             "ORDER BY k.ord"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Unique constraints and unique indexes (a unique index with no constraint enforces the same
+        # thing). Partial and expression indexes are left out: neither makes the column unique.
+        # indnkeyatts leaves out a covering index's INCLUDE columns. An index a failed CREATE INDEX
+        # CONCURRENTLY left invalid may sit over duplicates.
+        return (
+            "SELECT con.conname AS constraint_name, a.attname AS column_name, k.ord "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum "
+            "WHERE con.contype = 'u' "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "UNION "
+            "SELECT ic.relname AS constraint_name, a.attname AS column_name, k.ord "
+            "FROM pg_index i "
+            "JOIN pg_class ic ON ic.oid = i.indexrelid "
+            "JOIN pg_class c ON c.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
+            "WHERE i.indisunique AND NOT i.indisprimary AND i.indisvalid AND i.indisready "
+            "AND i.indpred IS NULL AND i.indexprs IS NULL AND k.ord <= i.indnkeyatts "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "ORDER BY constraint_name, ord"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # unnest(conkey, confkey) pairs the columns of a composite key in declaration order, and
         # to_schema is the referenced table's own schema, which may differ from the constraint's.
@@ -360,6 +435,41 @@ class PostgreSQL(Dialect):
             f"AND c.relname = {self.quote_lit(table)}"
         )
 
+    # From the pg_* catalog for the same reason as the keys: any role can read it.
+    def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT a.attname AS column_name, e.enumlabel AS enum_value "
+            "FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_enum e ON e.enumtypid = a.atttypid "
+            "WHERE a.attnum > 0 AND NOT a.attisdropped "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "ORDER BY a.attnum, e.enumsortorder"
+        )
+
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        # The text comes from information_schema, which shows a CHECK only to the table's owner:
+        # pg_get_constraintdef() would show it to any role, but the always-on recon gate refuses
+        # every pg_* call. So a SELECT-only role reads the enums above and no CHECKs.
+        return (
+            "SELECT cc.check_clause "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN information_schema.check_constraints cc "
+            "ON cc.constraint_schema = n.nspname AND cc.constraint_name = con.conname "
+            # a NO INHERIT CHECK binds only the parent's own rows; reading the parent reads its children
+            "WHERE con.contype = 'c' AND con.convalidated AND NOT con.connoinherit "
+            # a name is unique only per table: one another table also uses could join to its text
+            "AND NOT EXISTS (SELECT 1 FROM pg_constraint o WHERE o.connamespace = con.connamespace "
+            "AND o.conname = con.conname AND o.oid <> con.oid) "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "ORDER BY con.conname"
+        )
+
 
 class Supabase(PostgreSQL):
     # Supabase is hosted Postgres. Stored as storage_type=PostgreSQL; this alias
@@ -371,11 +481,16 @@ class Redshift(PostgreSQL):
     name = "Redshift"
     duration_rounds = True
     fk_enforced = False  # Redshift declares but does not enforce FKs
+    unique_enforced = False  # nor unique keys
 
     # Redshift has no LATERAL and no unnest(...) WITH ORDINALITY, so the pg_constraint queries
     # PostgreSQL uses would fail there. It keeps the information_schema ones.
     sql_primary_keys = Dialect.sql_primary_keys
     sql_foreign_keys = Dialect.sql_foreign_keys
+    sql_unique_keys = Dialect.sql_unique_keys
+    # Nor enum types or CHECK constraints.
+    sql_enum_values = Dialect.sql_enum_values
+    sql_check_constraints = Dialect.sql_check_constraints
 
     # Schemas come from pg_namespace filtered on USAGE, not information_schema.schemata (#558). On
     # Redshift that view lists only the schemas the user OWNS, so a read-only role that can read every
@@ -457,6 +572,21 @@ class MySQL(Dialect):
                            end_type: str = "timestamp") -> str:
         return f"DATEDIFF({end}, {start})"
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Every unique index (a UNIQUE constraint is one). sub_part set means a prefix index, which
+        # only makes the prefix unique; a functional index part has no column_name.
+        return (
+            "SELECT index_name AS constraint_name, column_name FROM information_schema.statistics "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND non_unique = 0 AND index_name <> 'PRIMARY' "
+            "AND index_name NOT IN (SELECT index_name FROM information_schema.statistics "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND (sub_part IS NOT NULL OR column_name IS NULL)) "
+            "ORDER BY index_name, seq_in_index"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # MySQL exposes the target (incl. its schema) directly on key_column_usage.
         return (
@@ -476,11 +606,49 @@ class MySQL(Dialect):
             f"AND table_name = {self.quote_lit(table)}"
         )
 
+    def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT column_name, column_type FROM information_schema.columns "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND data_type = 'enum' ORDER BY ordinal_position"
+        )
+
+    case_insensitive_compare = True
+    accent_insensitive_compare = True
+
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        # check_constraints names no table on MySQL 8, so the table comes from table_constraints;
+        # a name used by two of the schema's CHECKs is skipped rather than risk the other's text.
+        # MariaDB has no `enforced` column, so there this fails and the fallback runs. Before
+        # MySQL 8.0.16 the view doesn't exist; both fail and nothing is declared.
+        return (
+            "SELECT cc.check_clause FROM information_schema.check_constraints cc "
+            "JOIN information_schema.table_constraints tc "
+            "ON tc.constraint_schema = cc.constraint_schema "
+            "AND tc.constraint_name = cc.constraint_name "
+            "WHERE tc.constraint_type = 'CHECK' AND tc.enforced = 'YES' "
+            f"AND tc.table_schema = {self.quote_lit(schema)} "
+            f"AND tc.table_name = {self.quote_lit(table)} "
+            "AND (SELECT COUNT(*) FROM information_schema.table_constraints t2 "
+            "WHERE t2.constraint_schema = tc.constraint_schema "
+            "AND t2.constraint_name = tc.constraint_name AND t2.constraint_type = 'CHECK') = 1"
+        )
+
+    def sql_check_constraints_fallback(self, schema: str, table: str) -> Optional[str]:
+        # MariaDB's check_constraints names the table itself, and enforces every CHECK.
+        return (
+            "SELECT cc.check_clause FROM information_schema.check_constraints cc "
+            f"WHERE cc.constraint_schema = {self.quote_lit(schema)} "
+            f"AND cc.table_name = {self.quote_lit(table)}"
+        )
+
 
 class Snowflake(Dialect):
     name = "Snowflake"
     folds_unquoted = "upper"
     backslash_escapes = True
+    unique_enforced = False  # Snowflake declares unique keys but does not enforce them
     duration_rounds = True
     reserved_extra = frozenset({
         "account", "alter", "connect", "connection", "database", "gscluster", "ilike", "increment",
@@ -505,12 +673,32 @@ class Snowflake(Dialect):
 class DuckDB(Dialect):
     name = "DuckDB"
 
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT expression AS check_clause FROM duckdb_constraints() "
+            "WHERE constraint_type = 'CHECK' "
+            f"AND schema_name = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)}"
+        )
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT constraint_index AS constraint_name, unnest(constraint_column_names) AS column_name "
+            "FROM duckdb_constraints() WHERE constraint_type = 'UNIQUE' "
+            f"AND schema_name = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "ORDER BY constraint_index"
+        )
+
 
 class Databricks(Dialect):
     name = "Databricks"
     backslash_escapes = True
     fk_enforced = False  # Unity Catalog constraints are informational
     duration_rounds = True
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None  # Unity Catalog has no unique constraint
 
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
@@ -537,6 +725,9 @@ class Trino(Dialect):
     def sql_foreign_keys(self, schema: str) -> str:
         return "SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column WHERE 1=0"
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return None  # varies per connector; skip
 
@@ -561,6 +752,7 @@ class SQLServer(Dialect):
         "view", "waitfor", "while", "within", "writetext",
     })
     _SYS_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
+    case_insensitive_compare = True   # the default collations are *_CI_*
 
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
@@ -568,6 +760,22 @@ class SQLServer(Dialect):
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
         return f"DATEDIFF(day, {start}, {end})"
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Unique constraints and unique indexes alike; a filtered index is unique only over its
+        # filter, and an INCLUDE column is not part of the key. A disabled index enforces nothing.
+        return (
+            "SELECT i.name AS constraint_name, col.name AS column_name "
+            "FROM sys.indexes i "
+            "JOIN sys.tables t ON t.object_id = i.object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+            "JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id "
+            "WHERE i.is_unique = 1 AND i.is_primary_key = 0 AND i.has_filter = 0 "
+            "AND i.is_disabled = 0 AND i.is_hypothetical = 0 AND ic.is_included_column = 0 "
+            f"AND s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
+            "ORDER BY i.name, ic.key_ordinal"
+        )
 
     def flag_rate_expr(self, col: str, *, boolean: bool) -> str:
         # A BIT is not a predicate in T-SQL: `CASE WHEN flag THEN` is a syntax error.
@@ -585,6 +793,16 @@ class SQLServer(Dialect):
             "JOIN sys.schemas s ON s.schema_id = t.schema_id "
             f"WHERE s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
             "AND ps.index_id IN (0,1)"
+        )
+
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT cc.definition AS check_clause FROM sys.check_constraints cc "
+            "JOIN sys.tables t ON t.object_id = cc.parent_object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            f"WHERE s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
+            # a disabled or NOCHECK-added constraint says nothing about the rows already stored
+            "AND cc.is_disabled = 0 AND cc.is_not_trusted = 0"
         )
 
 
@@ -661,6 +879,9 @@ class BigQuery(Dialect):
             "ORDER BY kcu.ordinal_position"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None  # BigQuery has no unique constraint
+
     def sql_foreign_keys(self, schema: str) -> str:
         return (
             "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
@@ -735,6 +956,20 @@ class SQLite(Dialect):
             f"{self.quote_lit(table)}) WHERE pk > 0 ORDER BY pk"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # UNIQUE constraints and CREATE UNIQUE INDEX alike; origin 'pk' is the primary key's own
+        # index, and a partial index is unique only over its WHERE. An index written with its own
+        # COLLATE may be unique under a comparison a join's `=` does not use, so it isn't trusted.
+        return (
+            "SELECT il.name AS constraint_name, ii.name AS column_name "
+            f"FROM pragma_index_list({self.quote_lit(table)}) il "
+            "JOIN pragma_index_info(il.name) ii "
+            "WHERE il.\"unique\" = 1 AND il.origin <> 'pk' AND il.partial = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM sqlite_master m WHERE m.type = 'index' "
+            "AND m.name = il.name AND m.sql IS NOT NULL AND UPPER(m.sql) LIKE '%COLLATE%') "
+            "ORDER BY il.name, ii.seqno"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # foreign_key_list is per-table; the engine special-cases SQLite to call
         # sql_foreign_keys_for_table per table. This whole-schema form is unused.
@@ -746,6 +981,10 @@ class SQLite(Dialect):
             "\"table\" AS to_table, \"to\" AS to_column "
             f"FROM pragma_foreign_key_list({self.quote_lit(table)})"
         )
+
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        # SQLite keeps no constraint catalog: the CHECKs are read out of the CREATE TABLE text.
+        return f"SELECT sql AS check_clause FROM sqlite_master WHERE type = 'table' AND name = {self.quote_lit(table)}"
 
 
 
@@ -819,6 +1058,18 @@ class Oracle(Dialect):
             f"AND ac.table_name = {self.quote_lit(table)} ORDER BY acc.position"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # A disabled or NOVALIDATE constraint does not vouch for the rows already there.
+        return (
+            "SELECT ac.constraint_name, acc.column_name FROM all_constraints ac "
+            "JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name "
+            "AND ac.owner = acc.owner "
+            "WHERE ac.constraint_type = 'U' AND ac.status = 'ENABLED' AND ac.validated = 'VALIDATED' "
+            f"AND ac.owner = {self.quote_lit(schema)} "
+            f"AND ac.table_name = {self.quote_lit(table)} "
+            "ORDER BY ac.constraint_name, acc.position"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         return (
             "SELECT ac.table_name AS from_table, acc.column_name AS from_column, "
@@ -836,6 +1087,15 @@ class Oracle(Dialect):
         return (
             "SELECT num_rows AS estimated_rows FROM all_tables "
             f"WHERE owner = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)}"
+        )
+
+    def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
+        # Type 'C' also holds every NOT NULL ("COL" IS NOT NULL); the parser ignores those.
+        return (
+            "SELECT search_condition AS check_clause FROM all_constraints "
+            "WHERE constraint_type = 'C' AND status = 'ENABLED' AND validated = 'VALIDATED' "
+            f"AND owner = {self.quote_lit(schema)} "
             f"AND table_name = {self.quote_lit(table)}"
         )
 
