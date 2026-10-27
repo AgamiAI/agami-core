@@ -811,7 +811,7 @@ def resolve_metrics(
             bindings = mm.bindings
             if _D.is_derived(mm) or _D.is_second_order(mm):
                 try:
-                    bindings = _D.expanded_bindings(mm, idx)
+                    bindings = _D.expanded_bindings(mm, idx, org)
                 except _D.DerivedError:
                     bindings = mm.bindings
             ranked.append(
@@ -6440,7 +6440,7 @@ def _metric_candidates(org: Datasource, storage_type: "str | None",
         bindings = mm.bindings or {}
         if _D.is_derived(mm) or _D.is_second_order(mm):
             try:
-                bindings = _D.expanded_bindings(mm, idx)
+                bindings = _D.expanded_bindings(mm, idx, org)
             except _D.DerivedError:
                 bindings = mm.bindings or {}
         text = (bindings or {}).get(storage_type)
