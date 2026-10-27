@@ -23,9 +23,26 @@ below corresponds to one such version.
   flags a JSON column whose keys hold personal data, with a caveat naming the key paths
   (`Contains personal data at: email, contact.phone`); a key that may itself be data (a person's
   name used as a key) is shown as `*`. Postgres JSON read through the CLI is recognised too. A column
-  holding emails or phone numbers (digit-only ones included) no longer gets a value list. No sampled
+  holding emails or phone numbers (digit-only ones included), or flagged or suspected as personal,
+  gets no value list, whether read from the data or declared by an enum type or CHECK. No sampled
   value is written to the model or the report. `ipv4_address`/`IPv4Address` stay suspected-only. An existing
   model keeps its flags on refresh; no model field is added.
+
+### Added
+
+- **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
+  of a metric's formula ("gives no value when the start date is missing") went into its description
+  or calculation, where it reads as part of the definition. A metric now takes an optional
+  `caveats` list, validated like a column's (no empty entries) and editable through `sm curate`
+  and the model explorer. It is served wherever the metric is: the metric's entry in
+  `get_datasource_schema`, metric search, the admin model page, the explorer's metric card and the
+  review queue. The validator reads it too: a metric caveat saying a missing value counts as 0
+  silences `metric_null_filled` the way the calculation saying so already did.
+
+  **Reading a model:** a metric file that sets `caveats` is refused by a release older than this
+  one, which does not know the key; files with no caveats stay readable, because the key is left
+  out of a metric file when the list is empty. Upgrade every server that reads the model (including
+  deploy images) before writing metric caveats.
 
 ### Added
 
