@@ -829,6 +829,7 @@ def resolve_metrics(
                 "calculation": mm.calculation,
                 "bindings": bindings,
                 "confidence": mm.confidence,
+                **({"caveats": list(mm.caveats)} if mm.caveats else {}),
             }
             if problem:
                 hit["binding_problem"] = problem

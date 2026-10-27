@@ -331,7 +331,8 @@ def _metric_item(area: Optional[str], mm) -> dict:
             "subtitle": f"metric · {area}" if area else "metric",
             "source_signal": mm.calculation,
             "signals": [{"ok": True, "text": mm.calculation}],
-            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines,
+            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines
+                           + [{"label": "Caveat", "text": c} for c in mm.caveats],
             "inferred": primary_sql, "origin": "llm_suggested",
             "bindings": mm.bindings, "business_question": mm.business_question,
             **_trust(mm)}
@@ -665,6 +666,9 @@ def _apply_one(root: Path, op: dict, signer, role,
             reason = _nested_aggregate_refusal(root, item)
             if reason:
                 raise ValueError(reason)  # before the dump: nothing is written for this op
+        if kind == "metric" and not item.get("caveats"):
+            # clearing the caveats removes the key, so the file stays readable by an older release
+            item.pop("caveats", None)
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
         return path, before
 
