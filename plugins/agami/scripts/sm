@@ -31,10 +31,9 @@ DEV_PKG_DIR=""
 if [ -f "$SCRIPT_DIR/../../../packages/agami-core/pyproject.toml" ]; then
   DEV_PKG_DIR="$(cd "$SCRIPT_DIR/../../../packages/agami-core" && pwd)"
 fi
-# Pin the git-install fallback to the plugin version (the cache dir name, e.g. .../agami-core/0.3.1/);
-# fall back to `main` outside a versioned cache (e.g. a dev checkout, where DEV_PKG_DIR wins anyway).
+# The plugin folder's name: a version in the marketplace cache (.../agami-core/0.3.1/), `agami` in a
+# dev checkout. It tells the two layouts apart; the version itself is read below, once $PY is known.
 VER="$(basename "$(cd "$SCRIPT_DIR/.." && pwd)")"
-case "$VER" in [0-9]*) GIT_REF="v$VER" ;; *) GIT_REF="main" ;; esac
 GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 
 # Guarantee AGAMI_PLUGIN_ROOT for the CLI subprocess: `semantic_model.cli discover` locates the plugin's
@@ -51,6 +50,12 @@ if [ -z "$PY" ]; then
   echo "agami: no Python interpreter found (tried \$AGAMI_PYTHON, <artifacts_dir>/local/.config, PATH)." >&2
   exit 3
 fi
+
+# The plugin version, from its manifest (the cache folder's name when the manifest can't be read). It
+# pins the git-install fallback; with none known that is `main` (a dev checkout, where DEV_PKG_DIR wins).
+PLUGIN_VER="$("$PY" -I "$SCRIPT_DIR/_plugin_version.py" </dev/null 2>/dev/null | tr -d '\r' || true)"
+case "$PLUGIN_VER" in [0-9]*.[0-9]*) ;; *) case "$VER" in [0-9]*) PLUGIN_VER="$VER" ;; *) PLUGIN_VER="" ;; esac ;; esac
+GIT_REF="${PLUGIN_VER:+v$PLUGIN_VER}"; GIT_REF="${GIT_REF:-main}"
 
 # Try a pip requirement `--user` first, then a plain install. "$@" preserves arg boundaries so a
 # PEP-508 direct reference (`agami-core[model] @ git+…`) stays a single argument. On the --user attempt
@@ -79,6 +84,12 @@ _pip_try() {
 # sys.path[0]).
 _imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot, yaml' ) 2>/dev/null; }
 
+# A dev checkout: packages/ beside the plugin, in a folder that isn't a versioned cache.
+_dev_layout() {
+  [ -n "$DEV_PKG_DIR" ] || return 1
+  case "$VER" in [0-9]*) return 1 ;; esac
+}
+
 # The installed agami-core must be at least as new as the plugin — and `_imports_ok` cannot see when it
 # isn't, because a stale library imports perfectly well. That gap is silent and it bites: the plugin's
 # own files are refetched on every version bump (the cache dir is the version), but the pip-installed
@@ -86,23 +97,21 @@ _imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot
 # bundled in `lib/`. So a user who updates the plugin runs new skills against an old library — 0.6.0's
 # render_chart.py rejects a pre-0.6.0 receipt outright, and every charted query dies on the first run.
 #
-# $VER is the floor because the plugin and the package are bumped to the same string on every release
+# $PLUGIN_VER is the floor because the plugin and the package are bumped to the same string on every release
 # (CONTRIBUTING → "Files to touch on a release"), so the plugin's own version is exactly the library its
 # skills were written against — no second constant to drift out of sync with the first.
 _version_ok() {
-  # Only meaningful in a versioned cache dir. A dev checkout's $VER is a directory name, not a version:
-  # there the question is whether the importable package IS this checkout. A released agami-core
-  # installed before the checkout was used satisfies the import, so the checkout's own code never ran
-  # (`--plugin-dir` rehearsals introspected with the old release). Not this checkout → reinstall from it.
-  case "$VER" in
-    [0-9]*) ;;
-    *) [ -z "$DEV_PKG_DIR" ] && return 0
-       ( cd / && "$PY" -c 'import os, sys, semantic_model as m
+  # In a dev checkout the question is whether the importable package IS this checkout. A released
+  # agami-core installed before the checkout was used satisfies the import, so the checkout's own code
+  # never ran (`--plugin-dir` rehearsals introspected with the old release). Not this checkout → reinstall.
+  if _dev_layout; then
+    ( cd / && "$PY" -c 'import os, sys, semantic_model as m
 sys.exit(0 if os.path.realpath(m.__file__).startswith(os.path.realpath(sys.argv[1]) + os.sep) else 1)' \
-         "$DEV_PKG_DIR/src" ) 2>/dev/null
-       return ;;
-  esac
-  ( cd / && "$PY" - "$VER" <<'PY'
+      "$DEV_PKG_DIR/src" ) 2>/dev/null
+    return
+  fi
+  [ -n "$PLUGIN_VER" ] || return 0   # no version to compare against
+  ( cd / && "$PY" - "$PLUGIN_VER" <<'PY'
 import re, sys
 try:
     from importlib.metadata import PackageNotFoundError, version
@@ -129,16 +138,31 @@ PY
 
 ensure_pkg() {
   _imports_ok && _version_ok && return 0
+  # Every route below is a pip install, and with stderr hidden a Python without pip would only end in
+  # "couldn't install", which doesn't say what is wrong or how to fix it.
+  if ! ( cd / && "$PY" -m pip --version ) >/dev/null 2>&1; then
+    if _imports_ok; then
+      local have
+      have="$( cd / && "$PY" -c 'from importlib.metadata import version; print(version("agami-core"))' 2>/dev/null | tr -d '\r' || true)"
+      echo "agami: $PY has no pip, so its agami-core${have:+ $have} can't be upgraded to this plugin's${PLUGIN_VER:+ $PLUGIN_VER}." >&2
+    else
+      echo "agami: $PY has no pip, so agami-core can't be installed into it." >&2
+    fi
+    echo "       Add pip to it:  $PY -m ensurepip --upgrade   (where its Python ships ensurepip)" >&2
+    echo "       Or point agami at a Python that has pip:  export AGAMI_PYTHON=/path/to/python" >&2
+    exit 3
+  fi
   # A MISSING library and a STALE one need different pip invocations: pip counts an already-present
   # distribution as satisfying a bare requirement, so the stale case would no-op without `--upgrade`
   # and leave the user exactly where they started — with the failure still ahead of them.
   local up=""
   if _imports_ok; then
     up="--upgrade"
-    case "$VER" in
-      [0-9]*) echo "agami: agami-core in $PY is older than this plugin ($VER); upgrading …" >&2 ;;
-      *) echo "agami: agami-core in $PY isn't this checkout; installing it from $DEV_PKG_DIR …" >&2 ;;
-    esac
+    if _dev_layout; then
+      echo "agami: agami-core in $PY isn't this checkout; installing it from $DEV_PKG_DIR …" >&2
+    else
+      echo "agami: agami-core in $PY is older than this plugin ($PLUGIN_VER); upgrading …" >&2
+    fi
   else
     echo "agami: installing agami-core (semantic model) into $PY …" >&2
   fi
