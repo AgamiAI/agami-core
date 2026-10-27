@@ -193,7 +193,13 @@ def _ident(name: str, storage_type: str) -> str:
         dialect = get_dialect(storage_type)
     except ValueError:
         return name
-    if not _PLAIN_IDENT_RE.match(name) or _is_reserved(name.lower(), storage_type):
+    if not _PLAIN_IDENT_RE.match(name):
+        return dialect.quote_ident(name)
+    if _is_reserved(name.lower(), storage_type):
+        # On an upper-folding engine a lower-case name means the stored upper-case one, and a
+        # quoted lower-case name would name a different object.
+        if name == name.lower() and _engine_folds("a", storage_type):
+            return dialect.quote_ident(name.upper())
         return dialect.quote_ident(name)
     if name != name.lower() and _engine_folds(name, storage_type):
         return dialect.quote_ident(name)
@@ -318,12 +324,40 @@ def _declares(table, col: str) -> bool:
     return table is not None and any(c.name.lower() == col.lower() for c in table.columns)
 
 
+def _dotted_grain(col: str, froms: list[str], org, base) -> list[tuple[str, str]]:
+    """Every (source table, declared column) a `table.column` grain entry can be read as; a
+    table or column name may itself contain a dot or a space, so each split is tried."""
+    found = []
+    for i, ch in enumerate(col):
+        if ch != ".":
+            continue
+        prefix, suffix = col[:i].strip(), col[i + 1:].strip()
+        for t in froms:
+            if (prefix and suffix and _same_table(t, None, prefix, None)
+                    and _declares(_table_def(t, org, base), suffix)):
+                found.append((t, suffix))
+    return found
+
+
 def _qualified_grain(metric_name: str, col: str, froms: list[str], org, storage_type: str,
                      base=None) -> str:
-    """A bare `inner_grain` column qualified by the one source table that declares it."""
-    if _DOTTED_IDENT_RE.match(col):
-        return _table_ref(col, storage_type)
+    """An `inner_grain` column qualified by its source table: `table.column` as written, else
+    the one source table that declares the bare column."""
+    dotted = _dotted_grain(col, froms, org, base) if "." in col else []
+    if len(dotted) > 1:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain {col!r} is ambiguous; it can be "
+            f"read as {[f'{t}.{c}' for t, c in dotted]}"
+        )
+    if dotted:
+        table, column = dotted[0]
+        return f"{_ident(bare_name(table), storage_type)}.{_ident(column, storage_type)}"
     owners = [t for t in froms if _declares(_table_def(t, org, base), col)]
+    if not owners and _DOTTED_IDENT_RE.match(col):
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain {col!r} does not name a column "
+            f"declared by one of the base metric's tables {froms}"
+        )
     if not owners and not _PLAIN_IDENT_RE.match(col):
         raise DerivedError(
             f"second-order metric {metric_name!r}: inner_grain {col!r} must name a column "
@@ -352,7 +386,57 @@ def _grain_sql(col: str, storage_type: str, table=None) -> str:
     return col
 
 
-def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: str) -> str:
+def _anchor(metric_name: str, base, froms: list[str], org, storage_type: str,
+            inner_sql: str) -> str:
+    """The source table the base metric measures: its `primary_table`, else the one table that
+    declares every column its aggregates read. Never guessed: joining from the wrong table
+    would repeat the measured rows."""
+    if base.primary_table:
+        match = [t for t in froms if _same_table(t, None, base.primary_table, None)]
+        if not match:
+            raise DerivedError(
+                f"second-order metric {metric_name!r}: the base metric's primary_table "
+                f"{base.primary_table!r} is not one of its source tables {froms}"
+            )
+        return match[0]
+    owners = _measured_tables(inner_sql, base, froms, org, storage_type)
+    if len(owners) != 1:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: can't tell which of {froms} the base metric "
+            f"{base.name!r} measures; set primary_table to say which table the metric measures"
+        )
+    return owners.pop()
+
+
+def _measured_tables(inner_sql: str, base, froms: list[str], org, storage_type: str) -> set:
+    """The source tables owning the columns inside the base binding's aggregates; empty when a
+    column can't be pinned to exactly one table (or none is read, as in COUNT(*))."""
+    try:
+        import sqlglot
+        from sqlglot import expressions as exp
+        from sqlglot.errors import ErrorLevel
+
+        from .sql_dialect import sqlglot_dialect
+
+        tree = sqlglot.parse_one(inner_sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=ErrorLevel.RAISE)
+    except Exception:
+        return set()
+    owners: set = set()
+    for agg in tree.find_all(exp.AggFunc):
+        for col in agg.find_all(exp.Column):
+            if col.table:
+                tables = [t for t in froms if _same_table(t, None, col.table, None)]
+            else:
+                tables = [t for t in froms if _declares(_table_def(t, org, base), col.name)]
+            if len(tables) != 1:
+                return set()
+            owners.add(tables[0])
+    return owners
+
+
+def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: str,
+                 inner_sql: str) -> str:
     """FROM the anchor table, INNER JOINed directly to each other source table."""
     if org is None:
         raise DerivedError(
@@ -367,7 +451,7 @@ def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: st
             f"second-order metric {metric_name!r}: its base reads tables with the same name "
             f"from different schemas ({clash}); synthesis can't tell them apart"
         )
-    anchor = base.primary_table if base.primary_table in froms else froms[0]
+    anchor = _anchor(metric_name, base, froms, org, storage_type, inner_sql)
     sql = _table_ref(anchor, storage_type)
     for other in froms:
         if other == anchor:
@@ -385,13 +469,14 @@ def synthesize_second_order(metric, storage_type: str, idx: dict, org=None) -> s
            SELECT order_date, SUM(amount) AS daily_revenue
            FROM orders GROUP BY order_date) _inner)
 
-    A base over several tables is joined from its anchor (`primary_table`, else the first
-    source table) to each other table by the one relationship declared directly between them,
+    A base over several tables is joined from its anchor (`primary_table`, else the one table
+    whose columns its aggregates read) to each other table by the one relationship declared directly between them,
     which needs `org`. Identifiers are quoted only where the engine needs it.
 
     Raises DerivedError if the shape isn't `OUTERAGG({base})`, the base is unknown / not a
     plain aggregate, `inner_grain` is empty, it has no source table, or a multi-table join
-    can't be built safely (no direct edge, several edges, a fan-out, an unresolvable grain)."""
+    can't be built safely (an unclear anchor, no direct edge, several edges, a fan-out, an
+    unresolvable grain)."""
     binding = (getattr(metric, "bindings", None) or {}).get(storage_type)
     if binding is None:
         raise DerivedError(f"metric {metric.name!r} has no {storage_type} binding")
@@ -425,7 +510,7 @@ def synthesize_second_order(metric, storage_type: str, idx: dict, org=None) -> s
         table = _table_def(froms[0], org, base) if org is not None else None
         grain = ", ".join(_grain_sql(g, storage_type, table) for g in metric.inner_grain)
     else:
-        from_sql = _from_clause(metric.name, base, froms, org, storage_type)
+        from_sql = _from_clause(metric.name, base, froms, org, storage_type, inner_sql)
         grain = ", ".join(
             _qualified_grain(metric.name, g, froms, org, storage_type, base)
             for g in metric.inner_grain

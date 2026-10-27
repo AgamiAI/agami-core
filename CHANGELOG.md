@@ -18,12 +18,18 @@ below corresponds to one such version.
   are quoted for the engine (#525).** `OUTERAGG({base})` with `inner_grain` used to be refused when
   the base metric read more than one table, and the synthesized statement wrote table and column
   names bare, so a mixed-case table failed on PostgreSQL. The synthesized inner query now joins the
-  base metric's `primary_table` (else its first source table) to each other source table by the one
-  relationship declared directly between them. It is still refused, with the reason, when there is
-  no such edge, more than one, or the join would fan out the base aggregate's rows; a bare
-  `inner_grain` column must be declared by exactly one of the tables (or written `table.column`).
-  Identifiers are quoted only where the engine needs it (including words one engine reserves,
-  such as `index` on SQLite or `key` on MySQL), so a plain lower-case name is emitted as before.
+  table the base metric measures to each other source table by the one relationship declared
+  directly between them. That table is the base's `primary_table` (matched to its source table
+  with or without the schema), else the one table that declares every column the base's
+  aggregates read; a `primary_table` that is not a source table, or a base whose measured columns
+  span tables or can't be placed, is refused and asks for `primary_table`. It is also refused,
+  with the reason, when there is no such edge, more than one, or the join would fan out the base
+  aggregate's rows. A bare `inner_grain` column must be declared by exactly one of the tables; a
+  `table.column` entry (`orders.order date`, `line items.id`) must name a source table and a
+  column it declares. Identifiers are quoted only where the engine needs it (including words one
+  engine reserves, such as `index` on SQLite or `key` on MySQL), so a plain lower-case name is
+  emitted as before; a reserved lower-case name on Snowflake or Oracle is quoted in upper case
+  (`"LIMIT"`), the name those engines store it under.
   Tables with the same name from different schemas in one base are refused. An `inner_grain` entry
   naming a declared column (`order date`) is that column, quoted; the base metric's own subject
   area is read first for the table's columns.

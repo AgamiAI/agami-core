@@ -88,6 +88,10 @@ def test_multi_table_inner_refused_without_a_declared_join():
     avg = _metric("avg_daily_revenue", "AVG({daily_revenue})",
                   base=["daily_revenue"], inner_grain=["order_date"])
     org = _org([rev, avg])
+    # No table declares `amount`, so nothing says which table the base measures.
+    with pytest.raises(D.DerivedError, match="set primary_table"):
+        D.resolve_metric_sql(avg, "PostgreSQL", D.metric_index(org), org)
+    rev.primary_table = "orders"
     with pytest.raises(D.DerivedError, match="no declared relationship joins 'orders' directly"):
         D.resolve_metric_sql(avg, "PostgreSQL", D.metric_index(org), org)
     # Without the model there are no relationships to join on at all.
@@ -346,3 +350,69 @@ def test_a_single_table_grain_column_with_a_space_is_quoted():
     sql = _sql(org, avg)
     # The declared column is quoted; an expression is still passed through as written.
     assert 'SELECT "order date", DATE(placed_at), SUM(amount)' in sql
+
+
+def _orders_first(org, avg, items_table="OrderItems"):
+    """List orders first in the base's source tables, so the first table is not the measured one."""
+    org.subject_areas[0].metrics[0].source_tables = ["orders", items_table]
+    avg.source_tables = ["orders", items_table]
+    return org, avg
+
+
+def test_primary_table_matches_its_schema_qualified_source_table():
+    org, avg = _orders_first(*_two_table_org(items_table="sales.OrderItems",
+                                             base_primary="OrderItems"), "sales.OrderItems")
+    # Matched by name, not exact string: anchoring on orders would be refused as a fan-out.
+    assert 'FROM sales."OrderItems" INNER JOIN orders' in _sql(org, avg)
+
+
+def test_primary_table_outside_the_source_tables_is_refused():
+    org, avg = _two_table_org(base_primary="customers")
+    with pytest.raises(D.DerivedError, match="'customers' is not one of its source tables"):
+        _sql(org, avg)
+
+
+def test_without_primary_table_the_measured_table_is_the_anchor():
+    org, avg = _orders_first(*_two_table_org())
+    assert 'FROM "OrderItems" INNER JOIN orders' in _sql(org, avg)
+    org.subject_areas[0].metrics[0].bindings = {"PostgreSQL": 'SUM("OrderItems".quantity)'}
+    assert 'FROM "OrderItems" INNER JOIN orders' in _sql(org, avg)
+
+
+@pytest.mark.parametrize("binding", ["SUM(quantity * discount)", "COUNT(*)", "SUM(id)",
+                                     "SUM(nope)"])
+def test_without_primary_table_an_unclear_measured_table_is_refused(binding):
+    org, avg = _two_table_org()
+    org.subject_areas[0].tables_defined[1].columns.append(_col("discount", "decimal"))
+    org.subject_areas[0].metrics[0].bindings = {"PostgreSQL": binding}
+    with pytest.raises(D.DerivedError, match="set primary_table to say which table"):
+        _sql(org, avg)
+
+
+def test_a_dotted_grain_names_a_column_of_that_source_table():
+    org, avg = _two_table_org(grain=("orders.order date",))
+    for t in org.subject_areas[0].tables_defined:
+        t.columns.append(_col("order date", "date"))
+    assert 'GROUP BY orders."order date"' in _sql(org, avg)
+    org, avg = _two_table_org(grain=("line items.id",), items_table="line items")
+    assert 'SELECT "line items".id, SUM(quantity)' in _sql(org, avg)
+
+
+@pytest.mark.parametrize("grain", ["orders.nope", "customers.id", "sales.orders.nope"])
+def test_a_dotted_grain_outside_the_source_tables_is_refused(grain):
+    org, avg = _two_table_org(grain=(grain,))
+    with pytest.raises(D.DerivedError, match="does not name a column declared"):
+        _sql(org, avg)
+
+
+@pytest.mark.parametrize("name, stype, expected", [
+    ("limit", "Oracle", '"LIMIT"'),
+    ("order", "Oracle", '"ORDER"'),
+    ("limit", "Snowflake", '"LIMIT"'),
+    ("order", "Snowflake", '"ORDER"'),
+    ("limit", "PostgreSQL", '"limit"'),
+    ("orders", "Oracle", "orders"),
+    ("orders", "Snowflake", "orders"),
+])
+def test_a_reserved_name_on_an_upper_folding_engine_is_quoted_upper_case(name, stype, expected):
+    assert D._table_ref(name, stype) == expected
