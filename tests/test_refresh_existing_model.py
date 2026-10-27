@@ -236,13 +236,13 @@ def test_a_profile_inside_a_larger_repository_is_never_committed_and_says_so(tmp
     assert _git(team, "diff", "--cached", "--name-only").stdout == ""
 
 
-def test_a_profile_outside_git_says_it_has_no_history(tmp_path, monkeypatch):
+def test_a_profile_outside_git_points_to_its_curation_log(tmp_path, monkeypatch):
     root = tmp_path / "shop"
     root.mkdir()
     (root / "datasource.yaml").write_text("datasource: shop\n", encoding="utf-8")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))  # never find a repo above the tmp dir
     committed, note = curate._git_commit(root, "x")
-    assert committed is False and "git init" in note
+    assert committed is False and f"sm history {root}" in note and "git init" in note
 
 
 def test_the_note_reaches_the_cli_output(tmp_path, monkeypatch, capsys):

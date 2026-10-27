@@ -36,12 +36,13 @@ validator gives via `additionalProperties: false`.
 from __future__ import annotations
 
 import re
-from typing import Any, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    constr,
     field_validator,
     model_serializer,
     model_validator,
@@ -274,8 +275,9 @@ class Column(_Base):
     description_source: Optional[DescriptionSource] = None
     primary_key: bool = False
     foreign_key: Optional[ForeignKey] = None
-    # enum semantics: maps stored value -> human meaning
-    choice_field: Optional[dict[str, str]] = None
+    # enum semantics: maps stored value -> human meaning. The stored value is kept exactly, never
+    # trimmed (#517): a query must match 'Open ' to find those rows.
+    choice_field: Optional[dict[constr(strip_whitespace=False), str]] = None
     # How this column may be aggregated as a measure (additive / averageable / dimension).
     # Set by an introspection heuristic, refined by the curator. Consumed by the query-time
     # enforcement layer (e.g. refuse SUM of an `averageable` price, or AVG of a `dimension`
@@ -284,7 +286,8 @@ class Column(_Base):
     sensitive: bool = False
     # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
     value_transform: Optional[str] = None
-    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…)
+    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…),
+    # optionally scaled and/or a rate (USD_millions, USD/day — grammar in units.py),
     # drives a deterministic symbol + grouping in the formatter/chart renderer;
     # other units (cents, percent, days, ms) surface as a label. This is the
     # structured home for the onboarding "what currency are these in?" answer —
@@ -352,6 +355,9 @@ class Table(_Base):
 
     # composite-key-aware primary key; the source of truth for grain.
     grain: list[str] = Field(default_factory=list)
+    # Every other unique key the database declares, one list of columns per key. Read by join
+    # cardinality: a join on the whole of one is one row per value, like a join on the grain.
+    unique_keys: list[list[str]] = Field(default_factory=list)
     description: str = ""  # ONE line — what is this table
     # provenance of `description` — drives "earn trust through use" (advisory, not a gate)
     description_source: Optional[DescriptionSource] = None
@@ -408,6 +414,25 @@ class Table(_Base):
             raise ValueError(f"table {self.name!r}: sql must be empty when source_type='table'")
         return self
 
+    @model_validator(mode="after")
+    def _unique_keys_resolve(self) -> "Table":
+        names = self.column_names()
+        for key in self.unique_keys:
+            if not key or len(set(key)) != len(key):
+                raise ValueError(f"table {self.name!r}: unique_keys entry {key} must name distinct columns")
+            missing = [c for c in key if c not in names]
+            if missing:
+                raise ValueError(f"table {self.name!r}: unique_keys names unknown column(s) {missing}")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_unique_keys(self, handler: Any) -> Any:
+        # Left out when empty so a table without one dumps as before; an older release forbids the key.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("unique_keys"):
+            data.pop("unique_keys", None)
+        return data
+
     @field_validator("caveats")
     @classmethod
     def _caveats_nonempty(cls, v: list[str]) -> list[str]:
@@ -417,6 +442,15 @@ class Table(_Base):
         return v
 
     # --- convenience accessors used by loader/validator ---
+
+    def unique_on(self, columns: Iterable[str]) -> bool:
+        """Whether `columns` are exactly the grain or exactly one unique key: one row per value.
+        Case-insensitive, since a catalog and a statement can spell one column two ways."""
+        cols = {c.lower() for c in columns}
+        if not cols:
+            return False
+        keys = [self.grain, *self.unique_keys]
+        return any(key and {k.lower() for k in key} == cols for key in keys)
 
     def column_names(self) -> set[str]:
         return {c.name for c in self.columns}
@@ -485,9 +519,11 @@ class Entity(_Base):
     caveats: list[str] = Field(default_factory=list)
     # rare override: force a clarifying question even when resolution is confident
     clarification_strictness: Optional[Literal["normal", "high"]] = None
-    # curation/trust — LLM-proposed entities default approved; reject to drop.
+    # curation/trust — entities are proposed by enrichment, so one waits in the review queue until
+    # a person approves it (which stamps the signer); an omitted review_state must not read as
+    # signed off (#508). Entities usable while unreviewed (Rule 2); reject to drop.
     confidence: Confidence = "confirmed"
-    review_state: ReviewState = "approved"
+    review_state: ReviewState = "unreviewed"
     signed_off_by: Optional[str] = None
     signed_off_at: Optional[str] = None
     signed_off_role: Optional[str] = None
@@ -529,8 +565,8 @@ class Metric(_Base):
     calculation: str
     # per-storage_type SQL bindings, e.g. {"PostgreSQL": "COUNT(DISTINCT ...)"}
     bindings: dict[str, str] = Field(default_factory=dict)
-    # display unit of the metric's output (e.g. a currency ISO code) so the
-    # formatter renders results deterministically (₹1,23,456 not 123456)
+    # display unit of the metric's output (e.g. a currency ISO code, or USD_millions /
+    # USD/day — grammar in units.py) so the formatter renders results deterministically
     unit: Optional[str] = None
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)

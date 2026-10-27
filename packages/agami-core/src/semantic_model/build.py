@@ -9,6 +9,7 @@ the assembly logic is independently testable and reusable.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -61,29 +62,103 @@ SINGLE_AREA_MAX = 24
 
 
 # Numeric columns whose NAME indicates a monetary value, so curation can offer a currency
-# `unit` without callers hand-rolling (and mis-rolling) a regex. Tokens match on word
-# boundaries (`_` or string edges), so a bare `count` never matches inside `discount`:
-# `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate` are not.
-_MONEY_RE = re.compile(
-    r"(^|_)(amount|amt|price|cost|fee|revenue|sales|salary|wage|income|payment|"
-    r"charge|balance|deposit|withdrawal|refund|discount|subtotal|total|spend|spent|"
-    r"budget|invoice|mrr|arr|gmv|ltv|aov|paid|due|owed|credit|debit)s?(_|$)",
-    re.IGNORECASE,
-)
-# Tokens that flip a money-ish name back to NON-money (it's a rate / count / id / key / score / …).
-# Keys matter in warehouses: `invoice_key` and `payment_key` name join keys, not money.
-_MONEY_NEGATIVE_RE = re.compile(
-    r"(^|_)(rate|pct|percent|percentage|ratio|count|cnt|qty|quantity|num|number|nbr|id|"
-    r"key|sk|fk|flag|year|age|day|month|score|rank|code|status)s?(_|$)",
-    re.IGNORECASE,
-)
+# `unit` without callers hand-rolling (and mis-rolling) a regex. Names are split into whole
+# words on `_`, other punctuation and camelCase, so a bare `count` never matches inside
+# `discount`: `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate`
+# are not.
+_MONEY_WORDS = frozenset({
+    "amount", "amt", "price", "cost", "fee", "revenue", "sales", "salary", "wage", "income",
+    "payment", "charge", "balance", "deposit", "withdrawal", "refund", "discount", "subtotal",
+    "total", "spend", "spent", "budget", "invoice", "mrr", "arr", "gmv", "ltv", "aov", "paid",
+    "due", "owed", "credit", "debit",
+})
+# Words that name a currency outright. ISO codes beyond these count only after the first word
+# (`gross_usd`, `fare_try`), since a few double as English words (`try_count`, `php_version`).
+_CURRENCY_WORDS = {"usd": "USD", "dollar": "USD", "eur": "EUR", "euro": "EUR", "gbp": "GBP",
+                   "inr": "INR", "rupee": "INR", "jpy": "JPY", "yen": "JPY"}
+# Words that flip a money-ish name back to NON-money: a rate / count / id / key / score, or a
+# non-money unit (minutes, hours, weight, points). Keys matter in warehouses: `invoice_key` and
+# `payment_key` name join keys, not money. `total_minutes` and `points_balance` are not money.
+_NOT_MONEY_WORDS = frozenset({
+    "rate", "pct", "percent", "percentage", "ratio", "count", "cnt", "qty", "quantity", "num",
+    "number", "nbr", "id", "key", "sk", "fk", "flag", "year", "age", "day", "month", "score",
+    "rank", "code", "status", "duration", "weight", "kg", "lb", "gram", "point", "pts", "units",
+})
+# Time words exclude only in the plural: `total_seconds` is a duration, `second_payment_amount`
+# is the second payment.
+_NOT_MONEY_PLURALS = frozenset({"seconds", "secs", "minutes", "mins", "hours", "hrs"})
+_SCALE_WORDS = {"thousand": "thousands", "million": "millions", "billion": "billions",
+                "lakh": "lakhs", "crore": "crores"}
+_PERIOD_WORDS = frozenset({"hour", "day", "week", "month", "quarter", "year"})
+_PERIOD_ADJECTIVES = {"hourly": "hour", "daily": "day", "weekly": "week", "monthly": "month",
+                      "quarterly": "quarter", "yearly": "year", "annual": "year"}
+
+
+def name_words(column_name: str) -> list[str]:
+    """`revenueUSDMillions` / `revenue_usd_millions` -> ["revenue", "usd", "millions"]."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", column_name)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", s.lower()) if w]
+
+
+def _in(word: str, vocab) -> Optional[str]:
+    """The vocabulary entry `word` is, allowing a plural `s` (`amounts`, `minutes`)."""
+    if word in vocab:
+        return word
+    if word.endswith("s") and word[:-1] in vocab:
+        return word[:-1]
+    return None
+
+
+def _per_period(words: list[str]) -> tuple[list[str], Optional[str]]:
+    """Drop a `per <x>` pair (`revenue_per_day`, `cost_per_kg`) — it says what the money is
+    per, not that it isn't money — and return the period when `<x>` is one."""
+    out, period, i = [], None, 0
+    while i < len(words):
+        if words[i] == "per" and i + 1 < len(words):
+            period = period or _in(words[i + 1], _PERIOD_WORDS)
+            i += 2
+            continue
+        out.append(words[i])
+        i += 1
+    return out, period
+
+
+def name_currency(column_name: str) -> Optional[str]:
+    """The ISO code a column's name states (`gross_usd`, `fx_dollar`, `amountEUR`), or None."""
+    from .units import CURRENCY_SYMBOLS
+
+    for i, w in enumerate(name_words(column_name)):
+        hit = _in(w, _CURRENCY_WORDS)
+        if hit:
+            return _CURRENCY_WORDS[hit]
+        if i and w.upper() in CURRENCY_SYMBOLS:
+            return w.upper()
+    return None
 
 
 def detect_money_column(column_name: str) -> bool:
-    """A column whose name looks monetary (amount/price/revenue/discount/…) and is NOT a
-    rate/count/id/score — so `discount_amount` is money while `discount_rate` and
-    `order_count` are not. Name-only; the caller restricts this to numeric columns."""
-    return bool(_MONEY_RE.search(column_name)) and not _MONEY_NEGATIVE_RE.search(column_name)
+    """A column whose name looks monetary (amount/price/revenue/discount/… or a currency such as
+    `_usd`) and carries no rate/count/id/score or non-money unit word — so `discount_amount` and
+    `balance_usd` are money while `discount_rate`, `order_count`, `total_minutes`, `credit_hours`
+    and `points_balance` are not. Name-only; the caller restricts this to numeric columns."""
+    words, _ = _per_period(name_words(column_name))
+    if any(_in(w, _NOT_MONEY_WORDS) or w in _NOT_MONEY_PLURALS for w in words):
+        return False
+    return name_currency(column_name) is not None or any(_in(w, _MONEY_WORDS) for w in words)
+
+
+def suggest_unit(column_name: str) -> Optional[str]:
+    """The unit a money column's name spells out, in the units.py grammar:
+    `revenue_usd_millions` -> `USD_millions`, `cost_usd_per_day` -> `USD/day`. None when the
+    name states no currency (the caller then asks which currency it is)."""
+    code = name_currency(column_name)
+    if not code or not detect_money_column(column_name):
+        return None
+    words, period = _per_period(name_words(column_name))
+    period = period or next((_PERIOD_ADJECTIVES[w] for w in words if w in _PERIOD_ADJECTIVES), None)
+    scale = next((_SCALE_WORDS[_in(w, _SCALE_WORDS)] for w in words if _in(w, _SCALE_WORDS)), None)
+    return code + (f"_{scale}" if scale else "") + (f"/{period}" if period else "")
 
 
 # --- aggregation class (the Phase-1 column-intrinsic measure semantics) ------
@@ -113,9 +188,12 @@ _AVERAGEABLE_RE = re.compile(
 # on the metric as `non_additive_dimensions` (Phase 2 / #3), not here.
 _ADDITIVE_RE = re.compile(
     r"(^|_)(amount|amt|total|subtotal|sum|qty|quantity|count|cnt|revenue|sales|cost|"
-    r"spend|spent|value|volume|units|gmv|charge|fee|tax|discount|paid|due|gross|net|"
+    r"spend|spent|value|volume|gmv|charge|fee|tax|discount|paid|due|gross|net|"
     r"profit|income|expense|balance|deposit|withdrawal|refund|credit|debit|payment|"
-    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)",
+    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)"
+    # a bare `units` is often a per-entity reading (`reading_units`); only a flow settles it
+    r"|(^|_)units_(sold|shipped|ordered|delivered|received|returned|purchased|produced)(_|$)"
+    r"|(^|_)(sold|shipped|ordered|delivered|received|returned|purchased|produced)_units(_|$)",
     re.IGNORECASE,
 )
 
@@ -130,9 +208,12 @@ def classify_aggregation(column_name: str, column_type: str, is_key: bool = Fals
         return "dimension"
     if column_type not in _NUMERIC_TYPES:
         return "dimension"
-    if _DIMENSION_RE.search(column_name):
+    # money detection reads camelCase / kebab words, so these checks must too, or `unitPrice`
+    # would skip the averageable test and be called additive
+    spelled = (column_name, "_".join(name_words(column_name)))
+    if any(_DIMENSION_RE.search(n) for n in spelled):
         return "dimension"
-    if _AVERAGEABLE_RE.search(column_name):
+    if any(_AVERAGEABLE_RE.search(n) for n in spelled):
         return "averageable"
     if detect_money_column(column_name) or _ADDITIVE_RE.search(column_name):
         return "additive"
@@ -290,28 +371,27 @@ def maybe_column_groups(
 
 
 def infer_cardinality(
-    from_table: str,
-    to_table: str,
+    from_table: Optional[Table],
+    to_table: Optional[Table],
     from_cols: list[str],
     to_cols: list[str],
-    grain_by_table: dict[str, set[str]],
 ) -> str:
-    """Infer join cardinality from declared/inferred grain.
+    """Infer join cardinality from each side's keys: its grain (primary key) and unique keys.
 
-    to-side == to PK & from-side == from PK -> one_to_one
-    to-side == to PK (unique), from not      -> many_to_one
-    from-side == from PK, to not             -> one_to_many
-    else                                     -> many_to_one (default; review)
+    A side is "one" when the join's columns are exactly one of its keys; a multi-column key counts
+    only when the join uses all of it. A nullable unique column still counts: NULL never joins.
+    Tables, not names, so two same-named tables in two schemas don't lend each other a key.
+
+    both sides keyed  -> one_to_one
+    to side keyed     -> many_to_one
+    from side keyed   -> one_to_many
+    neither           -> many_to_one (default; review)
     """
-    from_pk = grain_by_table.get(from_table, set())
-    to_pk = grain_by_table.get(to_table, set())
-    from_is_pk = bool(from_pk) and set(from_cols) == from_pk
-    to_is_pk = bool(to_pk) and set(to_cols) == to_pk
-    if from_is_pk and to_is_pk:
+    from_one = from_table is not None and from_table.unique_on(from_cols)
+    to_one = to_table is not None and to_table.unique_on(to_cols)
+    if from_one and to_one:
         return "one_to_one"
-    if to_is_pk and not from_is_pk:
-        return "many_to_one"
-    if from_is_pk and not to_is_pk:
+    if from_one:
         return "one_to_many"
     return "many_to_one"
 
@@ -699,17 +779,85 @@ _END_NAME_RE = re.compile(
     r"(^|_)(closed|resolved|ended|end|finished|completed|fulfilled|approved|delivered)(_|$)", re.I)
 _FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
 _TS_TYPES = {"timestamp", "date"}
+# Audit columns record when a row was written or changed, not when the thing it describes began or
+# ended, so a duration pairs one only when no other column can stand in for it (#514).
+_AUDIT_NAME_RE = re.compile(
+    r"^(sys_.+|.+_by|.*modified.*|(created|updated|inserted|last_updated)(_(at|on|date|time|ts))?"
+    r"|date_(created|updated))$", re.I)
+_PLANNED_NAME_RE = re.compile(r"(^|_)(planned|scheduled|expected|estimated|target)(_|$)", re.I)
+_ACTUAL_NAME_RE = re.compile(r"(^|_)actual(_|$)", re.I)
+# Below this many rows a rate or an average is too thin to define a metric on (#514).
+TINY_TABLE_ROWS = 50
+
+
+def _flag(code: str, why: str) -> dict:
+    return {"flag": code, "why": why}
+
+
+def _duration_family(name: str) -> str:
+    """planned / actual / "" — a duration pairs a start and an end of the SAME family, never a
+    planned start with an actual end."""
+    if _PLANNED_NAME_RE.search(name):
+        return "planned"
+    if _ACTUAL_NAME_RE.search(name):
+        return "actual"
+    return ""
+
+
+def _prefer_non_audit(cols: list[Column]) -> tuple[list[Column], bool]:
+    """The non-audit columns, or the audit ones (and True) when they are all there is."""
+    plain = [c for c in cols if not _AUDIT_NAME_RE.match(c.name)]
+    return (plain, False) if plain else (cols, bool(cols))
+
+
+# How many other pairings an ambiguous_pairing flag names; a wide table can have dozens.
+_LISTED_PAIRS = 3
+
+
+def _others(pairs: list[tuple[Column, Column]], this: tuple[Column, Column]) -> str:
+    rest = (f"{a.name}→{b.name}" for a, b in pairs if (a, b) != this)
+    shown = list(itertools.islice(rest, _LISTED_PAIRS))
+    more = len(pairs) - 1 - len(shown)
+    return ", ".join(shown) + (f" … and {more} more" if more else "")
+
+
+def _duration_pairs(ts_cols: list[Column]) -> list[tuple[Column, Column, str, list[dict]]]:
+    """(start, end, family, flags) for every start/end pairing worth offering."""
+    out = []
+    for fam in ("", "actual", "planned"):
+        mine = [c for c in ts_cols if _duration_family(c.name) == fam]
+        starts, s_audit = _prefer_non_audit([c for c in mine if _START_NAME_RE.search(c.name)])
+        ends, e_audit = _prefer_non_audit([c for c in mine if _END_NAME_RE.search(c.name)])
+        pairs = [(s, e) for s in starts for e in ends if s is not e]
+        for s, e in pairs:
+            flags = []
+            if len(pairs) > 1:
+                flags.append(_flag("ambiguous_pairing", f"{len(pairs)} start/end pairings fit; "
+                                   f"also offered: {_others(pairs, (s, e))}"))
+            if s_audit or e_audit:
+                which = ", ".join(c.name for c, a in ((s, s_audit), (e, e_audit)) if a)
+                flags.append(_flag("audit_column", f"{which} looks like an audit column (when the "
+                                   "row was written), the only candidate for this pairing"))
+            out.append((s, e, fam, flags))
+    return out
 
 
 def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
       • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
-        pattern — fraction true);
-      • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
-        pattern — `AVG(end − start)` via the dialect's day-difference form).
+        pattern — fraction true among the rows where the flag is set);
+      • an AVG DURATION for each start+end timestamp pair (the `avg_resolution_time` pattern —
+        `AVG(end − start)` via the dialect's day-difference form for the columns' types), leaving
+        out rows where the end is before the start. A start pairs only with an end of the same
+        planned/actual family, and an audit column only when nothing else fits.
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
     bulk in the explorer. Capped at max_per_table. Each one pairs columns or picks a condition —
     a choice the engine could get wrong — so none of them is auto-approved.
+
+    Each dict also carries `_proposal`, which is not a Metric field and is popped before writing:
+    `flags` (why a person should look before it is kept — an ambiguous or audit pairing, a table
+    under TINY_TABLE_ROWS rows), `columns` (what the binding reads) and `row_expr` (the per-row
+    value the binding averages, which a test run checks for a constant result).
 
     A plain COUNT(*) / SUM(col) / AVG(col) is never proposed. `runtime._check_aggregation_semantics`
     enforces a column's `aggregation` class on every statement with or without a named metric, and
@@ -730,7 +878,7 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
     t = table.name
     st = dialect.name
     out: list[dict] = []
-    ts_cols: list[str] = []
+    ts_cols: list[Column] = []
     for c in table.columns:
         if c.primary_key:
             continue
@@ -739,34 +887,49 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
         is_bool = c.type == "boolean"
         is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
         if is_bool or is_int_flag:
-            cond = c.name if is_bool else f"{c.name} <> 0"
+            row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=is_bool)
             out.append({"name": f"{t}_{c.name}_rate",
-                        "calculation": f"Fraction of {t} where {c.name} is true",
-                        "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
-                        "source_tables": [t]})
+                        "calculation": f"Fraction of {t} where {c.name} is true, among the rows "
+                                       f"where {c.name} is set (rows where it is NULL are left out)",
+                        "bindings": {st: f"AVG({row})"},
+                        "source_tables": [t],
+                        "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
             continue
         if c.type in _TS_TYPES:
-            ts_cols.append(c.name)
-    starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
-    ends = [c for c in ts_cols if _END_NAME_RE.search(c)]
-    if starts and ends and starts[0] != ends[0]:
-        s, e = starts[0], ends[0]
-        out.append({"name": f"{t}_avg_duration_days",
-                    "calculation": f"Average days from {s} to {e} in {t}",
-                    "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
-                    "source_tables": [t], "unit": "days"})
+            ts_cols.append(c)
+    pairs = _duration_pairs(ts_cols)
+    for s, e, fam, flags in pairs:
+        days = dialect.duration_days_expr(dialect.ident(s.name), dialect.ident(e.name),
+                                          start_type=s.type, end_type=e.type)
+        guard = dialect.duration_guard(dialect.ident(s.name), dialect.ident(e.name),
+                                       start_type=s.type, end_type=e.type)
+        row = f"CASE WHEN {guard} THEN {days} END"
+        same_family = [p for p in pairs if p[2] == fam]
+        name = (f"{t}_avg_days_{s.name}_to_{e.name}" if len(same_family) > 1
+                else f"{t}_avg_{fam + '_' if fam else ''}duration_days")
+        out.append({"name": name,
+                    "calculation": f"Average days from {s.name} to {e.name} in {t}; rows where "
+                                   f"{e.name} is before {s.name} are left out",
+                    "bindings": {st: f"AVG({row})"},
+                    "source_tables": [t], "unit": "days",
+                    "_proposal": {"flags": flags, "columns": [s.name, e.name], "row_expr": row}})
     # Clamped, not floored at 1: `0` honestly means none, but a negative cap must not fall through
     # to Python's negative slice, where `-1` would quietly return every proposal except the last.
     out = out[: max(0, max_per_table)]
+    rows = table.performance_hints.estimated_row_count if table.performance_hints else None
     for m in out:
         m["confidence"] = "proposed"
         m["review_state"] = "unreviewed"
         m["primary_table"] = t  # every suggested metric is single-table — anchor it there
+        if rows is not None and 0 <= rows < TINY_TABLE_ROWS:
+            m["_proposal"]["flags"].append(_flag(
+                "low_confidence", f"{t} has about {rows} rows (under {TINY_TABLE_ROWS})"))
     return out
 
 
 __all__ = [
-    "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
+    "SENSITIVE_RE", "detect_sensitive", "detect_money_column", "suggest_unit", "name_currency",
+    "name_words",
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
