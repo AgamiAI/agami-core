@@ -125,10 +125,10 @@ _LOG = logging.getLogger(__name__)
 # A logger of its OWN for raw driver text, and the reason is a leak rather than tidiness (ACE-039).
 # This module never calls `basicConfig`, so in a forked child a record on `_LOG` falls through to
 # `logging.lastResort` and is written to STDERR — and `tools._child_failure_message` relays the
-# child's whole stderr into `failure.message` for any classified exit code. Logging the raw text on
-# `_LOG` would therefore hand it straight back to the caller on the DEFAULT surface, undoing the
-# sanitization in the same breath. (The catch-all beneath the classifier escapes this only because
-# its `exc_info=True` trips the traceback guard, at the cost of degrading its message.)
+# child's whole stderr into `failure.message` for an authored exit code (2, 3). Logging the raw text on
+# `_LOG` would therefore hand it straight back to the caller on the DEFAULT surface whenever a config
+# error follows, undoing the sanitization in the same breath. Every other code is rebuilt by the
+# parent from the code (`other` too, since #583), so the stream does not reach the caller there.
 #
 # `main` silences this logger at CLI entry, so the forked child emits nothing here and the column
 # stays NULL. In-process and hosted, it propagates to the server's root logger as intended.
@@ -395,8 +395,9 @@ _SQLSTATE_UNCLASSIFIED = (
     "The details are in the server log."
 )
 
-# Every sentence above with its code slot as a pattern. The forked transport relays a `syntax`
-# failure's line only when it matches one whole, because only our template and a valid code can.
+# Every sentence above with its code slot as a pattern. The forked transport relays a `syntax` or
+# `other` failure's line only when it matches one whole, because only our template and a valid code
+# can.
 SQLSTATE_MESSAGE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(re.escape(template).replace(re.escape("{code}"), "[0-9A-Z]{5}"))
     for template in (*set(_SQLSTATE_MESSAGES.values()), _SQLSTATE_UNCLASSIFIED)

@@ -86,6 +86,10 @@ def cmd_validate(args) -> int:
     # exists for it even with rejected included.
     org = L.load_datasource(args.root, include_rejected=True)
     res = V.validate(org)
+    unknown = L.unknown_datasource_keys(args.root)
+    if unknown:
+        # A warning, not an error (#575): the model still loads, but those fields are not served.
+        res.warn("unknown_datasource_key", L.unknown_keys_message(unknown))
     print(V.format_result(res))
     ok = res.ok
     # Deployment-level pass (F16 / ACE-072): when the profile sits under a deployment with an
@@ -642,7 +646,9 @@ def cmd_suggest_units(args) -> int:
     """List the numeric **money** columns (so a currency `unit` can be stamped) using the
     tested name matcher — never a hand-rolled regex that mis-handles `count` inside
     `discount`. Skips columns that already carry a `unit`. Emits
-    {money_columns: [{area, table, column, type}]} for the caller to confirm + apply."""
+    {money_columns: [{area, table, column, type, suggested_unit}]}, where `suggested_unit`
+    is the unit the name spells out (`revenue_usd_millions` -> `USD_millions`) or null, for
+    the caller to show, confirm and apply."""
     from . import build as B
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
@@ -651,26 +657,27 @@ def cmd_suggest_units(args) -> int:
         for t in sa.tables_defined:
             for c in t.columns:
                 if not c.unit and c.type in numeric and B.detect_money_column(c.name):
-                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
+                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
+                                  "suggested_unit": B.suggest_unit(c.name)})
     _print_json({"money_columns": money})
     return 0
 
 
 def cmd_set_units(args) -> int:
-    """The APPLY half of suggest-units: stamp a currency/unit on every detected money column in
+    """The APPLY half of suggest-units: stamp a currency/unit on detected money columns in
     ONE validated curate batch — so a skill never pipes suggest-units JSON through a hand-rolled
     script (the fragile glue that broke on empty stdin). Detects the same money columns (tested
-    matcher); `--columns` overrides detection for non-obvious names; `--area` scopes it."""
+    matcher); a detected column whose name states its currency gets that unit, the rest get
+    `--currency`/`--unit`. Detection only PLANS: it writes nothing until `--yes`, so a guess is
+    always reviewed. `--columns` names the columns outright (applying the reviewed plan to just
+    those): each keeps the unit its name states, the rest get the given unit; `--area` scopes it."""
     from . import build as B
     from . import curate
     unit = args.currency or args.unit
-    if not unit:
-        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>"})
-        return 1
+    explicit = set(args.columns or [])
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
-    explicit = set(args.columns or [])
-    ops = []
+    plan = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
@@ -681,38 +688,127 @@ def cmd_set_units(args) -> int:
                 if explicit:
                     if f"{t.name}.{c.name}" not in explicit and c.name not in explicit:
                         continue
+                    col_unit = B.suggest_unit(c.name) or unit
                 elif not (c.type in numeric and B.detect_money_column(c.name)):
                     continue
-                ops.append({"op": "edit", "kind": "table", "area": sa.name, "name": t.name,
-                            "column": c.name, "field": "unit", "value": unit})
-    if not ops:
+                else:
+                    col_unit = B.suggest_unit(c.name) or unit
+                plan.append({"area": sa.name, "table": t.name, "column": c.name, "unit": col_unit})
+    if not plan:
         _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
         return 0
+    missing = [f"{p['table']}.{p['column']}" for p in plan if not p["unit"]]
+    if missing:
+        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>: these names "
+                     "state no currency", "columns": missing})
+        return 1
+    if not (explicit or args.yes):
+        _print_json({"set": 0, "planned": plan,
+                     "next": "nothing written: show this plan, then re-run with --yes to apply "
+                             "it, or with the same --currency/--unit plus --columns <table.col …> to apply "
+                             "only some (each keeps the unit planned for it)"})
+        return 0
+    ops = [{"op": "edit", "kind": "table", "area": p["area"], "name": p["table"],
+            "column": p["column"], "field": "unit", "value": p["unit"]} for p in plan]
     res = curate.apply(args.root, ops)
-    _print_json({"set": len(res.applied), "unit": unit, "errors": res.errors})
+    _print_json({"set": len(res.applied), "unit": unit,
+                 "units": {f"{p['table']}.{p['column']}": p["unit"] for p in plan},
+                 "errors": res.errors})
     return 0 if res.validated else 1
+
+
+# A test run reads at most this many rows of a table: enough to see a constant or broken binding,
+# bounded so it is never a full scan of a large table.
+_TEST_RUN_ROWS = 10000
+
+
+def _num(v) -> Optional[float]:
+    try:
+        return None if v is None or str(v).strip() == "" else float(v)
+    except ValueError:
+        return None
+
+
+def _test_run_sql(table, dialect, props: list[dict]) -> str:
+    """One bounded statement that evaluates every proposal on `table`: each one's AVG (its binding)
+    with the MIN and MAX of the per-row value it averages, over a sample of the columns they read."""
+    cols = sorted({c for p in props for c in p["_proposal"]["columns"]})
+    if table.source_type == "sql":
+        # Newlines keep a trailing `--` comment in the table's SQL from swallowing the `)`.
+        src = f"(\n{table.sql.strip().rstrip(';').rstrip()}\n) src"
+    else:
+        src = dialect.qualified(table.schema_name, table.name)
+    inner = dialect.limited(f"SELECT {', '.join(dialect.ident(c) for c in cols)} FROM {src}",
+                            _TEST_RUN_ROWS)
+    parts = []
+    for i, p in enumerate(props):
+        v = p["_proposal"]["row_expr"]
+        parts += [f"AVG({v}) AS m{i}", f"MIN({v}) AS m{i}_min", f"MAX({v}) AS m{i}_max"]
+    return f"SELECT {', '.join(parts)}, COUNT(*) AS n_rows FROM ({inner}) sample_rows"
+
+
+def _test_run_table(runner, table, dialect, props: list[dict]) -> dict[str, dict]:
+    """name → {value, min, max, rows} or {error}. One statement for the table; only when it fails
+    does each proposal run on its own, so one broken binding does not hide the others' results."""
+    def run(batch: list[dict]) -> dict[str, dict]:
+        row = (runner(_test_run_sql(table, dialect, batch)) or [{}])[0]
+        return {p["name"]: {"value": _num(row.get(f"m{i}")), "min": _num(row.get(f"m{i}_min")),
+                            "max": _num(row.get(f"m{i}_max")), "rows": _num(row.get("n_rows"))}
+                for i, p in enumerate(batch)}
+    try:
+        return run(props)
+    except Exception as e:  # noqa: BLE001 — a failed read is reported per proposal, not raised
+        if len(props) == 1:
+            return {props[0]["name"]: {"error": str(e)}}
+    out: dict[str, dict] = {}
+    for p in props:
+        out.update(_test_run_table(runner, table, dialect, [p]))
+    return out
+
+
+def _test_run_flags(table_name: str, result: dict) -> list[dict]:
+    """Flags a successful test run raises: a degenerate result, or too few rows to trust it."""
+    from . import build as B
+    flags = []
+    if result["value"] is None:
+        flags.append(B._flag("degenerate", "no row gives a value (the result is NULL)"))
+    elif result["min"] is not None and result["min"] == result["max"]:
+        flags.append(B._flag("degenerate", f"every row gives {result['min']:g}, so the result is "
+                             "a constant (a constant or all-zero column)"))
+    rows = result["rows"]
+    if rows is not None and rows < B.TINY_TABLE_ROWS:
+        flags.append(B._flag("low_confidence", f"{table_name} has {rows:g} rows "
+                             f"(under {B.TINY_TABLE_ROWS})"))
+    return flags
 
 
 def cmd_suggest_metrics(args) -> int:
     """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
-    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer,
-    instead of asking the user to pick ~4 upfront. An unsigned metric is still used, and the answer
-    warns that it is unreviewed (Rule 1), so every proposal is worth a person's glance."""
+    COUNT/SUM/AVG (#406) — and PRINT them; `--write` saves them proposed/unreviewed for bulk
+    sign-off in the explorer. An unsigned metric is still used, and the answer warns that it is
+    unreviewed (Rule 1), so nothing is written until a person has seen the list (#514).
+
+    `--profile` test-runs every binding first (one bounded read per table, opt-in because a billed
+    warehouse charges for it): one that errors is never written, and a degenerate result (constant,
+    all zero or NULL) is flagged. A flagged proposal — degenerate, a tiny table, an ambiguous or
+    audit-column pairing — is written only when `--names` names it."""
     from . import build as B
     from . import curate
     from . import dialects as D
     org = L.load_datasource(args.root)
+    if not org.storage_connections:
+        _print_json({"error": "the model declares no storage connection, so there is no dialect "
+                              "to write bindings in"})
+        return 2
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
-    default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
-    _dcache: dict = {}
-
-    def _dialect(st: str):
-        if st not in _dcache:
-            try:
-                _dcache[st] = D.get_dialect(st)
-            except Exception:
-                _dcache[st] = D.get_dialect("postgresql")
-        return _dcache[st]
+    default_type = org.storage_connections[0].storage_type
+    dialects: dict = {}
+    for st in set(conn_type.values()):
+        try:
+            dialects[st] = D.get_dialect(st)
+        except ValueError as e:
+            _print_json({"error": f"no SQL dialect for storage type {st!r}: {e}"})
+            return 2
 
     # Every metric name on disk, rejected ones included. `org` drops rejected entries, which is
     # right for choosing what to propose on (never a rejected table or column), but `write_items`
@@ -720,8 +816,14 @@ def cmd_suggest_metrics(args) -> int:
     # metric a person had rejected and reset it to unreviewed, undoing the rejection.
     on_disk = {sa.name: {m.name for m in sa.metrics}
                for sa in L.load_datasource(args.root, include_rejected=True).subject_areas}
+    runner = None
+    if args.profile:
+        from . import introspect as INTRO
+        runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    named = set(args.names or [])
 
-    suggested = written = skipped_opaque = 0
+    proposals: list[dict] = []
+    written = skipped_opaque = 0
     errors: list[str] = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
@@ -739,33 +841,72 @@ def cmd_suggest_metrics(args) -> int:
                      or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))
                      or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
                                                     or B._END_NAME_RE.search(c.name)))))
-            st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
-                if met["name"] in existing:
-                    continue
-                existing.add(met["name"])
-                items.append(met)
-                suggested += 1
-        if items:
+            dialect = dialects[conn_type.get(t.storage_connection, default_type)]
+            props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table)
+                     if m["name"] not in existing and (not named or m["name"] in named)]
+            existing.update(m["name"] for m in props)
+            results = _test_run_table(runner, t, dialect, props) if runner and props else {}
+            for met in props:
+                extra = met.pop("_proposal")
+                entry = {"name": met["name"], "subject_area": sa.name, "source_table": t.name,
+                         "binding": next(iter(met["bindings"].values())),
+                         "calculation": met["calculation"], "flags": extra["flags"]}
+                res = results.get(met["name"])
+                if res and "error" in res and t.source_type == "sql":
+                    # The table's own SQL may be what failed, so the binding is unproven rather
+                    # than broken: kept out unless named, like any other flagged proposal.
+                    entry["test_run"] = None
+                    entry["flags"].append(B._flag(
+                        "not_test_run", "defined by SQL; its bindings could not be test-run "
+                        f"({res['error']})"))
+                elif res and "error" in res:
+                    entry["error"] = res["error"]
+                elif res:
+                    entry["test_run"] = res
+                    if res["rows"] is not None:
+                        # The live count replaces the stored estimate's low_confidence.
+                        entry["flags"] = [f for f in entry["flags"] if f["flag"] != "low_confidence"]
+                    entry["flags"] += _test_run_flags(t.name, res)
+                entry["write"] = "error" not in entry and (not entry["flags"]
+                                                           or met["name"] in named)
+                proposals.append(entry)
+                if entry["write"]:
+                    items.append(met)
+        if args.write and items:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    note = ("flag rates & durations proposed — review & sign off in the explorer (/agami-model); "
-            "give each one you keep a one-line description")
+    if args.write:
+        note = ("flag rates & durations written — review & sign off in the explorer (/agami-model); "
+                "give each one you keep a one-line description")
+    else:
+        note = ("dry run: nothing written — show these to the user, then re-run with --write "
+                "(add --names <metric> … to keep only some, or to keep a flagged one)")
+    if not runner:
+        note += (". Bindings were NOT test-run against the database — pass --profile <name> to run "
+                 "each one first (one bounded read per table; billed on a pay-per-scan warehouse)")
     if skipped_opaque:
         note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
                  "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
-    _print_json({"suggested": suggested, "written": written,
-                 "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
+    out = {"dry_run": not args.write, "test_run": runner is not None,
+           "suggested": len(proposals), "would_write": sum(p["write"] for p in proposals),
+           "written": written, "skipped_opaque": skipped_opaque, "errors": errors,
+           "proposals": proposals, "note": note}
+    unknown = sorted(named - {p["name"] for p in proposals})
+    if unknown:
+        out["unknown_names"] = unknown
+    _print_json(out)
     return 0 if not errors else 1
 
 
 def cmd_describe_file(args) -> int:
-    """Apply many column descriptions from a lightweight TSV — one per line,
-    `<table.column>` or `<area.table.column>` then a TAB then the description — as ONE validated
-    curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
-    generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
+    """Apply many column descriptions from a file as ONE validated curate batch — a TSV
+    (`<table.column>` or `<area.table.column>`, a TAB, the description), or a CSV / JSON data
+    dictionary. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
+    generator script to build ops. `--source ai` (default) → ai_unvalidated (earns trust through
+    use); `--source metadata` → metadata, the customer's own dictionary text."""
     from . import curate
+    from . import dictionary as DD
     if args.file:
         p = Path(args.file).expanduser()
         try:
@@ -778,27 +919,31 @@ def cmd_describe_file(args) -> int:
             return 2
     else:
         text = sys.stdin.read()
-    ops = []
-    for ln in text.splitlines():
-        if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
-            continue
-        loc, desc = (p.strip() for p in ln.split("\t", 1))
-        segs = loc.split(".")
-        if not desc or len(segs) not in (2, 3):
-            continue
-        op = {"op": "edit", "kind": "table", "field": "description", "value": desc, "source": "ai"}
-        if len(segs) == 3:
-            op["area"], op["name"], op["column"] = segs
-        else:
-            op["name"], op["column"] = segs
-        ops.append(op)
-    if not ops:
-        _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
+    fmt = DD.format_for(args.file, args.format)
+    try:
+        rows = DD.parse(text, fmt)
+    except ValueError as exc:  # bad JSON or CSV quoting, a CSV without the needed header
+        _print_json({"error": f"could not read the {fmt.upper()} file: {exc}"})
+        return 2
+    root = Path(args.root).expanduser()
+    if not (root / "datasource.yaml").is_file() or not (root / "subject_areas").is_dir():
+        # otherwise every row comes back no_table with exit 0, as if the dictionary were the problem
+        _print_json({"error": f"no semantic model at {root.resolve()} (needs datasource.yaml and "
+                              "subject_areas/)"})
+        return 2
+    m = DD.match(root, rows, source=args.source)
+    report = {"unmatched": m["unmatched"], "kept_human": m["kept_human"],
+              "case_corrected": m["case_corrected"],
+              "schema_prefix_stripped": m["schema_prefix_stripped"]}
+    if not m["ops"]:
+        _print_json({"described": 0, "reason": "no row matched a column of the model", **report,
+                     "skipped": [], "errors": []})
         return 0
-    res = curate.apply(args.root, ops)
+    res = curate.apply(root, m["ops"])
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
-    _print_json({"described": len(res.applied), "skipped": res.skipped, "errors": res.errors})
+    _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
+                 "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1233,9 +1378,12 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     `(intra: {area: [rel,…]}, cross: [xrel,…], skipped_target_count)`. SELF-references are kept
     (a hierarchical `parent → same table` is a real join). Edges whose TARGET isn't modelled are
     skipped and COUNTED (so pruning that drops a join target is reported, not silent). Already-
-    present edges are skipped. References are `many_to_one` to the target's grain, written
+    present edges are skipped. References point at the target's grain, labelled from both sides'
+    keys (`build.infer_cardinality`), written
     `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
     from collections import defaultdict
+
+    from . import build as B
     tindex: dict = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
@@ -1268,7 +1416,7 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
         existing.add(key)
         base = {"from_table": ft, "from_column": fc, "to_table": tt, "to_column": ttab.grain[0],
                 "from_schema": ftab.schema_name, "to_schema": ttab.schema_name,
-                "relationship": "many_to_one", "join_type": "LEFT",
+                "relationship": B.infer_cardinality(ftab, ttab, [fc], [ttab.grain[0]]), "join_type": "LEFT",
                 # per-spec trust (a verified candidate is confirmed/approved); defaults otherwise
                 "confidence": spec.get("confidence", "inferred"),
                 "review_state": spec.get("review_state", "unreviewed"),
@@ -1572,25 +1720,40 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example)
 
-    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch")
+    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch; prints the plan and writes nothing without --yes or --columns")
     sp.add_argument("root")
-    sp.add_argument("--currency", default=None, help="ISO currency code (USD/EUR/INR/…)")
+    sp.add_argument("--currency", default=None,
+                    help="currency unit: an ISO code, optionally scaled and/or a rate (USD, USD_millions, USD/day, USD_millions/year)")
     sp.add_argument("--unit", default=None, help="non-currency unit (cents/percent/days/…)")
+    sp.add_argument("--yes", action="store_true",
+                    help="apply the detected plan (without it, detection only prints the plan)")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--columns", nargs="*", default=None,
-                    help="explicit table.column (or bare column) list — overrides money detection")
+                    help="explicit table.column (or bare column) list — overrides money detection; a name that states its currency keeps that unit")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) and print them; --write saves them proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
                     help="cap measures per table")
+    sp.add_argument("--write", action="store_true",
+                    help="save the unflagged proposals (and any named with --names); default is a dry run")
+    sp.add_argument("--names", nargs="+", default=None, metavar="METRIC",
+                    help="only these proposals; a named one is written even when flagged (never when its binding errors)")
+    sp.add_argument("--profile", default=None,
+                    help="test-run every binding against this profile's database first (one bounded read per table)")
     sp.set_defaults(func=cmd_suggest_metrics)
 
-    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
+    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description), CSV or JSON data dictionary (stdin or --file) in one validated batch — no generator script; unmatched rows are listed")
     sp.add_argument("root")
-    sp.add_argument("--file", default=None, help="TSV path (default: read stdin)")
+    sp.add_argument("--file", default=None, help="TSV / CSV / JSON path, format from the extension (default: read TSV from stdin)")
+    sp.add_argument("--format", choices=["tsv", "csv", "json"], default=None,
+                    help="override the format the file extension implies")
+    sp.add_argument("--source", choices=["ai", "metadata"], default="ai",
+                    help="ai (default): generated text, stamped ai_unvalidated. metadata: taken as written "
+                         "from the customer's dictionary, stamped metadata; not checked against the data "
+                         "(see #564); never replaces a description a person wrote")
     sp.set_defaults(func=cmd_describe_file)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")

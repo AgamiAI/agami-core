@@ -539,6 +539,33 @@ def test_detect_money_column_handles_word_boundaries():
         assert not build.detect_money_column(c), f"{c} should NOT be money"
 
 
+@pytest.mark.parametrize("name", ["duration_minutes", "total_minutes", "total_hours",
+                                  "credit_hours", "points_balance", "total_weight",
+                                  "totalMinutes", "reading_units", "balance_pts",
+                                  "total_seconds", "duration_secs"])
+def test_non_money_unit_words_are_not_money(name):
+    assert not build.detect_money_column(name)
+
+
+@pytest.mark.parametrize("name", ["gross_usd", "value_usd", "balance_usd", "fx_dollar",
+                                  "amount_total", "total_amount", "revenueUSDMillions",
+                                  "revenue_per_day", "cost_per_kg", "fare_try",
+                                  "second_payment_amount", "second_installment_fee",
+                                  "hour_cost", "cost_per_hour"])
+def test_currency_named_and_money_named_columns_are_money(name):
+    assert build.detect_money_column(name)
+
+
+@pytest.mark.parametrize("name,unit", [
+    ("revenue_usd_millions", "USD_millions"), ("revenueUSDMillions", "USD_millions"),
+    ("gross_usd", "USD"), ("fx_dollar", "USD"), ("cost_usd_per_day", "USD/day"),
+    ("monthly_fee_inr_thousands", "INR_thousands/month"), ("total_amount", None),
+    ("try_count", None),   # a leading ISO-looking word is not a currency
+])
+def test_suggest_unit_reads_currency_scale_and_period_from_the_name(name, unit):
+    assert build.suggest_unit(name) == unit
+
+
 # ---------------------------------------------------------------------------
 # Cross-schema relationships (Case 1): schema is stamped on every edge, declared
 # cross-schema FKs are surfaced for review (not auto-approved), and the inferred
@@ -703,7 +730,7 @@ def _redshift_fk_runner(overlap_matches: bool):
     which is what the value-overlap probe decides."""
     def run(sql):
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        if "FROM pg_namespace" in s:  # Redshift's schema list (#558)
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"},
@@ -766,7 +793,7 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
 
     def runner(sql):
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        if "FROM pg_namespace" in s:  # Redshift's schema list (#558)
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             rows = [{"schema_name": "public", "table_name": "parent", "table_type": "BASE TABLE"}]
@@ -946,26 +973,26 @@ def _rows(n):
     "sample_rows, est_rows, expect_list",
     [
         (120, None, True),  # the sample is the whole table
-        (I.SAMPLE_ROWS, 5_000, True),  # first rows of a small table, per the catalog
-        (I.SAMPLE_ROWS, None, False),  # a view or no estimate: the first rows could be any corner
-        (I.SAMPLE_ROWS, 15_000_000, False),  # a big table: an incomplete list would mislead
+        (I.SAMPLE_ROWS, 5_000, True),  # a small table, per the catalog
+        (I.SAMPLE_ROWS, None, False),  # a view or no estimate: it could be any size
+        (I.SAMPLE_ROWS, 15_000_000, False),  # a big table: DISTINCT would scan it
     ],
 )
-def test_a_value_list_is_built_only_from_a_representative_sample(
+def test_a_value_list_is_read_with_distinct_on_a_small_table_only(
     sample_rows, est_rows, expect_list
 ):
+    # The list is the column's DISTINCT values (#517), so 'Returned', which the sampled rows never
+    # show, is in it; before, the list was the sample's values and missed it.
     from semantic_model import dialects as D
 
+    def run(sql):
+        if sql.startswith("SELECT DISTINCT"):
+            return [{"v": v} for v in ("Open", "Closed", "Returned")]
+        return _rows(sample_rows)
+
     col = _status_col()
-    I._enrich_from_sample(
-        D.get_dialect("postgres"),
-        lambda sql: _rows(sample_rows),
-        "s",
-        "t",
-        [col],
-        est_rows=est_rows,
-    )
-    assert (col.choice_field == {"Closed": "", "Open": ""}) is expect_list
+    I._enrich_from_sample(D.get_dialect("postgres"), run, "s", "t", [col], est_rows=est_rows)
+    assert (col.choice_field == {"Closed": "", "Open": "", "Returned": ""}) is expect_list
 
 
 def test_an_unknown_row_estimate_is_not_a_small_table():

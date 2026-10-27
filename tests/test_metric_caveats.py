@@ -189,3 +189,17 @@ def test_clearing_a_metrics_caveats_removes_the_key(tmp_path):
         assert not res.errors, res.errors
     assert "caveats" not in yaml.safe_load(path.read_text())
     assert loader.load_datasource(root).subject_areas[0].metrics[0].caveats == []
+
+
+def test_clearing_a_cross_area_metrics_caveats_removes_the_key(tmp_path):
+    root = _write_model(tmp_path)
+    (root / "subject_areas" / "support" / "metrics" / "avg_resolution_days.yaml").unlink()
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [_metric(subject_areas=["support"]).model_dump(exclude_none=True)]
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    for value in ([CAVEAT], []):
+        res = curate.apply(root, [{"op": "edit", "kind": "metric", "name": "avg_resolution_days",
+                                   "field": "caveats", "value": value}])
+        assert not res.errors, res.errors
+    assert "caveats" not in yaml.safe_load((root / "datasource.yaml").read_text())["cross_subject_area_metrics"][0]
+    assert loader.load_datasource(root).cross_subject_area_metrics[0].caveats == []

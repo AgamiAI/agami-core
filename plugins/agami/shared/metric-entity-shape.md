@@ -23,7 +23,7 @@ YAML when building them during onboarding/enrichment. The data below is
 
 Fields: `name`, `description`, `calculation` (prose intent — **required**,
 provider-portable), `bindings` (per-dialect SQL keyed by `StorageType`),
-`source_tables`, `other_names`, `unit` (optional, e.g. a currency ISO code),
+`source_tables`, `other_names`, `unit` (optional: a currency ISO code, optionally scaled and/or a rate — `USD`, `USD_millions`, `USD/day`, `USD_millions/year` — or a plain label),
 `subject_areas` (optional; only for cross-cutting metrics), `caveats` (optional; what the
 formula does not cover, served with the metric as a warning). Trust:
 `confidence` + `review_state` (declared → `inferred`/`unreviewed`; pure guess →
@@ -134,6 +134,18 @@ inner_grain:
 source_tables:
   - orders
 ```
+
+A base metric over several tables works too: the engine joins the table it measures to each other
+source table by the one relationship declared directly between them, and refuses the metric when
+there is no such edge, more than one, or a join that fans out the anchor's rows. The measured
+table is the base's `primary_table` (it must be one of its `source_tables`, with or without the
+schema), else the one table that declares every column the base's aggregates read; when those
+columns span tables (or it reads none, as in `COUNT(*)`), set `primary_table`. With several
+tables, write each `inner_grain` entry as a column only one of them declares, or as
+`table.column` naming a source table and a column it declares; the tables must not share a name
+across schemas. Table and column
+names are quoted where the engine needs it, so a mixed-case table such as `"OrderLines"` works on
+PostgreSQL.
 
 ## Entity
 
