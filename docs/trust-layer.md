@@ -100,7 +100,8 @@ one-click "Approve all". Each card shows:
 - The inferred SQL fragment / definition / mapping
 - Its confidence + review state
 - An inline editable textarea for the description / `calculation`
-- Per-card Approve / Reject / Edit buttons + group-level "Approve all"
+- Per-card Approve / Reject / Edit buttons + group-level "Approve all" and "Reject all"
+  (a bulk reject asks for one reason, written with each rejected item to `curation_log.jsonl`)
 
 Approving stamps the curator's email + role (resolved once and saved). Click
 through the queue, hit "Generate feedback for Claude" at the bottom, paste back

@@ -121,10 +121,11 @@ class ValidationResult:
 
 
 # An incremental-validation cache (ACE-046): per-area findings keyed by everything a per-area rule
-# reads — the area's own content AND the org-wide table registry. An enrichment run passes one of
-# these across edits so only the edited area's rules re-run; a normal `validate(org)` (cache=None)
-# is unchanged. Because the key pins every input, a cache hit is byte-identical to recomputing.
-# Key = (area name, area content sha, org-table-registry sha) → that area's findings.
+# reads — the area's own content, the org-wide table registry and the engine's dialect. An
+# enrichment run passes one of these across edits so only the edited area's rules re-run; a normal
+# `validate(org)` (cache=None) is unchanged. Because the key pins every input, a cache hit is
+# byte-identical to recomputing.
+# Key = (area name, area content sha, "<org-table-registry sha>:<dialect>") → that area's findings.
 ValidationCache = dict[tuple[str, str, str], "list[Finding]"]
 
 # Hard ceiling so a long-lived process (e.g. the HTTP server) that validates many distinct models
@@ -176,16 +177,17 @@ def _validate_area(
     # (entity mappings + each relationship's FK-type check), instead of rebuilding it per
     # relationship — that per-rel rebuild was the O(R×T) cost this pass eliminates (ACE-046).
     defined = _all_tables(sa)
+    dialect = _model_dialect(org)
     _check_subject_area_sizing(sa, ares)
     _check_table_refs_resolve(sa, ares, org_tables)
     _check_expose_column_groups(sa, ares, org_tables)
     _check_deep_table_column_groups(sa, ares)
     _check_default_filters_columns(sa, ares)
-    _check_value_transforms(sa, ares)
+    _check_value_transforms(sa, ares, dialect)
     _check_choice_fields(sa, ares)
     _check_entity_mappings(sa, ares, defined)
     for rel in sa.relationships:
-        _check_relationship(rel, sa, org, ares, cross=False, defined=defined)
+        _check_relationship(rel, sa, org, ares, cross=False, defined=defined, dialect=dialect)
         _check_relationship_served(rel, sa, ares, defined)
     return ares.findings
 
@@ -311,7 +313,8 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     # defined in another area (multi-membership without duplication — the design
     # doc's "defined once, TableRef'd from each subject area" pattern).
     org_tables = _org_tables(org)
-    reg_sig = _org_tables_sig(org_tables) if cache is not None else ""
+    # The dialect the area's SQL fragments parse in is an input too, so a storage-type edit misses.
+    reg_sig = f"{_org_tables_sig(org_tables)}:{_model_dialect(org)}" if cache is not None else ""
     for sa in org.subject_areas:
         if cache is not None:
             key = (sa.name, _sig(sa), reg_sig)
@@ -331,6 +334,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     for rel in org.cross_subject_area_relationships:
         _check_cross_relationship(rel, org, res)
 
+    _check_entity_mappings_elsewhere(org, res)
     _check_cross_area_entity_collisions(org, res)
     _check_ambiguities(org, org_tables, res)
     _check_table_name_across_schemas(org, res)
@@ -790,11 +794,11 @@ def _check_default_filters_columns(sa: SubjectArea, res: ValidationResult) -> No
                     )
 
 
-def _check_value_transforms(sa: SubjectArea, res: ValidationResult) -> None:
+def _check_value_transforms(sa: SubjectArea, res: ValidationResult, dialect: Optional[str]) -> None:
     for table in sa.tables_defined:
         for col in table.columns:
             if col.value_transform:
-                err = _sqlparse_error(col.value_transform)
+                err = _sqlparse_error(col.value_transform, dialect=dialect)
                 if err:
                     res.error(
                         "value_transform_unparseable",
@@ -838,6 +842,35 @@ def _check_entity_mappings(
                 )
 
 
+def _check_entity_mappings_elsewhere(org: Datasource, res: ValidationResult) -> None:
+    """Check the mappings the per-area rule can't see: an area entity's mapping to a table the area
+    doesn't define, and every org-level cross-area entity mapping. Resolved against the whole model.
+    Warnings, not errors, so a model that validated before still writes; org-level because the
+    per-area cache key doesn't cover other areas' columns."""
+    mappings = [(f"subject area {sa.name!r} entity {ent.name!r}", f"{sa.name}.entities[{ent.name}]", mp)
+                for sa in org.subject_areas for ent in sa.entities for mp in ent.maps_to
+                if mp.table not in {t.name for t in sa.tables_defined}]
+    mappings += [(f"cross-area entity {ent.name!r}", f"cross_subject_area_entities[{ent.name}]", mp)
+                 for ent in org.cross_subject_area_entities for mp in ent.maps_to]
+    defs = _table_defs(org)
+    for who, locator, mp in mappings:
+        hits = _tables_named(defs, mp.table)
+        if not hits:
+            res.warn(
+                "entity_mapping_unknown_table",
+                f"{who}: maps_to references {mp.table}.{mp.column} but no "
+                "subject area defines that table",
+                locator=locator,
+            )
+        elif not any(mp.column.lower() in {c.lower() for c in t.column_names()} for t in hits):
+            res.warn(
+                "entity_mapping_column_not_found",
+                f"{who}: maps_to references {mp.table}.{mp.column} but that "
+                "table has no such column",
+                locator=locator,
+            )
+
+
 def _check_relationship(
     rel: Relationship,
     sa: SubjectArea,
@@ -846,6 +879,7 @@ def _check_relationship(
     *,
     cross: bool,
     defined: dict[str, Table],
+    dialect: Optional[str] = None,
 ) -> None:
     # cardinality required (structural gate, check #17) — models enforces non-null,
     # re-assert the value domain here for a clear validator-level error too.
@@ -872,7 +906,7 @@ def _check_relationship(
 
     # on: must parse if present
     if rel.on:
-        err = _sqlparse_error(rel.on, as_condition=True)
+        err = _sqlparse_error(rel.on, as_condition=True, dialect=dialect or _model_dialect(org))
         if err:
             res.error(
                 "relationship_on_unparseable",
@@ -986,11 +1020,12 @@ def _check_cross_area_entity_collisions(org: Datasource, res: ValidationResult) 
                 seen_pairs.add(pair_key)
                 tgt_a = _entity_targets(org, area_a, ent_a)
                 tgt_b = _entity_targets(org, area_b, ent_b)
-                if tgt_a and tgt_b and tgt_a != tgt_b:
+                if tgt_a and tgt_b and set(tgt_a) != set(tgt_b):
                     res.warn(
                         "cross_area_entity_collision",
                         f"entity {ent_a.name!r} is declared independently in areas "
-                        f"{area_a!r} (-> {sorted(tgt_a)}) and {area_b!r} (-> {sorted(tgt_b)}). "
+                        f"{area_a!r} (-> {', '.join(sorted(tgt_a.values()))}) and "
+                        f"{area_b!r} (-> {', '.join(sorted(tgt_b.values()))}). "
                         "Consider declaring it ONCE in a cross-cutting subject area with "
                         "maps_to across both, so the runtime never has to ask which was meant.",
                         suggestion=(
@@ -1366,6 +1401,54 @@ def _binding_column_refs(sql: str) -> set[str]:
     return {c.name.lower() for c in tree.find_all(exp.Column) if c.name}
 
 
+def _binding_base_column_refs(sql: str, storage_type: str) -> set[str]:
+    """Like `_binding_column_refs`, but leaves out names that are aliases rather than table columns:
+    a column a derived table or CTE projects (`s.r`, or a bare `r` read from it) and a select-list
+    alias used in the same SELECT's HAVING / ORDER BY. Validator-only: the loader keeps the broader
+    set, so a metric reading a hidden column through an alias is still hidden at runtime."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return set()
+    from sqlglot.optimizer.scope import Scope, traverse_scope
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+        scopes = traverse_scope(tree)
+    except Exception:
+        return _binding_column_refs(sql)
+    if not scopes:  # a bare expression such as `SUM(amount)`: no aliases to resolve
+        return _binding_column_refs(sql)
+
+    def derived_of(scope: Scope) -> list[Scope]:
+        # only the sources the SELECT reads: an unused CTE projecting `cst` must not hide a typo
+        return [src for _, src in scope.selected_sources.values() if isinstance(src, Scope)]
+
+    def projects(src: Scope, name: str) -> bool:
+        """Whether `src` makes `name` an alias. Through a star, only if a derived source of its own
+        does; a star over a base table passes the table's columns through, so those stay checked."""
+        selects = {n.lower() for n in getattr(src.expression, "named_selects", [])}
+        if name in selects:
+            return True
+        return "*" in selects and any(projects(inner, name) for inner in derived_of(src))
+
+    out: set[str] = set()
+    for scope in scopes:
+        derived = derived_of(scope)
+        for col in scope.columns:
+            name = col.name.lower()
+            if not name:
+                continue
+            if col.table:
+                _, src = scope.selected_sources.get(col.table, (None, None))
+                if isinstance(src, Scope) and projects(src, name):
+                    continue
+            elif any(projects(s, name) for s in derived):
+                continue
+            out.add(name)
+    return out
+
+
 def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> None:
     """WARN when a metric's binding references a column that exists on NONE of its source_tables —
     catches a typo'd or renamed column (e.g. `SUM(cst)`) before it fails at query time, which is
@@ -1391,7 +1474,7 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
         if not allowed:
             continue  # source tables aren't in the model (its own check) — don't double-flag
         for stype, sql in (met.bindings or {}).items():
-            missing = sorted(r for r in _binding_column_refs(sql) if r not in allowed)
+            missing = sorted(r for r in _binding_base_column_refs(sql, stype) if r not in allowed)
             if missing:
                 res.warn(
                     "metric_binding_unknown_column",
@@ -1603,18 +1686,56 @@ def _types_compatible(a: str, b: str) -> bool:
     return frozenset({a, b}) in _COERCIBLE_PAIRS
 
 
-def _entity_targets(org: Datasource, area_name: str, ent: Entity) -> set[str]:
-    """Resolve an entity's maps_to into a set of 'connection.schema.table' strings."""
+def _table_defs(org: Datasource) -> list[tuple[tuple[str, str], Table]]:
+    return [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+
+
+def _tables_named(defs: list[tuple[tuple[str, str], Table]], ref: str) -> list[Table]:
+    """Every defined Table `ref` names, by schema-aware identity: `s.orders` finds schema `s`'s
+    `orders` (or a schema-less one), a bare `orders` finds every table of that name."""
+    schema, bare = table_key(ref)
+    if schema:
+        return [t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+    return [t for k, t in defs if k[1] == bare]
+
+
+def _entity_targets(org: Datasource, area_name: str, ent: Entity) -> dict[tuple, str]:
+    """Resolve an entity's maps_to into {identity: display}. A table is found in the area itself,
+    else through the area's TableRefs or anywhere in the model, so two areas mapping one table
+    compare equal. Display is `schema.table`, naming the connection only when there are several."""
     sa = org.subject_area(area_name)
-    out: set[str] = set()
+    out: dict[tuple, str] = {}
     if sa is None:
         return out
+    several = len(org.storage_connections) > 1
     defined = _all_tables(sa)
     for mp in ent.maps_to:
         t = defined.get(mp.table)
-        conn = t.storage_connection if t else "?"
-        schema = (t.schema_name if t else None) or "?"
-        out.add(f"{conn}.{schema}.{mp.table}")
+        ref_conn = ""
+        if t is None:
+            schema, bare = table_key(mp.table)
+            # the area's own TableRef settles which schema a bare name means, and which connection
+            listed = [r for r in sa.tables if (k := table_key(r.table, r.schema_name))[1] == bare
+                      and (not schema or k[0] in (schema, ""))]
+            if len(listed) == 1:
+                schema = table_key(listed[0].table, listed[0].schema_name)[0] or schema
+                ref_conn = listed[0].storage_connection
+            hits = _tables_named(_table_defs(org), f"{schema}.{bare}" if schema else bare)
+            if ref_conn:
+                hits = [h for h in hits if h.storage_connection in (ref_conn, None)]
+            if len({(h.storage_connection, table_key(h.name, h.schema_name)) for h in hits}) == 1:
+                t = hits[0]
+        if t is None:
+            schema, bare = table_key(mp.table)
+            conn, shown = ref_conn, mp.table
+        else:
+            schema, bare = table_key(t.name, t.schema_name)
+            ref = next((r for r in sa.tables if table_key(r.table, r.schema_name) == (schema, bare)), None)
+            conn = t.storage_connection or ref_conn or (ref.storage_connection if ref else "")
+            shown = f"{t.schema_name}.{t.name}" if t.schema_name and "." not in t.name else t.name
+        if several and conn:
+            shown = f"{shown} on {conn}"
+        out[(conn if several else "", schema, bare)] = shown
     return out
 
 
@@ -1658,16 +1779,37 @@ def _columns_referenced(expr: str, table_name: str) -> set[str]:
     return cols
 
 
-def _sqlparse_error(expr: str, *, as_condition: bool = False) -> Optional[str]:
-    """Return None if `expr` parses as SQL, else a short error string."""
+def _model_dialect(org: Datasource) -> Optional[str]:
+    """The sqlglot dialect of the datasource's engine, or None when it can't be resolved."""
+    from .sql_dialect import DialectUnresolved, resolve_datasource_dialect
+    try:
+        return resolve_datasource_dialect(org)
+    except DialectUnresolved:
+        return None
+
+
+def _sqlparse_error(
+    expr: str, *, as_condition: bool = False, dialect: Optional[str] = None
+) -> Optional[str]:
+    """Return None if `expr` parses as SQL, else a short error string.
+
+    A fragment is accepted when it parses in the engine's dialect (Postgres `~`, T-SQL brackets)
+    or in the generic grammar, which is what every model was checked against before (#518), so
+    no fragment that used to pass starts failing."""
     if not _HAVE_SQLGLOT:
         return None  # can't check; treat as ok (sqlglot optional, like legacy)
     candidate = f"SELECT 1 WHERE {expr}" if as_condition else f"SELECT {expr}"
-    try:
-        parsed = sqlglot.parse_one(candidate, error_level=_ErrorLevel.RAISE)
-        return None if parsed is not None else "empty parse"
-    except Exception as e:  # sqlglot.errors.ParseError and friends
-        return str(e).splitlines()[0][:160]
+    first_err = None
+    for read in ([dialect] if dialect else []) + [None]:
+        try:
+            parsed = sqlglot.parse_one(candidate, read=read, error_level=_ErrorLevel.RAISE)
+        except Exception as e:  # sqlglot.errors.ParseError and friends
+            first_err = first_err or str(e).splitlines()[0][:160]
+            continue
+        if parsed is not None:
+            return None
+        first_err = first_err or "empty parse"
+    return first_err
 
 
 def _value_matches_type(value: str, ctype: str) -> bool:

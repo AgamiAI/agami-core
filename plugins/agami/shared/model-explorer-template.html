@@ -382,6 +382,8 @@
     }
     .btn-sm.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     .btn-sm.primary:hover { background: var(--accent-hover); }
+    .btn-sm.bulk-reject { color: var(--bad-fg); border-color: var(--bad-border); }
+    .kind-subhead .btn-sm + .btn-sm { margin-left: 6px; }
     /* Prominent "Add metric" buttons (the open trigger + the form submit) — easy to spot.
        Selector outscopes the generic `.card-actions button` rule (else it gets overridden). */
     .card-actions button.add-metric-open, .card-actions button.add-metric-go,
@@ -949,6 +951,11 @@
       // metrics/entities/joins that aren't already approved/excluded, and aren't moot
       // (approving a join to a table you excluded is pointless — the runtime drops it).
       return effReviewState(item) !== 'approved' && !effExcluded(item) && !mootReason(item);
+    }
+    // What a bulk reject may turn down: not approved, not already rejected. A moot item still
+    // qualifies (its card offers Reject too) — only approving it is pointless.
+    function isRejectable(item) {
+      return effReviewState(item) !== 'approved' && !effExcluded(item);
     }
     // The sign-off queue: every metric / entity / join not yet approved or rejected.
     // The "untouched" review queue — items not yet approved/rejected AND not yet edited.
@@ -1816,9 +1823,10 @@
     // the first source table (legacy models carry no anchor).
     function metricGroupKey(m) { return (m.area || '?') + '.' + (m.primary_table || (m.source_tables || [])[0] || '?'); }
     function renderMetricsGrouped(root) {
+      // `_kind` as reviewAll stamps it, so a bulk op from this tab names its kind.
       const all = (manifest.metrics || []).filter(m =>
         (!searchQ || `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`.toLowerCase().includes(searchQ))
-        && passesFilter(m, 'metric'));
+        && passesFilter(m, 'metric')).map(m => ({ ...m, _kind: 'metric' }));
       setSearchCounts(`${all.length} of ${(manifest.metrics || []).length} metric${(manifest.metrics || []).length === 1 ? '' : 's'} shown`);
       if (!all.length) {
         root.appendChild(el('div', { class: 'empty-state', text: (manifest.metrics || []).length ? 'No metrics match.' : 'No metrics defined yet.' }));
@@ -1828,10 +1836,13 @@
       all.forEach(m => { const k = metricGroupKey(m); if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(m); });
       const sec = el('div', { class: 'schema-section' });
       const allApprovable = all.filter(isApprovable);
-      if (allApprovable.length) {
+      const allRejectable = all.filter(isRejectable);
+      if (allApprovable.length || allRejectable.length) {
         const bar = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
-        bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+        if (allApprovable.length) bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
           onclick: () => bulkApprove(all) }, `✓ Approve all ${allApprovable.length} proposed`));
+        bar.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
+          onclick: () => bulkReject(all) }, `✕ Reject all ${allRejectable.length} proposed`));
         sec.appendChild(bar);
       }
       order.forEach(k => {
@@ -1931,8 +1942,11 @@
       h.appendChild(el('span', { class: 'kind-count', text: String(items.length) }));
       if (bulk) {
         const approvable = items.filter(isApprovable);
+        const rejectable = items.filter(isRejectable);
         if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm',
           style: 'margin-left:auto;', onclick: () => bulkApprove(items) }, `✓ Approve ${approvable.length}`));
+        if (rejectable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
+          style: approvable.length ? '' : 'margin-left:auto;', onclick: () => bulkReject(items) }, `✕ Reject ${rejectable.length}`));
       }
       return h;
     }
@@ -1957,6 +1971,31 @@
     }
     function bulkApprove(items) {
       items.forEach(it => { if (isApprovable(it)) ops[it.qname] = { op: 'approve', kind: it._kind, area: it.area, name: relName(it) }; });
+      renderAll();
+    }
+    const KIND_NOUN = { metric: ['metric', 'metrics'], entity: ['entity', 'entities'],
+                        relationship: ['join', 'joins'] };
+    function kindNoun(items, n) {
+      const kinds = [...new Set(items.map(it => it._kind))];
+      const pair = kinds.length === 1 && KIND_NOUN[kinds[0]] || ['item', 'items'];
+      return pair[n === 1 ? 0 : 1];
+    }
+    // Queues one reject per shown item, all carrying the one reason the person gives — the reason
+    // reaches curation_log.jsonl with each op. Nothing is applied until the block is submitted.
+    function bulkReject(items) {
+      const targets = items.filter(isRejectable);
+      if (!targets.length) return;
+      const noun = kindNoun(targets, targets.length);
+      if (!window.confirm(`Reject ${targets.length} ${noun}?`)) return;
+      let reason = '';
+      let ask = `Why are you rejecting these ${targets.length} ${noun}? The reason is recorded on each one.`;
+      while (!reason) {
+        const got = window.prompt(ask, '');
+        if (got === null) return;
+        reason = got.trim();
+        ask = `A reason is required to reject ${targets.length} ${noun}.`;
+      }
+      targets.forEach(it => { ops[it.qname] = { op: 'exclude', kind: it._kind, area: it.area, name: relName(it), reason }; });
       renderAll();
     }
     // Sign-off identity control (email + role). Recreated on re-render; value persists
@@ -2627,7 +2666,7 @@
 
       // approve/reject ops — split metrics / joins / entities
       const opv = Object.entries(ops);
-      const opRow = ([q, o]) => queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}`, () => delete ops[q]);
+      const opRow = ([q, o]) => queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}` + (o.reason ? ` — ${o.reason}` : ''), () => delete ops[q]);
       [['metric', 'Metrics'], ['relationship', 'Joins'], ['entity', 'Entities']].forEach(([kind, label]) =>
         qGroup(label, opv.filter(([, o]) => o.kind === kind).map(opRow)));
       qGroup('Other', opv.filter(([, o]) => !['metric', 'relationship', 'entity'].includes(o.kind)).map(opRow));
@@ -2784,7 +2823,8 @@
     function renderMeta() {
       const t = manifest.totals || {};
       const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-      const parts = [plural(t.schemas || 0, 'schema'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
+      // the manifest's `schemas` key holds subject areas, not database schemas
+      const parts = [plural(t.schemas || 0, 'subject area'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
       if (t.metrics) parts.push(plural(t.metrics, 'metric'));
       if (t.relationships) parts.push(plural(t.relationships, 'join'));
       if (t.entities) parts.push(plural(t.entities, 'entity').replace('entitys', 'entities'));

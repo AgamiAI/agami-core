@@ -6,7 +6,7 @@ model (read by `mcp_server._model_version` and the agami-query skill's
 `ls -t .snapshots/ | head -1`). Nothing used to WRITE that directory, so
 `model_version` was `null` for every profile. This module is the writer: it is
 called from the deterministic model-write chokepoints (introspect's
-`build.write_tree` and every curation commit via `curate._git_commit`) so a
+`build.write_tree` and every curation write via `curate._record`) so a
 snapshot is stamped whenever the model changes — independent of git, identical
 across the skill / MCP server / cron.
 
