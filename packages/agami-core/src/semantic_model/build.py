@@ -9,6 +9,7 @@ the assembly logic is independently testable and reusable.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -779,17 +780,85 @@ _END_NAME_RE = re.compile(
     r"(^|_)(closed|resolved|ended|end|finished|completed|fulfilled|approved|delivered)(_|$)", re.I)
 _FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
 _TS_TYPES = {"timestamp", "date"}
+# Audit columns record when a row was written or changed, not when the thing it describes began or
+# ended, so a duration pairs one only when no other column can stand in for it (#514).
+_AUDIT_NAME_RE = re.compile(
+    r"^(sys_.+|.+_by|.*modified.*|(created|updated|inserted|last_updated)(_(at|on|date|time|ts))?"
+    r"|date_(created|updated))$", re.I)
+_PLANNED_NAME_RE = re.compile(r"(^|_)(planned|scheduled|expected|estimated|target)(_|$)", re.I)
+_ACTUAL_NAME_RE = re.compile(r"(^|_)actual(_|$)", re.I)
+# Below this many rows a rate or an average is too thin to define a metric on (#514).
+TINY_TABLE_ROWS = 50
+
+
+def _flag(code: str, why: str) -> dict:
+    return {"flag": code, "why": why}
+
+
+def _duration_family(name: str) -> str:
+    """planned / actual / "" — a duration pairs a start and an end of the SAME family, never a
+    planned start with an actual end."""
+    if _PLANNED_NAME_RE.search(name):
+        return "planned"
+    if _ACTUAL_NAME_RE.search(name):
+        return "actual"
+    return ""
+
+
+def _prefer_non_audit(cols: list[Column]) -> tuple[list[Column], bool]:
+    """The non-audit columns, or the audit ones (and True) when they are all there is."""
+    plain = [c for c in cols if not _AUDIT_NAME_RE.match(c.name)]
+    return (plain, False) if plain else (cols, bool(cols))
+
+
+# How many other pairings an ambiguous_pairing flag names; a wide table can have dozens.
+_LISTED_PAIRS = 3
+
+
+def _others(pairs: list[tuple[Column, Column]], this: tuple[Column, Column]) -> str:
+    rest = (f"{a.name}→{b.name}" for a, b in pairs if (a, b) != this)
+    shown = list(itertools.islice(rest, _LISTED_PAIRS))
+    more = len(pairs) - 1 - len(shown)
+    return ", ".join(shown) + (f" … and {more} more" if more else "")
+
+
+def _duration_pairs(ts_cols: list[Column]) -> list[tuple[Column, Column, str, list[dict]]]:
+    """(start, end, family, flags) for every start/end pairing worth offering."""
+    out = []
+    for fam in ("", "actual", "planned"):
+        mine = [c for c in ts_cols if _duration_family(c.name) == fam]
+        starts, s_audit = _prefer_non_audit([c for c in mine if _START_NAME_RE.search(c.name)])
+        ends, e_audit = _prefer_non_audit([c for c in mine if _END_NAME_RE.search(c.name)])
+        pairs = [(s, e) for s in starts for e in ends if s is not e]
+        for s, e in pairs:
+            flags = []
+            if len(pairs) > 1:
+                flags.append(_flag("ambiguous_pairing", f"{len(pairs)} start/end pairings fit; "
+                                   f"also offered: {_others(pairs, (s, e))}"))
+            if s_audit or e_audit:
+                which = ", ".join(c.name for c, a in ((s, s_audit), (e, e_audit)) if a)
+                flags.append(_flag("audit_column", f"{which} looks like an audit column (when the "
+                                   "row was written), the only candidate for this pairing"))
+            out.append((s, e, fam, flags))
+    return out
 
 
 def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
       • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
-        pattern — fraction true);
-      • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
-        pattern — `AVG(end − start)` via the dialect's day-difference form).
+        pattern — fraction true among the rows where the flag is set);
+      • an AVG DURATION for each start+end timestamp pair (the `avg_resolution_time` pattern —
+        `AVG(end − start)` via the dialect's day-difference form for the columns' types), leaving
+        out rows where the end is before the start. A start pairs only with an end of the same
+        planned/actual family, and an audit column only when nothing else fits.
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
     bulk in the explorer. Capped at max_per_table. Each one pairs columns or picks a condition —
     a choice the engine could get wrong — so none of them is auto-approved.
+
+    Each dict also carries `_proposal`, which is not a Metric field and is popped before writing:
+    `flags` (why a person should look before it is kept — an ambiguous or audit pairing, a table
+    under TINY_TABLE_ROWS rows), `columns` (what the binding reads) and `row_expr` (the per-row
+    value the binding averages, which a test run checks for a constant result).
 
     A plain COUNT(*) / SUM(col) / AVG(col) is never proposed. `runtime._check_aggregation_semantics`
     enforces a column's `aggregation` class on every statement with or without a named metric, and
@@ -810,7 +879,7 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
     t = table.name
     st = dialect.name
     out: list[dict] = []
-    ts_cols: list[str] = []
+    ts_cols: list[Column] = []
     for c in table.columns:
         if c.primary_key:
             continue
@@ -819,29 +888,43 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
         is_bool = c.type == "boolean"
         is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
         if is_bool or is_int_flag:
-            cond = c.name if is_bool else f"{c.name} <> 0"
+            row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=is_bool)
             out.append({"name": f"{t}_{c.name}_rate",
-                        "calculation": f"Fraction of {t} where {c.name} is true",
-                        "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
-                        "source_tables": [t]})
+                        "calculation": f"Fraction of {t} where {c.name} is true, among the rows "
+                                       f"where {c.name} is set (rows where it is NULL are left out)",
+                        "bindings": {st: f"AVG({row})"},
+                        "source_tables": [t],
+                        "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
             continue
         if c.type in _TS_TYPES:
-            ts_cols.append(c.name)
-    starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
-    ends = [c for c in ts_cols if _END_NAME_RE.search(c)]
-    if starts and ends and starts[0] != ends[0]:
-        s, e = starts[0], ends[0]
-        out.append({"name": f"{t}_avg_duration_days",
-                    "calculation": f"Average days from {s} to {e} in {t}",
-                    "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
-                    "source_tables": [t], "unit": "days"})
+            ts_cols.append(c)
+    pairs = _duration_pairs(ts_cols)
+    for s, e, fam, flags in pairs:
+        days = dialect.duration_days_expr(dialect.ident(s.name), dialect.ident(e.name),
+                                          start_type=s.type, end_type=e.type)
+        guard = dialect.duration_guard(dialect.ident(s.name), dialect.ident(e.name),
+                                       start_type=s.type, end_type=e.type)
+        row = f"CASE WHEN {guard} THEN {days} END"
+        same_family = [p for p in pairs if p[2] == fam]
+        name = (f"{t}_avg_days_{s.name}_to_{e.name}" if len(same_family) > 1
+                else f"{t}_avg_{fam + '_' if fam else ''}duration_days")
+        out.append({"name": name,
+                    "calculation": f"Average days from {s.name} to {e.name} in {t}; rows where "
+                                   f"{e.name} is before {s.name} are left out",
+                    "bindings": {st: f"AVG({row})"},
+                    "source_tables": [t], "unit": "days",
+                    "_proposal": {"flags": flags, "columns": [s.name, e.name], "row_expr": row}})
     # Clamped, not floored at 1: `0` honestly means none, but a negative cap must not fall through
     # to Python's negative slice, where `-1` would quietly return every proposal except the last.
     out = out[: max(0, max_per_table)]
+    rows = table.performance_hints.estimated_row_count if table.performance_hints else None
     for m in out:
         m["confidence"] = "proposed"
         m["review_state"] = "unreviewed"
         m["primary_table"] = t  # every suggested metric is single-table — anchor it there
+        if rows is not None and 0 <= rows < TINY_TABLE_ROWS:
+            m["_proposal"]["flags"].append(_flag(
+                "low_confidence", f"{t} has about {rows} rows (under {TINY_TABLE_ROWS})"))
     return out
 
 
