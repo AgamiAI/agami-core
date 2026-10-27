@@ -400,3 +400,51 @@ def test_a_qualifier_cannot_contradict_a_lone_table_that_records_no_schema():
         m.SubjectArea(name="sales", tables_defined=[_table("orders", None)])])
     assert [t.name for t in L._find_tables(org, "warehouse.orders")] == ["orders"]
     assert L._find_tables(_two_schemas_org(), "warehouse.customers") == []
+
+
+def test_a_dot_inside_a_table_name_is_part_of_the_name():
+    """Introspection stores `schema` apart, so Postgres `public."orders.v2"` is one table."""
+    from semantic_model import runtime as rt
+    assert m.stored_identity("orders.v2", "public") == ("public", "orders.v2")
+    assert m.stored_identity("public.orders", "public") == ("public", "orders")
+    org = m.Datasource(datasource="acme",
+                       storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
+                       subject_areas=[m.SubjectArea(name="s", tables_defined=[_table("orders.v2", "public")])])
+    assert rt.check_table_scope('SELECT id FROM public."orders.v2"', org) is None
+
+
+def test_a_table_ref_with_a_schema_reaches_a_table_that_records_none():
+    """The validator accepts it, so serving must reach it too."""
+    org = m.Datasource(datasource="acme", subject_areas=[
+        m.SubjectArea(name="sales", tables_defined=[_table("orders", None)]),
+        m.SubjectArea(name="finance", tables=[
+            m.TableRef(storage_connection="c", schema="public", table="orders")])],
+        storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")])
+    assert "orphan_table_ref" not in {f.code for f in V.validate(org).findings}
+    assert [t.name for t in L._find_tables(org, "orders", "finance")] == ["orders"]
+    assert [t.name for t in L._find_tables(org, "orders", "finance", index=L.build_table_index(org))] == ["orders"]
+
+
+def test_the_validator_folds_a_schemas_case_like_the_loader():
+    org = _two_schemas_org()
+    org.subject_areas.append(m.SubjectArea(name="ops", tables=[
+        m.TableRef(storage_connection="c", schema="PUBLIC", table="orders",
+                   expose_column_groups=None)]))
+    assert "orphan_table_ref" not in {f.code for f in V.validate(org).findings}
+    defined = V._all_tables(org.subject_areas[0])
+    assert V._endpoint(defined, "orders", "ARCHIVE").schema_name == "archive"
+    assert V._endpoint(defined, "orders", "Public").schema_name == "public"
+
+
+def test_both_copies_keep_their_identical_looking_joins(tmp_path, monkeypatch):
+    """Each schema's `orders` joins `customers` by customer_id=id: two edges, not one."""
+    org = _two_schemas_org()
+    for t in org.subject_areas[0].tables_defined[:2]:
+        t.columns.append(m.Column(name="customer_id", type="integer"))
+    org.subject_areas[0].relationships = [
+        m.Relationship(from_table="orders", from_schema=s, from_column="customer_id",
+                       to_table="customers", to_schema="public", to_column="id",
+                       relationship="many_to_one") for s in ("public", "archive")]
+    ctx = tools._table_contexts(org, ["orders"], L, index=L.build_table_index(org))
+    froms = sorted(r.get("from_schema") for r in ctx["relationships"] if r.get("to_table") == "customers")
+    assert froms == ["archive", "public"]

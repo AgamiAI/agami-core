@@ -664,14 +664,14 @@ def _all_tables(sa: SubjectArea) -> dict[str, Table]:
         out.setdefault(t.name, t)
         schema, bare = stored_identity(t.name, t.schema_name)
         if schema:
-            out[f"{schema}.{bare}"] = t
+            out[f"{schema.lower()}.{bare}"] = t
     return out
 
 
 def _endpoint(defined: dict[str, Table], table: str, schema: Optional[str]) -> Optional[Table]:
     """The table a relationship endpoint names: by its schema where it gives one, else by name."""
     if schema:
-        found = defined.get(f"{schema}.{bare_name(table)}")
+        found = defined.get(f"{schema.lower()}.{bare_name(table)}")
         if found is not None:
             return found
     return defined.get(table)
@@ -718,7 +718,7 @@ def _org_tables(org: Datasource) -> dict[str, Table]:
             out[t.name] = t
             schema, bare = stored_identity(t.name, t.schema_name)
             if schema:
-                out[f"{schema}.{bare}"] = t
+                out[f"{schema.lower()}.{bare}"] = t
     return out
 
 
@@ -729,7 +729,7 @@ def _ref_table(org_tables: dict[str, Table], ref: TableRef) -> Optional[Table]:
     table of another schema: serving resolves it by schema too, so passing it here would let the
     model validate and the table then go missing from that area."""
     if ref.schema_name:
-        found = org_tables.get(f"{ref.schema_name}.{bare_name(ref.table)}")
+        found = org_tables.get(f"{ref.schema_name.lower()}.{bare_name(ref.table)}")
         if found is not None:
             return found
     found = org_tables.get(ref.table)

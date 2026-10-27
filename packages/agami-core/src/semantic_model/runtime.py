@@ -1592,16 +1592,12 @@ def _table_decls(org: Datasource) -> "dict[tuple, list[Table]]":
     return decls
 
 
-# Engines where a quoted identifier is case-sensitive and an unquoted one folds: Postgres (and
-# Supabase, which parses as it) to lower, Snowflake and Oracle to upper. Elsewhere a quoted name
-# matches without regard to case, as the engine resolves it: Redshift folds quoted names by default,
-# and DuckDB, SQL Server, SQLite, Databricks, Trino and BigQuery datasets match them
-# case-insensitively, so the folded comparison the index already makes is the engine's own.
-_QUOTED_EXACT_FOLD: dict[str, Callable[[str], str]] = {
-    "postgres": str.lower,
-    "snowflake": str.upper,
-    "oracle": str.upper,
-}
+# Engines where a quoted identifier is case-sensitive: Postgres (and Supabase, which parses as it),
+# Snowflake and Oracle. Elsewhere a quoted name matches without regard to case, as the engine
+# resolves it: Redshift folds quoted names by default, and DuckDB, SQL Server, SQLite, Databricks,
+# Trino and BigQuery datasets match them case-insensitively, so the folded comparison the index
+# already makes is the engine's own.
+_QUOTED_EXACT = frozenset({"postgres", "snowflake", "oracle"})
 
 # Engines where a table or database name is case-sensitive whether or not it is quoted. MySQL on
 # Linux, its default (`lower_case_table_names=0`), keeps the case a table was created with and
@@ -1611,22 +1607,16 @@ _QUOTED_EXACT_FOLD: dict[str, Callable[[str], str]] = {
 _EXACT_NAMES = frozenset({"mysql"})
 
 
-def _part_names(ident: object, declared: str, dialect: "str | None") -> bool:
+def _part_names(ident: "exp.Expression", declared: str, dialect: "str | None") -> bool:
     """Whether a written identifier part names the declared one in the case the engine compares.
 
-    On `_EXACT_NAMES` engines the written name must be the declared one. On `_QUOTED_EXACT_FOLD`
-    engines only a quoted part is checked, since an unquoted one was already matched folded and
-    folding is right for it. The declared spelling is the physical one when it has mixed case; in a
-    single case it may be a hand-written model's habit rather than the warehouse's (`orders` on
-    Snowflake, whose table is `ORDERS`), so the engine's fold of it counts too.
+    On `_EXACT_NAMES` engines the written name must be the declared one. On `_QUOTED_EXACT` engines
+    a quoted part must be the declared spelling exactly: `"orders"` and `"ORDERS"` are two tables on
+    Snowflake, and accepting either for one declaration would let the other through. An unquoted
+    part was already matched folded, and folding is right for it.
     """
-    if dialect in _EXACT_NAMES:
-        return not isinstance(ident, exp.Identifier) or ident.name == declared
-    fold = _QUOTED_EXACT_FOLD.get(dialect or "")
-    if fold is None or not isinstance(ident, exp.Identifier) or not ident.args.get("quoted"):
-        return True
-    mixed = declared != declared.lower() and declared != declared.upper()
-    return ident.name in ({declared} if mixed else {declared, fold(declared)})
+    strict = dialect in _EXACT_NAMES or (dialect in _QUOTED_EXACT and ident.args.get("quoted"))
+    return not strict or ident.name == declared
 
 
 def _names_declared(tbl: "exp.Table", t: Table, dialect: "str | None") -> bool:
@@ -2014,6 +2004,15 @@ def check_column_scope(sql: str, org: Datasource,
         if sel is not None:
             resolved = _resolve_table(sidx, tbl, decls, dialect)
             binding = resolved if isinstance(resolved, tuple) else False
+            if binding:
+                # Case alone can tell two declarations apart (`sales."Orders"` vs `sales.orders` on
+                # Postgres). The folded index unions their columns, so bind the reference to the
+                # columns of the declarations it actually names.
+                named = [t for t in decls.get(binding, []) if _names_declared(tbl, t, dialect)]
+                if named and len(named) < len(decls.get(binding, [])):
+                    exact = binding + (frozenset(id(t) for t in named),)
+                    declared[exact] = {_tkey(c.name) for t in named for c in t.columns}
+                    binding = exact
             aliases = alias_by_select.setdefault(id(sel), {})
             aliases[tbl.alias_or_name.lower()] = binding
             if tbl.db and not tbl.alias:
@@ -2133,15 +2132,15 @@ def _declared_listing(org: Datasource, offending: list[str],
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             schema, bare = stored_identity(t.name, t.schema_name)
-            key = (_tkey(schema) or None, _tkey(bare))
-            if key not in keys:
-                continue
-            names.setdefault(key, t.name)
-            have, had = columns.setdefault(key, []), seen.setdefault(key, set())
-            for c in _visible_columns(t, _exposed_groups_for(sa, t)):
-                if _tkey(c.name) not in had:
-                    had.add(_tkey(c.name))
-                    have.append(c.name)
+            base = (_tkey(schema) or None, _tkey(bare))
+            # A key carrying table ids names only those declarations: case told them apart.
+            for key in (k for k in keys if k[:2] == base and (len(k) == 2 or id(t) in k[2])):
+                names.setdefault(key, t.name)
+                have, had = columns.setdefault(key, []), seen.setdefault(key, set())
+                for c in _visible_columns(t, _exposed_groups_for(sa, t)):
+                    if _tkey(c.name) not in had:
+                        had.add(_tkey(c.name))
+                        have.append(c.name)
     ordered = sorted(columns, key=lambda k: (names[k].lower(), k[0] or ""))
     listed = ordered[:_LIST_MAX_TABLES]
     bare_count: dict[str, int] = {}

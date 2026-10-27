@@ -68,9 +68,12 @@ below corresponds to one such version.
       always in the workspace's default catalog, so a catalog prefix is refused there; write
       `schema.table`.
     - A four-part name (`server.database.schema.table`) never matches a declared table.
-    - On Postgres, Snowflake and Oracle, a quoted name has to match the declared table in the case
-      the engine keeps, so `"Orders"` no longer passes for `orders`. Unquoted names still match
-      without regard to case there.
+    - On Postgres, Snowflake and Oracle, a quoted name has to be the declared spelling exactly, so
+      `"Orders"` no longer passes for `orders`, nor `"ORDERS"` for a declared `orders` on Snowflake.
+      Unquoted names still match without regard to case there. Where case alone tells two declared
+      tables apart, column scope reads the columns of the one the statement names.
+    - A dot inside a table name is part of the name when the model gives the schema separately, so
+      Postgres `public."orders.v2"` is one table.
     - On MySQL a table or database name has to match the declared case exactly, quoted or not:
       on Linux, its default, `sales.Orders` and `sales.orders` are two different tables.
     - The other engines match names without regard to case, as they resolve them.

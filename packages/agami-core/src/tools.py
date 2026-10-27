@@ -1767,9 +1767,13 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
             # whose two tables land in different area groups arrives once per group. Dedupe on the
             # endpoints rather than the whole dict: two genuinely distinct edges between the same
             # pair differ by their join columns, which are part of the key.
+            # The schemas too: with `public.orders` and `archive.orders` returned for one bare
+            # name, each copy's identical-looking join to `customers` is its own edge (#258).
             key = (
                 rel.get("from_table"),
+                rel.get("from_schema"),
                 rel.get("to_table"),
+                rel.get("to_schema"),
                 rel.get("from_column"),
                 rel.get("to_column"),
                 rel.get("on"),

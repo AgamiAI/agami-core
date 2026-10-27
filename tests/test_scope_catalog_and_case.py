@@ -52,6 +52,10 @@ def _table_scope(sql: str, org: m.Datasource):
     ("PostgreSQL", "orders", 'SELECT id FROM "Sales".orders'),
     ("Snowflake", "ORDERS", 'SELECT id FROM sales."orders"'),
     ("Oracle", "ORDERS", 'SELECT id FROM sales."Orders"'),
+    # A quoted name is the declared spelling or another table, single-case declarations included:
+    # `"orders"` and `"ORDERS"` are both real, distinct relations on Snowflake and Postgres.
+    ("Snowflake", "orders", 'SELECT id FROM sales."ORDERS"'),
+    ("PostgreSQL", "ORDERS", 'SELECT id FROM sales."orders"'),
 ])
 def test_a_quoted_name_in_another_case_is_another_table(engine, declared, sql):
     res = _table_scope(sql, _org(engine, declared))
@@ -62,10 +66,8 @@ def test_a_quoted_name_in_another_case_is_another_table(engine, declared, sql):
     ("PostgreSQL", "orders", 'SELECT id FROM sales."orders"'),
     ("PostgreSQL", "orders", "SELECT id FROM SALES.ORDERS"),
     ("PostgreSQL", "Orders", 'SELECT id FROM sales."Orders"'),
-    # A single-case name may be the model's habit, not the warehouse's: its fold counts too.
-    ("PostgreSQL", "ORDERS", 'SELECT id FROM sales."orders"'),
     ("Snowflake", "ORDERS", 'SELECT id FROM sales."ORDERS"'),
-    ("Snowflake", "orders", 'SELECT id FROM sales."ORDERS"'),
+    ("Snowflake", "orders", 'SELECT id FROM sales."orders"'),
     ("Snowflake", "ORDERS", "SELECT id FROM sales.orders"),
     # These engines match a quoted name without regard to case, so folding it is their rule.
     ("Redshift", "orders", 'SELECT id FROM sales."Orders"'),
@@ -210,3 +212,20 @@ def test_an_edge_whose_schema_the_returned_table_cannot_confirm_stays_whole():
 def test_an_edge_the_returned_tables_schema_confirms_is_compacted():
     kept, compact = tools._compact_other_joins([_edge("Sales")], {"orders"}, {"orders": "sales"})
     assert kept == [] and compact[0]["table"] == "customers"
+
+
+def test_column_scope_reads_the_columns_of_the_case_it_names():
+    """Postgres `sales.Orders` (id) and `sales.orders` (id, secret_col) are two tables; a quoted
+    `"Orders"` must not borrow the other's columns through the folded key they share."""
+    def t(name, *cols):
+        return m.Table(name=name, schema="sales", storage_connection="c", grain=["id"],
+                       description=name, columns=[m.Column(name=c, type="integer") for c in cols])
+    org = m.Datasource(datasource="acme",
+                       storage_connections=[m.StorageConnection(name="c", storage_type="PostgreSQL")],
+                       subject_areas=[m.SubjectArea(name="a", tables_defined=[t("Orders", "id")]),
+                                      m.SubjectArea(name="b", tables_defined=[t("orders", "id", "secret_col")])])
+    res = rt.check_column_scope('SELECT o.secret_col FROM sales."Orders" o', org)
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+    # The repair lists the named table's own columns, never the other's hidden one.
+    assert "Orders: id." in res.remediation and "secret_col" not in res.remediation.split("—")[1]
+    assert rt.check_column_scope('SELECT o.secret_col FROM sales."orders" o', org) is None

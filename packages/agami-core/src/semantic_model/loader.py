@@ -688,7 +688,9 @@ def _referenced(cands: list[Table], refs: list[TableRef]) -> list[Table]:
     wanted = {table_key(r.table, r.schema_name)[0] for r in refs}
     if "" in wanted:
         return cands
-    return [t for t in cands if table_key(t.name, t.schema_name)[0] in wanted]
+    exact = [t for t in cands if table_key(t.name, t.schema_name)[0] in wanted]
+    # A table recording no schema cannot contradict the ref's, as the validator accepts it.
+    return exact or [t for t in cands if not table_key(t.name, t.schema_name)[0]]
 
 
 def _find_table(
