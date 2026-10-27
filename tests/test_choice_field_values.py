@@ -466,16 +466,30 @@ def test_mysql_enum_escapes_are_decoded():
     ("sqlite", "CREATE TABLE t (status TEXT CHECK (CAST(status AS INTEGER) IN (1, 2)))", []),
     ("postgres", "CHECK (((status)::character varying(1) = ANY (ARRAY['a'::text])))", []),
     ("postgres", "CHECK ((level = ANY (ARRAY['01'::integer, '2'::integer])))", []),
+    # a number cast to a number type is unwrapped only when it keeps its value
+    ("sqlite", "CREATE TABLE t (level DECIMAL CHECK (level IN (CAST(1.9 AS INTEGER), CAST(2.9 AS INTEGER))))", []),
+    ("sqlite", "CREATE TABLE t (level DECIMAL CHECK (level IN (CAST(1.25 AS DECIMAL(3,1)), 2)))", []),
+    ("postgres", "CHECK ((level = ANY ((ARRAY[1.9, 2])::integer[])))", []),
+    ("sqlite", "CREATE TABLE t (level DECIMAL CHECK (level IN (CAST(-2 AS DECIMAL(3,1)), CAST(1.5 AS REAL))))",
+     [("level", ["-2", "1.5"])]),
+    ("postgres", "CHECK ((level = ANY (ARRAY[(1.5)::numeric, (2.25)::double precision])))", [("level", ["1.5", "2.25"])]),
+    # MySQL's and SQL Server's DECIMAL with no scale rounds to a whole number
+    ("mysql", "(`level` in (cast(1.5 as decimal),2))", []),
+    ("sqlserver", "([level]=CAST(1.5 AS DECIMAL) OR [level]=(2))", []),
 ])
 def test_only_casts_that_keep_the_values_are_unwrapped(db_type, clause, expected):
     assert I._check_lists(clause, D.get_dialect(db_type)) == expected
 
 
 _CI = "this database compares values case-insensitively: 'open' also matches other capitalisations"
+_CI_AI = ("this database compares values case- and accent-insensitively: 'open' also matches other "
+          "capitalisations and accented spellings")
 
 
 def _ci(caveats):
-    return any(c.startswith("this database compares values case-insensitively: '") for c in caveats)
+    return any(c.startswith(("this database compares values case-insensitively: '",
+                             "this database compares values case- and accent-insensitively: '"))
+               for c in caveats)
 
 
 def _declared_runner(enum_type=None, check=None):
@@ -489,16 +503,19 @@ def _declared_runner(enum_type=None, check=None):
 
 
 @pytest.mark.parametrize("db_type, run, caveat", [
-    ("mysql", _declared_runner(check="(`status` in (_utf8mb4'open',_utf8mb4'closed'))"), True),
-    ("sqlserver", _declared_runner(check="([status]='open' OR [status]='closed')"), True),
-    ("mysql", _declared_runner(enum_type="enum('open','closed')"), False),   # an ENUM stores exactly
-    ("postgres", _declared_runner(check="CHECK ((status = ANY (ARRAY['open'::text, 'closed'::text])))"), False),
+    # MySQL/MariaDB's default *_ci collations ignore accents as well as case
+    ("mysql", _declared_runner(check="(`status` in (_utf8mb4'open',_utf8mb4'closed'))"), _CI_AI),
+    ("mariadb", _declared_runner(check="(`status` in (_utf8mb4'open',_utf8mb4'closed'))"), _CI_AI),
+    ("mysql", _declared_runner(check="(`status` in (_utf8mb4\\'open\\',_utf8mb4\\'closed\\'))"), _CI_AI),
+    ("sqlserver", _declared_runner(check="([status]='open' OR [status]='closed')"), _CI),
+    ("mysql", _declared_runner(enum_type="enum('open','closed')"), None),   # an ENUM stores exactly
+    ("postgres", _declared_runner(check="CHECK ((status = ANY (ARRAY['open'::text, 'closed'::text])))"), None),
 ])
 def test_a_check_list_on_a_case_insensitive_engine_gets_a_caveat(db_type, run, caveat):
     status = I.Column(name="status", type="string", description="")
     I._apply_declared_values(D.get_dialect(db_type), run, "s", "orders", [status])
     assert list(status.choice_field) == ["open", "closed"]
-    assert (_CI in status.caveats) is caveat
+    assert status.caveats == ([caveat] if caveat else [])
 
 
 @pytest.mark.parametrize("db_type, caveat", [("mysql", True), ("sqlserver", True), ("postgres", False)])
@@ -532,3 +549,47 @@ def test_a_sqlite_nocase_column_gets_the_caveat(tmp_path):
     assert _CI in t.get_column("status").caveats            # a CHECK list on a NOCASE column
     assert _ci(t.get_column("channel").caveats)             # a data list on a NOCASE column
     assert not _ci(t.get_column("kind").caveats)          # SQLite compares exactly by default
+
+
+def test_postgres_skips_no_inherit_checks():
+    # a parent's NO INHERIT CHECK says nothing of its children's rows, which reading the parent returns
+    assert "AND NOT con.connoinherit" in _sql("postgres")
+
+
+def test_columns_whose_names_differ_only_by_case_get_no_declared_list(tmp_path):
+    seen: list[str] = []
+    runner = make_catalog_runner(
+        tables=["orders"],
+        columns={"orders": [col("id", "integer", nullable=False), col("status", "text"), col("STATUS", "text"),
+                            col("kind", "text")]},
+        checks=["CHECK ((status = ANY (ARRAY['b'::text, 'a'::text])))",
+                "CHECK ((kind = ANY (ARRAY['x'::text, 'y'::text])))"],
+        sample=lambda sql: [{"id": i, "status": "ab"[i % 2], "STATUS": "pq"[i % 2], "kind": "x"} for i in range(60)],
+    )
+    org, _ = I.introspect("shop", "postgres", runner=_recording(runner, seen), artifacts_dir=tmp_path, dry_run=True)
+    t = _orders(org)
+    assert list(t.get_column("kind").choice_field) == ["x", "y"]
+    # neither gets the CHECK's list (declared order b, a); each reads its own values from the data
+    assert list(t.get_column("status").choice_field) == ["a", "b"]
+    assert list(t.get_column("STATUS").choice_field) == ["p", "q"]
+    assert any('SELECT DISTINCT "status"' in s for s in seen) and any('SELECT DISTINCT "STATUS"' in s for s in seen)
+
+
+@pytest.mark.parametrize("clause, expected", [
+    ("CHECK (((status = 'a'::text) OR (\"STATUS\" = 'b'::text)))", []),     # two columns, not one
+    ("CHECK (((\"Status\" = 'a'::text) OR (\"Status\" = 'b'::text)))", [("Status", ["a", "b"])]),
+    ("CHECK (((status = 'a'::text) OR (STATUS = 'b'::text)))", [("status", ["a", "b"])]),  # both fold
+])
+def test_a_quoted_column_name_in_a_check_is_exact(clause, expected):
+    assert I._check_lists(clause, D.get_dialect("postgres")) == expected
+
+
+@pytest.mark.parametrize("raw, expected", [
+    # MySQL 8's information_schema text, as the engine returns it: every quote and backslash escaped
+    ("(`status` in (_utf8mb4\\'open\\',_utf8mb4\\'closed\\'))", [("status", ["open", "closed"])]),
+    ("(`s` in (_utf8mb4\\'it\\\\\\'s\\',_utf8mb4\\'a\\\\\\\\b\\'))", [("s", ["it's", "a\\b"])]),
+    # MariaDB's plain text is read as it is
+    ("`s` in ('a\\'b','c')", [("s", ["a'b", "c"])]),
+])
+def test_mysql_check_text_is_unescaped(raw, expected):
+    assert I._check_lists(I._mysql_check_text(raw), D.get_dialect("mysql")) == expected

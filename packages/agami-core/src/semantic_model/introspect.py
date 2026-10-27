@@ -1664,7 +1664,8 @@ def _enrich_from_sample(
         ch = _maybe_choice([r.get("v") for r in rows], rows=seen)
         # only genuinely code-like: skip long free-text values (names, descriptions, ids).
         if ch and all(len(str(k)) <= 40 for k in ch):
-            _set_choice(c, ch, case_insensitive=dialect.case_insensitive_compare or c.name.lower() in nocase)
+            _set_choice(c, ch, case_insensitive=dialect.case_insensitive_compare or c.name.lower() in nocase,
+                        accents=dialect.accent_insensitive_compare)
     # Deterministic descriptions for universal coded formats (currency/country/timezone/locale) —
     # fills a column the LLM would otherwise leave `ai_unknown`, on any database. Only when blank.
     for c in cols:
@@ -1693,22 +1694,27 @@ def _data_choice_candidate(c: Column) -> bool:
             and not _NOT_DATA_CHOICE_NAME_RE.search(c.name))
 
 
-def _set_choice(c: Column, choice: dict[str, str], *, case_insensitive: bool = False) -> None:
+def _set_choice(
+    c: Column, choice: dict[str, str], *, case_insensitive: bool = False, accents: bool = False,
+) -> None:
     c.choice_field = choice
     notes = [_lookalike_caveat(list(choice))]
     if case_insensitive:
-        notes.append(_case_insensitive_caveat(list(choice)))
+        notes.append(_case_insensitive_caveat(list(choice), accents=accents))
     for note in notes:
         if note and note not in c.caveats:
             c.caveats.append(note)
 
 
-def _case_insensitive_caveat(values: list[str]) -> Optional[str]:
+def _case_insensitive_caveat(values: list[str], *, accents: bool = False) -> Optional[str]:
     """On an engine that compares strings ignoring case, a listed value also finds its other
     capitalisations (and DISTINCT returns only one of them), so the list is not every spelling."""
     v = next((v for v in values if any(ch.isalpha() for ch in v)), None)
     if v is None:
         return None
+    if accents:
+        return (f"this database compares values case- and accent-insensitively: '{v}' also matches "
+                "other capitalisations and accented spellings")
     return f"this database compares values case-insensitively: '{v}' also matches other capitalisations"
 
 
@@ -1740,16 +1746,22 @@ def _apply_declared_values(
     from .validator import _value_matches_type
 
     declared = _declared_values(dialect, runner, schema, table)
+    # Declarations are matched by lowercased name, so with both `status` and "STATUS" on one table
+    # neither can be told apart: no declared list for either, and the data step may read each.
+    folded = [c.name.lower() for c in cols]
+    collide = {k for k in folded if folded.count(k) > 1}
+    declared.rejected -= collide
     for c in cols:
         key = c.name.lower()
         values = declared.values.get(key)
-        if not values or c.choice_field is not None:
+        if not values or c.choice_field is not None or key in collide:
             continue
         if not all(_value_matches_type(v, c.type) for v in values):
             declared.rejected.add(key)
             continue
         _set_choice(c, {v: "" for v in values}, case_insensitive=key in declared.checked and (
-            dialect.case_insensitive_compare or key in declared.nocase))
+            dialect.case_insensitive_compare or key in declared.nocase),
+            accents=dialect.accent_insensitive_compare)
     return declared
 
 
@@ -1792,6 +1804,8 @@ def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], 
             rows = _try(runner, fallback)
         for r in rows or []:
             text = str(r.get("check_clause") or "")
+            if dialect.name == "MySQL":
+                text = _mysql_check_text(text)
             for name, values in _check_lists(text, dialect):
                 put(name, values)
                 checked.add(name.lower())
@@ -1800,6 +1814,14 @@ def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], 
     rejected = {k for k, v in found.items() if k in clash or len(v) > DECLARED_MAX_VALUES}
     values = {k: v for k, v in found.items() if k not in rejected and v}
     return _Declared(values, rejected, checked, nocase)
+
+
+def _mysql_check_text(text: str) -> str:
+    """MySQL 8's information_schema escapes each quote and backslash of a CHECK once more
+    (`_utf8mb4\\'open\\'`); undo that when every quote is escaped. MariaDB's text is plain."""
+    if "'" not in text or re.search(r"(?<!\\)'", text):
+        return text
+    return re.sub(r"\\(['\\])", r"\1", text)
 
 
 def _nocase_columns(create_sql: str) -> set[str]:
@@ -1865,11 +1887,29 @@ def _check_lists(text: str, dialect: D.Dialect) -> list[tuple[str, list[str]]]:
         exprs = [c.this for c in tree.find_all(exp.CheckColumnConstraint)]
     else:
         exprs = [tree]
-    return [hit for hit in (_listed_values(e) for e in exprs) if hit]
+    exact_decimal = dialect.name in _EXACT_DECIMAL_DIALECTS
+    return [hit for hit in (_listed_values(e, exact_decimal=exact_decimal) for e in exprs) if hit]
 
 
-def _listed_values(e) -> Optional[tuple[str, list[str]]]:
+# Engines whose NUMERIC/DECIMAL with no precision or scale holds any number exactly (MySQL's and SQL
+# Server's default to a scale of 0, DuckDB's to 3).
+_EXACT_DECIMAL_DIALECTS = frozenset({"PostgreSQL", "Oracle", "SQLite"})
+
+
+def _listed_values(e, *, exact_decimal: bool = False) -> Optional[tuple[str, list[str]]]:
     from sqlglot import exp
+
+    T = exp.DataType.Type
+
+    def lossless(to, x) -> bool:  # casting the number literal `x` to `to` keeps its value
+        while isinstance(x, exp.Paren):
+            x = x.this
+        num = x.this if isinstance(x, exp.Neg) else x
+        if not isinstance(num, exp.Literal) or num.is_string:
+            return False
+        if re.fullmatch(r"\d+", str(num.this)) or to.this in (T.FLOAT, T.DOUBLE):
+            return True
+        return exact_decimal and to.this in (T.DECIMAL, T.BIGDECIMAL) and not to.expressions
 
     def stringy(to) -> bool:  # a string type with no length, which can't truncate a value
         return to.this in exp.DataType.TEXT_TYPES | {exp.DataType.Type.BPCHAR} and not to.expressions
@@ -1887,10 +1927,11 @@ def _listed_values(e) -> Optional[tuple[str, list[str]]]:
                 if literal_side and not ok:
                     if to.this == exp.DataType.Type.ARRAY:
                         el = to.expressions[0] if to.expressions else None
-                        ok = el is not None and (stringy(el) or el.this in exp.DataType.NUMERIC_TYPES)
+                        ok = el is not None and (stringy(el) or (
+                            el.this in exp.DataType.NUMERIC_TYPES and isinstance(inner, exp.Array)
+                            and all(lossless(el, v) for v in inner.expressions)))
                     elif to.this in exp.DataType.NUMERIC_TYPES:
-                        num = inner.this if isinstance(inner, exp.Neg) else inner
-                        ok = isinstance(num, exp.Literal) and not num.is_string
+                        ok = lossless(to, inner)
                 if not ok:
                     return x
             x = x.this
@@ -1935,9 +1976,9 @@ def _listed_values(e) -> Optional[tuple[str, list[str]]]:
         if not isinstance(col, exp.Column) or not lits:
             return None
         if name is None:
-            name = col.name
-        elif name.lower() != col.name.lower():
-            return None
+            name, quoted = col.name, col.this.quoted
+        elif (name != col.name if quoted or col.this.quoted else name.lower() != col.name.lower()):
+            return None  # a quoted name is exact: `status` and "STATUS" are two columns
         for lit in lits:
             v = literal(lit)
             if v is None:

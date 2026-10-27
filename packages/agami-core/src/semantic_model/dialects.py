@@ -260,6 +260,8 @@ class Dialect:
 
     # The engine's default string comparison ignores case, so 'open' also matches 'Open'.
     case_insensitive_compare = False
+    # ... and ignores accents too (MySQL/MariaDB's default *_ci collations).
+    accent_insensitive_compare = False
 
     def distinct_sql(self, schema: Optional[str], table: str, column: str, n: int) -> str:
         """Up to `n` distinct non-null values of one column, as `v`."""
@@ -354,7 +356,8 @@ class PostgreSQL(Dialect):
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "JOIN information_schema.check_constraints cc "
             "ON cc.constraint_schema = n.nspname AND cc.constraint_name = con.conname "
-            "WHERE con.contype = 'c' AND con.convalidated "
+            # a NO INHERIT CHECK binds only the parent's own rows; reading the parent reads its children
+            "WHERE con.contype = 'c' AND con.convalidated AND NOT con.connoinherit "
             # a name is unique only per table: one another table also uses could join to its text
             "AND NOT EXISTS (SELECT 1 FROM pg_constraint o WHERE o.connamespace = con.connamespace "
             "AND o.conname = con.conname AND o.oid <> con.oid) "
@@ -476,6 +479,7 @@ class MySQL(Dialect):
         )
 
     case_insensitive_compare = True
+    accent_insensitive_compare = True
 
     def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
         # check_constraints names no table on MySQL 8, so the table comes from table_constraints;
