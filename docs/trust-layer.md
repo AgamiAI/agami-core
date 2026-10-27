@@ -72,8 +72,11 @@ tab and is **not signed off**: a receipt shows its `review_state: stale` like an
 isn't `approved`. Its old `signed_off_*` stay as a record of the approval it lost; re-approving it
 records the new signer and time.
 
-Only cosmetic fields keep the approval: `description` and `other_names` (and an entity's
-`caveats`). The list is an allow-list, so a field added later counts as a change to the
+Only cosmetic fields keep the approval: `description` and `other_names`, a metric's
+`business_question`, an entity's `caveats` and `plural`, and a join's `for_questions_about`. They
+describe an entry or steer which one a question picks, and change no SQL; an entity's
+`value_pattern` and `value_format_hint` change which rows a typed value matches, so they are not
+cosmetic. The list is an allow-list, so a field added later counts as a change to the
 definition. An edit that sets a field to the value it already has changes nothing, and an edit of
 an `unreviewed` or `stale` entry leaves its state as it is. In one batch, an approve after the
 edit signs off the edited version (the explorer sends approvals after edits); an edit after the

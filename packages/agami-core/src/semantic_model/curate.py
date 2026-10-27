@@ -738,12 +738,14 @@ def _apply_one(root: Path, op: dict, signer, role,
 
 
 # The fields an edit may change on an approved metric, entity or join and keep its approval: the words
-# around a definition. Every other field, a field added later included, changes what the item computes
-# or connects, so the edit sends the item back to review (#537).
+# around a definition, and the question hints that, like other_names, only steer which item a question
+# picks. Every other field, a field added later included, changes what the item computes or connects
+# (value_pattern and value_format_hint change which rows a typed value matches), so the edit sends the
+# item back to review (#537).
 _COSMETIC_FIELDS = {
-    "metric": frozenset({"description", "other_names"}),
-    "entity": frozenset({"description", "other_names", "caveats"}),
-    "relationship": frozenset({"description"}),
+    "metric": frozenset({"description", "other_names", "business_question"}),
+    "entity": frozenset({"description", "other_names", "caveats", "plural"}),
+    "relationship": frozenset({"description", "for_questions_about"}),
 }
 # The sign-off itself rather than the definition it covers.
 _TRUST_FIELDS = frozenset({"confidence", "review_state", "signed_off_by", "signed_off_at",

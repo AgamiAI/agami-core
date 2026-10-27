@@ -18,7 +18,8 @@ below corresponds to one such version.
   approved` with the old signer and time, so a receipt reported a definition nobody approved as
   signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
   reports it as not signed off until someone re-approves it, which records the new signer and time.
-  Only `description`, `other_names` and an entity's `caveats` keep the approval; every other field,
+  Only `description`, `other_names`, a metric's `business_question`, an entity's `caveats` and
+  `plural`, and a join's `for_questions_about` keep the approval; every other field,
   including any added later, counts as a change, and an edit that sets a field to the value it
   already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
   was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an

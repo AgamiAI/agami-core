@@ -126,6 +126,7 @@ def _set_state(root: Path, kind: str, **fields) -> None:
     (_edit("metric", "revenue", "source_tables", ["orders", "customers"]), "metric"),
     (MAPS, "entity"),
     (_edit("entity", "customer", "value_pattern", "^[0-9]+$"), "entity"),
+    (_edit("entity", "customer", "value_format_hint", "digits only"), "entity"),
     (CARDINALITY, "relationship"),
     (_edit("relationship", "orders->customers", "from_column", "buyer_id"), "relationship"),
     (_edit("relationship", "orders->customers", "join_type", "INNER"), "relationship"),
@@ -150,6 +151,9 @@ def test_an_edit_of_what_an_approved_item_computes_or_connects_makes_it_stale(ro
     (_edit("entity", "customer", "other_names", ["client"]), "entity"),
     (_edit("entity", "customer", "caveats", ["test accounts included"]), "entity"),
     (_edit("relationship", "orders->customers", "description", "who placed the order"), "relationship"),
+    (_edit("metric", "revenue", "business_question", "How much did we sell?"), "metric"),
+    (_edit("entity", "customer", "plural", "clients"), "entity"),
+    (_edit("relationship", "orders->customers", "for_questions_about", ["who ordered"]), "relationship"),
 ], ids=lambda v: v if isinstance(v, str) else f"{v['kind']}-{v['field']}")
 def test_a_cosmetic_edit_keeps_the_approval(root, op, kind):
     res = curate.apply(root, [op])
