@@ -1908,24 +1908,6 @@ def check_column_scope(sql: str, org: Datasource,
             binding_of[id(tbl)] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
-    # Per FROM / JOIN item: the declared table it reads, or the names it supplies.
-    items_by_select: dict[int, list[tuple[Any, "set[str] | None"]]] = {}
-    for sel in tree.find_all(exp.Select):
-        items = []
-        for src in _from_sources(sel):
-            names = _source_column_names(src, cte_refs, dialect)
-            inner = src
-            while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
-                inner = inner.this
-            items.append((binding_of.get(id(inner)) if names is None else None, names))
-            if names is not None:
-                source_cols.setdefault(id(sel), set()).update(names)
-        items_by_select[id(sel)] = items
-        # Top-level aliases only: one inside a function argument (`XMLFOREST(id AS x)`) names
-        # nothing the select returns.
-        output_by_select[id(sel)] = {e.alias.lower() for e in sel.expressions
-                                     if isinstance(e, exp.Alias) and e.alias}
-
     offending: set[str] = set()
     # The declared tables each offending column was judged against — what the refusal may list. Only
     # tables the statement itself reads: never the rest of the model (see `_declared_listing`).
@@ -1933,36 +1915,86 @@ def check_column_scope(sql: str, org: Datasource,
     # Refused in a scope that also reads a CTE / derived source: the column may be one that source
     # returns without a name the gate can read, which qualifying it says.
     beside_source: set[str] = set()
+    # Refused where it names one of the select's own output aliases: the engine reads the input
+    # column of that name there, so the repair is the alias's expression, not the model.
+    alias_named: set[str] = set()
     # A USING or NATURAL join compares names without a column reference, and merges them: the
     # result is the physical side's value, or COALESCE of both, so a source naming it does not make
     # it the source's. Each join is judged on its own operands, everything left of it and the item
     # it joins, so a third table is not held to a key it never joins on.
     merged_by_select: dict[int, set[str]] = {}
-    for sel in tree.find_all(exp.Select):
-        items = items_by_select.get(id(sel), [])
-        # `items` is the FROM item then one per join, so join k joins items[k + 1] to items[:k + 1].
-        for k, j in enumerate(sel.args.get("joins") or []):
-            left, right = items[:k + 1], items[k + 1]
+
+    def declares(leaf: tuple, key: str) -> bool:
+        ph, names = leaf
+        return ((isinstance(ph, tuple) and ph in declared and key.lower() in declared[ph])
+                or (names is not None and key in names))
+
+    def tables_of(leaves: list) -> list[tuple]:
+        return [ph for ph, _ in leaves if isinstance(ph, tuple) and ph in declared]
+
+    def judge_joins(sel: "exp.Select", joins: list, groups: list) -> None:
+        # `groups` is the leaves of the first item then of one per join: join k joins groups[k + 1]
+        # to groups[:k + 1].
+        for k, j in enumerate(joins):
+            left = [leaf for g in groups[:k + 1] for leaf in g]
+            right = groups[k + 1]
             for key in filter(None, (_column_key(u, dialect) for u in j.args.get("using") or [])):
                 merged_by_select.setdefault(id(sel), set()).add(key)
-                lk = key.lower()
-                left_ok = any((isinstance(ph, tuple) and ph in declared and lk in declared[ph])
-                              or (names is not None and key in names) for ph, names in left)
-                rph = right[0]
-                right_ok = not (isinstance(rph, tuple) and rph in declared and lk not in declared[rph])
+                left_ok = any(declares(leaf, key) for leaf in left)
+                right_ok = any(declares(leaf, key) for leaf in right) or not tables_of(right)
                 if not (left_ok and right_ok):
                     offending.add(key)
-                    judged.setdefault(key, set()).update(
-                        ph for ph, _ in (*left, right) if isinstance(ph, tuple) and ph in declared)
+                    judged.setdefault(key, set()).update(tables_of(left + right))
             if str(j.args.get("method") or "").upper() == "NATURAL":
-                operands = (*left, right)
+                operands = left + right
                 compared = set().union(*(names for _, names in operands if names is not None))
                 merged_by_select.setdefault(id(sel), set()).update(compared)
-                tables = [ph for ph, _ in operands if isinstance(ph, tuple) and ph in declared]
+                tables = tables_of(operands)
                 for key in sorted(compared):
                     if tables and not all(key.lower() in declared[t] for t in tables):
                         offending.add(key)
                         judged.setdefault(key, set()).update(tables)
+
+    def leaves_of(sel: "exp.Select", src: "exp.Expression") -> list[tuple]:
+        """One FROM / JOIN item as (declared table read or None, names supplied or None) leaves.
+
+        A parenthesised join is one item whose leaves are its own items, its joins judged as the
+        select's are. Its alias (`(...) AS w`) is registered so `w.col` is judged on those leaves.
+        """
+        wrappers, inner = _parens(src)
+        if not (wrappers and inner.args.get("joins")):
+            names = _source_column_names(src, cte_refs, dialect)
+            leaves = [(binding_of.get(id(inner)) if names is None else None, names)]
+            if names is None and id(inner) in binding_of:
+                for w in wrappers:  # `(customers) AS x`: x is that table
+                    if w.alias:
+                        alias_by_select.setdefault(id(sel), {})[w.alias.lower()] = binding_of[id(inner)]
+            return leaves
+        joins = inner.args["joins"]
+        groups = [leaves_of(sel, inner)] + [leaves_of(sel, j.this) for j in joins]
+        judge_joins(sel, joins, groups)
+        leaves = [leaf for g in groups for leaf in g]
+        # A column list renames the join's columns by position, physical ones included, so no
+        # name it gives is known to be a source's.
+        if any(isinstance(w.args.get("alias"), exp.TableAlias) and w.args["alias"].columns
+               for w in wrappers):
+            leaves = [(ph, None) for ph, _ in leaves]
+        for w in wrappers:
+            if w.alias:
+                alias_by_select.setdefault(id(sel), {})[w.alias.lower()] = _JoinAlias(leaves)
+        return leaves
+
+    for sel in tree.find_all(exp.Select):
+        groups = [leaves_of(sel, src) for src in _from_sources(sel)]
+        judge_joins(sel, sel.args.get("joins") or [], groups)
+        for _, names in (leaf for g in groups for leaf in g):
+            if names is not None:
+                source_cols.setdefault(id(sel), set()).update(names)
+        # Top-level aliases only: one inside a function argument (`XMLFOREST(id AS x)`) names
+        # nothing the select returns.
+        output_by_select[id(sel)] = {e.alias.lower() for e in sel.expressions
+                                     if isinstance(e, exp.Alias) and e.alias}
+
     for col in tree.find_all(exp.Column):
         name = col.name
         if not name:
@@ -1984,6 +2016,14 @@ def check_column_scope(sql: str, org: Datasource,
                     break
             if phys is None:
                 continue  # qualified by a CTE/derived alias — validated at its own source
+            if isinstance(phys, _JoinAlias):
+                ckey = _column_key(col.this, dialect)
+                if not (ckey and any(declares(leaf, ckey) for leaf in phys.leaves)):
+                    tables = tables_of(phys.leaves)
+                    if tables:  # the engine reads `col` from one of these tables
+                        offending.add(name)
+                        judged.setdefault(name, set()).update(tables)
+                continue
             if phys and lname not in declared[phys]:
                 # Bare `table.column`: the schema half is the model's to know, not the echo's.
                 offending.add(f"{phys[1]}.{name}")
@@ -2011,6 +2051,8 @@ def check_column_scope(sql: str, org: Datasource,
                 judged.setdefault(name, set()).update(local)
                 if id(s) in source_cols:
                     beside_source.add(name)
+                if lname in output_by_select.get(id(scopes[0]), set()):
+                    alias_named.add(name)
                 break
 
     if not offending:
@@ -2031,6 +2073,9 @@ def check_column_scope(sql: str, org: Datasource,
         detail="query references column(s) not in the semantic model: " + _echo_identifiers(cols)
                + " — only columns declared on the model's tables may be queried.",
         remediation=_declared_listing(org, cols, judged)
+                    + ("A select-list alias is read as itself only as a whole ORDER BY or GROUP BY "
+                       "item; elsewhere write its expression out (HAVING SUM(amount) > 1000, not "
+                       "HAVING revenue > 1000). " if alias_named else "")
                     + ("If a column comes from a CTE or subquery, give it a name there (AS ...) "
                        "or qualify it with that source's alias. " if beside_source else "")
                     + "Add the column to the model (agami-connect / '/agami-model'), "
@@ -4230,7 +4275,8 @@ def _column_scopes(node: "exp.Expression", dialect: "str | None" = None) -> list
         if isinstance(p, exp.CTE) and p.parent is not None:
             hidden.add(id(p.parent.parent))  # CTE -> With -> the query (or set operation) carrying it
         elif (isinstance(p, exp.Subquery) and isinstance(p.parent, (exp.From, exp.Join))
-              and dialect != "duckdb"):
+              and dialect != "duckdb" and not isinstance(_parens(p)[1], exp.Table)):
+            # A parenthesised join's ON is its owner's, not a body's: only a query hides the owner.
             hidden.add(id(p.parent.parent))
         p = p.parent
     return scopes
@@ -4267,6 +4313,25 @@ def _reads_output_alias(col: "exp.Column", sel: "exp.Select", dialect: "str | No
                        and e.find(exp.Window) is not None for e in sel.expressions)
         p = p.parent
     return False
+
+
+def _parens(src: "exp.Expression") -> tuple[list["exp.Subquery"], "exp.Expression"]:
+    """The parentheses around a table or a join, outermost first, and what they wrap.
+
+    sqlglot parses `(customers JOIN t ON ...)` as a Subquery over a Table carrying the joins.
+    """
+    wrappers: list["exp.Subquery"] = []
+    inner = src
+    while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
+        wrappers.append(inner)
+        inner = inner.this
+    return wrappers, inner
+
+
+@dataclass(frozen=True)
+class _JoinAlias:
+    """The alias of a parenthesised join: `w.col` reads whichever of these leaves has `col`."""
+    leaves: list
 
 
 def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
@@ -4350,11 +4415,7 @@ def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
 
     # Parentheses around a table: a physical one is a physical source; a CTE reference is that
     # CTE, renamed by each wrapper's alias list from the innermost out (`(c) AS x(n)`).
-    wrappers: list["exp.Expression"] = []
-    inner = src
-    while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
-        wrappers.append(inner)
-        inner = inner.this
+    wrappers, inner = _parens(src)
     if wrappers and isinstance(inner, exp.Table):
         cte = cte_refs.get(id(inner))
         if cte is None:

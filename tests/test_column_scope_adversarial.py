@@ -248,6 +248,22 @@ BESIDE_A_SOURCE = [
     ("WITH c(a, secret_col) AS (SELECT 1) SELECT secret_col FROM orders, c", "secret_col"),
     # VALUES and a table function name their columns their own way, not after the alias.
     ("SELECT secret_col FROM orders, (VALUES (1)) AS secret_col", "secret_col"),
+    # A parenthesised join: its tables, its ON, its alias and its USING / NATURAL are the select's.
+    ("SELECT secret_col FROM (customers JOIN orders ON orders.customer_id = customers.id)",
+     "secret_col"),
+    ("SELECT name FROM (customers JOIN orders ON secret_col = orders.id)", "secret_col"),
+    ("SELECT w.secret_col FROM (customers JOIN orders ON orders.customer_id = customers.id) AS w",
+     "secret_col"),
+    ("WITH c AS (SELECT 1 AS secret_col) SELECT w.secret_col "
+     "FROM (customers JOIN orders ON orders.customer_id = customers.id) AS w, c", "secret_col"),
+    ("WITH c AS (SELECT 1 AS secret_col) SELECT secret_col FROM (customers JOIN c USING (secret_col))",
+     "secret_col"),
+    ("SELECT id FROM (orders NATURAL JOIN (SELECT 'x' AS secret_col) d)", "secret_col"),
+    ("SELECT secret_col FROM customers JOIN (orders o JOIN (SELECT 1 AS k) s ON s.k = o.id) "
+     "ON o.customer_id = customers.id", "secret_col"),
+    # A column list over a join renames physical columns by position too.
+    ("WITH c AS (SELECT 1 AS n) SELECT n FROM (customers JOIN c ON true) AS w(a, b, n)", "n"),
+    ("SELECT x.secret_col FROM (customers) AS x", "customers.secret_col"),
 ]
 
 
@@ -373,6 +389,29 @@ def test_refusal_beside_a_source_says_how_to_name_it():
     assert "qualify it with that source's alias" in res.remediation
 
 
+def test_model_facing_rules_do_not_advise_an_alias_the_gate_refuses():
+    """The SQL rules once told the model BigQuery reads aliases in WHERE and HAVING, which this gate
+    refuses, so the model kept writing statements that were refused."""
+    import tools
+    shared = REPO_ROOT / "plugins" / "agami" / "shared"
+    dialect = (shared / "dialect-rules.md").read_text()
+    assert "column aliases from `SELECT` are visible here" not in dialect
+    assert "can reference `SELECT` aliases" not in dialect
+    assert "write the expression out (`HAVING SUM(amount) > 1000`" in dialect
+    assert ("Reuse an alias only as a whole `ORDER BY` or `GROUP BY` item"
+            in (shared / "sql-generation-rules.md").read_text())
+    assert ("Reuse a select-list alias only as a whole ORDER BY or GROUP BY item"
+            in tools.SERVER_INSTRUCTIONS)
+
+
+def test_refusal_of_a_reused_alias_says_to_write_the_expression_out():
+    res = rt.check_column_scope("SELECT customer_id, sum(amount) AS revenue FROM orders "
+                                "GROUP BY customer_id HAVING revenue > 1000", _scope_org())
+    assert "write its expression out" in res.remediation
+    plain = rt.check_column_scope("SELECT secret_col FROM orders", _scope_org())
+    assert "write its expression out" not in plain.remediation
+
+
 # The other direction: a column one source names is bound to it, so none of these is refused.
 NAMED_BY_A_SOURCE = [
     "WITH c AS (SELECT 1 AS n) SELECT n, amount FROM orders, c",
@@ -412,6 +451,15 @@ NAMED_BY_A_SOURCE = [
     "WITH c AS (SELECT 1 AS n, 2 AS m) SELECT k, m, amount FROM orders, (c) AS x(k)",
     # A union's ORDER BY inside a derived table names the union's output, not the outer query's.
     "SELECT x.id FROM (SELECT id FROM orders UNION SELECT id FROM customers ORDER BY id) x",
+    # Sources inside a parenthesised join name their columns as they do outside one.
+    "WITH t AS (SELECT customer_id, sum(amount) AS spend FROM orders GROUP BY customer_id) "
+    "SELECT name, spend FROM (customers JOIN t ON t.customer_id = customers.id)",
+    "SELECT name, k FROM customers JOIN (orders o JOIN (SELECT 1 AS k) s ON s.k = o.id) "
+    "ON o.customer_id = customers.id",
+    "WITH c AS (SELECT 1 AS n) SELECT w.n, w.name FROM (customers JOIN c ON true) AS w",
+    "SELECT w.name FROM (customers JOIN orders ON orders.customer_id = customers.id) AS w",
+    "SELECT name FROM (customers JOIN orders USING (id))",
+    "SELECT x.name FROM (customers) AS x",
 ]
 
 

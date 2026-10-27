@@ -31,7 +31,12 @@ below corresponds to one such version.
   only as a whole `ORDER BY` or `GROUP BY` item, or as a window-function alias in `QUALIFY` (DuckDB,
   Snowflake, BigQuery, Databricks), where engines read the alias. Anywhere else, including
   `HAVING`, expressions and `FILTER`, the engine reads the input column of that name, so `SELECT
-  secret_col AS secret_col FROM orders` is refused, and so is an alias referenced in `HAVING`.
+  secret_col AS secret_col FROM orders` is refused, and so is an alias referenced in `HAVING`; that
+  refusal says to write the expression out, and the SQL rules and server instructions now tell the
+  model to. A parenthesised join is read like the `FROM` around it: the sources inside it name their
+  columns, its `ON`, `USING` and `NATURAL` are checked, and its alias (`(...) AS w`) reaches only
+  the columns its tables declare, so `w.secret_col` and `ON secret_col = ...` inside one are
+  refused where they ran before.
 
 ### Added
 
