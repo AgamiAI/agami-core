@@ -13,7 +13,7 @@ This skill orchestrates:
 
 1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `<artifacts_dir>/local/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**. The dashboard has tabs: **Datasource · Review · Subject areas · Tables · Metrics · Entities · Joins · Examples · Queued**. The **Review** tab is the sign-off queue (the old `/agami-review`); pass `--initial-tab review` to open on it.
 2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with a "Generate feedback for Claude" block (exclude/include, approve/reject, edits, new metrics, org edit).
-3. **Apply** — for each batch, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state / stamps sign-off, runs the validator, reverts via git on failure, appends to `curation_log.jsonl`, and commits.
+3. **Apply** — for each batch, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state / stamps sign-off, runs the validator, restores the files it changed on failure (from in-memory backups, no git needed), appends each change to `curation_log.jsonl` with its time and the value it replaced, and commits when the profile folder is its own git repository.
 4. **Re-render** — render to a new timestamped file and re-open. Wait for the next batch.
 
 Trust-spine semantics — three actions on the same `review_state` field:
@@ -140,7 +140,7 @@ It prints `{data, anomalies, needs_judgment}`:
 ]
 ```
 
-(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
+(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, logs to `curation_log.jsonl`, commits (when the profile folder is its own git repository), and reverts everything on validation failure**:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
@@ -213,7 +213,7 @@ Then end the turn. The skill is one-shot per invocation — re-enter via the sla
 | User types `exclude columns: schema.table.col` and the column doesn't exist | The applier returns it in `skipped[]` with reason "field not found on dataset". Surface the skip; continue with the rest. |
 | User types `exclude tables: schema.table.col` (3 segments — looks like a column) | The grammar is positional; agami treats the `exclude tables:` prefix as authoritative. The applier will fail to find a table with that 3-segment name and return `skipped` with reason "table yaml not found". Surface clearly. |
 | Validator fails on a partially-applied batch | The applier restores every file it touched from its own backups (no git needed) before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
-| `committed: false` with a `commit_note` | Nothing went wrong — the change is written and validated; it just wasn't committed. Pass the note on in one line, in your own words: the model isn't in git (suggest `git init` in its folder), or it's inside a larger repository (agami never commits there — tell them which folder changed so they commit it themselves). |
+| `committed: false` with a `commit_note` | Nothing went wrong — the change is written and validated; it just wasn't committed. Pass the note on in one line, in your own words: the model isn't in git (the change is still in `curation_log.jsonl` — `sm history <root>` lists what changed, newest first; `git init` in its folder keeps whole file versions too), or it's inside a larger repository (agami never commits there — tell them which folder changed so they commit it themselves). |
 | The model has 5000+ fields | The renderer handles it (JSON manifest is ~hundreds of KB at the high end). Client-side search is instant up to the millions of DOM nodes mark. If it gets sluggish, file an issue. |
 
 ---
