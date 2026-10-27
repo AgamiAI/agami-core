@@ -992,15 +992,20 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
     def label(r: dict) -> str:
         return f"{r.get('from_table')}->{r.get('to_table')}"
 
-    def place(r: dict, areas: tuple[Optional[str], Optional[str]]):
-        """(join with resolved schemas, from area, to area), or None when it isn't on the table."""
+    def place(r: dict, areas: tuple[Optional[str], Optional[str]], where: str):
+        """(join with resolved schemas, from area, to area), or None when it isn't on the table or
+        stays where it is because an end names a table no area defines (as before #513)."""
         ends = _join_ends(r)
         keys = [_resolve_ref(e, a, per, owners) for e, a in zip(ends, areas)]
         if not any(k == me or (k is None and e[1] == me[1]) for k, e in zip(keys, ends)):
             return None
+        if any(k is None and not any(o[1] == e[1] for o in owners) for k, e in zip(keys, ends)):
+            plan.setdefault("notes", []).append(
+                f"left in {where}: join {label(r)} points at a table no area defines")
+            return None
         if None in keys:
             raise ValueError(f"can't move {me[1]!r}: its join {label(r)} names a table that matches "
-                             "more than one table, or none; give the join's from_schema/to_schema first")
+                             "more than one table; give the join's from_schema/to_schema first")
         out = dict(r)
         for side, e, k in zip(("from", "to"), ends, keys):
             # Written only when the bare name is shared by two schemas, so the join keeps meaning one.
@@ -1014,7 +1019,7 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
         rels = (doc.get("relationships") or []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
         keep = []
         for r in rels:
-            hit = place(r, (src, src)) if isinstance(r, dict) else None
+            hit = place(r, (src, src), src) if isinstance(r, dict) else None
             if hit is None:
                 keep.append(r)
                 continue
@@ -1034,7 +1039,8 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
         rels = (doc.get(key) or []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
         keep, changed = [], False
         for r in rels:
-            hit = place(r, (r.get("from_subject_area"), r.get("to_subject_area"))) if isinstance(r, dict) else None
+            hit = place(r, (r.get("from_subject_area"), r.get("to_subject_area")),
+                        "the cross-area joins") if isinstance(r, dict) else None
             if hit is None:
                 keep.append(r)
                 continue

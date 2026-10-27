@@ -275,6 +275,19 @@ def test_a_move_is_refused_when_a_join_on_the_table_cannot_be_resolved(tmp_path)
     assert not (root / "subject_areas" / "people").exists()
 
 
+def test_a_join_to_a_table_no_area_defines_stays_and_is_noted(tmp_path):
+    root = _model(tmp_path)
+    rp = root / "subject_areas" / "sales" / "relationships.yaml"
+    doc = yaml.safe_load(rp.read_text())
+    doc["relationships"].append(_join("customers", "region_id", "regions"))
+    rp.write_text(yaml.safe_dump(doc))
+    res = curate.apply(root, [{"op": "move", "kind": "table", "name": "customers", "to_area": "catalog"}])
+    assert res.applied, res.as_dict()
+    assert "left in sales: join customers->regions points at a table no area defines" in res.notes
+    kept = yaml.safe_load(rp.read_text())["relationships"]
+    assert any(r["to_table"] == "regions" for r in kept)
+
+
 def test_a_failed_move_into_a_new_area_can_be_retried(tmp_path, monkeypatch):
     import types
 

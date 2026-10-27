@@ -23,8 +23,9 @@ below corresponds to one such version.
   that also reads a table outside it stays, and the result's `notes` names it; one left in another
   area moves too once all its tables have reached the new area by separate moves. A join that names
   its table by a bare name shared by two schemas is resolved by the area it sits in and gets the
-  schema written; a move with a join on the table that can't be resolved is refused, with nothing
-  written. The batch is validated and undone on failure (folders it created included), logged with
+  schema written; a move with a join on the table whose other end matches tables in two schemas is
+  refused, with nothing written. A join to a table no area defines stays where it is, and `notes`
+  says so. The batch is validated and undone on failure (folders it created included), logged with
   both areas, and committed when the model is its own git repository. The model explorer has a
   **Move to area** control on every table that queues the op.
 
