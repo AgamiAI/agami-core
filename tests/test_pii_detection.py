@@ -202,7 +202,8 @@ def test_one_sample_per_table_even_without_date_or_choice_columns(tmp_path):
     seen: list[str] = []
 
     def sample(sql):
-        seen.append(sql)
+        if "DISTINCT" not in sql:  # the value-list reads are separate, per column
+            seen.append(sql)
         return [{"id": "1", "contact": "you@example.com"}]
 
     runner = make_catalog_runner(
@@ -344,12 +345,13 @@ def test_probe_mode_reads_one_sample_per_table(tmp_path):
             for i in range(12)]
 
     def sample(sql):
-        seen.append(sql)
+        if "DISTINCT" not in sql:
+            seen.append(sql)
         return [dict(r) for r in rows]
 
     runner = make_catalog_runner(tables=["events"], columns={"events": []}, sample=sample)
     t, _ = _events(tmp_path, runner)
-    assert next(c for c in t.columns if c.name == "status").choice_field  # the probe's list
+    assert next(c for c in t.columns if c.name == "status").choice_field
     assert len(seen) == 1
 
 
@@ -362,3 +364,58 @@ def test_ip_address_values_are_not_read_as_phone_numbers():
     assert not any(pii.personal_value(v) for v in ips)
     phones = ["555.123.4567", "555.987.6543", "+1 555 0100 222", "(555) 010-0199"] * 5
     assert pii.looks_like_phones("source", phones)
+
+
+# --- value lists from any source stay off personal columns ---------------------------------------
+
+
+def test_a_declared_list_on_a_sensitive_column_is_dropped(tmp_path):
+    runner = make_catalog_runner(
+        tables=["people"],
+        columns={"people": [col("id", "integer", nullable=False), col("address_type", "text"),
+                            col("salary", "USER-DEFINED"), col("status", "text")]},
+        checks=["CHECK ((address_type = ANY (ARRAY['Home'::text, 'home'::text, 'work'::text])))",
+                "CHECK ((status = ANY (ARRAY['open'::text, 'closed'::text])))"],
+        enums=[{"column_name": "salary", "enum_value": v} for v in ("low", "high")],
+        estimate="50000",
+    )
+    org, _ = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    t = org.subject_areas[0].defined_table("people")
+    for name in ("address_type", "salary"):
+        c = t.get_column(name)
+        assert c.sensitive and c.choice_field is None, name
+        assert not any("'" in k for k in c.caveats), name  # no caveat quotes a dropped value
+    assert t.get_column("status").choice_field == {"open": "", "closed": ""}
+
+
+def test_a_declared_list_of_personal_values_is_dropped(tmp_path):
+    runner = make_catalog_runner(
+        tables=["people"],
+        columns={"people": [col("id", "integer", nullable=False), col("owner", "text")]},
+        checks=["CHECK ((owner = ANY (ARRAY['a@example.com'::text, 'b@example.com'::text])))"],
+        estimate="50000",
+    )
+    org, _ = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    assert org.subject_areas[0].defined_table("people").get_column("owner").choice_field is None
+
+
+def test_a_value_suspect_column_gets_no_list_read_from_the_data(tmp_path):
+    seen: list[str] = []
+    # Digit-only phone numbers: suspected from the sample, yet each value alone passes as a code.
+    rows = [{"id": str(i), "reach": "5550100111" if i % 2 else "5550100222",
+             "status": "open" if i % 2 else "closed"} for i in range(12)]
+
+    def sample(sql):
+        seen.append(sql)
+        return [dict(r) for r in rows]
+
+    runner = make_catalog_runner(
+        tables=["events"],
+        columns={"events": [col("id", "integer", nullable=False), col("reach", "text"), col("status", "text")]},
+        sample=sample)
+    org, _ = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    t = org.subject_areas[0].defined_table("events")
+    assert pii.PHONE_SUSPECT_CAVEAT in t.get_column("reach").caveats
+    assert t.get_column("reach").choice_field is None
+    assert not any("DISTINCT" in s and '"reach"' in s for s in seen)
+    assert t.get_column("status").choice_field == {"closed": "", "open": ""}
