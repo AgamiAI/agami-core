@@ -62,6 +62,33 @@ Auto-approve collapses the queue to what actually needs human eyes:
 
 Everything inferred stays `unreviewed` and surfaces in the Review tab.
 
+## Editing an approved entry sends it back to review
+
+A sign-off covers the definition that was approved, not whatever the entry says later. An edit
+(`sm curate`, the explorer's Edit) that changes what an approved metric, entity or join computes
+or connects — a binding or calculation, unit, source tables, filters, an entity's mappings, a
+join's columns, `on:` or cardinality — sets it to `stale`. A stale entry is back in the Review
+tab and is **not signed off**: a receipt shows its `review_state: stale` like any other entry that
+isn't `approved`. Its old `signed_off_*` stay as a record of the approval it lost; re-approving it
+records the new signer and time.
+
+Only cosmetic fields keep the approval: `description` and `other_names` (and an entity's
+`caveats`). The list is an allow-list, so a field added later counts as a change to the
+definition. An edit that sets a field to the value it already has changes nothing, and an edit of
+an `unreviewed` or `stale` entry leaves its state as it is. In one batch, an approve after the
+edit signs off the edited version (the explorer sends approvals after edits); an edit after the
+approve leaves the entry stale.
+
+The Review tab, `sm review-queue` and `sm approve-queue` show what changed on a stale entry since
+its approval, read from `curation_log.jsonl` — e.g. *binding (sqlite) changed from SUM(amount) to
+SUM(amount) - SUM(discount)*, with who made each edit and when. When the log doesn't reach back to
+the edit that took the approval away, the entry still shows as stale, with *changes not
+recorded*.
+
+A refresh (`introspect --append`) re-labels only the joins introspection approved itself, so it
+never touches a join a person edited: a stale join is not one of those, and it keeps its edited
+columns, cardinality and `stale` state.
+
 ## Rule 1 vs Rule 2 — and the hybrid review order
 
 - **Rule 1 — metrics** (always queue): a metric must be signed off — a

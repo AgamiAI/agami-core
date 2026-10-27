@@ -526,22 +526,62 @@ def _edit_join(root: Path, value: str, **kw):
 
 @pytest.mark.parametrize("signer", ["you@example.com", None], ids=["signed", "unsigned"])
 def test_a_persons_edit_of_an_engine_join_survives_a_refresh(db, tmp_path, signer):
+    """#537 replaced #511's re-stamp: the edited join goes back to review as `stale`, keeping the
+    engine's stamp as the record of the approval it lost, and a refresh still leaves it alone."""
     art = tmp_path / "art"
     _build(db, art)
     root = art / "acme"
     _as_an_older_release_wrote_it(root)
-    res = _edit_join(root, "many_to_one", signer=signer, role="data_owner" if signer else None)
+    res = _edit_join(root, "one_to_many", signer=signer, role="data_owner" if signer else None)
     assert res.validated and res.applied, res
     edited = _rels(L.load_datasource(root))[("passports", "users")]
-    if signer:
-        assert (edited.review_state, edited.signed_off_by, edited.signed_off_role) == \
-            ("approved", "you@example.com", "data_owner")
-    else:
-        assert edited.review_state == "unreviewed" and edited.signed_off_by is None
+    assert (edited.relationship, edited.review_state, edited.signed_off_by, edited.signed_off_role) == \
+        ("one_to_many", "stale", "agami_introspect", "system")
+    assert not I._engine_approved(edited)
 
+    _, preview = _build(db, art, append=True, dry_run=True)
+    assert not any("passports.person_id" in j for t in preview.changes.values()
+                   for j in t.get("joins corrected from the database's constraints", []))
     _build(db, art, append=True)
     after = _rels(L.load_datasource(root))[("passports", "users")]
-    assert after.relationship == "many_to_one"
+    assert after.model_dump() == edited.model_dump()
+
+
+def test_a_refresh_that_retypes_a_stale_joins_column_keeps_it_stale(db, tmp_path):
+    art = tmp_path / "art"
+    _build(db, art)
+    root = art / "acme"
+    _as_an_older_release_wrote_it(root)
+    assert _edit_join(root, "one_to_many").validated
+    con = sqlite3.connect(db)
+    con.executescript("""
+        CREATE TABLE p2(id INTEGER PRIMARY KEY, person_id TEXT UNIQUE REFERENCES users(id), fee NUMERIC);
+        INSERT INTO p2 SELECT id, CAST(person_id AS TEXT), fee FROM passports;
+        DROP TABLE passports; ALTER TABLE p2 RENAME TO passports;""")
+    con.commit()
+    con.close()
+    _build(db, art, append=True)
+    after = _rels(L.load_datasource(root))[("passports", "users")]
+    assert (after.relationship, after.review_state, after.confidence) == ("one_to_many", "stale", "proposed")
+
+
+def test_an_edit_to_the_engines_own_label_is_no_edit_and_an_approval_pins_it(db, tmp_path):
+    """Setting a join's cardinality to the label it has changes nothing (#537), so the engine still owns
+    it; a person who wants to keep that label approves the join, which makes the sign-off theirs."""
+    art = tmp_path / "art"
+    _build(db, art)
+    root = art / "acme"
+    _as_an_older_release_wrote_it(root)
+    assert _edit_join(root, "many_to_one").validated
+    assert I._engine_approved(_rels(L.load_datasource(root))[("passports", "users")])
+    from semantic_model import curate
+    op = {"op": "approve", "kind": "relationship", "area": "acme", "name": "passports->users",
+          "at": "2026-10-27T00:00:00Z"}
+    assert curate.apply(root, [op], signer="you@example.com", role="data_owner").validated
+    _build(db, art, append=True)
+    after = _rels(L.load_datasource(root))[("passports", "users")]
+    assert (after.relationship, after.review_state, after.signed_off_by) == \
+        ("many_to_one", "approved", "you@example.com")
 
 
 def test_a_description_edit_keeps_the_engine_sign_off(db, tmp_path):

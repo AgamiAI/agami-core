@@ -21,6 +21,7 @@ Locators address an entry uniquely: {kind, area, name, [column]} where kind ∈
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -57,30 +58,49 @@ def _needs_review(obj) -> bool:
     return getattr(obj, "review_state", "approved") in ("unreviewed", "stale")
 
 
-def review_queue(org: Datasource) -> dict[str, Any]:
+def _annotate_stale(items: list[dict], objs: list[Any], root: Optional[str | Path]) -> None:
+    """Give each stale item what changed since its approval, from the curation log under `root`."""
+    if root is None or not any(it.get("review_state") == "stale" for it in items):
+        return
+    log = _read_log_lines(Path(root))
+    for it, obj in zip(items, objs):
+        if it.get("review_state") == "stale":
+            it["changes_since_approval"] = since_approval(root, it["kind"], it["area"], obj, log=log)
+
+
+def review_queue(org: Datasource, *, root: Optional[str | Path] = None) -> dict[str, Any]:
     """Build the review queue. Rule 1 (metrics — block at runtime until signed off)
-    is surfaced separately from Rule 2 (relationships / entities — lazy)."""
+    is surfaced separately from Rule 2 (relationships / entities — lazy). With the model's `root`,
+    a stale item also carries `changes_since_approval`."""
     rule1: list[dict] = []
     rule2: list[dict] = []
+    objs1: list[Any] = []
+    objs2: list[Any] = []
 
     for sa in org.subject_areas:
         for mm in sa.metrics:
             if _needs_review(mm):
                 rule1.append(_metric_item(sa.name, mm))
+                objs1.append(mm)
         for rel in sa.relationships:
             if _needs_review(rel):
                 rule2.append(_rel_item(sa.name, rel))
+                objs2.append(rel)
         for ent in sa.entities:
             if _needs_review(ent):
                 rule2.append(_entity_item(sa.name, ent))
+                objs2.append(ent)
     for mm in org.cross_subject_area_metrics:
         if _needs_review(mm):
             rule1.append(_metric_item(None, mm))
+            objs1.append(mm)
     for rel in org.cross_subject_area_relationships:
         if _needs_review(rel):
             item = _rel_item(getattr(rel, "from_subject_area", None), rel)
             item["cross_area"] = True
             rule2.append(item)
+            objs2.append(rel)
+    _annotate_stale(rule1 + rule2, objs1 + objs2, root)
 
     return {
         "rule_1": rule1,            # metrics — sign-off required before queries use them
@@ -102,7 +122,7 @@ def _tab(obj) -> str:
     return "manual"
 
 
-def all_items(org: Datasource, *, scope: str = "all") -> list[dict]:
+def all_items(org: Datasource, *, scope: str = "all", root: Optional[str | Path] = None) -> list[dict]:
     """Every curatable entry (metric / relationship / entity), tab-classified, for
     the 4-tab review dashboard (For Review · Auto · Manual · Rejected). Tables and
     columns are curated in the model explorer, not here.
@@ -116,21 +136,30 @@ def all_items(org: Datasource, *, scope: str = "all") -> list[dict]:
       "rule2" — only Rule-2 items needing review (relationships + entities).
       "preseed" — what NL→SQL seeds depend on: metrics + named filters + entities
                 needing review (relationships excluded — those stay lazy). The
-                agami-connect "curate before examples" gate uses this."""
+                agami-connect "curate before examples" gate uses this.
+
+    With the model's `root`, a stale item also carries `changes_since_approval`."""
     items: list[dict] = []
+    objs: list[Any] = []
     for sa in org.subject_areas:
         for mm in sa.metrics:
             items.append({**_metric_item(sa.name, mm), "tab": _tab(mm)})
+            objs.append(mm)
         for rel in sa.relationships:
             items.append({**_rel_item(sa.name, rel), "tab": _tab(rel)})
+            objs.append(rel)
         for ent in sa.entities:
             items.append({**_entity_item(sa.name, ent), "tab": _tab(ent)})
+            objs.append(ent)
     for mm in org.cross_subject_area_metrics:
         items.append({**_metric_item(None, mm), "tab": _tab(mm)})
+        objs.append(mm)
     for rel in org.cross_subject_area_relationships:
         it = {**_rel_item(getattr(rel, "from_subject_area", None), rel), "tab": _tab(rel),
               "cross_area": True}
         items.append(it)
+        objs.append(rel)
+    _annotate_stale(items, objs, root)
     if scope == "rule1":
         items = [it for it in items if it["rule"] == 1 and it["tab"] == "review"]
     elif scope == "rule2":
@@ -398,11 +427,14 @@ class ApplyResult:
     committed: bool = False
     # Why nothing was committed, in a sentence the skill can pass on; empty when it was.
     commit_note: str = ""
+    # The approved entries an edit in the batch sent back to review (#537).
+    stale: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
                 "validated": self.validated, "committed": self.committed,
-                **({"commit_note": self.commit_note} if self.commit_note else {})}
+                **({"commit_note": self.commit_note} if self.commit_note else {}),
+                **({"stale": self.stale} if self.stale else {})}
 
 
 def _area_dir(root: Path, area: str) -> Path:
@@ -528,11 +560,17 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
     backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)
     logged: list[dict] = []  # the ops that took, each with the value it replaced
 
+    stale: dict[Any, str] = {}  # entry -> label, for each one this batch leaves sent back to review
     for op in ops:
         try:
-            _, before = _apply_one(root, op, signer, role, backups)
+            where, before, staled = _apply_one(root, op, signer, role, backups)
             res.applied.append(_op_label(op))
-            logged.append({**op, "before": before})
+            # An approve after the edit, in the same batch, signs off the edited definition.
+            if staled:
+                stale[where] = _op_label(op).split(" ", 1)[1]
+            elif op.get("op") != "edit":
+                stale.pop(where, None)
+            logged.append({**op, "before": before, **({"made_stale": True} if staled else {})})
         except BatchError as e:
             res.errors.append(f"{_op_label(op)}: {e}")
         except Exception as e:
@@ -558,6 +596,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
         res.applied = []
         return res
 
+    res.stale = list(stale.values())
     if res.applied:
         res.committed, res.commit_note = _record(root, f"curation: {len(res.applied)} change(s)",
                                                  logged, signer, role)
@@ -611,8 +650,9 @@ def _resolve_area(root: Path, op: dict) -> str:
 
 
 def _apply_one(root: Path, op: dict, signer, role,
-               backups: "Optional[dict[Path, Optional[str]]]" = None) -> tuple[Path, Any]:
-    """Apply one op; return the file it wrote and the value it replaced, for the curation log."""
+               backups: "Optional[dict[Path, Optional[str]]]" = None) -> tuple[Any, Any, bool]:
+    """Apply one op; return where the entry it changed lives, the value it replaced (for the curation
+    log), and whether the op sent an approved entry back to review."""
     if backups is None:
         backups = {}
     action = op.get("op")
@@ -655,14 +695,16 @@ def _apply_one(root: Path, op: dict, signer, role,
             # The file's own `name`: it can carry the schema (`public.wide`) the op's name leaves out.
             _reconcile_ambiguity_groups(root, path, str(doc.get("name") or name), doc.get("schema"),
                                         old_groups, doc.get("column_groups") or {}, backups)
-        return path, before
+        return (path, op.get("column")), before, False
 
     if kind in ("entity", "metric"):
         path, key, doc, item = _find_item(root, kind, name, area)
         _snapshot(backups, path)
+        prior = copy.deepcopy(item)
         before = _set_trust(item, op, new_state, signer, role)
+        staled = _stale_on_edit(kind, prior, item, op)
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
-        return path, before
+        return (path, _position(_entries(doc, key), item) if key else None), before, staled
 
     if kind == "subject_area":
         # edit-only (e.g. set the area's `description`) — a subject area carries no trust block,
@@ -681,41 +723,64 @@ def _apply_one(root: Path, op: dict, signer, role,
         before = doc.get(fld)
         doc[fld] = val
         _dump(path, doc)
-        return path, before
+        return (path, None), before, False
 
     if kind == "relationship":
         path, key, doc, rels, hit = _find_join(root, op, area)
         _snapshot(backups, path)
+        prior = copy.deepcopy(hit)
         before = _set_trust(hit, op, new_state, signer, role)
-        _restamp_join_edit(hit, op, signer, role)
+        staled = _stale_on_edit(kind, prior, hit, op)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
-        return path, before
+        return (path, _position(rels, hit)), before, staled
 
     raise ValueError(f"unknown kind {kind!r}")
 
 
-# The fields that say which rows a join meets; a description edit changes none of them.
-_JOIN_STRUCTURE_FIELDS = frozenset({
-    "relationship", "from_column", "to_column", "on", "from_schema", "to_schema",
-    "from_table", "to_table",
-})
+# The fields an edit may change on an approved metric, entity or join and keep its approval: the words
+# around a definition. Every other field, a field added later included, changes what the item computes
+# or connects, so the edit sends the item back to review (#537).
+_COSMETIC_FIELDS = {
+    "metric": frozenset({"description", "other_names"}),
+    "entity": frozenset({"description", "other_names", "caveats"}),
+    "relationship": frozenset({"description"}),
+}
+# The sign-off itself rather than the definition it covers.
+_TRUST_FIELDS = frozenset({"confidence", "review_state", "signed_off_by", "signed_off_at",
+                           "signed_off_role", "migrated_from"})
 
 
-def _restamp_join_edit(doc: dict, op: dict, signer: Optional[str], role: Optional[str]) -> None:
-    """A person's edit of an approved join's structure makes the sign-off theirs, so a refresh,
-    which relabels only the joins introspection approved itself, leaves the edit alone (#511).
-    With no signer to stamp, an engine sign-off is cleared and the join waits for review."""
-    if op.get("op") != "edit" or op.get("field") not in _JOIN_STRUCTURE_FIELDS:
-        return
-    if doc.get("review_state", "unreviewed") != "approved":
-        return
-    if signer and role:
-        doc["signed_off_by"], doc["signed_off_role"] = signer, role
-        doc["signed_off_at"] = op.get("at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    elif doc.get("signed_off_by") == "agami_introspect" or doc.get("signed_off_role") == "system":
-        doc["review_state"] = "unreviewed"
-        for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
-            doc.pop(k, None)
+def _definition(kind: str, doc: dict) -> Any:
+    """`doc` without its trust block, read through its model so `primary: false` and an omitted
+    `primary` compare equal; the raw fields when it doesn't read."""
+    model = {"metric": Metric, "entity": Entity}.get(kind) or (
+        CrossSubjectAreaRelationship if "from_subject_area" in doc else Relationship)
+    try:
+        return model(**doc).model_dump(mode="json", exclude=set(_TRUST_FIELDS))
+    except Exception:
+        return {k: v for k, v in doc.items() if k not in _TRUST_FIELDS}
+
+
+def _stale_on_edit(kind: str, prior: dict, doc: dict, op: dict) -> bool:
+    """Send an approved item an edit changed the meaning of back to review, as `stale`; say whether it did.
+
+    The sign-off fields stay, as a refresh leaves them on a column it marks stale: they say what the
+    approval was, and an item that is not `approved` is not signed off whatever they hold. This replaces
+    re-stamping a person's join edit as their approval (#511): a stale join is not one introspection
+    approved itself, so a refresh still leaves it alone."""
+    if op.get("op") != "edit" or prior.get("review_state") != "approved":
+        return False
+    fld = op.get("field")
+    if fld in _COSMETIC_FIELDS[kind] or fld in _TRUST_FIELDS:
+        return False
+    if _definition(kind, prior) == _definition(kind, doc):
+        return False
+    doc["review_state"] = "stale"
+    return True
+
+
+def _position(entries: list, entry: dict) -> int:
+    return next(i for i, e in enumerate(entries) if e is entry)
 
 
 def _area_names(root: Path) -> list[str]:
@@ -1028,6 +1093,10 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
             doc["signed_off_by"] = signer
             doc["signed_off_role"] = role
             doc["signed_off_at"] = op.get("at")  # caller stamps (Date.now unavailable here)
+        elif before == "stale":
+            # The stamp left on a stale entry is the approval its edit took away; keeping it would sign
+            # the new definition in someone else's name.
+            raise ValueError("re-approving a changed entry needs a signer (--signer / --role)")
     if new_state in ("unreviewed", "rejected"):
         # clear stale sign-off on un-approve
         for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
@@ -1425,12 +1494,112 @@ def _read_log_lines(root: Path) -> list[Optional[dict]]:
     return out
 
 
+def read_log(root: str | Path) -> list[Optional[dict]]:
+    """The curation log's lines, oldest first, to read once for many `since_approval` calls."""
+    return _read_log_lines(Path(root))
+
+
 def history(root: str | Path, *, limit: Optional[int] = None) -> list[dict]:
     """The curation log's entries, newest first — what changed, when, by whom, and the value each edit
     replaced. Entries written before #528 carry no `at` / `before` / `version`; unreadable lines are skipped."""
     entries = [e for e in _read_log_lines(Path(root)) if e is not None]
     entries.reverse()
     return entries[:limit] if limit is not None and limit >= 0 else entries
+
+
+_JOIN_IDENTITY = ("from_table", "to_table", "from_column", "to_column", "on", "from_schema", "to_schema")
+_FIELD_LABELS = {"bindings": "binding", "relationship": "cardinality", "maps_to": "maps to",
+                 "on": "join condition"}
+NOT_RECORDED = "changes not recorded"
+
+
+def _identity(kind: str, obj: Any) -> dict:
+    keys = _JOIN_IDENTITY if kind == "relationship" else ("name",)
+    if isinstance(obj, dict):
+        return {k: obj.get(k) for k in keys}
+    return {k: getattr(obj, k, None) for k in keys}
+
+
+def _names_entry(kind: str, entry: dict, ident: dict) -> bool:
+    """Whether a logged op named the entry that had identity `ident` when the op ran, the way
+    `_find_join` / `_find_item` matched it then."""
+    if kind != "relationship":
+        return _slug(str(entry.get("name") or "")) == _slug(str(ident.get("name") or ""))
+    if entry.get("name") != f"{ident.get('from_table')}->{ident.get('to_table')}":
+        return False
+    for k in ("from_column", "to_column"):
+        if entry.get(k) and str(ident.get(k) or "").lower() != str(entry[k]).lower():
+            return False
+    for k in ("from_schema", "to_schema"):
+        if entry.get(k) and ident.get(k) and str(ident[k]).lower() != str(entry[k]).lower():
+            return False
+    if entry.get("on") and " ".join(str(ident.get("on") or "").split()).lower() != \
+            " ".join(str(entry["on"]).split()).lower():
+        return False
+    return True
+
+
+def _shown(v: Any) -> str:
+    if v in (None, "", [], {}):
+        return "(none)"
+    if isinstance(v, list):
+        return ", ".join(f"{x.get('table')}.{x.get('column')}" if isinstance(x, dict) and "table" in x
+                         else str(x) for x in v)
+    return v if isinstance(v, str) else json.dumps(v, default=str)
+
+
+def _change_lines(entry: dict) -> list[str]:
+    fld = str(entry.get("field"))
+    label = _FIELD_LABELS.get(fld, fld.replace("_", " "))
+    old, new = entry.get("before"), entry.get("value")
+    if isinstance(old, dict) or isinstance(new, dict):
+        old, new = old if isinstance(old, dict) else {}, new if isinstance(new, dict) else {}
+        return [f"{label} ({k}) changed from {_shown(old.get(k))} to {_shown(new.get(k))}"
+                for k in sorted(set(old) | set(new), key=str) if old.get(k) != new.get(k)]
+    return [f"{label} changed from {_shown(old)} to {_shown(new)}"]
+
+
+def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj: Any,
+                           *, log: Optional[list] = None) -> Optional[list[dict]]:
+    """The edits made to a stale metric, entity or join since its approval, oldest first, read from the
+    curation log: each `{field, before, after, by, at, text}`. None when the log doesn't reach back to
+    the edit that took the approval away (no log, a trimmed one, or a hand edit) (#537)."""
+    lines = log if log is not None else _read_log_lines(Path(root))
+    ident = _identity(kind, obj)
+    found: list[dict] = []
+    for entry in reversed(lines):
+        if not isinstance(entry, dict) or entry.get("kind") != kind:
+            continue
+        if entry.get("area") and area and entry["area"] != area:
+            continue
+        # Walking back, an edit of a field that names the entry (a join's columns) named it by the old value.
+        prior = dict(ident)
+        if entry.get("op") == "edit" and entry.get("field") in prior:
+            prior[entry["field"]] = entry.get("before")
+        if not _names_entry(kind, entry, prior):
+            continue
+        ident = prior
+        if entry.get("op") != "edit":
+            return None   # approved, rejected or reopened after the last recorded edit that staled it
+        fld = entry.get("field")
+        if (fld not in _COSMETIC_FIELDS.get(kind, ()) and fld not in _TRUST_FIELDS
+                and entry.get("before") != entry.get("value")):
+            found += [{"field": fld, "before": entry.get("before"), "after": entry.get("value"),
+                       "by": entry.get("signer"), "at": entry.get("at"), "text": text}
+                      for text in _change_lines(entry)]
+        if entry.get("made_stale"):
+            found.reverse()
+            return found
+    return None
+
+
+def since_approval(root: str | Path, kind: str, area: Optional[str], obj: Any,
+                   *, log: Optional[list] = None) -> dict:
+    """`changes_since_approval` as the review surfaces show it, "changes not recorded" when unknown."""
+    changes = changes_since_approval(root, kind, area, obj, log=log)
+    if changes is None:
+        return {"recorded": False, "changes": [], "summary": NOT_RECORDED}
+    return {"recorded": True, "changes": changes, "summary": "; ".join(c["text"] for c in changes)}
 
 
 def has_model_curation(root: str | Path) -> bool:
@@ -1446,4 +1615,4 @@ def has_model_curation(root: str | Path) -> bool:
 
 __all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
            "write_items", "add_examples", "validate_seeds", "set_key_terminology",
-           "history", "ApplyResult"]
+           "history", "changes_since_approval", "since_approval", "read_log", "ApplyResult"]

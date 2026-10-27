@@ -12,6 +12,27 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+- **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
+  `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
+  tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
+  approved` with the old signer and time, so a receipt reported a definition nobody approved as
+  signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
+  reports it as not signed off until someone re-approves it, which records the new signer and time.
+  Only `description`, `other_names` and an entity's `caveats` keep the approval; every other field,
+  including any added later, counts as a change, and an edit that sets a field to the value it
+  already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
+  was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an
+  approve with no signer can't reuse them. In one batch an approve after the edit signs off the
+  edited version (the explorer now sends approvals after edits) and an edit after the approve leaves
+  the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
+  tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
+  read from `curation_log.jsonl` (e.g. "binding (sqlite) changed from SUM(amount) to SUM(amount) -
+  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it. This supersedes
+  #559's re-stamp of a person's structural join edit as their approval (#511): the edited join goes
+  stale instead, and a refresh still leaves it alone, since it re-labels only the joins introspection
+  approved itself; a refresh that lowers a stale join's confidence because a column's type changed
+  keeps it `stale`.
+
 - **A column's list of allowed values is the whole list, or none (#517).** Introspection built each
   `choice_field` from the first 500 rows the engine returned, so on a table of a few thousand rows a
   status with 14 values could list 6, and the list read as complete: a question about a missing value

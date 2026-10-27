@@ -456,14 +456,14 @@ def cmd_filter_values_judge(args) -> int:
 def cmd_review_queue(args) -> int:
     from . import curate
     org = L.load_datasource(args.root)
-    _print_json(curate.review_queue(org))
+    _print_json(curate.review_queue(org, root=args.root))
     return 0
 
 
 def cmd_review_items(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
-    _print_json(curate.all_items(org, scope=args.scope))
+    _print_json(curate.all_items(org, scope=args.scope, root=args.root))
     return 0
 
 
@@ -581,19 +581,27 @@ def cmd_approve_queue(args) -> int:
     type; `--dry-run` prints the ops without touching the model."""
     from . import curate
     org = L.load_datasource(args.root)
-    queue = curate.review_queue(org)
+    queue = curate.review_queue(org, root=args.root)
     kinds = set(args.kind) if args.kind else None
+    items = [it for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
+             if kinds is None or it["kind"] in kinds]
     ops = [{"op": "approve", "kind": it["kind"], "area": it["area"],
             "name": it["name"], "at": _utc_now_iso(),
             **{k: it[k] for k in ("from_schema", "to_schema", "from_column", "to_column", "on")
                if it.get(k)}}
-           for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
-           if kinds is None or it["kind"] in kinds]
+           for it in items]
+    # What a re-approval of a stale item signs off: the changes made since its last approval (#537).
+    changed = [{"kind": it["kind"], "area": it["area"], "name": it["name"],
+                "signed_off_by": it.get("signed_off_by"), "signed_off_at": it.get("signed_off_at"),
+                "changes": [c["text"] for c in it["changes_since_approval"]["changes"]]
+                or [curate.NOT_RECORDED]}
+               for it in items if it.get("changes_since_approval")]
+    shown = {"changed_since_approval": changed} if changed else {}
     if args.dry_run:
-        _print_json({"dry_run": True, "count": len(ops), "ops": ops})
+        _print_json({"dry_run": True, "count": len(ops), "ops": ops, **shown})
         return 0
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
-    _print_json({"approved": len(ops), **res.as_dict()})
+    _print_json({"approved": len(ops), **shown, **res.as_dict()})
     return 0 if res.validated else 1
 
 

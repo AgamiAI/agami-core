@@ -426,7 +426,10 @@ def introspect(
             hit = _retyped_end(retyped, r.from_schema, r.from_table, r.from_column) \
                 or _retyped_end(retyped, r.to_schema, r.to_table, r.to_column)
             if hit and r.confidence == "confirmed":
-                r.confidence, r.review_state = "proposed", "unreviewed"
+                # A stale join is already back in review, and `stale` is what says a person changed it.
+                r.confidence = "proposed"
+                if r.review_state != "stale":
+                    r.review_state = "unreviewed"
                 report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(
                     f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
         _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread)

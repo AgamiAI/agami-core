@@ -20,6 +20,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Exclude / Reject** → `rejected`. The loader drops rejected tables, columns, metrics, entities, and relationships entirely (`include_rejected=False` at runtime) — never in prompts, never joined, never aggregated. ("Exclude" is the verb for tables/columns; "Reject" for metrics/entities/joins — same op.)
 - **Include** → back to `unreviewed`.
 - **Approve** → `approved` + a sign-off stamp (`signed_off_by`/`_at`/`_role`). **Rule 1** (metrics) — a query that uses an unsigned metric still answers, and the metric arrives on the answer's receipt carrying its `review_state`, which is what raises the report's approve/change banner until it's approved; **Rule 2** (entities, inferred joins) is usable while unreviewed and self-approves through use, with an unreviewed join raising the report's trust banner. Only `rejected` entries are dropped from the runtime entirely. Approving requires the curator's email + role (Phase 0) — the validator rejects an approved entry with no sign-off stamp.
+- **Edit of an approved item → `stale`.** An edit that changes what an approved metric, entity or join computes or connects (a binding or calculation, unit, source tables, filters, an entity's mappings, a join's columns, `on:` or cardinality — any field but the cosmetic ones) sends it back to the review queue as `stale`; until someone re-approves it, it is not signed off, and the receipt says so. Only `description`, `other_names` and (entities) `caveats` are cosmetic and keep the approval; an edit that sets a field to the value it already has changes nothing. The old `signed_off_*` stay on a stale item as a record of the approval it lost. A batch that edits an item and then approves it ends approved by the approver (the dashboard puts approvals after edits); an approve followed by an edit ends `stale`. `sm curate` lists the items an edit sent back to review in `stale[]` — tell the user they need re-approving. The Review tab, `sm review-queue` and `sm approve-queue` show each stale item's `changes_since_approval` from the curation log (e.g. *binding (sqlite) changed from SUM(amount) to SUM(amount) - SUM(discount)*), or *changes not recorded* when the log doesn't go back that far.
 
 ## Conversation style
 
@@ -148,7 +149,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
-`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table).
+`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table) and `stale` when an edit sent approved items back to review.
 
 **Success** (`validated: true`):
 - Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*
@@ -230,6 +231,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" approve-queue "$ROOT" --signer you@example.
 # --dry-run                          → print the approve ops without applying
 ```
 
+- A **stale** item (approved, then edited) is in this queue too; the output's `changed_since_approval` lists what changed on each since its last approval (or *changes not recorded*). Show it to the user before approving — re-approving records the new signer and time.
 - **`--signer` and `--role` are required** — an approve must record *who* signed off (the validator rejects an approved entry with no sign-off stamp). The command self-stamps the `at` timestamp, so you don't build ops by hand.
 - Afterward `sm review-queue "$ROOT"` shows `counts.total: 0` and `sm curate-gate "$ROOT"` drops `preseed_count` to 0.
 - **PII does not block seeding.** `curate-gate` may still report `should_open_explorer: true` purely because sensitive columns remain queryable — that's **advisory** (your call to exclude or keep them), **not** a gate on seed generation. Only unreviewed **pre-seed** items (metrics/entities) block `seed-examples`; approving the queue clears that.
