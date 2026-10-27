@@ -3658,6 +3658,10 @@ def assemble_receipt(
         # CTE subtraction anywhere in between — so the fix that reached `tables`, the relationship
         # walk and the unqualified branch below never reached a qualified column. The reference
         # itself is kept either way: a dropped reference is an unchecked one.
+        if col.table and (origin := _qualified_reference_origin(col)) is not None:
+            # Resolved in the column's own scope, through a derived table or CTE (#521).
+            ref_cols.add(origin)
+            continue
         if col.table:                                   # qualified -> resolve via alias scope
             # The alias matched ignoring case, like the sensitive check (#456); an exact match
             # wins, and a qualifier that could be two aliases keeps the written name.
@@ -4501,6 +4505,164 @@ def _own_alias_map(sel: "exp.Select | None") -> dict[str, str]:
             for tbl in boundary if isinstance(tbl, exp.Table)}
 
 
+def _own_sources(sel: "exp.Select") -> list["exp.Expression"]:
+    """The relations this SELECT's own FROM and JOINs introduce, in the order it wrote them."""
+    frm = sel.args.get("from_") or sel.args.get("from")
+    nodes = [frm.this] if isinstance(frm, exp.From) else []
+    nodes += [join.this for join in sel.args.get("joins") or []]
+    return [node for node in nodes if node is not None]
+
+
+def _pick_binding(sources: list["exp.Expression"], qualifier: str) -> "exp.Expression | None":
+    """The source a qualifier names: an exact alias first, else the ONE that matches ignoring case."""
+    exact = [s for s in sources if s.alias_or_name == qualifier]
+    if exact:
+        return exact[0]
+    folded = [s for s in sources if _tkey(s.alias_or_name) == _tkey(qualifier)]
+    return folded[0] if len(folded) == 1 else None
+
+
+# The last tree `_cte_reference_ids` walked and its answer: one statement's receipt asks it once
+# per column, and `_cte_references` walks the whole tree.
+# Rebound whole, never mutated: receipts are built in worker threads, and a reader holding one
+# tuple cannot see another thread's tree paired with it.
+_CTE_REFS_LAST: tuple = (None, frozenset())
+
+
+def _cte_reference_ids(root: "exp.Expression") -> "set[int] | frozenset[int]":
+    """`_cte_references(root)`, computed once per tree."""
+    global _CTE_REFS_LAST
+    cached_root, refs = _CTE_REFS_LAST
+    if cached_root is not root:
+        refs = _cte_references(root)
+        _CTE_REFS_LAST = (root, refs)
+    return refs
+
+
+def _cte_binding(table: "exp.Table") -> "exp.CTE | None":
+    """The CTE a table reference reads, or None when it reads a table.
+
+    Bound by `_cte_references`' rules, so a schema-qualified name, a later sibling and a
+    non-recursive self-reference read the table, as they do for the scope gate.
+    """
+    if table.db or id(table) not in _cte_reference_ids(table.root()):
+        return None
+    key = _identifier_key(table.this)
+    via: "exp.CTE | None" = None
+    node: "exp.Expression | None" = table.parent
+    while node is not None:
+        if isinstance(node, exp.CTE):
+            via = node
+        with_ = node.args.get("with_") or node.args.get("with")
+        if isinstance(with_, exp.With):
+            ctes = list(with_.expressions)
+            pos = next((i for i, c in enumerate(ctes) if c is via), None)
+            if pos is not None:
+                # A body sees the siblings before it, and itself only under RECURSIVE.
+                ctes = ctes[:pos + 1] if with_.args.get("recursive") else ctes[:pos]
+            for cte in reversed(ctes):
+                alias = cte.args.get("alias")
+                name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
+                if name is not None and key is not None and _same_identifier(key, name):
+                    return cte
+        node = node.parent
+    return None
+
+
+def _alias_columns(node: "exp.Expression") -> list[str]:
+    """The column list an alias gives its relation (`AS s(y, x)`), or [] when it gives none."""
+    alias = node.args.get("alias")
+    return [c.name for c in alias.columns] if isinstance(alias, exp.TableAlias) else []
+
+
+def _projection_for(body: "exp.Select", cname: str,
+                    listed: list[str]) -> "exp.Expression | None":
+    """The ONE projection of `body` that outputs `cname`, by position when a column list renames
+    the outputs, else by name. None when that is not certain."""
+    if not listed:
+        # A star may output the same name ahead of the explicit projection.
+        if any(p.is_star for p in body.expressions):
+            return None
+        matches = [p for p in body.expressions if _tkey(p.alias_or_name) == _tkey(cname)]
+        return matches[0] if len(matches) == 1 else None
+    names = [_tkey(n) for n in listed]
+    if (len(names) != len(body.expressions) or names.count(_tkey(cname)) != 1
+            or any(p.is_star for p in body.expressions)):
+        return None
+    return body.expressions[names.index(_tkey(cname))]
+
+
+def _origin_through(source: "exp.Expression", cname: str,
+                    depth: int) -> Optional[tuple[str, str]]:
+    """(table, column) behind `cname` read from `source`, or None when it is not a plain column.
+
+    A plain table is its own origin. A derived table or a CTE is followed only through a
+    projection that hands one input column back unchanged, bare or renamed: `x / y AS r` is a value
+    the statement computed and no single column is its origin. A UNION body, a star and an output
+    name projected twice stop here too.
+    """
+    if depth >= _MAX_CTE_CHAIN:
+        return None
+    if isinstance(source, exp.Table):
+        if _alias_columns(source):
+            return None
+        cte = _cte_binding(source)
+        if cte is None:
+            return source.name, cname
+        body, listed = cte.this, _alias_columns(cte)
+    elif isinstance(source, exp.Subquery):
+        body, listed = source.this, _alias_columns(source)
+    else:
+        return None
+    if not isinstance(body, exp.Select):
+        return None
+    match = _projection_for(body, cname, listed)
+    inner = match.this if isinstance(match, exp.Alias) else match
+    if not isinstance(inner, exp.Column) or not inner.name:
+        return None
+    return _column_origin(inner, depth + 1)
+
+
+def _column_origin(col: "exp.Column", depth: int = 0) -> Optional[tuple[str, str]]:
+    """(table, column) a column reads, resolved in the scope it was written in, or None."""
+    chain = _enclosing_selects(col)
+    if not chain:
+        return None
+    if not col.table:
+        # Unqualified: followed only when the innermost SELECT reads exactly one source.
+        sources = _own_sources(chain[0])
+        if len(sources) != 1:
+            return None
+        return _origin_through(sources[0], col.name, depth)
+    for sel in chain:
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            return _origin_through(source, col.name, depth)
+    return None
+
+
+def _qualified_reference_origin(col: "exp.Column") -> Optional[tuple[str, str]]:
+    """(table, column) for the receipt's label of a QUALIFIED column, or None when its qualifier
+    names nothing in the scopes enclosing it.
+
+    The receipt's whole-statement alias map holds only plain tables, last one wins, so `s.x` over a
+    derived table or a CTE `s` stayed `s.x`, and an alias reused in a nested query resolved to
+    whichever table the walk met last (#521). This resolves the qualifier from the column's own
+    SELECT outward, and follows a derived table or a CTE to its table through plain projections.
+    When the qualifier is bound but the value is computed, the label keeps the name the source
+    was given: the CTE's name for a CTE reference, the alias for a derived table.
+
+    The receipt's labels only: the scope gate, the fan/chasm analysis and the metric match keep
+    their own resolution, so what is refused and what a value is matched to do not change here.
+    """
+    for sel in _enclosing_selects(col):
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            written = source.name if isinstance(source, exp.Table) else col.table
+            return _column_origin(col) or (written, col.name)
+    return None
+
+
 def _computed_relations(sel: "exp.Select | None") -> frozenset[str]:
     """The names THIS SELECT binds to a relation it COMPUTED, folded through `_tkey`.
 
@@ -4970,9 +5132,44 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # a total the join really does inflate reported `not_multiplied`. The chasm blast radius was
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
+        if _enclosing_select(agg) is not tree:
+            # Computed inside a nested SELECT: its columns bind in that scope, not in `scope_map`.
+            sites.append(_AggSite(
+                node=agg,
+                aggregate=_echo_expr(agg.sql()),
+                scope=scope,
+                sources=frozenset(),
+                value_sources=frozenset(),
+                resolved=False,
+                unresolved_because=("the aggregate is computed inside a nested SELECT, whose rows the "
+                                    "pre-flight does not analyse"),
+            ))
+            continue
         cols = list(agg.find_all(exp.Column))
+        holds_subquery = None
+        if agg.find(exp.Select) is not None:
+            # A subquery's columns are bound in its own scope; credited to this SELECT's aliases
+            # they could name a table the aggregate never reads. The outer columns still count, so
+            # a fan on them is reported, but the subquery's rows leave the rest unknown.
+            own = _enclosing_select(agg)
+            cols = [col for col in cols if _enclosing_select(col) is own]
+            holds_subquery = ("the aggregate holds a subquery whose rows the pre-flight does not "
+                              "analyse")
+        # `COUNT(*) FILTER (WHERE x > 0)` parses as `Filter(this=Count, expression=Where)`, so the
+        # predicate sits outside the aggregate node. It still decides which rows are folded, as the
+        # same test inside `COUNT(CASE WHEN x > 0 THEN 1 END)` does, so it is read too (#521). The
+        # value path below is left alone: the predicate is not part of the value.
+        nested = None
+        if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
+            predicate = agg.parent.expression
+            # A subquery's columns belong to its own scope, not this SELECT's (D4).
+            if predicate.find(exp.Subquery, exp.Exists, exp.Select) is not None:
+                nested = ("the aggregate's FILTER clause holds a subquery, so the pre-flight cannot "
+                          "tell which of this query's rows it counts")
+            else:
+                cols += list(predicate.find_all(exp.Column))
         resolved = [_resolve_folded(col, scope_map) for col in cols]
-        why = _why_unresolved(cols, resolved, scope_map, visible)
+        why = nested or holds_subquery or _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
             aggregate=_echo_expr(agg.sql()),

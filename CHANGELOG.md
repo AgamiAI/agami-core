@@ -12,6 +12,25 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The receipt names the table behind a subquery or CTE alias, and reads a `FILTER` clause (#521).**
+  `COUNT(*) FILTER (WHERE s.x > 0)` over a subquery `s` listed the reference as `s.x`, and the
+  aggregate said it names no column. A column qualified by a derived table or a CTE is now followed
+  through a projection that passes one column through unchanged (bare or renamed) to its table, so
+  the reference reads `public.t.x`. A computed projection (`x / id AS r`) keeps the alias it was
+  written with. A qualifier is resolved in the query it was written in, so an alias reused in a
+  nested query no longer borrows the other query's table. An aggregate's `FILTER (WHERE …)` columns
+  count as columns it reads, the same as a `CASE` inside it, so a single-table `COUNT(*) FILTER (…)`
+  is resolved and one over a join can report a fan. A CTE name binds as the scope gate binds it (a
+  schema-qualified table, a later sibling or a non-recursive self-reference is the table), and a
+  column list (`WITH s(y, x)`, `AS s(y, x)`) renames outputs by position. A subquery's columns are
+  not credited to the outer query's aliases: a `FILTER` holding a subquery, an aggregate holding
+  one and an aggregate computed inside a nested SELECT report `undetermined` (a fan proven on the
+  outer columns still reports `multiplied`). A body with a star keeps the written alias.
+  What the scope gate refuses is unchanged, and a value read from a subquery is still not matched to
+  a metric.
+
 ### Added
 
 - **The model explorer can reject in bulk, beside every bulk approve (#531).** Each "✓ Approve all N
