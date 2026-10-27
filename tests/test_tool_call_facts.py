@@ -319,10 +319,11 @@ def test_a_scope_where_no_named_table_exists_records_every_name(served):
     row = _one(served)
     assert (row["success"], row["error_kind"], row["miss_count"]) == (0, "not_found", 2)
     offered = _error(reply)["did_you_mean"]
-    # `sales` is an area: it gets a hint, not a guess, and is recorded with nothing offered.
+    # `sales` is an area: it gets a hint, not a guess, and is recorded with nothing offered and
+    # flagged as hinted (#567), so the empty list does not read as "given nothing".
     assert _missed(row) == [
         {"kind": "table", "name": "ordrs", "did_you_mean": offered["ordrs"]},
-        {"kind": "table", "name": "sales", "did_you_mean": []},
+        {"kind": "table", "name": "sales", "did_you_mean": [], "hinted": True},
     ]
 
 

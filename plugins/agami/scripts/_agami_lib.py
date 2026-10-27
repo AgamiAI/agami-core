@@ -6,7 +6,7 @@ modules aren't on `sys.path` there and nothing pip-installs them — which broke
 (agami-connect died on `import agami_paths`). This resolver makes the library importable in every layout,
 **no pip required**:
 
-  1. already importable  → a pip-installed package wins; do nothing.
+  1. already importable  → a pip-installed package wins; warn on stderr if it is older than the plugin.
   2. the bundled `lib/`   → the drift-checked copy shipped next to the scripts (`plugins/agami/lib/`),
                             present in BOTH the marketplace cache and a dev checkout (kept in sync by
                             `dev.py sync-lib`).
@@ -17,6 +17,7 @@ Stdlib only (it runs before the library is even on the path).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def ensure_importable() -> None:
     try:
         import agami_paths  # noqa: F401  — a pip-installed package wins; nothing to add.
 
+        _warn_if_older_than_plugin(Path(agami_paths.__file__).resolve().parent)
         return
     except ImportError:
         pass
@@ -52,3 +54,19 @@ def ensure_importable() -> None:
         "missing or incomplete. Reinstall the agami plugin, or (in a dev checkout) run "
         "`uv run dev.py sync-lib`."
     )
+
+
+def _warn_if_older_than_plugin(loaded_from: Path) -> None:
+    """The installed package wins over the bundled lib/, so say when it is older than the plugin."""
+    try:
+        if loaded_from in (_SCRIPTS.parent / "lib", _SCRIPTS.parents[2] / "packages" / "agami-core" / "src"):
+            return  # the plugin's own copy, or this checkout's source
+        from _plugin_version import CHECKED_ENV, library_warning
+
+        if os.environ.get(CHECKED_ENV):
+            return
+        msg = library_warning()
+        if msg:
+            print(msg, file=sys.stderr)
+    except Exception:  # a warning must never stop the script
+        pass

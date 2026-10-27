@@ -3,6 +3,7 @@ apply (exclude/include/approve/reject) write path with validation gating."""
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -322,6 +323,131 @@ def test_a_generated_description_never_replaces_a_human_one(tmp_path):
     assert col.description == "Who placed the order" and col.description_source == "human"
     # a person can still change it
     assert curate.apply(tmp_path, [{**human, "value": "Ordering customer"}]).applied
+
+
+# --- #528: a model outside git keeps a reviewable history in its curation log ---------------------
+
+
+def _no_repo_above(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+
+
+def test_two_edits_outside_git_leave_a_history_showing_both(tmp_path, monkeypatch):
+    from semantic_model import snapshot
+
+    _no_repo_above(tmp_path, monkeypatch)
+    _write_model(tmp_path, git=False)
+    first = curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "orders",
+                                     "field": "description", "value": "One row per order"}])
+    v1 = snapshot.newest_version(tmp_path)
+    second = curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "orders",
+                                      "column": "customer_id", "field": "description",
+                                      "value": "Who placed the order"}])
+    assert first.applied and second.applied and not second.committed
+    assert "sm history" in second.commit_note
+
+    newest, oldest = curate.history(tmp_path)
+    assert (oldest["field"], oldest["before"], oldest["value"]) == ("description", "orders", "One row per order")
+    assert (newest["column"], newest["before"], newest["value"]) == ("customer_id", None, "Who placed the order")
+    assert oldest["version"] == v1 and newest["version"] == snapshot.newest_version(tmp_path) != v1
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", newest["at"])
+
+
+def test_a_review_state_change_logs_the_state_it_replaced(tmp_path):
+    _write_model(tmp_path, git=False)
+    curate.apply(tmp_path, [{"op": "approve", "kind": "metric", "name": "order_count",
+                             "at": "2026-06-09T00:00:00Z"}], signer="you@example.com", role="cto")
+    entry = curate.history(tmp_path)[0]
+    assert entry["before"] == "unreviewed" and entry["signer"] == "you@example.com"
+
+
+def test_only_the_ops_that_took_are_logged(tmp_path):
+    _write_model(tmp_path, git=False)
+    res = curate.apply(tmp_path, [
+        {"op": "exclude", "kind": "table", "name": "orders", "column": "ssn"},
+        {"op": "edit", "kind": "table", "name": "no_such_table", "field": "description", "value": "x"},
+    ])
+    assert len(res.applied) == 1 and len(res.skipped) == 1
+    assert [e["name"] for e in curate.history(tmp_path)] == ["orders"]
+
+
+def test_a_batch_that_fails_validation_logs_nothing(tmp_path):
+    _write_model(tmp_path, git=False)
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "name": "order_count",
+                                   "field": "review_state", "value": "not-a-state"}])
+    assert not res.validated
+    assert curate.history(tmp_path) == []
+
+
+def test_datasource_description_and_glossary_writes_are_logged_with_the_prior_value(tmp_path):
+    _write_model(tmp_path, git=False)
+    assert curate.set_datasource_description(tmp_path, "Orders and customers").validated
+    assert curate.set_datasource_description(tmp_path, "Every order a customer placed").validated
+    assert curate.set_key_terminology(tmp_path, {"AOV": "average order value"}).validated
+    gloss, second, first = curate.history(tmp_path)
+    assert (first["before"], first["value"]) == (None, "Orders and customers")
+    assert (second["before"], second["value"]) == ("Orders and customers", "Every order a customer placed")
+    assert gloss["field"] == "key_terminology" and gloss["before"] == {}
+    assert gloss["value"] == {"AOV": "average order value"}
+    # a datasource-level edit doesn't make introspection treat the areas as curated
+    assert not curate.has_model_curation(tmp_path)
+
+
+def test_has_model_curation_counts_any_area_edit_or_an_unreadable_line(tmp_path):
+    log = tmp_path / "curation_log.jsonl"
+    assert not curate.has_model_curation(tmp_path)
+    log.write_text('{"op": "edit", "kind": "datasource"}\n', encoding="utf-8")
+    assert not curate.has_model_curation(tmp_path)
+    for extra in ('{"op": "exclude", "kind": "table"}\n', "{}\n", "not json\n"):
+        log.write_text('{"op": "edit", "kind": "datasource"}\n' + extra, encoding="utf-8")
+        assert curate.has_model_curation(tmp_path)
+
+
+def test_history_reads_older_entries_and_skips_unreadable_lines(tmp_path):
+    (tmp_path / "curation_log.jsonl").write_text(
+        '{"op": "exclude", "kind": "table", "name": "a", "signer": null, "role": null}\n'
+        "not json\n"
+        '{"op": "edit", "kind": "table", "name": "b", "at": "2026-10-01T00:00:00Z"}\n', encoding="utf-8")
+    assert [e["name"] for e in curate.history(tmp_path)] == ["b", "a"]
+    assert [e["name"] for e in curate.history(tmp_path, limit=1)] == ["b"]
+    assert curate.history(tmp_path / "missing") == []
+
+
+def test_a_line_that_is_not_utf8_is_skipped_not_fatal(tmp_path):
+    (tmp_path / "curation_log.jsonl").write_bytes(
+        b'{"op": "exclude", "kind": "table", "name": "a"}\n'
+        b"\xff\n"
+        b'{"op": "edit", "kind": "table", "name": "b"}\n')
+    assert [e["name"] for e in curate.history(tmp_path)] == ["b", "a"]
+    assert curate.has_model_curation(tmp_path)
+    (tmp_path / "curation_log.jsonl").write_bytes(b'{"op": "edit", "kind": "datasource"}\n\xff\n')
+    assert curate.has_model_curation(tmp_path)  # the unreadable line counts as curation
+
+
+def test_sm_history_prints_the_log_newest_first(tmp_path, capsys):
+    import json
+
+    from semantic_model import cli
+
+    _write_model(tmp_path, git=False)
+    curate.set_datasource_description(tmp_path, "first")
+    curate.set_datasource_description(tmp_path, "second")
+    assert cli.main(["history", str(tmp_path), "--limit", "1"]) == 0
+    (entry,) = json.loads(capsys.readouterr().out)
+    assert (entry["before"], entry["value"]) == ("first", "second")
+
+
+def test_a_profile_that_is_its_own_repository_commits_the_log_with_the_change(tmp_path, monkeypatch):
+    for k, v in {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "you@example.com", "GIT_COMMITTER_NAME": "t",
+                 "GIT_COMMITTER_EMAIL": "you@example.com", "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_CONFIG_NOSYSTEM": "1"}.items():
+        monkeypatch.setenv(k, v)
+    _write_model(tmp_path)
+    res = curate.apply(tmp_path, [{"op": "exclude", "kind": "table", "name": "orders", "column": "ssn"}])
+    assert res.committed
+    shown = subprocess.run(["git", "-C", str(tmp_path), "show", "--name-only", "HEAD"],
+                           capture_output=True, text=True).stdout
+    assert "curation_log.jsonl" in shown
 
 
 def test_an_enrichment_entity_is_unreviewed_until_approved_with_a_signer(tmp_path):
