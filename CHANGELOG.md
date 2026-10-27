@@ -12,8 +12,6 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-### Added
-
 - **`execute_sql --build-profile` for profiling while you build a model (#523).** Builders turned the
   safety check off (`--no-safety`) to read `information_schema` or expand a JSON column. The new flag
   keeps every check and allows only those: reads of `information_schema`'s structure views (plus
@@ -38,6 +36,24 @@ below corresponds to one such version.
   written even when the run stops part way. A plan that is JSON `null` is refused like any other
   plan that is not a list. agami-connect's sampling step no longer says
   `SELECT * … LIMIT 5`, which was refused: it names the columns and runs with `--build-profile`.
+
+### Added
+
+- **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
+  of a metric's formula ("gives no value when the start date is missing") went into its description
+  or calculation, where it reads as part of the definition. A metric now takes an optional
+  `caveats` list, validated like a column's (no empty entries) and editable through `sm curate`
+  and the model explorer. It is served wherever the metric is: the metric's entry in
+  `get_datasource_schema`, metric search, the admin model page, the explorer's metric card and the
+  review queue. The validator reads it too: a metric caveat saying a missing value counts as 0
+  silences `metric_null_filled` the way the calculation saying so already did.
+
+  **Reading a model:** a metric file that sets `caveats` is refused by a release older than this
+  one, which does not know the key; files with no caveats stay readable, because the key is left
+  out of a metric file when the list is empty. Upgrade every server that reads the model (including
+  deploy images) before writing metric caveats.
+
+### Added
 
 - **A customer's data dictionary is applied as `metadata` in one command (#522).** `sm describe-file`
   stamped every description `source: ai`, so a dictionary the customer wrote could only land as their

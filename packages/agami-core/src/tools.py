@@ -1601,6 +1601,9 @@ def _metric_full(
         "other_names": list(m.other_names or []),
         "review_state": m.review_state,
     }
+    caveats = getattr(m, "caveats", None)
+    if caveats:
+        out["caveats"] = list(caveats)
     if key and key != m.name:
         out["selector"] = key
     binding = (m.bindings or {}).get(engine) if engine else None
