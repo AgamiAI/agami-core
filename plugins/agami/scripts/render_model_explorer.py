@@ -123,7 +123,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                               if t.performance_hints else None),
                 "review_state": t.review_state, "origin": "", "excluded": t_excluded,
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
-                "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
+                "grain": t.grain, "unique_keys": t.unique_keys, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
                 # ordered group names for the wide-table grouped field view (empty on
                 # narrow tables — the UI then just lists fields flat)

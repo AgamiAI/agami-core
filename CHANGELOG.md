@@ -42,6 +42,40 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
+  fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
+  alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out
+  many-to-one. Unique keys are now read from the catalog on PostgreSQL (unique constraints and
+  unique indexes), MySQL, SQLite, SQL Server, Oracle and DuckDB, and kept on the table as
+  `unique_keys`. Snowflake and Redshift declare unique keys without enforcing them, so one is kept
+  only when the data bears it out; BigQuery, Databricks and Trino have none. A join is one-to-one
+  when its columns are the whole of a key on both sides, and the same rule now labels a join a
+  query writes that the model doesn't declare, a join to a grouped CTE, and the references
+  enrichment adds. When no key settles a join but its many side turns out unique in the data, the
+  label is kept and the join waits for review with a note saying so, since data that is unique
+  today is not a promise. A refresh relabels each join introspection approved itself from the
+  database's keys and lists it under `joins corrected from the database's constraints`; a join a
+  person signed off is never changed, and a person's edit of a join's cardinality, columns, `on` or
+  tables in the explorer makes the sign-off theirs (with no signer recorded, the engine's sign-off
+  is cleared and the join waits for review), so a refresh leaves the edit alone. Only enabled,
+  valid keys count: an invalid PostgreSQL index, a disabled SQL Server index and a disabled or
+  unvalidated Oracle constraint are not read, a SQLite unique index over an expression is not
+  shortened to its plain columns, and a SQLite unique index written with its own `COLLATE` is not
+  trusted. Labelling reads each table's own keys, so two tables of one name in two schemas no longer
+  lend each other a key, at introspection or at query time. At query time a join the model doesn't
+  declare counts as one-to-one by its keys only when its `ON` is on its own table, that table is read
+  once in the query, and every other join beside it is one-to-one too; otherwise its numbers stay
+  `undetermined`. A refresh that can't read a table's unique keys (a failed catalog read or data
+  check) keeps the stored ones and leaves that table's joins alone, with a note
+  `unique keys not re-read for <table>`.
+
+  **Reading a model:** a table that sets `unique_keys` is refused by a release older than this
+  one, which does not know the key. Upgrade every server that reads the model (including deploy
+  images) before re-introspecting with this release. A model with no unique keys stays readable by
+  older releases. CI that validates the model with a newer release won't catch this.
+
+### Fixed
+
 ### Fixed
 
 - **`sm suggest-metrics` prints its proposals before writing, and its bindings run and mean what

@@ -1372,9 +1372,12 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     `(intra: {area: [rel,…]}, cross: [xrel,…], skipped_target_count)`. SELF-references are kept
     (a hierarchical `parent → same table` is a real join). Edges whose TARGET isn't modelled are
     skipped and COUNTED (so pruning that drops a join target is reported, not silent). Already-
-    present edges are skipped. References are `many_to_one` to the target's grain, written
+    present edges are skipped. References point at the target's grain, labelled from both sides'
+    keys (`build.infer_cardinality`), written
     `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
     from collections import defaultdict
+
+    from . import build as B
     tindex: dict = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
@@ -1407,7 +1410,7 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
         existing.add(key)
         base = {"from_table": ft, "from_column": fc, "to_table": tt, "to_column": ttab.grain[0],
                 "from_schema": ftab.schema_name, "to_schema": ttab.schema_name,
-                "relationship": "many_to_one", "join_type": "LEFT",
+                "relationship": B.infer_cardinality(ftab, ttab, [fc], [ttab.grain[0]]), "join_type": "LEFT",
                 # per-spec trust (a verified candidate is confirmed/approved); defaults otherwise
                 "confidence": spec.get("confidence", "inferred"),
                 "review_state": spec.get("review_state", "unreviewed"),
