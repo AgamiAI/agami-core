@@ -72,6 +72,12 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
     org_id = org_id if org_id is not None else _default_org()
     # --- read + parse everything first (where malformed input fails, before any write) ---
     org = loader.load_datasource(profile_dir)
+    unknown = loader.unknown_datasource_keys(profile_dir)
+    if unknown:
+        # A warning, not a failure (#575): those fields are not deployed, which is exactly what has to
+        # be said here, since the stored model is what every caller is served.
+        print(f"model_deploy: datasource {datasource!r}: {loader.unknown_keys_message(unknown)}",
+              file=sys.stderr)
     if not (org.description or "").strip():
         # A warning, not a failure (#327): the model is still correct without one. But the description is
         # the one line `list_datasources` gives an agent to route a question by, and on an organization
