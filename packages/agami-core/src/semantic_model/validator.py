@@ -1227,11 +1227,11 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
         if not (D.is_derived(met) or D.is_second_order(met)):
             continue
         # resolve_metric_sql dispatches: second-order → CTE synthesis, else placeholder
-        # expansion. Either failure mode (cycle, unknown base, bad shape, multi-table inner
-        # synth, missing inner_grain) is deploy-blocking.
+        # expansion. Either failure mode (cycle, unknown base, bad shape, an unjoinable multi-table
+        # base, missing inner_grain) is deploy-blocking.
         for stype in (met.bindings or {}):
             try:
-                D.resolve_metric_sql(met, stype, idx)
+                D.resolve_metric_sql(met, stype, idx, org)
             except D.DerivedError as e:
                 res.error("derived_metric", str(e))
         # grain sanity (first-order case-a only): a base sharing no source_table may be a
