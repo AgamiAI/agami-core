@@ -1996,8 +1996,10 @@ def check_column_scope(sql: str, org: Datasource,
         ckey = _column_key(col.this, dialect)
         for s in scopes:
             local = {t for t in direct_phys.get(id(s), set()) if t in declared}
+            # A merged name is the physical side's only where a table is in this scope; between
+            # CTEs and subqueries alone it is theirs.
             supplied = (ckey in source_cols.get(id(s), set())
-                        and ckey not in merged_by_select.get(id(s), set()))
+                        and (not local or ckey not in merged_by_select.get(id(s), set())))
             if any(lname in declared[t] for t in local) or supplied:
                 break  # declared, or named by a CTE / derived source (possibly ambiguous — the DB's call)
             if local:
@@ -4176,6 +4178,8 @@ def _reads_output_alias(col: "exp.Column", sel: "exp.Select", dialect: "str | No
     have it reads an alias of a window function, which is how a deduplication is written there.
     """
     p = col.parent
+    while isinstance(p, exp.Paren):  # `ORDER BY (doubled)` is still the whole item
+        p = p.parent
     if isinstance(p, exp.Ordered) and isinstance(p.parent, exp.Order) and p.parent.parent is sel:
         return True
     if isinstance(p, exp.Group) and p.parent is sel:
@@ -4237,6 +4241,10 @@ def _query_column_names(query: "exp.Expression", dialect: "str | None") -> "list
     """
     while isinstance(query, (exp.Subquery, exp.SetOperation)):
         query = query.this
+    if isinstance(query, exp.Values):
+        # A VALUES body (as MySQL parses one) names nothing but has a position per column.
+        first = query.expressions[0] if query.expressions else None
+        return [None] * (len(first.expressions) if isinstance(first, exp.Tuple) else 1)
     names: list[Optional[str]] = []
     for e in query.expressions if isinstance(query, exp.Select) else ():
         if isinstance(e, exp.Alias):
@@ -4248,6 +4256,13 @@ def _query_column_names(query: "exp.Expression", dialect: "str | None") -> "list
     return names
 
 
+def _cte_output_names(cte: "exp.CTE", dialect: "str | None") -> "list[Optional[str]]":
+    """A CTE's output names in order: its body's, renamed by the CTE's own column list."""
+    a = cte.args.get("alias")
+    own = [_column_key(c, dialect) for c in a.columns] if isinstance(a, exp.TableAlias) else []
+    return _renamed(_query_column_names(cte.this, dialect), own)
+
+
 def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
                          dialect: "str | None") -> Optional[set[str]]:
     """The `_column_key`s one FROM / JOIN item supplies, or None for a physical table, whose
@@ -4256,24 +4271,34 @@ def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
     Alias column lists rename by position: a CTE's own list over its body, then the reference's
     (`FROM c AS x(n)`) over that, so `x` supplies `n` and not the name it renamed.
     """
-    alias = src.args.get("alias")
-    renames = ([_column_key(c, dialect) for c in alias.columns]
-               if isinstance(alias, exp.TableAlias) else [])
+    def listed(node: "exp.Expression") -> "list[Optional[str]]":
+        a = node.args.get("alias")
+        return [_column_key(c, dialect) for c in a.columns] if isinstance(a, exp.TableAlias) else []
+
+    # Parentheses around a table: a physical one is a physical source; a CTE reference is that
+    # CTE, renamed by each wrapper's alias list from the innermost out (`(c) AS x(n)`).
+    wrappers: list["exp.Expression"] = []
     inner = src
     while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
+        wrappers.append(inner)
         inner = inner.this
-    if isinstance(inner, exp.Table) and inner is not src:
-        return None  # `(customers) AS x` is a physical table in parentheses, not a derived one
+    if wrappers and isinstance(inner, exp.Table):
+        cte = cte_refs.get(id(inner))
+        if cte is None:
+            return None  # `(customers) AS x` is a physical table in parentheses
+        ordered = _renamed(_cte_output_names(cte, dialect), listed(inner))
+        for w in reversed(wrappers):
+            ordered = _renamed(ordered, listed(w))
+        return {n for n in ordered if n}
+    alias = src.args.get("alias")
+    renames = listed(src)
     names: Optional[list[Optional[str]]] = None
     if isinstance(src, exp.Table):
         cte = cte_refs.get(id(src))
         if cte is None and src.name:
             return None
         if cte is not None:
-            cte_alias = cte.args.get("alias")
-            own = ([_column_key(c, dialect) for c in cte_alias.columns]
-                   if isinstance(cte_alias, exp.TableAlias) else [])
-            names = _renamed(_query_column_names(cte.this, dialect), own)
+            names = _cte_output_names(cte, dialect)
     elif isinstance(src, (exp.Subquery, exp.Lateral)) and isinstance(
             src.this, (exp.Subquery, exp.Query)):
         names = _query_column_names(src.this, dialect)

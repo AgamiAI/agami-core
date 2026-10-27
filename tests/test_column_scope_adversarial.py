@@ -239,6 +239,11 @@ BESIDE_A_SOURCE = [
      "USING (secret_col)", "secret_col"),
     ("SELECT o.id FROM orders o JOIN (SELECT 'x' AS secret_col) d USING (secret_col)", "secret_col"),
     ("SELECT id FROM orders NATURAL JOIN (SELECT 'x' AS secret_col) d", "secret_col"),
+    # The same shapes must still refuse what they do not supply.
+    ("WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, (c)", "secret_col"),
+    ("WITH c AS (SELECT 1 AS secret_col) SELECT secret_col FROM orders, (c) AS x(n)", "secret_col"),
+    # Inside an expression neither name is the alias, so both are judged as input columns.
+    ("SELECT amount AS doubled FROM orders ORDER BY (doubled + secret_col)", "doubled, secret_col"),
     # Alias names past a CTE's outputs rename nothing (DuckDB ignores them).
     ("WITH c(a, secret_col) AS (SELECT 1) SELECT secret_col FROM orders, c", "secret_col"),
     # VALUES and a table function name their columns their own way, not after the alias.
@@ -319,6 +324,24 @@ def test_mysql_column_names_fold_whatever_their_case():
         "WITH c AS (SELECT 1 AS N) SELECT secret_col FROM orders, c", org), "secret_col")
 
 
+@pytest.mark.parametrize("sql", [
+    "WITH c(a) AS (VALUES ROW(1)) SELECT a, amount FROM orders, c",
+    "WITH c(a) AS (SELECT * FROM (VALUES ROW(1)) v) SELECT a, amount FROM orders, c",
+])
+def test_a_values_cte_is_named_by_its_column_list_on_mysql(sql):
+    org = _scope_org()
+    org.storage_connections = [m.StorageConnection(name="c", storage_type="MySQL")]
+    assert rt.check_column_scope(sql, org) is None
+
+
+def test_a_bare_values_body_holds_one_position_per_column():
+    """Some dialects parse a CTE's `VALUES` body as `exp.Values` itself: its row's arity is the
+    positions a column list can name, and a name past them still names nothing."""
+    values = rt.exp.Values(expressions=[rt.exp.Tuple(expressions=[rt.exp.Literal.number(1),
+                                                                  rt.exp.Literal.number(2)])])
+    assert rt._query_column_names(values, None) == [None, None]
+
+
 def test_an_empty_quoted_name_names_nothing():
     """`""` is a zero-length identifier: it is no column, and as a source's output it vouches for
     none."""
@@ -379,6 +402,14 @@ NAMED_BY_A_SOURCE = [
     "SELECT id FROM orders JOIN customers USING (id)",
     "SELECT id FROM orders NATURAL JOIN customers",
     "SELECT n FROM orders JOIN (SELECT 1 AS id, 2 AS n) d USING (id)",
+    # Between CTEs / subqueries alone, a USING-merged name is theirs (no table in that scope).
+    "SELECT (SELECT n FROM (SELECT 1 AS n) a JOIN (SELECT 1 AS n) b USING (n)) FROM orders",
+    # An alias in parentheses is still the whole ORDER BY item.
+    "SELECT amount * 2 AS doubled FROM orders ORDER BY (doubled)",
+    # A CTE in parentheses is that CTE, renamed by each wrapper's alias list in turn.
+    "WITH c AS (SELECT 1 AS n) SELECT n, amount FROM orders, (c)",
+    "WITH c AS (SELECT 1 AS n) SELECT n, amount FROM orders, (c) AS x",
+    "WITH c AS (SELECT 1 AS n, 2 AS m) SELECT k, m, amount FROM orders, (c) AS x(k)",
     # A union's ORDER BY inside a derived table names the union's output, not the outer query's.
     "SELECT x.id FROM (SELECT id FROM orders UNION SELECT id FROM customers ORDER BY id) x",
 ]
