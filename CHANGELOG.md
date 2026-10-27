@@ -36,6 +36,59 @@ below corresponds to one such version.
   pairing flagged rather than picking one (its reason names up to three of the others). A storage type with no SQL dialect now fails clearly
   instead of being written as PostgreSQL.
 
+- **A curate op on a join, entity or metric that doesn't name an area is resolved, or fails the batch (#538).**
+  An op on a join between two subject areas was skipped unless it named one side's area, so the batch
+  reported success with that change missing. A metric or entity defined across areas could not be
+  curated at all, so `sm approve-queue` skipped every cross-area metric. An op with no area is now
+  searched for in every area's files and in the cross-area joins, entities and metrics. Exactly one
+  match is applied; an entity or metric whose declared name equals the op's name exactly wins over
+  others that only share its file slug (`revenue ($)` and `revenue (%)`). No match, or more than one (two joins between the same tables), fails the whole
+  batch with an error naming the op and the candidates, and nothing in the batch is written;
+  `from_column` / `to_column` (or `area`) picks one. A join op whose named area doesn't hold the join
+  also finds it in another area. An op that names an area behaves as before otherwise: a missing
+  target is reported under `skipped` and the rest of the batch applies.
+
+### Fixed
+
+- **A second-order metric can sit on a base metric that spans several tables, and its table names
+  are quoted for the engine (#525).** `OUTERAGG({base})` with `inner_grain` used to be refused when
+  the base metric read more than one table, and the synthesized statement wrote table and column
+  names bare, so a mixed-case table failed on PostgreSQL. The synthesized inner query now joins the
+  table the base metric measures to each other source table by the one relationship declared
+  directly between them. That table is the base's `primary_table` (matched to its source table
+  with or without the schema), else the one table that declares every column the base's
+  aggregates read; a `primary_table` that is not a source table, or a base whose measured columns
+  span tables or can't be placed, is refused and asks for `primary_table`. It is also refused,
+  with the reason, when there is no such edge, more than one, or the join would fan out the base
+  aggregate's rows. A bare `inner_grain` column must be declared by exactly one of the tables; a
+  `table.column` entry (`orders.order date`, `line items.id`) must name a source table and a
+  column it declares. Identifiers are quoted only where the engine needs it (including words one
+  engine reserves, such as `index` on SQLite or `key` on MySQL), so a plain lower-case name is
+  emitted as before; a reserved lower-case name on Snowflake or Oracle is quoted in upper case
+  (`"LIMIT"`), the name those engines store it under.
+  Tables with the same name from different schemas in one base are refused. An `inner_grain` entry
+  naming a declared column (`order date`) is that column, quoted; the base metric's own subject
+  area is read first for the table's columns.
+
+### Fixed
+
+- **The receipt names the table behind a subquery or CTE alias, and reads a `FILTER` clause (#521).**
+  `COUNT(*) FILTER (WHERE s.x > 0)` over a subquery `s` listed the reference as `s.x`, and the
+  aggregate said it names no column. A column qualified by a derived table or a CTE is now followed
+  through a projection that passes one column through unchanged (bare or renamed) to its table, so
+  the reference reads `public.t.x`. A computed projection (`x / id AS r`) keeps the alias it was
+  written with. A qualifier is resolved in the query it was written in, so an alias reused in a
+  nested query no longer borrows the other query's table. An aggregate's `FILTER (WHERE …)` columns
+  count as columns it reads, the same as a `CASE` inside it, so a single-table `COUNT(*) FILTER (…)`
+  is resolved and one over a join can report a fan. A CTE name binds as the scope gate binds it (a
+  schema-qualified table, a later sibling or a non-recursive self-reference is the table), and a
+  column list (`WITH s(y, x)`, `AS s(y, x)`) renames outputs by position. A subquery's columns are
+  not credited to the outer query's aliases: a `FILTER` holding a subquery, an aggregate holding
+  one and an aggregate computed inside a nested SELECT report `undetermined` (a fan proven on the
+  outer columns still reports `multiplied`). A body with a star keeps the written alias.
+  What the scope gate refuses is unchanged, and a value read from a subquery is still not matched to
+  a metric.
+
 ### Added
 
 - **The model explorer can reject in bulk, beside every bulk approve (#531).** Each "✓ Approve all N
