@@ -189,7 +189,8 @@ def test_suggest_metrics_rate_and_duration_patterns():
         "AVG(CASE WHEN is_active <> 0 THEN 1.0 WHEN is_active = 0 THEN 0.0 END)"
     dur = mets["incident_avg_duration_days"]   # start+end timestamp pair → dialect DATEDIFF
     days = "DATEDIFF('day', opened_at, resolved_at)"
-    assert dur["bindings"]["Redshift"] == f"AVG(CASE WHEN {days} >= 0 THEN {days} END)"
+    # DATEDIFF counts day boundaries, so the guard compares the values themselves
+    assert dur["bindings"]["Redshift"] == f"AVG(CASE WHEN resolved_at >= opened_at THEN {days} END)"
     assert dur["unit"] == "days"
     # A flag RATE picks a condition and a DURATION pairs two columns: a choice the engine could
     # get wrong, so every proposal waits for a person, and none carries a system sign-off.

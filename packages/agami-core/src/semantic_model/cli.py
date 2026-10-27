@@ -733,9 +733,13 @@ def _test_run_sql(table, dialect, props: list[dict]) -> str:
     """One bounded statement that evaluates every proposal on `table`: each one's AVG (its binding)
     with the MIN and MAX of the per-row value it averages, over a sample of the columns they read."""
     cols = sorted({c for p in props for c in p["_proposal"]["columns"]})
-    inner = dialect.limited(
-        f"SELECT {', '.join(dialect.ident(c) for c in cols)} "
-        f"FROM {dialect.qualified(table.schema_name, table.name)}", _TEST_RUN_ROWS)
+    if table.source_type == "sql":
+        # Newlines keep a trailing `--` comment in the table's SQL from swallowing the `)`.
+        src = f"(\n{table.sql.strip().rstrip(';').rstrip()}\n) src"
+    else:
+        src = dialect.qualified(table.schema_name, table.name)
+    inner = dialect.limited(f"SELECT {', '.join(dialect.ident(c) for c in cols)} FROM {src}",
+                            _TEST_RUN_ROWS)
     parts = []
     for i, p in enumerate(props):
         v = p["_proposal"]["row_expr"]
@@ -841,18 +845,27 @@ def cmd_suggest_metrics(args) -> int:
             props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table)
                      if m["name"] not in existing and (not named or m["name"] in named)]
             existing.update(m["name"] for m in props)
-            results = (_test_run_table(runner, t, dialect, props)
-                       if runner and props and t.source_type == "table" else {})
+            results = _test_run_table(runner, t, dialect, props) if runner and props else {}
             for met in props:
                 extra = met.pop("_proposal")
                 entry = {"name": met["name"], "subject_area": sa.name, "source_table": t.name,
                          "binding": next(iter(met["bindings"].values())),
                          "calculation": met["calculation"], "flags": extra["flags"]}
                 res = results.get(met["name"])
-                if res and "error" in res:
+                if res and "error" in res and t.source_type == "sql":
+                    # The table's own SQL may be what failed, so the binding is unproven rather
+                    # than broken: kept out unless named, like any other flagged proposal.
+                    entry["test_run"] = None
+                    entry["flags"].append(B._flag(
+                        "not_test_run", "defined by SQL; its bindings could not be test-run "
+                        f"({res['error']})"))
+                elif res and "error" in res:
                     entry["error"] = res["error"]
                 elif res:
                     entry["test_run"] = res
+                    if res["rows"] is not None:
+                        # The live count replaces the stored estimate's low_confidence.
+                        entry["flags"] = [f for f in entry["flags"] if f["flag"] != "low_confidence"]
                     entry["flags"] += _test_run_flags(t.name, res)
                 entry["write"] = "error" not in entry and (not entry["flags"]
                                                            or met["name"] in named)

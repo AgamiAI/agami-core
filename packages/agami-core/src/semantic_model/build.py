@@ -9,6 +9,7 @@ the assembly logic is independently testable and reusable.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -810,6 +811,17 @@ def _prefer_non_audit(cols: list[Column]) -> tuple[list[Column], bool]:
     return (plain, False) if plain else (cols, bool(cols))
 
 
+# How many other pairings an ambiguous_pairing flag names; a wide table can have dozens.
+_LISTED_PAIRS = 3
+
+
+def _others(pairs: list[tuple[Column, Column]], this: tuple[Column, Column]) -> str:
+    rest = (f"{a.name}→{b.name}" for a, b in pairs if (a, b) != this)
+    shown = list(itertools.islice(rest, _LISTED_PAIRS))
+    more = len(pairs) - 1 - len(shown)
+    return ", ".join(shown) + (f" … and {more} more" if more else "")
+
+
 def _duration_pairs(ts_cols: list[Column]) -> list[tuple[Column, Column, str, list[dict]]]:
     """(start, end, family, flags) for every start/end pairing worth offering."""
     out = []
@@ -821,9 +833,8 @@ def _duration_pairs(ts_cols: list[Column]) -> list[tuple[Column, Column, str, li
         for s, e in pairs:
             flags = []
             if len(pairs) > 1:
-                others = ", ".join(f"{a.name}→{b.name}" for a, b in pairs if (a, b) != (s, e))
-                flags.append(_flag("ambiguous_pairing",
-                                   f"{len(pairs)} start/end pairings fit; also offered: {others}"))
+                flags.append(_flag("ambiguous_pairing", f"{len(pairs)} start/end pairings fit; "
+                                   f"also offered: {_others(pairs, (s, e))}"))
             if s_audit or e_audit:
                 which = ", ".join(c.name for c, a in ((s, s_audit), (e, e_audit)) if a)
                 flags.append(_flag("audit_column", f"{which} looks like an audit column (when the "
@@ -891,7 +902,9 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
     for s, e, fam, flags in pairs:
         days = dialect.duration_days_expr(dialect.ident(s.name), dialect.ident(e.name),
                                           start_type=s.type, end_type=e.type)
-        row = f"CASE WHEN {days} >= 0 THEN {days} END"
+        guard = dialect.duration_guard(dialect.ident(s.name), dialect.ident(e.name),
+                                       start_type=s.type, end_type=e.type)
+        row = f"CASE WHEN {guard} THEN {days} END"
         same_family = [p for p in pairs if p[2] == fam]
         name = (f"{t}_avg_days_{s.name}_to_{e.name}" if len(same_family) > 1
                 else f"{t}_avg_{fam + '_' if fam else ''}duration_days")

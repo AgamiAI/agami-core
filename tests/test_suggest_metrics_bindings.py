@@ -57,6 +57,11 @@ def test_a_mixed_case_column_is_quoted_where_the_engine_folds_it(db, expected):
     ("is_open", "postgresql", "is_open"), ("ORDERS", "snowflake", "ORDERS"),
     ("orders", "snowflake", "orders"), ("order", "postgresql", '"order"'),
     ("line items", "postgresql", '"line items"'), ("OrderItems", "mysql", "OrderItems"),
+    # words one engine reserves beyond the shared set
+    ("index", "sqlite", '"index"'), ("index", "postgresql", '"index"'), ("key", "mysql", "`key`"),
+    ("rank", "mysql", "`rank`"), ("key", "sqlserver", "[key]"), ("level", "oracle", '"level"'),
+    ("qualify", "snowflake", '"qualify"'), ("key", "postgresql", "key"),
+    ("status", "sqlite", "status"), ("status", "mysql", "status"),
 ])
 def test_identifiers_are_quoted_only_when_needed(name, db, expected):
     assert D.get_dialect(db).ident(name) == expected
@@ -85,7 +90,48 @@ _TS_PAIR = (m.Column(name="opened_at", type="timestamp"),
 ])
 def test_durations_use_the_dialects_date_arithmetic_for_the_column_types(db, pair, days):
     met = _mets(_table(*pair), db)["tickets_avg_duration_days"]
-    assert _binding(met) == f"AVG(CASE WHEN {days} >= 0 THEN {days} END)"
+    s, e = pair[0].name, pair[1].name
+    guard = {"bigquery": (f"{e} >= {s}" if pair is _DATE_PAIR
+                          else f"CAST({e} AS TIMESTAMP) >= CAST({s} AS TIMESTAMP)"),
+             "redshift": f"{e} >= {s}", "snowflake": f"{e} >= {s}"}.get(db, f"{days} >= 0")
+    assert _binding(met) == f"AVG(CASE WHEN {guard} THEN {days} END)"
+
+
+_MIXED_PAIR = (m.Column(name="opened_on", type="date"), m.Column(name="closed_at", type="timestamp"))
+
+
+@pytest.mark.parametrize("db, pair, guard", [
+    # a whole-day difference rounds a reversed same-day pair to 0, so these compare the values
+    ("redshift", _TS_PAIR, "closed_at >= opened_at"),
+    ("snowflake", _TS_PAIR, "closed_at >= opened_at"),
+    ("mysql", _TS_PAIR, "closed_at >= opened_at"),
+    ("databricks", _TS_PAIR, "closed_at >= opened_at"),
+    ("trino", _TS_PAIR, "closed_at >= opened_at"),
+    ("sqlserver", _TS_PAIR, "closed_at >= opened_at"),
+    ("bigquery", _DATE_PAIR, "closed_on >= opened_on"),
+    ("bigquery", _TS_PAIR, "CAST(closed_at AS TIMESTAMP) >= CAST(opened_at AS TIMESTAMP)"),
+    ("bigquery", _MIXED_PAIR, "CAST(closed_at AS TIMESTAMP) >= CAST(opened_on AS TIMESTAMP)"),
+    # unrounded differences keep the `days >= 0` form unchanged
+    ("postgresql", _TS_PAIR, "EXTRACT(EPOCH FROM (closed_at - opened_at)) / 86400.0 >= 0"),
+    ("sqlite", _TS_PAIR, "julianday(closed_at) - julianday(opened_at) >= 0"),
+    ("oracle", _TS_PAIR, "(CAST(closed_at AS DATE) - CAST(opened_at AS DATE)) >= 0"),
+])
+def test_the_duration_guard_compares_values_where_the_day_difference_rounds(db, pair, guard):
+    binding = _binding(next(iter(_mets(_table(*pair), db).values())))
+    assert binding.startswith(f"AVG(CASE WHEN {guard} THEN ")
+
+
+def test_a_reversed_same_day_pair_is_left_out_by_a_rounding_engine_shape():
+    """SQLite stands in for a rounding engine: its DATE() difference is 0 for a pair a few hours
+    apart either way, as DATEDIFF('day') is; the guard on the values still leaves the reversed one out."""
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE t (s TEXT, e TEXT)")
+    con.executemany("INSERT INTO t VALUES (?, ?)", [
+        ("2024-01-01 08:00", "2024-01-03 08:00"), ("2024-01-01 18:00", "2024-01-01 09:00")])
+    guard = D.get_dialect("snowflake").duration_guard("s", "e")
+    days = "julianday(date(e)) - julianday(date(s))"
+    assert con.execute(f"SELECT AVG(CASE WHEN {guard} THEN {days} END) FROM t").fetchone()[0] == 2.0
+    assert con.execute(f"SELECT AVG(CASE WHEN {days} >= 0 THEN {days} END) FROM t").fetchone()[0] == 1.0
 
 
 def test_a_duration_leaves_out_rows_ending_before_they_start_and_says_so():
@@ -119,6 +165,26 @@ def test_a_nullable_flag_rate_is_the_rate_among_rows_where_it_is_set():
                     [(i, 1 if i < 16 else 0 if i < 25 else None) for i in range(50)])
     sql = f"SELECT {_binding(met['tickets_is_urgent_rate'])} FROM tickets"
     assert con.execute(sql).fetchone()[0] == pytest.approx(0.64)
+
+
+def test_a_sqlite_flag_named_index_is_quoted_and_runs():
+    met = _mets(_table(m.Column(name="index", type="boolean")), "sqlite")["tickets_index_rate"]
+    assert '"index"' in _binding(met)
+    con = sqlite3.connect(":memory:")
+    con.execute('CREATE TABLE tickets (id INTEGER, "index" BOOLEAN)')
+    con.executemany("INSERT INTO tickets VALUES (?, ?)", [(1, 1), (2, 0), (3, None), (4, 1)])
+    assert con.execute(f"SELECT {_binding(met)} FROM tickets").fetchone()[0] == pytest.approx(2 / 3)
+
+
+def test_a_wide_table_keeps_each_ambiguous_pairing_reason_short():
+    starts = [m.Column(name=f"start_{i}", type="timestamp") for i in range(6)]
+    ends = [m.Column(name=f"end_{i}", type="timestamp") for i in range(6)]
+    pairs = build._duration_pairs([*starts, *ends])
+    assert len(pairs) == 36
+    for _s, _e, _fam, flags in pairs:
+        why = next(f["why"] for f in flags if f["flag"] == "ambiguous_pairing")
+        assert why.startswith("36 start/end pairings fit") and why.endswith("… and 32 more")
+        assert why.count("→") == 3 and len(why) < 200
 
 
 def test_a_sqlite_duration_runs_and_skips_negative_rows():
@@ -302,3 +368,66 @@ def test_a_storage_type_with_no_dialect_fails_instead_of_using_postgres(tmp_path
     monkeypatch.delitem(D._REGISTRY, "sqlite")
     rc, out = _run(["suggest-metrics", str(tmp_path)])
     assert rc == 2 and "SQLite" in out["error"], out
+
+
+def _edit_table(root: Path, **fields) -> None:
+    p = root / "subject_areas" / "s" / "tables" / "tickets.yaml"
+    doc = yaml.safe_load(p.read_text())
+    doc.update(fields)
+    p.write_text(yaml.safe_dump(doc))
+
+
+def _profile_run(tmp_path, monkeypatch, *extra):
+    from semantic_model import introspect
+    seen: list[str] = []
+    monkeypatch.setattr(introspect, "make_execute_sql_runner",
+                        lambda profile, **kw: _canned_runner(tmp_path / "db.sqlite", seen))
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", *extra])
+    return rc, out, seen
+
+
+def test_a_sql_defined_table_is_test_run_over_its_sql(tmp_path, monkeypatch):
+    _model(tmp_path / "m")
+    _db(tmp_path / "db.sqlite")
+    _edit_table(tmp_path / "m", source_type="sql", sql="SELECT * FROM tickets -- the live rows\n;",
+                columns=[{"name": "id", "type": "integer", "primary_key": True},
+                         {"name": "is_urgent", "type": "boolean"}])
+    rc, out, seen = _profile_run(tmp_path, monkeypatch, "--write")
+    assert rc == 0, out
+    (p,) = out["proposals"]
+    assert p["test_run"]["value"] == pytest.approx(0.5) and p["flags"] == [] and p["write"], p
+    assert "SELECT * FROM tickets -- the live rows\n) src" in seen[0] and "LIMIT 10000" in seen[0]
+    assert (_metrics_dir(tmp_path / "m") / "tickets_is_urgent_rate.yaml").exists()
+
+
+def test_a_sql_defined_table_whose_read_fails_is_flagged_not_test_run(tmp_path, monkeypatch):
+    _model(tmp_path / "m")
+    _db(tmp_path / "db.sqlite")
+    _edit_table(tmp_path / "m", source_type="sql", sql="SELECT * FROM no_such_table",
+                columns=[{"name": "id", "type": "integer", "primary_key": True},
+                         {"name": "is_urgent", "type": "boolean"}])
+    rc, out, _ = _profile_run(tmp_path, monkeypatch, "--write")
+    (p,) = out["proposals"]
+    assert rc == 0 and p["test_run"] is None and "error" not in p, p
+    assert [f["flag"] for f in p["flags"]] == ["not_test_run"] and not p["write"]
+    assert "defined by SQL; its bindings could not be test-run" in p["flags"][0]["why"]
+    assert not _metrics_dir(tmp_path / "m").exists()
+    # named, it is written like any flagged proposal
+    rc, out, _ = _profile_run(tmp_path, monkeypatch, "--write", "--names", "tickets_is_urgent_rate")
+    assert rc == 0 and out["written"] == 1, out
+
+
+def test_a_live_row_count_replaces_the_estimates_low_confidence(tmp_path, monkeypatch):
+    _model(tmp_path / "m")
+    _db(tmp_path / "db.sqlite")   # 90 rows
+    _edit_table(tmp_path / "m", performance_hints={"estimated_row_count": 12},
+                columns=[{"name": "id", "type": "integer", "primary_key": True},
+                         {"name": "is_urgent", "type": "boolean"}])
+    rc, out, _ = _profile_run(tmp_path, monkeypatch, "--write")
+    (p,) = out["proposals"]
+    assert rc == 0 and p["flags"] == [] and p["write"] and out["written"] == 1, p
+    # without a test run the estimate still flags it
+    _model(tmp_path / "m2")
+    _edit_table(tmp_path / "m2", performance_hints={"estimated_row_count": 12})
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m2")])
+    assert {f["flag"] for p in out["proposals"] for f in p["flags"]} == {"low_confidence"}, out

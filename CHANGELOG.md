@@ -21,15 +21,19 @@ below corresponds to one such version.
   or a flagged one a person chose). `--profile <name>` test-runs every binding first, one bounded
   read per table (opt-in, as a pay-per-scan warehouse bills it): a binding that errors is never
   written, and a constant, all-zero or NULL result is flagged `degenerate` and left out unless named.
-  Proposals on a table under 50 rows are flagged `low_confidence`. The SQL itself: a mixed-case
-  column is quoted where the engine folds case (PostgreSQL, Redshift, Snowflake, Oracle); a pair of
+  Proposals on a table under 50 rows are flagged `low_confidence` (from the test run's own row
+  count when there is one). A table defined by SQL is test-run over that SQL; when that read fails
+  its proposals are flagged `not_test_run` and each proposal says whether it was test-run. The SQL itself: a mixed-case
+  column is quoted where the engine folds case (PostgreSQL, Redshift, Snowflake, Oracle), and a
+  column named after a word the engine reserves (`index` on SQLite, `key` on MySQL) is quoted; a pair of
   DATE columns subtracts to days on PostgreSQL and DuckDB, where `EXTRACT(EPOCH ...)` of the integer
   failed, and uses `DATE_DIFF` on BigQuery; BigQuery and Oracle timestamp pairs no longer fail; a
   flag rate leaves NULL rows out instead of counting them false, and a T-SQL `BIT` flag is compared
   rather than used as a predicate. A duration leaves out rows where the end is before the start and
-  its calculation says so, pairs a planned start only with a planned end (and actual with actual),
+  its calculation says so (compared directly on engines whose day difference rounds a reversed
+  same-day pair to 0), pairs a planned start only with a planned end (and actual with actual),
   uses an audit column such as `sys_created_on` only when nothing else fits, and offers an ambiguous
-  pairing flagged rather than picking one. A storage type with no SQL dialect now fails clearly
+  pairing flagged rather than picking one (its reason names up to three of the others). A storage type with no SQL dialect now fails clearly
   instead of being written as PostgreSQL.
 
 ### Added
