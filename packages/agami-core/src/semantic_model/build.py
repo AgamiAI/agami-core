@@ -61,29 +61,103 @@ SINGLE_AREA_MAX = 24
 
 
 # Numeric columns whose NAME indicates a monetary value, so curation can offer a currency
-# `unit` without callers hand-rolling (and mis-rolling) a regex. Tokens match on word
-# boundaries (`_` or string edges), so a bare `count` never matches inside `discount`:
-# `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate` are not.
-_MONEY_RE = re.compile(
-    r"(^|_)(amount|amt|price|cost|fee|revenue|sales|salary|wage|income|payment|"
-    r"charge|balance|deposit|withdrawal|refund|discount|subtotal|total|spend|spent|"
-    r"budget|invoice|mrr|arr|gmv|ltv|aov|paid|due|owed|credit|debit)s?(_|$)",
-    re.IGNORECASE,
-)
-# Tokens that flip a money-ish name back to NON-money (it's a rate / count / id / key / score / …).
-# Keys matter in warehouses: `invoice_key` and `payment_key` name join keys, not money.
-_MONEY_NEGATIVE_RE = re.compile(
-    r"(^|_)(rate|pct|percent|percentage|ratio|count|cnt|qty|quantity|num|number|nbr|id|"
-    r"key|sk|fk|flag|year|age|day|month|score|rank|code|status)s?(_|$)",
-    re.IGNORECASE,
-)
+# `unit` without callers hand-rolling (and mis-rolling) a regex. Names are split into whole
+# words on `_`, other punctuation and camelCase, so a bare `count` never matches inside
+# `discount`: `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate`
+# are not.
+_MONEY_WORDS = frozenset({
+    "amount", "amt", "price", "cost", "fee", "revenue", "sales", "salary", "wage", "income",
+    "payment", "charge", "balance", "deposit", "withdrawal", "refund", "discount", "subtotal",
+    "total", "spend", "spent", "budget", "invoice", "mrr", "arr", "gmv", "ltv", "aov", "paid",
+    "due", "owed", "credit", "debit",
+})
+# Words that name a currency outright. ISO codes beyond these count only after the first word
+# (`gross_usd`, `fare_try`), since a few double as English words (`try_count`, `php_version`).
+_CURRENCY_WORDS = {"usd": "USD", "dollar": "USD", "eur": "EUR", "euro": "EUR", "gbp": "GBP",
+                   "inr": "INR", "rupee": "INR", "jpy": "JPY", "yen": "JPY"}
+# Words that flip a money-ish name back to NON-money: a rate / count / id / key / score, or a
+# non-money unit (minutes, hours, weight, points). Keys matter in warehouses: `invoice_key` and
+# `payment_key` name join keys, not money. `total_minutes` and `points_balance` are not money.
+_NOT_MONEY_WORDS = frozenset({
+    "rate", "pct", "percent", "percentage", "ratio", "count", "cnt", "qty", "quantity", "num",
+    "number", "nbr", "id", "key", "sk", "fk", "flag", "year", "age", "day", "month", "score",
+    "rank", "code", "status", "duration", "weight", "kg", "lb", "gram", "point", "pts", "units",
+})
+# Time words exclude only in the plural: `total_seconds` is a duration, `second_payment_amount`
+# is the second payment.
+_NOT_MONEY_PLURALS = frozenset({"seconds", "secs", "minutes", "mins", "hours", "hrs"})
+_SCALE_WORDS = {"thousand": "thousands", "million": "millions", "billion": "billions",
+                "lakh": "lakhs", "crore": "crores"}
+_PERIOD_WORDS = frozenset({"hour", "day", "week", "month", "quarter", "year"})
+_PERIOD_ADJECTIVES = {"hourly": "hour", "daily": "day", "weekly": "week", "monthly": "month",
+                      "quarterly": "quarter", "yearly": "year", "annual": "year"}
+
+
+def name_words(column_name: str) -> list[str]:
+    """`revenueUSDMillions` / `revenue_usd_millions` -> ["revenue", "usd", "millions"]."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", column_name)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", s.lower()) if w]
+
+
+def _in(word: str, vocab) -> Optional[str]:
+    """The vocabulary entry `word` is, allowing a plural `s` (`amounts`, `minutes`)."""
+    if word in vocab:
+        return word
+    if word.endswith("s") and word[:-1] in vocab:
+        return word[:-1]
+    return None
+
+
+def _per_period(words: list[str]) -> tuple[list[str], Optional[str]]:
+    """Drop a `per <x>` pair (`revenue_per_day`, `cost_per_kg`) — it says what the money is
+    per, not that it isn't money — and return the period when `<x>` is one."""
+    out, period, i = [], None, 0
+    while i < len(words):
+        if words[i] == "per" and i + 1 < len(words):
+            period = period or _in(words[i + 1], _PERIOD_WORDS)
+            i += 2
+            continue
+        out.append(words[i])
+        i += 1
+    return out, period
+
+
+def name_currency(column_name: str) -> Optional[str]:
+    """The ISO code a column's name states (`gross_usd`, `fx_dollar`, `amountEUR`), or None."""
+    from .units import CURRENCY_SYMBOLS
+
+    for i, w in enumerate(name_words(column_name)):
+        hit = _in(w, _CURRENCY_WORDS)
+        if hit:
+            return _CURRENCY_WORDS[hit]
+        if i and w.upper() in CURRENCY_SYMBOLS:
+            return w.upper()
+    return None
 
 
 def detect_money_column(column_name: str) -> bool:
-    """A column whose name looks monetary (amount/price/revenue/discount/…) and is NOT a
-    rate/count/id/score — so `discount_amount` is money while `discount_rate` and
-    `order_count` are not. Name-only; the caller restricts this to numeric columns."""
-    return bool(_MONEY_RE.search(column_name)) and not _MONEY_NEGATIVE_RE.search(column_name)
+    """A column whose name looks monetary (amount/price/revenue/discount/… or a currency such as
+    `_usd`) and carries no rate/count/id/score or non-money unit word — so `discount_amount` and
+    `balance_usd` are money while `discount_rate`, `order_count`, `total_minutes`, `credit_hours`
+    and `points_balance` are not. Name-only; the caller restricts this to numeric columns."""
+    words, _ = _per_period(name_words(column_name))
+    if any(_in(w, _NOT_MONEY_WORDS) or w in _NOT_MONEY_PLURALS for w in words):
+        return False
+    return name_currency(column_name) is not None or any(_in(w, _MONEY_WORDS) for w in words)
+
+
+def suggest_unit(column_name: str) -> Optional[str]:
+    """The unit a money column's name spells out, in the units.py grammar:
+    `revenue_usd_millions` -> `USD_millions`, `cost_usd_per_day` -> `USD/day`. None when the
+    name states no currency (the caller then asks which currency it is)."""
+    code = name_currency(column_name)
+    if not code or not detect_money_column(column_name):
+        return None
+    words, period = _per_period(name_words(column_name))
+    period = period or next((_PERIOD_ADJECTIVES[w] for w in words if w in _PERIOD_ADJECTIVES), None)
+    scale = next((_SCALE_WORDS[_in(w, _SCALE_WORDS)] for w in words if _in(w, _SCALE_WORDS)), None)
+    return code + (f"_{scale}" if scale else "") + (f"/{period}" if period else "")
 
 
 # --- aggregation class (the Phase-1 column-intrinsic measure semantics) ------
@@ -113,9 +187,12 @@ _AVERAGEABLE_RE = re.compile(
 # on the metric as `non_additive_dimensions` (Phase 2 / #3), not here.
 _ADDITIVE_RE = re.compile(
     r"(^|_)(amount|amt|total|subtotal|sum|qty|quantity|count|cnt|revenue|sales|cost|"
-    r"spend|spent|value|volume|units|gmv|charge|fee|tax|discount|paid|due|gross|net|"
+    r"spend|spent|value|volume|gmv|charge|fee|tax|discount|paid|due|gross|net|"
     r"profit|income|expense|balance|deposit|withdrawal|refund|credit|debit|payment|"
-    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)",
+    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)"
+    # a bare `units` is often a per-entity reading (`reading_units`); only a flow settles it
+    r"|(^|_)units_(sold|shipped|ordered|delivered|received|returned|purchased|produced)(_|$)"
+    r"|(^|_)(sold|shipped|ordered|delivered|received|returned|purchased|produced)_units(_|$)",
     re.IGNORECASE,
 )
 
@@ -130,9 +207,12 @@ def classify_aggregation(column_name: str, column_type: str, is_key: bool = Fals
         return "dimension"
     if column_type not in _NUMERIC_TYPES:
         return "dimension"
-    if _DIMENSION_RE.search(column_name):
+    # money detection reads camelCase / kebab words, so these checks must too, or `unitPrice`
+    # would skip the averageable test and be called additive
+    spelled = (column_name, "_".join(name_words(column_name)))
+    if any(_DIMENSION_RE.search(n) for n in spelled):
         return "dimension"
-    if _AVERAGEABLE_RE.search(column_name):
+    if any(_AVERAGEABLE_RE.search(n) for n in spelled):
         return "averageable"
     if detect_money_column(column_name) or _ADDITIVE_RE.search(column_name):
         return "additive"
@@ -766,7 +846,8 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
 
 
 __all__ = [
-    "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
+    "SENSITIVE_RE", "detect_sensitive", "detect_money_column", "suggest_unit", "name_currency",
+    "name_words",
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",

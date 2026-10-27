@@ -12,37 +12,132 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-- **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
-  in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
-  script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
-  source tables are not in the model is still an error.
+### Fixed
+
+- **A second-order metric can sit on a base metric that spans several tables, and its table names
+  are quoted for the engine (#525).** `OUTERAGG({base})` with `inner_grain` used to be refused when
+  the base metric read more than one table, and the synthesized statement wrote table and column
+  names bare, so a mixed-case table failed on PostgreSQL. The synthesized inner query now joins the
+  table the base metric measures to each other source table by the one relationship declared
+  directly between them. That table is the base's `primary_table` (matched to its source table
+  with or without the schema), else the one table that declares every column the base's
+  aggregates read; a `primary_table` that is not a source table, or a base whose measured columns
+  span tables or can't be placed, is refused and asks for `primary_table`. It is also refused,
+  with the reason, when there is no such edge, more than one, or the join would fan out the base
+  aggregate's rows. A bare `inner_grain` column must be declared by exactly one of the tables; a
+  `table.column` entry (`orders.order date`, `line items.id`) must name a source table and a
+  column it declares. Identifiers are quoted only where the engine needs it (including words one
+  engine reserves, such as `index` on SQLite or `key` on MySQL), so a plain lower-case name is
+  emitted as before; a reserved lower-case name on Snowflake or Oracle is quoted in upper case
+  (`"LIMIT"`), the name those engines store it under.
+  Tables with the same name from different schemas in one base are refused. An `inner_grain` entry
+  naming a declared column (`order date`) is that column, quoted; the base metric's own subject
+  area is read first for the table's columns.
 
 ### Fixed
 
+- **The receipt names the table behind a subquery or CTE alias, and reads a `FILTER` clause (#521).**
+  `COUNT(*) FILTER (WHERE s.x > 0)` over a subquery `s` listed the reference as `s.x`, and the
+  aggregate said it names no column. A column qualified by a derived table or a CTE is now followed
+  through a projection that passes one column through unchanged (bare or renamed) to its table, so
+  the reference reads `public.t.x`. A computed projection (`x / id AS r`) keeps the alias it was
+  written with. A qualifier is resolved in the query it was written in, so an alias reused in a
+  nested query no longer borrows the other query's table. An aggregate's `FILTER (WHERE …)` columns
+  count as columns it reads, the same as a `CASE` inside it, so a single-table `COUNT(*) FILTER (…)`
+  is resolved and one over a join can report a fan. A CTE name binds as the scope gate binds it (a
+  schema-qualified table, a later sibling or a non-recursive self-reference is the table), and a
+  column list (`WITH s(y, x)`, `AS s(y, x)`) renames outputs by position. A subquery's columns are
+  not credited to the outer query's aliases: a `FILTER` holding a subquery, an aggregate holding
+  one and an aggregate computed inside a nested SELECT report `undetermined` (a fan proven on the
+  outer columns still reports `multiplied`). A body with a star keeps the written alias.
+  What the scope gate refuses is unchanged, and a value read from a subquery is still not matched to
+  a metric.
+
+### Added
+
+- **The model explorer can reject in bulk, beside every bulk approve (#531).** Each "✓ Approve all N
+  proposed" and "✓ Approve N" now has a "✕ Reject all N proposed" / "✕ Reject N" next to it. It acts
+  on exactly the items shown (the sub-tab, kind group, status filter and search), skipping anything
+  already approved or rejected, confirms with the count and kind ("Reject 104 metrics?") and asks for
+  one reason, which is required. Each queued reject op carries that `reason`, which reaches
+  `curation_log.jsonl` with the op; the model itself does not store it. Like approvals, the rejects
+  are queued and applied only when the feedback block is submitted. A single reject still carries no
+  reason.
+
 ### Fixed
 
-- **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
-  `review_state: approved`, so an entity written during enrichment without the field came out
-  signed off, with no signer, and was trusted at query time although no one had looked at it. The
-  default is now `unreviewed`: such an entity waits in the review queue, and approving it in
-  `/agami-model` or with `sm approve-queue` records who signed it off and when. The shape reference
-  agami-connect follows showed `review_state: approved` in its entity example; it now shows
-  `unreviewed`.
-
-  **Existing models:** an entity file that states `review_state: approved` stays approved. Only one
-  that leaves the field out now loads as unreviewed and appears in the review queue.
+- **"Approve all" on the Metrics tab names the kind on each op (#531).** The Metrics tab's bulk
+  approve queued ops with no `kind`, so the Queued tab showed "approve undefined" and the curation
+  engine skipped them as "op needs kind + name". They now say `metric`, as the Review tab's do.
 
 ### Fixed
 
-- **A join only the metadata preset assumes is not engine-approved (#509).** `sm enrich-metadata`
-  adds reference joins from two sources: the database's own dictionary, and the preset's list of
-  standard joins for that platform. A standard join whose values overlapped in the data was written
-  confirmed and approved by the engine, although this database never declared it. Such a join is
-  now written inferred and unreviewed, says it is the preset's standard join and not declared, and
-  waits in the review queue. A reference the database's dictionary declares is still
-  engine-approved once its values overlap, as a declared foreign key is during introspection.
-  Introspection already wrote every join it inferred from names and values unreviewed. New tests
-  now pin that for a database with no declared foreign keys.
+- **The interpreter resolver no longer picks a Python that can never be brought up to date (#529).**
+  `connect_resolve.py` checks each candidate for pip and for the agami-core version it carries, read
+  from installed metadata. A candidate with no pip and an agami-core that is missing or older than the
+  plugin is skipped, with a `reason` in `candidates_scored`; a pip-less one whose library is current is
+  still chosen, and `$AGAMI_PYTHON` is never skipped but gets a warning. The output says
+  `chosen_because`. `sm` and `py` apply the same rule to the Pythons on PATH, so an activated
+  pip-less venv no longer shadows a working one; a configured interpreter that fails it gives way to
+  a PATH one that passes, and is kept (so `sm` can say what is wrong) when none does. When the library a Python runs is older than the plugin, `connect_resolve`
+  (as a `library_older_than_plugin` anomaly), `py` and the scripts' library loader warn on stderr,
+  naming both versions, the interpreter and the fix (`sm install`, or `AGAMI_PYTHON`). `sm` says
+  "<python> has no pip" instead of a bare "couldn't install". The plugin version is read from
+  `plugin.json` by one shared helper, with the cache folder's name as the fallback.
+
+### Fixed
+
+- **Validator: fewer false positives, entity mappings checked everywhere, collision messages name
+  the table (#520).** `metric_binding_unknown_column` read the aliases of a binding's own subquery
+  as missing columns: `SELECT AVG(s.r) FROM (SELECT …, SUM(pts) / SUM(maxpts) AS r …) s` warned
+  about `r`. It now leaves out a column a derived table or CTE the SELECT reads projects (through
+  a `SELECT *` too, when the star is over another derived table) and a select-list alias used in
+  the same SELECT's HAVING or ORDER BY; a typo inside the subquery, one read through a star over a
+  base table, and one an unused CTE happens to project still warn. The loader's rule
+  for hiding a metric that reads an excluded or stale column is unchanged. An entity mapping to a
+  table outside its own area was never checked, nor were `cross_subject_area_entities`; both now
+  resolve against the whole model, with new warnings `entity_mapping_unknown_table` (no area
+  defines the table) and `entity_mapping_column_not_found` (the table has no such column). They are
+  warnings so a model that validated before still writes. `cross_area_entity_collision` printed
+  `?.?.<table>` for a table the area only listed, and so warned when two areas mapped the same
+  table; it now resolves the table across the model (on the connection the area lists it on, when
+  two connections define it), compares the resolved table, and prints
+  `schema.table` with each area's name (the connection too when there is more than one).
+
+### Fixed
+
+- **A subject area named where a table was wanted also names that area's tables like it (#567).**
+  `get_datasource_schema(dataset_names=["orders"])` answered "'orders' is a subject area, not a
+  table: pass it as `area`" and nothing else, so in a model whose tables carry a suffix (`orders_v`)
+  the agent spent a second call finding the table. The hint now ends "or did you mean 'orders_v'?"
+  with the same names in `did_you_mean`, matched against that area's own tables only, so a
+  like-named table elsewhere is never guessed and never crowds the area's own out. The activity
+  log's `missed` entry for a name answered with any wrong-kind hint (an area or a column) now
+  carries `hinted: true`, so an empty suggestion list no longer reads as "the caller was given
+  nothing".
+
+- **The forked transport no longer relays a child's whole stderr on an `other` failure (#583).**
+  Every sanitized failure is rebuilt by the parent from the exit code, because stderr is shared with
+  anything a library logs during the run. `other` (exit 6) had no fixed sentence, so it fell through
+  to the relay meant for the authored configuration errors (exit 2 and 3), and a library's line,
+  values or paths included, reached `failure.message`. It now gets the generic sentence, or a
+  SQLSTATE sentence (#561) relayed only as an exact match; a stream holding neither goes to the
+  server log.
+
+- **A datasource.yaml key this agami-core does not read is reported, not silently dropped (#575).**
+  The loader reads a fixed list of top-level keys, so a model written for a newer agami-core that
+  declared a field the running one did not know lost it without a word, and a deploy fed by that
+  load stored the model without it. The model still loads and the field is still ignored, but `sm
+  validate` lists the keys as an `unknown_datasource_key` warning and the deploy prints them, saying
+  the model may need a newer agami-core. The load itself stays silent, since the executor loads the
+  model in a child process whose stderr is its output.
+
+- **On Redshift, discovery finds the tables of a read-only user (#558).** `sm discover`, and an
+  introspection run without a table list, listed schemas from `information_schema.schemata`, which on
+  Redshift shows only the schemas the user owns. A read-only role owns none, so discovery reported
+  "no tables discovered" for a catalog it could read in full; passing `--tables` worked, which hid
+  it. Redshift now lists the schemas the user has USAGE on (`pg_namespace` with
+  `has_schema_privilege`), leaving out the system schemas. Other engines are unchanged.
 
 - **A table is identified by its schema as well as its name (#258, #337).**
   - **Storage.** The served model stored tables keyed by subject area and bare name, so
@@ -77,6 +172,123 @@ below corresponds to one such version.
     - On MySQL a table or database name has to match the declared case exactly, quoted or not:
       on Linux, its default, `sales.Orders` and `sales.orders` are two different tables.
     - The other engines match names without regard to case, as they resolve them.
+
+## [0.9.20] — 2026-10-26
+
+### Changed
+
+- **Units can carry a scale and a rate, and a guessed currency is never applied without review
+  (#515).** A `unit` now reads `<ISO code>[_<scale>][/<period>]`: `USD_millions` shows 12.5 as
+  `$12.5M` (scales `thousands`, `millions`, `billions`, `lakhs`, `crores`), `USD/day` shows 120 as
+  `$120.00/day`, and `USD_millions/year` combines both, in answers and charts alike. There is no new
+  field: a release older than this one reads these strings as a plain label, so the model still loads
+  everywhere. `suggest-units` now splits a name into whole words, so `total_minutes`, `credit_hours`,
+  `points_balance` and `total_weight` are no longer taken for money, while `gross_usd`, `value_usd`
+  and `fx_dollar` now are; each row gains a `suggested_unit` read from the name
+  (`revenue_usd_millions` → `USD_millions`). `set-units` without `--columns` prints its plan and
+  writes nothing until `--yes`, and gives a column whose name states a currency that unit, with
+  `--columns` too (so a subset of the plan is written as planned). A bare
+  `units` column (`reading_units`) is no longer classed additive at introspection; `units_sold` and
+  the like still are, and classes already in a model are left as they are.
+
+### Fixed
+
+- **A model outside git keeps a reviewable history of its edits (#528).** agami commits a curation
+  only when the profile folder is its own git repository, and it never creates one, so on a fresh
+  artifacts folder an edit left nothing a reviewer could compare: `curation_log.jsonl` listed the ops
+  with no time and no prior value, and the datasource description and glossary writes weren't logged
+  at all. Every model write now logs each change with its UTC time (`at`), the model version it
+  produced (`version`) and, for an edit or a review-state change, the value it replaced (`before`)
+  beside the new one. The description and glossary writes are logged too, and a curate batch logs
+  only the ops that took, not the ones it skipped. A new `sm history <root> [--limit N]` prints the
+  log newest first, and a curate result outside git points to it. Older log lines without the new
+  keys read as before. The docs no longer say onboarding runs `git init` or that a failed edit is
+  reverted through git; it is restored from backups.
+
+### Fixed
+
+- **A column's `value_transform` and a join's `on:` parse in the datasource's own SQL dialect, and a
+  text column of ISO dates gets a date format whatever it is called (#518).** Both fragments were
+  parsed with sqlglot's generic grammar, so a valid Postgres transform such as
+  `CASE WHEN code ~ '^[0-9]+$' THEN code::int END` failed validation. A fragment is now accepted when
+  it parses in the engine's dialect or in the generic grammar, so nothing that validated before
+  starts failing; a datasource whose engine can't be resolved keeps the generic parse, and the
+  incremental validation cache includes the dialect. A field inside a JSON column is reached by a
+  transform on the JSON column that extracts the key itself (`(profile->>'signup_date')::date` on
+  Postgres, `json_extract(profile, '$.signup_date')` on SQLite); agami-connect now says so.
+  Introspection set `iso8601` only on columns with a date-like name; it now also sets it on a text
+  column with any name when at least 20 sampled values are present and every one is a real ISO date
+  or timestamp. Such a column no longer gets a `choice_field` skeleton.
+
+- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
+  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
+  areas, which reads as database schemas. Labels that really are about database schemas, such as a
+  cross-schema join, are unchanged.
+
+### Fixed
+
+- **A metric built on a rejected metric is no longer served (#571).** The loader left out a derived
+  metric whose base was dropped only when a table or column was also hidden, so with just a metric
+  rejected, a metric built on it stayed in the served model and validation reported "references
+  unknown base metric". It now runs on every load, per area and cross-area, and repeats down a
+  chain of derived metrics. Only a base that was rejected or hidden drops a metric: a base the model
+  never had is a mistake in the model, and stays for the validator to report. An ambiguity naming a
+  dropped metric loses that metric, as for any metric not served. The curation view is unchanged.
+
+- **A statement the database rejected says so, by its SQLSTATE (#561).** An execution error none of
+  the classifier's patterns read came back as `other` with "an unexpected error on the server", so a
+  client could not tell a statement it should rewrite from a broken server, and guessed. The
+  database's own text still never travels, since it can carry a value from a row. Its SQLSTATE now
+  does: five characters, no values, and a class that means the same on every engine that reports
+  one, so one table covers them all without a rule per database. Class `42` (the statement broke a
+  rule), `0A` (unsupported feature) and `22` (a value did not fit an operation) come back as `syntax`
+  with the code and "rewrite it"; `53`/`54` (too heavy) and `40` (a conflict, retry) with the code
+  and what to do; `42501` as `permission`, `08` as `network` and `28` as `auth` with their usual
+  sentences; any other class as the code beside the usual sentence. The
+  code is read from the driver's exception (`sqlstate`, `pgcode`, or `redshift_connector`'s `C`
+  field), never from its message, and an injected executor can pass it as
+  `ExecutorError(sqlstate=…)`. An engine that reports no code is unchanged, and a dialect rule (#566)
+  still answers first. On the forked transport a `syntax` sentence is relayed only as an exact match;
+  the others travel as every `other` failure does today.
+
+- **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
+  in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
+  script running it. It now says no preset applies and exits 0. Naming a preset with `--preset` whose
+  source tables are not in the model is still an error.
+
+### Fixed
+
+- **A SUM with a zero fallback on the many side no longer reads as a fan trap (#579).** The
+  receipt flagged `SUM(CASE WHEN orders.status = 'shipped' THEN COALESCE(order_items.quantity, 0)
+  END)` over `orders JOIN order_items` as multiplied: the `0` belongs to no table, so the check that
+  decides which table the summed value comes from found none, and the `orders` column in the
+  condition made the join look like it repeated the value. A `0` or `NULL` adds nothing to a sum
+  however often its row repeats, so directly under a `SUM` (through `CASE`, `COALESCE`, `IF`,
+  parentheses and casts) it is now left out. `COUNT`, `AVG` and arithmetic are unchanged, and
+  `SUM(CASE WHEN … THEN 1 ELSE 0 END)`, which counts the joined rows, is still reported.
+
+- **An entity is unreviewed until a person approves it (#508).** The entity model defaulted to
+  `review_state: approved`, so an entity written during enrichment without the field came out
+  signed off, with no signer, and was trusted at query time although no one had looked at it. The
+  default is now `unreviewed`: such an entity waits in the review queue, and approving it in
+  `/agami-model` or with `sm approve-queue` records who signed it off and when. The shape reference
+  agami-connect follows showed `review_state: approved` in its entity example; it now shows
+  `unreviewed`.
+
+  **Existing models:** an entity file that states `review_state: approved` stays approved. Only one
+  that leaves the field out now loads as unreviewed and appears in the review queue.
+
+### Fixed
+
+- **A join only the metadata preset assumes is not engine-approved (#509).** `sm enrich-metadata`
+  adds reference joins from two sources: the database's own dictionary, and the preset's list of
+  standard joins for that platform. A standard join whose values overlapped in the data was written
+  confirmed and approved by the engine, although this database never declared it. Such a join is
+  now written inferred and unreviewed, says it is the preset's standard join and not declared, and
+  waits in the review queue. A reference the database's dictionary declares is still
+  engine-approved once its values overlap, as a declared foreign key is during introspection.
+  Introspection already wrote every join it inferred from names and values unreviewed. New tests
+  now pin that for a database with no declared foreign keys.
 
 ## [0.9.19] — 2026-10-25
 

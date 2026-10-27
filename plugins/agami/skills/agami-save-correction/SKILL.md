@@ -355,7 +355,7 @@ Always include the validator step in 4c regardless of which option they pick (si
 
 ### 4c — apply with validation (the gate)
 
-**For `relationship` / `field_metadata` / `table_metadata` edits** (existing entries): build the ops array, **write it with the Write tool** (never a heredoc / shell variable / `python3 -c` — JSON quotes and `null` break those), then apply via the curation engine — it validates the whole model, commits to the profile git repo, logs to `curation_log.jsonl`, and **reverts every change if validation fails**:
+**For `relationship` / `field_metadata` / `table_metadata` edits** (existing entries): build the ops array, **write it with the Write tool** (never a heredoc / shell variable / `python3 -c` — JSON quotes and `null` break those), then apply via the curation engine — it validates the whole model, logs to `curation_log.jsonl` (with the value each edit replaced), commits when the profile folder is its own git repository, and **reverts every change if validation fails**:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-correction-ops.json"

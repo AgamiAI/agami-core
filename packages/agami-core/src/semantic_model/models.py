@@ -302,7 +302,8 @@ class Column(_Base):
     sensitive: bool = False
     # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
     value_transform: Optional[str] = None
-    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…)
+    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…),
+    # optionally scaled and/or a rate (USD_millions, USD/day — grammar in units.py),
     # drives a deterministic symbol + grouping in the formatter/chart renderer;
     # other units (cents, percent, days, ms) surface as a label. This is the
     # structured home for the onboarding "what currency are these in?" answer —
@@ -549,8 +550,8 @@ class Metric(_Base):
     calculation: str
     # per-storage_type SQL bindings, e.g. {"PostgreSQL": "COUNT(DISTINCT ...)"}
     bindings: dict[str, str] = Field(default_factory=dict)
-    # display unit of the metric's output (e.g. a currency ISO code) so the
-    # formatter renders results deterministically (₹1,23,456 not 123456)
+    # display unit of the metric's output (e.g. a currency ISO code, or USD_millions /
+    # USD/day — grammar in units.py) so the formatter renders results deterministically
     unit: Optional[str] = None
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
