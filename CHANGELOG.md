@@ -12,6 +12,152 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
+  query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
+  skipped, since the CTE might have supplied it. A column the model excludes was then returned:
+  `WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, c` ran, while the same statement without
+  `c` was refused. The gate now reads what each CTE, derived table, `LATERAL` subquery, `VALUES` list
+  and table function names in its projection or alias. A column one of them names passes. Otherwise it
+  is refused when that scope reads a declared table, and a scope with no source supplying the name
+  defers to the enclosing query as a correlated reference does, so `SELECT (SELECT secret_col) FROM
+  orders` is refused too. An output with no readable name (`SELECT count(*)` with no alias) does not
+  count, and the refusal says to name it with `AS` or to qualify the column with the source's alias.
+  Alias column lists rename by position, a quoted output name keeps its case where the engine does,
+  and a CTE inside a scalar subquery still sees the outer query. A key a `USING` join compares must
+  be declared on the side of that join it comes from, and a name a `NATURAL` join compares from a
+  CTE or subquery must be declared on the tables of that join. An output alias stands for itself
+  only as a whole `ORDER BY` or `GROUP BY` item, or as a window-function alias in `QUALIFY` (DuckDB,
+  Snowflake, BigQuery, Databricks), where engines read the alias. Anywhere else, including
+  `HAVING`, expressions and `FILTER`, the engine reads the input column of that name, so `SELECT
+  secret_col AS secret_col FROM orders` is refused, and so is an alias referenced in `HAVING`.
+
+### Added
+
+- **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
+  of a metric's formula ("gives no value when the start date is missing") went into its description
+  or calculation, where it reads as part of the definition. A metric now takes an optional
+  `caveats` list, validated like a column's (no empty entries) and editable through `sm curate`
+  and the model explorer. It is served wherever the metric is: the metric's entry in
+  `get_datasource_schema`, metric search, the admin model page, the explorer's metric card and the
+  review queue. The validator reads it too: a metric caveat saying a missing value counts as 0
+  silences `metric_null_filled` the way the calculation saying so already did.
+
+  **Reading a model:** a metric file that sets `caveats` is refused by a release older than this
+  one, which does not know the key; files with no caveats stay readable, because the key is left
+  out of a metric file when the list is empty. Upgrade every server that reads the model (including
+  deploy images) before writing metric caveats.
+
+### Added
+
+- **A customer's data dictionary is applied as `metadata` in one command (#522).** `sm describe-file`
+  stamped every description `source: ai`, so a dictionary the customer wrote could only land as their
+  own text through a script that built `curate` ops, which agami-connect forbids. It now takes
+  `--source metadata` and reads a CSV (`table`, `column`, `description`, optional `area` / `schema`
+  header; quoted text may hold commas and newlines) or JSON (a list of those objects, or an object
+  mapping `"table.column"` to a description) as well as the TSV it already read, by file extension or
+  `--format`. Each row is matched to a model column, exactly first and then ignoring case, and lands
+  on the model's spelling. A `SCHEMA.TABLE` in the table column is read as that schema's table when
+  the model has the schema, and listed under `schema_prefix_stripped`; a schema the model doesn't
+  have is reported as such. A row that can't be applied comes back under `unmatched` with a reason
+  (`no_table`, `no_column`, `ambiguous_table`, `ambiguous_column`, `malformed`, `empty_description`),
+  where a TSV's bad lines used to be skipped without a word; a CSV row with more fields than the
+  header is `malformed`, and broken quoting fails the whole file (exit 2) rather than merging rows. A
+  folder with no semantic model is refused (exit 2). A dictionary row never replaces a description a
+  person wrote; those are listed under `kept_human`. A `metadata` description is taken as written
+  from the customer's dictionary; it is not checked against the data (see #564). Without the flag
+  the command stamps `ai` as before. agami-connect applies a dictionary file this way and reports
+  the unmatched rows.
+
+- **A column's list of allowed values is the whole list, or none (#517).** Introspection built each
+  `choice_field` from the first 500 rows the engine returned, so on a table of a few thousand rows a
+  status with 14 values could list 6, and the list read as complete: a question about a missing value
+  was written against the list, and the reconcile probe graded a correct literal as a query defect.
+  Values the catalog declares now come first, on a table of any size and with no table scan: a
+  Postgres enum type, a MySQL/MariaDB `ENUM(...)` column, and a CHECK constraint that only lists one
+  column's values (`col IN ('a','b')`, `col = 'a' OR col = 'b'`), read on Postgres, MySQL 8, SQL
+  Server, Oracle, SQLite and DuckDB; a declared list is kept as declared, up to 200 values, integer
+  columns included. Only a CHECK the engine enforces on every stored row counts (not Postgres `NOT
+  VALID` or `NO INHERIT`, MySQL `NOT ENFORCED`, a disabled or untrusted SQL Server CHECK, or an
+  Oracle one that is disabled or `NOVALIDATE`), a CHECK whose name another table also uses is skipped,
+  and one that casts the column to a non-string type, or casts a listed number in a way that can change
+  it (`CAST(1.9 AS INTEGER)`), declares nothing. Two columns whose names differ only by case (Postgres
+  `status` and `"STATUS"`) get no declared list. A declared list that can't be kept (over 200
+  values, two CHECKs that disagree, or a value the column's type can't hold) gives the column no list
+  at all. On SQL Server and a SQLite `COLLATE NOCASE` column a string list also gets a caveat that the
+  database compares values case-insensitively; on MySQL/MariaDB, case- and accent-insensitively. Postgres shows a CHECK's text only to the table's owner (the function that shows
+  it to any role is refused by the recon gate), so a SELECT-only role reads enums and no CHECKs. When nothing is declared, a small table (the same size rule as before) reads the
+  list with one bounded `SELECT DISTINCT` per column, at most 1,000 in a run; more than 25 values
+  gives no list rather than part of one. Keys (`*_key`, `*_sk`, `*_fk`), measures and years get no
+  list from the data. Values are listed exactly as stored: 'Open ' is no longer trimmed into 'Open',
+  and a column whose values differ only by spacing or case gets a caveat naming them; loading a model
+  no longer trims a `choice_field` key either. A refresh leaves an existing column's list alone, so
+  labels a person filled in are kept; new columns get the new lists.
+
+  **Reading a model:** a release older than this one trims `choice_field` keys as it loads them, so it
+  reads a list holding both 'Open' and 'Open ' as one 'Open'.
+
+### Fixed
+
+- **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
+  fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
+  alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out
+  many-to-one. Unique keys are now read from the catalog on PostgreSQL (unique constraints and
+  unique indexes), MySQL, SQLite, SQL Server, Oracle and DuckDB, and kept on the table as
+  `unique_keys`. Snowflake and Redshift declare unique keys without enforcing them, so one is kept
+  only when the data bears it out; BigQuery, Databricks and Trino have none. A join is one-to-one
+  when its columns are the whole of a key on both sides, and the same rule now labels a join a
+  query writes that the model doesn't declare, a join to a grouped CTE, and the references
+  enrichment adds. When no key settles a join but its many side turns out unique in the data, the
+  label is kept and the join waits for review with a note saying so, since data that is unique
+  today is not a promise. A refresh relabels each join introspection approved itself from the
+  database's keys and lists it under `joins corrected from the database's constraints`; a join a
+  person signed off is never changed, and a person's edit of a join's cardinality, columns, `on` or
+  tables in the explorer makes the sign-off theirs (with no signer recorded, the engine's sign-off
+  is cleared and the join waits for review), so a refresh leaves the edit alone. Only enabled,
+  valid keys count: an invalid PostgreSQL index, a disabled SQL Server index and a disabled or
+  unvalidated Oracle constraint are not read, a SQLite unique index over an expression is not
+  shortened to its plain columns, and a SQLite unique index written with its own `COLLATE` is not
+  trusted. Labelling reads each table's own keys, so two tables of one name in two schemas no longer
+  lend each other a key, at introspection or at query time. At query time a join the model doesn't
+  declare counts as one-to-one by its keys only when its `ON` is on its own table, that table is read
+  once in the query, and every other join beside it is one-to-one too; otherwise its numbers stay
+  `undetermined`. A refresh that can't read a table's unique keys (a failed catalog read or data
+  check) keeps the stored ones and leaves that table's joins alone, with a note
+  `unique keys not re-read for <table>`.
+
+  **Reading a model:** a table that sets `unique_keys` is refused by a release older than this
+  one, which does not know the key. Upgrade every server that reads the model (including deploy
+  images) before re-introspecting with this release. A model with no unique keys stays readable by
+  older releases. CI that validates the model with a newer release won't catch this.
+
+### Fixed
+
+### Fixed
+
+- **`sm suggest-metrics` prints its proposals before writing, and its bindings run and mean what
+  they say (#514).** It used to write straight into the model, and every proposal kept from it on a
+  large onboarding had to be fixed by hand. It is now a dry run by default: it prints each metric's
+  binding, calculation, source table and flags, and `--write` saves them (`--names` keeps only some,
+  or a flagged one a person chose). `--profile <name>` test-runs every binding first, one bounded
+  read per table (opt-in, as a pay-per-scan warehouse bills it): a binding that errors is never
+  written, and a constant, all-zero or NULL result is flagged `degenerate` and left out unless named.
+  Proposals on a table under 50 rows are flagged `low_confidence` (from the test run's own row
+  count when there is one). A table defined by SQL is test-run over that SQL; when that read fails
+  its proposals are flagged `not_test_run` and each proposal says whether it was test-run. The SQL itself: a mixed-case
+  column is quoted where the engine folds case (PostgreSQL, Redshift, Snowflake, Oracle), and a
+  column named after a word the engine reserves (`index` on SQLite, `key` on MySQL) is quoted; a pair of
+  DATE columns subtracts to days on PostgreSQL and DuckDB, where `EXTRACT(EPOCH ...)` of the integer
+  failed, and uses `DATE_DIFF` on BigQuery; BigQuery and Oracle timestamp pairs no longer fail; a
+  flag rate leaves NULL rows out instead of counting them false, and a T-SQL `BIT` flag is compared
+  rather than used as a predicate. A duration leaves out rows where the end is before the start and
+  its calculation says so (compared directly on engines whose day difference rounds a reversed
+  same-day pair to 0), pairs a planned start only with a planned end (and actual with actual),
+  uses an audit column such as `sys_created_on` only when nothing else fits, and offers an ambiguous
+  pairing flagged rather than picking one (its reason names up to three of the others). A storage type with no SQL dialect now fails clearly
+  instead of being written as PostgreSQL.
+
 - **A curate op on a join, entity or metric that doesn't name an area is resolved, or fails the batch (#538).**
   An op on a join between two subject areas was skipped unless it named one side's area, so the batch
   reported success with that change missing. A metric or entity defined across areas could not be
@@ -150,25 +296,6 @@ below corresponds to one such version.
   "no tables discovered" for a catalog it could read in full; passing `--tables` worked, which hid
   it. Redshift now lists the schemas the user has USAGE on (`pg_namespace` with
   `has_schema_privilege`), leaving out the system schemas. Other engines are unchanged.
-
-- **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
-  query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
-  skipped, since the CTE might have supplied it. A column the model excludes was then returned:
-  `WITH c AS (SELECT 1 AS n) SELECT secret_col FROM orders, c` ran, while the same statement without
-  `c` was refused. The gate now reads what each CTE, derived table, `LATERAL` subquery, `VALUES` list
-  and table function names in its projection or alias. A column one of them names passes. Otherwise it
-  is refused when that scope reads a declared table, and a scope with no source supplying the name
-  defers to the enclosing query as a correlated reference does, so `SELECT (SELECT secret_col) FROM
-  orders` is refused too. An output with no readable name (`SELECT count(*)` with no alias) does not
-  count, and the refusal says to name it with `AS` or to qualify the column with the source's alias.
-  Alias column lists rename by position, a quoted output name keeps its case where the engine does,
-  and a CTE inside a scalar subquery still sees the outer query. A key a `USING` join compares must
-  be declared on the side of that join it comes from, and a name a `NATURAL` join compares from a
-  CTE or subquery must be declared on the tables of that join. An output alias stands for itself
-  only as a whole `ORDER BY` or `GROUP BY` item, or as a window-function alias in `QUALIFY` (DuckDB,
-  Snowflake, BigQuery, Databricks), where engines read the alias. Anywhere else, including
-  `HAVING`, expressions and `FILTER`, the engine reads the input column of that name, so `SELECT
-  secret_col AS secret_col FROM orders` is refused, and so is an alias referenced in `HAVING`.
 
 ## [0.9.20] — 2026-10-26
 

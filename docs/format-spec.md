@@ -120,10 +120,12 @@ name: orders
 schema: public
 storage_connection: shop_postgres
 grain: [id]
+unique_keys: [[order_number]]   # optional: each other unique key, as its columns; read for join cardinality
 description: One row per order.
 default_filters: ["{alias}.deleted_at IS NULL"]
 columns:
   - { name: id, type: integer, primary_key: true }
+  - { name: order_number, type: string }
   - { name: customer_id, type: integer, foreign_key: { table: customers, column: id } }
   - { name: status, type: string, choice_field: { pending: Pending, shipped: Shipped } }
   - { name: amount, type: decimal, caveats: ["Amount in USD; excludes refunds."] }

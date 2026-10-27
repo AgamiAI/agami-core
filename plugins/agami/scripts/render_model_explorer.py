@@ -123,7 +123,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                               if t.performance_hints else None),
                 "review_state": t.review_state, "origin": "", "excluded": t_excluded,
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
-                "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
+                "grain": t.grain, "unique_keys": t.unique_keys, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
                 # ordered group names for the wide-table grouped field view (empty on
                 # narrow tables — the UI then just lists fields flat)
@@ -151,7 +151,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "non_additive_dimensions": mm.non_additive_dimensions,
                 "semi_additive_agg": mm.semi_additive_agg,
                 "source_tables": mm.source_tables, "primary_table": mm.primary_table,
-                "description": mm.description,
+                "description": mm.description, "caveats": mm.caveats,
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
                 "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
