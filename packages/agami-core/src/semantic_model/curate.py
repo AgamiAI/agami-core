@@ -516,7 +516,8 @@ _VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
 def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
           role: Optional[str] = None) -> ApplyResult:
     """Apply curation ops to the on-disk model, validate, commit (best-effort),
-    revert on validation failure. Each op: {op, kind, area, name, [column], [field, value]}."""
+    revert on validation failure. Each op: {op, kind, area, name, [column], [field, value],
+    [reason]} — a reject's `reason` is not stored on the model, only in curation_log.jsonl."""
     root = Path(root)
     res = ApplyResult()
     backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)

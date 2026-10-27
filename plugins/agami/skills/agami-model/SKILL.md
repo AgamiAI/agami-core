@@ -78,7 +78,8 @@ Tabs: Datasource · Review · Subject areas · Tables · Metrics · Entities ·
 Joins · Examples · Queued. Live search + status filters per tab.
 • Review tab — the sign-off queue: Approve / Reject the metrics (must be
   signed off before queries use them), entities, and inferred joins, with a
-  one-click "Approve all" for the confident ones.
+  one-click "Approve all" for the confident ones and a matching "Reject all"
+  (one reason, recorded on each rejected item in curation_log.jsonl).
 • Tables/Metrics/… — browse + edit; Exclude tables/columns you don't want
   queried (a column offers "exclude all N named <col>" to drop it everywhere);
   add metrics; edit datasource.md.
@@ -134,6 +135,7 @@ It prints `{data, anomalies, needs_judgment}`:
   {"op": "exclude", "kind": "table", "area": "sales", "name": "CUSTOMERS", "column": "EMAIL"},
   {"op": "approve", "kind": "metric", "area": "sales", "name": "total_revenue", "at": "2026-06-10T17:51:41Z"},
   {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
+  {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_discount", "reason": "not a real metric"},
   {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"}
 ]
 ```
