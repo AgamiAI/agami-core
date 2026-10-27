@@ -782,19 +782,79 @@ def _test_run_flags(table_name: str, result: dict) -> list[dict]:
     return flags
 
 
+# How many flag columns the flag_rates summary lists by name; the rest are counted.
+_LISTED_FLAG_COLUMNS = 20
+
+
+def _parse_flag_rates(values: Optional[list[str]]) -> tuple[bool, set[tuple[str, str]], list[str]]:
+    """(all, {(table, column)} lowercased, errors) from `--flag-rates` values, each `all` or a
+    comma-separated list of table.column."""
+    every, wanted, errors = False, set(), []
+    for tok in (x.strip() for v in values or () for x in v.split(",")):
+        if not tok:
+            continue
+        if tok.lower() == "all":
+            every = True
+        elif tok.count(".") == 1 and all(tok.split(".")):
+            wanted.add(tuple(tok.lower().split(".")))
+        else:
+            errors.append(f"--flag-rates {tok}: name a column as table.column, or pass all")
+    return every, wanted, errors
+
+
+def _flag_rate_problem(key: tuple[str, str], seen: dict, area: Optional[str]) -> str:
+    """Why a `--flag-rates` column got no proposal: missing, not a flag, or un-described."""
+    from . import build as B
+    name = ".".join(key)
+    c = seen.get(key)
+    if c is None:
+        return f"--flag-rates {name}: no such column in the model" + (
+            f" (in --area {area})" if area else "")
+    if c.description_source == "ai_unknown":
+        return (f"--flag-rates {name}: the column is un-described (ai_unknown); describe it, "
+                "then re-run")
+    if c.primary_key or not (c.type == "boolean" or (c.type == "integer"
+                                                     and B._FLAG_NAME_RE.match(c.name))):
+        return f"--flag-rates {name}: not a boolean or flag column (type {c.type})"
+    return f"--flag-rates {name}: no rate proposed"
+
+
+def _flag_rate_summary(columns: list[str]) -> dict:
+    """One entry for the flag columns given no rate, in place of a proposal for each (#530)."""
+    out: dict = {"available": len(columns), "columns": columns[:_LISTED_FLAG_COLUMNS]}
+    if len(columns) > _LISTED_FLAG_COLUMNS:
+        out["more"] = len(columns) - _LISTED_FLAG_COLUMNS
+    if columns:
+        out["hint"] = (f"{len(columns)} boolean column(s) could each have a share-of-true metric; "
+                       "add one with --flag-rates <table.column>[,...] or --flag-rates all")
+    return out
+
+
 def cmd_suggest_metrics(args) -> int:
-    """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
-    COUNT/SUM/AVG (#406) — and PRINT them; `--write` saves them proposed/unreviewed for bulk
+    """Infer a sensible per-table metric set — start→end durations, never a plain COUNT/SUM/AVG
+    (#406) — and PRINT them; `--write` saves them proposed/unreviewed for bulk
     sign-off in the explorer. An unsigned metric is still used, and the answer warns that it is
     unreviewed (Rule 1), so nothing is written until a person has seen the list (#514).
 
     `--profile` test-runs every binding first (one bounded read per table, opt-in because a billed
     warehouse charges for it): one that errors is never written, and a degenerate result (constant,
     all zero or NULL) is flagged. A flagged proposal — degenerate, a tiny table, an ambiguous or
-    audit-column pairing — is written only when `--names` names it."""
+    audit-column pairing — is written only when `--names` names it.
+
+    A share-of-true rate per boolean column is proposed only for the columns `--flag-rates` names
+    (or every one with `--flag-rates all`): proposed for each by default, they were nearly all the
+    suggested metrics on a large onboarding while the business defined one (#530). The output's
+    `flag_rates` counts the columns left out instead. `--cite` records where a requested rate is
+    defined in its description."""
     from . import build as B
     from . import curate
     from . import dialects as D
+    flag_all, flag_wanted, flag_errors = _parse_flag_rates(args.flag_rates)
+    cite = (args.cite or "").strip().rstrip(".").strip()
+    if cite and not (flag_all or flag_wanted):
+        _print_json({"error": "--cite records where a requested flag rate is defined; pass it "
+                              "with --flag-rates <table.column>"})
+        return 2
     org = L.load_datasource(args.root)
     if not org.storage_connections:
         _print_json({"error": "the model declares no storage connection, so there is no dialect "
@@ -824,7 +884,11 @@ def cmd_suggest_metrics(args) -> int:
 
     proposals: list[dict] = []
     written = skipped_opaque = 0
-    errors: list[str] = []
+    errors: list[str] = list(flag_errors)
+    flag_available: list[str] = []
+    flag_matched: set[tuple[str, str]] = set()
+    flag_present: list[str] = []
+    seen_columns: dict = {}
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
@@ -833,16 +897,27 @@ def cmd_suggest_metrics(args) -> int:
         for t in sa.tables_defined:
             # columns agami couldn't read yield no metric until described — count them so the
             # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
-            # A flag would have been a rate; a start or end timestamp half of a duration.
+            # A start or end timestamp would have been half of a duration; a flag a rate, when
+            # every flag's rate was asked for.
             skipped_opaque += sum(
                 1 for c in t.columns
                 if c.description_source == "ai_unknown" and not c.primary_key
-                and (c.type == "boolean"
-                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))
+                and ((flag_all and (c.type == "boolean" or (c.type == "integer"
+                                                             and B._FLAG_NAME_RE.match(c.name))))
                      or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
                                                     or B._END_NAME_RE.search(c.name)))))
+            seen_columns.update(((t.name.lower(), c.name.lower()), c) for c in t.columns)
+            asked = [c for c in B.flag_columns(t)
+                     if flag_all or (t.name.lower(), c.name.lower()) in flag_wanted]
+            flag_matched.update((t.name.lower(), c.name.lower()) for c in asked)
+            rate_names = {B.flag_rate_name(t.name, c.name) for c in asked}
+            if not flag_all:
+                flag_present += sorted(n for n in rate_names if n in existing)
+            flag_available += [f"{t.name}.{c.name}" for c in B.flag_columns(t)
+                               if B.flag_rate_name(t.name, c.name) not in rate_names | existing]
             dialect = dialects[conn_type.get(t.storage_connection, default_type)]
-            props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table)
+            props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table,
+                                                  flag_rates=[c.name for c in asked])
                      if m["name"] not in existing and (not named or m["name"] in named)]
             existing.update(m["name"] for m in props)
             results = _test_run_table(runner, t, dialect, props) if runner and props else {}
@@ -851,6 +926,9 @@ def cmd_suggest_metrics(args) -> int:
                 entry = {"name": met["name"], "subject_area": sa.name, "source_table": t.name,
                          "binding": next(iter(met["bindings"].values())),
                          "calculation": met["calculation"], "flags": extra["flags"]}
+                if cite and met["name"] in rate_names:
+                    met["description"] = f"Defined in: {cite}."
+                    entry["description"] = met["description"]
                 res = results.get(met["name"])
                 if res and "error" in res and t.source_type == "sql":
                     # The table's own SQL may be what failed, so the binding is unproven rather
@@ -876,8 +954,10 @@ def cmd_suggest_metrics(args) -> int:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
+    errors += [_flag_rate_problem(k, seen_columns, args.area)
+               for k in sorted(flag_wanted - flag_matched)]
     if args.write:
-        note = ("flag rates & durations written — review & sign off in the explorer (/agami-model); "
+        note = ("metrics written — review & sign off in the explorer (/agami-model); "
                 "give each one you keep a one-line description")
     else:
         note = ("dry run: nothing written — show these to the user, then re-run with --write "
@@ -891,7 +971,11 @@ def cmd_suggest_metrics(args) -> int:
     out = {"dry_run": not args.write, "test_run": runner is not None,
            "suggested": len(proposals), "would_write": sum(p["write"] for p in proposals),
            "written": written, "skipped_opaque": skipped_opaque, "errors": errors,
-           "proposals": proposals, "note": note}
+           "proposals": proposals, "flag_rates": _flag_rate_summary(flag_available),
+           "note": note}
+    if flag_present:
+        # Asked for by name but kept as it is, so a --cite run says why nothing changed.
+        out["flag_rates"]["already_in_model"] = flag_present
     unknown = sorted(named - {p["name"] for p in proposals})
     if unknown:
         out["unknown_names"] = unknown
@@ -1723,7 +1807,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explicit table.column (or bare column) list — overrides money detection; a name that states its currency keeps that unit")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) and print them; --write saves them proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (start→end durations, and flag rates only when --flag-rates asks; never a plain count/sum/avg) and print them; --write saves them proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
@@ -1734,6 +1818,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="only these proposals; a named one is written even when flagged (never when its binding errors)")
     sp.add_argument("--profile", default=None,
                     help="test-run every binding against this profile's database first (one bounded read per table)")
+    sp.add_argument("--flag-rates", nargs="+", default=None, dest="flag_rates", metavar="TABLE.COLUMN",
+                    help="also propose a share-of-true rate for these boolean columns (table.column, comma- or space-separated), or 'all' for every one; none by default")
+    sp.add_argument("--cite", default=None, metavar="SOURCE",
+                    help="with --flag-rates: the document that defines the requested rates; their description says 'Defined in: SOURCE.'")
     sp.set_defaults(func=cmd_suggest_metrics)
 
     sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
