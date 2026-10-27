@@ -900,11 +900,13 @@ def cmd_suggest_metrics(args) -> int:
 
 
 def cmd_describe_file(args) -> int:
-    """Apply many column descriptions from a lightweight TSV — one per line,
-    `<table.column>` or `<area.table.column>` then a TAB then the description — as ONE validated
-    curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
-    generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
+    """Apply many column descriptions from a file as ONE validated curate batch — a TSV
+    (`<table.column>` or `<area.table.column>`, a TAB, the description), or a CSV / JSON data
+    dictionary. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
+    generator script to build ops. `--source ai` (default) → ai_unvalidated (earns trust through
+    use); `--source metadata` → metadata, the customer's own dictionary text."""
     from . import curate
+    from . import dictionary as DD
     if args.file:
         p = Path(args.file).expanduser()
         try:
@@ -917,27 +919,31 @@ def cmd_describe_file(args) -> int:
             return 2
     else:
         text = sys.stdin.read()
-    ops = []
-    for ln in text.splitlines():
-        if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
-            continue
-        loc, desc = (p.strip() for p in ln.split("\t", 1))
-        segs = loc.split(".")
-        if not desc or len(segs) not in (2, 3):
-            continue
-        op = {"op": "edit", "kind": "table", "field": "description", "value": desc, "source": "ai"}
-        if len(segs) == 3:
-            op["area"], op["name"], op["column"] = segs
-        else:
-            op["name"], op["column"] = segs
-        ops.append(op)
-    if not ops:
-        _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
+    fmt = DD.format_for(args.file, args.format)
+    try:
+        rows = DD.parse(text, fmt)
+    except ValueError as exc:  # bad JSON or CSV quoting, a CSV without the needed header
+        _print_json({"error": f"could not read the {fmt.upper()} file: {exc}"})
+        return 2
+    root = Path(args.root).expanduser()
+    if not (root / "datasource.yaml").is_file() or not (root / "subject_areas").is_dir():
+        # otherwise every row comes back no_table with exit 0, as if the dictionary were the problem
+        _print_json({"error": f"no semantic model at {root.resolve()} (needs datasource.yaml and "
+                              "subject_areas/)"})
+        return 2
+    m = DD.match(root, rows, source=args.source)
+    report = {"unmatched": m["unmatched"], "kept_human": m["kept_human"],
+              "case_corrected": m["case_corrected"],
+              "schema_prefix_stripped": m["schema_prefix_stripped"]}
+    if not m["ops"]:
+        _print_json({"described": 0, "reason": "no row matched a column of the model", **report,
+                     "skipped": [], "errors": []})
         return 0
-    res = curate.apply(args.root, ops)
+    res = curate.apply(root, m["ops"])
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
-    _print_json({"described": len(res.applied), "skipped": res.skipped, "errors": res.errors})
+    _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
+                 "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1739,9 +1745,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="test-run every binding against this profile's database first (one bounded read per table)")
     sp.set_defaults(func=cmd_suggest_metrics)
 
-    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
+    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description), CSV or JSON data dictionary (stdin or --file) in one validated batch — no generator script; unmatched rows are listed")
     sp.add_argument("root")
-    sp.add_argument("--file", default=None, help="TSV path (default: read stdin)")
+    sp.add_argument("--file", default=None, help="TSV / CSV / JSON path, format from the extension (default: read TSV from stdin)")
+    sp.add_argument("--format", choices=["tsv", "csv", "json"], default=None,
+                    help="override the format the file extension implies")
+    sp.add_argument("--source", choices=["ai", "metadata"], default="ai",
+                    help="ai (default): generated text, stamped ai_unvalidated. metadata: taken as written "
+                         "from the customer's dictionary, stamped metadata; not checked against the data "
+                         "(see #564); never replaces a description a person wrote")
     sp.set_defaults(func=cmd_describe_file)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")

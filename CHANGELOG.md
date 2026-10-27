@@ -12,6 +12,27 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A customer's data dictionary is applied as `metadata` in one command (#522).** `sm describe-file`
+  stamped every description `source: ai`, so a dictionary the customer wrote could only land as their
+  own text through a script that built `curate` ops, which agami-connect forbids. It now takes
+  `--source metadata` and reads a CSV (`table`, `column`, `description`, optional `area` / `schema`
+  header; quoted text may hold commas and newlines) or JSON (a list of those objects, or an object
+  mapping `"table.column"` to a description) as well as the TSV it already read, by file extension or
+  `--format`. Each row is matched to a model column, exactly first and then ignoring case, and lands
+  on the model's spelling. A `SCHEMA.TABLE` in the table column is read as that schema's table when
+  the model has the schema, and listed under `schema_prefix_stripped`; a schema the model doesn't
+  have is reported as such. A row that can't be applied comes back under `unmatched` with a reason
+  (`no_table`, `no_column`, `ambiguous_table`, `ambiguous_column`, `malformed`, `empty_description`),
+  where a TSV's bad lines used to be skipped without a word; a CSV row with more fields than the
+  header is `malformed`, and broken quoting fails the whole file (exit 2) rather than merging rows. A
+  folder with no semantic model is refused (exit 2). A dictionary row never replaces a description a
+  person wrote; those are listed under `kept_human`. A `metadata` description is taken as written
+  from the customer's dictionary; it is not checked against the data (see #564). Without the flag
+  the command stamps `ai` as before. agami-connect applies a dictionary file this way and reports
+  the unmatched rows.
+
 - **A column's list of allowed values is the whole list, or none (#517).** Introspection built each
   `choice_field` from the first 500 rows the engine returned, so on a table of a few thousand rows a
   status with 14 values could list 6, and the list read as complete: a question about a missing value
