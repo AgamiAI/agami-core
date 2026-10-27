@@ -217,3 +217,80 @@ def test_a_named_area_op_with_a_missing_target_is_still_a_skip(tmp_path):
     assert [s["reason"] for s in res.skipped] == [
         "no metric named 'no such metric' in area 'billing'",
         "relationship customers->invoices not found in the area or the cross-area relationships"]
+
+
+_NULL_LISTS = {"cross_subject_area_metrics": None, "cross_subject_area_entities": None,
+               "cross_subject_area_relationships": None}
+
+
+def test_null_cross_area_lists_still_resolve_an_area_item(tmp_path):
+    # `key: null` on datasource.yaml loads as an empty list; the resolver must not trip on it.
+    _model(tmp_path, cross=[])
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump({**ds, **_NULL_LISTS}))
+    billing = tmp_path / "subject_areas" / "billing"
+    (billing / "metrics").mkdir()
+    (billing / "metrics" / "billed_customers.yaml").write_text(yaml.safe_dump(_CROSS_METRIC))
+    (billing / "entities").mkdir()
+    (billing / "entities" / "account.yaml").write_text(yaml.safe_dump(
+        {"name": "account", "maps_to": [{"table": "invoices", "column": "customer_id"}]}))
+    (billing / "relationships.yaml").write_text(yaml.safe_dump({"relationships": [
+        {"from_table": "invoices", "from_column": "payer_id", "to_table": "invoices", "to_column": "id",
+         "relationship": "many_to_one", "confidence": "inferred", "review_state": "unreviewed"}]}))
+    res = curate.apply(tmp_path, [
+        {"op": "approve", "kind": "metric", "name": "billed customers"},
+        {"op": "edit", "kind": "entity", "name": "account", "field": "description", "value": "a payer"},
+        {"op": "reject", "kind": "relationship", "name": "invoices->invoices"},
+    ], **_SIGN)
+    assert res.validated and len(res.applied) == 3 and not res.skipped and not res.errors, res.as_dict()
+    area = loader.load_datasource(tmp_path, include_rejected=True).subject_area("billing")
+    assert area.metrics[0].review_state == "approved"
+    assert area.relationships[0].review_state == "rejected"
+    for kind, name in [("metric", "no such metric"), ("entity", "no such entity"),
+                       ("relationship", "invoices->nowhere")]:
+        res = curate.apply(tmp_path, [{"op": "approve", "kind": kind, "name": name}], **_SIGN)
+        assert not res.applied and not res.skipped and len(res.errors) == 1, res.as_dict()
+
+
+def _two_revenues(root: Path) -> None:
+    rev = [{**_CROSS_METRIC, "name": "revenue ($)"},
+           {**_CROSS_METRIC, "name": "revenue (%)", "bindings": {"PostgreSQL": "AVG(invoices.id)"}}]
+    _model(root, cross=[_JOIN], ds_extra={"cross_subject_area_metrics": rev})
+
+
+@pytest.mark.parametrize("name", ["revenue ($)", "revenue (%)"])
+def test_an_exact_name_picks_one_of_two_cross_area_metrics_sharing_a_slug(tmp_path, name):
+    _two_revenues(tmp_path)
+    res = curate.apply(tmp_path, [{"op": "approve", "kind": "metric", "name": name}], **_SIGN)
+    assert res.validated and res.applied and not res.errors, res.as_dict()
+    states = {m.name: m.review_state
+              for m in loader.load_datasource(tmp_path).cross_subject_area_metrics}
+    assert states[name] == "approved"
+    assert [s for n, s in states.items() if n != name] == ["unreviewed"]
+
+
+def test_approve_queue_signs_off_two_cross_area_metrics_sharing_a_slug(tmp_path):
+    _two_revenues(tmp_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cli.main(["approve-queue", str(tmp_path), "--signer", "you@example.com", "--role", "owner"])
+    out = json.loads(buf.getvalue())
+    assert rc == 0 and out["validated"] and len(out["applied"]) == 3 and not out["errors"], out
+    org = loader.load_datasource(tmp_path)
+    assert {m.review_state for m in org.cross_subject_area_metrics} == {"approved"}
+
+
+def test_a_slug_only_name_still_resolves_and_a_duplicate_exact_name_still_fails(tmp_path):
+    _two_revenues(tmp_path)
+    res = curate.apply(tmp_path, [{"op": "approve", "kind": "metric", "name": "revenue"}], **_SIGN)
+    assert not res.applied and "is in 2 places" in res.errors[0], res.as_dict()
+    _model(tmp_path / "m2", cross=[_JOIN], ds_extra={"cross_subject_area_metrics": [_CROSS_METRIC]})
+    res = curate.apply(tmp_path / "m2", [{"op": "approve", "kind": "metric", "name": "billed_customers"}],
+                       **_SIGN)
+    assert res.applied and not res.errors, res.as_dict()
+    # the same exact name in an area file and the cross-area list is still ambiguous
+    (tmp_path / "m2" / "subject_areas" / "billing" / "metrics").mkdir()
+    (tmp_path / "m2" / "subject_areas" / "billing" / "metrics" / "billed_customers.yaml").write_text(
+        yaml.safe_dump(_CROSS_METRIC))
+    res = curate.apply(tmp_path / "m2", [{"op": "reject", "kind": "metric", "name": "billed customers"}])
+    assert not res.applied and "is in 2 places (billing, cross-area)" in res.errors[0], res.as_dict()

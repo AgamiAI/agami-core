@@ -699,7 +699,9 @@ def _area_names(root: Path) -> list[str]:
 
 
 def _entries(doc: Any, key: str) -> list:
-    return doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
+    # `key: null` loads as an empty list, so it must read as one here too.
+    v = doc.get(key) if isinstance(doc, dict) else doc
+    return v if isinstance(v, list) else []
 
 
 # Where a cross-area entity / metric lives: a list on datasource.yaml, or its own file.
@@ -731,6 +733,10 @@ def _find_item(root: Path, kind: str, name: str, area: Optional[str]) -> tuple:
             doc = _load(path) or {}
             found += [("cross-area", path, key, doc, it) for it in _entries(doc, key)
                       if isinstance(it, dict) and _slug(str(it.get("name") or "")) == stem]
+    # Distinct names can share a slug (`revenue ($)`, `revenue (%)`): the exact declared name wins.
+    exact = [f for f in found if isinstance(f[4], dict) and f[4].get("name") == name]
+    if exact:
+        found = exact
     if len(found) == 1:
         return found[0][1:]
     if not found:

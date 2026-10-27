@@ -17,7 +17,8 @@ below corresponds to one such version.
   reported success with that change missing. A metric or entity defined across areas could not be
   curated at all, so `sm approve-queue` skipped every cross-area metric. An op with no area is now
   searched for in every area's files and in the cross-area joins, entities and metrics. Exactly one
-  match is applied. No match, or more than one (two joins between the same tables), fails the whole
+  match is applied; an entity or metric whose declared name equals the op's name exactly wins over
+  others that only share its file slug (`revenue ($)` and `revenue (%)`). No match, or more than one (two joins between the same tables), fails the whole
   batch with an error naming the op and the candidates, and nothing in the batch is written;
   `from_column` / `to_column` (or `area`) picks one. A join op whose named area doesn't hold the join
   also finds it in another area. An op that names an area behaves as before otherwise: a missing
