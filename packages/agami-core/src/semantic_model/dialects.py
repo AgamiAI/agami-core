@@ -700,12 +700,15 @@ class SQLite(Dialect):
 
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         # UNIQUE constraints and CREATE UNIQUE INDEX alike; origin 'pk' is the primary key's own
-        # index, and a partial index is unique only over its WHERE.
+        # index, and a partial index is unique only over its WHERE. An index written with its own
+        # COLLATE may be unique under a comparison a join's `=` does not use, so it isn't trusted.
         return (
             "SELECT il.name AS constraint_name, ii.name AS column_name "
             f"FROM pragma_index_list({self.quote_lit(table)}) il "
             "JOIN pragma_index_info(il.name) ii "
             "WHERE il.\"unique\" = 1 AND il.origin <> 'pk' AND il.partial = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM sqlite_master m WHERE m.type = 'index' "
+            "AND m.name = il.name AND m.sql IS NOT NULL AND UPPER(m.sql) LIKE '%COLLATE%') "
             "ORDER BY il.name, ii.seqno"
         )
 

@@ -266,8 +266,9 @@ def introspect(
     built: list[Table] = []
     _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
     budget = _CountBudget(_COUNT_BUDGET_S)
+    keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
     for i, (schema, table) in enumerate(pairs, 1):
-        t = _build_table(dialect, runner, schema, table, conn_name, report, budget)
+        t = _build_table(dialect, runner, schema, table, conn_name, report, budget, keys_unread)
         built.append(t)
         if i % _step == 0 or i == len(pairs):
             _progress(pp, f"columns+grain {i}/{len(pairs)}")
@@ -329,6 +330,7 @@ def introspect(
         existing = {k: next((t for _, t in cs if t.review_state != "rejected"), cs[0][1]) for k, cs in copies.items()}
         per_area: dict[tuple, Table] = {}   # (area, (schema, table)) -> that area's merged copy
         merged: list[Table] = []
+        unread: list[Table] = []   # merged tables whose keys were kept, not re-read
         retyped: dict[tuple, str] = {}   # (schema, table, column) whose type changed -> schema.table
         for t in built:
             _refuse_sql_table(existing, t)
@@ -339,14 +341,20 @@ def introspect(
                 fresh_keys.add((t.schema_name, t.name))
                 report.new_tables.append(_qualified(t))
                 continue
-            m, change = _merge_table(old, t)
+            keys_read = (t.schema_name, t.name) not in keys_unread
+            if not keys_read:
+                report.notes.append(f"unique keys not re-read for {_qualified(old)}: kept the stored ones")
+            m, change = _merge_table(old, t, keys_read=keys_read)
+            if not keys_read:
+                unread.append(m)
             # Already large, so its filters were settled when the seed was first offered and the
             # merge keeps them: listing the fresh seed would ask again about a table already answered.
             if old.performance_hints and (old.performance_hints.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
                 report.large_tables.pop(t.name, None)
             merged.append(m)
             for area, copy in copies[(old.schema_name, old.name)]:
-                per_area[(area, (old.schema_name, old.name))] = m if copy is old else _merge_table(copy, t)[0]
+                per_area[(area, (old.schema_name, old.name))] = (
+                    m if copy is old else _merge_table(copy, t, keys_read=keys_read)[0])
             for r in change.get("retyped", []):
                 retyped[((m.schema_name or "").lower(), m.name.lower(), r.split(":")[0].lower())] = _qualified(m)
             if change:
@@ -409,7 +417,7 @@ def introspect(
                 r.confidence, r.review_state = "proposed", "unreviewed"
                 report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(
                     f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
-        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget)
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread)
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
             f"{len(built)} total")
@@ -598,12 +606,13 @@ def _areas_untouched(prev: Datasource, root: Path) -> bool:
     return True
 
 
-def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]:
+def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[Table, dict[str, list[str]]]:
     """`old` with the structure `fresh` read from the database, and the curation kept.
 
     A column the database still has keeps every field but its type; a new one arrives as
     introspection built it; one the database no longer has stays, marked `stale`, so a description or
-    sign-off is never silently lost and a person decides. Returns the merged table and what changed."""
+    sign-off is never silently lost and a person decides. `keys_read` False keeps `old`'s unique keys,
+    since a failed read is not the database dropping them. Returns the merged table and what changed."""
     fresh_by = {c.name.lower(): c for c in fresh.columns}
     old_names = {c.name.lower() for c in old.columns}
     cols: list[Column] = []
@@ -638,7 +647,7 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
     restored_table = old.review_state == "stale"
     if restored_table:
         change.setdefault("table", []).append("back in the database")
-    unique_keys = _merged_unique_keys(fresh, cols, change)
+    unique_keys = _merged_unique_keys(fresh if keys_read else old, cols, change)
     if unique_keys != old.unique_keys:
         change.setdefault("unique keys", []).append(
             "; ".join(", ".join(k) for k in unique_keys) or "(none)")
@@ -660,8 +669,8 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
 
 
 def _merged_unique_keys(fresh: Table, cols: list[Column], change: dict) -> list[list[str]]:
-    """The database's unique keys as it reports them now, in the merged table's column spelling.
-    A key on a column the database dropped is gone with it."""
+    """`fresh`'s unique keys (the database's as it reports them now, or the stored ones when they
+    couldn't be read), in the merged table's column spelling. A key on a dropped column is gone with it."""
     gone = {n.lower() for n in change["dropped"]}
     by_lower = {c.name.lower(): c.name for c in cols}
     return [[by_lower[k.lower()] for k in key] for key in fresh.unique_keys
@@ -944,6 +953,7 @@ def _discover_tables(
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
+    keys_unread: Optional[set] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
     cols, mode = _columns(dialect, runner, schema, table)
@@ -964,6 +974,11 @@ def _build_table(
             f"size; set it by hand if you know the key."
         )
     unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows)
+    if unique_keys is None:
+        # Unknown, not none: a refresh keeps the stored keys rather than read this as their removal.
+        unique_keys = []
+        if keys_unread is not None and cols:
+            keys_unread.add((schema, table))
     pk_set = set(grain)
     for c in cols:
         c.primary_key = c.name in pk_set
@@ -1157,14 +1172,19 @@ def _grain(
 def _unique_keys(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
     grain: list[str], *, est_rows: Optional[int] = None,
-) -> list[list[str]]:
-    """The table's unique keys other than its grain, in the column spelling `cols` uses.
+) -> Optional[list[list[str]]]:
+    """The table's unique keys other than its grain, in the column spelling `cols` uses, or None
+    when a catalog read or a data check failed and the keys are unknown.
 
     Where the engine declares unique keys without enforcing them, a key is kept only when the data
     bears it out, the way an unenforced foreign key is confirmed by overlap: a single-column key
     whose non-null values are all distinct, on a table under the grain probe's size guard."""
     sql = dialect.sql_unique_keys(schema, table)
-    rows = _try(runner, sql) if sql else None
+    if not sql:
+        return []
+    rows = _try(runner, sql)
+    if rows is None:
+        return None
     if not rows:
         return []
     by_lower = {c.name.lower(): c.name for c in cols}
@@ -1188,15 +1208,27 @@ def _unique_keys(
         return keys
     if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
         return []
-    return [key for key in keys
-            if len(key) == 1 and _distinct_rows(dialect, runner, schema, table, key[0]) is not None]
+    kept = []
+    for key in keys:
+        if len(key) != 1:
+            continue
+        res = _try(runner, dialect.count_distinct_sql(schema, table, key[0]))
+        if res is None:
+            return None
+        if _all_distinct(res) is not None:
+            kept.append(key)
+    return kept
 
 
 def _distinct_rows(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, column: str,
 ) -> Optional[int]:
     """How many non-null rows `column` has when every one of their values is distinct, else None."""
-    res = _try(runner, dialect.count_distinct_sql(schema, table, column))
+    return _all_distinct(_try(runner, dialect.count_distinct_sql(schema, table, column)))
+
+
+def _all_distinct(res: Optional[list[dict]]) -> Optional[int]:
+    """`_distinct_rows` read off a probe's result rows."""
     if not res:
         return None
     try:
@@ -1293,16 +1325,19 @@ def _key_reason(t: Table, col: str) -> str:
 def _recheck_engine_joins(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
     report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
+    keys_unread: Optional[list[Table]] = None,
 ) -> None:
     """On a refresh, label each join the engine approved itself from the database's keys as they
     are now, and list every one whose label that changes. A join a person signed off or edited is
-    never touched, and one only the data says is one-to-one is flagged for review, not relabelled."""
+    never touched, nor one on a table whose keys this run couldn't read (`keys_unread`), and one
+    only the data says is one-to-one is flagged for review, not relabelled."""
+    unread = {id(t) for t in keys_unread or []}
     for r in rels:
         if not _engine_approved(r) or r.on or not (r.from_column and r.to_column):
             continue
         ft = _endpoint(tables, r.from_table, r.from_schema)
         tt = _endpoint(tables, r.to_table, r.to_schema)
-        if ft is None or tt is None:
+        if ft is None or tt is None or id(ft) in unread or id(tt) in unread:
             continue
         card = build.infer_cardinality(ft, tt, [r.from_column], [r.to_column])
         if card == r.relationship:

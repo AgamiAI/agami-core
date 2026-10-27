@@ -2181,9 +2181,9 @@ def _aggregate_reports(tree, org: Datasource,
         sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
         declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
                     if sites else [])
-        join_statuses = ([(js.scope, _weighed_status(js, _join_site_status(js, declared)[0], tidx, org),
-                           f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
-                          for js in sites], written - len(sites))
+        weighed = _weighed_statuses(sites, [_join_site_status(js, declared) for js in sites], tidx, org)
+        join_statuses = ([(js.scope, status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                          for js, status in zip(sites, weighed)], written - len(sites))
     return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
 
 
@@ -2202,26 +2202,58 @@ def _names_in_several_schemas(org: Datasource) -> set[str]:
     return {name for name, schemas in seen.items() if len(schemas) > 1}
 
 
-def _weighed_status(js: "_JoinSite", status: str, tidx: dict[str, tuple], org: Datasource) -> str:
-    """`status`, unless the model declares no such join but its columns are the whole of a key on
-    both sides: one row meets at most one row, so it repeats nothing and the number stays clean."""
-    if status != UNDECLARED or not js.pairs:
-        return status
+def _weighed_statuses(sites: "list[_JoinSite]", results: "list[tuple[str, Optional[Relationship]]]",
+                      tidx: dict[str, tuple], org: Datasource) -> list[str]:
+    """Each join's status, an undeclared one reported `_KEYED_ONE_TO_ONE` when its columns are the
+    whole of a key on both sides and no other join that can feed the same numbers could fan. A fan
+    further along could repeat rows through the keyed join, and following it is #595's to do."""
+    several = _names_in_several_schemas(org) if sites else set()
+    keyed = [status == UNDECLARED and _keyed_one_to_one(js, tidx, several)
+             for js, (status, _match) in zip(sites, results)]
+    out = []
+    for i, (js, (status, _match)) in enumerate(zip(sites, results)):
+        others = [j for j, other in enumerate(sites) if j != i and (
+            other.scope == js.scope or other.scope.startswith("cte:") or js.scope.startswith("cte:"))]
+        if keyed[i] and all(keyed[j] or (results[j][0] == DECLARED and results[j][1] is not None
+                                         and results[j][1].relationship == "one_to_one")
+                            for j in others):
+            out.append(_KEYED_ONE_TO_ONE)
+        else:
+            out.append(status)
+    return out
+
+
+def _keyed_one_to_one(js: "_JoinSite", tidx: dict[str, tuple], several: set[str]) -> bool:
+    """Whether the join's columns are the whole of a key on both sides, so one row meets at most one."""
+    if not js.pairs or not isinstance(js.node.this, exp.Table):
+        return False
+    # The pairs carry base-table names, so every equality must be on this join's own right-hand
+    # alias: `JOIN b b2 ON a.code = b1.code` constrains nothing about b2.
+    right = js.node.this.alias_or_name
+    for conj in _and_conjuncts(js.node.args.get("on")):
+        if (isinstance(conj, exp.EQ) and isinstance(conj.this, exp.Column)
+                and isinstance(conj.expression, exp.Column) and conj.this.table and conj.expression.table
+                and [conj.this.table, conj.expression.table].count(right) != 1):
+            return False
     cols: dict[str, list[str]] = {}
     for pair in js.pairs:
         # `a.x = a.y` compares a table with itself and constrains nothing between the two.
         if len(pair) != 2 or len({key for key, _ in pair}) != 2:
-            return status
+            return False
         for table_key, column in pair:
             cols.setdefault(table_key, []).append(column)
-    if len(cols) != 2 or set(cols) & _names_in_several_schemas(org):
+    if len(cols) != 2 or set(cols) & several:
         # The pairs carry bare names, and a name two schemas define could borrow the other's key.
-        return status
+        return False
+    # A table read twice in this SELECT leaves the pairs unable to say which instance each one is.
+    reads = [_tkey(tbl.name) for tbl in _own_table_refs(_enclosing_select(js.node))]
+    if any(reads.count(table_key) > 1 for table_key in cols):
+        return False
     for table_key, columns in cols.items():
         hit = tidx.get(table_key)
         if hit is None or not hit[0].unique_on(columns):
-            return status
-    return _KEYED_ONE_TO_ONE
+            return False
+    return True
 
 
 def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
@@ -3535,8 +3567,8 @@ def assemble_receipt(
     declared_pairs = ([(rel, _declared_pairs(rel, dialect)) for rel in _cardinality_index(org)]
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
-    for js in join_sites:
-        status, match = _join_site_status(js, declared_pairs)
+    join_results = [_join_site_status(js, declared_pairs) for js in join_sites]
+    for js, (status, match) in zip(join_sites, join_results):
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
         # per-relationship build had — it printed a signed-off trail beside a join written on the
@@ -3929,8 +3961,9 @@ def assemble_receipt(
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
     reports = _aggregate_reports(
         tree, org, ctx=None, visible=visible, tidx=tidx,
-        join_statuses=([(it["scope"], _weighed_status(js, it["status"], tidx, org), it["from_to"])
-                        for js, it in zip(join_sites, join_items)], dropped_joins),
+        join_statuses=([(it["scope"], status, it["from_to"])
+                        for status, it in zip(_weighed_statuses(join_sites, join_results, tidx, org), join_items)],
+                       dropped_joins),
     )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
@@ -4528,11 +4561,15 @@ def _own_alias_map(sel: "exp.Select | None") -> dict[str, str]:
     `walk` yields the node it prunes at, hence the `isinstance` on the way out: the nested SELECT
     itself comes back, and it is not a table reference.
     """
+    return {(tbl.alias or tbl.name): tbl.name for tbl in _own_table_refs(sel)}
+
+
+def _own_table_refs(sel: "exp.Select | None") -> list["exp.Table"]:
+    """The table references THIS SELECT reads itself, in order, repeats kept (see `_own_alias_map`)."""
     if sel is None:
-        return {}
+        return []
     boundary = sel.walk(prune=lambda node: isinstance(node, exp.Select) and node is not sel)
-    return {(tbl.alias or tbl.name): tbl.name
-            for tbl in boundary if isinstance(tbl, exp.Table)}
+    return [tbl for tbl in boundary if isinstance(tbl, exp.Table)]
 
 
 def _computed_relations(sel: "exp.Select | None") -> frozenset[str]:

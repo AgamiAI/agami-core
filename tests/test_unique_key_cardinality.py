@@ -553,3 +553,93 @@ def test_a_description_edit_keeps_the_engine_sign_off(db, tmp_path):
           "field": "description", "value": "each person has one passport"}
     assert curate.apply(root, [op]).validated
     assert _rels(L.load_datasource(root))[("passports", "users")].signed_off_by == "agami_introspect"
+
+
+# --- review fixes (second round) -----------------------------------------------------------------
+
+
+def _model_from(tmp_path: Path, script: str) -> m.Datasource:
+    path = tmp_path / "r.db"
+    con = sqlite3.connect(path)
+    con.executescript(script)
+    con.commit()
+    con.close()
+    I.introspect("acme", "sqlite", runner=_runner(path), artifacts_dir=tmp_path / "art")
+    return L.load_datasource(tmp_path / "art" / "acme")
+
+
+def test_a_second_alias_of_a_keyed_table_is_not_settled_by_the_first_ones_key(tmp_path):
+    org = _model_from(tmp_path, "CREATE TABLE a(id INTEGER PRIMARY KEY, code TEXT UNIQUE, amount NUMERIC);"
+                                "CREATE TABLE b(id INTEGER PRIMARY KEY, code TEXT UNIQUE);")
+    plain = "SELECT SUM(a.amount) AS s FROM a JOIN b ON a.code = b.code"
+    assert _statuses(org, plain) == [(rt.NOT_MULTIPLIED, [])]
+    # b2's ON constrains b1, so b2 repeats every row of a.
+    twice = ("SELECT SUM(a.amount) AS s FROM a JOIN b b1 ON a.code = b1.code "
+             "JOIN b b2 ON a.code = b1.code")
+    assert _statuses(org, twice) == [(rt.UNDETERMINED, [])]
+    assert [r.status for r in rt.pre_flight_check(twice, org).aggregates] == [rt.UNDETERMINED]
+    both = ("SELECT SUM(a.amount) AS s FROM a JOIN b b1 ON a.code = b1.code "
+            "JOIN b b2 ON a.code = b2.code")
+    assert _statuses(org, both) == [(rt.UNDETERMINED, [])]
+
+
+def test_a_keyed_join_followed_by_a_fan_is_not_called_clean(tmp_path):
+    org = _model_from(tmp_path,
+                      "CREATE TABLE users(id INTEGER PRIMARY KEY);"
+                      "CREATE TABLE accounts(id INTEGER PRIMARY KEY, holder INTEGER UNIQUE, balance NUMERIC);"
+                      "CREATE TABLE sessions(id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id));")
+    keyed = "SELECT SUM(a.balance) AS b FROM accounts a JOIN users u ON a.holder = u.id"
+    assert [j["status"] for j in rt.assemble_receipt(org, keyed)["joins"]["items"]] == [rt.UNDECLARED]
+    assert _statuses(org, keyed) == [(rt.NOT_MULTIPLIED, [])]
+    fanned = keyed + " JOIN sessions s ON s.user_id = u.id"
+    assert _statuses(org, fanned) == [(rt.UNDETERMINED, [])]
+    assert [r.status for r in rt.pre_flight_check(fanned, org).aggregates] == [rt.UNDETERMINED]
+
+
+def test_a_sqlite_unique_index_with_its_own_collation_is_not_a_key(tmp_path):
+    con = sqlite3.connect(tmp_path / "c.db")
+    con.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, code TEXT COLLATE NOCASE, u TEXT UNIQUE,"
+                      " v TEXT, w TEXT);"
+                      "CREATE UNIQUE INDEX t_code ON t(code COLLATE BINARY);"
+                      "CREATE UNIQUE INDEX t_v ON t(v);")
+    keys = I._unique_keys(D.SQLite(), _sqlite_runner(con), "main", "t",
+                          _cols("id", "code", "u", "v", "w"), ["id"])
+    assert sorted(keys) == [["u"], ["v"]]
+
+
+def test_a_failed_unique_key_read_is_unknown_not_none(tmp_path):
+    con = sqlite3.connect(tmp_path / "e.db")
+    con.executescript("CREATE TABLE t(id INTEGER PRIMARY KEY, a INT);")
+    assert I._unique_keys(D.SQLite(), _sqlite_runner(con), "main", "t", _cols("id", "a"), ["id"]) == []
+
+    def failing(sql: str) -> list[dict]:
+        raise RuntimeError("permission denied")
+    assert I._unique_keys(D.SQLite(), failing, "main", "t", _cols("id", "a"), ["id"]) is None
+
+    def probe_fails(sql: str) -> list[dict]:
+        if "COUNT(DISTINCT" in sql.upper():
+            raise RuntimeError("timeout")
+        return [{"constraint_name": "u_a", "column_name": "a"}]
+    assert I._unique_keys(D.get_dialect("redshift"), probe_fails, "public", "t",
+                          _cols("id", "a"), ["id"]) is None
+
+
+def test_a_refresh_that_cannot_read_unique_keys_keeps_them_and_the_one_to_one_label(db, tmp_path):
+    art = tmp_path / "art"
+    _build(db, art)
+    root = art / "acme"
+    assert _rels(L.load_datasource(root))[("passports", "users")].relationship == "one_to_one"
+    base = _runner(db)
+
+    def no_index_access(sql: str) -> list[dict]:
+        if "pragma_index_list" in sql:
+            raise RuntimeError("permission denied")
+        return base(sql)
+
+    _, report = I.introspect("acme", "sqlite", runner=no_index_access, artifacts_dir=art, append=True)
+    back = L.load_datasource(root)
+    assert _table(back, "passports").unique_keys == [["person_id"]]
+    assert _table(back, "users").unique_keys == [["email"]]
+    assert _rels(back)[("passports", "users")].relationship == "one_to_one"
+    assert "unique keys not re-read for main.passports: kept the stored ones" in report.notes
+    assert not any("joins corrected" in k for c in report.changes.values() for k in c)

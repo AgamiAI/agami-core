@@ -31,9 +31,15 @@ below corresponds to one such version.
   tables in the explorer makes the sign-off theirs (with no signer recorded, the engine's sign-off
   is cleared and the join waits for review), so a refresh leaves the edit alone. Only enabled,
   valid keys count: an invalid PostgreSQL index, a disabled SQL Server index and a disabled or
-  unvalidated Oracle constraint are not read, and a SQLite unique index over an expression is not
-  shortened to its plain columns. Labelling reads each table's own keys, so two tables of one name
-  in two schemas no longer lend each other a key, at introspection or at query time.
+  unvalidated Oracle constraint are not read, a SQLite unique index over an expression is not
+  shortened to its plain columns, and a SQLite unique index written with its own `COLLATE` is not
+  trusted. Labelling reads each table's own keys, so two tables of one name in two schemas no longer
+  lend each other a key, at introspection or at query time. At query time a join the model doesn't
+  declare counts as one-to-one by its keys only when its `ON` is on its own table, that table is read
+  once in the query, and every other join beside it is one-to-one too; otherwise its numbers stay
+  `undetermined`. A refresh that can't read a table's unique keys (a failed catalog read or data
+  check) keeps the stored ones and leaves that table's joins alone, with a note
+  `unique keys not re-read for <table>`.
 
   **Reading a model:** a table that sets `unique_keys` is refused by a release older than this
   one, which does not know the key. Upgrade every server that reads the model (including deploy
