@@ -18,7 +18,7 @@ below corresponds to one such version.
   approved` with the old signer and time, so a receipt reported a definition nobody approved as
   signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
   reports it as not signed off until someone re-approves it, which records the new signer and time.
-  Only `description`, `other_names`, a metric's `business_question`, an entity's `caveats` and
+  Only `description`, `other_names`, a metric's `business_question`, a metric's or entity's `caveats`, an entity's
   `plural`, and a join's `for_questions_about` keep the approval; every other field,
   including any added later, counts as a change, and an edit that sets a field to the value it
   already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
@@ -33,6 +33,22 @@ below corresponds to one such version.
   stale instead, and a refresh still leaves it alone, since it re-labels only the joins introspection
   approved itself; a refresh that lowers a stale join's confidence because a column's type changed
   keeps it `stale`.
+
+### Added
+
+- **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
+  of a metric's formula ("gives no value when the start date is missing") went into its description
+  or calculation, where it reads as part of the definition. A metric now takes an optional
+  `caveats` list, validated like a column's (no empty entries) and editable through `sm curate`
+  and the model explorer. It is served wherever the metric is: the metric's entry in
+  `get_datasource_schema`, metric search, the admin model page, the explorer's metric card and the
+  review queue. The validator reads it too: a metric caveat saying a missing value counts as 0
+  silences `metric_null_filled` the way the calculation saying so already did.
+
+  **Reading a model:** a metric file that sets `caveats` is refused by a release older than this
+  one, which does not know the key; files with no caveats stay readable, because the key is left
+  out of a metric file when the list is empty. Upgrade every server that reads the model (including
+  deploy images) before writing metric caveats.
 
 ### Added
 

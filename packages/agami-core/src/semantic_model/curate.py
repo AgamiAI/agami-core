@@ -360,7 +360,8 @@ def _metric_item(area: Optional[str], mm) -> dict:
             "subtitle": f"metric · {area}" if area else "metric",
             "source_signal": mm.calculation,
             "signals": [{"ok": True, "text": mm.calculation}],
-            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines,
+            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines
+                           + [{"label": "Caveat", "text": c} for c in mm.caveats],
             "inferred": primary_sql, "origin": "llm_suggested",
             "bindings": mm.bindings, "business_question": mm.business_question,
             **_trust(mm)}
@@ -702,6 +703,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         _snapshot(backups, path)
         prior = copy.deepcopy(item)
         before = _set_trust(item, op, new_state, signer, role)
+        if kind == "metric" and not item.get("caveats"):
+            # clearing the caveats removes the key, so the file stays readable by an older release
+            item.pop("caveats", None)
         staled = _stale_on_edit(kind, prior, item, op)
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
         return (path, _position(_entries(doc, key), item) if key else None), before, staled
@@ -743,7 +747,7 @@ def _apply_one(root: Path, op: dict, signer, role,
 # (value_pattern and value_format_hint change which rows a typed value matches), so the edit sends the
 # item back to review (#537).
 _COSMETIC_FIELDS = {
-    "metric": frozenset({"description", "other_names", "business_question"}),
+    "metric": frozenset({"description", "other_names", "business_question", "caveats"}),
     "entity": frozenset({"description", "other_names", "caveats", "plural"}),
     "relationship": frozenset({"description", "for_questions_about"}),
 }

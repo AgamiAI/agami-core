@@ -152,6 +152,7 @@ def test_an_edit_of_what_an_approved_item_computes_or_connects_makes_it_stale(ro
     (_edit("entity", "customer", "caveats", ["test accounts included"]), "entity"),
     (_edit("relationship", "orders->customers", "description", "who placed the order"), "relationship"),
     (_edit("metric", "revenue", "business_question", "How much did we sell?"), "metric"),
+    (_edit("metric", "revenue", "caveats", ["refunds not netted"]), "metric"),
     (_edit("entity", "customer", "plural", "clients"), "entity"),
     (_edit("relationship", "orders->customers", "for_questions_about", ["who ordered"]), "relationship"),
 ], ids=lambda v: v if isinstance(v, str) else f"{v['kind']}-{v['field']}")

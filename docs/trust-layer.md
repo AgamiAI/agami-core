@@ -73,7 +73,7 @@ isn't `approved`. Its old `signed_off_*` stay as a record of the approval it los
 records the new signer and time.
 
 Only cosmetic fields keep the approval: `description` and `other_names`, a metric's
-`business_question`, an entity's `caveats` and `plural`, and a join's `for_questions_about`. They
+`business_question`, a metric's or entity's `caveats`, an entity's `plural`, and a join's `for_questions_about`. They
 describe an entry or steer which one a question picks, and change no SQL; an entity's
 `value_pattern` and `value_format_hint` change which rows a typed value matches, so they are not
 cosmetic. The list is an allow-list, so a field added later counts as a change to the
