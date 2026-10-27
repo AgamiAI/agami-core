@@ -16,6 +16,7 @@ Input (stdin or --block-file):
     include tables:  <area>.<table>
     exclude columns: <area>.<table>.<column>, ...
     curate-ops: [ {"op":"approve","kind":"metric","area":"...","name":"...","at":"..."}, ... ]
+                (a reject may carry a "reason"; it is kept and lands in curation_log.jsonl)
     new-metrics: [ {"area":"...","name":"...","calculation":"...", ...}, ... ]
     key-terminology: {"gold tier": "lifetime spend > $10k", ...}
     signed-off-by: jane@x.com (cfo)

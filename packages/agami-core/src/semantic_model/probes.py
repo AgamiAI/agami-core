@@ -290,11 +290,11 @@ def _declared_cardinality(rels: list, site: "RT._JoinSite") -> list[dict[str, An
 
 
 def _unique_by_model(table: Table, column: Column) -> bool:
-    """Whether the semantic model says one row per value of this column: a declared key, or the
-    whole of the table's grain. One rule, read by both emitters, so a column reached through a
-    declared join and an undeclared one gets the same answer."""
-    grain = [g.lower() for g in (getattr(table, "grain", None) or [])]
-    return bool(column.primary_key) or (bool(grain) and grain == [column.name.lower()])
+    """Whether the semantic model says one row per value of this column: a declared key, the
+    whole of the table's grain, or the whole of one of its unique keys. One rule, read by both
+    emitters, so a column reached through a declared join and an undeclared one gets the same
+    answer."""
+    return bool(column.primary_key) or table.unique_on([column.name])
 
 
 def _size_known(table: Table) -> bool:

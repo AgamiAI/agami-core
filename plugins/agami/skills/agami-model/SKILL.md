@@ -78,7 +78,8 @@ Tabs: Datasource · Review · Subject areas · Tables · Metrics · Entities ·
 Joins · Examples · Queued. Live search + status filters per tab.
 • Review tab — the sign-off queue: Approve / Reject the metrics (must be
   signed off before queries use them), entities, and inferred joins, with a
-  one-click "Approve all" for the confident ones.
+  one-click "Approve all" for the confident ones and a matching "Reject all"
+  (one reason, recorded on each rejected item in curation_log.jsonl).
 • Tables/Metrics/… — browse + edit; Exclude tables/columns you don't want
   queried (a column offers "exclude all N named <col>" to drop it everywhere);
   add metrics; edit datasource.md.
@@ -134,6 +135,7 @@ It prints `{data, anomalies, needs_judgment}`:
   {"op": "exclude", "kind": "table", "area": "sales", "name": "CUSTOMERS", "column": "EMAIL"},
   {"op": "approve", "kind": "metric", "area": "sales", "name": "total_revenue", "at": "2026-06-10T17:51:41Z"},
   {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
+  {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_discount", "reason": "not a real metric"},
   {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"}
 ]
 ```
@@ -155,6 +157,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
 
 **Failure** (`validated: false`):
 - The engine already reverted via git. Surface: *"⚠ Validator rejected the batch — all changes reverted. No files were modified."* Show `errors` verbatim. Stop; don't re-render.
+- The same happens when an op with no `area` names a join, entity or metric that isn't in the model, or one that matches more than one entry (e.g. two joins between the same tables): the error names the op and the candidates. Re-send the op with `from_column` / `to_column` (or `area` for an entity or metric), never drop it. An op without `area` is searched for in every subject area and in the cross-area joins, entities and metrics (an entity or metric whose declared name equals the op's `name` exactly wins over others that only share its slug); an op that names an area and misses its target is listed in `skipped[]` as before.
 
 Excluded entries vanish from the runtime model (the loader drops `review_state: rejected`) but stay visible in the explorer (which loads with `include_rejected=True`) so the user can re-include them.
 

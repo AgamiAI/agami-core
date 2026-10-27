@@ -174,7 +174,8 @@ def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path)
                             "description_source": "ai_unknown"})
     items.write_text(yaml.safe_dump(spec))
 
-    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    # --write: the default is a dry run since #514; this test is about what gets written.
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write"])
     d = json.loads(out)
     assert rc == 0 and d["written"] == 1, d
     assert d["skipped_opaque"] == 2, d
@@ -204,7 +205,8 @@ def test_suggest_metrics_never_resurrects_a_rejected_metric(tmp_path):
                 "review_state": "rejected"}
     (mets / "order_items_is_gift_rate.yaml").write_text(yaml.safe_dump(rejected))
 
-    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    # --write, or the run would write nothing anyway and the test would prove nothing (#514).
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write"])
 
     assert rc == 0 and json.loads(out)["written"] == 0, out
     on_disk = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())

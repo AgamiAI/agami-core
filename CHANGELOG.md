@@ -34,6 +34,164 @@ below corresponds to one such version.
   written even when the run stops part way. agami-connect's sampling step no longer says
   `SELECT * … LIMIT 5`, which was refused: it names the columns and runs with `--build-profile`.
 
+- **A column's list of allowed values is the whole list, or none (#517).** Introspection built each
+  `choice_field` from the first 500 rows the engine returned, so on a table of a few thousand rows a
+  status with 14 values could list 6, and the list read as complete: a question about a missing value
+  was written against the list, and the reconcile probe graded a correct literal as a query defect.
+  Values the catalog declares now come first, on a table of any size and with no table scan: a
+  Postgres enum type, a MySQL/MariaDB `ENUM(...)` column, and a CHECK constraint that only lists one
+  column's values (`col IN ('a','b')`, `col = 'a' OR col = 'b'`), read on Postgres, MySQL 8, SQL
+  Server, Oracle, SQLite and DuckDB; a declared list is kept as declared, up to 200 values, integer
+  columns included. Only a CHECK the engine enforces on every stored row counts (not Postgres `NOT
+  VALID` or `NO INHERIT`, MySQL `NOT ENFORCED`, a disabled or untrusted SQL Server CHECK, or an
+  Oracle one that is disabled or `NOVALIDATE`), a CHECK whose name another table also uses is skipped,
+  and one that casts the column to a non-string type, or casts a listed number in a way that can change
+  it (`CAST(1.9 AS INTEGER)`), declares nothing. Two columns whose names differ only by case (Postgres
+  `status` and `"STATUS"`) get no declared list. A declared list that can't be kept (over 200
+  values, two CHECKs that disagree, or a value the column's type can't hold) gives the column no list
+  at all. On SQL Server and a SQLite `COLLATE NOCASE` column a string list also gets a caveat that the
+  database compares values case-insensitively; on MySQL/MariaDB, case- and accent-insensitively. Postgres shows a CHECK's text only to the table's owner (the function that shows
+  it to any role is refused by the recon gate), so a SELECT-only role reads enums and no CHECKs. When nothing is declared, a small table (the same size rule as before) reads the
+  list with one bounded `SELECT DISTINCT` per column, at most 1,000 in a run; more than 25 values
+  gives no list rather than part of one. Keys (`*_key`, `*_sk`, `*_fk`), measures and years get no
+  list from the data. Values are listed exactly as stored: 'Open ' is no longer trimmed into 'Open',
+  and a column whose values differ only by spacing or case gets a caveat naming them; loading a model
+  no longer trims a `choice_field` key either. A refresh leaves an existing column's list alone, so
+  labels a person filled in are kept; new columns get the new lists.
+
+  **Reading a model:** a release older than this one trims `choice_field` keys as it loads them, so it
+  reads a list holding both 'Open' and 'Open ' as one 'Open'.
+
+### Fixed
+
+- **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
+  fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
+  alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out
+  many-to-one. Unique keys are now read from the catalog on PostgreSQL (unique constraints and
+  unique indexes), MySQL, SQLite, SQL Server, Oracle and DuckDB, and kept on the table as
+  `unique_keys`. Snowflake and Redshift declare unique keys without enforcing them, so one is kept
+  only when the data bears it out; BigQuery, Databricks and Trino have none. A join is one-to-one
+  when its columns are the whole of a key on both sides, and the same rule now labels a join a
+  query writes that the model doesn't declare, a join to a grouped CTE, and the references
+  enrichment adds. When no key settles a join but its many side turns out unique in the data, the
+  label is kept and the join waits for review with a note saying so, since data that is unique
+  today is not a promise. A refresh relabels each join introspection approved itself from the
+  database's keys and lists it under `joins corrected from the database's constraints`; a join a
+  person signed off is never changed, and a person's edit of a join's cardinality, columns, `on` or
+  tables in the explorer makes the sign-off theirs (with no signer recorded, the engine's sign-off
+  is cleared and the join waits for review), so a refresh leaves the edit alone. Only enabled,
+  valid keys count: an invalid PostgreSQL index, a disabled SQL Server index and a disabled or
+  unvalidated Oracle constraint are not read, a SQLite unique index over an expression is not
+  shortened to its plain columns, and a SQLite unique index written with its own `COLLATE` is not
+  trusted. Labelling reads each table's own keys, so two tables of one name in two schemas no longer
+  lend each other a key, at introspection or at query time. At query time a join the model doesn't
+  declare counts as one-to-one by its keys only when its `ON` is on its own table, that table is read
+  once in the query, and every other join beside it is one-to-one too; otherwise its numbers stay
+  `undetermined`. A refresh that can't read a table's unique keys (a failed catalog read or data
+  check) keeps the stored ones and leaves that table's joins alone, with a note
+  `unique keys not re-read for <table>`.
+
+  **Reading a model:** a table that sets `unique_keys` is refused by a release older than this
+  one, which does not know the key. Upgrade every server that reads the model (including deploy
+  images) before re-introspecting with this release. A model with no unique keys stays readable by
+  older releases. CI that validates the model with a newer release won't catch this.
+
+### Fixed
+
+### Fixed
+
+- **`sm suggest-metrics` prints its proposals before writing, and its bindings run and mean what
+  they say (#514).** It used to write straight into the model, and every proposal kept from it on a
+  large onboarding had to be fixed by hand. It is now a dry run by default: it prints each metric's
+  binding, calculation, source table and flags, and `--write` saves them (`--names` keeps only some,
+  or a flagged one a person chose). `--profile <name>` test-runs every binding first, one bounded
+  read per table (opt-in, as a pay-per-scan warehouse bills it): a binding that errors is never
+  written, and a constant, all-zero or NULL result is flagged `degenerate` and left out unless named.
+  Proposals on a table under 50 rows are flagged `low_confidence` (from the test run's own row
+  count when there is one). A table defined by SQL is test-run over that SQL; when that read fails
+  its proposals are flagged `not_test_run` and each proposal says whether it was test-run. The SQL itself: a mixed-case
+  column is quoted where the engine folds case (PostgreSQL, Redshift, Snowflake, Oracle), and a
+  column named after a word the engine reserves (`index` on SQLite, `key` on MySQL) is quoted; a pair of
+  DATE columns subtracts to days on PostgreSQL and DuckDB, where `EXTRACT(EPOCH ...)` of the integer
+  failed, and uses `DATE_DIFF` on BigQuery; BigQuery and Oracle timestamp pairs no longer fail; a
+  flag rate leaves NULL rows out instead of counting them false, and a T-SQL `BIT` flag is compared
+  rather than used as a predicate. A duration leaves out rows where the end is before the start and
+  its calculation says so (compared directly on engines whose day difference rounds a reversed
+  same-day pair to 0), pairs a planned start only with a planned end (and actual with actual),
+  uses an audit column such as `sys_created_on` only when nothing else fits, and offers an ambiguous
+  pairing flagged rather than picking one (its reason names up to three of the others). A storage type with no SQL dialect now fails clearly
+  instead of being written as PostgreSQL.
+
+- **A curate op on a join, entity or metric that doesn't name an area is resolved, or fails the batch (#538).**
+  An op on a join between two subject areas was skipped unless it named one side's area, so the batch
+  reported success with that change missing. A metric or entity defined across areas could not be
+  curated at all, so `sm approve-queue` skipped every cross-area metric. An op with no area is now
+  searched for in every area's files and in the cross-area joins, entities and metrics. Exactly one
+  match is applied; an entity or metric whose declared name equals the op's name exactly wins over
+  others that only share its file slug (`revenue ($)` and `revenue (%)`). No match, or more than one (two joins between the same tables), fails the whole
+  batch with an error naming the op and the candidates, and nothing in the batch is written;
+  `from_column` / `to_column` (or `area`) picks one. A join op whose named area doesn't hold the join
+  also finds it in another area. An op that names an area behaves as before otherwise: a missing
+  target is reported under `skipped` and the rest of the batch applies.
+
+### Fixed
+
+- **A second-order metric can sit on a base metric that spans several tables, and its table names
+  are quoted for the engine (#525).** `OUTERAGG({base})` with `inner_grain` used to be refused when
+  the base metric read more than one table, and the synthesized statement wrote table and column
+  names bare, so a mixed-case table failed on PostgreSQL. The synthesized inner query now joins the
+  table the base metric measures to each other source table by the one relationship declared
+  directly between them. That table is the base's `primary_table` (matched to its source table
+  with or without the schema), else the one table that declares every column the base's
+  aggregates read; a `primary_table` that is not a source table, or a base whose measured columns
+  span tables or can't be placed, is refused and asks for `primary_table`. It is also refused,
+  with the reason, when there is no such edge, more than one, or the join would fan out the base
+  aggregate's rows. A bare `inner_grain` column must be declared by exactly one of the tables; a
+  `table.column` entry (`orders.order date`, `line items.id`) must name a source table and a
+  column it declares. Identifiers are quoted only where the engine needs it (including words one
+  engine reserves, such as `index` on SQLite or `key` on MySQL), so a plain lower-case name is
+  emitted as before; a reserved lower-case name on Snowflake or Oracle is quoted in upper case
+  (`"LIMIT"`), the name those engines store it under.
+  Tables with the same name from different schemas in one base are refused. An `inner_grain` entry
+  naming a declared column (`order date`) is that column, quoted; the base metric's own subject
+  area is read first for the table's columns.
+
+### Fixed
+
+- **The receipt names the table behind a subquery or CTE alias, and reads a `FILTER` clause (#521).**
+  `COUNT(*) FILTER (WHERE s.x > 0)` over a subquery `s` listed the reference as `s.x`, and the
+  aggregate said it names no column. A column qualified by a derived table or a CTE is now followed
+  through a projection that passes one column through unchanged (bare or renamed) to its table, so
+  the reference reads `public.t.x`. A computed projection (`x / id AS r`) keeps the alias it was
+  written with. A qualifier is resolved in the query it was written in, so an alias reused in a
+  nested query no longer borrows the other query's table. An aggregate's `FILTER (WHERE …)` columns
+  count as columns it reads, the same as a `CASE` inside it, so a single-table `COUNT(*) FILTER (…)`
+  is resolved and one over a join can report a fan. A CTE name binds as the scope gate binds it (a
+  schema-qualified table, a later sibling or a non-recursive self-reference is the table), and a
+  column list (`WITH s(y, x)`, `AS s(y, x)`) renames outputs by position. A subquery's columns are
+  not credited to the outer query's aliases: a `FILTER` holding a subquery, an aggregate holding
+  one and an aggregate computed inside a nested SELECT report `undetermined` (a fan proven on the
+  outer columns still reports `multiplied`). A body with a star keeps the written alias.
+  What the scope gate refuses is unchanged, and a value read from a subquery is still not matched to
+  a metric.
+
+### Added
+
+- **The model explorer can reject in bulk, beside every bulk approve (#531).** Each "✓ Approve all N
+  proposed" and "✓ Approve N" now has a "✕ Reject all N proposed" / "✕ Reject N" next to it. It acts
+  on exactly the items shown (the sub-tab, kind group, status filter and search), skipping anything
+  already approved or rejected, confirms with the count and kind ("Reject 104 metrics?") and asks for
+  one reason, which is required. Each queued reject op carries that `reason`, which reaches
+  `curation_log.jsonl` with the op; the model itself does not store it. Like approvals, the rejects
+  are queued and applied only when the feedback block is submitted. A single reject still carries no
+  reason.
+
+### Fixed
+
+- **"Approve all" on the Metrics tab names the kind on each op (#531).** The Metrics tab's bulk
+  approve queued ops with no `kind`, so the Queued tab showed "approve undefined" and the curation
+  engine skipped them as "op needs kind + name". They now say `metric`, as the Review tab's do.
+
 ### Fixed
 
 - **The interpreter resolver no longer picks a Python that can never be brought up to date (#529).**

@@ -509,6 +509,11 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
     return res
 
 
+class BatchError(ValueError):
+    """An area-less op on a join, entity or metric that matches no entry, or more than one. A skip
+    would let the batch report success with that change missing, so apply() refuses the batch (#538)."""
+
+
 _VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
 # exclude == reject; include == set unreviewed + clear sign-off (model-explorer verbs)
 
@@ -516,7 +521,8 @@ _VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
 def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
           role: Optional[str] = None) -> ApplyResult:
     """Apply curation ops to the on-disk model, validate, commit (best-effort),
-    revert on validation failure. Each op: {op, kind, area, name, [column], [field, value]}."""
+    revert on validation failure. Each op: {op, kind, area, name, [column], [field, value],
+    [reason]} — a reject's `reason` is not stored on the model, only in curation_log.jsonl."""
     root = Path(root)
     res = ApplyResult()
     backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)
@@ -527,8 +533,14 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             _, before = _apply_one(root, op, signer, role, backups)
             res.applied.append(_op_label(op))
             logged.append({**op, "before": before})
+        except BatchError as e:
+            res.errors.append(f"{_op_label(op)}: {e}")
         except Exception as e:
             res.skipped.append({"op": _op_label(op), "reason": str(e)})
+    if res.errors:
+        _restore(list(backups.items()))
+        res.applied = []
+        return res
 
     # validate the whole model after the batch
     try:
@@ -610,8 +622,11 @@ def _apply_one(root: Path, op: dict, signer, role,
     name = op.get("name")
     if not kind or not name:
         raise ValueError("op needs kind + name")
-    # `area` is optional — resolve it from the model by name when the caller omits it.
-    area = op.get("area") or _resolve_area(root, op)
+    # `area` is optional — resolve it from the model by name when the caller omits it. Joins, entities
+    # and metrics can also live outside every area, so they search the cross-area places themselves.
+    area = op.get("area")
+    if not area and kind in ("table", "subject_area"):
+        area = _resolve_area(root, op)
 
     new_state = {"approve": "approved", "include": "unreviewed",
                  "reject": "rejected", "exclude": "rejected"}.get(action)
@@ -642,28 +657,11 @@ def _apply_one(root: Path, op: dict, signer, role,
                                         old_groups, doc.get("column_groups") or {}, backups)
         return path, before
 
-    if kind == "entity":
-        # entities/metrics are stored under the SLUGGED name (write_items uses _slug), so resolve
-        # the same way — a multi-word name ("total event sales") must find total_event_sales.yaml,
-        # not a literal "total event sales.yaml". _slug is idempotent, so an already-slugged name
-        # still resolves. (Tables keep their literal name — they're written verbatim, not slugged.)
-        path = _area_dir(root, area) / "entities" / f"{_slug(name)}.yaml"
-        if not path.exists():
-            raise FileNotFoundError(f"no entity named {name!r} in area {area!r}")
+    if kind in ("entity", "metric"):
+        path, key, doc, item = _find_item(root, kind, name, area)
         _snapshot(backups, path)
-        doc = _load(path)
-        before = _set_trust(doc, op, new_state, signer, role)
-        _dump(path, doc)
-        return path, before
-
-    if kind == "metric":
-        path = _area_dir(root, area) / "metrics" / f"{_slug(name)}.yaml"
-        if not path.exists():
-            raise FileNotFoundError(f"no metric named {name!r} in area {area!r}")
-        _snapshot(backups, path)
-        doc = _load(path)
-        before = _set_trust(doc, op, new_state, signer, role)
-        _dump(path, doc)
+        before = _set_trust(item, op, new_state, signer, role)
+        _dump(path, {key: doc} if isinstance(doc, list) else doc)
         return path, before
 
     if kind == "subject_area":
@@ -686,37 +684,147 @@ def _apply_one(root: Path, op: dict, signer, role,
         return path, before
 
     if kind == "relationship":
-        frm, _, to = name.partition("->")
-        # Where joins live: the area's relationships.yaml, then the org-level cross-area joins — in
-        # datasource.yaml or in their own file, which is where add_relationships writes them.
-        places: list[tuple[Path, str]] = []
-        if area:
-            places.append((_area_dir(root, area) / "relationships.yaml", "relationships"))
-        places += [(root / "datasource.yaml", "cross_subject_area_relationships"),
-                   (root / "cross_subject_area_relationships.yaml", "edges")]
-        # Count matches across every place before choosing: a join in the area and one between areas
-        # can share a table pair, and stopping at the first place with one match would pick one.
-        found = []
-        for path, key in places:
-            if not path.exists():
-                continue
-            doc = _load(path) or {}
-            rels = doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
-            found += [(path, key, doc, rels, hit) for hit in _matching_joins(rels, frm, to, op)]
-        if not found:
-            raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
-        if len(found) > 1:
-            raise ValueError(
-                f"{len(found)} joins match {name}; name the one you mean with from_column and "
-                "to_column, or its `on` condition, and from_schema / to_schema when the table "
-                "names repeat across schemas — the table pair alone would pick one at random")
-        path, key, doc, rels, hit = found[0]
+        path, key, doc, rels, hit = _find_join(root, op, area)
         _snapshot(backups, path)
         before = _set_trust(hit, op, new_state, signer, role)
+        _restamp_join_edit(hit, op, signer, role)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
         return path, before
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+# The fields that say which rows a join meets; a description edit changes none of them.
+_JOIN_STRUCTURE_FIELDS = frozenset({
+    "relationship", "from_column", "to_column", "on", "from_schema", "to_schema",
+    "from_table", "to_table",
+})
+
+
+def _restamp_join_edit(doc: dict, op: dict, signer: Optional[str], role: Optional[str]) -> None:
+    """A person's edit of an approved join's structure makes the sign-off theirs, so a refresh,
+    which relabels only the joins introspection approved itself, leaves the edit alone (#511).
+    With no signer to stamp, an engine sign-off is cleared and the join waits for review."""
+    if op.get("op") != "edit" or op.get("field") not in _JOIN_STRUCTURE_FIELDS:
+        return
+    if doc.get("review_state", "unreviewed") != "approved":
+        return
+    if signer and role:
+        doc["signed_off_by"], doc["signed_off_role"] = signer, role
+        doc["signed_off_at"] = op.get("at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif doc.get("signed_off_by") == "agami_introspect" or doc.get("signed_off_role") == "system":
+        doc["review_state"] = "unreviewed"
+        for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+            doc.pop(k, None)
+
+
+def _area_names(root: Path) -> list[str]:
+    sa_root = root / "subject_areas"
+    return sorted(p.name for p in sa_root.iterdir() if p.is_dir()) if sa_root.is_dir() else []
+
+
+def _entries(doc: Any, key: str) -> list:
+    # `key: null` loads as an empty list, so it must read as one here too.
+    v = doc.get(key) if isinstance(doc, dict) else doc
+    return v if isinstance(v, list) else []
+
+
+# Where a cross-area entity / metric lives: a list on datasource.yaml, or its own file.
+_CROSS_ITEMS = {"metric": ("cross_subject_area_metrics", "cross_subject_area_metrics.yaml", "metrics"),
+                "entity": ("cross_subject_area_entities", "cross_subject_area_entities.yaml", "entities")}
+
+
+def _find_item(root: Path, kind: str, name: str, area: Optional[str]) -> tuple:
+    """(path, list key or None, file doc, entry) of the one entity / metric an op names. With an area,
+    only that area's file, as before; without one, every area and the cross-area lists."""
+    # entities/metrics are stored under the SLUGGED name (write_items uses _slug) — a multi-word name
+    # ("total event sales") must find total_event_sales.yaml. _slug is idempotent.
+    sub, stem = _KINDS[kind][0], _slug(name)
+    if area:
+        path = _area_dir(root, area) / sub / f"{stem}.yaml"
+        if not path.exists():
+            raise FileNotFoundError(f"no {kind} named {name!r} in area {area!r}")
+        doc = _load(path)
+        return path, None, doc, doc
+    found: list[tuple[str, Path, Optional[str], Any, dict]] = []
+    for a in _area_names(root):
+        path = _area_dir(root, a) / sub / f"{stem}.yaml"
+        if path.exists():
+            doc = _load(path)
+            found.append((a, path, None, doc, doc))
+    ds_key, fname, fkey = _CROSS_ITEMS[kind]
+    for path, key in ((root / "datasource.yaml", ds_key), (root / fname, fkey)):
+        if path.exists():
+            doc = _load(path) or {}
+            found += [("cross-area", path, key, doc, it) for it in _entries(doc, key)
+                      if isinstance(it, dict) and _slug(str(it.get("name") or "")) == stem]
+    # Distinct names can share a slug (`revenue ($)`, `revenue (%)`): the exact declared name wins.
+    exact = [f for f in found if isinstance(f[4], dict) and f[4].get("name") == name]
+    if exact:
+        found = exact
+    if len(found) == 1:
+        return found[0][1:]
+    if not found:
+        raise BatchError(f"no {kind} named {name!r} in any subject area or the cross-area {sub}")
+    raise BatchError(f"{kind} {name!r} is in {len(found)} places ({', '.join(f[0] for f in found)}); "
+                     "pass the 'area' of the one you mean")
+
+
+def _join_label(where: str, r: dict) -> str:
+    on = (f"{r.get('from_table')}.{r.get('from_column')} -> {r.get('to_table')}.{r.get('to_column')}"
+          if r.get("from_column") else f"ON {r.get('on')}")
+    return f"{where}: {on}"
+
+
+def _find_join(root: Path, op: dict, area: Optional[str]) -> tuple:
+    """(path, list key, file doc, list, entry) of the one join an op names. The named area's file and
+    the cross-area joins are searched first, as before; when they hold none (or no area is named),
+    every area's file and the cross-area joins are."""
+    name = op["name"]
+    frm, _, to = name.partition("->")
+    # The org-level cross-area joins live in datasource.yaml or in their own file, which is where
+    # add_relationships writes them.
+    cross = [(root / "datasource.yaml", "cross_subject_area_relationships"),
+             (root / "cross_subject_area_relationships.yaml", "edges")]
+
+    def search(area_names: list[str]) -> list:
+        places = [(_area_dir(root, a) / "relationships.yaml", "relationships", a) for a in area_names]
+        places += [(p, k, None) for p, k in cross]
+        # Count matches across every place before choosing: a join in the area and one between areas
+        # can share a table pair, and stopping at the first place with one match would pick one.
+        out = []
+        for path, key, a in places:
+            if path.exists():
+                doc = _load(path) or {}
+                rels = _entries(doc, key)
+                out += [(a or f"cross-area {hit.get('from_subject_area')}->{hit.get('to_subject_area')} "
+                         f"in {path.name}", path, key, doc, rels, hit)
+                        for hit in _matching_joins(rels, frm, to, op)]
+        return out
+
+    found = search([area]) if area else []
+    if not found:
+        found = search(_area_names(root))
+    if area and len(found) != 1:
+        # An op naming an area keeps main's skip; only an area-less op fails the batch (#538).
+        if not found:
+            raise ValueError(f"relationship {name} not found in the area or the cross-area relationships")
+        raise ValueError(
+            f"{len(found)} joins match {name}; name the one you mean with from_column and "
+            "to_column, or its `on` condition, and from_schema / to_schema when the table "
+            "names repeat across schemas — the table pair alone would pick one at random")
+    if not found:
+        named = ", ".join(f"{k}={op[k]}" for k in ("from_column", "to_column", "on", "from_schema",
+                                                    "to_schema") if op.get(k))
+        raise BatchError(f"no join {name}{f' ({named})' if named else ''} in any area or the "
+                         "cross-area joins")
+    if len(found) > 1:
+        raise BatchError(
+            f"{len(found)} joins match {name} ({'; '.join(_join_label(f[0], f[5]) for f in found)}); "
+            "name the one you mean with from_column and to_column, or its `on` condition, and "
+            "from_schema / to_schema when the table names repeat across schemas — the table pair "
+            "alone would pick one at random")
+    return found[0][1:]
 
 
 def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
