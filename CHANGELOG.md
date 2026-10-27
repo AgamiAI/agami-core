@@ -12,6 +12,18 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+- **A curate op on a join, entity or metric that doesn't name an area is resolved, or fails the batch (#538).**
+  An op on a join between two subject areas was skipped unless it named one side's area, so the batch
+  reported success with that change missing. A metric or entity defined across areas could not be
+  curated at all, so `sm approve-queue` skipped every cross-area metric. An op with no area is now
+  searched for in every area's files and in the cross-area joins, entities and metrics. Exactly one
+  match is applied; an entity or metric whose declared name equals the op's name exactly wins over
+  others that only share its file slug (`revenue ($)` and `revenue (%)`). No match, or more than one (two joins between the same tables), fails the whole
+  batch with an error naming the op and the candidates, and nothing in the batch is written;
+  `from_column` / `to_column` (or `area`) picks one. A join op whose named area doesn't hold the join
+  also finds it in another area. An op that names an area behaves as before otherwise: a missing
+  target is reported under `skipped` and the rest of the batch applies.
+
 ### Fixed
 
 - **A second-order metric can sit on a base metric that spans several tables, and its table names
