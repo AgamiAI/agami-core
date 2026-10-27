@@ -146,6 +146,9 @@ class IntrospectReport:
     sensitive_columns: int = 0
     # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
     suspected_columns: list[str] = field(default_factory=list)
+    # (display text, (schema, table, column lower-cased)) per sample finding, so a refresh can drop
+    # the ones it did not apply; the text alone is ambiguous across schemas.
+    sample_findings: list[tuple[str, tuple]] = field(default_factory=list, repr=False)
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
     files_unchanged: int = 0
@@ -341,7 +344,7 @@ def introspect(
                 report.new_tables.append(_qualified(t))
                 continue
             m, change = _merge_table(old, t)
-            _drop_sample_findings(report, t.name, {c.name for c in old.columns})
+            _drop_sample_findings(report, t.schema_name, t.name, {c.name for c in old.columns})
             # Already large, so its filters were settled when the seed was first offered and the
             # merge keeps them: listing the fresh seed would ask again about a table already answered.
             if old.performance_hints and (old.performance_hints.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
@@ -656,12 +659,22 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
     return merged, {k: v for k, v in change.items() if v}
 
 
-def _drop_sample_findings(report: IntrospectReport, table: str, kept: set[str]) -> None:
-    """A refresh keeps an existing column as it was, so what the sample found on it was not applied."""
-    heads = {f"{table}.{c}" for c in kept}
-    report.suspected_columns = [s for s in report.suspected_columns if s.split(" (", 1)[0] not in heads]
-    report.notes = [n for n in report.notes
-                    if not (": flagged sensitive" in n and n.split(":", 1)[0] in heads)]
+_VALUE_SUSPECT_CAVEATS = frozenset(pii.VALUE_SUSPECT_CAVEATS)
+
+
+def _drop_sample_findings(report: IntrospectReport, schema: Optional[str], table: str, kept: set[str]) -> None:
+    """A refresh keeps an existing column as it was, so what the sample found on it was not applied.
+    Matched like the merge matches columns: by schema and table, column case-insensitively."""
+    gone = {(schema, table, c.lower()) for c in kept}
+    keep: list[tuple[str, tuple]] = []
+    for text, key in report.sample_findings:
+        if key not in gone:
+            keep.append((text, key))
+            continue
+        for lst in (report.suspected_columns, report.notes):
+            if text in lst:
+                lst.remove(text)  # one occurrence: another schema's same-named finding stays
+    report.sample_findings = keep
 
 
 def _retyped(c: Column, f: Column, change: dict) -> Column:
@@ -942,7 +955,8 @@ def _build_table(
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
-    cols, mode = _columns(dialect, runner, schema, table)
+    probe_sample: list = []
+    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample)
     report.mode_per_capability.setdefault("columns", mode)
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
@@ -972,10 +986,12 @@ def _build_table(
     # One live sample → date encoding/timezone AND choice_field skeletons for low-cardinality
     # coded columns (so catalog-mode coded columns get an enum skeleton the LLM labels, not
     # just the probe-mode path).
-    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, report=report)
+    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, report=report,
+                        sample=probe_sample if mode == "probe" else None)
     for c in cols:
-        if c.sensitive:
-            c.choice_field = None  # its keys would be personal values written into the model
+        # Its keys would be personal values written into the model.
+        if c.sensitive or _VALUE_SUSPECT_CAVEATS & set(c.caveats):
+            c.choice_field = None
 
     column_groups = build.maybe_column_groups(cols)
     column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
@@ -1016,8 +1032,11 @@ def _build_table(
 
 
 def _columns(
-    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
+    *, probe_sample: Optional[list] = None,
 ) -> tuple[list[Column], str]:
+    """The columns and how they were read. In probe mode the probe's sample rows are put in
+    `probe_sample`, so enrichment reuses them instead of reading the table again."""
     sql = dialect.sql_columns(schema, table)
     # `_try` answers None for a FAILED read and [] for a table with no columns. One failure is
     # retried: on a wide build over a VPN or tunnel a single dropped connection otherwise fell through
@@ -1035,12 +1054,15 @@ def _columns(
             cols.append(Column(name=r["column_name"], type=ctype, description=""))
         return cols, "catalog"
     # probe: header for names, sample for types
-    return _probe_columns(dialect, runner, schema, table), "probe"
+    pcols, sample = _probe_columns(dialect, runner, schema, table)
+    if probe_sample is not None:
+        probe_sample.extend(sample)
+    return pcols, "probe"
 
 
 def _probe_columns(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
-) -> list[Column]:
+) -> tuple[list[Column], list]:
     header = _try(runner, dialect.header_sql(schema, table)) or []
     names: list[str]
     if header and isinstance(header, list):
@@ -1058,7 +1080,7 @@ def _probe_columns(
         values = [row.get(n) for row in sample if row.get(n) not in (None, "")]
         cols.append(Column(name=n, type=_infer_value_type(values), description="",
                             choice_field=_maybe_choice(values) if covers else None))
-    return cols
+    return cols, sample
 
 
 # The fallback counts run one table after another, each under the per-statement limit, so a catalog
@@ -1616,6 +1638,7 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
     *, est_rows: Optional[int] = None, report: Optional[IntrospectReport] = None,
+    sample: Optional[list] = None,
 ) -> None:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
     (b) a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns (the LLM
@@ -1634,13 +1657,16 @@ def _enrich_from_sample(
                     if c.choice_field is None and not c.primary_key and c.foreign_key is None
                     and c.type in ("integer", "string") and not _looks_time_named(c.name)
                     and not _NOT_CHOICE_NAME_RE.search(c.name)]
-    pii_cands = [c for c in cols if c.type in ("string", "json", "date", "timestamp")]
+    # An integer column too: phone numbers stored as digits (and probe mode types digit text so).
+    pii_cands = [c for c in cols if c.type in ("string", "json", "date", "timestamp")
+                 or (c.type == "integer" and not c.primary_key and not _looks_time_named(c.name))]
     if not date_cands and not choice_cands and not iso_text_cands and not pii_cands:
         return
-    sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
+    if sample is None:
+        sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
         return
-    _pii_from_sample(table, pii_cands, sample, report)
+    _pii_from_sample(schema, table, pii_cands, sample, report)
     for c in date_cands:
         df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
         if df:
@@ -1674,7 +1700,8 @@ def _enrich_from_sample(
 
 
 def _pii_from_sample(
-    table: str, cols: list[Column], sample: list[dict], report: Optional[IntrospectReport],
+    schema: Optional[str], table: str, cols: list[Column], sample: list[dict],
+    report: Optional[IntrospectReport],
 ) -> None:
     """Flag or list personal data from the sampled VALUES: email-shaped values and JSON keys
     flag the column, phone- and birth-date-shaped values list it as suspected. Only reasons
@@ -1697,6 +1724,7 @@ def _pii_from_sample(
                     report.sensitive_columns += 1
             if report is not None:
                 report.notes.append(flag_note)
+                report.sample_findings.append((flag_note, (schema, table, c.name.lower())))
             continue
         if c.sensitive:
             continue
@@ -1705,7 +1733,9 @@ def _pii_from_sample(
             if caveat not in c.caveats:
                 c.caveats = [*c.caveats, caveat]
             if report is not None:
-                report.suspected_columns.append(f"{table}.{c.name} ({pii.VALUE_SUSPECT_CAVEATS[caveat]})")
+                text = f"{table}.{c.name} ({pii.VALUE_SUSPECT_CAVEATS[caveat]})"
+                report.suspected_columns.append(text)
+                report.sample_findings.append((text, (schema, table, c.name.lower())))
 
 
 def _infer_value_type(values: list) -> str:

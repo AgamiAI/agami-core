@@ -10,6 +10,7 @@ read here, never returned: callers get booleans, reasons and key paths.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from datetime import date
@@ -75,11 +76,23 @@ _MOBILE_NUMBER_WORDS = _NUMBER_WORDS | {"phone", "contact"}
 
 def tokens(name: str) -> list[str]:
     """The words of a column name, lower-cased: `customerEmail_2` -> customer, email, 2."""
-    return [t.lower() for t in _TOKEN_RE.findall(name or "")]
+    return [w for _, _, w in _token_spans(name)]
 
 
 def _token_spans(name: str) -> list[tuple[int, int, str]]:
-    return [(m.start(), m.end(), m.group().lower()) for m in _TOKEN_RE.finditer(name or "")]
+    spans = [(m.start(), m.end(), m.group().lower()) for m in _TOKEN_RE.finditer(name or "")]
+    # The splitter cuts `ipv4` into ipv|4 and `IPv4` into i|pv|4; join them back into one word.
+    out: list[tuple[int, int, str]] = []
+    for s, e, w in spans:
+        if w in ("4", "6") and out and out[-1][1] == s:
+            if out[-1][2] == "ipv":
+                out[-1] = (out[-1][0], e, "ipv" + w)
+                continue
+            if out[-1][2] == "pv" and len(out) > 1 and out[-2][2] == "i" and out[-2][1] == out[-1][0]:
+                out[-2:] = [(out[-2][0], e, "ipv" + w)]
+                continue
+        out.append((s, e, w))
+    return out
 
 
 def _mobile_is_number(words: list[str], i: int) -> bool:
@@ -243,7 +256,7 @@ def looks_like_birth_dates(column_name: str, values: Iterable[Any]) -> bool:
 
 def value_suspect_caveat(column_name: str, column_type: str, values: list) -> Optional[str]:
     """The suspected-tier caveat the sample earns, if any: phone- or birth-date-shaped values."""
-    if column_type == "string" and looks_like_phones(column_name, values):
+    if column_type in ("string", "integer") and looks_like_phones(column_name, values):
         return PHONE_SUSPECT_CAVEAT
     if column_type in ("string", "date", "timestamp") and looks_like_birth_dates(column_name, values):
         return DOB_SUSPECT_CAVEAT
@@ -254,9 +267,11 @@ def value_suspect_caveat(column_name: str, column_type: str, values: list) -> Op
 
 JSON_MAX_DEPTH = 3
 JSON_MAX_KEYS = 50
-# Only identifier-like keys are read or reported, so a key that is itself data (an address
-# used as a key) never reaches a caveat.
-_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_ -]{0,63}$")
+# Python-literal fallback is bounded: a larger value is not worth parsing for a key scan.
+_LITERAL_MAX_CHARS = 64 * 1024
+# A path segment is reported only when it reads like a field name; anything else may be data
+# (a person's name used as a key) and is shown as `*`.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _as_object(v: Any) -> Optional[dict]:
@@ -266,37 +281,67 @@ def _as_object(v: Any) -> Optional[dict]:
         try:
             obj = json.loads(v)
         except ValueError:
-            return None
+            obj = _literal_object(v)
         return obj if isinstance(obj, dict) else None
     return None
 
 
-def _walk(obj: dict, prefix: tuple, depth: int, leaves: dict[tuple, list]) -> None:
+def _literal_object(v: str) -> Optional[dict]:
+    """A Postgres json/jsonb value read through the CLI arrives as a Python repr
+    (`{'email': ...}`). literal_eval only builds literals; it never runs code."""
+    if len(v) > _LITERAL_MAX_CHARS:
+        return None
+    try:
+        obj = ast.literal_eval(v.strip())
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _walk(obj: dict, prefix: tuple, depth: int, leaves: dict[tuple, list], seen: set[tuple]) -> None:
+    """Collect leaf values per key path; `seen` gets (depth, key) for every key read."""
     for k, v in obj.items():
-        if not isinstance(k, str) or not _KEY_RE.match(k):
+        if not isinstance(k, str):
             continue
         path = (*prefix, k)
         if path not in leaves:
             if len(leaves) >= JSON_MAX_KEYS:
                 continue
             leaves[path] = []
+        seen.add((depth, k))
         items = v if isinstance(v, list) else [v]
         for item in items[:5]:
             if isinstance(item, dict):
                 if depth < JSON_MAX_DEPTH:
-                    _walk(item, path, depth + 1, leaves)
+                    _walk(item, path, depth + 1, leaves, seen)
             elif item is not None and not isinstance(item, list):
                 leaves[path].append(item)
 
 
+def _shown_path(path: tuple, counts: dict[tuple, int], n_objects: int) -> str:
+    def trusted(i: int) -> bool:
+        if not _IDENT_RE.match(path[i]):
+            return False
+        # A field name recurs across rows; a key that is data (a person's name) mostly doesn't.
+        return n_objects < 2 or counts.get((i + 1, path[i]), 0) * 2 >= n_objects
+    return ".".join(seg if trusted(i) else "*" for i, seg in enumerate(path))
+
+
 def json_pii_paths(table_name: str, values: Iterable[Any]) -> list[str]:
     """Key paths inside JSON-object values that hold personal data, by key name or by
-    email-shaped values (`email`, `contact.phone`). Empty when no value is a JSON object."""
+    email-shaped values (`email`, `contact.phone`). Empty when no value is a JSON object.
+    A segment that may itself be data is shown as `*` (`*.email`)."""
     leaves: dict[tuple, list] = {}
+    counts: dict[tuple, int] = {}
+    n_objects = 0
     for v in values:
         obj = _as_object(v)
         if obj is not None:
-            _walk(obj, (), 1, leaves)
+            n_objects += 1
+            seen: set[tuple] = set()
+            _walk(obj, (), 1, leaves, seen)
+            for p in seen:
+                counts[p] = counts.get(p, 0) + 1
     hits: list[tuple] = []
     for path, vals in leaves.items():
         if any(path[:i] in hits for i in range(1, len(path))):
@@ -304,7 +349,7 @@ def json_pii_paths(table_name: str, values: Iterable[Any]) -> list[str]:
         by_name = detect_sensitive(table_name, path[-1]) or strong_pii_name("_".join(path))
         if by_name or looks_like_emails(vals):
             hits.append(path)
-    return [".".join(p) for p in hits]
+    return list(dict.fromkeys(_shown_path(p, counts, n_objects) for p in hits))
 
 
 def json_pii_caveat(paths: list[str]) -> str:

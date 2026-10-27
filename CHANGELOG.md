@@ -21,8 +21,10 @@ below corresponds to one such version.
   values are mostly email addresses, lists phone-number-shaped and birth-date-shaped columns as
   suspected (with a caveat on the column, shown by `sm sensitive` and the explorer's PII tab), and
   flags a JSON column whose keys hold personal data, with a caveat naming the key paths
-  (`Contains personal data at: email, contact.phone`). A column holding emails or phone numbers no
-  longer gets a value list. No sampled value is written to the model or the report. An existing
+  (`Contains personal data at: email, contact.phone`); a key that may itself be data (a person's
+  name used as a key) is shown as `*`. Postgres JSON read through the CLI is recognised too. A column
+  holding emails or phone numbers (digit-only ones included) no longer gets a value list. No sampled
+  value is written to the model or the report. `ipv4_address`/`IPv4Address` stay suspected-only. An existing
   model keeps its flags on refresh; no model field is added.
 
 ### Added

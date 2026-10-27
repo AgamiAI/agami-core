@@ -244,3 +244,110 @@ def test_refresh_reports_no_sample_findings_for_kept_columns(tmp_path):
     org, rep = I.introspect("shop", "postgres", runner=_runner(), artifacts_dir=tmp_path, append=True)
     assert rep.suspected_columns == []
     assert not any("flagged sensitive" in n for n in rep.notes)
+
+
+# --- review fixes ----------------------------------------------------------------
+
+_REACH = [{"id": str(i), "reach": "5550100100" if i % 2 else "5550100101"} for i in range(12)]
+
+
+@pytest.mark.parametrize("probe", [False, True])
+def test_digit_only_phone_column_gets_no_choice_list(tmp_path, probe):
+    runner = make_catalog_runner(
+        tables=["events"],
+        columns={"events": [] if probe else [col("id", "integer", nullable=False), col("reach", "text")]},
+        sample=lambda sql: [dict(r) for r in _REACH])
+    t, _ = _events(tmp_path, runner)
+    reach = next(c for c in t.columns if c.name == "reach")
+    assert pii.PHONE_SUSPECT_CAVEAT in reach.caveats
+    assert reach.choice_field is None
+
+
+def test_json_data_keys_are_redacted_but_still_flagged():
+    rows = [json.dumps({"Demo Person": {"email": "you@example.com"}})]
+    assert pii.json_pii_paths("t", rows) == ["*.email"]
+    # An identifier-shaped key seen in fewer than half the objects is data too.
+    rows = [json.dumps({f"Person{i}": {"email": "you@example.com"}, "contact": {"phone": "x"}})
+            for i in range(4)]
+    assert pii.json_pii_paths("t", rows) == ["*.email", "contact.phone"]
+
+
+def test_json_data_key_never_reaches_caveat_or_report(tmp_path):
+    sample = [{"id": str(i), "profile": json.dumps({"Demo Person": {"email": "you@example.com"}})}
+              for i in range(3)]
+    runner = make_catalog_runner(
+        tables=["events"], columns={"events": [col("id", "integer", nullable=False), col("profile", "jsonb")]},
+        sample=lambda sql: [dict(r) for r in sample])
+    t, rep = _events(tmp_path, runner)
+    prof = next(c for c in t.columns if c.name == "profile")
+    assert prof.sensitive
+    assert prof.caveats == ["Contains personal data at: *.email"]
+    written = rep.render() + "".join(p.read_text() for p in (tmp_path / "shop").rglob("*") if p.is_file())
+    assert "Demo Person" not in written
+
+
+def test_json_python_repr_from_the_cli_is_read():
+    assert pii.json_pii_paths("t", [str({"email": "you@example.com"})]) == ["email"]
+    assert pii.json_pii_paths("t", ["{__import__('os').system('true'): 1}"]) == []  # never executed
+
+
+def test_json_python_repr_through_a_cli_shaped_runner_flags_the_column(tmp_path):
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.DictWriter(buf, fieldnames=["id", "profile"])
+    w.writeheader()
+    for i in range(3):
+        # What execute_sql's CSV writes for a native Postgres jsonb value: the Python repr.
+        w.writerow({"id": i, "profile": str({"email": f"user{i}@example.com", "tier": "gold"})})
+    rows = [I._Row(r) for r in csv.DictReader(io.StringIO(buf.getvalue()))]
+    runner = make_catalog_runner(
+        tables=["events"], columns={"events": [col("id", "integer", nullable=False), col("profile", "jsonb")]},
+        sample=lambda sql: rows)
+    t, _ = _events(tmp_path, runner)
+    prof = next(c for c in t.columns if c.name == "profile")
+    assert prof.sensitive and prof.caveats == ["Contains personal data at: email"]
+
+
+@pytest.mark.parametrize("name", ["ipv4_address", "ipv6_address", "IPv4Address", "IPv6Address"])
+def test_ip_address_variants_are_suspected_only(name):
+    assert not build.detect_sensitive("events", name)
+    assert build.suspected_pii(name)
+
+
+def _finding_report(schema, column):
+    rep = I.IntrospectReport(profile="shop", db_type="postgres", out_dir="", dry_run=True)
+    cols = [m.Column(name=column, type="string")]
+    I._pii_from_sample(schema, "events", cols, [{column: "+1 555 010 0100"}] * 3, rep)
+    return rep
+
+
+def test_refresh_drops_findings_only_for_the_kept_tables_schema():
+    rep = _finding_report("public", "reach")
+    other = _finding_report("private", "reach")
+    rep.suspected_columns += other.suspected_columns
+    rep.sample_findings += other.sample_findings
+    I._drop_sample_findings(rep, "public", "events", {"reach"})
+    assert rep.suspected_columns == ["events.reach (values look like phone numbers)"]
+    assert [k for _, k in rep.sample_findings] == [("private", "events", "reach")]
+
+
+def test_refresh_drops_findings_for_a_case_only_rename():
+    rep = _finding_report("public", "Reach")
+    I._drop_sample_findings(rep, "public", "events", {"reach"})
+    assert rep.suspected_columns == []
+
+
+def test_probe_mode_reads_one_sample_per_table(tmp_path):
+    seen: list[str] = []
+    rows = [{"id": str(i), "status": "open" if i % 2 else "closed", "created_on": "2026-01-02"}
+            for i in range(12)]
+
+    def sample(sql):
+        seen.append(sql)
+        return [dict(r) for r in rows]
+
+    runner = make_catalog_runner(tables=["events"], columns={"events": []}, sample=sample)
+    t, _ = _events(tmp_path, runner)
+    assert next(c for c in t.columns if c.name == "status").choice_field  # the probe's list
+    assert len(seen) == 1
