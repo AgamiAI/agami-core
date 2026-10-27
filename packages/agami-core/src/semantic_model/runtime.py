@@ -412,8 +412,93 @@ def _unscopable(detail: str) -> "guardrail.Refusal":
     )
 
 
+# Read under `execute_sql --build-profile` only (#523), a local, command-line run that builds the
+# model. Profiling needs the engine's catalog and the expansion of a JSON or array column; neither
+# reaches a column the model leaves out, so column scope still judges every column they name.
+_PROFILING_TABLE_FUNCTIONS = frozenset({
+    "jsonb_each", "jsonb_each_text", "json_each", "json_each_text", "json_tree",
+    "jsonb_array_elements", "jsonb_array_elements_text", "json_array_elements",
+    "json_array_elements_text", "jsonb_object_keys", "json_object_keys",
+    "unnest", "explode", "posexplode", "explode_outer", "posexplode_outer", "flatten",
+})
+# Structure only. pg_stats is left out on purpose: its sampled values would show a left-out column's
+# data.
+_PG_CATALOG_STRUCTURE = frozenset({
+    "pg_class", "pg_namespace", "pg_attribute", "pg_attrdef", "pg_constraint", "pg_index",
+    "pg_inherits", "pg_type", "pg_enum", "pg_description", "pg_tables", "pg_views",
+    "pg_matviews", "pg_indexes",
+})
+
+
+def _expands_a_column(node: "exp.Expression | None") -> bool:
+    """A profiling table function over a column: on the list, naming a column, and holding no
+    subquery that could read some other table's rows."""
+    if node is None or node.find(exp.Column) is None or node.find(exp.Select) is not None:
+        return False
+    if isinstance(node, exp.Unnest):
+        name = "unnest"
+    elif isinstance(node, exp.Anonymous):
+        name = node.name
+    elif isinstance(node, exp.Func):
+        name = node.sql_name()
+    else:
+        return False
+    return (name or "").lower() in _PROFILING_TABLE_FUNCTIONS
+
+
+def _is_catalog_relation(tbl: "exp.Table", dialect: "str | None") -> bool:
+    """A read-only catalog view a profiling run may read: `information_schema` on any engine (BigQuery
+    puts it in the table name), the structure tables of `pg_catalog`, and SQLite's schema table."""
+    schema, name = (tbl.db or "").lower(), (tbl.name or "").lower()
+    if schema == "information_schema" or name.startswith("information_schema."):
+        return True
+    if dialect in ("postgres", "redshift") and schema == "pg_catalog":
+        return name in _PG_CATALOG_STRUCTURE
+    if dialect == "sqlite" and schema in ("", "main"):
+        return name in ("sqlite_master", "sqlite_schema")
+    return False
+
+
+def _ordered_by_own_alias(col: "exp.Column") -> bool:
+    """A bare ORDER BY name its own SELECT gives as an output alias, which the engine resolves to that
+    output before any table's column."""
+    order = col.parent.parent if isinstance(col.parent, exp.Ordered) else None
+    sel = order.parent if isinstance(order, exp.Order) else None
+    return isinstance(sel, exp.Select) and any(
+        isinstance(e, exp.Alias) and e.alias.lower() == col.name.lower() for e in sel.expressions)
+
+
+def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
+                                      ctx: "GuardContext | None") -> "guardrail.Refusal | None":
+    """Under the build profile, a statement that reads a model table and also a catalog view or a
+    table function names every column with its table. A bare name the inner source lacks resolves to
+    the outer model table, and column scope does not follow it there (#523)."""
+    sidx = ctx.schema_index if ctx is not None and ctx.schema_index is not None else _schema_index(org)
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
+    cte_refs = _cte_references(tree)
+    named = [t for t in tree.find_all(exp.Table) if t.name and id(t) not in cte_refs]
+    catalog = any(_is_catalog_relation(t, dialect) for t in named)
+    declared = any(isinstance(_resolve_table(sidx, t), tuple) for t in named
+                   if not _is_catalog_relation(t, dialect))
+    expands = (any(not t.name for t in tree.find_all(exp.Table))
+               or tree.find(exp.Lateral, exp.Unnest) is not None)
+    if not declared or not (catalog or expands):
+        return None
+    bare = sorted({c.name for c in tree.find_all(exp.Column)
+                   if c.name and not c.table and not _ordered_by_own_alias(c)})
+    if not bare:
+        return None
+    return guardrail.refuse(
+        guardrail.RULE_UNSCOPABLE,
+        detail="under the build profile, a statement that reads a model table beside a catalog view "
+               "or a table function must qualify every column; unqualified: " + _echo_identifiers(bare),
+        remediation="Qualify each column with its table or alias (alias.column), then run it again.",
+    )
+
+
 def check_scopable(sql: str, org: Datasource,
-                   ctx: "GuardContext | None" = None) -> "guardrail.Refusal | None":
+                   ctx: "GuardContext | None" = None, *,
+                   build_profile: bool = False) -> "guardrail.Refusal | None":
     """Refuse a statement that parses perfectly and still presents a source the scope walk cannot
     reason about.
 
@@ -470,18 +555,19 @@ def check_scopable(sql: str, org: Datasource,
     # sitting in `.this`. Checked first because it is the shape the two gates above each look
     # straight through.
     for tbl in tree.find_all(exp.Table):
-        if not tbl.name:
+        if not tbl.name and not (build_profile and _expands_a_column(tbl.this)):
             return _unscopable(
                 "a FROM/JOIN source is a table function rather than a named table, so there is "
                 "nothing to check against the declared surface"
             )
     # sqlglot attaches a LATERAL under the From/Join for Postgres' `LATERAL (...)` and as a Select
     # property for Hive's `LATERAL VIEW`, so sweep the whole tree rather than the sources alone.
-    if tree.find(exp.Lateral) is not None:
-        return _unscopable(
-            "a FROM/JOIN source is a LATERAL rather than a named table, so there is nothing to "
-            "check against the declared surface"
-        )
+    for lateral in tree.find_all(exp.Lateral):
+        if not (build_profile and _expands_a_column(lateral.this)):
+            return _unscopable(
+                "a FROM/JOIN source is a LATERAL rather than a named table, so there is nothing to "
+                "check against the declared surface"
+            )
     # `VALUES` is swept whole-tree for the same reason, and the reason is not symmetry.
     # A parenthesized `VALUES` used as a set-operation ARM — `SELECT id FROM orders UNION ALL
     # (VALUES (1))` — is not a FROM/JOIN source at all: it hangs off the `Union` beside the select,
@@ -499,6 +585,10 @@ def check_scopable(sql: str, org: Datasource,
     # declared table written first cannot shield what follows it.
     for node in tree.find_all(exp.From, exp.Join):
         for src in [node.this, *(node.args.get("expressions") or [])]:
+            if build_profile and isinstance(src, exp.Lateral) and _expands_a_column(src.this):
+                continue
+            if build_profile and isinstance(src, exp.Unnest) and _expands_a_column(src):
+                continue
             if src is not None and not isinstance(src, (exp.Table, exp.Subquery)):
                 # The node's class name describes the SQL construct the caller wrote, not a value
                 # from it or a name from the model — value-free in the sense the contract means.
@@ -506,6 +596,8 @@ def check_scopable(sql: str, org: Datasource,
                     f"a FROM/JOIN source is a {type(src).__name__.upper()} rather than a named "
                     "table, so there is nothing to check against the declared surface"
                 )
+    if build_profile:
+        return _bare_column_beside_a_model_table(tree, org, ctx)
     return None
 
 
@@ -1613,7 +1705,8 @@ def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
 
 
 def check_table_scope(sql: str, org: Datasource,
-                      ctx: "GuardContext | None" = None) -> "guardrail.Refusal | None":
+                      ctx: "GuardContext | None" = None, *,
+                      build_profile: bool = False) -> "guardrail.Refusal | None":
     """Refuse a query that references a table not declared in the semantic model.
 
     **The boundary, stated: this is a 4b gate.** It refuses for exactly one reason — the SQL names
@@ -1660,12 +1753,15 @@ def check_table_scope(sql: str, org: Datasource,
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
             else _schema_index(org))
     cte_refs = _cte_references(tree)
+    dialect = (ctx.dialect if ctx is not None else _dialect_of(org)[0]) if build_profile else None
     offending: set[str] = set()
     ambiguous: dict[str, str] = {}  # folded name -> the caller's first spelling, for the echo
     for tbl in tree.find_all(exp.Table):
         name = tbl.name
         if not name or id(tbl) in cte_refs:
             continue  # a CTE an enclosing WITH defines, not a physical table
+        if build_profile and _is_catalog_relation(tbl, dialect):
+            continue
         resolved = _resolve_table(sidx, tbl)
         if resolved is None:
             # The caller's own qualified spelling: echoing only `orders` for `staging.orders` would

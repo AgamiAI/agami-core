@@ -115,7 +115,9 @@ def test_a_plan_that_is_not_a_list_of_runnable_items_runs_nothing(warehouse, mon
     assert _main(monkeypatch, "--batch", str(bad)) == 2 and "has no `out`" in capsys.readouterr().err
     bad.write_text(json.dumps([{"out": str(warehouse / "x.csv")}]))
     assert _main(monkeypatch, "--batch", str(bad)) == 2 and "neither `sql` nor `sql_file`" in capsys.readouterr().err
-    assert not (warehouse / "x.csv").exists()
+    # A malformed item is recorded like any item that did not run: an empty CSV and a run file (#523).
+    assert (warehouse / "x.csv").read_text() == ""
+    assert json.loads((warehouse / "x.run.json").read_text())["status"] == "failed"
     bad.write_text("not json")
     assert _main(monkeypatch, "--batch", str(bad)) == 2 and "cannot read the plan" in capsys.readouterr().err
 
@@ -185,3 +187,75 @@ def test_a_relative_out_resolves_from_the_current_directory_and_the_manifest_say
     manifest = json.loads(capsys.readouterr().out)
     assert manifest["items"][0]["out"] == str((warehouse / "results" / "count.csv").resolve())
     assert (warehouse / "results" / "count.csv").exists()
+
+
+def test_a_malformed_item_is_recorded_and_the_rest_still_run(warehouse, monkeypatch, capsys):
+    out = warehouse / "rows" / "3"
+    plan = _plan(warehouse, [
+        {"id": "first", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "a.csv")},
+        {"id": "no-sql", "out": str(out / "b.csv")},
+        "not an object",
+        {"id": "no-out", "sql": "SELECT 1"},
+        {"id": "last", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "e.csv")},
+    ])
+    rc = _main(monkeypatch, "--batch", str(plan))
+    assert rc == 2  # the first item that did not run was malformed, a usage error at the single door
+    assert (out / "a.csv").read_bytes() == (out / "e.csv").read_bytes() == b"n\r\n3\r\n"
+    assert (out / "b.csv").read_text() == ""
+    manifest = json.loads((warehouse / "probes.plan.json.manifest.json").read_text())
+    assert [(i["id"], i["status"], i["exit"]) for i in manifest["items"]] == [
+        ("first", "ok", 0), ("no-sql", "failed", 2), ("3", "failed", 2), ("no-out", "failed", 2), ("last", "ok", 0)]
+    assert manifest["total"] == 5 and manifest["ok"] == 2 and manifest["items"][3]["out"] is None
+    assert "item 2 has neither `sql` nor `sql_file`" in capsys.readouterr().err
+
+
+def test_an_exception_mid_plan_still_writes_the_manifest(warehouse, monkeypatch, capsys):
+    out = warehouse / "rows" / "4"
+    plan = _plan(warehouse, [
+        {"id": "a", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "a.csv")},
+        {"id": "b", "sql": "SELECT 2", "out": str(out / "b.csv")},
+        {"id": "c", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "c.csv")},
+    ])
+    real = execute_sql.execute_guarded
+
+    def breaks_on_b(sql, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if sql == "SELECT 2":
+            raise RuntimeError("an adapter bug at /secret/path")
+        return real(sql, *args, **kwargs)
+
+    monkeypatch.setattr(execute_sql, "execute_guarded", breaks_on_b)
+    assert _main(monkeypatch, "--batch", str(plan)) == 6
+    manifest = json.loads((warehouse / "probes.plan.json.manifest.json").read_text())
+    assert [i["status"] for i in manifest["items"]] == ["ok", "failed", "ok"]
+    assert manifest["items"][1]["kind"] == "other" and "/secret/path" not in json.dumps(manifest)
+
+    def interrupted(sql, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003, ANN202
+        if sql == "SELECT 2":
+            raise KeyboardInterrupt
+        return real(sql, *args, **kwargs)
+
+    monkeypatch.setattr(execute_sql, "execute_guarded", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _main(monkeypatch, "--batch", str(plan), "--manifest", str(warehouse / "partial.json"))
+    partial = json.loads((warehouse / "partial.json").read_text())
+    assert [i["id"] for i in partial["items"]] == ["a"] and execute_sql._BATCH_CONNECTIONS is None
+
+
+def test_an_unreadable_plan_still_writes_a_manifest_saying_why(warehouse, monkeypatch, capsys):
+    plan = warehouse / "broken.json"
+    plan.write_text("not json")
+    assert _main(monkeypatch, "--batch", str(plan)) == 2
+    manifest = json.loads((warehouse / "broken.json.manifest.json").read_text())
+    assert manifest["total"] == 0 and manifest["items"] == [] and "cannot read the plan" in manifest["error"]
+
+
+def test_a_failed_item_records_the_database_s_first_line_locally(warehouse, monkeypatch, capsys):
+    out = warehouse / "rows" / "5"
+    plan = _plan(warehouse, [{"id": "nested", "sql": "SELECT SUM(SUM(id)) FROM orders", "out": str(out / "a.csv")}])
+    assert _main(monkeypatch, "--batch", str(plan)) == 6
+    run = json.loads((out / "a.run.json").read_text())
+    assert run["detail"] == execute_sql.UNEXPECTED_FAILURE_MESSAGE
+    assert run["database_error"] == "SQLite execution error: misuse of aggregate function SUM()"
+    monkeypatch.setenv(execute_sql.SERVED_CHILD_ENV, "1")
+    assert _main(monkeypatch, "--batch", str(plan)) == 6
+    assert "database_error" not in json.loads((out / "a.run.json").read_text())

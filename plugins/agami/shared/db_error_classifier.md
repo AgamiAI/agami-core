@@ -11,6 +11,12 @@ model references a column that's no longer in the live DB; re-introspect with `/
 
 This file is the single source of truth for the classification rules.
 
+**`python -m execute_sql` on your own machine** writes the fixed sentence for the kind on stderr's first
+line and, on the next, `Database error: <the database's first line> (SQLSTATE <code>)`, with credentials,
+hosts and addresses redacted and HINT / DETAIL / CONTEXT lines dropped. Read the kind from the exit code,
+which is unchanged, and use that second line to see what the database objected to. A hosted server and the
+MCP tool return the fixed sentence alone.
+
 ## Classification rules
 
 When SQL execution raises an exception, match the exception class and message against this table **in
