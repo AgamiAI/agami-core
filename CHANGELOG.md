@@ -12,6 +12,36 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+- **A column's list of allowed values is the whole list, or none (#517).** Introspection built each
+  `choice_field` from the first 500 rows the engine returned, so on a table of a few thousand rows a
+  status with 14 values could list 6, and the list read as complete: a question about a missing value
+  was written against the list, and the reconcile probe graded a correct literal as a query defect.
+  Values the catalog declares now come first, on a table of any size and with no table scan: a
+  Postgres enum type, a MySQL/MariaDB `ENUM(...)` column, and a CHECK constraint that only lists one
+  column's values (`col IN ('a','b')`, `col = 'a' OR col = 'b'`), read on Postgres, MySQL 8, SQL
+  Server, Oracle, SQLite and DuckDB; a declared list is kept as declared, up to 200 values, integer
+  columns included. Only a CHECK the engine enforces on every stored row counts (not Postgres `NOT
+  VALID` or `NO INHERIT`, MySQL `NOT ENFORCED`, a disabled or untrusted SQL Server CHECK, or an
+  Oracle one that is disabled or `NOVALIDATE`), a CHECK whose name another table also uses is skipped,
+  and one that casts the column to a non-string type, or casts a listed number in a way that can change
+  it (`CAST(1.9 AS INTEGER)`), declares nothing. Two columns whose names differ only by case (Postgres
+  `status` and `"STATUS"`) get no declared list. A declared list that can't be kept (over 200
+  values, two CHECKs that disagree, or a value the column's type can't hold) gives the column no list
+  at all. On SQL Server and a SQLite `COLLATE NOCASE` column a string list also gets a caveat that the
+  database compares values case-insensitively; on MySQL/MariaDB, case- and accent-insensitively. Postgres shows a CHECK's text only to the table's owner (the function that shows
+  it to any role is refused by the recon gate), so a SELECT-only role reads enums and no CHECKs. When nothing is declared, a small table (the same size rule as before) reads the
+  list with one bounded `SELECT DISTINCT` per column, at most 1,000 in a run; more than 25 values
+  gives no list rather than part of one. Keys (`*_key`, `*_sk`, `*_fk`), measures and years get no
+  list from the data. Values are listed exactly as stored: 'Open ' is no longer trimmed into 'Open',
+  and a column whose values differ only by spacing or case gets a caveat naming them; loading a model
+  no longer trims a `choice_field` key either. A refresh leaves an existing column's list alone, so
+  labels a person filled in are kept; new columns get the new lists.
+
+  **Reading a model:** a release older than this one trims `choice_field` keys as it loads them, so it
+  reads a list holding both 'Open' and 'Open ' as one 'Open'.
+
+### Fixed
+
 - **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
   fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
   alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out
