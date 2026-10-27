@@ -12,13 +12,6 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
-  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
-  areas, which reads as database schemas. Labels that really are about database schemas, such as a
-  cross-schema join, are unchanged.
-
-### Fixed
-
 - **Sensitive-column detection reads whole words, checks sampled values and looks inside JSON
   (#516).** A new build split column names into words, so `phoneme_error_rate`, `mobile_sessions`,
   `headphones_sold`, `adobe_campaign_id` and `ip_address` are no longer flagged (they stay in the
@@ -31,6 +24,170 @@ below corresponds to one such version.
   (`Contains personal data at: email, contact.phone`). A column holding emails or phone numbers no
   longer gets a value list. No sampled value is written to the model or the report. An existing
   model keeps its flags on refresh; no model field is added.
+
+### Added
+
+- **The model explorer can reject in bulk, beside every bulk approve (#531).** Each "✓ Approve all N
+  proposed" and "✓ Approve N" now has a "✕ Reject all N proposed" / "✕ Reject N" next to it. It acts
+  on exactly the items shown (the sub-tab, kind group, status filter and search), skipping anything
+  already approved or rejected, confirms with the count and kind ("Reject 104 metrics?") and asks for
+  one reason, which is required. Each queued reject op carries that `reason`, which reaches
+  `curation_log.jsonl` with the op; the model itself does not store it. Like approvals, the rejects
+  are queued and applied only when the feedback block is submitted. A single reject still carries no
+  reason.
+
+### Fixed
+
+- **"Approve all" on the Metrics tab names the kind on each op (#531).** The Metrics tab's bulk
+  approve queued ops with no `kind`, so the Queued tab showed "approve undefined" and the curation
+  engine skipped them as "op needs kind + name". They now say `metric`, as the Review tab's do.
+
+### Fixed
+
+- **The interpreter resolver no longer picks a Python that can never be brought up to date (#529).**
+  `connect_resolve.py` checks each candidate for pip and for the agami-core version it carries, read
+  from installed metadata. A candidate with no pip and an agami-core that is missing or older than the
+  plugin is skipped, with a `reason` in `candidates_scored`; a pip-less one whose library is current is
+  still chosen, and `$AGAMI_PYTHON` is never skipped but gets a warning. The output says
+  `chosen_because`. `sm` and `py` apply the same rule to the Pythons on PATH, so an activated
+  pip-less venv no longer shadows a working one; a configured interpreter that fails it gives way to
+  a PATH one that passes, and is kept (so `sm` can say what is wrong) when none does. When the library a Python runs is older than the plugin, `connect_resolve`
+  (as a `library_older_than_plugin` anomaly), `py` and the scripts' library loader warn on stderr,
+  naming both versions, the interpreter and the fix (`sm install`, or `AGAMI_PYTHON`). `sm` says
+  "<python> has no pip" instead of a bare "couldn't install". The plugin version is read from
+  `plugin.json` by one shared helper, with the cache folder's name as the fallback.
+
+### Fixed
+
+- **Validator: fewer false positives, entity mappings checked everywhere, collision messages name
+  the table (#520).** `metric_binding_unknown_column` read the aliases of a binding's own subquery
+  as missing columns: `SELECT AVG(s.r) FROM (SELECT …, SUM(pts) / SUM(maxpts) AS r …) s` warned
+  about `r`. It now leaves out a column a derived table or CTE the SELECT reads projects (through
+  a `SELECT *` too, when the star is over another derived table) and a select-list alias used in
+  the same SELECT's HAVING or ORDER BY; a typo inside the subquery, one read through a star over a
+  base table, and one an unused CTE happens to project still warn. The loader's rule
+  for hiding a metric that reads an excluded or stale column is unchanged. An entity mapping to a
+  table outside its own area was never checked, nor were `cross_subject_area_entities`; both now
+  resolve against the whole model, with new warnings `entity_mapping_unknown_table` (no area
+  defines the table) and `entity_mapping_column_not_found` (the table has no such column). They are
+  warnings so a model that validated before still writes. `cross_area_entity_collision` printed
+  `?.?.<table>` for a table the area only listed, and so warned when two areas mapped the same
+  table; it now resolves the table across the model (on the connection the area lists it on, when
+  two connections define it), compares the resolved table, and prints
+  `schema.table` with each area's name (the connection too when there is more than one).
+
+### Fixed
+
+- **A subject area named where a table was wanted also names that area's tables like it (#567).**
+  `get_datasource_schema(dataset_names=["orders"])` answered "'orders' is a subject area, not a
+  table: pass it as `area`" and nothing else, so in a model whose tables carry a suffix (`orders_v`)
+  the agent spent a second call finding the table. The hint now ends "or did you mean 'orders_v'?"
+  with the same names in `did_you_mean`, matched against that area's own tables only, so a
+  like-named table elsewhere is never guessed and never crowds the area's own out. The activity
+  log's `missed` entry for a name answered with any wrong-kind hint (an area or a column) now
+  carries `hinted: true`, so an empty suggestion list no longer reads as "the caller was given
+  nothing".
+
+- **The forked transport no longer relays a child's whole stderr on an `other` failure (#583).**
+  Every sanitized failure is rebuilt by the parent from the exit code, because stderr is shared with
+  anything a library logs during the run. `other` (exit 6) had no fixed sentence, so it fell through
+  to the relay meant for the authored configuration errors (exit 2 and 3), and a library's line,
+  values or paths included, reached `failure.message`. It now gets the generic sentence, or a
+  SQLSTATE sentence (#561) relayed only as an exact match; a stream holding neither goes to the
+  server log.
+
+- **A datasource.yaml key this agami-core does not read is reported, not silently dropped (#575).**
+  The loader reads a fixed list of top-level keys, so a model written for a newer agami-core that
+  declared a field the running one did not know lost it without a word, and a deploy fed by that
+  load stored the model without it. The model still loads and the field is still ignored, but `sm
+  validate` lists the keys as an `unknown_datasource_key` warning and the deploy prints them, saying
+  the model may need a newer agami-core. The load itself stays silent, since the executor loads the
+  model in a child process whose stderr is its output.
+
+- **On Redshift, discovery finds the tables of a read-only user (#558).** `sm discover`, and an
+  introspection run without a table list, listed schemas from `information_schema.schemata`, which on
+  Redshift shows only the schemas the user owns. A read-only role owns none, so discovery reported
+  "no tables discovered" for a catalog it could read in full; passing `--tables` worked, which hid
+  it. Redshift now lists the schemas the user has USAGE on (`pg_namespace` with
+  `has_schema_privilege`), leaving out the system schemas. Other engines are unchanged.
+
+## [0.9.20] — 2026-10-26
+
+### Changed
+
+- **Units can carry a scale and a rate, and a guessed currency is never applied without review
+  (#515).** A `unit` now reads `<ISO code>[_<scale>][/<period>]`: `USD_millions` shows 12.5 as
+  `$12.5M` (scales `thousands`, `millions`, `billions`, `lakhs`, `crores`), `USD/day` shows 120 as
+  `$120.00/day`, and `USD_millions/year` combines both, in answers and charts alike. There is no new
+  field: a release older than this one reads these strings as a plain label, so the model still loads
+  everywhere. `suggest-units` now splits a name into whole words, so `total_minutes`, `credit_hours`,
+  `points_balance` and `total_weight` are no longer taken for money, while `gross_usd`, `value_usd`
+  and `fx_dollar` now are; each row gains a `suggested_unit` read from the name
+  (`revenue_usd_millions` → `USD_millions`). `set-units` without `--columns` prints its plan and
+  writes nothing until `--yes`, and gives a column whose name states a currency that unit, with
+  `--columns` too (so a subset of the plan is written as planned). A bare
+  `units` column (`reading_units`) is no longer classed additive at introspection; `units_sold` and
+  the like still are, and classes already in a model are left as they are.
+
+### Fixed
+
+- **A model outside git keeps a reviewable history of its edits (#528).** agami commits a curation
+  only when the profile folder is its own git repository, and it never creates one, so on a fresh
+  artifacts folder an edit left nothing a reviewer could compare: `curation_log.jsonl` listed the ops
+  with no time and no prior value, and the datasource description and glossary writes weren't logged
+  at all. Every model write now logs each change with its UTC time (`at`), the model version it
+  produced (`version`) and, for an edit or a review-state change, the value it replaced (`before`)
+  beside the new one. The description and glossary writes are logged too, and a curate batch logs
+  only the ops that took, not the ones it skipped. A new `sm history <root> [--limit N]` prints the
+  log newest first, and a curate result outside git points to it. Older log lines without the new
+  keys read as before. The docs no longer say onboarding runs `git init` or that a failed edit is
+  reverted through git; it is restored from backups.
+
+### Fixed
+
+- **A column's `value_transform` and a join's `on:` parse in the datasource's own SQL dialect, and a
+  text column of ISO dates gets a date format whatever it is called (#518).** Both fragments were
+  parsed with sqlglot's generic grammar, so a valid Postgres transform such as
+  `CASE WHEN code ~ '^[0-9]+$' THEN code::int END` failed validation. A fragment is now accepted when
+  it parses in the engine's dialect or in the generic grammar, so nothing that validated before
+  starts failing; a datasource whose engine can't be resolved keeps the generic parse, and the
+  incremental validation cache includes the dialect. A field inside a JSON column is reached by a
+  transform on the JSON column that extracts the key itself (`(profile->>'signup_date')::date` on
+  Postgres, `json_extract(profile, '$.signup_date')` on SQLite); agami-connect now says so.
+  Introspection set `iso8601` only on columns with a date-like name; it now also sets it on a text
+  column with any name when at least 20 sampled values are present and every one is a real ISO date
+  or timestamp. Such a column no longer gets a `choice_field` skeleton.
+
+- **The model explorer counts subject areas as "subject areas", not "schemas" (#527).** The totals
+  line at the top of the page and the line the renderer prints said "3 schemas" for three subject
+  areas, which reads as database schemas. Labels that really are about database schemas, such as a
+  cross-schema join, are unchanged.
+
+### Fixed
+
+- **A metric built on a rejected metric is no longer served (#571).** The loader left out a derived
+  metric whose base was dropped only when a table or column was also hidden, so with just a metric
+  rejected, a metric built on it stayed in the served model and validation reported "references
+  unknown base metric". It now runs on every load, per area and cross-area, and repeats down a
+  chain of derived metrics. Only a base that was rejected or hidden drops a metric: a base the model
+  never had is a mistake in the model, and stays for the validator to report. An ambiguity naming a
+  dropped metric loses that metric, as for any metric not served. The curation view is unchanged.
+
+- **A statement the database rejected says so, by its SQLSTATE (#561).** An execution error none of
+  the classifier's patterns read came back as `other` with "an unexpected error on the server", so a
+  client could not tell a statement it should rewrite from a broken server, and guessed. The
+  database's own text still never travels, since it can carry a value from a row. Its SQLSTATE now
+  does: five characters, no values, and a class that means the same on every engine that reports
+  one, so one table covers them all without a rule per database. Class `42` (the statement broke a
+  rule), `0A` (unsupported feature) and `22` (a value did not fit an operation) come back as `syntax`
+  with the code and "rewrite it"; `53`/`54` (too heavy) and `40` (a conflict, retry) with the code
+  and what to do; `42501` as `permission`, `08` as `network` and `28` as `auth` with their usual
+  sentences; any other class as the code beside the usual sentence. The
+  code is read from the driver's exception (`sqlstate`, `pgcode`, or `redshift_connector`'s `C`
+  field), never from its message, and an injected executor can pass it as
+  `ExecutorError(sqlstate=…)`. An engine that reports no code is unchanged, and a dialect rule (#566)
+  still answers first. On the forked transport a `syntax` sentence is relayed only as an exact match;
+  the others travel as every `other` failure does today.
 
 - **`sm enrich-metadata` exits 0 when no metadata preset applies (#526).** Most databases carry no
   in-database dictionary, and the command reported that as a failure (exit 1), which stopped a
