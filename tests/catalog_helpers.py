@@ -23,6 +23,7 @@ def make_catalog_runner(
     *, tables: list[str], columns: dict[str, list[dict]], schema: str = "public",
     fks: list[dict] = (), pk: Optional[str] = "id", estimate: Optional[str] = "1000",
     sample: Optional[Callable[[str], list[dict]]] = None,
+    unique: Optional[dict[str, list[list[str]]]] = None,
 ) -> Callable[[str], list[dict]]:
     """Build a `runner(sql)` answering the catalog queries introspect issues.
 
@@ -32,6 +33,7 @@ def make_catalog_runner(
     pk       — PK column name shared by every table (None → no catalog PK).
     estimate — reltuples row estimate (None → none reported).
     sample   — optional callable for the `SELECT … LIMIT` sample probe.
+    unique   — {table: [[col, ...], ...]}: the unique keys (other than the PK) each table declares.
     """
     table_rows = [{"schema_name": schema, "table_name": t, "table_type": "BASE TABLE"} for t in tables]
     cols_by_table = {
@@ -52,6 +54,12 @@ def make_catalog_runner(
                 if f"'{t}'" in s:
                     return list(cols_by_table.get(t, []))
             return list(cols_by_table.get(tables[0], [])) if len(tables) == 1 else []
+        if unique is not None and ("contype = 'u'" in s or "constraint_type = 'UNIQUE'" in s):
+            for t, keys in unique.items():
+                if f"'{t}'" in s:
+                    return [{"constraint_name": f"{t}_uk{i}", "column_name": c}
+                            for i, key in enumerate(keys) for c in key]
+            return []
         if "PRIMARY KEY" in s:
             return [{"column_name": pk}] if pk else []
         if "FOREIGN KEY" in s:
