@@ -1,6 +1,8 @@
 # _python.sh — which Python agami runs, on every OS. Sourced (never run) by `sm` and `py`, so the two
 # can never disagree about the interpreter: $AGAMI_PYTHON, then the one agami-connect configured
-# (`.config` tool_paths.python3), then python3 / python on PATH — never the Windows Store stub.
+# (`.config` tool_paths.python3), then python3 / python on PATH — never the Windows Store stub, and
+# not a pip-less one `sm install` could never make current while a better one is on PATH (configured
+# or not).
 # shellcheck shell=bash
 
 # On Windows, `python3` (and often `python`) may be the Microsoft Store's App Execution Alias: a stub
@@ -15,13 +17,27 @@ usable_python() {
   esac
 }
 
+# The first Python on PATH that `sm install` can bring current, so an activated project venv with no
+# pip and an old or missing agami-core doesn't shadow a working one later on PATH (#529). With none,
+# the first usable one, so `sm` can say what is wrong with it.
+_PY_VERSION_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_plugin_version.py"
+never_current() {
+  local rc=0
+  "$1" "$_PY_VERSION_HELPER" --usable </dev/null >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 3 ]
+}
 path_python() {
-  local c p
+  local c p first=""
   for c in python3 python; do
     while IFS= read -r p; do
-      usable_python "$p" && { echo "$p"; return; }
+      usable_python "$p" || continue
+      [ -n "$first" ] || first="$p"
+      never_current "$p" || { echo "$p"; return; }
     done < <(type -ap "$c" 2>/dev/null)
   done
+  # return 0 when nothing is found: `PY="$(resolve_python)"` runs under set -e, and the caller
+  # explains an empty answer
+  if [ -n "$first" ]; then echo "$first"; fi
 }
 
 # The configured interpreter, read in plain shell: it is how a machine whose only `python3` is that stub
@@ -69,8 +85,16 @@ config_python() {
 
 resolve_python() {
   if [ -n "${AGAMI_PYTHON:-}" ]; then echo "$AGAMI_PYTHON"; return; fi
-  local cfg
+  local cfg alt
   cfg="$(config_python)"
-  if [ -n "$cfg" ] && usable_python "$cfg"; then echo "$cfg"; return; fi
+  if [ -n "$cfg" ] && usable_python "$cfg"; then
+    # A configured one `sm install` can never bring current gives way to a PATH one that passes the
+    # same check, as connect_resolve.py does; with none, keep it so `sm` can say what is wrong.
+    if never_current "$cfg"; then
+      alt="$(path_python)"
+      if [ -n "$alt" ] && ! never_current "$alt"; then echo "$alt"; return; fi
+    fi
+    echo "$cfg"; return
+  fi
   path_python
 }

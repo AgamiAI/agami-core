@@ -20,11 +20,13 @@ Output (the standard refactor contract):
       "example_present": bool,
       "config": {"present": bool, "active_profile": ..., "tier": ..., "tool_paths": {...}},
       "interpreter": {"python3": "/path", "has_model_deps": bool,
-                      "has_driver": bool|null, "candidates_scored": [...]},
+                      "has_driver": bool|null, "chosen_because": "...",
+                      "plugin_version": "0.9.18"|null, "agami_core": "0.9.18"|null,
+                      "candidates_scored": [{..., "has_pip", "agami_core", "skipped", "reason"?}]},
       "tools": {"psql": "/path"|null, "sqlite3": ...},
       "next": "ready" | "promote" | "bootstrap"
     },
-    "anomalies": [...],
+    "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current
     "needs_judgment": null
   }
 
@@ -48,6 +50,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 # agami_paths lives in the agami-core package; the resolver puts it on the path in every layout
@@ -56,6 +59,14 @@ from _agami_lib import ensure_importable  # noqa: E402
 
 ensure_importable()
 import agami_paths  # noqa: E402
+from _plugin_version import (  # noqa: E402
+    cannot_be_brought_current,
+    is_older,
+    plugin_version,
+    stale_warning,
+)
+
+_VERSION_HELPER = Path(__file__).resolve().parent / "_plugin_version.py"
 
 # import module to probe per DB type (sqlite/duckdb need no external driver)
 _DRIVER_MOD = {
@@ -107,6 +118,10 @@ def _probe(py: str, mods: list[str]) -> bool:
         return False
 
 
+def _venv_python(venv: str, windows: bool = os.name == "nt") -> str:
+    return str(Path(venv) / "Scripts" / "python.exe") if windows else str(Path(venv) / "bin" / "python")
+
+
 def _candidate_interpreters() -> list[str]:
     """The bounded candidate list from the skill's 0a.5 prose, in priority order."""
     out: list[str] = []
@@ -117,7 +132,15 @@ def _candidate_interpreters() -> list[str]:
             out.append(c)
     venv = os.environ.get("VIRTUAL_ENV")
     if venv:
-        out.append(str(Path(venv) / "bin" / "python"))
+        out.append(_venv_python(venv))
+    # Every other python3 / python on PATH, after the first ones: when the first is skipped (no pip, an
+    # old library), the next one on PATH is the one the user would expect instead. Not the Windows Store
+    # stubs, which run nothing.
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for name in ("python3", "python"):
+            c = shutil.which(name, path=d) if d and "windowsapps" not in d.lower() else None
+            if c:
+                out.append(c)
     globs = ["/opt/homebrew/bin/python3.*", "/usr/local/bin/python3.*",
              "/Library/Frameworks/Python.framework/Versions/*/bin/python3",
              str(Path.home() / ".pyenv/versions/*/bin/python3")]
@@ -133,14 +156,33 @@ def _candidate_interpreters() -> list[str]:
     return uniq
 
 
+def _probe_install(py: str) -> dict:
+    """Whether `py` has pip and which agami-core it carries, read from metadata (nothing is imported or
+    installed). Unknown values come back as None, and an unknown never gets a candidate skipped."""
+    try:
+        r = subprocess.run([py, "-X", "utf8", str(_VERSION_HELPER), "--probe"],
+                           capture_output=True, text=True, encoding="utf-8", timeout=15)
+        got = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
+    except Exception:
+        got = {}
+    return {"has_pip": got.get("has_pip"), "agami_core": got.get("agami_core"),
+            "this_checkout": bool(got.get("this_checkout"))}
+
+
 def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
     """Score candidates on (driver + model deps); pick the best. A configured
     interpreter that still satisfies everything wins (no churn). Mirrors 0a.5 — but
-    deterministically, so we never record a Python that's missing a dep."""
+    deterministically, so we never record a Python that's missing a dep.
+
+    A candidate that can't install packages and whose agami-core is missing or older than the plugin is
+    skipped: `sm install` could never fix it. $AGAMI_PYTHON is the user's explicit choice and is never
+    skipped; it gets a warning instead."""
     db_key = (db_type or "").lower()
     driver = _DRIVER_MOD.get(db_key, None)
     want_driver = bool(driver)
     driver_mods = [driver, *_DRIVER_EXTRA.get(db_key, [])] if want_driver else []
+    want = plugin_version()
+    pinned = os.environ.get("AGAMI_PYTHON") or None
     candidates = []
     if configured and os.access(configured, os.X_OK):
         candidates.append(configured)
@@ -148,6 +190,9 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
 
     scored = []
     best = None
+    warnings: list[dict] = []
+    current = set()  # ids of entries whose library is this checkout's own source
+    because = ""
     for py in candidates:
         has_deps = _probe(py, list(_MODEL_DEPS))
         has_driver = _probe(py, driver_mods) if want_driver else None
@@ -158,17 +203,46 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
                                    capture_output=True, text=True, encoding="utf-8", timeout=10).stdout.strip() or py
         except Exception:
             canon = py
-        entry = {"python3": canon, "has_model_deps": has_deps, "has_driver": has_driver, "score": score}
+        inst = _probe_install(py)
+        why_not = cannot_be_brought_current(inst, want)
+        is_pinned = py == pinned
+        if is_pinned and why_not:
+            warnings.append({"kind": "agami_python_cannot_be_brought_current", "where": canon,
+                             "detail": f"$AGAMI_PYTHON is kept as set, but it has {why_not}"})
+        entry = {"python3": canon, "has_model_deps": has_deps, "has_driver": has_driver, "score": score,
+                 "has_pip": inst["has_pip"], "agami_core": inst["agami_core"],
+                 "skipped": bool(why_not) and not is_pinned}
+        if entry["skipped"]:
+            entry["reason"] = f"skipped: {why_not}"
         scored.append(entry)
+        if inst["this_checkout"]:
+            current.add(id(entry))
         full = has_deps and (has_driver or not want_driver)
-        if full and best is None:
+        if full and best is None and not entry["skipped"]:
             best = entry
+            because = ("the first candidate with the model deps"
+                       + (f" and the {db_key} driver" if want_driver else "")
+                       + (" ($AGAMI_PYTHON)" if is_pinned else
+                          " (the configured interpreter)" if py == configured else ""))
     if best is None:
         # nothing fully equipped → first working base interpreter (caller installs into it)
-        best = scored[0] if scored else {"python3": shutil.which("python3") or "python3",
-                                         "has_model_deps": False, "has_driver": None, "score": 0}
-    return {**{k: best[k] for k in ("python3", "has_model_deps", "has_driver")},
-            "candidates_scored": scored}
+        usable = [e for e in scored if not e["skipped"]]
+        if usable:
+            best = usable[0]
+            because = "no candidate has every dependency; the first one not skipped (the caller installs the rest)"
+        elif scored:
+            best = scored[0]
+            because = "every candidate was skipped; the first one, which needs pip or a newer agami-core"
+        else:
+            best = {"python3": shutil.which("python3") or "python3", "has_model_deps": False,
+                    "has_driver": None, "agami_core": None}
+            because = "no candidate interpreter found"
+    if id(best) not in current and is_older(best.get("agami_core"), want):
+        warnings.append({"kind": "library_older_than_plugin", "where": best["python3"],
+                         "detail": stale_warning(best["python3"], best["agami_core"], want)})
+    return {**{k: best[k] for k in ("python3", "has_model_deps", "has_driver")}, "chosen_because": because,
+            "plugin_version": want, "agami_core": best.get("agami_core"),
+            "candidates_scored": scored, "warnings": warnings}
 
 
 def main(argv=None) -> int:
@@ -232,6 +306,9 @@ def main(argv=None) -> int:
 
     db_type = args.db_type or creds["type"]
     interpreter = _resolve_interpreter(db_type, config["tool_paths"].get("python3"))
+    for w in interpreter.pop("warnings"):
+        anomalies.append(w)
+        print(w["detail"] if w["detail"].startswith("agami:") else f"agami: {w['detail']}", file=sys.stderr)
     tools = {t: shutil.which(t) for t in _NATIVE_TOOLS}
 
     # On a first-time bootstrap the profile is genuinely unresolved (the "main" fallback is a placeholder
