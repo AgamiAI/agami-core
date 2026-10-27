@@ -123,7 +123,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                               if t.performance_hints else None),
                 "review_state": t.review_state, "origin": "", "excluded": t_excluded,
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
-                "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
+                "grain": t.grain, "unique_keys": t.unique_keys, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
                 # ordered group names for the wide-table grouped field view (empty on
                 # narrow tables — the UI then just lists fields flat)
@@ -328,7 +328,7 @@ def main() -> int:
     manifest["initial_tab"] = initial
     if not manifest["schemas"]:
         sys.stderr.write(
-            f"agami: no schemas found in {profile_dir}. Run /agami-connect first.\n"
+            f"agami: no subject areas found in {profile_dir}. Run /agami-connect first.\n"
         )
         return 1
 
@@ -349,7 +349,7 @@ def main() -> int:
 
     print(
         f"Wrote {out_path} "
-        f"({_plural(t['schemas'], 'schema')} · {_plural(t['tables'], 'table')} · "
+        f"({_plural(t['schemas'], 'subject area')} · {_plural(t['tables'], 'table')} · "
         f"{_plural(t['fields'], 'field')}; "
         f"{t['excluded_tables']} tables + {t['excluded_fields']} columns currently excluded)"
     )

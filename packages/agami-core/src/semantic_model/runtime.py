@@ -46,6 +46,7 @@ exposure. So the analysis stays, and both the authoring and the refusing go.
 
 from __future__ import annotations
 
+import decimal
 import functools
 import re
 from dataclasses import dataclass, field, replace
@@ -74,10 +75,12 @@ from .models import (
     Entity,
     Metric,
     Relationship,
+    Table,
 )
 from .models import (
     bare_name as _bare,
 )
+from .models import table_key as _table_key
 from .sql_dialect import DialectUnresolved, engines_disagree, resolve_datasource_dialect
 from .suggest import did_you_mean
 
@@ -810,7 +813,7 @@ def resolve_metrics(
             bindings = mm.bindings
             if _D.is_derived(mm) or _D.is_second_order(mm):
                 try:
-                    bindings = _D.expanded_bindings(mm, idx)
+                    bindings = _D.expanded_bindings(mm, idx, org)
                 except _D.DerivedError:
                     bindings = mm.bindings
             ranked.append(
@@ -2178,13 +2181,79 @@ def _aggregate_reports(tree, org: Datasource,
         sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
         declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
                     if sites else [])
-        join_statuses = ([(js.scope, _join_site_status(js, declared)[0],
-                           f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
-                          for js in sites], written - len(sites))
+        weighed = _weighed_statuses(sites, [_join_site_status(js, declared) for js in sites], tidx, org)
+        join_statuses = ([(js.scope, status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                          for js, status in zip(sites, weighed)], written - len(sites))
     return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
 
 
 _UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat rows: "
+# What an undeclared join reports to `_downgrade_unweighed` when the model's own keys settle it.
+_KEYED_ONE_TO_ONE = "keyed_one_to_one"
+
+
+def _names_in_several_schemas(org: Datasource) -> set[str]:
+    """Bare table names (folded) that the model defines in more than one schema."""
+    seen: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, name = _table_key(t.name, t.schema_name)
+            seen.setdefault(name, set()).add(schema)
+    return {name for name, schemas in seen.items() if len(schemas) > 1}
+
+
+def _weighed_statuses(sites: "list[_JoinSite]", results: "list[tuple[str, Optional[Relationship]]]",
+                      tidx: dict[str, tuple], org: Datasource) -> list[str]:
+    """Each join's status, an undeclared one reported `_KEYED_ONE_TO_ONE` when its columns are the
+    whole of a key on both sides and no other join that can feed the same numbers could fan. A fan
+    further along could repeat rows through the keyed join, and following it is #595's to do."""
+    several = _names_in_several_schemas(org) if sites else set()
+    keyed = [status == UNDECLARED and _keyed_one_to_one(js, tidx, several)
+             for js, (status, _match) in zip(sites, results)]
+    out = []
+    for i, (js, (status, _match)) in enumerate(zip(sites, results)):
+        others = [j for j, other in enumerate(sites) if j != i and (
+            other.scope == js.scope or other.scope.startswith("cte:") or js.scope.startswith("cte:"))]
+        if keyed[i] and all(keyed[j] or (results[j][0] == DECLARED and results[j][1] is not None
+                                         and results[j][1].relationship == "one_to_one")
+                            for j in others):
+            out.append(_KEYED_ONE_TO_ONE)
+        else:
+            out.append(status)
+    return out
+
+
+def _keyed_one_to_one(js: "_JoinSite", tidx: dict[str, tuple], several: set[str]) -> bool:
+    """Whether the join's columns are the whole of a key on both sides, so one row meets at most one."""
+    if not js.pairs or not isinstance(js.node.this, exp.Table):
+        return False
+    # The pairs carry base-table names, so every equality must be on this join's own right-hand
+    # alias: `JOIN b b2 ON a.code = b1.code` constrains nothing about b2.
+    right = js.node.this.alias_or_name
+    for conj in _and_conjuncts(js.node.args.get("on")):
+        if (isinstance(conj, exp.EQ) and isinstance(conj.this, exp.Column)
+                and isinstance(conj.expression, exp.Column) and conj.this.table and conj.expression.table
+                and [conj.this.table, conj.expression.table].count(right) != 1):
+            return False
+    cols: dict[str, list[str]] = {}
+    for pair in js.pairs:
+        # `a.x = a.y` compares a table with itself and constrains nothing between the two.
+        if len(pair) != 2 or len({key for key, _ in pair}) != 2:
+            return False
+        for table_key, column in pair:
+            cols.setdefault(table_key, []).append(column)
+    if len(cols) != 2 or set(cols) & several:
+        # The pairs carry bare names, and a name two schemas define could borrow the other's key.
+        return False
+    # A table read twice in this SELECT leaves the pairs unable to say which instance each one is.
+    reads = [_tkey(tbl.name) for tbl in _own_table_refs(_enclosing_select(js.node))]
+    if any(reads.count(table_key) > 1 for table_key in cols):
+        return False
+    for table_key, columns in cols.items():
+        hit = tidx.get(table_key)
+        if hit is None or not hit[0].unique_on(columns):
+            return False
+    return True
 
 
 def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
@@ -2663,7 +2732,7 @@ def _projection_sources(body: "exp.Expression") -> dict[str, str]:
 
 
 def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain: list[str],
-              grains: dict[str, set[str]], scope_map: dict[str, str],
+              tables: dict[str, Table], scope_map: dict[str, str],
               outputs: dict[str, str]) -> Optional[Relationship]:
     """The join edge between a grain-CHANGING CTE and the table it is joined to, or None.
 
@@ -2688,9 +2757,9 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
       (a comma join, or an edge written some way this does not read); more than one means a
       composite key, whose cardinality is not the single-column rule's to state.
     * the far side resolving to no table in scope.
-    * the far side's DECLARED GRAIN being empty. This guard sits BEFORE the call and that placement
-      is the point: `infer_cardinality` tests `bool(to_pk)`, so a table declared `grain: []` and a
-      table with no grain at all are indistinguishable to it and BOTH fall through to its
+    * the far side declaring NO KEY — an empty grain and no unique key. This guard sits BEFORE the
+      call and that placement is the point: a table declared `grain: []` and a table with no grain
+      at all are indistinguishable to `infer_cardinality`, and BOTH fall through to its
       `many_to_one` default. Calling it anyway would put a cardinality on the receipt that no one
       declared, which is worse than saying nothing.
 
@@ -2718,11 +2787,12 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         return None
     near, far = pairs[0]
     other = scope_map.get(far.table)
-    if not other or not grains.get(_tkey(other)):
+    far_table = tables.get(_tkey(other)) if other else None
+    if far_table is None or not (far_table.grain or far_table.unique_keys):
         return None
 
     # Every name that reaches `infer_cardinality` is folded, on BOTH sides of every comparison it
-    # makes. `grains` was folded by the caller, `grain` by `_group_by_grain`, and the join keys are
+    # makes. `Table.unique_on` folds the keys, `grain` by `_group_by_grain`, and the join keys are
     # folded here — the module's own convention, stated on `check_column_scope` as "matching is
     # case-insensitive", and the one this comparison was missing. The `Relationship` keeps the
     # WRITTEN spellings, because that is what the receipt echoes back to the caller.
@@ -2736,9 +2806,7 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         from_table=cte_key, to_table=other,
         from_column=near.name, to_column=far.name,
         relationship=infer_cardinality(
-            _tkey(cte_key), _tkey(other), [near_key], [_tkey(far.name)],
-            {**grains, _tkey(cte_key): set(grain)},
-        ),
+            Table(name=cte_key, grain=list(grain)), far_table, [near_key], [_tkey(far.name)]),
     )
 
 
@@ -2793,13 +2861,11 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     matches nothing. So `WITH OI AS (…) … JOIN OI` derives an edge named `OI`, and the grain lookup
     that decides its cardinality folds on the way in.
     """
-    # Folded, because `Table.grain` comes from a catalog and the join keys come from the caller's
-    # SQL — Snowflake and Oracle hand back `ID` where the query writes `id`. Unfolded on either
-    # side, a declared `grain=["ID"]` matches no join key, `infer_cardinality` reads the CTE as
-    # non-unique and invents a fan the statement does not have. It also walks straight through the
-    # empty-grain guard above, since a case-mismatched grain is a non-empty one.
-    grains = {key: {_tkey(col) for col in table.grain or []}
-              for key, (table, _area) in tidx.items()}
+    # `infer_cardinality` compares keys case-folded (`Table.unique_on`), because `Table.grain` comes
+    # from a catalog and the join keys come from the caller's SQL — Snowflake and Oracle hand back
+    # `ID` where the query writes `id`. Unfolded, a declared `grain=["ID"]` matched no join key and
+    # the CTE was read as non-unique, inventing a fan the statement does not have.
+    tables = {key: table for key, (table, _area) in tidx.items()}
     conjuncts = [c for on in _all_join_predicates(sel) for c in _and_conjuncts(on)]
     resolved = dict(scope_map)
     # PASS ONE settles every grain-preserving rebinding, and nothing else. `_cte_edge` resolves the
@@ -2828,7 +2894,7 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     for alias, written in pending:
         body = bodies[_tkey(written)]
         grain = _group_by_grain(body)
-        edge = _cte_edge(conjuncts, alias, written, grain, grains, settled,
+        edge = _cte_edge(conjuncts, alias, written, grain, tables, settled,
                          _projection_sources(body)) if grain else None
         if edge is None:
             resolved[alias] = ""
@@ -3526,8 +3592,8 @@ def assemble_receipt(
     declared_pairs = ([(rel, _declared_pairs(rel, dialect)) for rel in _cardinality_index(org)]
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
-    for js in join_sites:
-        status, match = _join_site_status(js, declared_pairs)
+    join_results = [_join_site_status(js, declared_pairs) for js in join_sites]
+    for js, (status, match) in zip(join_sites, join_results):
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
         # per-relationship build had — it printed a signed-off trail beside a join written on the
@@ -3682,6 +3748,10 @@ def assemble_receipt(
         # CTE subtraction anywhere in between — so the fix that reached `tables`, the relationship
         # walk and the unqualified branch below never reached a qualified column. The reference
         # itself is kept either way: a dropped reference is an unchecked one.
+        if col.table and (origin := _qualified_reference_origin(col)) is not None:
+            # Resolved in the column's own scope, through a derived table or CTE (#521).
+            ref_cols.add(origin)
+            continue
         if col.table:                                   # qualified -> resolve via alias scope
             # The alias matched ignoring case, like the sensitive check (#456); an exact match
             # wins, and a qualifier that could be two aliases keeps the written name.
@@ -3920,7 +3990,9 @@ def assemble_receipt(
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
     reports = _aggregate_reports(
         tree, org, ctx=None, visible=visible, tidx=tidx,
-        join_statuses=([(it["scope"], it["status"], it["from_to"]) for it in join_items], dropped_joins),
+        join_statuses=([(it["scope"], status, it["from_to"])
+                        for status, it in zip(_weighed_statuses(join_sites, join_results, tidx, org), join_items)],
+                       dropped_joins),
     )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
@@ -4518,11 +4590,173 @@ def _own_alias_map(sel: "exp.Select | None") -> dict[str, str]:
     `walk` yields the node it prunes at, hence the `isinstance` on the way out: the nested SELECT
     itself comes back, and it is not a table reference.
     """
+    return {(tbl.alias or tbl.name): tbl.name for tbl in _own_table_refs(sel)}
+
+
+def _own_table_refs(sel: "exp.Select | None") -> list["exp.Table"]:
+    """The table references THIS SELECT reads itself, in order, repeats kept (see `_own_alias_map`)."""
     if sel is None:
-        return {}
+        return []
     boundary = sel.walk(prune=lambda node: isinstance(node, exp.Select) and node is not sel)
-    return {(tbl.alias or tbl.name): tbl.name
-            for tbl in boundary if isinstance(tbl, exp.Table)}
+    return [tbl for tbl in boundary if isinstance(tbl, exp.Table)]
+
+
+def _own_sources(sel: "exp.Select") -> list["exp.Expression"]:
+    """The relations this SELECT's own FROM and JOINs introduce, in the order it wrote them."""
+    frm = sel.args.get("from_") or sel.args.get("from")
+    nodes = [frm.this] if isinstance(frm, exp.From) else []
+    nodes += [join.this for join in sel.args.get("joins") or []]
+    return [node for node in nodes if node is not None]
+
+
+def _pick_binding(sources: list["exp.Expression"], qualifier: str) -> "exp.Expression | None":
+    """The source a qualifier names: an exact alias first, else the ONE that matches ignoring case."""
+    exact = [s for s in sources if s.alias_or_name == qualifier]
+    if exact:
+        return exact[0]
+    folded = [s for s in sources if _tkey(s.alias_or_name) == _tkey(qualifier)]
+    return folded[0] if len(folded) == 1 else None
+
+
+# The last tree `_cte_reference_ids` walked and its answer: one statement's receipt asks it once
+# per column, and `_cte_references` walks the whole tree.
+# Rebound whole, never mutated: receipts are built in worker threads, and a reader holding one
+# tuple cannot see another thread's tree paired with it.
+_CTE_REFS_LAST: tuple = (None, frozenset())
+
+
+def _cte_reference_ids(root: "exp.Expression") -> "set[int] | frozenset[int]":
+    """`_cte_references(root)`, computed once per tree."""
+    global _CTE_REFS_LAST
+    cached_root, refs = _CTE_REFS_LAST
+    if cached_root is not root:
+        refs = _cte_references(root)
+        _CTE_REFS_LAST = (root, refs)
+    return refs
+
+
+def _cte_binding(table: "exp.Table") -> "exp.CTE | None":
+    """The CTE a table reference reads, or None when it reads a table.
+
+    Bound by `_cte_references`' rules, so a schema-qualified name, a later sibling and a
+    non-recursive self-reference read the table, as they do for the scope gate.
+    """
+    if table.db or id(table) not in _cte_reference_ids(table.root()):
+        return None
+    key = _identifier_key(table.this)
+    via: "exp.CTE | None" = None
+    node: "exp.Expression | None" = table.parent
+    while node is not None:
+        if isinstance(node, exp.CTE):
+            via = node
+        with_ = node.args.get("with_") or node.args.get("with")
+        if isinstance(with_, exp.With):
+            ctes = list(with_.expressions)
+            pos = next((i for i, c in enumerate(ctes) if c is via), None)
+            if pos is not None:
+                # A body sees the siblings before it, and itself only under RECURSIVE.
+                ctes = ctes[:pos + 1] if with_.args.get("recursive") else ctes[:pos]
+            for cte in reversed(ctes):
+                alias = cte.args.get("alias")
+                name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
+                if name is not None and key is not None and _same_identifier(key, name):
+                    return cte
+        node = node.parent
+    return None
+
+
+def _alias_columns(node: "exp.Expression") -> list[str]:
+    """The column list an alias gives its relation (`AS s(y, x)`), or [] when it gives none."""
+    alias = node.args.get("alias")
+    return [c.name for c in alias.columns] if isinstance(alias, exp.TableAlias) else []
+
+
+def _projection_for(body: "exp.Select", cname: str,
+                    listed: list[str]) -> "exp.Expression | None":
+    """The ONE projection of `body` that outputs `cname`, by position when a column list renames
+    the outputs, else by name. None when that is not certain."""
+    if not listed:
+        # A star may output the same name ahead of the explicit projection.
+        if any(p.is_star for p in body.expressions):
+            return None
+        matches = [p for p in body.expressions if _tkey(p.alias_or_name) == _tkey(cname)]
+        return matches[0] if len(matches) == 1 else None
+    names = [_tkey(n) for n in listed]
+    if (len(names) != len(body.expressions) or names.count(_tkey(cname)) != 1
+            or any(p.is_star for p in body.expressions)):
+        return None
+    return body.expressions[names.index(_tkey(cname))]
+
+
+def _origin_through(source: "exp.Expression", cname: str,
+                    depth: int) -> Optional[tuple[str, str]]:
+    """(table, column) behind `cname` read from `source`, or None when it is not a plain column.
+
+    A plain table is its own origin. A derived table or a CTE is followed only through a
+    projection that hands one input column back unchanged, bare or renamed: `x / y AS r` is a value
+    the statement computed and no single column is its origin. A UNION body, a star and an output
+    name projected twice stop here too.
+    """
+    if depth >= _MAX_CTE_CHAIN:
+        return None
+    if isinstance(source, exp.Table):
+        if _alias_columns(source):
+            return None
+        cte = _cte_binding(source)
+        if cte is None:
+            return source.name, cname
+        body, listed = cte.this, _alias_columns(cte)
+    elif isinstance(source, exp.Subquery):
+        body, listed = source.this, _alias_columns(source)
+    else:
+        return None
+    if not isinstance(body, exp.Select):
+        return None
+    match = _projection_for(body, cname, listed)
+    inner = match.this if isinstance(match, exp.Alias) else match
+    if not isinstance(inner, exp.Column) or not inner.name:
+        return None
+    return _column_origin(inner, depth + 1)
+
+
+def _column_origin(col: "exp.Column", depth: int = 0) -> Optional[tuple[str, str]]:
+    """(table, column) a column reads, resolved in the scope it was written in, or None."""
+    chain = _enclosing_selects(col)
+    if not chain:
+        return None
+    if not col.table:
+        # Unqualified: followed only when the innermost SELECT reads exactly one source.
+        sources = _own_sources(chain[0])
+        if len(sources) != 1:
+            return None
+        return _origin_through(sources[0], col.name, depth)
+    for sel in chain:
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            return _origin_through(source, col.name, depth)
+    return None
+
+
+def _qualified_reference_origin(col: "exp.Column") -> Optional[tuple[str, str]]:
+    """(table, column) for the receipt's label of a QUALIFIED column, or None when its qualifier
+    names nothing in the scopes enclosing it.
+
+    The receipt's whole-statement alias map holds only plain tables, last one wins, so `s.x` over a
+    derived table or a CTE `s` stayed `s.x`, and an alias reused in a nested query resolved to
+    whichever table the walk met last (#521). This resolves the qualifier from the column's own
+    SELECT outward, and follows a derived table or a CTE to its table through plain projections.
+    When the qualifier is bound but the value is computed, the label keeps the name the source
+    was given: the CTE's name for a CTE reference, the alias for a derived table.
+
+    The receipt's labels only: the scope gate, the fan/chasm analysis and the metric match keep
+    their own resolution, so what is refused and what a value is matched to do not change here.
+    """
+    for sel in _enclosing_selects(col):
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            written = source.name if isinstance(source, exp.Table) else col.table
+            return _column_origin(col) or (written, col.name)
+    return None
 
 
 def _computed_relations(sel: "exp.Select | None") -> frozenset[str]:
@@ -5053,15 +5287,50 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # a total the join really does inflate reported `not_multiplied`. The chasm blast radius was
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
+        if _enclosing_select(agg) is not tree:
+            # Computed inside a nested SELECT: its columns bind in that scope, not in `scope_map`.
+            sites.append(_AggSite(
+                node=agg,
+                aggregate=_echo_expr(agg.sql()),
+                scope=scope,
+                sources=frozenset(),
+                value_sources=frozenset(),
+                resolved=False,
+                unresolved_because=("the aggregate is computed inside a nested SELECT, whose rows the "
+                                    "pre-flight does not analyse"),
+            ))
+            continue
         cols = list(agg.find_all(exp.Column))
+        holds_subquery = None
+        if agg.find(exp.Select) is not None:
+            # A subquery's columns are bound in its own scope; credited to this SELECT's aliases
+            # they could name a table the aggregate never reads. The outer columns still count, so
+            # a fan on them is reported, but the subquery's rows leave the rest unknown.
+            own = _enclosing_select(agg)
+            cols = [col for col in cols if _enclosing_select(col) is own]
+            holds_subquery = ("the aggregate holds a subquery whose rows the pre-flight does not "
+                              "analyse")
+        # `COUNT(*) FILTER (WHERE x > 0)` parses as `Filter(this=Count, expression=Where)`, so the
+        # predicate sits outside the aggregate node. It still decides which rows are folded, as the
+        # same test inside `COUNT(CASE WHEN x > 0 THEN 1 END)` does, so it is read too (#521). The
+        # value path below is left alone: the predicate is not part of the value.
+        nested = None
+        if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
+            predicate = agg.parent.expression
+            # A subquery's columns belong to its own scope, not this SELECT's (D4).
+            if predicate.find(exp.Subquery, exp.Exists, exp.Select) is not None:
+                nested = ("the aggregate's FILTER clause holds a subquery, so the pre-flight cannot "
+                          "tell which of this query's rows it counts")
+            else:
+                cols += list(predicate.find_all(exp.Column))
         resolved = [_resolve_folded(col, scope_map) for col in cols]
-        why = _why_unresolved(cols, resolved, scope_map, visible)
+        why = nested or holds_subquery or _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
             aggregate=_echo_expr(agg.sql()),
             scope=scope,
             sources=frozenset(t for t in resolved if t),
-            value_sources=_value_sources(agg, scope_map),
+            value_sources=_value_sources(agg, scope_map, zero_arms_inert=isinstance(agg, exp.Sum)),
             resolved=why is None,
             unresolved_because=why,
         ))
@@ -5147,9 +5416,13 @@ if _HAVE_SQLGLOT:
         "Binary", "Unary", "Cast", "Distinct",
         "Sum", "Count", "Avg", "Min", "Max", "LogicalOr", "LogicalAnd",
     )
+    # The combining nodes whose value IS their operand's (#579). A value under one still reaches
+    # the SUM unchanged, so `SUM((CASE … ELSE 0 END))` keeps its zero arm inert, and a literal under
+    # one is still that literal, so an arm written `(0)` or `CAST(0 AS DECIMAL)` reads as zero.
+    _PASS_THROUGH_NODES = _exp_nodes("Paren", "Cast")
 else:  # pragma: no cover - nothing in this section runs without a parser
     _ALTERNATION_NODES = _TERNARY_NODES = _STRUCTURAL_NODES = _COMBINING_NODES = ()
-    _DECODE_NODES = ()
+    _DECODE_NODES = _PASS_THROUGH_NODES = ()
 
 
 # What `_value_operands` says about a node, and what `_value_sources` does with the operands beside
@@ -5177,7 +5450,9 @@ def _value_operands(node: "exp.Expression") -> tuple[str, list["exp.Expression"]
       aggregate skips rather than folds, so counting it would report a fan on
       `SUM(CASE WHEN orders.flag THEN order_items.quantity END)`, whose value is at item grain on
       every row that contributes one. An explicit `ELSE NULL` IS counted, contributes no table and
-      so clears no edge: the same shape read the other way, in the fail-closed direction.
+      so clears no edge: the same shape read the other way, in the fail-closed direction. Under a
+      `SUM`, with only alternations, parentheses and casts between, `_value_sources` drops it and an
+      `ELSE 0` the way the absent default is dropped (#579).
     - `exp.If` and `exp.Nvl2`. `IF` / `IIF` / `IFF` parse to `exp.If`, NOT to `exp.Case`, on every
       dialect this layer speaks, and `NVL2` to a node with the identical three arguments. Without a
       case of their own the combining branch would take the CONDITION's columns as value columns,
@@ -5232,6 +5507,22 @@ def _present(operands: list) -> list["exp.Expression"]:
     return [operand for operand in operands if isinstance(operand, exp.Expression)]
 
 
+def _is_zero_or_null(node: "exp.Expression") -> bool:
+    """Whether a node is the literal `0` or `NULL`, through parentheses and casts (#579)."""
+    while isinstance(node, _PASS_THROUGH_NODES):
+        node = node.this
+    if isinstance(node, exp.Null):
+        return True
+    if isinstance(node, exp.Literal) and not node.is_string:
+        # Decimal, not float: `float('1e-400')` rounds to 0.0, and a constant that small is still
+        # added once per joined row.
+        try:
+            return decimal.Decimal(node.this) == 0
+        except decimal.InvalidOperation:
+            return False
+    return False
+
+
 def _decode_arms(node: "exp.Expression") -> list["exp.Expression"]:
     """The result slots of a `DECODE`, plus its trailing default when it wrote one.
 
@@ -5255,7 +5546,8 @@ def _decode_arms(node: "exp.Expression") -> list["exp.Expression"]:
     return arms
 
 
-def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozenset[str]:
+def _value_sources(node: "exp.Expression", scope_map: dict[str, str], *,
+                   zero_arms_inert: bool = False) -> frozenset[str]:
     """The tables an expression's value is at the grain of on EVERY path through it.
 
     This is the one question the per-edge fan suppression asks, and both halves of it are load
@@ -5302,10 +5594,23 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
     its operands' answers out of `computed`. Keying by `id()` is safe because every operand
     `_value_operands` returns is a node the caller's tree already holds, so none of them can be
     collected and have its id reused while this runs.
+
+    **`zero_arms_inert` is for a `SUM` (#579).** An arm that is the literal `0` or `NULL` adds
+    nothing to a sum however often its row is repeated, so it is left out of the intersection the
+    way an absent `ELSE` already is. Without that, `SUM(CASE WHEN orders.status = 'shipped' THEN
+    COALESCE(order_items.quantity, 0) END)` intersected `order_items` with the `0`'s empty set and
+    reported a fan on a value that is at item grain on every row that adds anything. It holds only
+    while every node between the arm and the `SUM` is an alternation, a parenthesis or a cast: under
+    `COUNT` or `AVG` a `0` is still a counted row, and under arithmetic it is not the value (`COALESCE
+    (x, 0) + orders.total_amount` sums a one-side amount on the rows where `x` is NULL). An
+    alternation whose every arm is inert keeps an empty value path, so the fan is still reported.
     """
     if not isinstance(node, exp.Expression):
         return frozenset()
     computed: dict[int, frozenset[str]] = {}
+    # The nodes whose value reaches the SUM unchanged, keyed like `computed`. Only their alternation
+    # arms may drop out as inert.
+    summand: set[int] = {id(node)} if zero_arms_inert else set()
     stack: list[tuple["exp.Expression", bool]] = [(node, False)]
     while stack:
         current, folding = stack.pop()
@@ -5322,8 +5627,17 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
         if not folding:
             stack.append((current, True))
             stack.extend((operand, False) for operand in operands)
+            passes_value = (reading == _VALUE_INTERSECT or current is node
+                            or isinstance(current, _PASS_THROUGH_NODES))
+            if id(current) in summand and passes_value:
+                summand.update(id(operand) for operand in operands)
             continue
+        if reading == _VALUE_INTERSECT and id(current) in summand:
+            operands = [operand for operand in operands if not _is_zero_or_null(operand)]
         parts = [computed.get(id(operand), frozenset()) for operand in operands]
+        if not parts:
+            computed[id(current)] = frozenset()
+            continue
         computed[id(current)] = (
             frozenset.intersection(*parts) if reading == _VALUE_INTERSECT
             else frozenset().union(*parts)
@@ -6332,7 +6646,7 @@ def _metric_candidates(org: Datasource, storage_type: "str | None",
         bindings = mm.bindings or {}
         if _D.is_derived(mm) or _D.is_second_order(mm):
             try:
-                bindings = _D.expanded_bindings(mm, idx)
+                bindings = _D.expanded_bindings(mm, idx, org)
             except _D.DerivedError:
                 bindings = mm.bindings or {}
         text = (bindings or {}).get(storage_type)

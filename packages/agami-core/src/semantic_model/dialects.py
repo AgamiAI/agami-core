@@ -35,6 +35,7 @@ NOT live-verified — treat them as such until exercised against a real instance
 
 from __future__ import annotations
 
+import re
 from typing import Callable, Optional
 
 from .models import ColumnType, StorageType
@@ -83,6 +84,20 @@ def normalize_type(raw: str, *, numeric_scale: Optional[int] = None) -> ColumnTy
     return "string"
 
 
+# Words most engines reserve, so a column named after one must be quoted.
+_RESERVED_WORDS = frozenset({
+    "all", "and", "any", "as", "asc", "between", "by", "case", "cast", "check", "column",
+    "constraint", "create", "cross", "current_date", "current_time", "current_timestamp",
+    "current_user", "default", "delete", "desc", "distinct", "drop", "else", "end", "except",
+    "exists", "false", "fetch", "for", "foreign", "from", "full", "grant", "group", "having", "in",
+    "index", "inner", "insert", "intersect", "into", "is", "join", "left", "like", "limit", "natural",
+    "not", "null", "offset", "on", "or", "order", "outer", "primary", "references", "right",
+    "select", "session_user", "table", "then", "to", "true", "union", "unique", "update", "user",
+    "using", "values", "when", "where", "window", "with",
+})
+_PLAIN_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def _esc(s: str) -> str:
     """Escape a string literal for embedding in SQL (single-quote doubling)."""
     return s.replace("'", "''")
@@ -97,15 +112,39 @@ class Dialect:
     name: StorageType = "PostgreSQL"
     limit_style: str = "limit"  # "limit" | "top" | "fetch"
     fk_enforced: bool = True    # False => always confirm inferred FKs by overlap
+    unique_enforced: bool = True  # False => a declared unique key is confirmed on the data first
     # True where a backslash escapes inside a string literal by default, so a name ending in one
     # would end the literal early (#439). Introspection reads skip the model pass, so this escaping
     # is their remaining defence.
     backslash_escapes: bool = False
+    # How the engine folds an unquoted identifier: "lower", "upper", or None where it matches
+    # names case-insensitively as written.
+    folds_unquoted: Optional[str] = None
+    # Words this engine reserves beyond _RESERVED_WORDS. Only those are quoted: quoting every name
+    # would change what an unquoted name means on a case-folding engine (Snowflake, Oracle).
+    reserved_extra: frozenset = frozenset()
+    # True where the day difference counts calendar-day boundaries, so an end a few hours before
+    # its start on the same day still gives 0 and the guard must compare the values themselves.
+    duration_rounds: bool = False
 
     # --- identifier / literal helpers ---
 
     def quote_ident(self, name: str) -> str:
         return '"' + name.replace('"', '""') + '"'
+
+    def ident(self, name: str) -> str:
+        """`name` for an expression, quoted only when this engine needs it: special characters, a
+        reserved word, or a case the engine would fold away. A plain name stays bare, so a binding
+        reads the way a person would write it. On an upper-folding engine an all-lower name stays
+        bare too, as hand-written models spell upper-case catalog names that way."""
+        low = name.lower()
+        if not _PLAIN_IDENT_RE.match(name) or low in _RESERVED_WORDS or low in self.reserved_extra:
+            return self.quote_ident(name)
+        if self.folds_unquoted == "lower" and name != name.lower():
+            return self.quote_ident(name)
+        if self.folds_unquoted == "upper" and name not in (name.lower(), name.upper()):
+            return self.quote_ident(name)
+        return name
 
     def quote_lit(self, s: str) -> str:
         if self.backslash_escapes:
@@ -117,11 +156,31 @@ class Dialect:
             return f"{self.quote_ident(schema)}.{self.quote_ident(table)}"
         return self.quote_ident(table)
 
-    def duration_days_expr(self, start: str, end: str) -> str:
-        """Per-row 'days between two timestamps' (bare column names) for an avg-duration metric.
-        Postgres-family default (interval epoch); overridden where the dialect needs a
-        DATEDIFF / TIMESTAMP_DIFF form."""
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
+        """Per-row 'days between two columns' (identifiers as written) for an avg-duration metric.
+        `start_type`/`end_type` are the columns' ColumnTypes. Postgres-family default: DATE minus
+        DATE is already a whole number of days, and EXTRACT(EPOCH ...) of that integer fails, so
+        only a pair with a timestamp goes through the interval's epoch."""
+        if start_type == end_type == "date":
+            return f"({end} - {start})"
         return f"EXTRACT(EPOCH FROM ({end} - {start})) / 86400.0"
+
+    def duration_guard(self, start: str, end: str, *, start_type: str = "timestamp",
+                       end_type: str = "timestamp") -> str:
+        """The condition a row must meet for its duration to count: the end is not before the
+        start."""
+        if self.duration_rounds:
+            return f"{end} >= {start}"
+        days = self.duration_days_expr(start, end, start_type=start_type, end_type=end_type)
+        return f"{days} >= 0"
+
+    def flag_rate_expr(self, col: str, *, boolean: bool) -> str:
+        """Per-row 1.0 / 0.0 for a flag column, NULL where the flag is NULL, so AVG of it is the
+        rate among the rows the flag applies to rather than counting a NULL as false."""
+        if boolean:
+            return f"CASE WHEN {col} THEN 1.0 WHEN NOT {col} THEN 0.0 END"
+        return f"CASE WHEN {col} <> 0 THEN 1.0 WHEN {col} = 0 THEN 0.0 END"
 
     # --- row-limit syntax (probe mode) ---
 
@@ -214,6 +273,20 @@ class Dialect:
             "ORDER BY kcu.ordinal_position"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        """Each unique key other than the primary key, one row per column: `constraint_name`,
+        `column_name`, in key order. None where the engine has no catalog of them."""
+        return (
+            "SELECT tc.constraint_name, kcu.column_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON tc.constraint_name = kcu.constraint_name "
+            "AND tc.table_schema = kcu.table_schema AND tc.table_name = kcu.table_name "
+            "WHERE tc.constraint_type = 'UNIQUE' "
+            f"AND tc.table_schema = {self.quote_lit(schema)} "
+            f"AND tc.table_name = {self.quote_lit(table)} "
+            "ORDER BY tc.constraint_name, kcu.ordinal_position"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # The referenced column is matched by POSITION (referential_constraints names the key the
         # FK points at, position_in_unique_constraint the column in it). constraint_column_usage
@@ -264,6 +337,7 @@ class Dialect:
 
 class PostgreSQL(Dialect):
     name = "PostgreSQL"
+    folds_unquoted = "lower"
 
     # Keys come from pg_constraint, not information_schema: Postgres shows a constraint in
     # table_constraints only to the table's owner or a role holding a privilege other than SELECT,
@@ -283,6 +357,36 @@ class PostgreSQL(Dialect):
             f"AND n.nspname = {self.quote_lit(schema)} "
             f"AND c.relname = {self.quote_lit(table)} "
             "ORDER BY k.ord"
+        )
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Unique constraints and unique indexes (a unique index with no constraint enforces the same
+        # thing). Partial and expression indexes are left out: neither makes the column unique.
+        # indnkeyatts leaves out a covering index's INCLUDE columns. An index a failed CREATE INDEX
+        # CONCURRENTLY left invalid may sit over duplicates.
+        return (
+            "SELECT con.conname AS constraint_name, a.attname AS column_name, k.ord "
+            "FROM pg_constraint con "
+            "JOIN pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum "
+            "WHERE con.contype = 'u' "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "UNION "
+            "SELECT ic.relname AS constraint_name, a.attname AS column_name, k.ord "
+            "FROM pg_index i "
+            "JOIN pg_class ic ON ic.oid = i.indexrelid "
+            "JOIN pg_class c ON c.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) ON TRUE "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum "
+            "WHERE i.indisunique AND NOT i.indisprimary AND i.indisvalid AND i.indisready "
+            "AND i.indpred IS NULL AND i.indexprs IS NULL AND k.ord <= i.indnkeyatts "
+            f"AND n.nspname = {self.quote_lit(schema)} "
+            f"AND c.relname = {self.quote_lit(table)} "
+            "ORDER BY constraint_name, ord"
         )
 
     def sql_foreign_keys(self, schema: str) -> str:
@@ -323,12 +427,29 @@ class Supabase(PostgreSQL):
 
 class Redshift(PostgreSQL):
     name = "Redshift"
+    duration_rounds = True
     fk_enforced = False  # Redshift declares but does not enforce FKs
+    unique_enforced = False  # nor unique keys
 
     # Redshift has no LATERAL and no unnest(...) WITH ORDINALITY, so the pg_constraint queries
     # PostgreSQL uses would fail there. It keeps the information_schema ones.
     sql_primary_keys = Dialect.sql_primary_keys
     sql_foreign_keys = Dialect.sql_foreign_keys
+    sql_unique_keys = Dialect.sql_unique_keys
+
+    # Schemas come from pg_namespace filtered on USAGE, not information_schema.schemata (#558). On
+    # Redshift that view lists only the schemas the user OWNS, so a read-only role that can read every
+    # view in a schema listed none, and discovery reported "no tables discovered" for a catalog that
+    # was not locked down at all. svv_all_schemas is no better: it lists every database's schemas.
+    # `LEFT(…, 3)` rather than LIKE 'pg\_%', so no escape character depends on the server's settings.
+    def sql_schemas(self) -> str:
+        excl = ", ".join(self.quote_lit(s) for s in self._SYS_SCHEMAS)
+        return (
+            "SELECT nspname AS schema_name FROM pg_namespace "
+            "WHERE has_schema_privilege(nspname, 'USAGE') "
+            f"AND nspname NOT IN ({excl}) AND LEFT(nspname, 3) <> 'pg_' "
+            "ORDER BY nspname"
+        )
 
     # Columns come from svv_columns, not information_schema.columns. A late-binding view (CREATE
     # VIEW ... WITH NO SCHEMA BINDING) is listed in information_schema.tables but its columns are not
@@ -354,7 +475,8 @@ class Redshift(PostgreSQL):
             "ORDER BY table_schema, table_name, ordinal_position"
         )
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -368,6 +490,18 @@ class Redshift(PostgreSQL):
 class MySQL(Dialect):
     name = "MySQL"
     backslash_escapes = True
+    duration_rounds = True
+    reserved_extra = frozenset({
+        "add", "alter", "change", "condition", "cube", "cume_dist", "database", "databases", "dec",
+        "dense_rank", "div", "dual", "empty", "explain", "first_value", "function", "generated",
+        "groups", "if", "ignore", "interval", "key", "keys", "kill", "lag", "last_value", "lateral",
+        "lead", "leave", "lines", "load", "lock", "long", "loop", "match", "mod", "nth_value",
+        "ntile", "of", "option", "out", "over", "partition", "percent_rank", "procedure", "range",
+        "rank", "read", "recursive", "regexp", "release", "rename", "repeat", "replace", "require",
+        "restrict", "return", "revoke", "rlike", "row", "row_number", "rows", "schema", "separator",
+        "show", "signal", "spatial", "sql", "system", "trigger", "undo", "unlock", "unsigned",
+        "usage", "use", "varying", "virtual", "while", "write", "xor", "year_month", "zerofill",
+    })
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound
@@ -379,8 +513,24 @@ class MySQL(Dialect):
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF({end}, {start})"
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Every unique index (a UNIQUE constraint is one). sub_part set means a prefix index, which
+        # only makes the prefix unique; a functional index part has no column_name.
+        return (
+            "SELECT index_name AS constraint_name, column_name FROM information_schema.statistics "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND non_unique = 0 AND index_name <> 'PRIMARY' "
+            "AND index_name NOT IN (SELECT index_name FROM information_schema.statistics "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "AND (sub_part IS NOT NULL OR column_name IS NULL)) "
+            "ORDER BY index_name, seq_in_index"
+        )
 
     def sql_foreign_keys(self, schema: str) -> str:
         # MySQL exposes the target (incl. its schema) directly on key_column_usage.
@@ -406,10 +556,20 @@ class MySQL(Dialect):
 
 class Snowflake(Dialect):
     name = "Snowflake"
+    folds_unquoted = "upper"
     backslash_escapes = True
+    unique_enforced = False  # Snowflake declares unique keys but does not enforce them
+    duration_rounds = True
+    reserved_extra = frozenset({
+        "account", "alter", "connect", "connection", "database", "gscluster", "ilike", "increment",
+        "issue", "lateral", "localtime", "localtimestamp", "minus", "of", "organization", "qualify",
+        "regexp", "revoke", "rlike", "row", "rows", "sample", "schema", "set", "some", "start",
+        "tablesample", "trigger", "try_cast", "view",
+    })
     _SYS_SCHEMAS = ("INFORMATION_SCHEMA",)
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -423,24 +583,40 @@ class Snowflake(Dialect):
 class DuckDB(Dialect):
     name = "DuckDB"
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return (
+            "SELECT constraint_index AS constraint_name, unnest(constraint_column_names) AS column_name "
+            "FROM duckdb_constraints() WHERE constraint_type = 'UNIQUE' "
+            f"AND schema_name = {self.quote_lit(schema)} "
+            f"AND table_name = {self.quote_lit(table)} "
+            "ORDER BY constraint_index"
+        )
+
 
 class Databricks(Dialect):
     name = "Databricks"
     backslash_escapes = True
     fk_enforced = False  # Unity Catalog constraints are informational
+    duration_rounds = True
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None  # Unity Catalog has no unique constraint
 
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"datediff({end}, {start})"
 
 
 class Trino(Dialect):
     name = "Trino"
     fk_enforced = False  # Trino generally has no constraints -> probe FKs
+    duration_rounds = True
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"date_diff('day', {start}, {end})"
 
     def sql_primary_keys(self, schema: str, table: str) -> str:
@@ -452,6 +628,9 @@ class Trino(Dialect):
         return ("SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column, "
                 "NULL AS constraint_name, NULL AS key_ordinal WHERE 1=0")
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return None  # varies per connector; skip
 
@@ -459,13 +638,50 @@ class Trino(Dialect):
 class SQLServer(Dialect):
     name = "SQLServer"
     limit_style = "top"
+    duration_rounds = True
+    reserved_extra = frozenset({
+        "add", "alter", "backup", "begin", "break", "browse", "bulk", "cascade", "checkpoint",
+        "close", "clustered", "coalesce", "commit", "compute", "contains", "continue", "convert",
+        "current", "cursor", "database", "dbcc", "deallocate", "declare", "deny", "disk",
+        "distributed", "double", "dump", "errlvl", "escape", "exec", "execute", "exit", "external",
+        "file", "fillfactor", "freetext", "function", "goto", "holdlock", "identity",
+        "identitycol", "if", "key", "kill", "lineno", "load", "merge", "national", "nocheck",
+        "nonclustered", "nullif", "of", "off", "offsets", "open", "option", "over", "percent",
+        "pivot", "plan", "precision", "print", "proc", "procedure", "public", "raiserror", "read",
+        "readtext", "reconfigure", "replication", "restore", "restrict", "return", "revert",
+        "revoke", "rollback", "rowcount", "rowguidcol", "rule", "save", "schema", "set", "setuser",
+        "shutdown", "some", "statistics", "system_user", "tablesample", "textsize", "top", "tran",
+        "transaction", "trigger", "truncate", "tsequal", "unpivot", "updatetext", "use", "varying",
+        "view", "waitfor", "while", "within", "writetext",
+    })
     _SYS_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
 
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"DATEDIFF(day, {start}, {end})"
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # Unique constraints and unique indexes alike; a filtered index is unique only over its
+        # filter, and an INCLUDE column is not part of the key. A disabled index enforces nothing.
+        return (
+            "SELECT i.name AS constraint_name, col.name AS column_name "
+            "FROM sys.indexes i "
+            "JOIN sys.tables t ON t.object_id = i.object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id "
+            "JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id "
+            "WHERE i.is_unique = 1 AND i.is_primary_key = 0 AND i.has_filter = 0 "
+            "AND i.is_disabled = 0 AND i.is_hypothetical = 0 AND ic.is_included_column = 0 "
+            f"AND s.name = {self.quote_lit(schema)} AND t.name = {self.quote_lit(table)} "
+            "ORDER BY i.name, ic.key_ordinal"
+        )
+
+    def flag_rate_expr(self, col: str, *, boolean: bool) -> str:
+        # A BIT is not a predicate in T-SQL: `CASE WHEN flag THEN` is a syntax error.
+        return super().flag_rate_expr(col, boolean=False)
 
     def sql_foreign_keys(self, schema: str) -> str:
         # sys.foreign_key_columns pairs each column with its referenced column; SQL Server's
@@ -514,8 +730,21 @@ class BigQuery(Dialect):
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "") + "`"
 
-    def duration_days_expr(self, start: str, end: str) -> str:
-        return f"TIMESTAMP_DIFF({end}, {start}, DAY)"
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
+        if start_type == end_type == "date":
+            return f"DATE_DIFF({end}, {start}, DAY)"
+        # TIMESTAMP_DIFF takes neither a DATE nor a DATETIME (both normalize to these types), and
+        # a CAST of a TIMESTAMP to TIMESTAMP is a no-op.
+        return f"TIMESTAMP_DIFF(CAST({end} AS TIMESTAMP), CAST({start} AS TIMESTAMP), DAY)"
+
+    def duration_guard(self, start: str, end: str, *, start_type: str = "timestamp",
+                       end_type: str = "timestamp") -> str:
+        # TIMESTAMP_DIFF truncates, so a reversed sub-day pair gives 0. DATE, DATETIME and
+        # TIMESTAMP don't compare with each other, so both sides get the cast the difference uses.
+        if start_type == end_type == "date":
+            return f"{end} >= {start}"
+        return f"CAST({end} AS TIMESTAMP) >= CAST({start} AS TIMESTAMP)"
 
     def qualified(self, schema: Optional[str], table: str) -> str:
         # BigQuery: dataset.table, backtick-wrapped as one path.
@@ -557,6 +786,9 @@ class BigQuery(Dialect):
             f"AND tc.table_name = {self.quote_lit(table)} "
             "ORDER BY kcu.ordinal_position"
         )
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return None  # BigQuery has no unique constraint
 
     def sql_foreign_keys(self, schema: str) -> str:
         # No REFERENTIAL_CONSTRAINTS here, so the referenced column is found among the referenced
@@ -613,8 +845,21 @@ class BigQuery(Dialect):
 
 class SQLite(Dialect):
     name = "SQLite"
+    reserved_extra = frozenset({
+        "abort", "action", "add", "after", "alter", "always", "analyze", "attach", "autoincrement",
+        "before", "begin", "cascade", "collate", "commit", "conflict", "current", "database",
+        "deferrable", "deferred", "detach", "do", "each", "escape", "exclude", "exclusive",
+        "explain", "fail", "filter", "first", "following", "generated", "glob", "groups", "if",
+        "ignore", "immediate", "indexed", "initially", "instead", "isnull", "key", "last",
+        "match", "materialized", "no", "nothing", "notnull", "nulls", "of", "others", "over",
+        "partition", "plan", "pragma", "preceding", "query", "raise", "range", "recursive",
+        "regexp", "reindex", "release", "rename", "replace", "restrict", "returning", "rollback",
+        "row", "rows", "savepoint", "temp", "temporary", "ties", "transaction", "trigger",
+        "unbounded", "vacuum", "view", "virtual", "without",
+    })
 
-    def duration_days_expr(self, start: str, end: str) -> str:
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
         return f"julianday({end}) - julianday({start})"
 
     def sql_schemas(self) -> str:
@@ -647,6 +892,20 @@ class SQLite(Dialect):
             f"{self.quote_lit(table)}) WHERE pk > 0 ORDER BY pk"
         )
 
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # UNIQUE constraints and CREATE UNIQUE INDEX alike; origin 'pk' is the primary key's own
+        # index, and a partial index is unique only over its WHERE. An index written with its own
+        # COLLATE may be unique under a comparison a join's `=` does not use, so it isn't trusted.
+        return (
+            "SELECT il.name AS constraint_name, ii.name AS column_name "
+            f"FROM pragma_index_list({self.quote_lit(table)}) il "
+            "JOIN pragma_index_info(il.name) ii "
+            "WHERE il.\"unique\" = 1 AND il.origin <> 'pk' AND il.partial = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM sqlite_master m WHERE m.type = 'index' "
+            "AND m.name = il.name AND m.sql IS NOT NULL AND UPPER(m.sql) LIKE '%COLLATE%') "
+            "ORDER BY il.name, ii.seqno"
+        )
+
     def sql_foreign_keys(self, schema: str) -> str:
         # foreign_key_list is per-table; the engine special-cases SQLite to call
         # sql_foreign_keys_for_table per table. This whole-schema form is unused.
@@ -672,9 +931,23 @@ class SQLite(Dialect):
 class Oracle(Dialect):
     name = "Oracle"
     limit_style = "fetch"
+    folds_unquoted = "upper"
+    reserved_extra = frozenset({
+        "access", "add", "alter", "audit", "char", "cluster", "comment", "compress", "connect",
+        "date", "decimal", "exclusive", "file", "float", "identified", "immediate", "increment",
+        "initial", "integer", "level", "lock", "long", "maxextents", "minus", "mlslabel", "mode",
+        "modify", "noaudit", "nocompress", "nowait", "number", "of", "offline", "online", "option",
+        "pctfree", "prior", "privileges", "public", "raw", "rename", "resource", "row", "rowid",
+        "rownum", "rows", "session", "set", "share", "size", "smallint", "start", "successful",
+        "synonym", "sysdate", "uid", "validate", "varchar", "varchar2", "view", "whenever",
+    })
 
-    def duration_days_expr(self, start: str, end: str) -> str:
-        return f"({end} - {start})"  # Oracle DATE subtraction yields days
+    def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
+                           end_type: str = "timestamp") -> str:
+        if start_type == end_type == "date":
+            return f"({end} - {start})"  # Oracle DATE subtraction yields days
+        # TIMESTAMP minus TIMESTAMP is an INTERVAL, which AVG rejects.
+        return f"(CAST({end} AS DATE) - CAST({start} AS DATE))"
 
     def sql_schemas(self) -> str:
         return (
@@ -718,6 +991,18 @@ class Oracle(Dialect):
             "WHERE ac.constraint_type = 'P' "
             f"AND ac.owner = {self.quote_lit(schema)} "
             f"AND ac.table_name = {self.quote_lit(table)} ORDER BY acc.position"
+        )
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        # A disabled or NOVALIDATE constraint does not vouch for the rows already there.
+        return (
+            "SELECT ac.constraint_name, acc.column_name FROM all_constraints ac "
+            "JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name "
+            "AND ac.owner = acc.owner "
+            "WHERE ac.constraint_type = 'U' AND ac.status = 'ENABLED' AND ac.validated = 'VALIDATED' "
+            f"AND ac.owner = {self.quote_lit(schema)} "
+            f"AND ac.table_name = {self.quote_lit(table)} "
+            "ORDER BY ac.constraint_name, acc.position"
         )
 
     def sql_foreign_keys(self, schema: str) -> str:

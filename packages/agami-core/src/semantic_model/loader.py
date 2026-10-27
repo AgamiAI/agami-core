@@ -76,6 +76,27 @@ def _read_yaml(path: Path) -> Any:
         return yaml.safe_load(fh)
 
 
+# The top-level keys `load_datasource` reads, which are exactly `Datasource`'s fields. Every other
+# key in datasource.yaml is dropped by that read, so a model written for a newer agami-core lost a
+# field it declared without a word, and a deploy fed by that load stored a model without it (#575).
+# Reported by the callers a person reads (`sm validate`, the deploy), never from the load itself: the
+# executor loads the model in a child process whose stderr is its output contract.
+_DATASOURCE_KEYS = frozenset(Datasource.model_fields)
+
+
+def unknown_datasource_keys(root: str | Path) -> list[str]:
+    """The top-level keys in `<root>/datasource.yaml` this agami-core does not read, sorted."""
+    doc = _read_yaml(Path(root) / "datasource.yaml")
+    if not isinstance(doc, dict):
+        return []  # malformed: `load_datasource` reports it
+    return sorted(k for k in doc if isinstance(k, str) and k not in _DATASOURCE_KEYS)
+
+
+def unknown_keys_message(keys: list[str]) -> str:
+    return (f"datasource.yaml has keys this agami-core does not read, so they are ignored: "
+            f"{', '.join(keys)}. The model may need a newer agami-core.")
+
+
 def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Datasource:
     """Parse a v2 profile directory into a Datasource model.
 
@@ -144,6 +165,9 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         ]
         _drop_uses_of_unserved(org, hidden)
         hidden.metrics_removed |= before - _metric_names(org)
+        # Always, not only when a table or column is hidden (#571): a derived metric whose base was
+        # rejected would fail to expand, and validation reported "references unknown base metric".
+        _drop_metrics_on_removed_bases(org, hidden.metrics_removed)
         # Two areas may share a metric name: rejecting one copy doesn't remove the name.
         hidden.metrics_removed -= _metric_names(org)
         # Always, not only when a table or column is hidden: a rejected metric hides nothing else.
@@ -279,6 +303,8 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             t.grain = [g for g in t.grain if not hidden.column_hidden(t.schema_name, t.name, g)]
+            t.unique_keys = [k for k in t.unique_keys
+                             if not any(hidden.column_hidden(t.schema_name, t.name, c) for c in k)]
             if t.default_filters:
                 alias = bare_name(t.name)
                 t.default_filters = [
@@ -292,7 +318,6 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     org.cross_subject_area_entities = _entities_served(org.cross_subject_area_entities, end_hidden)
     org.cross_subject_area_relationships = [r for r in org.cross_subject_area_relationships if join_ok(r)]
     org.cross_subject_area_metrics = [mm for mm in org.cross_subject_area_metrics if metric_ok(mm)]
-    _drop_metrics_on_removed_bases(org)
 
 
 def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -> list:
@@ -333,10 +358,15 @@ def _ambiguities_served(ambiguities: list, hidden: "_Hidden", org: Datasource) -
     return out
 
 
-def _drop_metrics_on_removed_bases(org: Datasource) -> None:
-    """A derived metric built on a metric that was just left out would fail to expand; leave it out
-    too, repeating until every served metric's bases are served. Bases are read the way expansion
-    reads them — `base_metrics` and `{…}` placeholders, looked up in `metric_index`."""
+def _drop_metrics_on_removed_bases(org: Datasource, removed: set[str]) -> None:
+    """A derived metric built on a metric that was left out would fail to expand; leave it out too,
+    and add its name to `removed`, repeating until no served metric is built on one. Bases are read
+    the way expansion reads them — `base_metrics` and `{…}` placeholders, looked up in
+    `metric_index`.
+
+    Only a base in `removed` (on disk, but rejected or hidden) drops a metric. A base this model never
+    had is a mistake in the model, not something the runtime chose to leave out, so it stays for the
+    validator to report rather than vanishing from the served view without a word."""
     from . import derived as D
 
     def bases(mm) -> list[str]:
@@ -350,9 +380,12 @@ def _drop_metrics_on_removed_bases(org: Datasource) -> None:
         changed = False
         for holder in [*org.subject_areas, org]:
             attr = "metrics" if holder is not org else "cross_subject_area_metrics"
-            kept = [mm for mm in getattr(holder, attr) if all(b in idx for b in bases(mm))]
-            if len(kept) != len(getattr(holder, attr)):
-                setattr(holder, attr, kept)
+            current = getattr(holder, attr)
+            dropped = [mm for mm in current if any(b in removed and b not in idx for b in bases(mm))]
+            if dropped:
+                removed.update(mm.name for mm in dropped)
+                gone = {id(d) for d in dropped}
+                setattr(holder, attr, [mm for mm in current if id(mm) not in gone])
                 changed = True
         if not changed:
             return
@@ -454,6 +487,8 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
                 if hidden is not None:
                     hidden.keep(t.schema_name, t.name, kept, t.columns)
                 t.columns = kept
+                served = {c.name for c in kept}
+                t.unique_keys = [k for k in t.unique_keys if set(k) <= served]
                 # ...and prune those dropped columns out of column_groups, else a group still
                 # naming an excluded column fails the column_group_missing_column check on load
                 # (excluding a deep table's column would otherwise break the whole model).

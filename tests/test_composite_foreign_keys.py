@@ -209,9 +209,8 @@ def _build(key: str, rows: list[dict]) -> tuple[list[m.Relationship], I.Introspe
         return [dict(r) for r in rows] if sql in fk_sql else []
 
     report = I.IntrospectReport(profile="p", db_type=key, out_dir="", dry_run=True)
-    grain = {t.name: set(t.grain) for t in tables}
     pairs = [("shipments", "shipments")] if key == "sqlite" else [("s", t.name) for t in tables]
-    return I._build_relationships(dialect, run, pairs, tables, grain, report), report
+    return I._build_relationships(dialect, run, pairs, tables, report), report
 
 
 @pytest.mark.parametrize("key", ["postgres", "redshift", "mysql", "snowflake", "duckdb", "databricks",
@@ -481,6 +480,35 @@ def test_a_refresh_leaves_a_split_key_a_person_signed_off(shop):
     assert "composite foreign key not applied" in done.stdout
     assert "not changed: signed off by you@example.com" in done.stdout
     assert _between(L.load_datasource(shop["root"]), "shipments", "order_lines") == before
+
+
+def _relabel(path: Path, card: str, **match) -> None:
+    doc = yaml.safe_load(path.read_text())
+    for r in doc["relationships"]:
+        if all(r.get(k) == v for k, v in match.items()):
+            r["relationship"] = card
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+def test_a_refresh_relabels_the_engines_composite_join_from_all_its_columns(shop):
+    assert _introspect(shop).returncode == 0
+    _relabel(next(shop["root"].glob("subject_areas/*/relationships.yaml")), "one_to_one", on=_COMPOSITE_ON)
+    done = _introspect(shop, "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert ("shipments.(order_id, line_no) -> order_lines.(order_id, line_no): one_to_one → many_to_one"
+            in done.stdout)
+    (rel,) = _between(L.load_datasource(shop["root"]), "shipments", "order_lines")
+    assert rel.on == _COMPOSITE_ON and rel.relationship == "many_to_one"
+
+
+def test_split_joins_the_merge_replaces_are_not_also_listed_as_relabelled(shop):
+    assert _introspect(shop).returncode == 0
+    path = _split_the_key(shop)
+    _relabel(path, "one_to_one", to_table="order_lines")
+    done = _introspect(shop, "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "joins merged into one composite join" in done.stdout
+    assert "joins corrected" not in done.stdout
 
 
 # --- review fixes -----------------------------------------------------------------------------------
