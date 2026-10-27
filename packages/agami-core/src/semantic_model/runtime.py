@@ -46,6 +46,7 @@ exposure. So the analysis stays, and both the authoring and the refusing go.
 
 from __future__ import annotations
 
+import decimal
 import functools
 import re
 from dataclasses import dataclass, field, replace
@@ -5149,7 +5150,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
             aggregate=_echo_expr(agg.sql()),
             scope=scope,
             sources=frozenset(t for t in resolved if t),
-            value_sources=_value_sources(agg, scope_map),
+            value_sources=_value_sources(agg, scope_map, zero_arms_inert=isinstance(agg, exp.Sum)),
             resolved=why is None,
             unresolved_because=why,
         ))
@@ -5235,9 +5236,13 @@ if _HAVE_SQLGLOT:
         "Binary", "Unary", "Cast", "Distinct",
         "Sum", "Count", "Avg", "Min", "Max", "LogicalOr", "LogicalAnd",
     )
+    # The combining nodes whose value IS their operand's (#579). A value under one still reaches
+    # the SUM unchanged, so `SUM((CASE … ELSE 0 END))` keeps its zero arm inert, and a literal under
+    # one is still that literal, so an arm written `(0)` or `CAST(0 AS DECIMAL)` reads as zero.
+    _PASS_THROUGH_NODES = _exp_nodes("Paren", "Cast")
 else:  # pragma: no cover - nothing in this section runs without a parser
     _ALTERNATION_NODES = _TERNARY_NODES = _STRUCTURAL_NODES = _COMBINING_NODES = ()
-    _DECODE_NODES = ()
+    _DECODE_NODES = _PASS_THROUGH_NODES = ()
 
 
 # What `_value_operands` says about a node, and what `_value_sources` does with the operands beside
@@ -5265,7 +5270,9 @@ def _value_operands(node: "exp.Expression") -> tuple[str, list["exp.Expression"]
       aggregate skips rather than folds, so counting it would report a fan on
       `SUM(CASE WHEN orders.flag THEN order_items.quantity END)`, whose value is at item grain on
       every row that contributes one. An explicit `ELSE NULL` IS counted, contributes no table and
-      so clears no edge: the same shape read the other way, in the fail-closed direction.
+      so clears no edge: the same shape read the other way, in the fail-closed direction. Under a
+      `SUM`, with only alternations, parentheses and casts between, `_value_sources` drops it and an
+      `ELSE 0` the way the absent default is dropped (#579).
     - `exp.If` and `exp.Nvl2`. `IF` / `IIF` / `IFF` parse to `exp.If`, NOT to `exp.Case`, on every
       dialect this layer speaks, and `NVL2` to a node with the identical three arguments. Without a
       case of their own the combining branch would take the CONDITION's columns as value columns,
@@ -5320,6 +5327,22 @@ def _present(operands: list) -> list["exp.Expression"]:
     return [operand for operand in operands if isinstance(operand, exp.Expression)]
 
 
+def _is_zero_or_null(node: "exp.Expression") -> bool:
+    """Whether a node is the literal `0` or `NULL`, through parentheses and casts (#579)."""
+    while isinstance(node, _PASS_THROUGH_NODES):
+        node = node.this
+    if isinstance(node, exp.Null):
+        return True
+    if isinstance(node, exp.Literal) and not node.is_string:
+        # Decimal, not float: `float('1e-400')` rounds to 0.0, and a constant that small is still
+        # added once per joined row.
+        try:
+            return decimal.Decimal(node.this) == 0
+        except decimal.InvalidOperation:
+            return False
+    return False
+
+
 def _decode_arms(node: "exp.Expression") -> list["exp.Expression"]:
     """The result slots of a `DECODE`, plus its trailing default when it wrote one.
 
@@ -5343,7 +5366,8 @@ def _decode_arms(node: "exp.Expression") -> list["exp.Expression"]:
     return arms
 
 
-def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozenset[str]:
+def _value_sources(node: "exp.Expression", scope_map: dict[str, str], *,
+                   zero_arms_inert: bool = False) -> frozenset[str]:
     """The tables an expression's value is at the grain of on EVERY path through it.
 
     This is the one question the per-edge fan suppression asks, and both halves of it are load
@@ -5390,10 +5414,23 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
     its operands' answers out of `computed`. Keying by `id()` is safe because every operand
     `_value_operands` returns is a node the caller's tree already holds, so none of them can be
     collected and have its id reused while this runs.
+
+    **`zero_arms_inert` is for a `SUM` (#579).** An arm that is the literal `0` or `NULL` adds
+    nothing to a sum however often its row is repeated, so it is left out of the intersection the
+    way an absent `ELSE` already is. Without that, `SUM(CASE WHEN orders.status = 'shipped' THEN
+    COALESCE(order_items.quantity, 0) END)` intersected `order_items` with the `0`'s empty set and
+    reported a fan on a value that is at item grain on every row that adds anything. It holds only
+    while every node between the arm and the `SUM` is an alternation, a parenthesis or a cast: under
+    `COUNT` or `AVG` a `0` is still a counted row, and under arithmetic it is not the value (`COALESCE
+    (x, 0) + orders.total_amount` sums a one-side amount on the rows where `x` is NULL). An
+    alternation whose every arm is inert keeps an empty value path, so the fan is still reported.
     """
     if not isinstance(node, exp.Expression):
         return frozenset()
     computed: dict[int, frozenset[str]] = {}
+    # The nodes whose value reaches the SUM unchanged, keyed like `computed`. Only their alternation
+    # arms may drop out as inert.
+    summand: set[int] = {id(node)} if zero_arms_inert else set()
     stack: list[tuple["exp.Expression", bool]] = [(node, False)]
     while stack:
         current, folding = stack.pop()
@@ -5410,8 +5447,17 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
         if not folding:
             stack.append((current, True))
             stack.extend((operand, False) for operand in operands)
+            passes_value = (reading == _VALUE_INTERSECT or current is node
+                            or isinstance(current, _PASS_THROUGH_NODES))
+            if id(current) in summand and passes_value:
+                summand.update(id(operand) for operand in operands)
             continue
+        if reading == _VALUE_INTERSECT and id(current) in summand:
+            operands = [operand for operand in operands if not _is_zero_or_null(operand)]
         parts = [computed.get(id(operand), frozenset()) for operand in operands]
+        if not parts:
+            computed[id(current)] = frozenset()
+            continue
         computed[id(current)] = (
             frozenset.intersection(*parts) if reading == _VALUE_INTERSECT
             else frozenset().union(*parts)
