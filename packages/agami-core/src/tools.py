@@ -466,7 +466,12 @@ _call_misses: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 
 
 def _note_miss(
-    kind: str, name: str, did_you_mean: list[str] | None = None, value: Any = None
+    kind: str,
+    name: str,
+    did_you_mean: list[str] | None = None,
+    value: Any = None,
+    *,
+    hinted: bool = False,
 ) -> None:
     """Publish one name the model lacked, beside the reply and never in it.
 
@@ -486,6 +491,10 @@ def _note_miss(
         entry["did_you_mean"] = list(did_you_mean)
     if isinstance(value, str):
         entry["value"] = value
+    # Whether the reply carried a wrong-kind hint for it (#567): without it, an entry whose
+    # `did_you_mean` is empty reads as "the caller was given nothing" when it was told what the name is.
+    if hinted:
+        entry["hinted"] = True
     misses = _call_misses.get()
     if misses is None:
         misses = []
@@ -1869,17 +1878,25 @@ class _ModelNames(NamedTuple):
     # from a metric really named `revenue (net)`.
     metric_keys: dict[str, "tuple[str, str | None]"]  # key -> (metric name, area or None)
     folded_tables: frozenset[str]  # casefolded bare table names, for "is this a table at all"
+    # area -> its own tables like its name (#567). Filled on first use: one call can pass the same
+    # area in thousands of spellings, and each would otherwise run the matcher again.
+    area_guesses: dict[str, list[str]]
+    # area -> every table it defines. `tables` keeps only the FIRST defining area per name (it is
+    # what `area_of` answers), so a table two areas define would vanish from the second's guesses.
+    area_tables: dict[str, list[str]]
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
         from semantic_model import loader as L
 
         tables: dict[str, str] = {}
+        area_tables: dict[str, list[str]] = {}
         columns: dict[str, list[str]] = {}
         for sa in org.subject_areas:
             for t in sa.tables_defined:
                 bare = _bare_name(t.name)
                 tables.setdefault(bare, sa.name)
+                area_tables.setdefault(sa.name, []).append(bare)
                 # Only the columns `get_datasource_schema` would show: a table read in its owning
                 # area exposes the column groups that area's TableRef names, and a hint naming a
                 # column outside them would disclose what the schema response deliberately hides.
@@ -1893,6 +1910,8 @@ class _ModelNames(NamedTuple):
             columns,
             metric_keys,
             frozenset(t.casefold() for t in tables),
+            {},
+            area_tables,
         )
 
     def area_of(self, table: str) -> "str | None":
@@ -1904,19 +1923,25 @@ class _ModelNames(NamedTuple):
         """
         return self.tables.get(_bare_name(table))
 
-    def table_hint(self, name: str) -> "str | None":
+    def table_hint(self, name: str, *, suggest: bool = True) -> "str | None":
         """Why `name` is not a table, when it is a real name of another kind.
 
         Only when no table answers to it in any case: a name can be an area AND a table
         (`payments`), and there `Payments` is a case typo of the table — telling the caller it "is a
         subject area, not a table" would be false.
+
+        `suggest=False` keeps the hint plain: past `_SUGGESTED_MISSES` nothing is searched, so the
+        prose must not offer a table the structured `did_you_mean` and the activity log never got.
         """
         folded = name.casefold()
         if _bare_name(folded) in self.folded_tables:
             return None
         area = next((a for a in self.areas if a.casefold() == folded), None)
         if area:
-            return f"{area!r} is a subject area, not a table: pass it as `area`."
+            lead = f"{area!r} is a subject area, not a table: pass it as `area`"
+            if suggest and (near := self.area_table_guesses(name)):
+                return f"{lead}, or did you mean {', '.join(repr(g) for g in near)}?"
+            return f"{lead}."
         holders = self.columns.get(_bare_name(name).casefold())
         if holders:
             listed = ", ".join(sorted(set(holders))[:5])
@@ -1937,8 +1962,19 @@ class _ModelNames(NamedTuple):
         """The refusal for a table scope in which no named table exists."""
         # A name past the cap is left out rather than given `[]`: an empty list says "searched,
         # nothing close", and these were not searched.
-        hints = {n: h for n in names if (h := self.table_hint(n))}
-        guesses = {n: self.table_guesses(n) for n in names[:_SUGGESTED_MISSES] if n not in hints}
+        hints = {
+            n: h
+            for i, n in enumerate(names)
+            if (h := self.table_hint(n, suggest=i < _SUGGESTED_MISSES))
+        }
+        # A hinted name gets a list only when its own area holds a table like it (#567); otherwise it
+        # stays out, as before, and its hint stands alone.
+        guesses = {
+            n: near
+            for n in names[:_SUGGESTED_MISSES]
+            if (near := self.area_table_guesses(n) if n in hints else self.table_guesses(n))
+            or n not in hints
+        }
         # Named in prose only up to the cap too: past it the count is the caller's own number, and
         # a statement of thousands of names is not thousands of sentences of refusal.
         sentences = [
@@ -1947,7 +1983,9 @@ class _ModelNames(NamedTuple):
         ]
         # Searched up to the cap, so a name there gets a list, empty when a hint stood in for it.
         for i, n in enumerate(names):
-            _note_miss("table", n, guesses.get(n, []) if i < _SUGGESTED_MISSES else None)
+            _note_miss(
+                "table", n, guesses.get(n, []) if i < _SUGGESTED_MISSES else None, hinted=n in hints
+            )
         if len(names) > _SUGGESTED_MISSES:
             sentences.append(f"And {len(names) - _SUGGESTED_MISSES} more unknown table name(s).")
         if not any(guesses.values()) and not hints:
@@ -1996,6 +2034,9 @@ class _ModelNames(NamedTuple):
         hint = self.table_hint(name)
         if hint:
             entry["hint"] = hint
+            # Beside an area hint, only that area's own tables (#567), never a model-wide guess.
+            if near := self.area_table_guesses(name):
+                entry["did_you_mean"] = near
         elif guesses := self.table_guesses(name):
             entry["did_you_mean"] = guesses
         return entry
@@ -2047,6 +2088,26 @@ class _ModelNames(NamedTuple):
 
     def table_guesses(self, name: str) -> list[str]:
         return _did_you_mean(name, self.tables)
+
+    def area_table_guesses(self, name: str) -> list[str]:
+        """The tables like `name` inside the area `name` names, when it names one (#567).
+
+        Models often name an area after its main table with a suffix (area `orders`, table
+        `orders_v`), and a caller asking for the area by its table's name wants that table. Only the
+        area's OWN tables, the ones it defines: a near-miss elsewhere in the model is the unrelated
+        guess the hint exists to avoid. Matched against those tables alone, so a closer name in
+        another area can never crowd one out of the top few. Memoized per area, since the answer
+        depends only on the area and not on how the caller spelled it.
+        """
+        folded = name.casefold()
+        if _bare_name(folded) in self.folded_tables:
+            return []
+        area = next((a for a in self.areas if a.casefold() == folded), None)
+        if area is None:
+            return []
+        if area not in self.area_guesses:
+            self.area_guesses[area] = _did_you_mean(area, self.area_tables.get(area, []))
+        return list(self.area_guesses[area])
 
 
 class Scope(NamedTuple):
@@ -2704,6 +2765,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 searched = [] if t in shown else None
                 if names.area_of(t) is not None:
                     _note_miss("misplaced_table", t, searched)
+                elif t in shown and names.table_hint(t):
+                    # What the reply showed for it (#567): the hint, and the area's own tables.
+                    _note_miss("table", t, names.area_table_guesses(t), hinted=True)
                 else:
                     _note_miss("table", t, guesses.get(t, searched))
             return json.dumps(
@@ -2791,7 +2855,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 searched = (
                     ctx["tables"][n].get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
                 )
-                _note_miss("table", n, searched)
+                hinted = i < _SUGGESTED_MISSES and "hint" in ctx["tables"][n]
+                _note_miss("table", n, searched, hinted=hinted)
         requested = {_bare_name(n) for n in ctx["tables"]} | set(ctx["tables"])
         schemas = {n: t.get("schema") for n, t in ctx["tables"].items() if isinstance(t, dict)}
         kept_joins, other_joins = _compact_other_joins(ctx["relationships"], requested, schemas)
@@ -3242,10 +3307,10 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
 
     Relayed only when BOTH hold:
 
-      * the exit code is one the child's CLI contract produces from a `Failure`
-        (`execute_sql.EXIT_TO_FAILURE_KIND`, 2-11). Those are the codes `main` reaches by
-        writing `env.failure.message`, so the text is something the child classified and chose. Any
-        other code — a Python-level crash exiting 1, a signal, a code we do not know — means the
+      * the exit code is one of the AUTHORED configuration codes (2, 3), whose text is this
+        module's own remediation; every other code the child's contract produces (4-11) is rebuilt
+        from the code instead, below. Any other code — a Python-level crash exiting 1, a signal,
+        a code we do not know — means the
         child never got that far, so its stderr is whatever happened to be on the way out.
       * the text carries no Python traceback. Belt and braces on the rule above, and the concrete
         thing that used to land here: before `execute_guarded` was made total, a malformed
@@ -3258,11 +3323,12 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     needs, and it is the same text the in-process path surfaces from `ExecutorError.msg` — the two
     paths agreeing on it is a property this slice exists to keep.
 
-    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with one exact-match exception: a
+    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with exact-match exceptions: a
     `syntax` failure whose line is exactly one of `sql_dialect_rules.FIX_MESSAGES` (#566), a fixed set
-    built from our own rules, so nothing else in the stream can pass. For every code whose message
-    the child derives from `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the
-    exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
+    built from our own rules, and a `syntax` or `other` failure whose line wholly matches one of
+    `execute_sql.SQLSTATE_MESSAGE_PATTERNS` (#561, #583), our templates with a five-character code,
+    so nothing else in the stream can pass. For every code whose message the child derives from
+    `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
     is a *shared* stream, and the child writes to it before the failure line. The concrete case was
     `_model_safety`'s `[agami] applied default_filters: …` notice — it put a declared row-level
     predicate, which the caller never sent, into `failure.message` on the DEFAULT transport, while
@@ -3292,12 +3358,46 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
         # our own rules. The parent cannot rebuild it from the code, since only the child saw which
         # construct the database rejected; an exact match means no other byte of the stream passes.
         if kind == "syntax":
+            from execute_sql import SQLSTATE_MESSAGE_PATTERNS
             from sql_dialect_rules import FIX_MESSAGES
 
             fix = next((line.strip() for line in text.splitlines() if line.strip() in FIX_MESSAGES), None)
             if fix is not None:
                 return fix
+            # The same exactness for a SQLSTATE sentence (#561): a whole line built from one of our
+            # templates and a five-character code, which is all the parent cannot rebuild.
+            coded = next(
+                (
+                    line.strip()
+                    for line in text.splitlines()
+                    if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+                ),
+                None,
+            )
+            if coded is not None:
+                return coded
         return _ERROR_MESSAGES[kind]
+    if kind == "other":
+        # Rebuilt too (#583). `other` has no entry in `_ERROR_MESSAGES`, so it used to fall to the
+        # relay below with the authored codes, and the caller got the child's WHOLE stderr: any line a
+        # library logged before the failure line included. The child writes one of two kinds of
+        # sentence for it: the generic one, rebuilt here, or a SQLSTATE sentence (#561), relayed only
+        # as an exact match like the `syntax` ones above.
+        from execute_sql import SQLSTATE_MESSAGE_PATTERNS
+
+        coded = next(
+            (
+                line.strip()
+                for line in text.splitlines()
+                if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+            ),
+            None,
+        )
+        if coded is not None:
+            return coded
+        if text and text != UNEXPECTED_FAILURE_MESSAGE:
+            _LOG.error("forked executor exited %s (other); raw stderr: %s", returncode, text)
+        return UNEXPECTED_FAILURE_MESSAGE
     classified = returncode in EXIT_TO_FAILURE_KIND
     # `Traceback (most recent call last):` is the stable header of every Python traceback, and a
     # `  File "…", line N` frame is the line that carries the absolute path. Either one is enough.
@@ -4109,6 +4209,8 @@ def _bounded_missed(misses: list[dict[str, Any]] | None) -> str | None:
         if "value" in miss:
             entry["value"], value_cut = _audit_text(miss["value"], AUDIT_MISS_NAME_MAX_CHARS)
             truncated = truncated or value_cut
+        if miss.get("hinted") is True:
+            entry["hinted"] = True  # a flag, never the hint's prose
         # Absent or None means never searched, and stays absent; a lone value is one suggestion.
         offered = miss.get("did_you_mean")
         if offered is not None:

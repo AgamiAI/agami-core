@@ -382,6 +382,20 @@ class Redshift(PostgreSQL):
     sql_enum_values = Dialect.sql_enum_values
     sql_check_constraints = Dialect.sql_check_constraints
 
+    # Schemas come from pg_namespace filtered on USAGE, not information_schema.schemata (#558). On
+    # Redshift that view lists only the schemas the user OWNS, so a read-only role that can read every
+    # view in a schema listed none, and discovery reported "no tables discovered" for a catalog that
+    # was not locked down at all. svv_all_schemas is no better: it lists every database's schemas.
+    # `LEFT(…, 3)` rather than LIKE 'pg\_%', so no escape character depends on the server's settings.
+    def sql_schemas(self) -> str:
+        excl = ", ".join(self.quote_lit(s) for s in self._SYS_SCHEMAS)
+        return (
+            "SELECT nspname AS schema_name FROM pg_namespace "
+            "WHERE has_schema_privilege(nspname, 'USAGE') "
+            f"AND nspname NOT IN ({excl}) AND LEFT(nspname, 3) <> 'pg_' "
+            "ORDER BY nspname"
+        )
+
     # Columns come from svv_columns, not information_schema.columns. A late-binding view (CREATE
     # VIEW ... WITH NO SCHEMA BINDING) is listed in information_schema.tables but its columns are not
     # in information_schema.columns, so a schema built from such views introspected as tables with no

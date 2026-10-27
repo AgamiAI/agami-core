@@ -59,7 +59,8 @@ def make_catalog_runner(
 
     def run(sql: str) -> list[dict]:
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        # Redshift lists schemas from pg_namespace (#558), same field.
+        if "information_schema.schemata" in s or "FROM pg_namespace" in s:
             return [{"schema_name": schema}]
         if "information_schema.tables" in s and "table_type" in s:
             return list(table_rows)

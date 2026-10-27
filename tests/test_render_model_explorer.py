@@ -174,3 +174,15 @@ def test_manifest_carries_table_description_source_ai_unknown(tmp_path):
     m = build_manifest(root, "p")
     t = m["schemas"][0]["tables"][0]
     assert t["description_source"] == "ai_unknown"
+
+
+def test_subject_areas_are_not_called_schemas(profile_dir, tmp_path, monkeypatch, capsys):
+    # #527: the manifest's `schemas` key holds subject areas; "schema" reads as a database schema
+    import render_model_explorer as R
+    out = tmp_path / "explorer.html"
+    monkeypatch.setattr(sys, "argv", ["render_model_explorer.py", "--profile", profile_dir.name,
+                                      "--artifacts-dir", str(profile_dir.parent), "--out", str(out)])
+    assert R.main() == 0
+    counts = capsys.readouterr().out.split("(", 1)[1]   # past the output path, which can say anything
+    assert counts.startswith("1 subject area ·") and "schema" not in counts
+    assert "plural(t.schemas || 0, 'subject area')" in out.read_text(encoding="utf-8")

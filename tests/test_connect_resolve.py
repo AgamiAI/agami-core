@@ -13,6 +13,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
@@ -114,11 +116,17 @@ def test_profile_resolution_order(tmp_path, monkeypatch):
     assert data2["profile_source"] == "active_profile"
 
 
-def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for):
-    """Wire _resolve_interpreter's two probe seams to fake interpreters, so the
+def _fake_candidates(monkeypatch, paths, *, deps_for, driver_for, no_pip=(), lib=None, plugin="0.9.18"):
+    """Wire _resolve_interpreter's probe seams to fake interpreters, so the
     scoring/tie-break runs on controlled inputs (the real host Python set can't
-    exercise the fix — every interpreter there happens to be fully equipped)."""
+    exercise the fix — every interpreter there happens to be fully equipped).
+    `no_pip` lists interpreters without pip; `lib` maps one to its agami-core version
+    (the rest carry the plugin's own version)."""
     monkeypatch.setattr(CR, "_candidate_interpreters", lambda: list(paths))
+    monkeypatch.setattr(CR, "plugin_version", lambda: plugin)
+    lib = lib or {}
+    monkeypatch.setattr(CR, "_probe_install", lambda py: {
+        "has_pip": py not in no_pip, "agami_core": lib.get(py, plugin), "this_checkout": False})
 
     def fake_probe(py: str, mods: list[str]) -> bool:
         mods = [m for m in mods if m]
@@ -198,3 +206,92 @@ def test_secret_values_never_reach_the_output(tmp_path, monkeypatch, capsys):
     assert fields["password"] == fields["token"] == CR._REDACTED
     assert fields["url"].startswith("postgresql://demo:") and "your-cluster.example.com:5439" in fields["url"]
     assert fields["host"] == "your-cluster.example.com" and data["credentials"]["type"] == "redshift"
+
+
+def test_pipless_stale_venv_is_skipped_with_a_reason(monkeypatch):
+    # #529: a project .venv first on PATH, with an old agami-core and no pip, was recorded as the
+    # interpreter, and `sm install` could never upgrade it.
+    venv, good = "/fake/repo/.venv/bin/python3", "/fake/usr/python3"
+    _fake_candidates(monkeypatch, [venv, good], deps_for={venv, good}, driver_for={venv, good},
+                     no_pip={venv}, lib={venv: "0.9.14"})
+    res = CR._resolve_interpreter("postgres", configured=None)
+    assert res["python3"] == good
+    assert "postgres driver" in res["chosen_because"]
+    scored = {c["python3"]: c for c in res["candidates_scored"]}
+    assert scored[venv]["skipped"] is True and scored[venv]["has_pip"] is False
+    assert "no pip" in scored[venv]["reason"] and "0.9.14" in scored[venv]["reason"]
+    assert scored[good]["skipped"] is False and "reason" not in scored[good]
+    assert res["warnings"] == []
+
+
+def test_pipless_but_current_venv_is_still_chosen(monkeypatch):
+    # No pip is only disqualifying when something needs installing.
+    venv, other = "/fake/repo/.venv/bin/python3", "/fake/usr/python3"
+    _fake_candidates(monkeypatch, [venv, other], deps_for={venv, other}, driver_for={venv, other},
+                     no_pip={venv})
+    res = CR._resolve_interpreter("postgres", configured=None)
+    assert res["python3"] == venv
+    assert not res["candidates_scored"][0]["skipped"]
+
+
+def test_pipless_configured_interpreter_without_the_library_is_skipped(monkeypatch):
+    configured, good = "/fake/cfg/python3", "/fake/usr/python3"
+    _fake_candidates(monkeypatch, [good], deps_for={configured, good}, driver_for=set(),
+                     no_pip={configured}, lib={configured: None})
+    monkeypatch.setattr(CR.os, "access", lambda p, m: True)
+    res = CR._resolve_interpreter("sqlite", configured=configured)
+    assert res["python3"] == good
+    assert "no agami-core installed" in res["candidates_scored"][0]["reason"]
+
+
+def test_agami_python_is_kept_but_warned_when_it_cannot_be_brought_current(monkeypatch):
+    pinned = "/fake/pinned/python3"
+    monkeypatch.setenv("AGAMI_PYTHON", pinned)
+    _fake_candidates(monkeypatch, [pinned, "/fake/usr/python3"], deps_for={pinned, "/fake/usr/python3"},
+                     driver_for=set(), no_pip={pinned}, lib={pinned: "0.9.11"})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["python3"] == pinned and "$AGAMI_PYTHON" in res["chosen_because"]
+    kinds = {w["kind"]: w["detail"] for w in res["warnings"]}
+    assert "no pip" in kinds["agami_python_cannot_be_brought_current"]
+    stale = kinds["library_older_than_plugin"]
+    assert "0.9.11" in stale and "0.9.18" in stale and pinned in stale and "sm\" install" in stale
+
+
+def test_stale_library_with_pip_is_chosen_with_a_warning_in_anomalies(tmp_path, monkeypatch, capsys):
+    py = "/fake/usr/python3"
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set(), lib={py: "0.9.11"})
+    data, anomalies = _run(monkeypatch, tmp_path)
+    assert data["interpreter"]["python3"] == py and data["interpreter"]["agami_core"] == "0.9.11"
+    assert data["interpreter"]["plugin_version"] == "0.9.18"
+    (stale,) = [a for a in anomalies if a["kind"] == "library_older_than_plugin"]
+    assert "0.9.11" in stale["detail"] and "0.9.18" in stale["detail"]
+    assert "older than this plugin (0.9.18)" in capsys.readouterr().err
+
+
+def test_unknown_versions_skip_nothing_and_warn_nothing(monkeypatch):
+    py = "/fake/usr/python3"
+    _fake_candidates(monkeypatch, [py], deps_for={py}, driver_for=set(), no_pip={py}, plugin=None,
+                     lib={py: None})
+    res = CR._resolve_interpreter("sqlite", configured=None)
+    assert res["python3"] == py and res["warnings"] == []
+    assert res["candidates_scored"][0]["skipped"] is False
+
+
+def test_windows_virtualenv_layout():
+    assert CR._venv_python("venv", windows=True).replace("\\", "/") == "venv/Scripts/python.exe"
+    assert CR._venv_python("venv", windows=False).replace("\\", "/") == "venv/bin/python"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_later_pythons_on_path_are_candidates_too(monkeypatch, tmp_path):
+    # The first python3 on PATH may be skipped; the next one on PATH must still be considered.
+    first, second = tmp_path / "venv" / "bin", tmp_path / "usr" / "bin"
+    for d in (first, second):
+        d.mkdir(parents=True)
+        (d / "python3").write_text("#!/bin/sh\n")
+        (d / "python3").chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(first), str(second)]))
+    monkeypatch.delenv("AGAMI_PYTHON", raising=False)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    got = CR._candidate_interpreters()
+    assert got.index(str(first / "python3")) < got.index(str(second / "python3"))

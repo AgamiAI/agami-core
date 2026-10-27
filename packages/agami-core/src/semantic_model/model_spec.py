@@ -648,13 +648,13 @@ def apply_spec(
     finally:
         shutil.rmtree(backup, ignore_errors=True)
 
-    curate._append_curation_log(
+    res.committed, res.commit_note = curate._record(
         root,
+        "apply model spec",
         [{"op": "apply_spec", **{k: v for k, v in res.counts.items() if k != "subject_areas"}}],
         signer,
         role,
     )
-    res.committed, res.commit_note = curate._git_commit(root, "apply model spec")
     res.applied = True
     return res
 
