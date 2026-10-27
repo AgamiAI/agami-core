@@ -331,7 +331,8 @@ def _metric_item(area: Optional[str], mm) -> dict:
             "subtitle": f"metric · {area}" if area else "metric",
             "source_signal": mm.calculation,
             "signals": [{"ok": True, "text": mm.calculation}],
-            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines,
+            "extra_lines": [{"label": "Definition", "text": mm.calculation}] + binding_lines
+                           + [{"label": "Caveat", "text": c} for c in mm.caveats],
             "inferred": primary_sql, "origin": "llm_suggested",
             "bindings": mm.bindings, "business_question": mm.business_question,
             **_trust(mm)}
@@ -661,6 +662,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         path, key, doc, item = _find_item(root, kind, name, area)
         _snapshot(backups, path)
         before = _set_trust(item, op, new_state, signer, role)
+        if kind == "metric" and not item.get("caveats"):
+            # clearing the caveats removes the key, so the file stays readable by an older release
+            item.pop("caveats", None)
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
         return path, before
 
@@ -687,10 +691,35 @@ def _apply_one(root: Path, op: dict, signer, role,
         path, key, doc, rels, hit = _find_join(root, op, area)
         _snapshot(backups, path)
         before = _set_trust(hit, op, new_state, signer, role)
+        _restamp_join_edit(hit, op, signer, role)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
         return path, before
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+# The fields that say which rows a join meets; a description edit changes none of them.
+_JOIN_STRUCTURE_FIELDS = frozenset({
+    "relationship", "from_column", "to_column", "on", "from_schema", "to_schema",
+    "from_table", "to_table",
+})
+
+
+def _restamp_join_edit(doc: dict, op: dict, signer: Optional[str], role: Optional[str]) -> None:
+    """A person's edit of an approved join's structure makes the sign-off theirs, so a refresh,
+    which relabels only the joins introspection approved itself, leaves the edit alone (#511).
+    With no signer to stamp, an engine sign-off is cleared and the join waits for review."""
+    if op.get("op") != "edit" or op.get("field") not in _JOIN_STRUCTURE_FIELDS:
+        return
+    if doc.get("review_state", "unreviewed") != "approved":
+        return
+    if signer and role:
+        doc["signed_off_by"], doc["signed_off_role"] = signer, role
+        doc["signed_off_at"] = op.get("at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    elif doc.get("signed_off_by") == "agami_introspect" or doc.get("signed_off_role") == "system":
+        doc["review_state"] = "unreviewed"
+        for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+            doc.pop(k, None)
 
 
 def _area_names(root: Path) -> list[str]:

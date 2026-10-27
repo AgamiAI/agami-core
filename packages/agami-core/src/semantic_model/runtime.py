@@ -81,6 +81,7 @@ from .models import (
 from .models import (
     bare_name as _bare,
 )
+from .models import table_key as _table_key
 from .sql_dialect import DialectUnresolved, engines_disagree, resolve_datasource_dialect
 from .suggest import did_you_mean
 
@@ -829,6 +830,7 @@ def resolve_metrics(
                         "calculation": mm.calculation,
                         "bindings": bindings,
                         "confidence": mm.confidence,
+                        **({"caveats": list(mm.caveats)} if mm.caveats else {}),
                     },
                 )
             )
@@ -2311,13 +2313,79 @@ def _aggregate_reports(tree, org: Datasource,
         sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
         declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
                     if sites else [])
-        join_statuses = ([(js.scope, _join_site_status(js, declared)[0],
-                           f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
-                          for js in sites], written - len(sites))
+        weighed = _weighed_statuses(sites, [_join_site_status(js, declared) for js in sites], tidx, org)
+        join_statuses = ([(js.scope, status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                          for js, status in zip(sites, weighed)], written - len(sites))
     return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
 
 
 _UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat rows: "
+# What an undeclared join reports to `_downgrade_unweighed` when the model's own keys settle it.
+_KEYED_ONE_TO_ONE = "keyed_one_to_one"
+
+
+def _names_in_several_schemas(org: Datasource) -> set[str]:
+    """Bare table names (folded) that the model defines in more than one schema."""
+    seen: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, name = _table_key(t.name, t.schema_name)
+            seen.setdefault(name, set()).add(schema)
+    return {name for name, schemas in seen.items() if len(schemas) > 1}
+
+
+def _weighed_statuses(sites: "list[_JoinSite]", results: "list[tuple[str, Optional[Relationship]]]",
+                      tidx: dict[str, tuple], org: Datasource) -> list[str]:
+    """Each join's status, an undeclared one reported `_KEYED_ONE_TO_ONE` when its columns are the
+    whole of a key on both sides and no other join that can feed the same numbers could fan. A fan
+    further along could repeat rows through the keyed join, and following it is #595's to do."""
+    several = _names_in_several_schemas(org) if sites else set()
+    keyed = [status == UNDECLARED and _keyed_one_to_one(js, tidx, several)
+             for js, (status, _match) in zip(sites, results)]
+    out = []
+    for i, (js, (status, _match)) in enumerate(zip(sites, results)):
+        others = [j for j, other in enumerate(sites) if j != i and (
+            other.scope == js.scope or other.scope.startswith("cte:") or js.scope.startswith("cte:"))]
+        if keyed[i] and all(keyed[j] or (results[j][0] == DECLARED and results[j][1] is not None
+                                         and results[j][1].relationship == "one_to_one")
+                            for j in others):
+            out.append(_KEYED_ONE_TO_ONE)
+        else:
+            out.append(status)
+    return out
+
+
+def _keyed_one_to_one(js: "_JoinSite", tidx: dict[str, tuple], several: set[str]) -> bool:
+    """Whether the join's columns are the whole of a key on both sides, so one row meets at most one."""
+    if not js.pairs or not isinstance(js.node.this, exp.Table):
+        return False
+    # The pairs carry base-table names, so every equality must be on this join's own right-hand
+    # alias: `JOIN b b2 ON a.code = b1.code` constrains nothing about b2.
+    right = js.node.this.alias_or_name
+    for conj in _and_conjuncts(js.node.args.get("on")):
+        if (isinstance(conj, exp.EQ) and isinstance(conj.this, exp.Column)
+                and isinstance(conj.expression, exp.Column) and conj.this.table and conj.expression.table
+                and [conj.this.table, conj.expression.table].count(right) != 1):
+            return False
+    cols: dict[str, list[str]] = {}
+    for pair in js.pairs:
+        # `a.x = a.y` compares a table with itself and constrains nothing between the two.
+        if len(pair) != 2 or len({key for key, _ in pair}) != 2:
+            return False
+        for table_key, column in pair:
+            cols.setdefault(table_key, []).append(column)
+    if len(cols) != 2 or set(cols) & several:
+        # The pairs carry bare names, and a name two schemas define could borrow the other's key.
+        return False
+    # A table read twice in this SELECT leaves the pairs unable to say which instance each one is.
+    reads = [_tkey(tbl.name) for tbl in _own_table_refs(_enclosing_select(js.node))]
+    if any(reads.count(table_key) > 1 for table_key in cols):
+        return False
+    for table_key, columns in cols.items():
+        hit = tidx.get(table_key)
+        if hit is None or not hit[0].unique_on(columns):
+            return False
+    return True
 
 
 def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
@@ -2771,7 +2839,7 @@ def _projection_sources(body: "exp.Expression") -> dict[str, str]:
 
 
 def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain: list[str],
-              grains: dict[str, set[str]], scope_map: dict[str, str],
+              tables: dict[str, Table], scope_map: dict[str, str],
               outputs: dict[str, str]) -> Optional[Relationship]:
     """The join edge between a grain-CHANGING CTE and the table it is joined to, or None.
 
@@ -2796,9 +2864,9 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
       (a comma join, or an edge written some way this does not read); more than one means a
       composite key, whose cardinality is not the single-column rule's to state.
     * the far side resolving to no table in scope.
-    * the far side's DECLARED GRAIN being empty. This guard sits BEFORE the call and that placement
-      is the point: `infer_cardinality` tests `bool(to_pk)`, so a table declared `grain: []` and a
-      table with no grain at all are indistinguishable to it and BOTH fall through to its
+    * the far side declaring NO KEY — an empty grain and no unique key. This guard sits BEFORE the
+      call and that placement is the point: a table declared `grain: []` and a table with no grain
+      at all are indistinguishable to `infer_cardinality`, and BOTH fall through to its
       `many_to_one` default. Calling it anyway would put a cardinality on the receipt that no one
       declared, which is worse than saying nothing.
 
@@ -2826,11 +2894,12 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         return None
     near, far = pairs[0]
     other = scope_map.get(far.table)
-    if not other or not grains.get(_tkey(other)):
+    far_table = tables.get(_tkey(other)) if other else None
+    if far_table is None or not (far_table.grain or far_table.unique_keys):
         return None
 
     # Every name that reaches `infer_cardinality` is folded, on BOTH sides of every comparison it
-    # makes. `grains` was folded by the caller, `grain` by `_group_by_grain`, and the join keys are
+    # makes. `Table.unique_on` folds the keys, `grain` by `_group_by_grain`, and the join keys are
     # folded here — the module's own convention, stated on `check_column_scope` as "matching is
     # case-insensitive", and the one this comparison was missing. The `Relationship` keeps the
     # WRITTEN spellings, because that is what the receipt echoes back to the caller.
@@ -2844,9 +2913,7 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         from_table=cte_key, to_table=other,
         from_column=near.name, to_column=far.name,
         relationship=infer_cardinality(
-            _tkey(cte_key), _tkey(other), [near_key], [_tkey(far.name)],
-            {**grains, _tkey(cte_key): set(grain)},
-        ),
+            Table(name=cte_key, grain=list(grain)), far_table, [near_key], [_tkey(far.name)]),
     )
 
 
@@ -2901,13 +2968,11 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     matches nothing. So `WITH OI AS (…) … JOIN OI` derives an edge named `OI`, and the grain lookup
     that decides its cardinality folds on the way in.
     """
-    # Folded, because `Table.grain` comes from a catalog and the join keys come from the caller's
-    # SQL — Snowflake and Oracle hand back `ID` where the query writes `id`. Unfolded on either
-    # side, a declared `grain=["ID"]` matches no join key, `infer_cardinality` reads the CTE as
-    # non-unique and invents a fan the statement does not have. It also walks straight through the
-    # empty-grain guard above, since a case-mismatched grain is a non-empty one.
-    grains = {key: {_tkey(col) for col in table.grain or []}
-              for key, (table, _area) in tidx.items()}
+    # `infer_cardinality` compares keys case-folded (`Table.unique_on`), because `Table.grain` comes
+    # from a catalog and the join keys come from the caller's SQL — Snowflake and Oracle hand back
+    # `ID` where the query writes `id`. Unfolded, a declared `grain=["ID"]` matched no join key and
+    # the CTE was read as non-unique, inventing a fan the statement does not have.
+    tables = {key: table for key, (table, _area) in tidx.items()}
     conjuncts = [c for on in _all_join_predicates(sel) for c in _and_conjuncts(on)]
     resolved = dict(scope_map)
     # PASS ONE settles every grain-preserving rebinding, and nothing else. `_cte_edge` resolves the
@@ -2936,7 +3001,7 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     for alias, written in pending:
         body = bodies[_tkey(written)]
         grain = _group_by_grain(body)
-        edge = _cte_edge(conjuncts, alias, written, grain, grains, settled,
+        edge = _cte_edge(conjuncts, alias, written, grain, tables, settled,
                          _projection_sources(body)) if grain else None
         if edge is None:
             resolved[alias] = ""
@@ -3638,8 +3703,8 @@ def assemble_receipt(
     declared_pairs = ([(rel, _declared_pairs(rel, dialect)) for rel in _cardinality_index(org)]
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
-    for js in join_sites:
-        status, match = _join_site_status(js, declared_pairs)
+    join_results = [_join_site_status(js, declared_pairs) for js in join_sites]
+    for js, (status, match) in zip(join_sites, join_results):
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
         # per-relationship build had — it printed a signed-off trail beside a join written on the
@@ -4036,7 +4101,9 @@ def assemble_receipt(
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
     reports = _aggregate_reports(
         tree, org, ctx=None, visible=visible, tidx=tidx,
-        join_statuses=([(it["scope"], it["status"], it["from_to"]) for it in join_items], dropped_joins),
+        join_statuses=([(it["scope"], status, it["from_to"])
+                        for status, it in zip(_weighed_statuses(join_sites, join_results, tidx, org), join_items)],
+                       dropped_joins),
     )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
@@ -4634,11 +4701,15 @@ def _own_alias_map(sel: "exp.Select | None") -> dict[str, str]:
     `walk` yields the node it prunes at, hence the `isinstance` on the way out: the nested SELECT
     itself comes back, and it is not a table reference.
     """
+    return {(tbl.alias or tbl.name): tbl.name for tbl in _own_table_refs(sel)}
+
+
+def _own_table_refs(sel: "exp.Select | None") -> list["exp.Table"]:
+    """The table references THIS SELECT reads itself, in order, repeats kept (see `_own_alias_map`)."""
     if sel is None:
-        return {}
+        return []
     boundary = sel.walk(prune=lambda node: isinstance(node, exp.Select) and node is not sel)
-    return {(tbl.alias or tbl.name): tbl.name
-            for tbl in boundary if isinstance(tbl, exp.Table)}
+    return [tbl for tbl in boundary if isinstance(tbl, exp.Table)]
 
 
 def _own_sources(sel: "exp.Select") -> list["exp.Expression"]:

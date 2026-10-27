@@ -1237,6 +1237,8 @@ def _model_texts(org: Datasource) -> Iterator[tuple[str, str]]:
     for met in metrics:
         yield f"metric {met.name!r}", met.calculation
         yield f"metric {met.name!r}", met.description
+        for caveat in met.caveats:
+            yield f"metric {met.name!r} caveat", caveat
     for ent in entities:
         for caveat in ent.caveats:
             yield f"entity {ent.name!r} caveat", caveat
@@ -1413,7 +1415,7 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
     for met in all_metrics:
         if D.is_derived(met) or not met.source_tables:
             continue
-        own = f"{met.calculation} {met.description}"
+        own = " ".join([met.calculation, met.description, *met.caveats])
         if (_says_missing_is_zero(own, _METRIC_DEFINES_ZERO_RE)
                 or _says_missing_is_zero(own, _NULL_MEANS_ZERO_RE)):
             continue  # the metric says why it fills, and where that rule comes from

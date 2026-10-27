@@ -24,7 +24,8 @@ YAML when building them during onboarding/enrichment. The data below is
 Fields: `name`, `description`, `calculation` (prose intent — **required**,
 provider-portable), `bindings` (per-dialect SQL keyed by `StorageType`),
 `source_tables`, `other_names`, `unit` (optional: a currency ISO code, optionally scaled and/or a rate — `USD`, `USD_millions`, `USD/day`, `USD_millions/year` — or a plain label),
-`subject_areas` (optional; only for cross-cutting metrics). Trust:
+`subject_areas` (optional; only for cross-cutting metrics), `caveats` (optional; what the
+formula does not cover, served with the metric as a warning). Trust:
 `confidence` + `review_state` (declared → `inferred`/`unreviewed`; pure guess →
 `proposed`/`unreviewed`).
 
@@ -40,6 +41,23 @@ source_tables:
 other_names:
   - delivered shipments
   - fulfilled orders
+confidence: inferred
+review_state: unreviewed
+```
+
+A limit of the formula goes in `caveats`, not in the description or calculation, so it is served
+as a warning rather than read as part of the definition:
+
+```yaml
+name: average resolution days
+description: Days from opening to resolution, averaged over resolved tickets.
+calculation: Average of resolved_at minus opened_at, in days.
+bindings:
+  PostgreSQL: "AVG(resolved_at::date - opened_at::date)"
+source_tables:
+  - tickets
+caveats:
+  - Gives no value for a ticket with no opened_at.
 confidence: inferred
 review_state: unreviewed
 ```
