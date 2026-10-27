@@ -25,7 +25,9 @@ below corresponds to one such version.
   is resolved and one over a join can report a fan. A CTE name binds as the scope gate binds it (a
   schema-qualified table, a later sibling or a non-recursive self-reference is the table), and a
   column list (`WITH s(y, x)`, `AS s(y, x)`) renames outputs by position. A subquery's columns are
-  not credited to the outer query's aliases: a `FILTER` holding a subquery reports `undetermined`.
+  not credited to the outer query's aliases: a `FILTER` holding a subquery, an aggregate holding
+  one and an aggregate computed inside a nested SELECT report `undetermined` (a fan proven on the
+  outer columns still reports `multiplied`). A body with a star keeps the written alias.
   What the scope gate refuses is unchanged, and a value read from a subquery is still not matched to
   a metric.
 

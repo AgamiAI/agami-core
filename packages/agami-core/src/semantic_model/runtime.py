@@ -4524,14 +4524,19 @@ def _pick_binding(sources: list["exp.Expression"], qualifier: str) -> "exp.Expre
 
 # The last tree `_cte_reference_ids` walked and its answer: one statement's receipt asks it once
 # per column, and `_cte_references` walks the whole tree.
-_CTE_REFS_LAST: list = [None, frozenset()]
+# Rebound whole, never mutated: receipts are built in worker threads, and a reader holding one
+# tuple cannot see another thread's tree paired with it.
+_CTE_REFS_LAST: tuple = (None, frozenset())
 
 
 def _cte_reference_ids(root: "exp.Expression") -> "set[int] | frozenset[int]":
     """`_cte_references(root)`, computed once per tree."""
-    if _CTE_REFS_LAST[0] is not root:
-        _CTE_REFS_LAST[:] = [root, _cte_references(root)]
-    return _CTE_REFS_LAST[1]
+    global _CTE_REFS_LAST
+    cached_root, refs = _CTE_REFS_LAST
+    if cached_root is not root:
+        refs = _cte_references(root)
+        _CTE_REFS_LAST = (root, refs)
+    return refs
 
 
 def _cte_binding(table: "exp.Table") -> "exp.CTE | None":
@@ -4575,6 +4580,9 @@ def _projection_for(body: "exp.Select", cname: str,
     """The ONE projection of `body` that outputs `cname`, by position when a column list renames
     the outputs, else by name. None when that is not certain."""
     if not listed:
+        # A star may output the same name ahead of the explicit projection.
+        if any(p.is_star for p in body.expressions):
+            return None
         matches = [p for p in body.expressions if _tkey(p.alias_or_name) == _tkey(cname)]
         return matches[0] if len(matches) == 1 else None
     names = [_tkey(n) for n in listed]
@@ -5124,12 +5132,29 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # a total the join really does inflate reported `not_multiplied`. The chasm blast radius was
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
+        if _enclosing_select(agg) is not tree:
+            # Computed inside a nested SELECT: its columns bind in that scope, not in `scope_map`.
+            sites.append(_AggSite(
+                node=agg,
+                aggregate=_echo_expr(agg.sql()),
+                scope=scope,
+                sources=frozenset(),
+                value_sources=frozenset(),
+                resolved=False,
+                unresolved_because=("the aggregate is computed inside a nested SELECT, whose rows the "
+                                    "pre-flight does not analyse"),
+            ))
+            continue
         cols = list(agg.find_all(exp.Column))
+        holds_subquery = None
         if agg.find(exp.Select) is not None:
             # A subquery's columns are bound in its own scope; credited to this SELECT's aliases
-            # they could name a table the aggregate never reads.
+            # they could name a table the aggregate never reads. The outer columns still count, so
+            # a fan on them is reported, but the subquery's rows leave the rest unknown.
             own = _enclosing_select(agg)
             cols = [col for col in cols if _enclosing_select(col) is own]
+            holds_subquery = ("the aggregate holds a subquery whose rows the pre-flight does not "
+                              "analyse")
         # `COUNT(*) FILTER (WHERE x > 0)` parses as `Filter(this=Count, expression=Where)`, so the
         # predicate sits outside the aggregate node. It still decides which rows are folded, as the
         # same test inside `COUNT(CASE WHEN x > 0 THEN 1 END)` does, so it is read too (#521). The
@@ -5144,7 +5169,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
             else:
                 cols += list(predicate.find_all(exp.Column))
         resolved = [_resolve_folded(col, scope_map) for col in cols]
-        why = nested or _why_unresolved(cols, resolved, scope_map, visible)
+        why = nested or holds_subquery or _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
             aggregate=_echo_expr(agg.sql()),

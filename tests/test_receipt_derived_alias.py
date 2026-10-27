@@ -205,3 +205,86 @@ def test_a_subquery_beside_an_outer_column_keeps_the_fan(org):
 def test_the_scope_gate_verdict_is_unchanged_for_the_review_statements(org, sql):
     # Admitted before these receipt fixes too: the gate is not touched.
     assert rt.check_column_scope(sql, org) is None
+
+
+CORRELATED_CASE = ("SELECT SUM(CASE WHEN u.y > 0 THEN (SELECT t.x) ELSE 0 END) AS n "
+                   "FROM public.t t JOIN public.u u ON u.t_id = t.id")
+OUTER_FAN_AND_SUBQUERY = ("SELECT SUM(CASE WHEN t.x > (SELECT MAX(u2.y) FROM public.u u2) THEN t.x ELSE 0 END) AS n "
+                          "FROM public.t t JOIN public.u u ON u.t_id = t.id")
+NESTED_FILTER = ("SELECT (SELECT COUNT(*) FILTER (WHERE t.x > 0) FROM public.t t "
+                 "JOIN public.u u ON u.t_id = t.id) AS n FROM public.u t")
+NESTED_SUM = "SELECT (SELECT SUM(t.x) FROM public.t t JOIN public.u u ON u.t_id = t.id) AS n FROM public.u t"
+STAR_THEN_ALIAS = "SELECT s.x FROM (SELECT t.*, t.id AS x FROM public.t t) s"
+
+
+def test_an_aggregate_holding_a_correlated_subquery_is_undetermined(org):
+    (item,) = rt.assemble_receipt(org, CORRELATED_CASE)["aggregates"]["items"]
+    assert item["status"] == "undetermined"
+    assert "holds a subquery" in item["reason"]
+
+
+def test_an_outer_fan_outranks_a_subquery_in_the_aggregate(org):
+    items = rt.assemble_receipt(org, OUTER_FAN_AND_SUBQUERY)["aggregates"]["items"]
+    assert items[0]["status"] == "multiplied"
+
+
+@pytest.mark.parametrize("sql", [NESTED_FILTER, NESTED_SUM], ids=["filter", "sum"])
+def test_an_aggregate_inside_a_nested_select_is_undetermined(org, sql):
+    (item,) = rt.assemble_receipt(org, sql)["aggregates"]["items"]
+    assert item["status"] == "undetermined"
+    assert "inside a nested SELECT" in item["reason"]
+
+
+def test_a_star_before_an_alias_keeps_the_written_label(org):
+    # On SQLite the star's `x` comes first, so `s.x` is not certainly `t.id`.
+    # `public.t.id` once: the inner reference itself, not the outer `s.x`.
+    assert _references(org, STAR_THEN_ALIAS) == ["s.x", "public.t.*", "public.t.id"]
+
+
+def test_the_cte_cache_never_returns_another_trees_ids(org, monkeypatch):
+    import sqlglot
+
+    mine = sqlglot.parse_one("WITH a AS (SELECT 1 AS x) SELECT a.x FROM a")
+    other = sqlglot.parse_one("WITH b AS (SELECT 1 AS x) SELECT b.x FROM b")
+    other_ids = rt._cte_references(other)
+
+    class Racing(list):
+        # Another thread's write lands between this caller's write and its read.
+        def __getitem__(self, i):
+            return other if i == 0 else other_ids
+
+    monkeypatch.setattr(rt, "_CTE_REFS_LAST", Racing([other, other_ids]))
+    assert rt._cte_reference_ids(mine) == rt._cte_references(mine)
+
+
+def test_the_cte_cache_under_two_threads(org):
+    import threading
+
+    import sqlglot
+
+    trees = [sqlglot.parse_one(f"WITH c{i} AS (SELECT 1 AS x) SELECT c{i}.x FROM c{i}") for i in range(2)]
+    expected = [rt._cte_references(t) for t in trees]
+    bad: list[int] = []
+
+    def run(i: int) -> None:
+        for _ in range(2000):
+            if rt._cte_reference_ids(trees[i]) != expected[i]:
+                bad.append(i)
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(2)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert not bad
+
+
+# What `check_column_scope` returned for each on main before these fixes: the gate is unchanged.
+MAIN_VERDICTS = {CORRELATED_CASE: None, OUTER_FAN_AND_SUBQUERY: None, NESTED_FILTER: None,
+                 NESTED_SUM: None, STAR_THEN_ALIAS: "column_scope"}
+
+
+@pytest.mark.parametrize("sql", list(MAIN_VERDICTS))
+def test_the_scope_gate_verdict_matches_main_for_the_latest_review_statements(org, sql):
+    refusal = rt.check_column_scope(sql, org)
+    assert (refusal.rule if refusal else None) == MAIN_VERDICTS[sql]
