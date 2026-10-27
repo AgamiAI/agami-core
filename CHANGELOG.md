@@ -14,6 +14,25 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Validator: fewer false positives, entity mappings checked everywhere, collision messages name
+  the table (#520).** `metric_binding_unknown_column` read the aliases of a binding's own subquery
+  as missing columns: `SELECT AVG(s.r) FROM (SELECT …, SUM(pts) / SUM(maxpts) AS r …) s` warned
+  about `r`. It now leaves out a column a derived table or CTE the SELECT reads projects (through
+  a `SELECT *` too, when the star is over another derived table) and a select-list alias used in
+  the same SELECT's HAVING or ORDER BY; a typo inside the subquery, one read through a star over a
+  base table, and one an unused CTE happens to project still warn. The loader's rule
+  for hiding a metric that reads an excluded or stale column is unchanged. An entity mapping to a
+  table outside its own area was never checked, nor were `cross_subject_area_entities`; both now
+  resolve against the whole model, with new warnings `entity_mapping_unknown_table` (no area
+  defines the table) and `entity_mapping_column_not_found` (the table has no such column). They are
+  warnings so a model that validated before still writes. `cross_area_entity_collision` printed
+  `?.?.<table>` for a table the area only listed, and so warned when two areas mapped the same
+  table; it now resolves the table across the model (on the connection the area lists it on, when
+  two connections define it), compares the resolved table, and prints
+  `schema.table` with each area's name (the connection too when there is more than one).
+
+### Fixed
+
 - **A subject area named where a table was wanted also names that area's tables like it (#567).**
   `get_datasource_schema(dataset_names=["orders"])` answered "'orders' is a subject area, not a
   table: pass it as `area`" and nothing else, so in a model whose tables carry a suffix (`orders_v`)
