@@ -86,6 +86,10 @@ def cmd_validate(args) -> int:
     # exists for it even with rejected included.
     org = L.load_datasource(args.root, include_rejected=True)
     res = V.validate(org)
+    unknown = L.unknown_datasource_keys(args.root)
+    if unknown:
+        # A warning, not an error (#575): the model still loads, but those fields are not served.
+        res.warn("unknown_datasource_key", L.unknown_keys_message(unknown))
     print(V.format_result(res))
     ok = res.ok
     # Deployment-level pass (F16 / ACE-072): when the profile sits under a deployment with an
@@ -463,6 +467,14 @@ def cmd_review_items(args) -> int:
     return 0
 
 
+def cmd_history(args) -> int:
+    """The model's curation log, newest first: each change with when it was made, who made it, the
+    value it replaced and the model version it produced — the history a profile outside git keeps (#528)."""
+    from . import curate
+    _print_json(curate.history(args.root, limit=args.limit))
+    return 0
+
+
 def cmd_curate_gate(args) -> int:
     """The Phase-4 curate gate decision in ONE call: count still-queryable PII columns
     + pending pre-seed sign-offs, and say whether to open the explorer. Replaces the
@@ -634,7 +646,9 @@ def cmd_suggest_units(args) -> int:
     """List the numeric **money** columns (so a currency `unit` can be stamped) using the
     tested name matcher — never a hand-rolled regex that mis-handles `count` inside
     `discount`. Skips columns that already carry a `unit`. Emits
-    {money_columns: [{area, table, column, type}]} for the caller to confirm + apply."""
+    {money_columns: [{area, table, column, type, suggested_unit}]}, where `suggested_unit`
+    is the unit the name spells out (`revenue_usd_millions` -> `USD_millions`) or null, for
+    the caller to show, confirm and apply."""
     from . import build as B
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
@@ -643,26 +657,27 @@ def cmd_suggest_units(args) -> int:
         for t in sa.tables_defined:
             for c in t.columns:
                 if not c.unit and c.type in numeric and B.detect_money_column(c.name):
-                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
+                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
+                                  "suggested_unit": B.suggest_unit(c.name)})
     _print_json({"money_columns": money})
     return 0
 
 
 def cmd_set_units(args) -> int:
-    """The APPLY half of suggest-units: stamp a currency/unit on every detected money column in
+    """The APPLY half of suggest-units: stamp a currency/unit on detected money columns in
     ONE validated curate batch — so a skill never pipes suggest-units JSON through a hand-rolled
     script (the fragile glue that broke on empty stdin). Detects the same money columns (tested
-    matcher); `--columns` overrides detection for non-obvious names; `--area` scopes it."""
+    matcher); a detected column whose name states its currency gets that unit, the rest get
+    `--currency`/`--unit`. Detection only PLANS: it writes nothing until `--yes`, so a guess is
+    always reviewed. `--columns` names the columns outright (applying the reviewed plan to just
+    those): each keeps the unit its name states, the rest get the given unit; `--area` scopes it."""
     from . import build as B
     from . import curate
     unit = args.currency or args.unit
-    if not unit:
-        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>"})
-        return 1
+    explicit = set(args.columns or [])
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
-    explicit = set(args.columns or [])
-    ops = []
+    plan = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
@@ -673,15 +688,32 @@ def cmd_set_units(args) -> int:
                 if explicit:
                     if f"{t.name}.{c.name}" not in explicit and c.name not in explicit:
                         continue
+                    col_unit = B.suggest_unit(c.name) or unit
                 elif not (c.type in numeric and B.detect_money_column(c.name)):
                     continue
-                ops.append({"op": "edit", "kind": "table", "area": sa.name, "name": t.name,
-                            "column": c.name, "field": "unit", "value": unit})
-    if not ops:
+                else:
+                    col_unit = B.suggest_unit(c.name) or unit
+                plan.append({"area": sa.name, "table": t.name, "column": c.name, "unit": col_unit})
+    if not plan:
         _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
         return 0
+    missing = [f"{p['table']}.{p['column']}" for p in plan if not p["unit"]]
+    if missing:
+        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>: these names "
+                     "state no currency", "columns": missing})
+        return 1
+    if not (explicit or args.yes):
+        _print_json({"set": 0, "planned": plan,
+                     "next": "nothing written: show this plan, then re-run with --yes to apply "
+                             "it, or with the same --currency/--unit plus --columns <table.col …> to apply "
+                             "only some (each keeps the unit planned for it)"})
+        return 0
+    ops = [{"op": "edit", "kind": "table", "area": p["area"], "name": p["table"],
+            "column": p["column"], "field": "unit", "value": p["unit"]} for p in plan]
     res = curate.apply(args.root, ops)
-    _print_json({"set": len(res.applied), "unit": unit, "errors": res.errors})
+    _print_json({"set": len(res.applied), "unit": unit,
+                 "units": {f"{p['table']}.{p['column']}": p["unit"] for p in plan},
+                 "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1608,6 +1640,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
     sp.set_defaults(func=cmd_curate)
 
+    sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
+    sp.add_argument("root")
+    sp.add_argument("--limit", type=int, default=None, help="show only the newest N entries")
+    sp.set_defaults(func=cmd_history)
+
     sp = sub.add_parser("approve-queue",
                         help="sign off the whole pending review queue in one call (no-browser path)")
     sp.add_argument("root")
@@ -1661,13 +1698,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example)
 
-    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch")
+    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch; prints the plan and writes nothing without --yes or --columns")
     sp.add_argument("root")
-    sp.add_argument("--currency", default=None, help="ISO currency code (USD/EUR/INR/…)")
+    sp.add_argument("--currency", default=None,
+                    help="currency unit: an ISO code, optionally scaled and/or a rate (USD, USD_millions, USD/day, USD_millions/year)")
     sp.add_argument("--unit", default=None, help="non-currency unit (cents/percent/days/…)")
+    sp.add_argument("--yes", action="store_true",
+                    help="apply the detected plan (without it, detection only prints the plan)")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--columns", nargs="*", default=None,
-                    help="explicit table.column (or bare column) list — overrides money detection")
+                    help="explicit table.column (or bare column) list — overrides money detection; a name that states its currency keeps that unit")
     sp.set_defaults(func=cmd_set_units)
 
     sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) and print them; --write saves them proposed/unreviewed for bulk sign-off — replaces ask-for-4")

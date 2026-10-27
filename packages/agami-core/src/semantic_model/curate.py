@@ -27,6 +27,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -460,7 +461,10 @@ def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) ->
         dsp.write_text(prior, encoding="utf-8")
         return res
     res.applied = [f"key_terminology: {len(merged)} term(s)"]
-    res.committed, res.commit_note = _git_commit(root, f"terminology: {len(merged)} term(s)")
+    res.committed, res.commit_note = _record(
+        root, f"terminology: {len(merged)} term(s)",
+        [{"op": "edit", "kind": "datasource", "field": "key_terminology", "value": merged, "before": existing}],
+        None, None)
     return res
 
 
@@ -483,6 +487,7 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
         return res
     prior = dsp.read_text(encoding="utf-8")
     odoc = _load(dsp) or {}
+    before = odoc.get("description")
     odoc["description"] = line
     _dump(dsp, odoc)
     try:
@@ -497,7 +502,10 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
         dsp.write_text(prior, encoding="utf-8")
         return res
     res.applied = ["description"]
-    res.committed, res.commit_note = _git_commit(root, "datasource description")
+    res.committed, res.commit_note = _record(
+        root, "datasource description",
+        [{"op": "edit", "kind": "datasource", "field": "description", "value": line, "before": before}],
+        None, None)
     return res
 
 
@@ -508,16 +516,18 @@ _VALID_OPS = {"approve", "reject", "exclude", "include", "edit"}
 def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
           role: Optional[str] = None) -> ApplyResult:
     """Apply curation ops to the on-disk model, validate, commit (best-effort),
-    revert on validation failure. Each op: {op, kind, area, name, [column], [field, value]}."""
+    revert on validation failure. Each op: {op, kind, area, name, [column], [field, value],
+    [reason]} — a reject's `reason` is not stored on the model, only in curation_log.jsonl."""
     root = Path(root)
     res = ApplyResult()
     backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)
+    logged: list[dict] = []  # the ops that took, each with the value it replaced
 
     for op in ops:
         try:
-            path = _apply_one(root, op, signer, role, backups)
-            if path is not None:
-                res.applied.append(_op_label(op))
+            _, before = _apply_one(root, op, signer, role, backups)
+            res.applied.append(_op_label(op))
+            logged.append({**op, "before": before})
         except Exception as e:
             res.skipped.append({"op": _op_label(op), "reason": str(e)})
 
@@ -538,8 +548,8 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
         return res
 
     if res.applied:
-        _append_curation_log(root, ops, signer, role)
-        res.committed, res.commit_note = _git_commit(root, f"curation: {len(res.applied)} change(s)")
+        res.committed, res.commit_note = _record(root, f"curation: {len(res.applied)} change(s)",
+                                                 logged, signer, role)
     return res
 
 
@@ -590,7 +600,8 @@ def _resolve_area(root: Path, op: dict) -> str:
 
 
 def _apply_one(root: Path, op: dict, signer, role,
-               backups: "Optional[dict[Path, Optional[str]]]" = None) -> Optional[Path]:
+               backups: "Optional[dict[Path, Optional[str]]]" = None) -> tuple[Path, Any]:
+    """Apply one op; return the file it wrote and the value it replaced, for the curation log."""
     if backups is None:
         backups = {}
     action = op.get("op")
@@ -612,14 +623,15 @@ def _apply_one(root: Path, op: dict, signer, role,
         doc = _load(path)
         old_groups = dict(doc.get("column_groups") or {})
         if op.get("column"):
-            _set_column_field(doc, op["column"], op, new_state, signer, role)
+            before = _set_column_field(doc, op["column"], op, new_state, signer, role)
         elif op.get("op") == "edit" and op.get("field") == "recommended_filters":
             # The filter list lives inside `performance_hints` beside the measured row count; editing
             # it alone keeps the count, which a whole-block edit would make the caller restate.
+            before = (doc.get("performance_hints") or {}).get("recommended_filters")
             doc["performance_hints"] = {**(doc.get("performance_hints") or {}),
                                         "recommended_filters": _filter_columns(doc, op.get("value"))}
         else:
-            _set_trust(doc, op, new_state, signer, role, desc_source=True)  # table desc has provenance
+            before = _set_trust(doc, op, new_state, signer, role, desc_source=True)  # table desc has provenance
         _dump(path, doc)
         # A column_groups edit renames the groups a TableRef may expose — reconcile so we
         # don't orphan `expose_column_groups` (which would fail validation).
@@ -629,7 +641,7 @@ def _apply_one(root: Path, op: dict, signer, role,
             # The file's own `name`: it can carry the schema (`public.wide`) the op's name leaves out.
             _reconcile_ambiguity_groups(root, path, str(doc.get("name") or name), doc.get("schema"),
                                         old_groups, doc.get("column_groups") or {}, backups)
-        return path
+        return path, before
 
     if kind == "entity":
         # entities/metrics are stored under the SLUGGED name (write_items uses _slug), so resolve
@@ -641,9 +653,9 @@ def _apply_one(root: Path, op: dict, signer, role,
             raise FileNotFoundError(f"no entity named {name!r} in area {area!r}")
         _snapshot(backups, path)
         doc = _load(path)
-        _set_trust(doc, op, new_state, signer, role)
+        before = _set_trust(doc, op, new_state, signer, role)
         _dump(path, doc)
-        return path
+        return path, before
 
     if kind == "metric":
         path = _area_dir(root, area) / "metrics" / f"{_slug(name)}.yaml"
@@ -651,9 +663,9 @@ def _apply_one(root: Path, op: dict, signer, role,
             raise FileNotFoundError(f"no metric named {name!r} in area {area!r}")
         _snapshot(backups, path)
         doc = _load(path)
-        _set_trust(doc, op, new_state, signer, role)
+        before = _set_trust(doc, op, new_state, signer, role)
         _dump(path, doc)
-        return path
+        return path, before
 
     if kind == "subject_area":
         # edit-only (e.g. set the area's `description`) — a subject area carries no trust block,
@@ -669,9 +681,10 @@ def _apply_one(root: Path, op: dict, signer, role,
             raise FileNotFoundError(f"no subject area {area!r}")
         _snapshot(backups, path)
         doc = _load(path)
+        before = doc.get(fld)
         doc[fld] = val
         _dump(path, doc)
-        return path
+        return path, before
 
     if kind == "relationship":
         frm, _, to = name.partition("->")
@@ -700,9 +713,9 @@ def _apply_one(root: Path, op: dict, signer, role,
                 "names repeat across schemas — the table pair alone would pick one at random")
         path, key, doc, rels, hit = found[0]
         _snapshot(backups, path)
-        _set_trust(hit, op, new_state, signer, role)
+        before = _set_trust(hit, op, new_state, signer, role)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
-        return path
+        return path, before
 
     raise ValueError(f"unknown kind {kind!r}")
 
@@ -866,11 +879,13 @@ def _filter_columns(table_doc: dict, value: Any) -> list[str]:
 
 
 def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
-               *, desc_source: bool = False) -> None:
+               *, desc_source: bool = False) -> Any:
+    """Apply the op to `doc` and return the value it replaced (the edited field, else the review state)."""
     if op.get("op") == "edit":
         fld, val = op.get("field"), op.get("value")
         if not fld:
             raise ValueError("edit op needs field")
+        before = doc.get(fld)
         # A generated description never replaces one a person wrote or the database's own dictionary
         # supplied — enrichment describes what is undescribed. A person can still overwrite either.
         if (fld == "description" and desc_source and op.get("source") == "ai"
@@ -897,7 +912,8 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
                 else "metadata" if src == "metadata"
                 else "human"
             )
-        return
+        return before
+    before = doc.get("review_state")
     if new_state:
         doc["review_state"] = new_state
     if new_state == "approved":
@@ -909,13 +925,13 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         # clear stale sign-off on un-approve
         for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
             doc.pop(k, None)
+    return before
 
 
-def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signer, role) -> None:
+def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signer, role) -> Any:
     for c in table_doc.get("columns", []):
         if c.get("name") == col_name:
-            _set_trust(c, op, new_state, signer, role, desc_source=True)  # column desc has provenance
-            return
+            return _set_trust(c, op, new_state, signer, role, desc_source=True)  # column desc has provenance
     raise ValueError(f"column {col_name} not found")
 
 
@@ -997,10 +1013,10 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
         res.applied = []
         return res
 
-    _append_curation_log(
-        root, [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]}
-               for a in res.applied], signer, role)
-    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} {kind}(s) in {area}")
+    res.committed, res.commit_note = _record(
+        root, f"enrich: +{len(res.applied)} {kind}(s) in {area}",
+        [{"op": "add", "kind": kind, "area": area, "name": a.split("/", 1)[-1]} for a in res.applied],
+        signer, role)
     return res
 
 
@@ -1081,9 +1097,9 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
         _restore(backups)
         res.applied = []
         return res
-    _append_curation_log(
-        root, [{"op": "add", "kind": "relationship", "name": a} for a in res.applied], signer, role)
-    res.committed, res.commit_note = _git_commit(root, f"enrich: +{len(res.applied)} relationship(s) from metadata")
+    res.committed, res.commit_note = _record(
+        root, f"enrich: +{len(res.applied)} relationship(s) from metadata",
+        [{"op": "add", "kind": "relationship", "name": a} for a in res.applied], signer, role)
     return res
 
 
@@ -1129,9 +1145,10 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     path.parent.mkdir(parents=True, exist_ok=True)
     _dump(path, existing)  # bare list — list_prompt_examples accepts list or {examples:[…]}
     res.validated = True    # examples aren't model-validated; the skill EXPLAIN-checks the SQL
-    _append_curation_log(root, [{"op": "add", "kind": "example", "area": area,
-                                 "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
-    res.committed, res.commit_note = _git_commit(root, f"examples: +{len(res.applied)} in {area}")
+    res.committed, res.commit_note = _record(
+        root, f"examples: +{len(res.applied)} in {area}",
+        [{"op": "add", "kind": "example", "area": area, "name": a.split("/", 1)[-1]} for a in res.applied],
+        signer, role)
     return res
 
 
@@ -1162,9 +1179,10 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
     path = root / "prompt_examples" / area / "examples.yaml"
     _dump(path, existing)  # bare list — kept in the file (rejected, for audit)
     res.validated = True
-    _append_curation_log(root, [{"op": "reject", "kind": "example", "area": area,
-                                 "name": a.split("/", 1)[-1]} for a in res.applied], signer, role)
-    res.committed, res.commit_note = _git_commit(root, f"examples: rejected {len(res.applied)} in {area}")
+    res.committed, res.commit_note = _record(
+        root, f"examples: rejected {len(res.applied)} in {area}",
+        [{"op": "reject", "kind": "example", "area": area, "name": a.split("/", 1)[-1]} for a in res.applied],
+        signer, role)
     return res
 
 
@@ -1225,20 +1243,25 @@ def _repository_top(root: Path) -> Optional[Path]:
     return Path(r.stdout.strip())
 
 
+def _record(root: Path, msg: str, entries: list[dict], signer, role) -> tuple[bool, str]:
+    """Model-write finalization point for every curation path (apply / write_items / terminology /
+    examples / metadata relationships / apply_spec): stamp the model_version snapshot, log the change
+    with that version, then commit when git can. The log comes before the commit so a profile that is
+    its own repository commits it with the change; without git the log is the only history (#528)."""
+    from . import snapshot
+    version = snapshot.write_snapshot(root)
+    _append_curation_log(root, entries, signer, role, version=version)
+    return _git_commit(root, msg)
+
+
 def _git_commit(root: Path, msg: str) -> tuple[bool, str]:
     """Commit the model's change when the profile folder is its own repository; else say why not.
-
-    Model-write finalization point for every curation path (apply / write_items / terminology /
-    examples / metadata relationships). The model_version snapshot is stamped FIRST, unconditionally,
-    so it happens whether or not anything is committed.
 
     A profile folder inside a LARGER repository — the usual home of a deployed model, checked in with
     the team's other files — is never committed to (#436): `git add -A` there stages the whole working
     tree, the commit lands on whatever branch is checked out under whoever's identity git has, and the
     message is agami's, not the team's. The note says which folder changed so the person commits it.
     Rollback never depended on git: a change that fails validation is restored from its backups."""
-    from . import snapshot
-    snapshot.write_snapshot(root)
     if (root / ".git").exists():
         try:
             _git(root, "add", "-A")
@@ -1252,22 +1275,68 @@ def _git_commit(root: Path, msg: str) -> tuple[bool, str]:
         return False, "git isn't installed here, so the change is written but not versioned"
     top = _repository_top(root)
     if top is None:
-        return False, ("this model isn't in git, so the change is written but has no history; "
-                       "`git init` its folder to keep one")
+        return False, ("this model isn't in git, so the change is written and recorded in its "
+                       f"curation log — `sm history {root}` shows what changed; `git init` its folder "
+                       "to keep full file versions too")
     return False, (f"this model is inside the git repository at {top}; agami doesn't commit there — "
                    f"review and commit the changes under {root} yourself")
 
 
-def _append_curation_log(root: Path, ops: list[dict], signer, role) -> None:
+CURATION_LOG = "curation_log.jsonl"
+
+
+def _append_curation_log(root: Path, ops: list[dict], signer, role,
+                         *, version: Optional[str] = None) -> None:
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        log = root / "curation_log.jsonl"
-        with log.open("a", encoding="utf-8") as f:
+        with (root / CURATION_LOG).open("a", encoding="utf-8") as f:
             for op in ops:
-                f.write(json.dumps({**op, "signer": signer, "role": role}, default=str) + "\n")
+                entry = {**op, "signer": signer, "role": role, "at": at}
+                if version:
+                    entry["version"] = version
+                f.write(json.dumps(entry, default=str) + "\n")
     except OSError:
         pass
 
 
+def _read_log_lines(root: Path) -> list[Optional[dict]]:
+    """Each line of the curation log, parsed; None for a line that isn't a JSON object."""
+    try:
+        # bytes, so one undecodable line is that line's problem, not the whole log's
+        lines = (root / CURATION_LOG).read_bytes().splitlines()
+    except OSError:
+        return []
+    out: list[Optional[dict]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:  # UnicodeDecodeError included
+            entry = None
+        out.append(entry if isinstance(entry, dict) else None)
+    return out
+
+
+def history(root: str | Path, *, limit: Optional[int] = None) -> list[dict]:
+    """The curation log's entries, newest first — what changed, when, by whom, and the value each edit
+    replaced. Entries written before #528 carry no `at` / `before` / `version`; unreadable lines are skipped."""
+    entries = [e for e in _read_log_lines(Path(root)) if e is not None]
+    entries.reverse()
+    return entries[:limit] if limit is not None and limit >= 0 else entries
+
+
+def has_model_curation(root: str | Path) -> bool:
+    """Whether the log records a change to the model's areas or tables. A datasource-level edit
+    (its description or glossary) doesn't count, nor did it before those edits were logged; a line
+    that can't be read does, as the log's mere existence once did."""
+    root = Path(root)
+    if not (root / CURATION_LOG).exists():
+        return False
+    lines = _read_log_lines(root)
+    return not lines or any(e is None or e.get("kind") != "datasource" for e in lines)
+
+
 __all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
            "write_items", "add_examples", "validate_seeds", "set_key_terminology",
-           "ApplyResult"]
+           "history", "ApplyResult"]
