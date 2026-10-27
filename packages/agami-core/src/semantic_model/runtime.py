@@ -431,6 +431,15 @@ _PG_CATALOG_STRUCTURE = frozenset({
     "pg_matviews", "pg_indexes",
 })
 
+# Structure only, on every engine that has the schema. Views that hold row values or statement text are
+# left out on purpose, as pg_stats is: MySQL's COLUMN_STATISTICS (histogram values), PROCESSLIST,
+# INNODB_TRX and OPTIMIZER_TRACE (query text), the INNODB_FT_* word lists, and BigQuery's JOBS views.
+_INFORMATION_SCHEMA_STRUCTURE = frozenset({
+    "tables", "columns", "views", "schemata", "key_column_usage", "table_constraints",
+    "referential_constraints", "constraint_column_usage", "constraint_table_usage", "check_constraints",
+    "statistics", "table_storage", "table_options", "column_field_paths",
+})
+
 
 def _expands_a_column(node: "exp.Expression | None") -> bool:
     """A profiling table function over a column: on the list, naming a column, and holding no
@@ -449,11 +458,17 @@ def _expands_a_column(node: "exp.Expression | None") -> bool:
 
 
 def _is_catalog_relation(tbl: "exp.Table", dialect: "str | None") -> bool:
-    """A read-only catalog view a profiling run may read: `information_schema` on any engine (BigQuery
-    puts it in the table name), the structure tables of `pg_catalog`, and SQLite's schema table."""
+    """A read-only catalog view a profiling run may read: the structure views of `information_schema`
+    (BigQuery puts it in the table name), the structure tables of `pg_catalog`, and SQLite's schema
+    table."""
     schema, name = (tbl.db or "").lower(), (tbl.name or "").lower()
-    if schema == "information_schema" or name.startswith("information_schema."):
-        return True
+    # Only BigQuery spells the view as one dotted name; elsewhere `"information_schema.x"` is an
+    # ordinary quoted table.
+    if dialect == "bigquery" and name.startswith("information_schema."):
+        return name.split(".", 1)[1] in _INFORMATION_SCHEMA_STRUCTURE
+    # SQLite has no information_schema, so the name there could only be an attached database.
+    if schema == "information_schema" and dialect != "sqlite":
+        return name in _INFORMATION_SCHEMA_STRUCTURE
     if dialect in ("postgres", "redshift") and schema == "pg_catalog":
         return name in _PG_CATALOG_STRUCTURE
     if dialect == "sqlite" and schema in ("", "main"):
@@ -496,6 +511,21 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
                "or a table function must qualify every column; unqualified: " + _echo_identifiers(bare),
         remediation="Qualify each column with its table or alias (alias.column), then run it again.",
     )
+
+
+def _implicit_join_columns(tree: "exp.Expression") -> "guardrail.Refusal | None":
+    """Under the build profile, a `USING` or `NATURAL` join reads columns the statement never names,
+    so column scope cannot see them (#523)."""
+    for join in tree.find_all(exp.Join):
+        if join.args.get("using") or (join.method or "").upper() == "NATURAL":
+            return guardrail.refuse(
+                guardrail.RULE_UNSCOPABLE,
+                detail="under the build profile, a USING or NATURAL join is refused: the columns it "
+                       "joins on are not named, so column scope cannot check them",
+                remediation="Write the join with an explicit ON that qualifies each column "
+                            "(ON a.col = b.col), then run it again.",
+            )
+    return None
 
 
 def check_scopable(sql: str, org: Datasource,
@@ -599,7 +629,7 @@ def check_scopable(sql: str, org: Datasource,
                     "table, so there is nothing to check against the declared surface"
                 )
     if build_profile:
-        return _bare_column_beside_a_model_table(tree, org, ctx)
+        return _implicit_join_columns(tree) or _bare_column_beside_a_model_table(tree, org, ctx)
     return None
 
 

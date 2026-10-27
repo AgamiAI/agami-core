@@ -259,3 +259,66 @@ def test_a_failed_item_records_the_database_s_first_line_locally(warehouse, monk
     monkeypatch.setenv(execute_sql.SERVED_CHILD_ENV, "1")
     assert _main(monkeypatch, "--batch", str(plan)) == 6
     assert "database_error" not in json.loads((out / "a.run.json").read_text())
+
+
+def test_a_plan_that_is_json_null_is_refused(warehouse, monkeypatch, capsys):
+    plan = warehouse / "null.json"
+    plan.write_text("null")
+    assert _main(monkeypatch, "--batch", str(plan)) == 2 and "must be a JSON list" in capsys.readouterr().err
+    assert "must be a JSON list" in json.loads((warehouse / "null.json.manifest.json").read_text())["error"]
+
+
+def test_a_failed_item_empties_its_csv_and_the_next_item_is_clean(warehouse, monkeypatch, capsys):
+    out = warehouse / "rows" / "6"
+    out.mkdir(parents=True)
+    (out / "b.csv").write_text("n\nrows from an earlier run\n")
+    (warehouse / "bad.sql").write_bytes(b"SELECT \xff")
+    plan = _plan(warehouse, [
+        {"id": "a", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "a.csv")},
+        {"id": "b", "sql_file": str(warehouse / "bad.sql"), "out": str(out / "b.csv")},
+        {"id": "c", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "c.csv")},
+    ])
+    assert _main(monkeypatch, "--batch", str(plan)) == 6
+    assert (out / "b.csv").read_text() == "" and (out / "c.csv").read_bytes() == b"n\r\n3\r\n"
+    assert json.loads((out / "b.run.json").read_text())["status"] == "failed"
+    manifest = json.loads((warehouse / "probes.plan.json.manifest.json").read_text())
+    assert [i["status"] for i in manifest["items"]] == ["ok", "failed", "ok"]
+
+
+def test_an_item_whose_output_cannot_be_written_stays_in_the_manifest_and_the_rest_run(warehouse, monkeypatch, capsys):
+    blocker = warehouse / "not-a-dir"
+    blocker.write_text("")
+    out = warehouse / "rows" / "7"
+    plan = _plan(warehouse, [
+        {"id": "a", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(blocker / "a.csv")},
+        {"id": "no-sql", "out": str(blocker / "b.csv")},
+        {"id": "c", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "c.csv")},
+    ])
+    assert _main(monkeypatch, "--batch", str(plan)) == 6
+    manifest = json.loads((warehouse / "probes.plan.json.manifest.json").read_text())
+    assert [(i["id"], i["status"]) for i in manifest["items"]] == [("a", "failed"), ("no-sql", "failed"), ("c", "ok")]
+    first = manifest["items"][0]
+    assert first["detail"].startswith("the output could not be written") and "artifact_error" in first
+    assert str(warehouse) not in first["detail"] + first["artifact_error"]
+    assert (out / "c.csv").read_bytes() == b"n\r\n3\r\n"
+
+
+def test_a_run_file_that_cannot_be_replaced_keeps_its_last_whole_copy(warehouse, monkeypatch, capsys):
+    out = warehouse / "rows" / "8"
+    plan = _plan(warehouse, [{"id": "a", "sql": "SELECT COUNT(*) AS n FROM orders", "out": str(out / "a.csv")}])
+    assert _main(monkeypatch, "--batch", str(plan)) == 0
+    before = (out / "a.run.json").read_text()
+    real_replace = os.replace
+
+    def replace(src, dst):  # noqa: ANN001, ANN202
+        if str(dst).endswith(".run.json"):
+            raise OSError(28, "No space left on device")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(execute_sql.os, "replace", replace)
+    plan = _plan(warehouse, [{"id": "a", "sql": "DELETE FROM orders", "out": str(out / "a.csv")}])
+    assert _main(monkeypatch, "--batch", str(plan)) == 1
+    assert (out / "a.run.json").read_text() == before
+    assert not [p for p in out.iterdir() if p.name.endswith(".tmp")]
+    item = json.loads((warehouse / "probes.plan.json.manifest.json").read_text())["items"][0]
+    assert item["status"] == "refused" and item["artifact_error"] == "the output could not be written: No space left on device"

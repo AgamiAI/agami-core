@@ -68,12 +68,15 @@ import argparse
 import configparser
 import contextlib
 import csv
+import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import stat
 import sys
+import tempfile
 import threading
 import urllib.parse
 import uuid
@@ -1549,6 +1552,18 @@ _REDACT_PATTERNS = (
     (re.compile(r"\S+@\S+"), _REDACTED),
     (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), _REDACTED),
 )
+# An IPv6 candidate, full, compressed or scoped (`fe80::1%eth0`); `_redact_ipv6` keeps only what parses
+# as an address, so a time such as `12:30:45` survives.
+_IPV6_CANDIDATE = re.compile(r"(?<![\w:])[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?:%[\w.-]+)?(?![\w:])",
+                             re.IGNORECASE)
+
+
+def _redact_ipv6(match: "re.Match[str]") -> str:
+    try:
+        ipaddress.IPv6Address(match.group(0).split("%", 1)[0])
+    except ValueError:
+        return match.group(0)
+    return _REDACTED
 # Credential fields whose values never appear in the detail, however the driver words its message.
 _SECRET_CRED_KEYS = ("password", "user", "username", "host", "account", "token", "access_token",
                      "private_key", "private_key_path", "credentials_path", "http_path", "dsn", "url")
@@ -1570,6 +1585,7 @@ def _db_error_first_line(text: str | None, sqlstate: str | None,
         line = line.replace(secret, _REDACTED)
     for pattern, replacement in _REDACT_PATTERNS:
         line = pattern.sub(replacement, line)
+    line = _IPV6_CANDIDATE.sub(_redact_ipv6, line)
     line = " ".join(line.split())[:300]
     return f"{line} (SQLSTATE {sqlstate})" if sqlstate else line
 
@@ -3543,6 +3559,29 @@ def _batch_run_json_path(out: Path) -> Path:
     return out.with_name(name + ".run.json")
 
 
+def _batch_write_atomic(path: Path, text: str) -> None:
+    """Write a batch artifact whole or not at all, so a reader never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _batch_out_path(item: dict[str, Any]) -> Path:
+    return Path(os.path.expanduser(str(item["out"]))).resolve()
+
+
+def _batch_write_problem(exc: BaseException) -> str:
+    # strerror only: the exception's own text carries the path.
+    return f"the output could not be written: {getattr(exc, 'strerror', None) or type(exc).__name__}"
+
+
 def _batch_item_problem(item: Any) -> str | None:
     """Why a plan item cannot be run as written, or None when it can."""
     if not isinstance(item, dict):
@@ -3559,24 +3598,25 @@ def _batch_run_item(item: dict[str, Any], profile: str, default_area: str | None
     """Run one well-formed plan item through the guard; write its CSV and return its outcome."""
     # Relative paths resolve from the current directory, not the plan's folder; the manifest
     # records the absolute path so a caller sees where each result actually landed.
-    out = Path(os.path.expanduser(str(item["out"]))).resolve()
+    out = _batch_out_path(item)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
         sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")
     except OSError as exc:
-        out.write_text("", encoding="utf-8")
+        _batch_write_atomic(out, "")
         return out, {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"the statement file could not be read: {exc.strerror or exc}"}
     env = execute_guarded(sql, profile, item.get("area") or default_area, executor=BUILTIN_EXECUTOR,
                           no_safety=no_safety, **({"build_profile": True} if build_profile else {}))
     if env.status == "ok":
-        with out.open("w", newline="", encoding="utf-8") as fh:
-            if env.data.columns:
-                writer = csv.writer(fh)
-                writer.writerow(env.data.columns)
-                for row in env.data.rows:
-                    writer.writerow(row)
+        buf = io.StringIO()
+        if env.data.columns:
+            writer = csv.writer(buf)
+            writer.writerow(env.data.columns)
+            for row in env.data.rows:
+                writer.writerow(row)
+        _batch_write_atomic(out, buf.getvalue())
         return out, {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None, "rows": len(env.data.rows)}
-    out.write_text("", encoding="utf-8")
+    _batch_write_atomic(out, "")
     if env.status == "refused":
         return out, {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
                      "detail": getattr(env.refusal, "reason", None)}
@@ -3586,6 +3626,23 @@ def _batch_run_item(item: dict[str, Any], profile: str, default_area: str | None
     if database_error:
         run["database_error"] = database_error
     return out, run
+
+
+def _batch_record(item: dict[str, Any], run: dict[str, Any]) -> Path | None:
+    """Write an item's run file, and empty its CSV unless it ran, so a failed item never leaves an
+    earlier run's rows behind. A write that fails is noted on `run` and never stops the plan."""
+    try:
+        out = _batch_out_path(item)
+        if run["status"] != "ok":
+            _batch_write_atomic(out, "")
+        _batch_write_atomic(_batch_run_json_path(out), json.dumps(run))
+        return out
+    except Exception as exc:  # noqa: BLE001 - the item is recorded however its files fare
+        run["artifact_error"] = _batch_write_problem(exc)
+        try:
+            return _batch_out_path(item)
+        except Exception:  # noqa: BLE001
+            return None
 
 
 def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_safety: bool,
@@ -3614,7 +3671,7 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
         except (OSError, ValueError) as exc:
             error = f"cannot read the plan: {exc}"
             plan = None
-        if plan is not None and not isinstance(plan, list):
+        if not error and not isinstance(plan, list):
             error, plan = "the plan must be a JSON list of objects", None
         if error:
             sys.stderr.write(f"--batch: {error}\n")
@@ -3626,33 +3683,30 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
             if problem is not None:
                 sys.stderr.write(f"--batch: item {n} {problem}\n")
                 run = {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"item {n} {problem}"}
-                if isinstance(item, dict) and item.get("out"):
-                    out = Path(os.path.expanduser(str(item["out"]))).resolve()
-                    out.parent.mkdir(parents=True, exist_ok=True)
-                    out.write_text("", encoding="utf-8")
             else:
-                out = Path(os.path.expanduser(str(item["out"]))).resolve()
                 try:
                     out, run = _batch_run_item(item, profile, default_area, no_safety, build_profile)
+                except OSError as exc:
+                    run = {"status": "failed", "exit": _DEFAULT_FAILURE_EXIT, "kind": "other", "rule": None,
+                           "detail": _batch_write_problem(exc)}
                 except Exception:
                     # Value-free like the guarded path's catch-all: the text of an exception nobody
                     # anticipated may carry a path or a DSN.
                     _LOG.error("unhandled error running a batch item", exc_info=True)
                     run = {"status": "failed", "exit": _DEFAULT_FAILURE_EXIT, "kind": "other", "rule": None,
                            "detail": UNEXPECTED_FAILURE_MESSAGE}
-            if out is not None:
-                _batch_run_json_path(out).write_text(json.dumps(run), encoding="utf-8")
+            if isinstance(item, dict) and item.get("out"):
+                out = _batch_record(item, run)
             items.append({"id": ident, "out": str(out) if out is not None else None, **run})
-            if run["status"] != "ok" and not first_bad:
-                first_bad = int(run["exit"])
+            if (run["status"] != "ok" or run.get("artifact_error")) and not first_bad:
+                first_bad = int(run["exit"]) or _DEFAULT_FAILURE_EXIT
     finally:
         _close_batch_connections()
         manifest: dict[str, Any] = {"profile": profile, "total": len(items),
                                     "ok": sum(1 for i in items if i["status"] == "ok"), "items": items}
         if error:
             manifest["error"] = error
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        _batch_write_atomic(target, json.dumps(manifest, indent=2))
     print(json.dumps(manifest))
     return 0 if first_bad == 0 else first_bad
 

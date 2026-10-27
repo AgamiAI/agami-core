@@ -287,3 +287,55 @@ def test_the_build_time_runner_keeps_no_safety_and_adds_the_build_profile_locall
     build, answer = seen
     assert "--no-safety" in build and ("--build-profile" in build) is not hosted
     assert "--no-safety" not in answer and "--build-profile" not in answer
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT o.id FROM orders o JOIN orders p USING (id)",
+    "SELECT o.id FROM orders o NATURAL JOIN orders p",
+    "SELECT o.id FROM orders o NATURAL LEFT JOIN orders p",
+    "SELECT o.id, c.column_name FROM orders o JOIN information_schema.columns c USING (status)",
+])
+def test_a_using_or_natural_join_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_UNSCOPABLE and "explicit ON" in refused.refusal.remediation
+
+
+def test_a_using_join_is_unchanged_without_build_profile_and_an_explicit_on_runs_with_it(model):
+    using = "SELECT o.id FROM orders o JOIN orders p USING (id)"
+    assert _run(using)[0].status == "ok"
+    on = "SELECT o.id FROM orders o JOIN orders p ON p.id = o.id"
+    assert _run(on, build_profile=True)[0].status == "ok"
+
+
+@pytest.mark.parametrize("sql", [
+    # An ordinary quoted table whose name only starts like BigQuery's catalog spelling.
+    'SELECT p.secret FROM public."information_schema.payroll" p',
+    # information_schema views that hold row values or statement text.
+    "SELECT s.histogram FROM information_schema.column_statistics s",
+    "SELECT p.info FROM information_schema.processlist p",
+    "SELECT t.trx_query FROM information_schema.innodb_trx t",
+])
+def test_a_catalog_name_that_is_not_a_structure_view_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+@pytest.mark.parametrize(("sql", "dialect", "allowed"), [
+    ("SELECT t.table_name FROM ds.INFORMATION_SCHEMA.TABLES t", "bigquery", True),
+    ("SELECT t.table_name FROM `proj.ds.INFORMATION_SCHEMA.COLUMNS` t", "bigquery", True),
+    ("SELECT j.query FROM proj.ds.INFORMATION_SCHEMA.JOBS j", "bigquery", False),
+    ('SELECT p.secret FROM public."information_schema.payroll" p', "postgres", False),
+    ('SELECT p.secret FROM "information_schema.tables" p', "sqlite", False),
+    ("SELECT t.name FROM main.information_schema.tables t", "sqlite", False),
+    ("SELECT t.table_name FROM information_schema.tables t", "postgres", True),
+    ("SELECT t.table_name FROM information_schema.tables t", "mysql", True),
+])
+def test_only_bigquery_spells_a_catalog_view_as_one_dotted_name(sql, dialect, allowed):
+    import sqlglot
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    tbl = sqlglot.parse_one(sql, read=dialect).find(exp.Table)
+    assert runtime._is_catalog_relation(tbl, dialect) is allowed

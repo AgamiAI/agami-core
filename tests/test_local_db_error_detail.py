@@ -171,3 +171,16 @@ def test_the_sqlstate_is_shown_when_the_driver_gives_one(warehouse):
         "Postgres execution error: column x does not exist (SQLSTATE 42703)")
     assert execute_sql._db_error_first_line("column x does not exist", "42703", {}) == (
         "column x does not exist (SQLSTATE 42703)")
+
+
+@pytest.mark.parametrize("address", ["fd00::10", "2001:db8:0:0:0:0:0:1", "fe80::1%eth0", "::1", "[2001:db8::7]"])
+def test_a_resolved_ipv6_address_is_redacted_even_when_the_profile_names_a_hostname(address):
+    text = (f'Postgres connect failed: connection to server at "db.example.com" ({address}), port 5432 '
+            "failed: Connection refused")
+    line = execute_sql._db_error_first_line(text, None, {"host": "db.example.com"})
+    assert address.strip("[]").split("%")[0] not in line and "eth0" not in line and "<redacted>" in line
+
+
+def test_a_time_of_day_is_not_taken_for_an_ipv6_address():
+    line = execute_sql._db_error_first_line('invalid input syntax for type time: "12:30:45"', None, {})
+    assert "12:30:45" in line
