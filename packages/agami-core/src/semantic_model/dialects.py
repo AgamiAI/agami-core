@@ -137,14 +137,17 @@ class Dialect:
         reserved word, or a case the engine would fold away. A plain name stays bare, so a binding
         reads the way a person would write it. On an upper-folding engine an all-lower name stays
         bare too, as hand-written models spell upper-case catalog names that way."""
-        low = name.lower()
-        if not _PLAIN_IDENT_RE.match(name) or low in _RESERVED_WORDS or low in self.reserved_extra:
+        if not _PLAIN_IDENT_RE.match(name) or self.reserves(name):
             return self.quote_ident(name)
         if self.folds_unquoted == "lower" and name != name.lower():
             return self.quote_ident(name)
         if self.folds_unquoted == "upper" and name not in (name.lower(), name.upper()):
             return self.quote_ident(name)
         return name
+
+    def reserves(self, name: str) -> bool:
+        """Whether this engine reserves `name` (any case), so it must be quoted to be a name."""
+        return name.lower() in _RESERVED_WORDS or name.lower() in self.reserved_extra
 
     def quote_lit(self, s: str) -> str:
         if self.backslash_escapes:

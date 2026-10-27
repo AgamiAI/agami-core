@@ -779,3 +779,134 @@ def test_hiding_the_key_column_hides_a_filtered_join(customers):
     tpath.write_text(yaml.safe_dump(doc, sort_keys=False))
     served = L.load_datasource(customers["root"])
     assert not [r for r in _between(served, "orders", "customers_curr") if r.on == _FILTERED_ON]
+
+
+# --- second review round ----------------------------------------------------------------------------
+
+
+def test_a_split_join_in_another_schema_is_not_merged_into_this_schemas_key():
+    # the stored join embeds its schema in the table name and leaves the schema fields empty
+    split = m.Relationship(from_table="crm.shipments", to_table="crm.order_lines", from_column="order_id",
+                           to_column="order_id", relationship="many_to_one", review_state="approved",
+                           confidence="confirmed", signed_off_by="agami_introspect", signed_off_role="system",
+                           signed_off_at="2026-01-01T00:00:00Z")
+    fresh = m.Relationship(from_table="shipments", to_table="order_lines", from_schema="billing",
+                           to_schema="billing", on=_COMPOSITE_ON, relationship="many_to_one")
+    assert not I._same_tables(fresh, split)
+    assert I._same_tables(fresh, split.model_copy(update={"from_table": "billing.shipments",
+                                                           "to_table": "billing.order_lines"}))
+    report = I.IntrospectReport(profile="p", db_type="sqlite", out_dir="", dry_run=True)
+    dropped, kept = I._merge_split_joins([fresh], [split], report, "sqlite")
+    assert dropped == set() and kept == [fresh] and not report.changes
+
+
+def test_a_join_naming_its_schema_in_the_table_name_stays_in_that_schemas_area():
+    from semantic_model import build
+
+    split = m.Relationship(from_table="crm.shipments", to_table="crm.order_lines", from_column="order_id",
+                           to_column="order_id", relationship="many_to_one")
+    names = {"shipments", "order_lines"}
+    assert build._rel_in_area(split, {("crm", n) for n in names}, names)
+    assert not build._rel_in_area(split, {("billing", n) for n in names}, names)
+    assert build._rel_in_area(split, {(None, n) for n in names}, names)   # a schemaless model keeps it
+
+
+@pytest.mark.parametrize("key", ["sqlite", "postgres", "mysql", "snowflake", "sqlserver", "oracle", "bigquery"])
+def test_a_composite_key_on_reserved_words_is_quoted_and_reads_back(key):
+    dialect = D.get_dialect(key)
+    on = I._composite_on(dialect, "shipments", ["order", "group"], "order", ["order", "group"])
+    assert dialect.quote_ident("order") + "." + dialect.quote_ident("group") in on
+    rel = m.Relationship(from_table="shipments", to_table="order", on=on, relationship="many_to_one")
+    assert R.join_key_pairs(rel, sqlglot_dialect(dialect.name)) == [("order", "order"), ("group", "group")]
+    # a plain name stays as it was
+    if key not in ("snowflake", "oracle"):
+        assert I._composite_on(dialect, "shipments", ["order_id", "line_no"], "order_lines",
+                               ["order_id", "line_no"]) == _COMPOSITE_ON
+
+
+def test_a_composite_key_on_reserved_words_runs_on_a_real_sqlite(tmp_path):
+    db = tmp_path / "r.db"
+    con = sqlite3.connect(db)
+    con.executescript(
+        'CREATE TABLE "order"("order" INTEGER, "group" INTEGER, PRIMARY KEY("order", "group"));'
+        'CREATE TABLE shipments(id INTEGER PRIMARY KEY, "order" INTEGER, "group" INTEGER,'
+        ' FOREIGN KEY("order", "group") REFERENCES "order"("order", "group"));'
+        'INSERT INTO "order" VALUES (1, 1), (1, 2); INSERT INTO shipments VALUES (1, 1, 1), (2, 1, 2);')
+    con.close()
+    org, _ = I.introspect("r", "sqlite", runner=_sqlite_runner(db), artifacts_dir=tmp_path)
+    (rel,) = _between(org, "shipments", "order")
+    assert rel.on == 'shipments."order" = "order"."order" AND shipments."group" = "order"."group"'
+    con = sqlite3.connect(db)
+    assert con.execute(f'SELECT COUNT(*) FROM shipments JOIN "order" ON {rel.on}').fetchone() == (2,)
+    con.close()
+    assert V.validate(org).ok
+
+
+def _two_joins_org(extra: m.Relationship) -> m.Datasource:
+    def t(name, cols, grain):
+        return m.Table(name=name, schema="s", storage_connection="c", grain=grain, description=name,
+                       columns=[m.Column(name=c, type="integer") for c in cols])
+    composite = m.Relationship(from_table="shipments", to_table="order_lines", on=_COMPOSITE_ON,
+                               relationship="many_to_one")
+    return m.Datasource(
+        datasource="Shop", storage_connections=[m.StorageConnection(name="c", storage_type="SQLite")],
+        subject_areas=[m.SubjectArea(name="sales", relationships=[composite, extra], tables_defined=[
+            t("shipments", ["id", "order_id", "line_no", "alt_order_id", "shipped_qty"], ["id"]),
+            t("order_lines", ["order_id", "line_no", "qty"], ["order_id", "line_no"])])])
+
+
+def test_a_join_matching_another_declaration_does_not_hide_a_partial_one():
+    alt = m.Relationship(from_table="shipments", to_table="order_lines", from_column="alt_order_id",
+                         to_column="order_id", relationship="many_to_one")
+    sql = ("SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines a ON s.alt_order_id = a.order_id "
+           "JOIN order_lines b ON s.order_id = b.order_id")
+    (finding,) = _partial_findings(_two_joins_org(alt), sql)
+    assert "on order_id only" in finding.reason
+
+
+def test_a_join_a_declaration_names_whole_is_not_a_partial_key():
+    one = m.Relationship(from_table="shipments", to_table="order_lines", from_column="order_id",
+                         to_column="order_id", relationship="many_to_one")
+    sql = ("SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines a ON s.order_id = a.order_id "
+           "AND s.line_no = a.line_no JOIN order_lines b ON s.order_id = b.order_id")
+    assert _partial_findings(_two_joins_org(one), sql) == []
+
+
+def _nodes_org() -> m.Datasource:
+    nodes = m.Table(name="nodes", schema="s", storage_connection="c", grain=["tenant_id", "id"], description="n",
+                    columns=[m.Column(name="tenant_id", type="integer"), m.Column(name="id", type="integer"),
+                             m.Column(name="parent_id", type="integer"),
+                             m.Column(name="amount", type="decimal", aggregation="additive")])
+    rel = m.Relationship(from_table="nodes", to_table="nodes", relationship="many_to_one",
+                         on=I._composite_on(D.get_dialect("sqlite"), "nodes", ["tenant_id", "parent_id"],
+                                            "nodes", ["tenant_id", "id"]))
+    return m.Datasource(datasource="Tree", storage_connections=[m.StorageConnection(name="c", storage_type="SQLite")],
+                        subject_areas=[m.SubjectArea(name="t", relationships=[rel], tables_defined=[nodes])])
+
+
+def test_an_aliased_self_join_on_part_of_the_key_is_partial():
+    org = _nodes_org()
+    sql = "SELECT SUM(n.amount) FROM nodes n JOIN nodes p ON n.parent_id = p.id"
+    (finding,) = _partial_findings(org, sql)
+    assert finding.risk == "fan_trap" and "on parent_id only" in finding.reason
+    whole = "SELECT SUM(n.amount) FROM nodes n JOIN nodes p ON n.tenant_id = p.tenant_id AND n.parent_id = p.id"
+    assert _partial_findings(org, whole) == []
+
+
+@pytest.mark.parametrize("sql, partial", [
+    ("SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines ol USING (order_id)", True),
+    ("SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines ol USING (order_id, line_no)", False),
+    # two relations before the join: only shipments has order_id
+    ("SELECT SUM(s.shipped_qty) FROM customers c JOIN shipments s ON s.customer_id = c.id "
+     "JOIN order_lines ol USING (order_id)", True),
+])
+def test_using_columns_are_the_joins_key(shop_org, sql, partial):
+    (agg,) = _aggregates(shop_org, sql).values()
+    assert bool(_partial_findings(shop_org, sql)) is partial
+    assert (agg.status == R.MULTIPLIED) is partial
+
+
+def test_a_condition_within_one_table_is_not_a_key_column():
+    on = "orders.customer_ntrl_key = customers_curr.customer_natural_key AND customers_curr.segment = customers_curr.region"
+    sql = "SELECT SUM(o.amount) FROM orders o JOIN customers_curr c ON o.customer_ntrl_key = c.customer_natural_key"
+    assert _partial_findings(_filtered_org(on, extra_cols=("region",)), sql) == []

@@ -2375,10 +2375,16 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # one-to-one was reported as a fan trap because a sibling many-to-one between the same two
     # tables was also in the list, while the joins section of the same receipt, which reads the
     # written key, called the join one-to-one. The written key names the edge.
-    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0])
+    def columns_of(table: str) -> "set[str] | None":
+        hit = tidx.get(table)
+        return {c.name.lower() for c in hit[0].columns} if hit else None
+
+    declared_rels = rels
+    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0], columns_of)
     # A join written on only part of a declared composite key repeats rows on BOTH sides, which the
     # one-way fan rule below cannot say, so such an edge is taken out of it and reported on its own.
-    partial = _partial_key_joins(rels, tree, tables_in_scope, _dialect_of(org)[0])
+    # Read against every declaration: which ones `_edges_as_written` kept depends on all the joins.
+    partial = _partial_key_joins(declared_rels, tree, tables_in_scope, _dialect_of(org)[0], columns_of)
     if partial:
         rels = [r for r in rels if id(r) not in partial]
 
@@ -5785,48 +5791,102 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
 
 
 def _written_join_pairs(
-    tree: "exp.Select", scope_map: dict[str, str]
+    tree: "exp.Select", scope_map: dict[str, str], columns: "Callable[[str], set[str] | None] | None" = None
 ) -> dict[frozenset[str], frozenset[frozenset[tuple[str, str]]]]:
     """THIS SELECT's own explicit joins as the column pairs each one wrote, keyed by the unordered
     pair of tables it connects: the same reading as `_joined_table_pairs`, keeping the columns. The
     same pinning rule too: only an ON that names its own join's two relations counts, and a pair an
     unqualified column kept this layer from resolving contributes nothing."""
     out: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
-    for tables, pairs, _kind in _each_written_join(tree, scope_map):
+    for tables, pairs, _kind in _each_written_join(tree, scope_map, columns):
         out.setdefault(tables, set()).update(pairs)
     return {tables: frozenset(pairs) for tables, pairs in out.items()}
 
 
 def _each_written_join(
-    tree: "exp.Select", scope_map: dict[str, str]
+    tree: "exp.Select", scope_map: dict[str, str], columns: "Callable[[str], set[str] | None] | None" = None
 ) -> "list[tuple[frozenset[str], frozenset[frozenset[tuple[str, str]]], str]]":
     """`_written_join_pairs` one join at a time: (tables, the pairs that join wrote, its kind such as
     SEMI or ANTI, '' for a plain join). Kept apart so two joins to two aliases of a table, each on
-    half a key, aren't read as one join on all of it."""
+    half a key, aren't read as one join on all of it. A self-join (`nodes n JOIN nodes p`) is keyed
+    by its one table; `USING` columns count when the relation they come from is known (`_using_pairs`)."""
     out = []
+    frm = tree.args.get("from_") or tree.args.get("from")
+    prior = [frm.this.alias_or_name] if isinstance(frm, exp.From) and frm.this is not None else []
     for join in tree.args.get("joins") or ():
-        on = join.args.get("on")
+        alias = join.this.alias_or_name
+        right = scope_map.get(alias, _relation_name(join.this))
+        kind = str(join.args.get("kind") or "").upper()
+        on, using = join.args.get("on"), join.args.get("using")
+        sources, prior = list(prior), prior + [alias]
         if on is None:
+            if using:
+                per = _using_pairs(using, alias, sources, scope_map, columns)
+                out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
             continue
-        right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
         names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue
         # This join's fixed-value conditions on its own alias travel with its key, so a declared
         # condition join compares whole here too (see `_fixed_value_pairs`).
-        fixed = _fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+        fixed = _fixed_value_pairs(on, scope_map, {alias})
         per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
         for pair in _predicate_pairs(on, scope_map):
             tables = frozenset(table for table, _column in pair)
             if len(tables) == 2:
                 per.setdefault(tables, set()).update({pair, *fixed})
-        kind = str(join.args.get("kind") or "").upper()
+        for pair in _self_join_pairs(on, scope_map, alias):
+            per.setdefault(frozenset({next(iter(pair))[0]}), set()).update({pair, *fixed})
         out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
     return out
 
 
+def _self_join_pairs(on: "exp.Expression", scope_map: dict[str, str],
+                     alias: str) -> "set[frozenset[tuple[str, str]]]":
+    """The equalities of a join's ON between its own alias and ANOTHER alias of the same table:
+    `n.parent_id = p.id` in `nodes n JOIN nodes p`. `_predicate_pairs` can't tell these from a
+    condition within one row, since both ends resolve to `nodes`; the aliases can."""
+    out = set()
+    for conj in _and_conjuncts(on):
+        if not isinstance(conj, exp.EQ):
+            continue
+        lhs, rhs = conj.this, conj.expression
+        if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column) and lhs.table and rhs.table):
+            continue
+        if lhs.table == rhs.table or alias not in (lhs.table, rhs.table):
+            continue
+        lt, rt = (_tkey(_bare(scope_map.get(c.table, c.table))) for c in (lhs, rhs))
+        if lt == rt:
+            out.add(frozenset({(lt, lhs.name.lower()), (rt, rhs.name.lower())}))
+    return out
+
+
+def _using_pairs(
+    using: list, alias: str, sources: list[str], scope_map: dict[str, str],
+    columns: "Callable[[str], set[str] | None] | None",
+) -> "dict[frozenset[str], set[frozenset[tuple[str, str]]]]":
+    """A `JOIN ... USING (a, b)` as the pairs it joins on. Each column comes from the one relation
+    before the join that has it: the only one, or the one whose modelled columns alone include it.
+    A column whose source can't be told contributes no pair, as an unqualified ON column doesn't."""
+    right = _tkey(_bare(scope_map.get(alias, alias)))
+    per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+    for col in using:
+        name = col.name.lower()
+        tables = [_tkey(_bare(scope_map.get(s, s))) for s in sources]
+        if len(tables) > 1:
+            known = [columns(t) if columns is not None else None for t in tables]
+            if any(k is None for k in known):
+                continue
+            tables = [t for t, k in zip(tables, known) if name in k]
+        if len(tables) != 1:
+            continue
+        per.setdefault(frozenset({tables[0], right}), set()).add(frozenset({(tables[0], name), (right, name)}))
+    return per
+
+
 def _edges_as_written(
-    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None"
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None",
+    columns: "Callable[[str], set[str] | None] | None" = None,
 ) -> list[Relationship]:
     """The declared edges the fan and chasm detectors may lean on, given the joins the statement
     wrote.
@@ -5848,7 +5908,7 @@ def _edges_as_written(
     The declared side is reduced with `_declared_pairs`, whose None means "cannot be compared" and
     is treated here as "does not match", never as a wildcard.
     """
-    written = _written_join_pairs(tree, scope_map)
+    written = _written_join_pairs(tree, scope_map, columns)
     if not written:
         return rels
     by_pair: dict[frozenset[str], list[Relationship]] = {}
@@ -5872,39 +5932,53 @@ def _edges_as_written(
 
 
 def _partial_key_joins(
-    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None"
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None",
+    columns: "Callable[[str], set[str] | None] | None" = None,
 ) -> "dict[int, tuple[Relationship, list[str], list[str]]]":
     """The declared composite-key joins this SELECT wrote only PART of, by id: each with the columns
     it wrote and the ones the declaration needs, named from the join's FROM side (#510).
 
-    Matched on the written column pairs as `_edges_as_written` matches, after it ran: an edge another
-    declaration matched whole is already gone from `rels`, so what remains here is a join on some but
-    not all of a key whose other columns are what keep it to one row."""
-    # One join at a time, so a full-key join elsewhere (or another alias's half) hides nothing. A
-    # SEMI or ANTI join returns each row at most once, so it can't repeat one.
-    joins = [(tables, pairs) for tables, pairs, kind in _each_written_join(tree, scope_map)
+    `rels` is every declaration, and each written join is read on its own: one that matches some
+    declaration whole (a declared single-column join, or the whole key) repeats nothing that
+    declaration doesn't already say; one that writes some but not all of a key is partial."""
+    # A SEMI or ANTI join returns each row at most once, so it can't repeat one.
+    joins = [(tables, pairs) for tables, pairs, kind in _each_written_join(tree, scope_map, columns)
              if kind not in ("SEMI", "ANTI")]
     if not joins:
         return {}
+    declared = [(rel, d) for rel in rels if (d := _declared_pairs(rel, dialect)) is not None]
     out: dict[int, tuple[Relationship, list[str], list[str]]] = {}
-    for rel in rels:
-        tables = _rel_tables(rel)
-        written = [pairs for t, pairs in joins if t == tables]
-        declared = _declared_pairs(rel, dialect) if rel.on and written else None
-        if declared is None:
+    for tables, pairs in joins:
+        between = [(rel, d) for rel, d in declared if _rel_tables(rel) == tables]
+        if any(d <= pairs for _rel, d in between):
             continue
-        keys = {p for p in declared if not _is_fixed_value(p)}
-        if len(keys) < 2:
-            continue
-        used = next((keys & pairs for pairs in written if keys & pairs and keys & pairs != keys), None)
-        if not used:
-            continue
-        ft, tt = _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table))
-        named = [(f, frozenset({(ft, f.lower()), (tt, t.lower())})) for f, t in join_key_pairs(rel, dialect) or []]
-        if not named:   # an `on:` with a fixed value too: name each pair by its FROM-side column
-            named = [(next((c for t, c in sorted(p) if t == ft), sorted(p)[0][1]), p) for p in sorted(keys, key=sorted)]
-        out[id(rel)] = (rel, [_echo_name(f) for f, p in named if p in used], [_echo_name(f) for f, _ in named])
+        for rel, d in between:
+            keys = _endpoint_pairs(rel, d)
+            used = keys & pairs
+            if rel.on and len(keys) > 1 and used and used != keys and id(rel) not in out:
+                out[id(rel)] = (rel, *_partial_names(rel, keys, used, dialect))
     return out
+
+
+def _endpoint_pairs(rel: Relationship,
+                    declared: "frozenset[frozenset[tuple[str, str]]]") -> "set[frozenset[tuple[str, str]]]":
+    """The declared pairs that join a column of one end to a column of the other: not a fixed value,
+    and not a condition within one table (`customers.billing_region = customers.region`). A self-join
+    declaration can't tell the last apart, so all its column pairs count."""
+    ends = _rel_tables(rel)
+    return {p for p in declared
+            if not _is_fixed_value(p) and (len(ends) == 1 or {t for t, _c in p} == ends)}
+
+
+def _partial_names(rel: Relationship, keys: "set[frozenset[tuple[str, str]]]",
+                   used: "set[frozenset[tuple[str, str]]]", dialect: "str | None") -> tuple[list[str], list[str]]:
+    """The columns a partial join wrote and the ones its declaration needs, by FROM-side name."""
+    ft, tt = _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table))
+    named = [(f, p) for f, t in join_key_pairs(rel, dialect) or []
+             if (p := frozenset({(ft, f.lower()), (tt, t.lower())})) in keys]
+    if len(named) != len(keys):   # an `on:` with a fixed value or a filter too: name each pair by its FROM-side column
+        named = [(next((c for t, c in sorted(p) if t == ft), sorted(p)[0][1]), p) for p in sorted(keys, key=sorted)]
+    return [_echo_name(f) for f, p in named if p in used], [_echo_name(f) for f, _ in named]
 
 
 # `apply_default_filters` was deleted here by ACE-042: declared filters are business logic, not a

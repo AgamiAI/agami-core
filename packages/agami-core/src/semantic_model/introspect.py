@@ -541,12 +541,13 @@ def _same_join(a: Relationship, b: Relationship, dialect: Optional[str] = None) 
 
 
 def _same_tables(a: Relationship, b: Relationship) -> bool:
-    def same_schema(x: Optional[str], y: Optional[str]) -> bool:
-        return not x or not y or x.lower() == y.lower()
+    """Whether two joins connect the same two tables. A schema embedded in the table name
+    (`crm.shipments`) counts as stated, so it isn't matched to `billing.shipments`."""
+    def same(x: tuple[str, str], y: tuple[str, str]) -> bool:
+        return x[1] == y[1] and (not x[0] or not y[0] or x[0] == y[0])
 
-    return (bare_name(a.from_table).lower() == bare_name(b.from_table).lower()
-            and bare_name(a.to_table).lower() == bare_name(b.to_table).lower()
-            and same_schema(a.from_schema, b.from_schema) and same_schema(a.to_schema, b.to_schema))
+    return (same(table_key(a.from_table, a.from_schema), table_key(b.from_table, b.from_schema))
+            and same(table_key(a.to_table, a.to_schema), table_key(b.to_table, b.to_schema)))
 
 
 def _pair_set(r: Relationship, dialect: Optional[str]) -> frozenset:
@@ -1655,12 +1656,12 @@ _FOLDS_LOWER = {"PostgreSQL", "Redshift", "Trino"}
 def _composite_on(dialect: D.Dialect, ft: str, fc: list[str], tt: str, tc: list[str]) -> str:
     """A composite key's join condition, `ft.a = tt.x AND ft.b = tt.y`, on bare table names (the
     receipt matches a written join to it by bare name). A name an unquoted spelling wouldn't reach
-    on this engine is quoted."""
+    on this engine, or a word it reserves (`order`), is quoted."""
     def q(name: str) -> str:
         plain = (bool(_UPPER_IDENT.fullmatch(name)) if dialect.name in _FOLDS_UPPER
                  else bool(_LOWER_IDENT.fullmatch(name)) if dialect.name in _FOLDS_LOWER
                  else bool(_LOWER_IDENT.fullmatch(name) or _UPPER_IDENT.fullmatch(name)))
-        return name if plain else dialect.quote_ident(name)
+        return name if plain and not dialect.reserves(name) else dialect.quote_ident(name)
     return " AND ".join(f"{q(ft)}.{q(f)} = {q(tt)}.{q(t)}" for f, t in zip(fc, tc))
 
 
