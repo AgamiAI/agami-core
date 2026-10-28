@@ -34,7 +34,8 @@ def _table(*cols, rows=None, name="tickets"):
 
 
 def _mets(table, db="postgresql"):
-    return {x["name"]: x for x in build.suggest_metrics(table, D.get_dialect(db))}
+    # Every flag column's rate, so the bindings below are checked; none is proposed unasked (#530).
+    return {x["name"]: x for x in build.suggest_metrics(table, D.get_dialect(db), flag_rates=True)}
 
 
 def _binding(met):
@@ -313,7 +314,7 @@ def _metrics_dir(root: Path) -> Path:
 
 def test_the_default_is_a_dry_run_that_writes_nothing(tmp_path):
     _model(tmp_path)
-    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "all"])
     assert rc == 0 and out["dry_run"] and out["written"] == 0, out
     assert not _metrics_dir(tmp_path).exists()
     assert {p["name"] for p in out["proposals"]} == {
@@ -325,7 +326,7 @@ def test_the_default_is_a_dry_run_that_writes_nothing(tmp_path):
 
 def test_write_saves_the_proposals_without_the_proposal_details(tmp_path):
     _model(tmp_path)
-    rc, out = _run(["suggest-metrics", str(tmp_path), "--write"])
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write", "--flag-rates", "all"])
     assert rc == 0 and out["written"] == 3, out
     met = yaml.safe_load((_metrics_dir(tmp_path) / "tickets_is_urgent_rate.yaml").read_text())
     assert "_proposal" not in met and met["review_state"] == "unreviewed"
@@ -338,7 +339,8 @@ def test_profile_test_runs_and_keeps_broken_and_degenerate_bindings_out(tmp_path
     seen: list[str] = []
     monkeypatch.setattr(introspect, "make_execute_sql_runner",
                         lambda profile, **kw: _canned_runner(tmp_path / "db.sqlite", seen))
-    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", "--write"])
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", "--write",
+                    "--flag-rates", "all"])
     assert rc == 0 and out["test_run"], out
     by = {p["name"]: p for p in out["proposals"]}
     assert "is_gone" in by["tickets_is_gone_rate"]["error"]            # the binding errors
@@ -357,7 +359,7 @@ def test_a_named_flagged_proposal_is_written_but_a_named_broken_one_never(tmp_pa
     monkeypatch.setattr(introspect, "make_execute_sql_runner",
                         lambda profile, **kw: _canned_runner(tmp_path / "db.sqlite", []))
     rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", "--write",
-                    "--names", "tickets_is_test_rate", "tickets_is_gone_rate"])
+                    "--flag-rates", "all", "--names", "tickets_is_test_rate", "tickets_is_gone_rate"])
     assert rc == 0, out
     assert sorted(f.name for f in _metrics_dir(tmp_path / "m").iterdir()) == [
         "tickets_is_test_rate.yaml"]
@@ -382,7 +384,8 @@ def _profile_run(tmp_path, monkeypatch, *extra):
     seen: list[str] = []
     monkeypatch.setattr(introspect, "make_execute_sql_runner",
                         lambda profile, **kw: _canned_runner(tmp_path / "db.sqlite", seen))
-    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo", *extra])
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m"), "--profile", "demo",
+                    "--flag-rates", "all", *extra])
     return rc, out, seen
 
 
@@ -429,5 +432,162 @@ def test_a_live_row_count_replaces_the_estimates_low_confidence(tmp_path, monkey
     # without a test run the estimate still flags it
     _model(tmp_path / "m2")
     _edit_table(tmp_path / "m2", performance_hints={"estimated_row_count": 12})
-    rc, out = _run(["suggest-metrics", str(tmp_path / "m2")])
+    rc, out = _run(["suggest-metrics", str(tmp_path / "m2"), "--flag-rates", "all"])
     assert {f["flag"] for p in out["proposals"] for f in p["flags"]} == {"low_confidence"}, out
+
+
+# --- flag rates only when asked (#530) ----------------------------------------
+
+_TEN_FLAGS = [f"is_flag_{i}" for i in range(10)]
+
+
+def _flag_model(root: Path) -> None:
+    """tickets with ten boolean columns and a start/end pair."""
+    _model(root)
+    _edit_table(root, columns=[{"name": "id", "type": "integer", "primary_key": True},
+                               *({"name": n, "type": "boolean"} for n in _TEN_FLAGS),
+                               {"name": "opened_at", "type": "timestamp"},
+                               {"name": "closed_at", "type": "timestamp"}])
+
+
+def test_no_flag_rate_is_proposed_unasked_only_a_summary(tmp_path):
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert rc == 0, out
+    assert [p["name"] for p in out["proposals"]] == ["tickets_avg_duration_days"]
+    fr = out["flag_rates"]
+    assert fr["available"] == 10 and fr["columns"] == [f"tickets.{n}" for n in _TEN_FLAGS]
+    assert "--flag-rates" in fr["hint"] and "more" not in fr
+
+
+def test_the_summary_lists_twenty_columns_and_counts_the_rest():
+    from semantic_model.cli import _flag_rate_summary
+    fr = _flag_rate_summary([f"t.c{i}" for i in range(25)])
+    assert fr["available"] == 25 and len(fr["columns"]) == 20 and fr["more"] == 5
+
+
+def test_flag_rates_names_columns_case_insensitively(tmp_path):
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates",
+                    "TICKETS.is_flag_3,tickets.IS_FLAG_7"])
+    assert rc == 0, out
+    assert {p["name"] for p in out["proposals"]} == {
+        "tickets_is_flag_3_rate", "tickets_is_flag_7_rate", "tickets_avg_duration_days"}
+    assert out["flag_rates"]["available"] == 8
+
+
+def test_flag_rates_all_proposes_every_one(tmp_path):
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "all",
+                    "--max-per-table", "20"])
+    names = {p["name"] for p in out["proposals"]}
+    assert rc == 0 and names == {f"tickets_{n}_rate" for n in _TEN_FLAGS} | {
+        "tickets_avg_duration_days"}, out
+    assert out["flag_rates"] == {"available": 0, "columns": []}
+
+
+@pytest.mark.parametrize("name, why", [
+    ("tickets.no_such", "no such column"), ("orders.is_flag_1", "no such column"),
+    ("tickets.opened_at", "not a boolean or flag column"), ("is_flag_1", "table.column"),
+])
+def test_an_unusable_flag_rates_name_is_reported(tmp_path, name, why):
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", f"tickets.is_flag_2,{name}"])
+    assert rc == 1, out
+    assert len(out["errors"]) == 1 and why in out["errors"][0] and name in out["errors"][0]
+    # the usable one is still proposed
+    assert "tickets_is_flag_2_rate" in {p["name"] for p in out["proposals"]}
+
+
+def test_cite_puts_the_source_in_the_written_description(tmp_path):
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_4",
+                    "--cite", "Support KPI handbook", "--write"])
+    assert rc == 0 and out["written"] == 2, out
+    by = {p["name"]: p for p in out["proposals"]}
+    assert by["tickets_is_flag_4_rate"]["description"] == "Defined in: Support KPI handbook."
+    assert "description" not in by["tickets_avg_duration_days"]
+    met = yaml.safe_load((_metrics_dir(tmp_path) / "tickets_is_flag_4_rate.yaml").read_text())
+    assert met["description"] == "Defined in: Support KPI handbook."
+    dur = yaml.safe_load((_metrics_dir(tmp_path) / "tickets_avg_duration_days.yaml").read_text())
+    assert not dur.get("description")
+
+
+def test_cite_without_flag_rates_is_refused(tmp_path):
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--cite", "Support KPI handbook"])
+    assert rc == 2 and "--flag-rates" in out["error"], out
+
+
+def test_a_rate_already_in_the_model_is_kept_and_not_counted(tmp_path):
+    _flag_model(tmp_path)
+    _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_0", "--write"])
+    path = _metrics_dir(tmp_path) / "tickets_is_flag_0_rate.yaml"
+    before = path.read_text()
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write"])
+    assert rc == 0 and out["written"] == 0, out
+    assert path.read_text() == before
+    assert "tickets.is_flag_0" not in out["flag_rates"]["columns"]
+    assert out["flag_rates"]["available"] == 9
+    # asked for again by name, it is still kept as it is, and the output says so
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_0",
+                    "--cite", "Support KPI handbook", "--write"])
+    assert rc == 0 and out["written"] == 0 and path.read_text() == before, out
+    assert out["flag_rates"]["already_in_model"] == ["tickets_is_flag_0_rate"]
+
+
+def test_flag_rates_split_on_the_last_dot(tmp_path):
+    # The column is after the last dot: schema.table.column, or a table name holding a dot.
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "MAIN.tickets.is_flag_3"])
+    assert rc == 0 and "tickets_is_flag_3_rate" in {p["name"] for p in out["proposals"]}, out
+    _edit_table(tmp_path, name="ops.tickets", schema=None)
+    area = tmp_path / "subject_areas" / "s" / "subject_area.yaml"
+    area.write_text(yaml.safe_dump({"name": "s", "tables": [
+        {"storage_connection": "c", "table": "ops.tickets"}]}))
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert "ops.tickets.is_flag_3" in out["flag_rates"]["columns"], out
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "ops.tickets.is_flag_3"])
+    assert rc == 0 and "ops.tickets_is_flag_3_rate" in {p["name"] for p in out["proposals"]}, out
+
+
+def _second_area(root: Path) -> None:
+    """Area b with its own `tickets`, in schema billing."""
+    (root / "subject_areas" / "b" / "tables").mkdir(parents=True)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/b")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    (root / "subject_areas" / "b" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "b", "tables": [{"storage_connection": "c", "schema": "billing",
+                                 "table": "tickets"}]}))
+    (root / "subject_areas" / "b" / "tables" / "tickets.yaml").write_text(yaml.safe_dump({
+        "name": "tickets", "schema": "billing", "storage_connection": "c", "grain": ["id"],
+        "description": "t",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "is_flag_0", "type": "boolean"}]}))
+
+
+def test_an_ambiguous_flag_rates_name_is_refused_before_writing(tmp_path):
+    _flag_model(tmp_path)
+    _second_area(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_0",
+                    "--cite", "Billing KPI handbook", "--write"])
+    assert rc == 2 and "more than one" in out["error"], out
+    assert out["ambiguous"] == {"tickets.is_flag_0": ["b: billing.tickets.is_flag_0",
+                                                      "s: main.tickets.is_flag_0"]}
+    assert not _metrics_dir(tmp_path).exists()
+    assert not (tmp_path / "subject_areas" / "b" / "metrics").exists()
+    # the summary names them schema-qualified, and that name picks the one table
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert "billing.tickets.is_flag_0" in out["flag_rates"]["columns"], out
+    assert "main.tickets.is_flag_0" in out["flag_rates"]["columns"]
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "billing.tickets.is_flag_0",
+                    "--write"])
+    assert rc == 0, out
+    assert [(p["subject_area"], p["name"]) for p in out["proposals"]
+            if p["name"].endswith("_rate")] == [("b", "tickets_is_flag_0_rate")]
+    assert not (_metrics_dir(tmp_path) / "tickets_is_flag_0_rate.yaml").exists()
+    # --area settles it too
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_1",
+                    "--area", "s"])
+    assert rc == 0 and "tickets_is_flag_1_rate" in {p["name"] for p in out["proposals"]}, out
