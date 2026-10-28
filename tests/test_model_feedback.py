@@ -87,3 +87,19 @@ def test_examples_orgmd_and_slash_signer():
     assert (data["signer"], data["role"]) == ("bob@x.com", "data_lead")
     assert set(data["examples_by_area"]) == {"sales", "ops"}
     assert data["datasource_md"].startswith("About this DB.")
+
+
+def test_move_ops_pass_through_and_run_after_the_ops_naming_the_old_area():
+    block = """profile: shop
+exclude columns: sales.orders.notes
+curate-ops: [{"op":"move","kind":"table","area":"sales","name":"orders","to_area":"fulfilment"},
+ {"op":"edit","kind":"table","area":"sales","name":"orders","field":"description","value":"x"},
+ {"op":"move","kind":"table","name":"lines"}]
+done
+"""
+    data, anomalies, needs = F.parse(block)
+    assert needs is None
+    assert [o["op"] for o in data["ops"]] == ["exclude", "edit", "move", "move"]
+    assert data["ops"][2] == {"op": "move", "kind": "table", "area": "sales", "name": "orders",
+                              "to_area": "fulfilment"}
+    assert [a["kind"] for a in anomalies] == ["move_missing_field"]

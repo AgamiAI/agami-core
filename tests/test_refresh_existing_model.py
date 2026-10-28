@@ -280,6 +280,90 @@ def test_a_batched_first_build_proposes_the_same_areas_as_a_one_shot_build(tmp_p
     assert areas(tmp_path / "batched") == areas(tmp_path / "one")
 
 
+def _xray_batches(tmp_path: Path) -> tuple:
+    """A catalog where batch one (`first`) puts xray with alpha, its join to beta cross-area, and
+    adding yank pulls xray to beta: that join moves inside beta, and xray -> alpha becomes cross-area."""
+    import sys as _sys
+    _sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from catalog_helpers import col, make_catalog_runner
+
+    def fk(frm: str, to: str) -> dict:
+        return {"from_schema": "public", "from_table": frm, "from_column": f"{to}_id",
+                "to_schema": "public", "to_table": to, "to_column": "id"}
+
+    first = ["alpha", *(f"alpha_{i}" for i in range(12)), "beta", *(f"beta_{i}" for i in range(12)), "xray"]
+    names = [*first, "yank"]
+    fks = [*(fk(f"alpha_{i}", "alpha") for i in range(12)), *(fk(f"beta_{i}", "beta") for i in range(12)),
+           fk("xray", "alpha"), fk("xray", "beta"), fk("yank", "xray"), fk("yank", "beta")]
+    cols = {n: [col("id", "integer", nullable=False), *(col(f["from_column"], "integer") for f in fks
+                                                        if f["from_table"] == n)] for n in names}
+    return make_catalog_runner(tables=names, columns=cols, fks=fks), first, names, len(fks)
+
+
+def _owner(org) -> dict[str, str]:
+    return {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+
+
+def test_a_join_whose_table_changes_area_between_batches_is_written_as_its_new_place(tmp_path):
+    # The cross-area copy carried from batch one was written into beta's relationships.yaml with its
+    # area keys, and the model didn't load.
+    from semantic_model import loader as L
+    from semantic_model import validator as V
+
+    runner, first, names, n_joins = _xray_batches(tmp_path)
+
+    def joins(org) -> dict[tuple, tuple]:
+        out = {(r.from_table, r.to_table): (sa.name, sa.name) for sa in org.subject_areas for r in sa.relationships}
+        out.update({(r.from_table, r.to_table): (r.from_subject_area, r.to_subject_area)
+                    for r in org.cross_subject_area_relationships})
+        return out
+
+    org, _ = I.introspect("batched", "postgres", runner=runner, artifacts_dir=tmp_path,
+                          tables=[f"public.{n}" for n in first], append=True)
+    assert _owner(org)["xray"] == _owner(org)["alpha"] != _owner(org)["beta"]
+    I.introspect("batched", "postgres", runner=runner, artifacts_dir=tmp_path, tables=["public.yank"], append=True)
+    I.introspect("one", "postgres", runner=runner, artifacts_dir=tmp_path, tables=[f"public.{n}" for n in names])
+
+    batched, one = L.load_datasource(tmp_path / "batched"), L.load_datasource(tmp_path / "one")
+    assert V.validate(batched).ok
+    assert _owner(batched)["xray"] == _owner(batched)["beta"] != _owner(batched)["alpha"]
+    assert joins(batched)[("xray", "beta")] == ("beta", "beta")      # was cross-area, now inside
+    assert joins(batched)[("xray", "alpha")] == ("beta", "alpha")    # was inside, now cross-area
+    assert joins(batched) == joins(one) and len(joins(batched)) == n_joins
+
+
+def test_a_refresh_that_would_not_load_back_is_not_written(tmp_path, monkeypatch):
+    from semantic_model import build
+    from semantic_model import loader as L
+
+    runner, first, _, _ = _xray_batches(tmp_path)
+    I.introspect("batched", "postgres", runner=runner, artifacts_dir=tmp_path,
+                 tables=[f"public.{n}" for n in first], append=True)
+    before = {p: p.read_bytes() for p in (tmp_path / "batched").rglob("*.yaml")}
+    monkeypatch.setattr(build, "_as_area_rel", lambda r: r)   # the shape the round trip must catch
+    _, report = I.introspect("batched", "postgres", runner=runner, artifacts_dir=tmp_path,
+                             tables=["public.yank"], append=True)
+    assert report.notes[0].startswith("NOT WRITTEN: the merged model wouldn't load once written")
+    assert "from_subject_area" in report.notes[0]
+    assert {p: p.read_bytes() for p in (tmp_path / "batched").rglob("*.yaml")} == before
+    L.load_datasource(tmp_path / "batched")
+
+
+def test_the_pre_write_check_refuses_a_model_that_would_not_load_back():
+    from semantic_model import build
+    from semantic_model import models as m
+
+    t = m.Table(name="orders", columns=[m.Column(name="id", type="integer")])
+    cross = m.CrossSubjectAreaRelationship(from_table="orders", from_column="id", to_table="orders",
+                                           to_column="id", relationship="one_to_one",
+                                           from_subject_area="shop", to_subject_area="shop")
+    org = _model(_area("shop", [t]))
+    assert build.unloadable(org) == []
+    org.subject_areas[0].relationships.append(cross)   # valid in memory, extra keys once written
+    (problem,) = build.unloadable(org)
+    assert "shop join orders->orders" in problem and "from_subject_area" in problem
+
+
 def _area(name: str, tables: list, description: str = "Curated.") -> object:
     from semantic_model import build
     from semantic_model import models as m

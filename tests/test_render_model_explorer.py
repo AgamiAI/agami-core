@@ -176,6 +176,15 @@ def test_manifest_carries_table_description_source_ai_unknown(tmp_path):
     assert t["description_source"] == "ai_unknown"
 
 
+def test_tables_offer_a_move_to_area_control_that_queues_a_move_op(profile_dir):
+    # #513: the explorer queues the curate `move` op, after the ops naming the table's current area
+    html = render(title="t", profile="test", manifest=build_manifest(profile_dir, "test"))
+    assert "function moveSelect(table)" in html and "actions.appendChild(moveSelect(table))" in html
+    assert "{ op: 'move', kind: 'table', area: table.area, name: table.name, to_area: to }" in html
+    assert html.index("Object.entries(edits).forEach(([qname, e])") < html.index(
+        "Object.values(moves).forEach(o => opList.push(o))")
+
+
 def test_subject_areas_are_not_called_schemas(profile_dir, tmp_path, monkeypatch, capsys):
     # #527: the manifest's `schemas` key holds subject areas; "schema" reads as a database schema
     import render_model_explorer as R
