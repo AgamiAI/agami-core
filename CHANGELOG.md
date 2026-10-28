@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`sm remove-example` names each example in full and says it keeps them (#550).** It cut each
+  question to about 50 characters, so two that opened the same way couldn't be told apart; its
+  `rejected` labels and the curation log now carry the whole question. The output also adds an
+  `examples` list (`area`, `question`, `id` when the example has one, `status`) and a `note` saying
+  they were marked rejected (kept for audit), not deleted; the existing keys are unchanged. Its
+  help says the same. `sm curate --help` no longer says `--signer`/`--role` are for approve ops only:
+  they are recorded in the curation log on every op, and an approve (or an edit of an approved
+  join's tables, columns or cardinality) also stamps them on the item as its sign-off.
+
 ### Changed
 
 - **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
@@ -31,14 +42,43 @@ below corresponds to one such version.
 
 ### Fixed
 
-- **`sm remove-example` names each example in full and says it keeps them (#550).** It cut each
-  question to about 50 characters, so two that opened the same way couldn't be told apart; its
-  `rejected` labels and the curation log now carry the whole question. The output also adds an
-  `examples` list (`area`, `question`, `id` when the example has one, `status`) and a `note` saying
-  they were marked rejected (kept for audit), not deleted; the existing keys are unchanged. Its
-  help says the same. `sm curate --help` no longer says `--signer`/`--role` are for approve ops only:
-  they are recorded in the curation log on every op, and an approve (or an edit of an approved
-  join's tables, columns or cardinality) also stamps them on the item as its sign-off.
+- **A foreign key over several columns is now one join on all of them, and a query joining on only
+  some of them is flagged (#510).** Introspection wrote each column of a composite key as its own
+  approved many-to-one join, and either one used alone repeats rows (981 became 2,502 in one
+  database). Every dialect's foreign-key query now returns the constraint name and column position,
+  and the generic `information_schema` query (Redshift, Snowflake, DuckDB, Databricks) and BigQuery's
+  match the referenced column by position, which they used to pair with every column of the key.
+  Where a catalog can't run the generic one (an older Redshift may lack
+  `position_in_unique_constraint`), introspection falls back to the query it used before, keeps its
+  single-column keys as before, and leaves out a composite key with a note rather than guess how its
+  columns pair; the report says when the fallback was used. A
+  key is written as one `on:` join, its cardinality read from the whole key; single-column joins are
+  unchanged. Where a catalog gives no constraint name, the columns are still kept apart but left for
+  review. A refresh replaces the split joins introspection approved for such a key with the one
+  join and lists that in the preview; if a person signed off any of them, nothing changes for that
+  key and the preview says so. On the receipt, a join written on part of a declared composite key
+  makes an aggregate on either side `multiplied`, with a `fan_trap` naming the missing columns; the
+  query still runs. Code that read only `from_column`/`to_column` now reads every column of an
+  `on:` join too (adding reference joins no longer raises on one), and the validator warns when an
+  `on:` names a column its table doesn't define. A join that is a key equality plus a fixed value
+  (`... AND customers_curr.current_flag = 'Y'`) is not a composite key: its receipt and refresh are
+  as before, its key column counts as a referenced column, and hiding that column now hides the
+  join. BigQuery and Oracle keys are kept apart per dataset/owner, a BigQuery key into another
+  dataset keeps its single-column join, and an `on:` now also parses in the engine's own grammar
+  (`` `OrderId` ``). A refresh keeps a single-column FK the catalog declares beside a composite
+  one, and only an `on:` join introspection signed goes back to review when a column is retyped.
+  The partial-key check reads each join on its own (an aliased self-join and a `USING` join too),
+  skips SEMI/ANTI joins and a join another declaration names whole, and counts only the equalities
+  between the join's two tables. A column an earlier `USING` or `NATURAL` join merged counts for
+  every table it merged, and one whose table can't be told leaves the aggregate `undetermined`. A
+  key column or table named after a reserved word (`order`) is quoted in the `on:`, and a refresh
+  matches a split join by its schema even when the schema is written in the table name
+  (`crm.shipments`), and keeps such a join in its own schema's area only.
+  A refresh's relabelling
+  from the database's keys (#511) labels a composite join from all its columns, and a split join the
+  refresh replaces is not also listed as relabelled.
+
+### Fixed
 
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
   query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
