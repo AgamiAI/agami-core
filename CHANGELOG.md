@@ -37,9 +37,11 @@ below corresponds to one such version.
   one, and only an `on:` join introspection signed goes back to review when a column is retyped.
   The partial-key check reads each join on its own (an aliased self-join and a `USING` join too),
   skips SEMI/ANTI joins and a join another declaration names whole, and counts only the equalities
-  between the join's two tables. A key column or table named after a reserved word (`order`) is
-  quoted in the `on:`, and a refresh matches a split join by its schema even when the schema is
-  written in the table name (`crm.shipments`), and keeps such a join in its own schema's area only.
+  between the join's two tables. A column an earlier `USING` or `NATURAL` join merged counts for
+  every table it merged, and one whose table can't be told leaves the aggregate `undetermined`. A
+  key column or table named after a reserved word (`order`) is quoted in the `on:`, and a refresh
+  matches a split join by its schema even when the schema is written in the table name
+  (`crm.shipments`), and keeps such a join in its own schema's area only.
   A refresh's relabelling
   from the database's keys (#511) labels a composite join from all its columns, and a split join the
   refresh replaces is not also listed as relabelled.

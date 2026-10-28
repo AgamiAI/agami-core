@@ -910,3 +910,35 @@ def test_a_condition_within_one_table_is_not_a_key_column():
     on = "orders.customer_ntrl_key = customers_curr.customer_natural_key AND customers_curr.segment = customers_curr.region"
     sql = "SELECT SUM(o.amount) FROM orders o JOIN customers_curr c ON o.customer_ntrl_key = c.customer_natural_key"
     assert _partial_findings(_filtered_org(on, extra_cols=("region",)), sql) == []
+
+
+def _composite_only_org() -> m.Datasource:
+    alt = m.Relationship(from_table="shipments", to_table="order_lines", from_column="alt_order_id",
+                         to_column="order_id", relationship="many_to_one")
+    return _two_joins_org(alt)
+
+
+_FULL_THEN = "SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines a USING (order_id, line_no) "
+
+
+@pytest.mark.parametrize("sql, partial", [
+    # the second USING joins on the column the first one merged, so it equates shipments.order_id too
+    (_FULL_THEN + "JOIN order_lines b USING (order_id)", True),
+    (_FULL_THEN + "JOIN order_lines b USING (order_id, line_no)", False),
+    ("SELECT SUM(s.shipped_qty) FROM shipments s NATURAL JOIN order_lines a JOIN order_lines b USING (order_id)", True),
+    ("SELECT SUM(s.shipped_qty) FROM shipments s NATURAL JOIN order_lines a", False),
+])
+def test_a_column_an_earlier_using_merged_is_traced_to_its_tables(sql, partial):
+    org = _composite_only_org()
+    (agg,) = _aggregates(org, sql).values()
+    assert bool(_partial_findings(org, sql)) is partial
+    # a whole-key USING is not multiplied; the joins section still reads a USING join as undetermined
+    assert (agg.status == R.MULTIPLIED) is partial
+
+
+def test_a_using_column_from_an_unknown_table_is_undetermined_not_clean():
+    # both shipments and the first order_lines have order_id, unmerged: which one b joins can't be told
+    sql = ("SELECT SUM(s.shipped_qty) FROM shipments s JOIN order_lines a ON s.order_id = a.order_id "
+           "AND s.line_no = a.line_no JOIN order_lines b USING (order_id)")
+    (agg,) = _aggregates(_composite_only_org(), sql).values()
+    assert agg.status == R.UNDETERMINED and "USING or NATURAL" in agg.reason
