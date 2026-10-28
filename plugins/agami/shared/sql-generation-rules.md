@@ -99,6 +99,8 @@ Use predictable alias patterns:
 | Amounts | Must end with `_amount` | `total_revenue_amount` |
 | Percentages | Must end with `_percent` or `_percentage` | `growth_percentage` |
 
+Reuse an alias only as a whole `ORDER BY` or `GROUP BY` item. In `WHERE`, `HAVING` or a later `SELECT` expression, write the expression out (`HAVING SUM(amount) > 1000`, not `HAVING revenue > 1000`) or filter in an outer query: the engine may read a same-named table column there instead of the alias, so the column check refuses it.
+
 ---
 
 ## Growth / Period-Over-Period Queries
