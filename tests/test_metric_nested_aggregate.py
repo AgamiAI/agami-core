@@ -177,8 +177,8 @@ def test_second_order_synthesis_is_still_accepted_and_unchanged(tmp_path):
         "FROM orders GROUP BY order_date) _inner)")
 
 
-def _derived_org(binding: str) -> m.Datasource:
-    rev = m.Metric(name="revenue", calculation="x", bindings={"PostgreSQL": "SUM(amount)"},
+def _derived_org(binding: str, base: str = "SUM(amount)") -> m.Datasource:
+    rev = m.Metric(name="revenue", calculation="x", bindings={"PostgreSQL": base},
                    source_tables=["orders"])
     der = m.Metric(name="d", calculation="x", bindings={"PostgreSQL": binding},
                    base_metrics=["revenue"], source_tables=["orders"])
@@ -186,9 +186,9 @@ def _derived_org(binding: str) -> m.Datasource:
         m.SubjectArea(name=AREA, metrics=[rev, der])])
 
 
-def _derived_findings(binding: str) -> list[tuple[str, str]]:
+def _derived_findings(binding: str, base: str = "SUM(amount)") -> list[tuple[str, str]]:
     res = V.ValidationResult()
-    V._check_derived_metrics(_derived_org(binding), res)
+    V._check_derived_metrics(_derived_org(binding, base), res)
     return [(f.severity, f.code) for f in res.findings]
 
 
@@ -201,6 +201,33 @@ def test_a_derived_nesting_only_the_new_rule_sees_is_a_warning():
     # keep validating.
     assert _derived_findings("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {revenue})") == [
         ("warning", CODE)]
+
+
+def test_the_inner_aggregates_own_filter_leaves_it_in_the_argument():
+    # The SUM's FILTER is its own, so AVG still nests it in the argument: still the error it was.
+    assert _derived_findings("AVG({revenue})", base="SUM(amount) FILTER (WHERE amount > 0)") == [
+        ("error", "derived_metric")]
+    assert [p.clause for p in D.binding_problems(
+        "AVG(SUM(amount) FILTER (WHERE amount > 0))", "PostgreSQL")] == ["argument"]
+    assert [p.clause for p in D.binding_problems(
+        "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount) FILTER (WHERE amount > 0))",
+        "PostgreSQL")] == ["within_group"]
+    assert [p.clause for p in D.binding_problems(
+        "SUM(amount) FILTER (WHERE PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount) > 0)",
+        "PostgreSQL")] == ["filter"]
+
+
+@pytest.mark.parametrize("derived_first", [True, False])
+def test_a_batch_judges_a_derived_metric_with_its_sibling_base_known(tmp_path, derived_first):
+    _write_model(tmp_path)
+    items = [_metric("median_revenue", "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {revenue})",
+                     base_metrics=["revenue"]),
+             _metric("revenue", "SUM(amount)")]
+    res = curate.write_items(tmp_path, AREA, "metric", items if derived_first else items[::-1])
+    assert res.applied == [f"metric {AREA}/revenue"]
+    assert [s["item"] for s in res.skipped] == ["median_revenue"]
+    assert "nested inside PERCENTILE_CONT(...) WITHIN GROUP" in res.skipped[0]["reason"]
+    assert not (tmp_path / "subject_areas" / AREA / "metrics" / "median_revenue.yaml").exists()
 
 
 def test_a_derived_aggregate_over_a_subquery_is_no_longer_refused():

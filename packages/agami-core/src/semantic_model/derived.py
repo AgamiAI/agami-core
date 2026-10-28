@@ -152,15 +152,23 @@ def _nested_in(unit, agg):
 
 
 def _clause_of(inner, agg) -> str:
-    """Whether `inner` sits in `agg`'s argument or in its WITHIN GROUP / FILTER clause."""
+    """Whether `inner` sits in `agg`'s argument or in its WITHIN GROUP / FILTER clause. Only `agg`'s
+    own wrappers count: `inner`'s, as in `AVG(SUM(a) FILTER (WHERE a > 0))`, leave it in the argument."""
     from sqlglot import expressions as exp
 
-    node = inner.parent
+    wrappers = []
+    node = agg.parent
+    while isinstance(node, (exp.WithinGroup, exp.Filter, exp.IgnoreNulls, exp.RespectNulls)):
+        wrappers.append(node)
+        node = node.parent
+    node = _aggregate_unit(inner).parent
     while node is not None and node is not agg:
-        if isinstance(node, exp.WithinGroup):
-            return "within_group"
-        if isinstance(node, exp.Filter):
-            return "filter"
+        if any(node is w for w in wrappers):
+            if isinstance(node, exp.WithinGroup):
+                return "within_group"
+            if isinstance(node, exp.Filter):
+                return "filter"
+            break
         node = node.parent
     return "argument"
 

@@ -193,6 +193,12 @@ def test_the_query_time_rule_carries_the_sourced_definition_exception():
     "/ NULLIF(COUNT(staff_count) + COUNT(volunteers), 0)",
     "SUM(COALESCE(staff_count, 0)) "
     "/ NULLIF(SUM(CASE WHEN staff_count IS NOT NULL THEN 1 ELSE 0 END), 0)",
+    "SUM(COALESCE(staff_count, 0)) * 1.0 / NULLIF(COUNT(staff_count), 0)",
+    "SUM(COALESCE(operations.staff_count, 0)) / NULLIF(COUNT(operations.staff_count), 0)",
+    "CAST(SUM(COALESCE(staff_count, 0)) AS NUMERIC) "
+    "/ NULLIF(COUNT(CASE WHEN staff_count IS NOT NULL THEN 1 END), 0)",
+    "1.0 * SUM(COALESCE(staff_count, 0)) "
+    "/ NULLIF(SUM(CASE WHEN NOT staff_count IS NULL THEN 1 ELSE 0 END), 0)",
 ])
 def test_a_fill_divided_by_the_count_of_present_values_is_left_alone(binding):
     # the zero adds to neither side, so the result is the average of the values that exist
@@ -204,6 +210,24 @@ def test_a_fill_divided_by_the_count_of_present_values_is_left_alone(binding):
     "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(DISTINCT staff_count), 0)",
     "SUM(COALESCE(staff_count, 0) + COALESCE(volunteers, 0)) / NULLIF(COUNT(volunteers), 0)",
     "COUNT(staff_count) / SUM(COALESCE(staff_count, 0))",  # the fill is the denominator
+    # another table's same-named column, or one whose table cannot be matched
+    "SUM(COALESCE(a.staff_count, 0)) / NULLIF(COUNT(b.staff_count), 0)",
+    "SUM(COALESCE(a.staff_count, 0)) / NULLIF(COUNT(staff_count), 0)",
+    # a term that counts the missing rows, beside one that does not
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(staff_count) + COUNT(*), 0)",
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(staff_count) + 1, 0)",
+    "SUM(COALESCE(staff_count, 0)) "
+    "/ NULLIF(COUNT(CASE WHEN staff_count IS NOT NULL THEN 1 ELSE 0 END), 0)",  # counts every row
+    # a fallback other than zero changes the total; another aggregate counts the filled rows
+    "SUM(COALESCE(staff_count, 100)) / NULLIF(COUNT(staff_count), 0)",
+    "AVG(COALESCE(staff_count, 0)) / NULLIF(COUNT(staff_count), 0)",
+    "MAX(COALESCE(staff_count, 0)) / NULLIF(COUNT(staff_count), 0)",
+    "SUM(COALESCE(staff_count, 0) * volunteers) / NULLIF(COUNT(staff_count), 0)",
+    "SUM(COALESCE(staff_count + volunteers, 0)) / NULLIF(COUNT(staff_count), 0)",
+    "SUM(COALESCE(staff_count, 0)) "
+    "/ NULLIF(SUM(CASE WHEN staff_count IS NOT NULL THEN 2 ELSE 0 END), 0)",
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(SUM(CASE WHEN staff_count IS NULL THEN 1 ELSE 0 END), 0)",
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(SUM(CASE WHEN staff_count > 0 THEN 1 ELSE 0 END), 0)",
 ])
 def test_a_denominator_that_does_not_count_only_present_values_still_warns(binding):
     assert len(_warnings(_org(binding))) == 1
@@ -215,3 +239,22 @@ def test_the_skill_and_the_shape_doc_show_the_present_values_form():
     for text in (SKILL, shape):
         assert "COUNT(a) + COUNT(b)" in text or "COUNT(score_a) + COUNT(score_b)" in text
         assert "`VALUES` list" in text
+
+
+def test_the_documented_present_values_form_is_not_integer_division():
+    # PostgreSQL and SQLite divide an integer sum by a count as integers: scores 1 and 2 gave 1.
+    import re
+    import sqlite3
+
+    shape = (REPO_ROOT / "plugins" / "agami" / "shared" / "metric-entity-shape.md").read_text(
+        encoding="utf-8")
+    binding = re.search(r'PostgreSQL: "(SUM\(COALESCE\(score_a.*?)"', shape).group(1)
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE t (score_a INTEGER, score_b INTEGER)")
+    con.executemany("INSERT INTO t VALUES (?, ?)", [(1, None), (2, None)])
+    assert con.execute(f"SELECT {binding} FROM t").fetchone()[0] == 1.5
+    assert _warnings(_org(binding.replace("score_a", "staff_count").replace("score_b", "volunteers"))) == []
+    skill_form = re.search(r"`(SUM\(COALESCE\(a, 0\).*?)`", SKILL).group(1)
+    con.execute("CREATE TABLE u (a INTEGER, b INTEGER)")
+    con.executemany("INSERT INTO u VALUES (?, ?)", [(1, None), (None, 2)])
+    assert con.execute(f"SELECT {skill_form} FROM u").fetchone()[0] == 1.5

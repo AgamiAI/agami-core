@@ -1370,49 +1370,139 @@ def _null_filled_columns(sql: str, storage_type: str) -> list:
     return found
 
 
-def _present_counted(node) -> set[str]:
-    """The columns `node` counts the present values of, through `COUNT(col)` or
-    `CASE WHEN col IS NOT NULL THEN 1 [ELSE 0] END`; empty when it reads any column another way."""
+def _strip_scale(node):
+    """`node` without parentheses, a CAST or a multiplication by a numeric literal (`x * 1.0`), none
+    of which changes which values are added or counted."""
     from sqlglot import expressions as exp
 
-    counted: set[str] = set()
-    for count in node.find_all(exp.Count):
-        if isinstance(count.this, exp.Column):
-            counted.add(count.this.name.lower())
-    for case in node.find_all(exp.Case):
-        ifs = case.args.get("ifs") or []
-        default = case.args.get("default")
-        if len(ifs) != 1 or not (default is None or isinstance(default, exp.Literal) and default.name == "0"):
-            continue
-        cond, then = ifs[0].this, ifs[0].args.get("true")
-        if not (isinstance(then, exp.Literal) and then.name == "1"):
-            continue
-        # `col IS NOT NULL` parses as Is(negate=True) in some dialects and Not(Is) in others.
-        if isinstance(cond, exp.Not):
-            cond = cond.this if isinstance(cond.this, exp.Is) else None
-        elif not (isinstance(cond, exp.Is) and cond.args.get("negate")):
-            cond = None
-        if cond is not None and isinstance(cond.this, exp.Column) and isinstance(cond.expression, exp.Null):
-            counted.add(cond.this.name.lower())
-    read = {c.name.lower() for c in node.find_all(exp.Column)}
-    return counted if read <= counted else set()
+    while True:
+        if isinstance(node, (exp.Paren, exp.Cast)):
+            node = node.this
+        elif isinstance(node, exp.Mul) and _is_number(node.this):
+            node = node.expression
+        elif isinstance(node, exp.Mul) and _is_number(node.expression):
+            node = node.this
+        else:
+            return node
+
+
+def _is_number(node, value: Optional[float] = None) -> bool:
+    """A numeric literal, equal to `value` when one is given."""
+    from sqlglot import expressions as exp
+
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if not (isinstance(node, exp.Literal) and node.is_number):
+        return False
+    try:
+        return value is None or float(node.name) == value
+    except ValueError:
+        return False
+
+
+def _column_identity(node) -> Optional[tuple[str, ...]]:
+    """A column as written, qualifier included (`a.score` and `b.score` differ), or None."""
+    from sqlglot import expressions as exp
+
+    node = _strip_scale(node)
+    if not isinstance(node, exp.Column) or not node.name:
+        return None
+    return tuple(part.name.lower() for part in node.parts)
+
+
+def _terms(node) -> list:
+    """The operands of a chain of `+`."""
+    from sqlglot import expressions as exp
+
+    node = _strip_scale(node)
+    if isinstance(node, exp.Add):
+        return _terms(node.this) + _terms(node.expression)
+    return [node]
+
+
+def _zero_filled_sum(node) -> Optional[list]:
+    """The columns `node` adds up as `SUM(COALESCE(col, 0) [+ COALESCE(col2, 0) ...])` (or a sum of
+    such SUMs), or None when it is any other shape: a fallback other than 0 changes the total, and
+    another aggregate (`AVG(COALESCE(col, 0))`) counts the filled rows."""
+    from sqlglot import expressions as exp
+
+    cols = []
+    for term in _terms(node):
+        if not isinstance(term, exp.Sum):
+            return None
+        for fill in _terms(term.this):
+            if not (isinstance(fill, exp.Coalesce) and len(fill.expressions) == 1
+                    and _is_number(fill.expressions[0], 0)):
+                return None
+            col = _column_identity(fill.this)
+            if col is None:
+                return None
+            cols.append(col)
+    return cols
+
+
+def _present_count(term) -> Optional[tuple[str, ...]]:
+    """The column `term` counts the present values of: `COUNT(col)`,
+    `COUNT(CASE WHEN col IS NOT NULL THEN 1 END)` or `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`."""
+    from sqlglot import expressions as exp
+
+    if not isinstance(term, (exp.Count, exp.Sum)):
+        return None
+    if isinstance(term, exp.Count) and isinstance(term.this, exp.Column):
+        return _column_identity(term.this)
+    case = term.this
+    if not isinstance(case, exp.Case) or len(case.args.get("ifs") or []) != 1:
+        return None
+    default = case.args.get("default")
+    # COUNT counts a 0 too, so only SUM may take ELSE 0
+    if not (default is None or isinstance(default, exp.Null)
+            or isinstance(term, exp.Sum) and _is_number(default, 0)):
+        return None
+    cond, then = case.args["ifs"][0].this, case.args["ifs"][0].args.get("true")
+    if not _is_number(then, 1):
+        return None
+    # `col IS NOT NULL` parses as Is(negate=True) in some dialects and Not(Is) in others.
+    if isinstance(cond, exp.Not):
+        cond = cond.this if isinstance(cond.this, exp.Is) else None
+    elif not (isinstance(cond, exp.Is) and cond.args.get("negate")):
+        cond = None
+    if cond is None or not isinstance(cond.expression, exp.Null):
+        return None
+    return _column_identity(cond.this)
+
+
+def _present_counts(node) -> Optional[list]:
+    """The columns a denominator counts the present values of, every term of it a supported count
+    (optionally inside `NULLIF(..., 0)`), or None: `COUNT(*)` counts the missing rows too."""
+    from sqlglot import expressions as exp
+
+    node = _strip_scale(node)
+    if isinstance(node, exp.Nullif) and _is_number(node.expression, 0):
+        node = node.this
+    cols = []
+    for term in _terms(node):
+        col = _present_count(term)
+        if col is None:
+            return None
+        cols.append(col)
+    return cols
 
 
 def _averages_present_values(fill) -> bool:
-    """True when the fill sits in the numerator of a division whose denominator counts only the
-    present values of the filled column(s), as in `SUM(COALESCE(score, 0)) / NULLIF(COUNT(score), 0)`.
-    The zero then adds nothing to either side: the result is the average of the values that exist,
-    not an invented one (#519)."""
+    """True when the fill sits in the numerator of a division that averages the present values,
+    `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: the numerator only zero-fills columns
+    inside a SUM and the denominator only counts the present values of those same columns. The zero
+    then adds nothing to either side: the result is the average of the values that exist, not an
+    invented one (#519)."""
     from sqlglot import expressions as exp
 
     node = fill
     while node.parent is not None and not isinstance(node.parent, exp.Query):
         parent = node.parent
         if isinstance(parent, exp.Div) and node.arg_key == "this":
-            # every column the numerator fills, so a second filled column the denominator does not
-            # count keeps the warning on both
-            filled = {c.name.lower() for f in node.find_all(exp.Coalesce) for c in f.this.find_all(exp.Column)}
-            return bool(filled) and filled <= _present_counted(parent.expression)
+            filled = _zero_filled_sum(parent.this)
+            counted = _present_counts(parent.expression)
+            return bool(filled) and counted is not None and set(filled) == set(counted)
         node = parent
     return False
 

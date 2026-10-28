@@ -1075,11 +1075,13 @@ def _slug(name: str) -> str:
     return item_file_stem(name)
 
 
-def _nested_aggregate_refusal(root: Path, metric: "Metric | dict") -> Optional[str]:
+def _nested_aggregate_refusal(root: Path, metric: "Metric | dict",
+                              batch: Optional[dict] = None) -> Optional[str]:
     """Why a new or edited metric binding is refused for nesting aggregates (#519), or None.
 
     The validator only warns on this, so an existing model keeps validating; a binding being
-    written now is refused, since the database would refuse every query that uses it."""
+    written now is refused, since the database would refuse every query that uses it. `batch` holds
+    the other metrics being written with it, so a base listed later in the batch is known."""
     from . import derived as D
 
     try:
@@ -1093,7 +1095,7 @@ def _nested_aggregate_refusal(root: Path, metric: "Metric | dict") -> Optional[s
             idx = D.metric_index(org)
         except Exception:
             pass
-    problems = D.metric_binding_problems(met, {**idx, met.name: met}, org)
+    problems = D.metric_binding_problems(met, {**idx, **(batch or {}), met.name: met}, org)
     return D.nested_aggregate_reason(met.name, problems) if problems else None
 
 
@@ -1115,6 +1117,7 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     dest = _area_dir(root, area) / subdir
     backups: list[tuple[Path, Optional[str]]] = []  # (path, prior text or None if new)
 
+    parsed: list[tuple[dict, Any]] = []
     for item in items:
         # Strip grouping/locator metadata that callers (e.g. the model-dashboard
         # "Add metric" form) attach but that isn't a model field. `area` is already
@@ -1122,11 +1125,17 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
         # new-metric fails with `extra_forbidden` on `area`.
         clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
         try:
-            obj = Model(**clean)  # structural validation (required fields, enums, …)
+            parsed.append((item, Model(**clean)))  # structural validation (required fields, enums, …)
         except Exception as e:
-            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
+            parsed.append((item, e))
+    # every structurally valid metric of the batch, so a derived one is judged whatever the order
+    batch = {o.name: o for _, o in parsed if kind == "metric" and not isinstance(o, Exception)}
+
+    for item, obj in parsed:
+        if isinstance(obj, Exception):
+            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(obj)})
             continue
-        reason = _nested_aggregate_refusal(root, obj) if kind == "metric" else None
+        reason = _nested_aggregate_refusal(root, obj, batch) if kind == "metric" else None
         if reason:
             res.skipped.append({"item": obj.name, "reason": reason})
             continue

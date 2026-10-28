@@ -160,14 +160,17 @@ columns, divide the sum of the present values by the count of the present values
 
 ```yaml
 bindings:
-  PostgreSQL: "SUM(COALESCE(score_a, 0) + COALESCE(score_b, 0)) / NULLIF(COUNT(score_a) + COUNT(score_b), 0)"
+  PostgreSQL: "SUM(COALESCE(score_a, 0) + COALESCE(score_b, 0)) * 1.0 / NULLIF(COUNT(score_a) + COUNT(score_b), 0)"
 ```
 
-The zero added for a missing score is not counted in the denominator, so it changes nothing, and
-`metric_null_filled` does not warn on this shape: a `COALESCE` in the numerator whose denominator
-counts only the present values of the same columns (`COUNT(col)`, or
-`SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`). `AVG(COALESCE(col, 0))` still warns: it
-averages the invented zeros.
+The `* 1.0` keeps the average fractional: without it an integer sum divided by a count is integer
+division on PostgreSQL, SQLite and SQL Server (scores 1 and 2 give 1, not 1.5). The zero added for a
+missing score is not counted in the denominator, so it changes nothing, and `metric_null_filled`
+does not warn on this shape: a `SUM` of `COALESCE(col, 0)` terms in the numerator whose denominator
+counts only the present values of the same columns, written the same way (`a.score` is not
+`b.score`), with `COUNT(col)` or `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`. Any other
+fallback than 0, another aggregate such as `AVG(COALESCE(col, 0))` (it averages the invented zeros),
+or a denominator term such as `COUNT(*)` that counts the missing rows still warns.
 
 ## Entity
 

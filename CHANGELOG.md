@@ -25,8 +25,13 @@ below corresponds to one such version.
   a database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
   Snowflake, BigQuery, Databricks, SQL Server and MySQL) is answered with a sentence naming the
   rewrite, with the same failure kind and exit code as before. `metric_null_filled` no longer warns
-  on an average of the values present, `SUM(COALESCE(score, 0)) / NULLIF(COUNT(score), 0)`, and the
-  metric guidance shows that form for several columns.
+  on an average of the values present, `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: a
+  numerator that only zero-fills columns inside a `SUM`, over a denominator that only counts the
+  present values of those same columns (a qualifier included, so `a.score` is not `b.score`). Any
+  other fallback, another aggregate or a term such as `COUNT(*)` keeps the warning. The metric
+  guidance shows that form for several columns, with the `* 1.0` that stops integer division. An
+  `sm add` batch judges a derived metric with the batch's other metrics known, whatever their order,
+  and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in the argument, not in a clause.
 
 ### Added
 
