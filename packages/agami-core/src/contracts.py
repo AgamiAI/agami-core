@@ -157,10 +157,8 @@ class SubjectAreaSummary(_Contract):
 # tables differ only by their join columns, and this tier carries no columns, so as a list they
 # serialized identically and a wide model spent most of the block repeating itself.
 #
-# Names are BARE. `dataset_names` strips every qualifier and resolves first-match, so a
-# schema-qualified node would look precise and select a different table; where one name is
-# declared under two schemas both edges land on one node. #258 is the fix, and this should
-# publish the qualified name once the resolver preserves it.
+# A name is bare unless it is declared under more than one schema, then `schema.table`: each node
+# is the spelling `dataset_names` resolves back to that one table (#258).
 CrossAreaMap = dict[str, list[str]]
 
 

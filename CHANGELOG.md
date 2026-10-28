@@ -139,6 +139,43 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A table is identified by its schema as well as its name (#258, #337).**
+  - **Storage.** The served model stored tables keyed by subject area and bare name, so
+    `sales_data.orders` and `staging.orders` in one area landed on one key and the deploy failed.
+    Migration `028_model_table_identity` adds the schema to `model_table`'s key. Rows
+    already stored copy across unchanged and still load, and the next deploy writes them in full.
+    One area defining the same table twice is now the validator error `duplicate_table_identity`,
+    which includes `public.orders` written next to `orders` with `schema: public`.
+  - **`dataset_names`.** It used to strip the schema, so `public.orders` could return
+    `archive.orders`. It now returns the table in the schema it names. A name declared under two
+    schemas returns both tables, each keyed `schema.table`. A schema the name isn't declared in is
+    answered with the spellings that do resolve.
+  - **Routing map.** On `mode="index"` it publishes `schema.table` where a name is ambiguous, and
+    passing that name back returns that table.
+  - **Name carrying its schema.** A table defined as `name: public.orders` can now be selected as
+    either `orders` or `public.orders`, and the scope gates match it.
+  - **Joins.** A join in `joins_to_other_tables` whose schema the returned table can't confirm now
+    stays whole, so it no longer reads `from: orders` with the schema dropped.
+  - **Scope gates.**
+    - A model's tables live in the connection's own database. A reference qualified with another
+      database or project is refused once the credentials say which one the connection is in. When
+      the credentials don't name one, the qualifier is refused. On Databricks the connection is
+      always in the workspace's default catalog, so a catalog prefix is refused there; write
+      `schema.table`. A Snowflake database in the credentials is compared as Snowflake reads it,
+      upper-cased unless quoted, so `database: analytics` accepts `"ANALYTICS".SALES.ORDERS`.
+    - A four-part name (`server.database.schema.table`) never matches a declared table.
+    - `database..table` is refused, saying to write the schema: it reads the connecting user's
+      default schema, which on SQL Server can be `dbo.orders` beside a declared `sales.orders`.
+    - On Postgres, Snowflake and Oracle, a quoted name has to be the declared spelling exactly, so
+      `"Orders"` no longer passes for `orders`, nor `"ORDERS"` for a declared `orders` on Snowflake.
+      Unquoted names still match without regard to case there. Where case alone tells two declared
+      tables apart, column scope reads the columns of the one the statement names.
+    - A dot inside a table name is part of the name when the model gives the schema separately, so
+      Postgres `public."orders.v2"` is one table.
+    - On MySQL a table or database name has to match the declared case exactly, quoted or not:
+      on Linux, its default, `sales.Orders` and `sales.orders` are two different tables.
+    - The other engines match names without regard to case, as they resolve them.
+
 - **A join on a unique key is labelled one-to-one, so a metric over it no longer carries a false
   fan-trap or chasm-trap finding (#511).** Introspection labelled a join from the primary keys
   alone, so a join onto a UNIQUE column, such as `passports.person_id → users.id`, came out
