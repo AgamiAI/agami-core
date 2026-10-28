@@ -62,6 +62,16 @@ def statement_subjects(org: Datasource, sql: str, grammar: Optional[str]) -> "tu
     return tables, columns, None
 
 
+def _metric_lines(metrics) -> Iterator[tuple[str, str, str, Optional[str]]]:
+    for metric in metrics:
+        for source, text in (("metric.description", getattr(metric, "description", "")),
+                             ("metric.calculation", getattr(metric, "calculation", ""))):
+            if text:
+                yield source, metric.name, text, None
+        for caveat in getattr(metric, "caveats", None) or []:
+            yield "metric.caveat", metric.name, caveat, None
+
+
 def _prose_lines(org: Datasource, root: Path, skipped: list[dict[str, str]]) -> Iterator[tuple[str, str, str, Optional[str]]]:
     """`(source, where, text, about)`; `about` is set when the line belongs to a table or column of
     its own (its description or caveats) and None when the line is free text matched by words. A
@@ -83,11 +93,8 @@ def _prose_lines(org: Datasource, root: Path, skipped: list[dict[str, str]]) -> 
                     yield "column.description", where, column.description, about
                 for caveat in column.caveats or []:
                     yield "column.caveat", where, caveat, about
-        for metric in getattr(sa, "metrics", None) or []:
-            for source, text in (("metric.description", getattr(metric, "description", "")),
-                                 ("metric.calculation", getattr(metric, "calculation", ""))):
-                if text:
-                    yield source, metric.name, text, None
+        yield from _metric_lines(getattr(sa, "metrics", None) or [])
+    yield from _metric_lines(getattr(org, "cross_subject_area_metrics", None) or [])
     for term, definition in (org.key_terminology or {}).items():
         yield "glossary", term, f"{term}: {definition}", None
     narrative = root / "datasource.md"

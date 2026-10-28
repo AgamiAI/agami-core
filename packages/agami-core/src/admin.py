@@ -1042,7 +1042,7 @@ def _metric_card_html(m: Any) -> str:
     return (
         f'<div class="mcard"><div class="nm">{ui.esc(m.name)}{alias_html}{unit}</div>'
         f'<div class="muted" style="font-size:13px">{ui.esc(m.description or "")}</div>'
-        f'<span class="calc">{calc}</span></div>'
+        f'<span class="calc">{calc}</span>{_caveat_callout(m.caveats)}</div>'
     )
 
 
