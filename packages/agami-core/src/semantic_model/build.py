@@ -580,9 +580,11 @@ def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
     don't both match an area just because the bare name `products` is present. Schemaless
     relationships (SQLite / legacy) fall back to bare-name membership."""
     def here(table: str, schema) -> bool:
-        return (schema, table) in keys if schema is not None else table in bare
-    return (here(bare_name(r.from_table), r.from_schema)
-            and here(bare_name(r.to_table), r.to_schema))
+        name = bare_name(table)
+        if schema is None and "." in table:   # a schema written in the name (`crm.shipments`) is stated too
+            return (table.split(".")[-2], name) in keys or (None, name) in keys
+        return (schema, name) in keys if schema is not None else name in bare
+    return here(r.from_table, r.from_schema) and here(r.to_table, r.to_schema)
 
 
 def _as_area_rel(r: Relationship) -> Relationship:
