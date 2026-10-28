@@ -1180,6 +1180,8 @@ def _model_texts(org: Datasource) -> Iterator[tuple[str, str]]:
     for met in metrics:
         yield f"metric {met.name!r}", met.calculation
         yield f"metric {met.name!r}", met.description
+        for caveat in met.caveats:
+            yield f"metric {met.name!r} caveat", caveat
     for ent in entities:
         for caveat in ent.caveats:
             yield f"entity {ent.name!r} caveat", caveat
@@ -1227,11 +1229,11 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
         if not (D.is_derived(met) or D.is_second_order(met)):
             continue
         # resolve_metric_sql dispatches: second-order → CTE synthesis, else placeholder
-        # expansion. Either failure mode (cycle, unknown base, bad shape, multi-table inner
-        # synth, missing inner_grain) is deploy-blocking.
+        # expansion. Either failure mode (cycle, unknown base, bad shape, an unjoinable multi-table
+        # base, missing inner_grain) is deploy-blocking.
         for stype in (met.bindings or {}):
             try:
-                D.resolve_metric_sql(met, stype, idx)
+                D.resolve_metric_sql(met, stype, idx, org)
             except D.DerivedError as e:
                 res.error("derived_metric", str(e))
         # grain sanity (first-order case-a only): a base sharing no source_table may be a
@@ -1356,7 +1358,7 @@ def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
     for met in all_metrics:
         if D.is_derived(met) or not met.source_tables:
             continue
-        own = f"{met.calculation} {met.description}"
+        own = " ".join([met.calculation, met.description, *met.caveats])
         if (_says_missing_is_zero(own, _METRIC_DEFINES_ZERO_RE)
                 or _says_missing_is_zero(own, _NULL_MEANS_ZERO_RE)):
             continue  # the metric says why it fills, and where that rule comes from

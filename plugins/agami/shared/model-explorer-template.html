@@ -39,7 +39,7 @@
     }
     A table:
       { "name", "qname", "description", "row_count", "review_state", "excluded",
-        "grain":[], "caveats":[], "default_filters":[], "area", "schema",
+        "grain":[], "unique_keys":[[]], "caveats":[], "default_filters":[], "area", "schema",
         "fields": [ { "name", "qname", "type", "description", "review_state",
                       "excluded", "sensitive", "unit", "caveats", "date_format", "timezone" } ] }
 -->
@@ -1378,9 +1378,10 @@
       if (dtext) { const at = aiDescTag(table.description_source); if (at) dsc.appendChild(at); }
       body.appendChild(dsc);
 
-      if ((table.grain || []).length || (table.caveats || []).length || (table.default_filters || []).length) {
+      if ((table.grain || []).length || (table.unique_keys || []).length || (table.caveats || []).length || (table.default_filters || []).length) {
         const chips = el('div', { class: 'table-chips' });
         (table.grain || []).forEach(g => chips.appendChild(el('span', { class: 'mini-chip', text: 'grain: ' + g })));
+        (table.unique_keys || []).forEach(k => chips.appendChild(el('span', { class: 'mini-chip', text: 'unique: ' + k.join(', ') })));
         (table.default_filters || []).forEach(d => chips.appendChild(el('span', { class: 'mini-chip', text: 'declared filter: ' + d })));
         body.appendChild(chips);
         if ((table.caveats || []).length) body.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + table.caveats.join(' · ') }));
@@ -1752,13 +1753,16 @@
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
       if ((m.source_tables || []).length) { body.appendChild(labelLine('Source tables')); body.appendChild(descBlock(m.source_tables.join(', '))); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
+      if ((m.caveats || []).length) body.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + m.caveats.join(' · ') }));
       body.appendChild(flatCardActions('metric', m));
       if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
         { field: 'unit', label: 'Unit', current: m.unit, rows: 1,
           hint: 'What the result is measured in, so answers format nicely — a currency like USD/INR, or "percent" / "days". For a SUM/AVG, agami inherits the source column’s unit automatically; set it here only if it’s missing or wrong. Leave blank for a plain count.' },
         { field: 'description', label: 'Notes (optional)', current: m.description, rows: 2,
-          hint: 'Extra business context beyond the definition above — when to use it, caveats, how it differs from a similar metric. The definition itself goes in “What it measures”; leave this blank if there’s nothing to add.' },
+          hint: 'Extra business context beyond the definition above — when to use it, how it differs from a similar metric (things to watch out for go in Caveats). The definition itself goes in “What it measures”; leave this blank if there’s nothing to add.' },
         { field: 'other_names', label: 'Also called', type: 'list', current: m.other_names, rows: 2 },
+        { field: 'caveats', label: 'Caveats (things to watch out for)', type: 'list', current: m.caveats, rows: 2,
+          hint: 'What the formula does not cover — e.g. “gives no value when the start date is missing”.' },
       ]));
       card.appendChild(body);
       return card;
