@@ -477,3 +477,57 @@ def test_a_join_that_turns_cross_area_is_not_added_twice(tmp_path):
     cross = loader.load_datasource(root).cross_subject_area_relationships
     assert [(r.from_subject_area, r.to_subject_area) for r in cross
             if (r.from_table, r.to_table) == ("order_items", "orders")] == [("catalog", "sales")]
+
+
+# A join a person edited after its approval is `stale` and keeps the approval's signer (#537).
+_STALE_ENGINE = {**_ENGINE, "review_state": "stale", "relationship": "one_to_one"}
+
+
+def test_a_stale_copy_outranks_an_engine_approved_one(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_STALE_ENGINE)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_ENGINE)
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    rels = loader.load_datasource(root).subject_area("catalog").relationships
+    same = [r for r in rels if (r.from_table, r.to_table) == ("order_items", "products")]
+    assert [(r.review_state, r.relationship) for r in same] == [("stale", "one_to_one")]
+    assert ("join order_items->products was already in area 'catalog'; kept one copy: "
+            "the moved copy, edited by a person since its approval") in res.notes
+
+
+def test_a_move_is_refused_when_a_stale_copy_and_a_signed_copy_disagree(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update({**_SIGNED, "review_state": "stale",
+                                                      "relationship": "one_to_one"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_SIGNED)
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    res = _move(root, "order_items", "catalog")
+    assert not res.applied and "signed off differently" in res.skipped[0]["reason"], res.as_dict()
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("kind,name,edit,rule", [
+    ("relationship", "order_items->orders", {"from_column": "order_id", "field": "relationship",
+                                             "value": "one_to_one"}, "rule_2"),
+    ("metric", "units_sold", {"field": "bindings", "value": {"PostgreSQL": "SUM(order_items.qty) * 2"}},
+     "rule_1"),
+])
+def test_a_moved_stale_item_stays_stale_and_shows_what_changed(tmp_path, kind, name, edit, rule):
+    root = _model(tmp_path)
+    who = {"signer": "you@example.com", "role": "owner"}
+    op = {"kind": kind, "area": "sales", "name": name}
+    which = {k: v for k, v in edit.items() if k == "from_column"}
+    assert curate.apply(root, [{**op, **which, "op": "approve", "at": "2026-01-01T00:00:00Z"}], **who).validated
+    assert curate.apply(root, [{**op, "op": "edit", **edit}], **who).stale
+    for to in ("catalog", "sales"):
+        assert _move(root, "order_items", to).validated
+        (it,) = [it for it in curate.review_queue(loader.load_datasource(root), root=root)[rule]
+                 if it["name"] == name]
+        assert (it["review_state"], it.get("signed_off_by")) == ("stale", "you@example.com"), it
+        changed = it["changes_since_approval"]
+        assert changed["recorded"] and [c["field"] for c in changed["changes"]] == [edit["field"]], (to, it)

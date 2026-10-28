@@ -36,7 +36,10 @@ below corresponds to one such version.
   approved itself, and never merges an edited split join into a database's composite foreign key
   (`composite foreign key not applied: … edited since its approval`); a refresh that lowers a stale
   join's confidence because a column's type changed keeps it `stale`, and a stale `on:` join keeps
-  its confidence.
+  its confidence. A table move (#513) keeps a stale join, metric or entity stale with its old signer,
+  and the review surfaces still show what changed; when a move finds two copies of one join, a stale
+  copy counts as a person's sign-off, so it is kept over an engine-approved one, and a move where it
+  disagrees with a copy a person signed off is refused.
 
 - **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
   single-schema database of more than 24 tables used to get one area per table-name prefix, with

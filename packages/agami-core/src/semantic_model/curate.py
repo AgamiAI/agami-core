@@ -1229,9 +1229,11 @@ def _same_join_entry(a: dict, b: dict) -> bool:
 
 
 def _sign_off_rank(r: dict) -> int:
-    """2 when a person approved or rejected the join, 1 when the engine approved it, 0 unreviewed."""
+    """2 when a person approved, rejected or edited (stale) the join, 1 when the engine approved it,
+    0 unreviewed."""
     rs = r.get("review_state", "unreviewed")
-    if rs == "rejected":
+    # A stale join keeps the signer of the approval it lost, an engine's included, but holds a person's edit (#537).
+    if rs in ("rejected", "stale"):
         return 2
     if rs != "approved":
         return 0
@@ -1240,6 +1242,11 @@ def _sign_off_rank(r: dict) -> int:
 
 
 _RANK_WORDS = {2: "signed off by a person", 1: "approved by the engine", 0: "unreviewed"}
+
+
+def _rank_words(r: dict) -> str:
+    return "edited by a person since its approval" if r.get("review_state") == "stale" \
+        else _RANK_WORDS[_sign_off_rank(r)]
 
 
 def _kept_copy(have: dict, moved: dict) -> tuple[dict, str]:
@@ -1253,8 +1260,8 @@ def _kept_copy(have: dict, moved: dict) -> tuple[dict, str]:
         raise ValueError(
             f"join {moved.get('from_table')}->{moved.get('to_table')} is already where it would move, "
             "signed off differently; approve or reject one copy so they agree, then move the table")
-    keep, other, why = ((moved, have, f"the moved copy, {_RANK_WORDS[rm]}") if rm > rh
-                        else (have, moved, f"the copy in place, {_RANK_WORDS[rh]}"))
+    keep, other, why = ((moved, have, f"the moved copy, {_rank_words(moved)}") if rm > rh
+                        else (have, moved, f"the copy in place, {_rank_words(have)}"))
     if all(keep.get(k) == other.get(k) for k in ("relationship", "join_type")):
         keep = {**keep, **{k: other[k] for k in ("description", "for_questions_about")
                            if other.get(k) and not keep.get(k)}}
@@ -2083,11 +2090,18 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
     the edit that took the approval away (no log, a trimmed one, or a hand edit) (#537)."""
     lines = log if log is not None else _read_log_lines(Path(root))
     ident = _identity(kind, obj)
+    areas = {area} if area else set()
     found: list[dict] = []
     for entry in reversed(lines):
-        if not isinstance(entry, dict) or entry.get("kind") != kind:
+        if not isinstance(entry, dict):
             continue
-        if entry.get("area") and area and entry["area"] != area:
+        if areas and _moved_with(kind, entry, ident, areas):
+            # Before the move the entry lived where its table did, or among the cross-area joins.
+            areas |= {entry.get("area"), CROSS_AREA} if kind == "relationship" else {entry.get("area")}
+            continue
+        if entry.get("kind") != kind:
+            continue
+        if entry.get("area") and areas and entry["area"] not in areas:
             continue
         # Walking back, an edit of a field that names the entry (a join's columns) named it by the old value.
         prior = dict(ident)
@@ -2108,6 +2122,16 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
             found.reverse()
             return found
     return None
+
+
+def _moved_with(kind: str, entry: dict, ident: dict, areas: set) -> bool:
+    """Whether a logged table move may have carried the entry out of another area: a join on that
+    table, or a metric or entity in the area the table moved to."""
+    if entry.get("op") != "move" or entry.get("kind") != "table" or not entry.get("area"):
+        return False
+    if kind == "relationship":
+        return entry.get("name") in (ident.get("from_table"), ident.get("to_table"))
+    return entry.get("to_area") in areas
 
 
 def since_approval(root: str | Path, kind: str, area: Optional[str], obj: Any,
