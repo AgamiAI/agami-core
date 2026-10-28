@@ -12,6 +12,23 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
+  On a large onboarding these `<table>_<column>_rate` metrics were 698 of the 706 it suggested and
+  about half of all metrics in the models, while the business's own definitions named one. They are
+  now left out by default; the output carries one `flag_rates` summary instead (how many boolean
+  columns could have one, up to 20 of them by name, and how to ask). `--flag-rates
+  <table.column>[,...]` proposes the named ones (matched case-insensitively, `schema.table.column`
+  when the table name is in more than one schema; a name that matches no boolean column is reported
+  in `errors`, and one that matches more than one table is refused before anything is written, with
+  the matches listed), and `--flag-rates all` proposes one for every flag column
+  as before. `--cite "<document>"` records where a requested rate is defined: its description reads
+  `Defined in: <document>.`. Requested rates go through the same dry run, `--write`, `--names` and
+  `--profile` test run as every other proposal. Rate metrics already in a model are not changed; the
+  explorer's Review tab can reject them in bulk. The agami-connect skill requests a rate only when the
+  customer's definitions name it.
+
 ### Fixed
 
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a

@@ -181,7 +181,9 @@ def test_suggest_metrics_rate_and_duration_patterns():
                     m.Column(name="is_active", type="integer"),       # int flag → rate
                     m.Column(name="opened_at", type="timestamp"),
                     m.Column(name="resolved_at", type="timestamp")])
-    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("redshift"))}
+    # flag_rates=True: a rate is proposed only when asked for (#530); this test checks its shape.
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("redshift"),
+                                                        flag_rates=True)}
     # NULL-safe: a NULL flag is left out rather than counted as false (#514).
     assert mets["incident_made_sla_rate"]["bindings"]["Redshift"] == \
         "AVG(CASE WHEN made_sla THEN 1.0 WHEN NOT made_sla THEN 0.0 END)"
@@ -214,14 +216,16 @@ def test_suggest_metrics_skips_opaque_columns_until_described():
     ]
     t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
                 description="a", columns=cols)
-    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"),
+                                                      flag_rates=True)}
     assert "alm_asset_active_to_rate" not in names   # opaque column → no metric proposed
     assert "alm_asset_is_leased_rate" in names       # described column → proposed
 
     # once the column is described, the SAME call now proposes its metric (the re-pass).
     cols[1].description_source = "ai"
     cols[1].description = "whether the asset is still within its active period"
-    names2 = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    names2 = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"),
+                                                       flag_rates=True)}
     assert "alm_asset_active_to_rate" in names2
 
 
@@ -255,6 +259,6 @@ def test_the_cap_is_clamped_at_zero_not_floored_at_one(cap, expected):
                     m.Column(name="is_rush", type="boolean"),
                     m.Column(name="is_gift", type="boolean")])
     assert len(build.suggest_metrics(
-        t, D.get_dialect("postgresql"), max_per_table=cap)) == expected
+        t, D.get_dialect("postgresql"), max_per_table=cap, flag_rates=True)) == expected
 
 
