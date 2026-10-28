@@ -35,8 +35,12 @@ below corresponds to one such version.
   some of them is flagged (#510).** Introspection wrote each column of a composite key as its own
   approved many-to-one join, and either one used alone repeats rows (981 became 2,502 in one
   database). Every dialect's foreign-key query now returns the constraint name and column position,
-  and the generic `information_schema` query (Redshift, DuckDB, Databricks) and BigQuery's
-  match the referenced column by position, which they used to pair with every column of the key. A
+  and the generic `information_schema` query (Redshift, Snowflake, DuckDB, Databricks) and BigQuery's
+  match the referenced column by position, which they used to pair with every column of the key.
+  Where a catalog can't run the generic one (an older Redshift may lack
+  `position_in_unique_constraint`), introspection falls back to the query it used before, keeps its
+  single-column keys as before, and leaves out a composite key with a note rather than guess how its
+  columns pair; the report says when the fallback was used. A
   key is written as one `on:` join, its cardinality read from the whole key; single-column joins are
   unchanged. Where a catalog gives no constraint name, the columns are still kept apart but left for
   review. A refresh replaces the split joins introspection approved for such a key with the one

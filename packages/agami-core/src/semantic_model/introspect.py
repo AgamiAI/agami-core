@@ -1499,11 +1499,22 @@ def _build_relationships(
                 catalog_ok = True
                 catalog_fks.extend(rows)
     else:
+        unpaired: list[str] = []
         for s in (schemas or {None}):
             rows = _try(runner, dialect.sql_foreign_keys(s)) if s else None
+            fallback = dialect.sql_foreign_keys_unpaired(s) if s and rows is None else None
+            if fallback:
+                rows = _try(runner, fallback)
+                if rows is not None:
+                    unpaired.append(s)
+                    rows = _single_column_fks(rows, report)
             if rows is not None:
                 catalog_ok = True
                 catalog_fks.extend(rows)
+        if unpaired:
+            report.notes.append(
+                f"foreign keys in {', '.join(sorted(unpaired))} read with the older catalog query: this "
+                "database's catalog has no column positions for them, so only single-column keys were kept")
 
     tables_by_name: dict[str, list[Table]] = {}
     for t in tables:
@@ -1616,6 +1627,36 @@ def _build_relationships(
 
 _UNGROUPED_FK = ("declared FK column; the catalog didn't say which columns form one key, so the key's "
                  "columns couldn't be grouped — if it spans several columns, join on all of them")
+
+
+def _single_column_fks(rows: list[dict], report: IntrospectReport) -> list[dict]:
+    """The older FK query's rows, one per single-column key. Its rows pair every column of a
+    composite key with every referenced column, so nothing in them says which pairs are right: such
+    a key is left out, with a note, rather than joined on a guess."""
+    keys: dict[tuple, list[dict]] = {}
+    for r in rows:
+        name = r.get("constraint_name")
+        # Without a name, every key between the same two tables may be one composite key.
+        tail = (str(name),) if name is not None and str(name) != "" else (r.get("to_schema"), r.get("to_table"))
+        keys.setdefault((r.get("from_schema"), r.get("from_table"), *tail), []).append(r)
+    out: list[dict] = []
+    for k, g in keys.items():
+        label = f"{k[1]}.{k[2]}" if len(k) == 3 else f"{k[1]} → {k[3]}"
+        # DuckDB's constraint_column_usage lists the key's own columns, not the ones it references.
+        if any((r.get("from_schema"), r.get("from_table"), r.get("from_column"))
+               == (r.get("to_schema"), r.get("to_table"), r.get("to_column")) for r in g):
+            report.notes.append(f"foreign key {label} not read: the catalog names its own column as the "
+                                "one it references")
+        elif len({(r.get("from_column"), r.get("to_schema"), r.get("to_table"), r.get("to_column"))
+                  for r in g}) == 1:
+            out.append({**g[0], "key_ordinal": 1})
+        elif len({r.get("from_column") for r in g}) > 1:
+            report.notes.append(f"composite foreign key {label} not read: this database's catalog doesn't "
+                                "say how its columns pair")
+        else:
+            report.notes.append(f"foreign key {label} not read: the catalog names more than one column it "
+                                "references")
+    return out
 
 
 def _fk_groups(rows: list[dict]) -> list[tuple[list[dict], bool]]:

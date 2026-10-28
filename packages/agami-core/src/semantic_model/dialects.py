@@ -318,6 +318,27 @@ class Dialect:
             "ORDER BY kcu.table_name, kcu.constraint_name, kcu.ordinal_position"
         )
 
+    def sql_foreign_keys_unpaired(self, schema: str) -> Optional[str]:
+        """The generic FK query as it was before #510, for a catalog without referential_constraints
+        or position_in_unique_constraint (an old Redshift may lack them). Its rows don't say how a
+        composite key's columns pair. None for a dialect with its own FK query."""
+        if type(self).sql_foreign_keys is not Dialect.sql_foreign_keys:
+            return None
+        return (
+            "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
+            "kcu.table_schema AS from_schema, "
+            "ccu.table_name AS to_table, ccu.column_name AS to_column, "
+            "ccu.table_schema AS to_schema, kcu.constraint_name AS constraint_name "
+            "FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON tc.constraint_name = kcu.constraint_name "
+            "AND tc.table_schema = kcu.table_schema "
+            "JOIN information_schema.constraint_column_usage ccu "
+            "ON tc.constraint_name = ccu.constraint_name "
+            "WHERE tc.constraint_type = 'FOREIGN KEY' "
+            f"AND tc.table_schema = {self.quote_lit(schema)}"
+        )
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         # Fallback: an exact COUNT(*). Dialects with cheap estimates override.
         return self.sql_row_count(schema, table)

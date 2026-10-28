@@ -266,6 +266,94 @@ def test_a_real_sqlite_database_gets_one_join_for_its_composite_key(shop_db, tmp
     assert not [r for r in _rels(org) if r.from_column in ("order_id", "line_no")]
 
 
+# --- a catalog the position-paired query can't read -------------------------------------------------
+
+
+def _unpaired_rows() -> list[dict]:
+    """What the older query returns: the composite key's columns crossed with its referenced ones."""
+    def row(fc: str, tt: str, tc: str, name: str) -> dict:
+        return {"from_table": "shipments", "from_column": fc, "from_schema": "s",
+                "to_table": tt, "to_column": tc, "to_schema": "s", "constraint_name": name}
+    return [row("customer_id", "customers", "id", "fk_cust")] + [
+        row(f, "order_lines", t, "fk_lines") for f in ("order_id", "line_no") for t in ("order_id", "line_no")]
+
+
+def _build_old_catalog(key: str, rows: list[dict], *, paired_fails: bool = True):
+    dialect = D.get_dialect(key)
+    tables = _tables()
+    calls: list[str] = []
+
+    def run(sql: str) -> list[dict]:
+        calls.append(sql)
+        if "position_in_unique_constraint" in sql:
+            if paired_fails:
+                raise RuntimeError("column kcu.position_in_unique_constraint does not exist")
+            return [dict(r) for r in _fk_rows(named=True)]
+        return [dict(r) for r in rows] if "constraint_column_usage" in sql else []
+
+    report = I.IntrospectReport(profile="p", db_type=key, out_dir="", dry_run=True)
+    rels = I._build_relationships(dialect, run, [("s", t.name) for t in tables], tables, report)
+    return rels, report, calls
+
+
+@pytest.mark.parametrize("key", ["redshift", "snowflake", "duckdb", "databricks"])
+def test_a_failing_paired_query_falls_back_to_the_older_one_for_single_column_keys(key):
+    rels, report, _ = _build_old_catalog(key, _unpaired_rows())
+    assert report.mode_per_capability["relationships"] == "catalog"
+    (cust,) = [r for r in rels if r.to_table == "customers"]
+    assert (cust.from_column, cust.to_column, cust.on) == ("customer_id", "id", None)
+    if D.get_dialect(key).fk_enforced:   # as on main: an enforced key is approved by the engine
+        assert cust.review_state == "approved" and cust.signed_off_by == "agami_introspect"
+    assert any(n.startswith("foreign keys in s read with the older catalog query") for n in report.notes)
+
+
+@pytest.mark.parametrize("key", ["redshift", "duckdb"])
+def test_the_fallback_never_joins_a_composite_key_on_its_crossed_rows(key):
+    rels, report, _ = _build_old_catalog(key, _unpaired_rows())
+    assert not [r for r in rels if r.to_table == "order_lines"]
+    assert ("composite foreign key shipments.fk_lines not read: this database's catalog doesn't say "
+            "how its columns pair") in report.notes
+
+
+def test_the_fallback_keeps_apart_unnamed_rows_between_the_same_two_tables():
+    rows = [{k: v for k, v in r.items() if k != "constraint_name"} for r in _unpaired_rows()]
+    rels, report, _ = _build_old_catalog("duckdb", rows)
+    assert [r.to_table for r in rels] == ["customers"]
+    assert any("composite foreign key shipments → order_lines not read" in n for n in report.notes)
+
+
+def test_the_fallback_skips_a_single_column_key_naming_two_referenced_columns():
+    rows = [{**r, "to_column": c} for r in _unpaired_rows()[:1] for c in ("id", "code")]
+    rels, report, _ = _build_old_catalog("duckdb", rows)
+    # only the name-based guess every build makes is left, for review
+    assert [(r.confidence, r.review_state) for r in rels] == [("inferred", "unreviewed")]
+    assert any("foreign key shipments.fk_cust not read" in n for n in report.notes)
+
+
+def test_the_fallback_skips_a_key_the_catalog_points_at_its_own_column():
+    # DuckDB's constraint_column_usage names the referencing table, so the older query reads a key
+    # as joining its own column; that is never a usable join.
+    rows = [{**r, "to_table": "shipments", "to_column": r["from_column"]} for r in _unpaired_rows()[:1]]
+    rels, report, _ = _build_old_catalog("duckdb", rows)
+    assert not [r for r in rels if r.to_table == "shipments"]
+    assert ("foreign key shipments.fk_cust not read: the catalog names its own column as the one it "
+            "references") in report.notes
+
+
+@pytest.mark.parametrize("key", ["redshift", "duckdb"])
+def test_a_working_paired_query_never_runs_the_fallback(key):
+    rels, report, calls = _build_old_catalog(key, _unpaired_rows(), paired_fails=False)
+    assert not [c for c in calls if "constraint_column_usage" in c]
+    assert len([r for r in rels if r.to_table == "order_lines" and r.on]) == 1
+    assert not any("older catalog query" in n for n in report.notes)
+
+
+@pytest.mark.parametrize("key", ["postgres", "supabase", "mysql", "trino", "sqlserver", "bigquery",
+                                 "oracle", "sqlite"])
+def test_a_dialect_with_its_own_fk_query_has_no_fallback(key):
+    assert D.get_dialect(key).sql_foreign_keys_unpaired("s") is None
+
+
 # --- the shared pair reader -------------------------------------------------------------------------
 
 
