@@ -47,7 +47,10 @@ from pathlib import Path
 from _agami_lib import ensure_importable  # noqa: E402
 
 ensure_importable()
-from semantic_model import units  # noqa: E402  (stdlib-only module)
+try:
+    from semantic_model import units  # stdlib-only module
+except ImportError:  # the bundled lib/ ships it under a private name so it can't shadow the package (#539)
+    import _semantic_model_units as units
 
 
 def _unit_for(unit_map: dict, headers: list[str], i: int):

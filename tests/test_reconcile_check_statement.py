@@ -674,7 +674,7 @@ def test_an_exists_file_counts_zero_only_when_it_holds_a_zero(tmp_path):
 
 
 def test_an_interpreter_without_the_semantic_model_package_is_told_how_to_get_one(tmp_path):
-    """The marketplace layout with no pip install: the bundled lib ships a stub `semantic_model`,
+    """The marketplace layout with no pip install: the bundled lib ships no `semantic_model` package,
     so the script stops before it could check anything and says what to run."""
     env = {**os.environ, "PYTHONPATH": ""}
     if (

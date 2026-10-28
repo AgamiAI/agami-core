@@ -2,7 +2,7 @@
 determine it, and the two entry points agree about everything else.
 
 `python3 -m execute_sql` is the invocation the plugin README documents, and it resolves the vendored
-stdlib-only slice, which ships `semantic_model/__init__.py` and `units.py` and no runtime at all.
+stdlib-only slice, which ships `units.py` (privately named) and no `semantic_model` runtime at all.
 Table scope, the `SELECT *` ban and column scope therefore cannot run there. `_receipt_for` already
 conceded exactly that, returning `undetermined_receipt(RECEIPT_NO_RUNTIME)` — so the executor
 published "I could not determine what this statement reaches" and then executed it anyway. Principle
@@ -398,6 +398,8 @@ def _broken_slice(root: Path) -> Path:
 
     lib = root / "brokenlib"
     shutil.copytree(VENDORED_LIB, lib, ignore=shutil.ignore_patterns("__pycache__"))
+    (lib / "semantic_model").mkdir()  # the slice ships no `semantic_model` package (#539)
+    (lib / "semantic_model" / "__init__.py").write_text("")
     (lib / "semantic_model" / "runtime.py").write_text(_BROKEN_RUNTIME)
     return lib
 

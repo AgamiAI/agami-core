@@ -31,6 +31,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
+  The folder held a partial copy of the model package (`semantic_model/` with only `__init__.py` and
+  `units.py`). With `lib/` as the working folder, or first on the import path, Python loaded that
+  copy instead of the installed package: `python -m semantic_model.cli` failed with `No module named
+  semantic_model.cli`, and the query runner refused every statement with `model_unavailable`. The
+  folder now ships `units.py` as `_semantic_model_units.py`, so nothing there can stand in for the
+  installed package. Runs from anywhere else are unchanged.
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
   query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
   skipped, since the CTE might have supplied it. A column the model excludes was then returned:

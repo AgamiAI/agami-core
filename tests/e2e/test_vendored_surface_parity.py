@@ -7,10 +7,10 @@ suite drives, and "both surfaces in sync" is the claim about what the two decide
 end to end before this file.
 
 **It is proved in two halves, and the split is structural rather than a convenience.**
-`dev.py::_VENDORED` mirrors `agami_paths`, `execute_sql`, `guardrail`, `sql_guard` and the
-`semantic_model` package init — and deliberately NOT `semantic_model/runtime.py`, which is where
-`table_scope`, `column_scope`, `select_star` and `unscopable` live and which needs pydantic and
-sqlglot the vendored path is designed not to require. Those four rules cannot fire on the plugin
+`dev.py::_VENDORED` mirrors `agami_paths`, `execute_sql`, `guardrail`, `sql_guard` and
+`semantic_model/units.py` (privately named) — and deliberately NOT `semantic_model/runtime.py`,
+which is where `table_scope`, `column_scope`, `select_star` and `unscopable` live and which needs
+pydantic and sqlglot the vendored path is designed not to require. Those four rules cannot fire on the plugin
 surface at all, so a test asserting they do would be asserting something the design says is false.
 
   * **The contract, symbol for symbol.** `REASON_FOR_RULE`, `Receipt.SECTIONS`, `PRE_MODEL_RULES`
@@ -381,9 +381,9 @@ def test_the_marketplace_layout_answers_from_the_bundled_lib(marketplace):
         "import sys, json\n"
         f"sys.path.insert(0, {str(root / 'scripts')!r})\n"
         "import _agami_lib; _agami_lib.ensure_importable()\n"
-        "import agami_paths, execute_sql, guardrail, sql_guard, semantic_model\n"
+        "import agami_paths, execute_sql, guardrail, sql_guard, _semantic_model_units\n"
         "resolved = {m.__name__: m.__file__ for m in "
-        "(agami_paths, execute_sql, guardrail, sql_guard, semantic_model)}\n"
+        "(agami_paths, execute_sql, guardrail, sql_guard, _semantic_model_units)}\n"
         "try:\n"
         "    from semantic_model import runtime\n"
         "    resolved['semantic_model.runtime'] = runtime.__file__\n"
@@ -403,7 +403,7 @@ def test_the_marketplace_layout_answers_from_the_bundled_lib(marketplace):
     # Named individually as well, so a probe that quietly stopped importing one of them cannot make
     # the loop above vacuous.
     assert set(resolved) == {"agami_paths", "execute_sql", "guardrail", "sql_guard",
-                             "semantic_model"}
+                             "_semantic_model_units"}
 
 
 def test_the_executor_the_cli_ran_was_compiled_out_of_the_bundled_lib(marketplace):
