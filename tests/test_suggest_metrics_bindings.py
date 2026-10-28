@@ -534,3 +534,60 @@ def test_a_rate_already_in_the_model_is_kept_and_not_counted(tmp_path):
                     "--cite", "Support KPI handbook", "--write"])
     assert rc == 0 and out["written"] == 0 and path.read_text() == before, out
     assert out["flag_rates"]["already_in_model"] == ["tickets_is_flag_0_rate"]
+
+
+def test_flag_rates_split_on_the_last_dot(tmp_path):
+    # The column is after the last dot: schema.table.column, or a table name holding a dot.
+    _flag_model(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "MAIN.tickets.is_flag_3"])
+    assert rc == 0 and "tickets_is_flag_3_rate" in {p["name"] for p in out["proposals"]}, out
+    _edit_table(tmp_path, name="ops.tickets", schema=None)
+    area = tmp_path / "subject_areas" / "s" / "subject_area.yaml"
+    area.write_text(yaml.safe_dump({"name": "s", "tables": [
+        {"storage_connection": "c", "table": "ops.tickets"}]}))
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert "ops.tickets.is_flag_3" in out["flag_rates"]["columns"], out
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "ops.tickets.is_flag_3"])
+    assert rc == 0 and "ops.tickets_is_flag_3_rate" in {p["name"] for p in out["proposals"]}, out
+
+
+def _second_area(root: Path) -> None:
+    """Area b with its own `tickets`, in schema billing."""
+    (root / "subject_areas" / "b" / "tables").mkdir(parents=True)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/b")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    (root / "subject_areas" / "b" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "b", "tables": [{"storage_connection": "c", "schema": "billing",
+                                 "table": "tickets"}]}))
+    (root / "subject_areas" / "b" / "tables" / "tickets.yaml").write_text(yaml.safe_dump({
+        "name": "tickets", "schema": "billing", "storage_connection": "c", "grain": ["id"],
+        "description": "t",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "is_flag_0", "type": "boolean"}]}))
+
+
+def test_an_ambiguous_flag_rates_name_is_refused_before_writing(tmp_path):
+    _flag_model(tmp_path)
+    _second_area(tmp_path)
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_0",
+                    "--cite", "Billing KPI handbook", "--write"])
+    assert rc == 2 and "more than one" in out["error"], out
+    assert out["ambiguous"] == {"tickets.is_flag_0": ["b: billing.tickets.is_flag_0",
+                                                      "s: main.tickets.is_flag_0"]}
+    assert not _metrics_dir(tmp_path).exists()
+    assert not (tmp_path / "subject_areas" / "b" / "metrics").exists()
+    # the summary names them schema-qualified, and that name picks the one table
+    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    assert "billing.tickets.is_flag_0" in out["flag_rates"]["columns"], out
+    assert "main.tickets.is_flag_0" in out["flag_rates"]["columns"]
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "billing.tickets.is_flag_0",
+                    "--write"])
+    assert rc == 0, out
+    assert [(p["subject_area"], p["name"]) for p in out["proposals"]
+            if p["name"].endswith("_rate")] == [("b", "tickets_is_flag_0_rate")]
+    assert not (_metrics_dir(tmp_path) / "tickets_is_flag_0_rate.yaml").exists()
+    # --area settles it too
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--flag-rates", "tickets.is_flag_1",
+                    "--area", "s"])
+    assert rc == 0 and "tickets_is_flag_1_rate" in {p["name"] for p in out["proposals"]}, out

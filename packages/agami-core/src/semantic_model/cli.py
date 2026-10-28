@@ -788,35 +788,69 @@ _LISTED_FLAG_COLUMNS = 20
 
 def _parse_flag_rates(values: Optional[list[str]]) -> tuple[bool, set[tuple[str, str]], list[str]]:
     """(all, {(table, column)} lowercased, errors) from `--flag-rates` values, each `all` or a
-    comma-separated list of table.column."""
+    comma-separated list of [schema.]table.column."""
     every, wanted, errors = False, set(), []
     for tok in (x.strip() for v in values or () for x in v.split(",")):
         if not tok:
             continue
         if tok.lower() == "all":
             every = True
-        elif tok.count(".") == 1 and all(tok.split(".")):
-            wanted.add(tuple(tok.lower().split(".")))
+        elif "." in tok and all(tok.split(".")):
+            # The column is after the last dot: what precedes it is the table, schema-qualified
+            # or a table name that itself holds a dot.
+            table, _, column = tok.lower().rpartition(".")
+            wanted.add((table, column))
         else:
-            errors.append(f"--flag-rates {tok}: name a column as table.column, or pass all")
+            errors.append(f"--flag-rates {tok}: name a column as table.column "
+                          "(or schema.table.column), or pass all")
     return every, wanted, errors
 
 
-def _flag_rate_problem(key: tuple[str, str], seen: dict, area: Optional[str]) -> str:
-    """Why a `--flag-rates` column got no proposal: missing, not a flag, or un-described."""
+def _qualified_table(t) -> str:
+    return f"{t.schema_name}.{t.name}" if t.schema_name else t.name
+
+
+def _flag_rate_problem(name: str, c) -> Optional[str]:
+    """Why a `--flag-rates` column can get no proposal (un-described or not a flag), else None."""
     from . import build as B
-    name = ".".join(key)
-    c = seen.get(key)
-    if c is None:
-        return f"--flag-rates {name}: no such column in the model" + (
-            f" (in --area {area})" if area else "")
     if c.description_source == "ai_unknown":
         return (f"--flag-rates {name}: the column is un-described (ai_unknown); describe it, "
                 "then re-run")
     if c.primary_key or not (c.type == "boolean" or (c.type == "integer"
                                                      and B._FLAG_NAME_RE.match(c.name))):
         return f"--flag-rates {name}: not a boolean or flag column (type {c.type})"
-    return f"--flag-rates {name}: no rate proposed"
+    return None
+
+
+def _resolve_flag_rates(areas: list, wanted: set[tuple[str, str]], area: Optional[str]
+                        ) -> tuple[dict, list[str], dict[str, list[str]]]:
+    """Each `--flag-rates` selector's column: ({(area, table, schema): {column}} lowercased,
+    errors, {selector: matches} for a selector naming more than one table's column). A selector's
+    table is the table name or schema.name."""
+    hits: dict = {sel: [] for sel in wanted}
+    for sa in areas:
+        for t in sa.tables_defined:
+            keys = {t.name.lower(), _qualified_table(t).lower()}
+            for sel in wanted:
+                if sel[0] in keys:
+                    hits[sel] += [(sa.name, t, c) for c in t.columns if c.name.lower() == sel[1]]
+    asked: dict = {}
+    errors: list[str] = []
+    ambiguous: dict[str, list[str]] = {}
+    for sel in sorted(wanted):
+        name = ".".join(sel)
+        found = hits[sel]
+        if len(found) > 1:
+            ambiguous[name] = sorted(f"{a}: {_qualified_table(t)}.{c.name}" for a, t, c in found)
+        elif not found:
+            errors.append(f"--flag-rates {name}: no such column in the model"
+                          + (f" (in --area {area})" if area else ""))
+        elif problem := _flag_rate_problem(name, found[0][2]):
+            errors.append(problem)
+        else:
+            a, t, c = found[0]
+            asked.setdefault((a, t.name, t.schema_name), set()).add(c.name.lower())
+    return asked, errors, ambiguous
 
 
 def _flag_rate_summary(columns: list[str]) -> dict:
@@ -870,6 +904,20 @@ def cmd_suggest_metrics(args) -> int:
             _print_json({"error": f"no SQL dialect for storage type {st!r}: {e}"})
             return 2
 
+    areas = [sa for sa in org.subject_areas if not args.area or sa.name == args.area]
+    flag_asked, flag_problems, ambiguous = _resolve_flag_rates(areas, flag_wanted, args.area)
+    if ambiguous:
+        # Refused before anything runs, so a rate is never written to the wrong table as well.
+        _print_json({"error": "a --flag-rates name matches more than one column; qualify the "
+                              "table as schema.table.column, or pass --area",
+                     "ambiguous": ambiguous})
+        return 2
+    # A name in more than one table is listed schema-qualified, so the summary's names select.
+    name_count: dict[str, int] = {}
+    for sa in areas:
+        for t in sa.tables_defined:
+            name_count[t.name.lower()] = name_count.get(t.name.lower(), 0) + 1
+
     # Every metric name on disk, rejected ones included. `org` drops rejected entries, which is
     # right for choosing what to propose on (never a rejected table or column), but `write_items`
     # overwrites a file of the same name — so checking against `org`'s metrics alone re-proposed a
@@ -884,14 +932,10 @@ def cmd_suggest_metrics(args) -> int:
 
     proposals: list[dict] = []
     written = skipped_opaque = 0
-    errors: list[str] = list(flag_errors)
+    errors: list[str] = flag_errors + flag_problems
     flag_available: list[str] = []
-    flag_matched: set[tuple[str, str]] = set()
     flag_present: list[str] = []
-    seen_columns: dict = {}
-    for sa in org.subject_areas:
-        if args.area and sa.name != args.area:
-            continue
+    for sa in areas:
         existing = set(on_disk.get(sa.name, ()))
         items: list[dict] = []
         for t in sa.tables_defined:
@@ -906,14 +950,13 @@ def cmd_suggest_metrics(args) -> int:
                                                              and B._FLAG_NAME_RE.match(c.name))))
                      or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
                                                     or B._END_NAME_RE.search(c.name)))))
-            seen_columns.update(((t.name.lower(), c.name.lower()), c) for c in t.columns)
-            asked = [c for c in B.flag_columns(t)
-                     if flag_all or (t.name.lower(), c.name.lower()) in flag_wanted]
-            flag_matched.update((t.name.lower(), c.name.lower()) for c in asked)
+            asked_here = flag_asked.get((sa.name, t.name, t.schema_name), set())
+            asked = [c for c in B.flag_columns(t) if flag_all or c.name.lower() in asked_here]
+            label = _qualified_table(t) if name_count[t.name.lower()] > 1 else t.name
             rate_names = {B.flag_rate_name(t.name, c.name) for c in asked}
             if not flag_all:
                 flag_present += sorted(n for n in rate_names if n in existing)
-            flag_available += [f"{t.name}.{c.name}" for c in B.flag_columns(t)
+            flag_available += [f"{label}.{c.name}" for c in B.flag_columns(t)
                                if B.flag_rate_name(t.name, c.name) not in rate_names | existing]
             dialect = dialects[conn_type.get(t.storage_connection, default_type)]
             props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table,
@@ -954,8 +997,6 @@ def cmd_suggest_metrics(args) -> int:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    errors += [_flag_rate_problem(k, seen_columns, args.area)
-               for k in sorted(flag_wanted - flag_matched)]
     if args.write:
         note = ("metrics written — review & sign off in the explorer (/agami-model); "
                 "give each one you keep a one-line description")
@@ -1828,7 +1869,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", default=None,
                     help="test-run every binding against this profile's database first (one bounded read per table)")
     sp.add_argument("--flag-rates", nargs="+", default=None, dest="flag_rates", metavar="TABLE.COLUMN",
-                    help="also propose a share-of-true rate for these boolean columns (table.column, comma- or space-separated), or 'all' for every one; none by default")
+                    help="also propose a share-of-true rate for these boolean columns (table.column or schema.table.column, comma- or space-separated; a name matching more than one table is refused), or 'all' for every one; none by default")
     sp.add_argument("--cite", default=None, metavar="SOURCE",
                     help="with --flag-rates: the document that defines the requested rates; their description says 'Defined in: SOURCE.'")
     sp.set_defaults(func=cmd_suggest_metrics)
