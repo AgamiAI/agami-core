@@ -163,6 +163,8 @@ _SHARED_INSTRUCTIONS = (
     "projection. Name them even where the same list appears a few lines above. `COUNT(*)` and "
     "other aggregates over `*` are fine — there the star is inside the call and the projection is "
     "the aggregate, so it is not affected by any of this. "
+    "Reuse a select-list alias only as a whole ORDER BY or GROUP BY item; in WHERE, HAVING or a "
+    "later select item write its expression out, or filter in an outer query. "
     "A plausible name is not a declared one, and a column missing from the table's "
     "own entry is out of scope however obvious it looks beside the ones that are there. The same "
     "holds for area, table and metric names: copy them from a response, never from the user's "
