@@ -121,14 +121,11 @@ def test_an_area_scope_drops_a_bridge_that_touches_neither_end(tmp_path, monkeyp
     assert "budgets" not in block
 
 
-def test_an_ambiguous_name_is_published_bare_because_that_is_what_the_next_call_takes(
+def test_an_ambiguous_name_is_published_qualified_and_resolves_back_to_that_table(
         tmp_path, monkeypatch):
-    """`_resolve_scope` strips every qualifier from `dataset_names` and resolves first-match, so a
-    qualified node would look precise and select a DIFFERENT table — published `public.orders`,
-    received `archive.orders`. Both edges therefore land on one node.
-
-    That merge is honest rather than desirable: the next call cannot tell those tables apart
-    either. #258 is the fix, and when it lands this should publish the qualified name.
+    """Where one name is declared under two schemas, each node is `schema.table`, and passing it
+    back as `dataset_names` returns that table and never the other (#258). Published bare, both
+    tables' edges landed on one node, and the qualified spelling used to resolve first-match.
     """
     import yaml
 
@@ -155,8 +152,13 @@ def test_an_ambiguous_name_is_published_bare_because_that_is_what_the_next_call_
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
 
     joins = _block("acme")
-    assert not any("." in k for k in joins), "a name the next call cannot honour must not be published"
-    assert set(joins["orders"]) == {"users", "ledger"}, "both edges land on the one node"
+    assert joins["archive.orders"] == ["ledger"]
+    assert joins["public.orders"] == ["users"]
+    assert "orders" not in joins, "a bare node would put both tables' edges on one name"
+    for node, schema in (("archive.orders", "archive"), ("public.orders", "public")):
+        out = tools.tool_get_datasource_schema({"datasource": "acme", "dataset_names": [node]})
+        tables = json.JSONDecoder().raw_decode(out)[0]["tables"]
+        assert [t["schema"] for t in tables.values()] == [schema], node
 
 
 def test_every_published_name_is_one_dataset_names_accepts(profile):
