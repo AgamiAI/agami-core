@@ -246,6 +246,7 @@ def introspect(
     if isinstance(dialect, D.BigQuery):
         dialect = D.BigQuery(region=bigquery_region)
     conn_name = f"{profile}_{dialect.name.lower()}"
+    sg = _sqlglot_name(dialect)
     artifacts_dir = Path(artifacts_dir)
     out = Path(out_dir) if out_dir else (artifacts_dir / profile)
 
@@ -326,6 +327,7 @@ def introspect(
     # sign-offs survive (#437). Runs on a dry run too, which is how a refresh is previewed.
     prev: Optional[Datasource] = None
     prev_rels: list[Relationship] = []
+    unread: list[Table] = []   # merged tables whose keys were kept, not re-read
     probe_budget = _ProbeBudget()   # one cap across the refresh's recheck and the new joins
     skip_keys: set = set()
     fresh_keys: set[tuple] = set()   # (schema, name): a bare name can exist in two schemas
@@ -342,7 +344,6 @@ def introspect(
         existing = {k: next((t for _, t in cs if t.review_state != "rejected"), cs[0][1]) for k, cs in copies.items()}
         per_area: dict[tuple, Table] = {}   # (area, (schema, table)) -> that area's merged copy
         merged: list[Table] = []
-        unread: list[Table] = []   # merged tables whose keys were kept, not re-read
         retyped: dict[tuple, str] = {}   # (schema, table, column) whose type changed -> schema.table
         for t in built:
             _refuse_sql_table(existing, t)
@@ -423,16 +424,14 @@ def introspect(
         # Joins on a column whose type changed go back to review: a confirmed join on mismatched
         # types is refused by the validator, which would make the refresh impossible to write.
         for r in prev_rels:
-            hit = _retyped_end(retyped, r.from_schema, r.from_table, r.from_column) \
-                or _retyped_end(retyped, r.to_schema, r.to_table, r.to_column)
-            if hit and r.confidence == "confirmed":
+            hit = next((h for fc, tc in _column_pairs(r, sg) or []
+                        for h in (_retyped_end(retyped, r.from_schema, r.from_table, fc),
+                                  _retyped_end(retyped, r.to_schema, r.to_table, tc)) if h), None)
+            # The validator type-checks only the column-pair form; an `on:` join someone wrote or
+            # signed is theirs, so only one introspection itself signed goes back to review.
+            if hit and r.confidence == "confirmed" and (not r.on or r.signed_off_role == "system"):
                 r.confidence, r.review_state = "proposed", "unreviewed"
-                report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(
-                    f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
-        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread)
-        report.notes.append(
-            f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
-            f"{len(built)} total")
+                report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(_join_label(r, sg))
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap). Use the FULL built set's
     # (schema, table) pairs so an --append batch builds relationships across the whole union, not
@@ -440,11 +439,23 @@ def introspect(
     _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
     rel_pairs = [(t.schema_name, t.name) for t in built]
     rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp)
-    if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
-        rels = [r for r in rels if not any(_same_join(r, p) for p in prev_rels)]
+    if prev_rels:
+        # A database key over several columns replaces the engine's own split joins for it (#510).
+        dropped, rels = _merge_split_joins(rels, prev_rels, report, sg)
+        if dropped:
+            prev = _without_joins(prev, dropped)
+            prev_rels = [r for r in prev_rels if id(r) not in dropped]
+        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg)
+        # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
+        rels = [r for r in rels if not any(_same_join(r, p, sg) for p in prev_rels)]
     _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
     if prev_rels:
         rels = list(prev_rels) + rels
+    if refreshing:   # counted after the join merge and relabel, which are changes too
+        report.notes.append(
+            f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
+            f"{len(built)} total")
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
@@ -461,7 +472,7 @@ def introspect(
     if prev_for_areas is None:
         # Every table, as a one-shot build would: a later batch's join can reveal an FK column in a
         # table an earlier batch built, and nobody has curated the grouping yet.
-        _regroup_columns_with_references(built, rels)
+        _regroup_columns_with_references(built, rels, sg)
         # 4. propose subject areas + cross-area edges
         areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
         report.notes.extend(notes)
@@ -484,7 +495,7 @@ def introspect(
             org = prev.model_copy(update={"subject_areas": areas, "cross_subject_area_relationships": cross})
     else:
         # Regroup only the tables this run created: an existing table's column groups are curation.
-        _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels)
+        _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels, sg)
         org = _refresh_existing(prev, built, rels[len(prev_rels):], fresh_keys, profile, report, per_area)
 
     # 5. write (backing up any legacy model at the profile root). An append onto an existing model is
@@ -519,22 +530,113 @@ def _retyped_end(retyped: dict[tuple, str], schema: Optional[str], table: str, c
     return None
 
 
-def _same_join(a: Relationship, b: Relationship) -> bool:
+def _same_join(a: Relationship, b: Relationship, dialect: Optional[str] = None) -> bool:
     """Whether two joins are the same edge, for de-duplicating an append. Both ends' tables (bare,
-    whatever `schema.table` spelling was stored) and columns must match; schemas must agree where
+    whatever `schema.table` spelling was stored) and column pairs must match; schemas must agree where
     both joins state one — so `crm.products` isn't taken for `billing.products` — while a join
-    stored without a schema (curation may omit it) still matches the catalog's copy of itself."""
-    def low(v: Optional[str]) -> str:
-        return (v or "").lower()
+    stored without a schema (curation may omit it) still matches the catalog's copy of itself.
+    An `on:` join compares by the column pairs it reads (`dialect` is the engine's sqlglot name),
+    and by its text when it isn't plain column equalities."""
+    return _same_tables(a, b) and _pair_set(a, dialect) == _pair_set(b, dialect)
 
-    def same_schema(x: Optional[str], y: Optional[str]) -> bool:
-        return not x or not y or x.lower() == y.lower()
 
-    return (low(bare_name(a.from_table)) == low(bare_name(b.from_table))
-            and low(a.from_column) == low(b.from_column)
-            and low(bare_name(a.to_table)) == low(bare_name(b.to_table))
-            and low(a.to_column) == low(b.to_column)
-            and same_schema(a.from_schema, b.from_schema) and same_schema(a.to_schema, b.to_schema))
+def _same_tables(a: Relationship, b: Relationship) -> bool:
+    """Whether two joins connect the same two tables. A schema embedded in the table name
+    (`crm.shipments`) counts as stated, so it isn't matched to `billing.shipments`."""
+    def same(x: tuple[str, str], y: tuple[str, str]) -> bool:
+        return x[1] == y[1] and (not x[0] or not y[0] or x[0] == y[0])
+
+    return (same(table_key(a.from_table, a.from_schema), table_key(b.from_table, b.from_schema))
+            and same(table_key(a.to_table, a.to_schema), table_key(b.to_table, b.to_schema)))
+
+
+def _pair_set(r: Relationship, dialect: Optional[str]) -> frozenset:
+    pairs = _key_pairs(r, dialect)
+    if pairs is None:
+        return frozenset({" ".join((r.on or "").lower().split())})
+    return frozenset((f.lower(), t.lower()) for f, t in pairs)
+
+
+def _key_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[str, str]]]:
+    from .runtime import join_key_pairs
+    return join_key_pairs(r, dialect)
+
+
+def _column_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[str, str]]]:
+    """The columns a join is keyed on, passing over a fixed-value condition (`x.flag = 'Y'`)."""
+    from .runtime import join_column_pairs
+    return join_column_pairs(r, dialect)
+
+
+def _sqlglot_name(dialect: D.Dialect) -> Optional[str]:
+    """The sqlglot grammar for this engine's model text (an `on:` join), or None when unmapped."""
+    from .sql_dialect import DialectUnresolved, sqlglot_dialect
+    try:
+        return sqlglot_dialect(dialect.name)
+    except DialectUnresolved:
+        return None
+
+
+def _join_label(r: Relationship, dialect: Optional[str] = None) -> str:
+    """How a refresh report names a join: `a.x -> b.y`, or every column of a composite one."""
+    pairs = _key_pairs(r, dialect)
+    if pairs is None:
+        return f"{r.from_table} -> {r.to_table} ON {r.on}"
+    return (f"{r.from_table}.({', '.join(f for f, _ in pairs)}) -> {r.to_table}.({', '.join(t for _, t in pairs)})"
+            if len(pairs) > 1 else f"{r.from_table}.{pairs[0][0]} -> {r.to_table}.{pairs[0][1]}")
+
+
+_MERGED_JOINS = "joins merged into one composite join (the database's foreign key spans all their columns)"
+_UNMERGED_JOINS = "composite foreign key not applied"
+
+
+def _merge_split_joins(
+    fresh: list[Relationship], prev_rels: list[Relationship], report: IntrospectReport,
+    dialect: Optional[str],
+) -> tuple[set[int], list[Relationship]]:
+    """On a refresh, a freshly read composite foreign key against the model's joins between the same
+    two tables whose columns are part of it — the split joins an older build wrote, each of which
+    repeats rows used alone. When the engine approved every one of them they go and the composite
+    join replaces them; when a person signed off any of them nothing changes for that key and the
+    composite join is not added. Both are listed in the refresh report. Returns the ids of the
+    model's joins to drop and the fresh joins to keep."""
+    dropped: set[int] = set()
+    kept: list[Relationship] = []
+    for c in fresh:
+        pairs = _key_pairs(c, dialect) if c.on else None
+        want = {(f.lower(), t.lower()) for f, t in pairs or []}
+        # A join the catalog still declares on its own (a single-column FK beside the composite
+        # one) is not a split of this key: it stays.
+        covered = [p for p in prev_rels
+                   if len(want) > 1 and id(p) not in dropped and _same_tables(c, p)
+                   and (got := _pair_set(p, dialect)) and got < want
+                   and not any(_same_join(p, f, dialect) for f in fresh)]
+        if not covered:
+            kept.append(c)
+            continue
+        where = f"{c.from_schema}.{c.from_table}" if c.from_schema else c.from_table
+        key = " AND ".join(f for f, _ in pairs)
+        people = [p for p in covered if not _engine_approved(p)]
+        if people:
+            why = ", ".join(sorted({f"signed off by {p.signed_off_by}" if p.signed_off_by
+                                    else "not approved by introspection" for p in people}))
+            report.changes.setdefault(where, {}).setdefault(_UNMERGED_JOINS, []).append(
+                f"{c.from_table} → {c.to_table} ({key}): not changed: {why}")
+            continue
+        parts = " + ".join(f"({', '.join(f for f, _ in _key_pairs(p, dialect) or [])})" for p in covered)
+        report.changes.setdefault(where, {}).setdefault(_MERGED_JOINS, []).append(
+            f"{c.from_table} → {c.to_table}: {parts} → {key}")
+        dropped.update(id(p) for p in covered)
+        kept.append(c)
+    return dropped, kept
+
+
+def _without_joins(org: Datasource, dropped: set[int]) -> Datasource:
+    """`org` without the joins whose ids are in `dropped`, every other object shared."""
+    areas = [sa.model_copy(update={"relationships": [r for r in sa.relationships if id(r) not in dropped]})
+             for sa in org.subject_areas]
+    cross = [r for r in org.cross_subject_area_relationships if id(r) not in dropped]
+    return org.model_copy(update={"subject_areas": areas, "cross_subject_area_relationships": cross})
 
 
 def _qualified(t: Table) -> str:
@@ -1336,36 +1438,40 @@ def _engine_approved(r: Relationship) -> bool:
             and r.signed_off_role == "system")
 
 
-def _key_reason(t: Table, col: str) -> str:
-    return "primary key" if [g.lower() for g in t.grain] == [col.lower()] else "unique constraint"
+def _key_reason(t: Table, cols: list[str]) -> str:
+    return "primary key" if [g.lower() for g in t.grain] == [c.lower() for c in cols] else "unique constraint"
 
 
 def _recheck_engine_joins(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
     report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
-    keys_unread: Optional[list[Table]] = None,
+    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None,
 ) -> None:
     """On a refresh, label each join the engine approved itself from the database's keys as they
     are now, and list every one whose label that changes. A join a person signed off or edited is
     never touched, nor one on a table whose keys this run couldn't read (`keys_unread`), and one
-    only the data says is one-to-one is flagged for review, not relabelled."""
+    only the data says is one-to-one is flagged for review, not relabelled. A composite `on:` join
+    is labelled from all its columns; one that isn't plain column equalities is left alone."""
     unread = {id(t) for t in keys_unread or []}
     for r in rels:
-        if not _engine_approved(r) or r.on or not (r.from_column and r.to_column):
+        pairs = _key_pairs(r, sg) if _engine_approved(r) else None
+        if not pairs:
             continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
         ft = _endpoint(tables, r.from_table, r.from_schema)
         tt = _endpoint(tables, r.to_table, r.to_schema)
         if ft is None or tt is None or id(ft) in unread or id(tt) in unread:
             continue
-        card = build.infer_cardinality(ft, tt, [r.from_column], [r.to_column])
+        card = build.infer_cardinality(ft, tt, fc, tc)
         if card == r.relationship:
             continue
-        why = ", ".join(sorted({_key_reason(t, c) for t, c in ((ft, r.from_column), (tt, r.to_column))
-                                if t.unique_on([c])})) or "no key on the join columns"
+        why = ", ".join(sorted({_key_reason(t, c) for t, c in ((ft, fc), (tt, tc))
+                                if t.unique_on(c)})) or "no key on the join columns"
+        label = (f"{r.from_table}.{r.from_column} → {r.to_table}.{r.to_column}"
+                 if r.from_column else _join_label(r, sg))
         report.changes.setdefault(_qualified(ft), {}).setdefault(
             "joins corrected from the database's constraints", []).append(
-            f"{r.from_table}.{r.from_column} → {r.to_table}.{r.to_column}: "
-            f"{r.relationship} → {card} ({why})")
+            f"{label}: {r.relationship} → {card} ({why})")
         r.relationship = card
     engine = [r for r in rels if _engine_approved(r)]
     _suggest_data_unique(dialect, runner, engine, tables, report, budget)
@@ -1393,11 +1499,22 @@ def _build_relationships(
                 catalog_ok = True
                 catalog_fks.extend(rows)
     else:
+        unpaired: list[str] = []
         for s in (schemas or {None}):
             rows = _try(runner, dialect.sql_foreign_keys(s)) if s else None
+            fallback = dialect.sql_foreign_keys_unpaired(s) if s and rows is None else None
+            if fallback:
+                rows = _try(runner, fallback)
+                if rows is not None:
+                    unpaired.append(s)
+                    rows = _single_column_fks(rows, report)
             if rows is not None:
                 catalog_ok = True
                 catalog_fks.extend(rows)
+        if unpaired:
+            report.notes.append(
+                f"foreign keys in {', '.join(sorted(unpaired))} read with the older catalog query: this "
+                "database's catalog has no column positions for them, so only single-column keys were kept")
 
     tables_by_name: dict[str, list[Table]] = {}
     for t in tables:
@@ -1408,12 +1525,16 @@ def _build_relationships(
     outside_model = 0
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
-        _fk_step = max(1, len(catalog_fks) // 10)   # ~10 heartbeat lines over the (slow) FK pass
-        for _fi, fk in enumerate(catalog_fks, 1):
-            if _fi % _fk_step == 0 or _fi == len(catalog_fks):
-                _progress(pp, f"relationships: declared FK {_fi}/{len(catalog_fks)}")
-            ft, fc, tt, tc = fk.get("from_table"), fk.get("from_column"), fk.get("to_table"), fk.get("to_column")
-            if not (ft and fc and tt and tc):
+        fk_keys = _fk_groups(catalog_fks)
+        _fk_step = max(1, len(fk_keys) // 10)   # ~10 heartbeat lines over the (slow) FK pass
+        for _fi, (key_rows, grouped) in enumerate(fk_keys, 1):
+            if _fi % _fk_step == 0 or _fi == len(fk_keys):
+                _progress(pp, f"relationships: declared FK {_fi}/{len(fk_keys)}")
+            fk = key_rows[0]
+            ft, tt = fk.get("from_table"), fk.get("to_table")
+            fc = [r.get("from_column") for r in key_rows]
+            tc = [r.get("to_column") for r in key_rows]
+            if not (ft and tt and all(fc) and all(tc)):
                 continue
             # The catalog lists every FK in the schema, including ones to tables the prune step
             # dropped or to a schema not introspected; a join to a table the model lacks is unusable.
@@ -1428,7 +1549,7 @@ def _build_relationships(
             cross = bool(from_schema and to_schema and from_schema != to_schema)
             fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
             tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
-            card = build.infer_cardinality(fobj, tobj, [fc], [tc])
+            card = build.infer_cardinality(fobj, tobj, fc, tc)   # every column of a composite key
             # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap.
             # The catalog's FK is a *declaration*, not a guarantee, so probe the data: if the
             # child values actually live in the parent key, treat it like an enforced FK
@@ -1442,10 +1563,13 @@ def _build_relationships(
                 # leave the declared FK inferred/unreviewed rather than full-scan to confirm it.
                 if fobj is not None and tobj is not None and not _too_big_to_probe(fobj):
                     overlap_probes += 1
-                    if _overlaps(dialect, runner, fobj, fc, tobj, tc):
+                    one = len(fc) == 1   # a single column keeps the probe it always had
+                    if _overlaps(dialect, runner, fobj, fc[0] if one else fc, tobj, tc[0] if one else tc):
                         confidence = "confirmed"
                         overlap_confirmed = True
-            trusted = dialect.fk_enforced or overlap_confirmed
+            # A key whose rows came without a constraint name can't be told from separate keys,
+            # and used alone each column of a composite one repeats rows: never trusted (#510).
+            trusted = (dialect.fk_enforced or overlap_confirmed) and grouped
             # trusted joins are sound structure -> auto-approve with a system sign-off (don't
             # flood the review queue); unconfirmed ones need a glance.
             # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
@@ -1458,11 +1582,15 @@ def _build_relationships(
                     desc = "declared FK, confirmed by value-overlap probe"
             else:
                 kw = {"review_state": "unreviewed"}
+            if not grouped:
+                desc = _UNGROUPED_FK
             if cross:
                 desc = f"crosses schemas: {from_schema} → {to_schema} (declared FK) — confirm it belongs in this model"
                 report.notes.append(f"cross-schema relationship: {from_schema}.{ft} → {to_schema}.{tt} (declared FK)")
+            ends = ({"from_column": fc[0], "to_column": tc[0]} if len(fc) == 1
+                    else {"on": _composite_on(dialect, ft, fc, tt, tc)})
             rels.append(Relationship(
-                from_table=ft, from_column=fc, to_table=tt, to_column=tc,
+                from_table=ft, to_table=tt, **ends,
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
@@ -1470,6 +1598,10 @@ def _build_relationships(
             report.notes.append(
                 f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
                 "remaining declared FKs left unreviewed for sign-off on /agami-model")
+        if any(not grouped for _, grouped in fk_keys):
+            report.notes.append(
+                "the catalog didn't say which foreign-key columns belong to one key, so joins with "
+                "several columns between the same two tables were kept apart and left for review")
         if outside_model:
             report.notes.append(
                 f"skipped {outside_model} declared foreign key(s) to tables outside the model "
@@ -1489,20 +1621,103 @@ def _build_relationships(
     # (which under-detects on sparse data). Conservative + type-checked, and `unreviewed` so
     # it's discoverable but never asserted as fact — the user signs it off (or it self-approves
     # through use). This is what lifts a sparse demo from ~9 joins toward the real graph.
-    rels.extend(_promote_reference_fields(tables, rels, report))
+    rels.extend(_promote_reference_fields(tables, rels, report, _sqlglot_name(dialect)))
     return rels
 
 
-def _regroup_columns_with_references(tables: list[Table], rels: list[Relationship]) -> None:
+_UNGROUPED_FK = ("declared FK column; the catalog didn't say which columns form one key, so the key's "
+                 "columns couldn't be grouped — if it spans several columns, join on all of them")
+
+
+def _single_column_fks(rows: list[dict], report: IntrospectReport) -> list[dict]:
+    """The older FK query's rows, one per single-column key. Its rows pair every column of a
+    composite key with every referenced column, so nothing in them says which pairs are right: such
+    a key is left out, with a note, rather than joined on a guess."""
+    keys: dict[tuple, list[dict]] = {}
+    for r in rows:
+        name = r.get("constraint_name")
+        # Without a name, every key between the same two tables may be one composite key.
+        tail = (str(name),) if name is not None and str(name) != "" else (r.get("to_schema"), r.get("to_table"))
+        keys.setdefault((r.get("from_schema"), r.get("from_table"), *tail), []).append(r)
+    out: list[dict] = []
+    for k, g in keys.items():
+        label = f"{k[1]}.{k[2]}" if len(k) == 3 else f"{k[1]} → {k[3]}"
+        # DuckDB's constraint_column_usage lists the key's own columns, not the ones it references.
+        if any((r.get("from_schema"), r.get("from_table"), r.get("from_column"))
+               == (r.get("to_schema"), r.get("to_table"), r.get("to_column")) for r in g):
+            report.notes.append(f"foreign key {label} not read: the catalog names its own column as the "
+                                "one it references")
+        elif len({(r.get("from_column"), r.get("to_schema"), r.get("to_table"), r.get("to_column"))
+                  for r in g}) == 1:
+            out.append({**g[0], "key_ordinal": 1})
+        elif len({r.get("from_column") for r in g}) > 1:
+            report.notes.append(f"composite foreign key {label} not read: this database's catalog doesn't "
+                                "say how its columns pair")
+        else:
+            report.notes.append(f"foreign key {label} not read: the catalog names more than one column it "
+                                "references")
+    return out
+
+
+def _fk_groups(rows: list[dict]) -> list[tuple[list[dict], bool]]:
+    """The catalog's FK rows as one entry per key, in catalog order: its rows in key order, and
+    whether they could be grouped. A row carries its constraint's name and its column's position in
+    the key; grouped by (from_schema, from_table, constraint_name), a key over several columns is one
+    entry. A row with no constraint name stands alone, and is ungroupable when another such row
+    joins the same two tables — it may be one column of a composite key."""
+    def ordinal(r: dict) -> float:
+        try:
+            return float(r.get("key_ordinal"))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def tables(r: dict) -> tuple:
+        return (r.get("from_schema"), r.get("from_table"), r.get("to_schema"), r.get("to_table"))
+
+    entries: dict[tuple, list[dict]] = {}
+    for i, r in enumerate(rows):
+        name = r.get("constraint_name")
+        named = name is not None and str(name) != ""
+        entries.setdefault((r.get("from_schema"), r.get("from_table"), str(name)) if named else (i,), []).append(r)
+    loose = [g[0] for k, g in entries.items() if len(k) == 1]
+    per_pair: dict[tuple, int] = {}
+    for r in loose:
+        per_pair[tables(r)] = per_pair.get(tables(r), 0) + 1
+    return [(sorted(g, key=ordinal), True) if len(k) > 1 else (g, per_pair[tables(g[0])] == 1)
+            for k, g in entries.items()]
+
+
+# Names written unquoted in a composite join: the spelling an unquoted name folds to on the engine.
+_LOWER_IDENT = re.compile(r"[a-z_][a-z0-9_]*")
+_UPPER_IDENT = re.compile(r"[A-Z_][A-Z0-9_]*")
+_FOLDS_UPPER = {"Snowflake", "Oracle"}
+_FOLDS_LOWER = {"PostgreSQL", "Redshift", "Trino"}
+
+
+def _composite_on(dialect: D.Dialect, ft: str, fc: list[str], tt: str, tc: list[str]) -> str:
+    """A composite key's join condition, `ft.a = tt.x AND ft.b = tt.y`, on bare table names (the
+    receipt matches a written join to it by bare name). A name an unquoted spelling wouldn't reach
+    on this engine, or a word it reserves (`order`), is quoted."""
+    def q(name: str) -> str:
+        plain = (bool(_UPPER_IDENT.fullmatch(name)) if dialect.name in _FOLDS_UPPER
+                 else bool(_LOWER_IDENT.fullmatch(name)) if dialect.name in _FOLDS_LOWER
+                 else bool(_LOWER_IDENT.fullmatch(name) or _UPPER_IDENT.fullmatch(name)))
+        return name if plain and not dialect.reserves(name) else dialect.quote_ident(name)
+    return " AND ".join(f"{q(ft)}.{q(f)} = {q(tt)}.{q(t)}" for f, t in zip(fc, tc))
+
+
+def _regroup_columns_with_references(
+    tables: list[Table], rels: list[Relationship], dialect: Optional[str] = None,
+) -> None:
     """Re-derive column_groups (+ descriptions) for deep tables now that relationships exist, so
-    each table's FK (FROM-side) columns land in the `references` group. Mutates `tables` in place;
-    a no-op for narrow tables (no groups) and tables with no outgoing simple-FK joins. Schema-aware
-    so a same-named table in another schema doesn't borrow the wrong references."""
+    each table's FK (FROM-side) columns land in the `references` group — every column of a composite
+    key's `on:` join too. Mutates `tables` in place; a no-op for narrow tables (no groups) and tables
+    with no outgoing column-keyed joins. Schema-aware so a same-named table in another schema doesn't
+    borrow the wrong references."""
     ref_by_table: dict[tuple, set[str]] = {}
     for r in rels:
-        if not r.from_column:   # skip on:-expression joins (no single FROM column)
-            continue
-        ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(r.from_column)
+        for fc, _tc in _column_pairs(r, dialect) or []:   # an `on:` on an expression names no column
+            ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(fc)
     for t in tables:
         if not t.column_groups:   # only deep tables carry groups
             continue
@@ -1541,6 +1756,7 @@ def _infer_reference_target(stem: str, by_name: dict, from_table: Table) -> Opti
 
 def _promote_reference_fields(
     tables: list[Table], existing: list[Relationship], report: IntrospectReport,
+    dialect: Optional[str] = None,
 ) -> list[Relationship]:
     """Promote `<x>_id` reference columns to inferred/unreviewed joins when the target table is
     identifiable by name and key-type-compatible — never requiring value overlap. Conservative:
@@ -1548,8 +1764,9 @@ def _promote_reference_fields(
     by_name: dict[str, list[Table]] = {}
     for t in tables:
         by_name.setdefault(t.name.lower(), []).append(t)
-    # schema-aware key so a same-named table in another schema doesn't suppress promotion here
-    seen = {(r.from_schema, r.from_table, r.from_column) for r in existing}
+    # schema-aware key so a same-named table in another schema doesn't suppress promotion here; every
+    # column of a composite key counts, or one of them would be promoted to a join of its own
+    seen = {(r.from_schema, r.from_table, fc) for r in existing for fc, _tc in _column_pairs(r, dialect) or []}
     out: list[Relationship] = []
     for t in tables:
         grain = set(t.grain)
@@ -1675,23 +1892,34 @@ def _too_big_to_probe(t: Table) -> bool:
     return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
-def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> str:
+def overlap_sql(dialect: D.Dialect, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
     `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
     join check, which hands every probe to the execution tier, emits exactly the probe introspection
     already trusts rather than a second spelling of it.
 
     The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
-    engines too; it used to apply only where the row-limit keyword was `LIMIT`."""
+    engines too; it used to apply only where the row-limit keyword was `LIMIT`.
+
+    A key over several columns (lists) samples their value combinations and matches all of them."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
-    col_f = dialect.quote_ident(fc)
-    col_t = dialect.quote_ident(tc)
-    sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
-    return (
-        f"SELECT COUNT(*) AS matched FROM ({sample}) src "
-        f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
-    )
+    if isinstance(fc, str) and isinstance(tc, str):
+        col_f = dialect.quote_ident(fc)
+        col_t = dialect.quote_ident(tc)
+        sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
+        return (
+            f"SELECT COUNT(*) AS matched FROM ({sample}) src "
+            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
+        )
+    fcs = [fc] if isinstance(fc, str) else fc
+    tcs = [tc] if isinstance(tc, str) else tc
+    cols_f = [dialect.quote_ident(c) for c in fcs]
+    picked = ", ".join(f"{c} AS v{i}" for i, c in enumerate(cols_f))
+    present = " AND ".join(f"{c} IS NOT NULL" for c in cols_f)
+    match = " AND ".join(f"t.{dialect.quote_ident(c)} = src.v{i}" for i, c in enumerate(tcs))
+    sample = dialect.limited(f"SELECT DISTINCT {picked} FROM {fq_from} WHERE {present}", 50)
+    return f"SELECT COUNT(*) AS matched FROM ({sample}) src WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE {match})"
 
 
 def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc: str) -> str:
@@ -1713,7 +1941,7 @@ def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc:
     )
 
 
-def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
+def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> bool:
     """Sample from-column values and check they exist in the target key."""
     res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
     if not res:
