@@ -184,3 +184,33 @@ def test_a_resolved_ipv6_address_is_redacted_even_when_the_profile_names_a_hostn
 def test_a_time_of_day_is_not_taken_for_an_ipv6_address():
     line = execute_sql._db_error_first_line('invalid input syntax for type time: "12:30:45"', None, {})
     assert "12:30:45" in line
+
+
+@pytest.mark.parametrize("text", [
+    # Escaped quotes and escaped whitespace, as libpq and SQL quoting write them.
+    f"invalid connection option: {_PW_KEY}='ab\\'c {_FAKE_SECRET}' dbname=demo",
+    f"invalid connection option: {_PW_KEY}='it''s {_FAKE_SECRET}' dbname=demo",
+    f'invalid connection option: {_PW_KEY}="ab\\" {_FAKE_SECRET}" dbname=demo',
+    f"invalid connection option: {_PW_KEY}=ab\\ {_FAKE_SECRET} dbname=demo",
+    f"invalid connection option: {_PW_KEY}='unterminated {_FAKE_SECRET}",
+    # Credential keys beyond the plain ones.
+    f"auth failed: access_token={_FAKE_SECRET} dbname=demo",
+    f"auth failed: refresh_token={_FAKE_SECRET} dbname=demo",
+    f"auth failed: client_secret='{_FAKE_SECRET}' dbname=demo",
+    f"auth failed: ssl{_PW_KEY}={_FAKE_SECRET} dbname=demo",
+    f'connection failed for user "a\\" {_FAKE_SECRET}"',
+])
+def test_an_escaped_or_less_common_credential_is_redacted_whole(text):
+    line = execute_sql._db_error_first_line(text, None, {})
+    assert _FAKE_SECRET not in line and "<redacted>" in line
+
+
+@pytest.mark.parametrize(("key", "value", "echoed"), [
+    ("client_secret", "it's" + _FAKE_SECRET, "it\\'s" + _FAKE_SECRET),
+    ("client_secret", "it's" + _FAKE_SECRET, "it''s" + _FAKE_SECRET),
+    ("refresh_token", "x" + _FAKE_SECRET, "x" + _FAKE_SECRET),
+    (_PW_KEY, 'a"b' + _FAKE_SECRET, 'a\\"b' + _FAKE_SECRET),
+])
+def test_a_profile_value_is_redacted_however_the_driver_escapes_it(key, value, echoed):
+    line = execute_sql._db_error_first_line(f"login failed near {echoed} for this role", None, {key: value})
+    assert _FAKE_SECRET not in line and "<redacted>" in line

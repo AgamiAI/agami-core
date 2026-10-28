@@ -457,17 +457,39 @@ def _expands_a_column(node: "exp.Expression | None") -> bool:
     return (name or "").lower() in _PROFILING_TABLE_FUNCTIONS
 
 
+# Engines with a native information_schema. Oracle and SQLite have none, so there the name could only
+# be an ordinary schema or an attached database.
+_HAS_INFORMATION_SCHEMA = frozenset({
+    "postgres", "redshift", "mysql", "snowflake", "bigquery", "tsql", "databricks", "trino", "duckdb",
+})
+# Engines that match a name whatever its case, quoted or not (SQL Server under its default *_CI_*
+# collations, as `SQLServer.case_insensitive_compare` assumes).
+_CASE_INSENSITIVE_NAMES = frozenset({"mysql", "tsql", "bigquery", "databricks", "trino", "duckdb", "sqlite"})
+_UPPER_FOLDING = frozenset({"snowflake", "oracle"})
+
+
+def _engine_name(ident: "exp.Expression | None", dialect: "str | None") -> str:
+    """The name the engine looks `ident` up by, lowercased where that is the same lookup. A quoted name
+    whose case the engine keeps comes back in quotes, so it matches only the same quoted spelling."""
+    if not isinstance(ident, exp.Identifier):
+        return ""
+    name = ident.name
+    if not ident.quoted or dialect in _CASE_INSENSITIVE_NAMES:
+        return name.lower()
+    folded = name.upper() if dialect in _UPPER_FOLDING else name.lower()
+    return name.lower() if name == folded else f'"{name}"'
+
+
 def _is_catalog_relation(tbl: "exp.Table", dialect: "str | None") -> bool:
     """A read-only catalog view a profiling run may read: the structure views of `information_schema`
     (BigQuery puts it in the table name), the structure tables of `pg_catalog`, and SQLite's schema
     table."""
-    schema, name = (tbl.db or "").lower(), (tbl.name or "").lower()
+    schema, name = _engine_name(tbl.args.get("db"), dialect), _engine_name(tbl.this, dialect)
     # Only BigQuery spells the view as one dotted name; elsewhere `"information_schema.x"` is an
     # ordinary quoted table.
     if dialect == "bigquery" and name.startswith("information_schema."):
         return name.split(".", 1)[1] in _INFORMATION_SCHEMA_STRUCTURE
-    # SQLite has no information_schema, so the name there could only be an attached database.
-    if schema == "information_schema" and dialect != "sqlite":
+    if schema == "information_schema" and dialect in _HAS_INFORMATION_SCHEMA:
         return name in _INFORMATION_SCHEMA_STRUCTURE
     if dialect in ("postgres", "redshift") and schema == "pg_catalog":
         return name in _PG_CATALOG_STRUCTURE
@@ -476,13 +498,16 @@ def _is_catalog_relation(tbl: "exp.Table", dialect: "str | None") -> bool:
     return False
 
 
-def _ordered_by_own_alias(col: "exp.Column") -> bool:
+def _ordered_by_own_alias(col: "exp.Column", dialect: "str | None") -> bool:
     """A bare ORDER BY name its own SELECT gives as an output alias, which the engine resolves to that
-    output before any table's column."""
+    output before any table's column. The names must match as the engine compares them: on Postgres
+    `ORDER BY secret` does not name the output `"SECRET"`, it names the column."""
     order = col.parent.parent if isinstance(col.parent, exp.Ordered) else None
     sel = order.parent if isinstance(order, exp.Order) else None
-    return isinstance(sel, exp.Select) and any(
-        isinstance(e, exp.Alias) and e.alias.lower() == col.name.lower() for e in sel.expressions)
+    want = _engine_name(col.this, dialect)
+    return bool(want) and isinstance(sel, exp.Select) and any(
+        isinstance(e, exp.Alias) and _engine_name(e.args.get("alias"), dialect) == want
+        for e in sel.expressions)
 
 
 def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
@@ -502,7 +527,7 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
     if not declared or not (catalog or expands):
         return None
     bare = sorted({c.name for c in tree.find_all(exp.Column)
-                   if c.name and not c.table and not _ordered_by_own_alias(c)})
+                   if c.name and not c.table and not _ordered_by_own_alias(c, dialect)})
     if not bare:
         return None
     return guardrail.refuse(

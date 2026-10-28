@@ -1543,12 +1543,18 @@ SERVED_CHILD_ENV = "AGAMI_SERVED_CHILD"
 
 _DETAIL_SKIP_PREFIXES = ("hint:", "detail:", "context:")
 _REDACTED = "<redacted>"
+# Any key that names a credential (`access_token`, `client_secret`, `sslpassword`, ...).
+_SECRET_KEY_WORDS = r"\w*(?:password|passwd|pwd|secret|token|api_?key|access_?key|private_?key|credential)\w*"
+# A quoted value runs to its closing quote past `\'` and `''` escapes, or to the end of the line when it
+# has none; an unquoted one runs past backslash-escaped whitespace.
+_SQ_VALUE = r"'(?:[^'\\]|\\.|'')*(?:'|$)"
+_DQ_VALUE = r'"(?:[^"\\]|\\.|"")*(?:"|$)'
 _REDACT_PATTERNS = (
     # A DSN or any URL: scheme://… can carry a user, a password and a host at once.
     (re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE), _REDACTED),
-    (re.compile(r"\b(password|passwd|pwd|secret|token|api_key|access_key|private_key|host|hostaddr|"
-                r"user|username)\s*=\s*('[^']*'|\"[^\"]*\"|\S+)", re.IGNORECASE), r"\1=" + _REDACTED),
-    (re.compile(r"\b(server at|host|user|role)\s+\"[^\"]*\"", re.IGNORECASE), r'\1 "' + _REDACTED + '"'),
+    (re.compile(rf"\b({_SECRET_KEY_WORDS}|host|hostaddr|user|username)\s*=\s*"
+                rf"({_SQ_VALUE}|{_DQ_VALUE}|(?:\\.|[^\s\\])+\\?)", re.IGNORECASE), r"\1=" + _REDACTED),
+    (re.compile(rf"\b(server at|host|user|role)\s+{_DQ_VALUE}", re.IGNORECASE), r'\1 "' + _REDACTED + '"'),
     (re.compile(r"\S+@\S+"), _REDACTED),
     (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), _REDACTED),
 )
@@ -1564,9 +1570,22 @@ def _redact_ipv6(match: "re.Match[str]") -> str:
     except ValueError:
         return match.group(0)
     return _REDACTED
-# Credential fields whose values never appear in the detail, however the driver words its message.
+# Credential fields whose values never appear in the detail, however the driver words its message,
+# besides every field whose name says it holds a credential.
 _SECRET_CRED_KEYS = ("password", "user", "username", "host", "account", "token", "access_token",
-                     "private_key", "private_key_path", "credentials_path", "http_path", "dsn", "url")
+                     "private_key", "private_key_path", "credentials_path", "http_path", "dsn", "url",
+                     "service_account_path")
+_SECRET_CRED_KEY_RE = re.compile(_SECRET_KEY_WORDS, re.IGNORECASE)
+
+
+def _is_secret_cred_key(key: Any) -> bool:
+    return key in _SECRET_CRED_KEYS or bool(_SECRET_CRED_KEY_RE.fullmatch(str(key)))
+
+
+def _escaped_spellings(value: str) -> set[str]:
+    """`value` as written raw and as a driver may echo it inside quotes."""
+    backslashed = value.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+    return {value, backslashed, value.replace("'", "''"), value.replace('"', '""')}
 
 
 def _db_error_first_line(text: str | None, sqlstate: str | None,
@@ -1579,8 +1598,9 @@ def _db_error_first_line(text: str | None, sqlstate: str | None,
                  if ln.strip() and not ln.strip().lower().startswith(_DETAIL_SKIP_PREFIXES)), "")
     if not line:
         return None
-    secrets = sorted({str(v) for k, v in (creds or {}).items()
-                      if k in _SECRET_CRED_KEYS and v and len(str(v)) >= 3}, key=len, reverse=True)
+    secrets = sorted({spelling for k, v in (creds or {}).items()
+                      if _is_secret_cred_key(k) and v and len(str(v)) >= 3
+                      for spelling in _escaped_spellings(str(v))}, key=len, reverse=True)
     for secret in secrets:
         line = line.replace(secret, _REDACTED)
     for pattern, replacement in _REDACT_PATTERNS:

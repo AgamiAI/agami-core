@@ -339,3 +339,48 @@ def test_only_bigquery_spells_a_catalog_view_as_one_dotted_name(sql, dialect, al
 
     tbl = sqlglot.parse_one(sql, read=dialect).find(exp.Table)
     assert runtime._is_catalog_relation(tbl, dialect) is allowed
+
+
+@pytest.mark.parametrize("sql", [
+    # On Postgres a quoted name keeps its case, so these are ordinary schemas, not the catalog.
+    'SELECT p.secret FROM "INFORMATION_SCHEMA".tables p',
+    'SELECT p.secret FROM information_schema."TABLES" p',
+    'SELECT p.secret FROM "PG_CATALOG".pg_class p',
+])
+def test_a_quoted_lookalike_of_a_catalog_schema_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+@pytest.mark.parametrize(("sql", "dialect", "allowed"), [
+    ('SELECT t.table_name FROM "information_schema"."tables" t', "postgres", True),
+    ('SELECT t.table_name FROM "INFORMATION_SCHEMA".tables t', "postgres", False),
+    ('SELECT t.table_name FROM "INFORMATION_SCHEMA"."COLUMNS" t', "snowflake", True),
+    ("SELECT t.table_name FROM information_schema.columns t", "snowflake", True),
+    ('SELECT t.table_name FROM "information_schema".columns t', "snowflake", False),
+    ("SELECT t.table_name FROM INFORMATION_SCHEMA.COLUMNS t", "tsql", True),
+    ("SELECT t.table_name FROM information_schema.columns t", "duckdb", True),
+    # Oracle has no information_schema, and an engine nobody resolved is trusted with none.
+    ("SELECT c.secret FROM information_schema.columns c", "oracle", False),
+    ("SELECT c.secret FROM information_schema.columns c", None, False),
+])
+def test_a_catalog_schema_matches_only_as_the_engine_spells_it(sql, dialect, allowed):
+    import sqlglot
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    tbl = sqlglot.parse_one(sql, read=dialect).find(exp.Table)
+    assert runtime._is_catalog_relation(tbl, dialect) is allowed
+
+
+def test_order_by_a_name_that_only_case_folds_to_an_alias_reads_the_column(model):
+    # Postgres resolves `secret` to orders.secret here, not to the output "SECRET".
+    sql = 'SELECT o.id AS "SECRET" FROM orders o, jsonb_each(o.payload) kv ORDER BY secret LIMIT 1'
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_UNSCOPABLE
+
+    same = 'SELECT kv.key, COUNT(*) AS "n" FROM orders o, jsonb_each(o.payload) AS kv GROUP BY kv.key ORDER BY n'
+    ran, executor = _run(same, build_profile=True)
+    assert ran.status == "ok", ran.refusal
