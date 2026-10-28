@@ -193,8 +193,11 @@ _DIGITS_RE = re.compile(r"\d")
 _NUMBER_VALUE_RE = re.compile(r"^-?\d+\.\d+$")
 # Four dot-separated groups is an IPv4 address; a dotted phone number (555.123.4567) has three.
 _IPV4_VALUE_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
-_DATE_ONLY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?:[ T]00:00(?::00(?:\.0+)?)?)?$")
+# Midnight may carry a zone (`Z`, `+00`, `+05:30`): a timestamptz DOB reads back that way.
+_DATE_ONLY_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})(?:[ T]00:00(?::00(?:\.0+)?)?(?:Z|[+-]\d{2}(?::?\d{2})?)?)?$")
 _ID_NAME_RE = re.compile(r"(^|_)(id|key|sk|code|hash|uuid|guid)s?$", re.IGNORECASE)
+_ID_WORDS = frozenset({"id", "ids", "key", "keys", "sk", "code", "codes", "hash", "uuid", "guid"})
 _BIRTH_HINT_WORDS = frozenset({"born", "bday", "birth", "birthday", "birthdate", "dob", "dateofbirth"})
 # The share of non-empty sampled values a rule needs, so one stray address in a notes column
 # doesn't flag the column.
@@ -237,8 +240,19 @@ def _phone_like(v: str, digits_only_ok: bool) -> bool:
     return True
 
 
+def _id_named(column_name: str) -> bool:
+    """`order_id`, `customerId`, `trackingCode`, `id_number`: an identifier, whose bare digits
+    are not a phone. Trailing number words are dropped, so `id_no` ends in `id`."""
+    if _ID_NAME_RE.search(column_name or ""):
+        return True
+    words = tokens(column_name)
+    while len(words) > 1 and words[-1] in _NUMBER_WORDS:
+        words.pop()
+    return bool(words) and words[-1] in _ID_WORDS
+
+
 def looks_like_phones(column_name: str, values: Iterable[Any]) -> bool:
-    digits_ok = not _ID_NAME_RE.search(column_name or "")
+    digits_ok = not _id_named(column_name)
     return _share(_present(values), lambda v: _phone_like(v, digits_ok))
 
 

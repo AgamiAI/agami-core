@@ -419,3 +419,39 @@ def test_a_value_suspect_column_gets_no_list_read_from_the_data(tmp_path):
     assert t.get_column("reach").choice_field is None
     assert not any("DISTINCT" in s and '"reach"' in s for s in seen)
     assert t.get_column("status").choice_field == {"closed": "", "open": ""}
+
+
+@pytest.mark.parametrize("v", ["1980-04-02T00:00:00Z", "1980-04-02 00:00:00+00:00", "1980-04-02 00:00:00+00",
+                               "1980-04-02T00:00:00+05:30", "1980-04-02 00:00:00.000000-0800"])
+def test_timezone_aware_midnight_is_a_birth_date(v):
+    assert pii.looks_like_birth_dates("born_on", [v] * 3)
+    assert pii.value_suspect_caveat("born_on", "timestamp", [v] * 3) == pii.DOB_SUSPECT_CAVEAT
+
+
+def test_timezone_aware_non_midnight_is_not_a_birth_date():
+    assert not pii.looks_like_birth_dates("born_on", ["1980-04-02T13:45:00+00:00"] * 3)
+
+
+@pytest.mark.parametrize("name", ["customerId", "userID", "trackingCode", "id_number", "idNumber",
+                                  "id_no", "customer_id_no", "accountUUID", "order_id", "id"])
+def test_id_named_columns_with_digit_values_are_not_phones(name):
+    assert not pii.looks_like_phones(name, ["5550100100", "5550100101"])
+
+
+@pytest.mark.parametrize("name", ["reach", "phone_number", "mobileNo", "number", "contact"])
+def test_non_id_names_with_digit_values_stay_phone_suspects(name):
+    assert pii.looks_like_phones(name, ["5550100100", "5550100101"])
+
+
+def test_introspect_tz_midnight_dob_and_camel_case_id(tmp_path):
+    rows = [{"id": str(i), "bornOn": f"1980-04-{i + 1:02d} 00:00:00+00:00",
+             "customerId": f"55501001{i:02d}"} for i in range(10)]
+    runner = make_catalog_runner(
+        tables=["events"],
+        columns={"events": [col("id", "integer", nullable=False), col("bornOn", "timestamptz"),
+                            col("customerId", "text")]},
+        sample=lambda sql: [dict(r) for r in rows])
+    t, rep = _events(tmp_path, runner)
+    assert pii.DOB_SUSPECT_CAVEAT in t.get_column("bornOn").caveats
+    assert pii.PHONE_SUSPECT_CAVEAT not in t.get_column("customerId").caveats
+    assert "events.customerId (values look like phone numbers)" not in rep.suspected_columns
