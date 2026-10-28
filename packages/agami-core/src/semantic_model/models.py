@@ -98,6 +98,24 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
 
 
+def stored_identity(name: str, schema: Optional[str] = None) -> tuple[str, str]:
+    """``(schema, bare name)`` as written, '' for a schema the model does not give.
+
+    What `model_table` is keyed by (#258). Not folded, unlike `table_key`: the store keeps the
+    model's own spelling, and two definitions that differ only by case are the validator's to catch.
+    The schema may be embedded in the name, read the same way `table_key` reads it, but only when
+    the `schema` field does not give it: introspection stores the two apart, so with a schema set a
+    dot in the name is part of the name (Postgres `public."orders.v2"`), unless the name merely
+    repeats that schema (`public.orders` with `schema: public`).
+    """
+    name = name or ""
+    if schema not in (None, ""):
+        prefix = f"{schema}."
+        return schema, name[len(prefix):] if name.lower().startswith(prefix.lower()) else name
+    parts = name.split(".")
+    return (parts[-2] if len(parts) > 1 else ""), parts[-1]
+
+
 # ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------
