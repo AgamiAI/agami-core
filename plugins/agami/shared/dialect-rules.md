@@ -355,7 +355,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 
 - `SELECT * EXCEPT (col1, col2) FROM t` — all columns except the listed ones.
 - `SELECT * REPLACE (expr AS col) FROM t` — replace one column's expression while keeping `*`.
 - `AS` keyword is optional for aliases (`SELECT x alias_name`), but writing `AS` explicitly is recommended.
-- **Column aliases declared in `SELECT` are referenceable in `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, and `QUALIFY`** — a BigQuery (and Snowflake) convenience that does NOT work in Postgres/Redshift.
+- **Reuse a `SELECT` alias only as a whole `ORDER BY` or `GROUP BY` item, or a window alias in `QUALIFY`.** BigQuery (and Snowflake) also read aliases in `WHERE` and `HAVING`, but agami's column check refuses that, because a same-named column of the table would be read instead: write the expression out (`HAVING SUM(amount) > 1000`, not `HAVING revenue > 1000`).
 - `SELECT AS STRUCT ...` / `SELECT AS VALUE ...` — produce a struct-typed or value-typed row (used inside `ARRAY(...)` subqueries).
 
 ### FROM / JOIN
@@ -367,9 +367,9 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 
 - The comma between `t` and `UNNEST(...)` is the BigQuery idiom for the implicit lateral join; do **not** write `CROSS JOIN UNNEST` with an `ON` clause.
 
 ### WHERE / GROUP BY / HAVING
-- `WHERE bool_expr` — column aliases from `SELECT` are visible here (unlike Postgres).
+- `WHERE bool_expr` — write expressions out rather than reusing a `SELECT` alias (see SELECT extensions).
 - `GROUP BY col, col2, ...` or `GROUP BY 1, 2` (ordinal references) or `GROUP BY ALL` (auto-group by all non-aggregated `SELECT` items — newer BigQuery feature, supported).
-- `HAVING bool_expr` — runs after `GROUP BY`; can reference `SELECT` aliases and aggregates.
+- `HAVING bool_expr` — runs after `GROUP BY`; write the aggregate out (`HAVING COUNT(*) > 5`) rather than its `SELECT` alias.
 - `GROUP BY ROLLUP(...)`, `GROUP BY CUBE(...)`, `GROUP BY GROUPING SETS(...)` — all supported.
 
 ### ORDER BY / LIMIT
