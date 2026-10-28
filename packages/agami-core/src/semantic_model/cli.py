@@ -564,7 +564,7 @@ def cmd_set_description(args) -> int:
 
 def cmd_curate(args) -> int:
     from . import curate
-    ops = _read_json_file(args.ops_file)
+    ops = _read_json_file(args.ops_file or args.ops)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
     _stamp_approve_ops(ops)
@@ -1782,7 +1782,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
     sp.add_argument("root")
-    sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
+    ops_src = sp.add_mutually_exclusive_group(required=True)
+    ops_src.add_argument("ops", nargs="?", metavar="OPS_FILE", help="JSON file: a list of op objects (or {ops:[...]}); relative to the current folder")
+    ops_src.add_argument("--ops-file", help="the same file, named by flag")
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
     sp.set_defaults(func=cmd_curate)
@@ -1981,8 +1983,21 @@ def _utf8_stdio() -> None:
             stream.reconfigure(encoding="utf-8")
 
 
+def _enter_caller_cwd() -> None:
+    """The `sm` launcher runs us from `/` so nothing in the caller's folder can shadow this package,
+    and names that folder in AGAMI_CALLER_CWD. Moving back once the package is imported makes a
+    relative path argument resolve where the caller ran `sm` (#542)."""
+    cwd = os.environ.pop("AGAMI_CALLER_CWD", "")
+    if cwd:
+        try:
+            os.chdir(cwd)
+        except OSError:
+            pass  # the folder is gone: stay put, and a relative path's error names where it looked
+
+
 def main(argv=None) -> int:
     _utf8_stdio()
+    _enter_caller_cwd()
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

@@ -31,6 +31,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm` resolves a relative path from the folder you run it in (#542).** The launcher runs the CLI
+  from `/` so nothing in your folder can shadow the installed package, and every relative path
+  argument resolved there too: `sm curate <root> --ops-file ops.json` looked for `/ops.json`, and a
+  relative model root or output path failed the same way. The CLI now moves back to the caller's
+  folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
+  (`sm curate <root> ops.json`); `--ops-file` still works, and giving both is a usage error.
+
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
   query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
   skipped, since the CTE might have supplied it. A column the model excludes was then returned:
