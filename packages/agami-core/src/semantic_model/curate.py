@@ -1150,28 +1150,47 @@ def _same_join_entry(a: dict, b: dict) -> bool:
     from types import SimpleNamespace
 
     from .introspect import _same_join
+    from .models import Relationship
 
+    # Every field, so whatever `_same_join` reads is there (a composite key's `on`, too).
     def ns(r: dict) -> Any:
-        return SimpleNamespace(**{k: r.get(k) for k in ("from_table", "to_table", "from_column", "to_column",
-                                                        "from_schema", "to_schema")})
+        return SimpleNamespace(**{k: r.get(k) for k in Relationship.model_fields})
 
     return (_same_join(ns(a), ns(b))
             and " ".join(str(a.get("on") or "").split()).lower() == " ".join(str(b.get("on") or "").split()).lower())
 
 
-def _kept_copy(have: dict, moved: dict) -> dict:
-    """Which of two copies of one join to keep: the one a person decided on, else the one in place.
-    Two decided copies that say different things are refused rather than one picked silently."""
-    def decided(r: dict) -> bool:
-        return r.get("review_state") in ("approved", "rejected")
+def _sign_off_rank(r: dict) -> int:
+    """2 when a person approved or rejected the join, 1 when the engine approved it, 0 unreviewed."""
+    rs = r.get("review_state", "unreviewed")
+    if rs == "rejected":
+        return 2
+    if rs != "approved":
+        return 0
+    engine = r.get("signed_off_role") == "system" or r.get("signed_off_by") in (None, "agami_introspect")
+    return 1 if engine else 2
 
-    if decided(have) and decided(moved):
-        if any(have.get(k) != moved.get(k) for k in ("review_state", "relationship", "join_type")):
-            raise ValueError(
-                f"join {moved.get('from_table')}->{moved.get('to_table')} is already where it would move, "
-                "signed off differently; approve or reject one copy so they agree, then move the table")
-        return have
-    return moved if decided(moved) else have
+
+_RANK_WORDS = {2: "signed off by a person", 1: "approved by the engine", 0: "unreviewed"}
+
+
+def _kept_copy(have: dict, moved: dict) -> tuple[dict, str]:
+    """Which of two copies of one join to keep, and why: the one a person signed off, else the
+    engine-approved one, else the one in place. The kept copy takes a description (or
+    `for_questions_about`) only the other has, when both say the same join. Two person-signed
+    copies that say different things are refused rather than one picked silently."""
+    rh, rm = _sign_off_rank(have), _sign_off_rank(moved)
+    agree = all(have.get(k) == moved.get(k) for k in ("review_state", "relationship", "join_type"))
+    if rh == rm == 2 and not agree:
+        raise ValueError(
+            f"join {moved.get('from_table')}->{moved.get('to_table')} is already where it would move, "
+            "signed off differently; approve or reject one copy so they agree, then move the table")
+    keep, other, why = ((moved, have, f"the moved copy, {_RANK_WORDS[rm]}") if rm > rh
+                        else (have, moved, f"the copy in place, {_RANK_WORDS[rh]}"))
+    if all(keep.get(k) == other.get(k) for k in ("relationship", "join_type")):
+        keep = {**keep, **{k: other[k] for k in ("description", "for_questions_about")
+                           if other.get(k) and not keep.get(k)}}
+    return keep, why
 
 
 def _land_joins(root: Path, plan: dict) -> dict:
@@ -1193,9 +1212,9 @@ def _land_joins(root: Path, plan: dict) -> dict:
                 current(*places[0]).append(r)
                 continue
             pk, i = hit
-            final[pk][i] = _kept_copy(final[pk][i], r)
+            final[pk][i], why = _kept_copy(final[pk][i], r)
             plan.setdefault("notes", []).append(
-                f"join {r.get('from_table')}->{r.get('to_table')} was already in {where}; kept one copy")
+                f"join {r.get('from_table')}->{r.get('to_table')} was already in {where}; kept one copy: {why}")
 
     for area, rels in plan["into_area"].items():
         merge([(_area_dir(root, area) / "relationships.yaml", "relationships")], rels, f"area {area!r}")

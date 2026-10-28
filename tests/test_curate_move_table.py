@@ -364,7 +364,8 @@ def test_a_move_never_lands_a_join_the_area_already_holds(tmp_path, cross_extra,
     rels = loader.load_datasource(root, include_rejected=True).subject_area("catalog").relationships
     same = [r for r in rels if (r.from_table, r.to_table) == ("order_items", "products")]
     assert len(same) == 1 and same[0].review_state == kept
-    assert "join order_items->products was already in area 'catalog'; kept one copy" in res.notes
+    assert any(n.startswith("join order_items->products was already in area 'catalog'; kept one copy: ")
+               for n in res.notes), res.notes
 
 
 def test_a_move_is_refused_when_two_copies_of_a_join_are_signed_differently(tmp_path):
@@ -377,6 +378,92 @@ def test_a_move_is_refused_when_two_copies_of_a_join_are_signed_differently(tmp_
     res = _move(root, "order_items", "catalog")
     assert not res.applied and "signed off differently" in res.skipped[0]["reason"], res.as_dict()
     assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+_ENGINE = {"review_state": "approved", "confidence": "confirmed", "signed_off_by": "agami_introspect",
+           "signed_off_role": "system", "signed_off_at": "2026-01-01T00:00:00Z"}
+
+
+def test_a_person_signed_copy_outranks_an_engine_approved_one(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_SIGNED)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_ENGINE, description="each line's product")
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    rels = loader.load_datasource(root).subject_area("catalog").relationships
+    same = [r for r in rels if (r.from_table, r.to_table) == ("order_items", "products")]
+    assert [(r.signed_off_by, r.description) for r in same] == [("you@example.com", "each line's product")]
+    assert ("join order_items->products was already in area 'catalog'; kept one copy: "
+            "the moved copy, signed off by a person") in res.notes
+
+
+def test_an_engine_approved_copy_outranks_an_unreviewed_one(tmp_path):
+    root = _model(tmp_path)
+    _catalog_holds(root, **_ENGINE)
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    rels = loader.load_datasource(root).subject_area("catalog").relationships
+    assert [r.signed_off_by for r in rels if r.from_table == "order_items"] == ["agami_introspect"]
+
+
+_COMPOSITE = "shipments.order_id = order_items.order_id AND shipments.product_id = order_items.product_id"
+
+
+def _with_shipments(root: Path, on: str) -> Path:
+    """sales also owns shipments, joined to order_items by line id and by an `on:` over two columns."""
+    sa = yaml.safe_load((root / "subject_areas" / "sales" / "subject_area.yaml").read_text())
+    sa["tables"].append({"storage_connection": "c", "schema": "public", "table": "shipments"})
+    (root / "subject_areas" / "sales" / "subject_area.yaml").write_text(yaml.safe_dump(sa))
+    _table(root, "sales", "shipments", ["line_id", "order_id", "product_id"])
+    rels_file = root / "subject_areas" / "sales" / "relationships.yaml"
+    rels = yaml.safe_load(rels_file.read_text())
+    rels["relationships"] += [
+        {**_join("shipments", "line_id", "order_items"), **_ENGINE},
+        {"from_table": "shipments", "to_table": "order_items", "on": on, "relationship": "many_to_one",
+         **_ENGINE}]
+    rels_file.write_text(yaml.safe_dump(rels))
+    return root
+
+
+def _shipment_joins(org) -> list:
+    rels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    return sorted(((r.on or "", r.from_column or "") for r in rels if r.from_table == "shipments"))
+
+
+@pytest.mark.parametrize("on", [_COMPOSITE, "shipments.order_id = order_items.order_id AND order_items.qty = 1"])
+def test_a_table_with_an_on_join_beside_a_column_join_moves_and_back(tmp_path, on):
+    root = _with_shipments(_model(tmp_path), on)
+    want = sorted([(on, ""), ("", "line_id")])
+    res = _move(root, "shipments", "logistics")
+    assert res.validated, res.as_dict()
+    org = loader.load_datasource(root)
+    assert _shipment_joins(org) == want
+    assert {(r.from_subject_area, r.to_subject_area) for r in org.cross_subject_area_relationships
+            if r.from_table == "shipments"} == {("logistics", "sales")}
+    res = _move(root, "shipments", "sales")
+    assert res.validated, res.as_dict()
+    org = loader.load_datasource(root)
+    assert _shipment_joins(org) == want and V.validate(org).ok
+
+
+def test_moving_back_into_an_area_that_holds_the_on_join_keeps_one_copy(tmp_path):
+    root = _with_shipments(_model(tmp_path), _COMPOSITE)
+    assert _move(root, "shipments", "logistics").validated
+    rels_file = root / "subject_areas" / "sales" / "relationships.yaml"
+    rels = yaml.safe_load(rels_file.read_text())
+    rels["relationships"].append({"from_table": "shipments", "to_table": "order_items",
+                                  "on": _COMPOSITE,
+                                  "relationship": "many_to_one", **_ENGINE})
+    rels_file.write_text(yaml.safe_dump(rels))
+    res = _move(root, "shipments", "sales")
+    assert res.validated, res.as_dict()
+    org = loader.load_datasource(root)
+    on_joins = [r for r in org.subject_area("sales").relationships if r.from_table == "shipments" and r.on]
+    assert len(on_joins) == 1 and len(_shipment_joins(org)) == 2
+    assert " ".join(on_joins[0].on.lower().split()) == _COMPOSITE.lower()
+    assert V.validate(org).ok
 
 
 def test_a_join_that_turns_cross_area_is_not_added_twice(tmp_path):

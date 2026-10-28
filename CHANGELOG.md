@@ -130,9 +130,12 @@ below corresponds to one such version.
   its table by a bare name shared by two schemas is resolved by the area it sits in and gets the
   schema written; a move with a join on the table whose other end matches tables in two schemas is
   refused, with nothing written. A join to a table no area defines stays where it is, and `notes`
-  says so. A join the target area already holds is kept once, the signed-off copy if one is, and a
-  move is refused when two signed-off copies disagree. The batch is validated and undone on failure
-  (folders it created included, and no `notes` reported), logged with both areas, and committed when the model is its own git repository. The model explorer has a
+  says so. A join the target area already holds is kept once: a copy a person signed off over one
+  the engine approved, and that over an unreviewed one, taking a description only the other copy
+  has; `notes` says which was kept. A move is refused when two copies a person signed off disagree.
+  A composite-key `on:` join moves intact beside another join between the same tables. The batch is
+  validated and undone on failure (folders it created included, and no `notes` reported), logged
+  with both areas, and committed when the model is its own git repository. The model explorer has a
   **Move to area** control on every table that queues the op.
 
 - **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
