@@ -14,6 +14,21 @@ below corresponds to one such version.
 
 ### Changed
 
+- **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
+  single-schema database of more than 24 tables used to get one area per table-name prefix, with
+  any name starting with a shorter one's prefix pulled in (`pro_x` with `products`) and names
+  singularised by dropping an "s" (`supplie`, `statu`). Tables are now grouped where they join each
+  other most densely (greedy modularity over the join graph), with no target number of areas, so a
+  hub table that half the database joins doesn't pull everything into one area; no group passes the
+  area size limit, and ties go to the tables sharing more words in their names and descriptions.
+  Tables with no joins go with tables sharing their whole first name word. Area names are the
+  tables' own words, and the grouping no longer depends on the order the tables arrive in. Only
+  proposals change: a curated model is never regrouped, while a model whose areas are still exactly
+  the engine's (a batched first build, or one built by an earlier release and never edited) is
+  regrouped by `introspect --append`. A join whose two tables end up in one area is written as that
+  area's join, and a refresh that would write a file the model can't load back is refused, with the
+  model left as it was.
+
 - **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
   On a large onboarding these `<table>_<column>_rate` metrics were 698 of the 706 it suggested and
   about half of all metrics in the models, while the business's own definitions named one. They are
@@ -30,6 +45,15 @@ below corresponds to one such version.
   customer's definitions name it.
 
 ### Fixed
+
+- **`sm add` refuses a subject area the model doesn't list, and takes `--area _cross` (#513).**
+  The loader reads only the areas `datasource.yaml` lists, so a metric added under any other name
+  was reported applied and validated and then never served. The error now lists the model's areas.
+  `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
+  `_entities.yaml`), validated like any other add, and those items can be signed off through
+  `sm curate`, where `"area": "_cross"` reads only the cross-area lists and otherwise acts as an op
+  with no area does (a missing name, or one in both places, fails the batch). Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
+  never defined twice.
 
 - **A foreign key over several columns is now one join on all of them, and a query joining on only
   some of them is flagged (#510).** Introspection wrote each column of a composite key as its own
@@ -94,6 +118,25 @@ below corresponds to one such version.
   refused where they ran before.
 
 ### Added
+
+- **A table can move to another subject area, keeping its joins, metrics and entities (#513).**
+  The curate op `{"op":"move","kind":"table","name":"<table>","area":"<from>","to_area":"<to>"}`
+  (`"schema"` too when two schemas share the name) moves the table and its area entry, and creates
+  the target area when the model doesn't have it. A join that now spans two areas becomes a
+  cross-area join, and a cross-area join whose two tables now share an area moves into it. Metrics
+  and entities on that table move with it when every table they read is now in the new area; one
+  that also reads a table outside it stays, and the result's `notes` names it; one left in another
+  area moves too once all its tables have reached the new area by separate moves. A join that names
+  its table by a bare name shared by two schemas is resolved by the area it sits in and gets the
+  schema written; a move with a join on the table whose other end matches tables in two schemas is
+  refused, with nothing written. A join to a table no area defines stays where it is, and `notes`
+  says so. A join the target area already holds is kept once: a copy a person signed off over one
+  the engine approved, and that over an unreviewed one, taking a description only the other copy
+  has; `notes` says which was kept. A move is refused when two copies a person signed off disagree.
+  A composite-key `on:` join moves intact beside another join between the same tables. The batch is
+  validated and undone on failure (folders it created included, and no `notes` reported), logged
+  with both areas, and committed when the model is its own git repository. The model explorer has a
+  **Move to area** control on every table that queues the op.
 
 - **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
   of a metric's formula ("gives no value when the start date is missing") went into its description
