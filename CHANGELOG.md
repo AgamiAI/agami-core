@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
 - **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
   query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
   every query that used it, while the check for derived metrics refused a legal aggregate over a
