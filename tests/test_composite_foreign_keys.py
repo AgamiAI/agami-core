@@ -599,6 +599,84 @@ def test_split_joins_the_merge_replaces_are_not_also_listed_as_relabelled(shop):
     assert "joins corrected" not in done.stdout
 
 
+# --- a person's edit of an approved join sends it back to review (#537) -----------------------------
+
+
+def _edit_join(shop, field: str, value, **which):
+    from semantic_model import curate
+    op = {"op": "edit", "kind": "relationship", "name": "shipments->order_lines", "field": field,
+          "value": value, "at": "2026-10-28T00:00:00Z", **which}
+    return curate.apply(shop["root"], [op], signer="you@example.com", role="data_owner")
+
+
+def _entry(path: Path, **match) -> dict:
+    (hit,) = [r for r in yaml.safe_load(path.read_text())["relationships"]
+              if all(r.get(k) == v for k, v in match.items())]
+    return hit
+
+
+def test_a_refresh_leaves_a_split_key_a_person_edited_since_its_approval(shop):
+    assert _introspect(shop).returncode == 0
+    path = _split_the_key(shop)            # both splits approved by introspection
+    res = _edit_join(shop, "relationship", "one_to_one", from_column="line_no", to_column="line_no")
+    assert res.validated and res.applied, res
+    edited = _entry(path, from_column="line_no")
+    assert (edited["review_state"], edited["signed_off_by"]) == ("stale", "agami_introspect")
+    before = _between(L.load_datasource(shop["root"]), "shipments", "order_lines")
+
+    done = _introspect(shop, "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "composite foreign key not applied" in done.stdout
+    assert "not changed: edited since its approval" in done.stdout
+    assert "signed off by agami_introspect" not in done.stdout
+    assert "joins merged into one composite join" not in done.stdout
+    assert _between(L.load_datasource(shop["root"]), "shipments", "order_lines") == before
+
+
+def test_a_person_edited_composite_join_goes_stale_and_a_refresh_leaves_it_alone(shop):
+    assert _introspect(shop).returncode == 0
+    path = next(shop["root"].glob("subject_areas/*/relationships.yaml"))
+    res = _edit_join(shop, "relationship", "one_to_one", on=_COMPOSITE_ON)
+    assert res.validated and res.applied, res
+    edited = _entry(path, on=_COMPOSITE_ON)
+    assert (edited["relationship"], edited["review_state"]) == ("one_to_one", "stale")
+
+    done = _introspect(shop, "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "joins corrected" not in done.stdout and "composite join" not in done.stdout
+    assert _entry(path, on=_COMPOSITE_ON) == edited
+
+
+def _retype_line_no(db: Path) -> None:
+    con = sqlite3.connect(db)
+    con.executescript(
+        "CREATE TABLE s2(id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id),"
+        " order_id INTEGER, line_no TEXT, shipped_qty INTEGER,"
+        " FOREIGN KEY(order_id, line_no) REFERENCES order_lines(order_id, line_no));"
+        "INSERT INTO s2 SELECT id, customer_id, order_id, CAST(line_no AS TEXT), shipped_qty FROM shipments;"
+        "DROP TABLE shipments; ALTER TABLE s2 RENAME TO shipments;")
+    con.commit()
+    con.close()
+
+
+@pytest.mark.parametrize("edited", [True, False], ids=["stale", "engine"])
+def test_a_retype_under_a_composite_join_demotes_only_the_engines_own(shop, shop_db, edited):
+    assert _introspect(shop).returncode == 0
+    path = next(shop["root"].glob("subject_areas/*/relationships.yaml"))
+    if edited:
+        assert _edit_join(shop, "relationship", "one_to_one", on=_COMPOSITE_ON).validated
+    before = _entry(path, on=_COMPOSITE_ON)
+    _retype_line_no(shop_db)
+    done = _introspect(shop, "--append")
+    assert done.returncode == 0, done.stdout + done.stderr
+    after = _entry(path, on=_COMPOSITE_ON)
+    if edited:     # a person's edit is theirs: still stale, its confidence as it was
+        assert after == before and after["review_state"] == "stale"
+    else:          # introspection's own join goes back to review, as on main
+        assert (after["confidence"], after["review_state"]) == ("proposed", "unreviewed")
+        assert "joins to review" in done.stdout
+
+
 # --- review fixes -----------------------------------------------------------------------------------
 
 

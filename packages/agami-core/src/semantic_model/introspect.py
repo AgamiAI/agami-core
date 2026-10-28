@@ -622,8 +622,7 @@ def _merge_split_joins(
         key = " AND ".join(f for f, _ in pairs)
         people = [p for p in covered if not _engine_approved(p)]
         if people:
-            why = ", ".join(sorted({f"signed off by {p.signed_off_by}" if p.signed_off_by
-                                    else "not approved by introspection" for p in people}))
+            why = ", ".join(sorted({_not_merged_reason(p) for p in people}))
             report.changes.setdefault(where, {}).setdefault(_UNMERGED_JOINS, []).append(
                 f"{c.from_table} → {c.to_table} ({key}): not changed: {why}")
             continue
@@ -633,6 +632,13 @@ def _merge_split_joins(
         dropped.update(id(p) for p in covered)
         kept.append(c)
     return dropped, kept
+
+
+def _not_merged_reason(p: Relationship) -> str:
+    # A stale join still carries the signer of the approval it lost, so say it was edited instead.
+    if p.review_state == "stale":
+        return "edited since its approval"
+    return f"signed off by {p.signed_off_by}" if p.signed_off_by else "not approved by introspection"
 
 
 def _without_joins(org: Datasource, dropped: set[int]) -> Datasource:

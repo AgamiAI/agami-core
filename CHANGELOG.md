@@ -33,8 +33,10 @@ below corresponds to one such version.
   SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it. This supersedes
   #559's re-stamp of a person's structural join edit as their approval (#511): the edited join goes
   stale instead, and a refresh still leaves it alone, since it re-labels only the joins introspection
-  approved itself; a refresh that lowers a stale join's confidence because a column's type changed
-  keeps it `stale`, and a stale `on:` join keeps its confidence.
+  approved itself, and never merges an edited split join into a database's composite foreign key
+  (`composite foreign key not applied: … edited since its approval`); a refresh that lowers a stale
+  join's confidence because a column's type changed keeps it `stale`, and a stale `on:` join keeps
+  its confidence.
 
 - **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
   On a large onboarding these `<table>_<column>_rate` metrics were 698 of the 706 it suggested and
