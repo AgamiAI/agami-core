@@ -12,7 +12,42 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
+  single-schema database of more than 24 tables used to get one area per table-name prefix, with
+  any name starting with a shorter one's prefix pulled in (`pro_x` with `products`) and names
+  singularised by dropping an "s" (`supplie`, `statu`). Tables are now grouped where they join each
+  other most densely (greedy modularity over the join graph), with no target number of areas, so a
+  hub table that half the database joins doesn't pull everything into one area; no group passes the
+  area size limit, and ties go to the tables sharing more words in their names and descriptions.
+  Tables with no joins go with tables sharing their whole first name word. Area names are the
+  tables' own words. Only new proposals change: an existing model is never regrouped.
+
+- **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
+  On a large onboarding these `<table>_<column>_rate` metrics were 698 of the 706 it suggested and
+  about half of all metrics in the models, while the business's own definitions named one. They are
+  now left out by default; the output carries one `flag_rates` summary instead (how many boolean
+  columns could have one, up to 20 of them by name, and how to ask). `--flag-rates
+  <table.column>[,...]` proposes the named ones (matched case-insensitively, `schema.table.column`
+  when the table name is in more than one schema; a name that matches no boolean column is reported
+  in `errors`, and one that matches more than one table is refused before anything is written, with
+  the matches listed), and `--flag-rates all` proposes one for every flag column
+  as before. `--cite "<document>"` records where a requested rate is defined: its description reads
+  `Defined in: <document>.`. Requested rates go through the same dry run, `--write`, `--names` and
+  `--profile` test run as every other proposal. Rate metrics already in a model are not changed; the
+  explorer's Review tab can reject them in bulk. The agami-connect skill requests a rate only when the
+  customer's definitions name it.
+
 ### Fixed
+
+- **`sm add` refuses a subject area the model doesn't list, and takes `--area _cross` (#513).**
+  The loader reads only the areas `datasource.yaml` lists, so a metric added under any other name
+  was reported applied and validated and then never served. The error now lists the model's areas.
+  `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
+  `_entities.yaml`), validated like any other add, and those items can be signed off through
+  `sm curate`. Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
+  never defined twice.
 
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
   query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
@@ -54,30 +89,6 @@ below corresponds to one such version.
   says so. The batch is validated and undone on failure (folders it created included), logged with
   both areas, and committed when the model is its own git repository. The model explorer has a
   **Move to area** control on every table that queues the op.
-
-### Changed
-
-- **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
-  single-schema database of more than 24 tables used to get one area per table-name prefix, with
-  any name starting with a shorter one's prefix pulled in (`pro_x` with `products`) and names
-  singularised by dropping an "s" (`supplie`, `statu`). Tables are now grouped where they join each
-  other most densely (greedy modularity over the join graph), with no target number of areas, so a
-  hub table that half the database joins doesn't pull everything into one area; no group passes the
-  area size limit, and ties go to the tables sharing more words in their names and descriptions.
-  Tables with no joins go with tables sharing their whole first name word. Area names are the
-  tables' own words. Only new proposals change: an existing model is never regrouped.
-
-### Fixed
-
-- **`sm add` refuses a subject area the model doesn't list, and takes `--area _cross` (#513).**
-  The loader reads only the areas `datasource.yaml` lists, so a metric added under any other name
-  was reported applied and validated and then never served. The error now lists the model's areas.
-  `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
-  `_entities.yaml`), validated like any other add, and those items can be signed off through
-  `sm curate`. Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
-  never defined twice.
-
-### Added
 
 - **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
   of a metric's formula ("gives no value when the start date is missing") went into its description
