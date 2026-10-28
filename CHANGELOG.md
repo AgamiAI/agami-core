@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
 - **Sensitive-column detection reads whole words, checks sampled values and looks inside JSON
   (#516).** A new build split column names into words, so `phoneme_error_rate`, `mobile_sessions`,
   `headphones_sold`, `adobe_campaign_id` and `ip_address` are no longer flagged (they stay in the
