@@ -143,6 +143,12 @@ relationships:
     signed_off_by: agami_introspect
     signed_off_role: system
     signed_off_at: "2026-06-09T00:00:00Z"
+  # A foreign key over several columns is ONE join, written as `on:` with every column pair.
+  # Joining on only some of them repeats rows, and the receipt flags that as a fan trap.
+  - from_table: shipments
+    to_table: order_lines
+    on: "shipments.order_id = order_lines.order_id AND shipments.line_no = order_lines.line_no"
+    relationship: many_to_one
 ```
 ```yaml
 # subject_areas/sales/metrics/total_revenue.yaml
@@ -163,7 +169,7 @@ The validator combines Pydantic structural validation (required fields, enums, r
 2. **FK type-compatibility** — a simple-FK join with mismatched column types caps `confidence` at `proposed` and suggests a `CAST` in `on:` (BigQuery `INT64 = STRING` class of bug).
 3. **Subject-area sizing** — warn at 25 tables, error at 30.
 4. **Deep-table column_groups** — tables ≥ 30 columns must declare `column_groups`; no column may be orphaned; `expose_column_groups` must reference declared groups; every `TableRef.table` resolves to a `tables_defined` entry (org-wide, for multi-membership).
-5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot, in the datasource's dialect (or the generic grammar); **caveats** non-empty; **choice_field** keys match the column type.
+5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot, in the datasource's dialect (or the generic grammar) (an `on:` naming a column its table doesn't define is a warning); **caveats** non-empty; **choice_field** keys match the column type.
 6. **Cross-area entity name-collision** → warning + a suggested cross-cutting unification. Two areas mapping the same table don't collide.
 7. **Entity mappings** — a mapping to a column the area's own table lacks is an error; a mapping to a table no area defines, or to a missing column on another area's table (cross-area entities included), is a warning.
 

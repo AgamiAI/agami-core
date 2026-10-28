@@ -276,9 +276,15 @@ def _drop_uses_of_unserved(org: Datasource, hidden: "_Hidden") -> None:
     def end_hidden(schema, table, column) -> bool:
         return hidden.table_hidden(schema, table) or hidden.column_hidden(schema, table, column)
 
+    from .runtime import join_column_pairs, model_dialect
+    sg = model_dialect(org)
+
     def join_ok(r) -> bool:
-        return not (end_hidden(r.from_schema, r.from_table, r.from_column)
-                    or end_hidden(r.to_schema, r.to_table, r.to_column))
+        # Every column the join is keyed on: one hidden column of a composite key hides the join,
+        # and so does a hidden key column of a join that also filters on a fixed value.
+        pairs = join_column_pairs(r, sg) or [(r.from_column, r.to_column)]
+        return not any(end_hidden(r.from_schema, r.from_table, fc) or end_hidden(r.to_schema, r.to_table, tc)
+                       for fc, tc in pairs)
 
     def metric_ok(met) -> bool:
         tables = list(met.source_tables or ([met.primary_table] if met.primary_table else []))

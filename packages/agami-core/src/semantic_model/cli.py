@@ -1521,12 +1521,13 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             tindex.setdefault(t.name.lower(), (t, sa.name))
+    from .runtime import join_column_pairs, model_dialect
+    sg = model_dialect(org)
     existing = set()
-    for sa in org.subject_areas:
-        for r in sa.relationships:
-            existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
-    for r in org.cross_subject_area_relationships:
-        existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+    # Every column a join is keyed on, a composite `on:` join's included (#510).
+    for r in [*(r for sa in org.subject_areas for r in sa.relationships), *org.cross_subject_area_relationships]:
+        for fc, _tc in join_column_pairs(r, sg) or []:
+            existing.add((r.from_table.lower(), fc.lower(), r.to_table.lower()))
 
     intra: dict = defaultdict(list)
     cross: list = []
