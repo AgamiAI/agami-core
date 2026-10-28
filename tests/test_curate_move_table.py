@@ -188,6 +188,20 @@ def test_a_move_to_a_new_area_creates_and_lists_it(tmp_path):
     assert _where(loader.load_datasource(root), "customers") == ["people"]
 
 
+def test_a_move_to_a_new_area_keeps_it_listed_when_an_inline_cross_join_is_rewritten(tmp_path):
+    # The inline cross-area join is rewritten after the new area is listed in the same file.
+    root = _model(tmp_path)
+    res = _move(root, "order_items", "lines")
+    assert res.validated and res.applied, res.as_dict()
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    assert "subject_areas/lines" in ds["subject_areas"]
+    assert [(r["from_subject_area"], r["to_subject_area"]) for r in ds["cross_subject_area_relationships"]] \
+        == [("lines", "catalog")]
+    org = loader.load_datasource(root)
+    assert V.validate(org).ok
+    assert _where(org, "order_items") == ["lines"]
+
+
 def test_a_new_area_name_must_be_a_plain_key(tmp_path):
     root = _model(tmp_path)
     res = _move(root, "customers", "Bad Name")

@@ -1141,7 +1141,7 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
                 plan["into_cross"].append({**out, "from_subject_area": fa, "to_subject_area": ta})
                 plan.setdefault("notes", []).append(f"join {label(r)} is now a cross-area join ({fa} -> {ta})")
         if len(keep) != len(rels):
-            plan["rewrite"].append((srel, doc, "relationships", keep))
+            plan["rewrite"].append((srel, "relationships", keep))
 
     for path, key in ((xfile, "edges"), (root / "datasource.yaml", "cross_subject_area_relationships")):
         if not path.exists():
@@ -1164,12 +1164,14 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
             else:
                 keep.append({**out, "from_subject_area": fa, "to_subject_area": ta})
         if changed:
-            plan["rewrite"].append((path, doc, key, keep))
+            plan["rewrite"].append((path, key, keep))
     return plan
 
 
 def _write_joins(root: Path, plan: dict, backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
-    for path, doc, key, keep in plan["rewrite"]:
+    for path, key, keep in plan["rewrite"]:
+        # Read again: a new area was listed in datasource.yaml after the plan read it.
+        doc = _load(path) or {}
         _snapshot(backups, path)
         _dump(path, {**doc, key: keep} if isinstance(doc, dict) else {key: keep})
     for area, rels in plan["into_area"].items():
