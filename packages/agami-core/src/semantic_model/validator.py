@@ -1517,19 +1517,16 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
     derived metrics and unparseable bindings) and a denormalized / not-yet-listed source table
     could produce a false positive — so it surfaces the suspicion without blocking the write."""
     from . import derived as D
-    cols_by_table: dict[str, set[str]] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            cols_by_table.setdefault(t.name.lower(), set()).update(c.name.lower() for c in t.columns)
+    defs = _table_defs(org)
     all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
     for sa in org.subject_areas:
         all_metrics.extend(sa.metrics)
     for met in all_metrics:
         if D.is_derived(met) or not met.source_tables:
             continue  # derived: columns live in the base; no source_tables: a different check
-        allowed: set[str] = set()
-        for tn in met.source_tables:
-            allowed |= cols_by_table.get(tn.lower(), set())
+        # By schema-aware identity, so `s.orders` resolves and `archive.orders` lends no columns.
+        allowed = {c.name.lower() for tn in met.source_tables for t in _tables_named(defs, tn)
+                   for c in t.columns}
         if not allowed:
             continue  # source tables aren't in the model (its own check) — don't double-flag
         for stype, sql in (met.bindings or {}).items():

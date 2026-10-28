@@ -31,6 +31,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`metric_binding_unknown_column` resolves schema-qualified source tables (#500).** The check
+  looked a metric's `source_tables` up by bare table name, so `s.orders` matched nothing and a typo'd
+  column in its binding was never reported, and `sales.orders` and `archive.orders` shared one column
+  set, so a column on the other schema's table hid a typo. A qualified source now finds that schema's
+  table (or a schema-less definition of the name), a bare one every table of that name, and a table
+  whose name embeds its schema (`name: public.orders`) is found either way. It stays a warning.
+
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
   query read a declared table and a CTE or derived table in the same `FROM`, an unqualified column was
   skipped, since the CTE might have supplied it. A column the model excludes was then returned:
