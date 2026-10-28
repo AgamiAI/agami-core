@@ -14,7 +14,7 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Collection, Optional
 
 import yaml
 
@@ -816,10 +816,26 @@ def _duration_pairs(ts_cols: list[Column]) -> list[tuple[Column, Column, str, li
     return out
 
 
-def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[dict]:
+def flag_columns(table: Table) -> list[Column]:
+    """The columns a share-of-true rate could be proposed on: boolean, or an integer named like a
+    flag (`is_*`/`has_*`/`*_flag`), not a key, and described (an `ai_unknown` one is skipped)."""
+    return [c for c in table.columns
+            if not c.primary_key and c.description_source != "ai_unknown"
+            and (c.type == "boolean" or (c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))))]
+
+
+def flag_rate_name(table: str, column: str) -> str:
+    return f"{table}_{column}_rate"
+
+
+def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
+                    flag_rates: bool | Collection[str] = False) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
-      • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
-        pattern — fraction true among the rows where the flag is set);
+      • a RATE for a boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
+        pattern — fraction true among the rows where the flag is set) — only when asked:
+        `flag_rates=True` for every flag column, or a collection of column names
+        (case-insensitive) for those. Proposed for every flag column they were most of the
+        suggested metrics on a large onboarding while the business defined one (#530);
       • an AVG DURATION for each start+end timestamp pair (the `avg_resolution_time` pattern —
         `AVG(end − start)` via the dialect's day-difference form for the columns' types), leaving
         out rows where the end is before the start. A start pairs only with an end of the same
@@ -852,25 +868,22 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10) -> list[d
     t = table.name
     st = dialect.name
     out: list[dict] = []
-    ts_cols: list[Column] = []
-    for c in table.columns:
-        if c.primary_key:
+    flags_here = flag_columns(table)
+    wanted = (None if flag_rates is True
+              else {n.lower() for n in flag_rates} if flag_rates else set())
+    for c in flags_here:
+        if wanted is not None and c.name.lower() not in wanted:
             continue
-        if c.description_source == "ai_unknown":  # opaque column → don't propose a metric on it
-            continue
-        is_bool = c.type == "boolean"
-        is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
-        if is_bool or is_int_flag:
-            row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=is_bool)
-            out.append({"name": f"{t}_{c.name}_rate",
-                        "calculation": f"Fraction of {t} where {c.name} is true, among the rows "
-                                       f"where {c.name} is set (rows where it is NULL are left out)",
-                        "bindings": {st: f"AVG({row})"},
-                        "source_tables": [t],
-                        "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
-            continue
-        if c.type in _TS_TYPES:
-            ts_cols.append(c)
+        row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=c.type == "boolean")
+        out.append({"name": flag_rate_name(t, c.name),
+                    "calculation": f"Fraction of {t} where {c.name} is true, among the rows "
+                                   f"where {c.name} is set (rows where it is NULL are left out)",
+                    "bindings": {st: f"AVG({row})"},
+                    "source_tables": [t],
+                    "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
+    ts_cols = [c for c in table.columns
+               if not c.primary_key and c.description_source != "ai_unknown"
+               and c.type in _TS_TYPES]
     pairs = _duration_pairs(ts_cols)
     for s, e, fam, flags in pairs:
         days = dialect.duration_days_expr(dialect.ident(s.name), dialect.ident(e.name),
@@ -907,6 +920,7 @@ __all__ = [
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
-    "suggest_metrics", "suspected_pii", "suspected_reason", "canonical_description",
+    "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "suspected_reason",
+    "canonical_description",
     "write_tree", "WriteReport",
 ]
