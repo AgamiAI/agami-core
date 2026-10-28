@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
 - **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
   `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
   tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
