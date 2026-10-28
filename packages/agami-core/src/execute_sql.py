@@ -2290,7 +2290,14 @@ def _connection_catalog(creds: dict) -> str | None:
     """The catalog (database / project) the credentials connect to, as a table reference's first
     part names it; None where the engine has none or the credentials leave it to a default."""
     db_type = str(creds.get("type", "")).lower()
-    if db_type in ("postgres", "supabase", "redshift", "snowflake", "sqlserver", "mssql"):
+    if db_type == "snowflake":
+        # The connector resolves the name as an identifier: upper-cased unless it is quoted, so
+        # `analytics` connects to ANALYTICS and a quoted `"ANALYTICS"` must name that.
+        db = str(creds.get("database") or "")
+        if len(db) > 1 and db.startswith('"') and db.endswith('"'):
+            return db[1:-1] or None
+        return db.upper() or None
+    if db_type in ("postgres", "supabase", "redshift", "sqlserver", "mssql"):
         return creds.get("database") or None
     if db_type == "bigquery":
         return creds.get("project") or None

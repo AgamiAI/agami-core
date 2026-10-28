@@ -603,7 +603,14 @@ def _table_sizes(tree: "exp.Expression", org: "Datasource",
 
 def _written(node: "exp.Table") -> str:
     """The table as the statement qualified it, without its alias: what a rewrite has to name."""
+    if _default_schema(node):
+        return f"{node.catalog}..{node.name}"
     return ".".join(p for p in (node.catalog, node.db, node.name) if p)
+
+
+def _default_schema(node: "exp.Table") -> bool:
+    """`db..table`: the database's default schema, which sqlglot keeps as an empty string."""
+    return isinstance(node.args.get("db"), str)
 
 
 def _rows_of(t: Any) -> int:
@@ -1634,7 +1641,8 @@ def _names_declared(tbl: "exp.Table", t: Table, dialect: "str | None") -> bool:
 def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
                    tbl: "exp.Table", decls: "dict[tuple, list[Table]] | None" = None,
                    dialect: "str | None" = None) -> "tuple[Optional[str], str] | str | None":
-    """The declared (schema, name) a physical reference reads, `"ambiguous"`, or None if undeclared.
+    """The declared (schema, name) a physical reference reads, `"ambiguous"`, `"default_schema"`,
+    or None if undeclared.
 
     Qualified: only a table declared with that schema — not one declared with no schema, since the
     model never said which schema that one lives in. Unqualified: the name must be declared under
@@ -1645,10 +1653,13 @@ def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
     (#337): `"Orders"` is not `orders` on Postgres, nor `Orders` on MySQL. A model's tables live in
     the connection's own database, so a catalog part is the connection's to judge, which
     `check_catalog_scope` does once credentials are known. A four-part name reads through a linked
-    server or another catalog's schema, and never names a declared table.
+    server or another catalog's schema, and never names a declared table. `db..table` reads the
+    default schema of the connecting user, which the guard cannot see: `"default_schema"`.
     """
     if isinstance(tbl.this, exp.Dot):
         return None
+    if _default_schema(tbl):
+        return "default_schema"
     name = _tkey(tbl.name)
     by_schema = sidx.get(name, {})
     if tbl.db:
@@ -1737,6 +1748,7 @@ def check_table_scope(sql: str, org: Datasource,
     cte_refs = _cte_references(tree)
     offending: set[str] = set()
     ambiguous: dict[str, str] = {}  # folded name -> the caller's first spelling, for the echo
+    defaulted: set[str] = set()
     for tbl in tree.find_all(exp.Table):
         name = tbl.name
         if not name or id(tbl) in cte_refs:
@@ -1748,7 +1760,9 @@ def check_table_scope(sql: str, org: Datasource,
             offending.add(_written(tbl))
         elif resolved == "ambiguous":
             ambiguous.setdefault(_tkey(name), name)
-    if not offending and not ambiguous:
+        elif resolved == "default_schema":
+            defaulted.add(_written(tbl))
+    if not offending and not ambiguous and not defaulted:
         return None
 
     # Echo-only by construction: static prose plus the table names the CALLER put in its own
@@ -1768,6 +1782,12 @@ def check_table_scope(sql: str, org: Datasource,
                        "schema, so which one is meant cannot be decided: "
                        + _echo_identifiers(sorted(ambiguous.values())) + ".")
         remediations.append("Qualify each of those tables with its schema (schema.table).")
+    if defaulted:
+        details.append("query leaves the schema empty (database..table), so which schema is read "
+                       "depends on the connecting user's default: "
+                       + _echo_identifiers(sorted(defaulted)) + ".")
+        remediations.append("Write the schema between the dots, or drop the database "
+                            "(schema.table).")
     return guardrail.refuse(
         guardrail.RULE_TABLE_SCOPE,
         detail=" ".join(details),

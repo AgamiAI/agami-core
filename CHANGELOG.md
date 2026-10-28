@@ -101,8 +101,11 @@ below corresponds to one such version.
       database or project is refused once the credentials say which one the connection is in. When
       the credentials don't name one, the qualifier is refused. On Databricks the connection is
       always in the workspace's default catalog, so a catalog prefix is refused there; write
-      `schema.table`.
+      `schema.table`. A Snowflake database in the credentials is compared as Snowflake reads it,
+      upper-cased unless quoted, so `database: analytics` accepts `"ANALYTICS".SALES.ORDERS`.
     - A four-part name (`server.database.schema.table`) never matches a declared table.
+    - `database..table` is refused, saying to write the schema: it reads the connecting user's
+      default schema, which on SQL Server can be `dbo.orders` beside a declared `sales.orders`.
     - On Postgres, Snowflake and Oracle, a quoted name has to be the declared spelling exactly, so
       `"Orders"` no longer passes for `orders`, nor `"ORDERS"` for a declared `orders` on Snowflake.
       Unquoted names still match without regard to case there. Where case alone tells two declared

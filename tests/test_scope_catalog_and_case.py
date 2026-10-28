@@ -148,6 +148,9 @@ def test_the_connections_own_catalog_passes(engine, sql, connection):
 
 @pytest.mark.parametrize("creds,expected", [
     ({"type": "snowflake", "database": "ANALYTICS"}, "ANALYTICS"),
+    # The connector upper-cases an unquoted name, as Snowflake does any identifier.
+    ({"type": "snowflake", "database": "analytics"}, "ANALYTICS"),
+    ({"type": "snowflake", "database": '"Analytics"'}, "Analytics"),
     ({"type": "postgres", "database": "shop"}, "shop"),
     ({"type": "sqlserver", "database": "shop"}, "shop"),
     ({"type": "bigquery", "project": "acme-project"}, "acme-project"),
@@ -176,6 +179,32 @@ def test_the_execution_path_refuses_another_catalog(monkeypatch):
     finally:
         execute_sql._guard_model.reset(token)
     assert execute_sql._foreign_catalog("SELECT id FROM other_db.sales.orders", creds) is None
+
+
+def test_a_lowercase_snowflake_database_in_the_credentials_is_its_uppercase_name():
+    """`database: analytics` connects to ANALYTICS, so the quoted spelling of that passes and a
+    quoted lowercase one, another database on Snowflake, is refused."""
+    org = _org("Snowflake", name="ORDERS", schema="SALES")
+    token = execute_sql._guard_model.set(org)
+    try:
+        creds = {"type": "snowflake", "database": "analytics"}
+        for sql in ('SELECT id FROM "ANALYTICS"."SALES"."ORDERS"', "SELECT id FROM analytics.sales.orders"):
+            assert execute_sql._foreign_catalog(sql, creds) is None
+        assert execute_sql._foreign_catalog('SELECT id FROM "analytics"."SALES"."ORDERS"', creds)
+    finally:
+        execute_sql._guard_model.reset(token)
+
+
+@pytest.mark.parametrize("engine", ["PostgreSQL", "Snowflake", "Oracle", "MySQL", "SQLServer",
+                                    "DuckDB", "BigQuery", "Trino"])
+def test_an_empty_schema_is_refused_with_its_repair(engine):
+    """`db..orders` reads the connecting user's default schema, which need not be the declared one:
+    on SQL Server it is `dbo.orders` beside a declared `sales.orders`."""
+    res = _table_scope("SELECT id FROM analytics..orders", _org(engine))
+    assert res is not None and res.rule == guardrail.RULE_TABLE_SCOPE
+    assert "analytics..orders" in res.detail and "schema.table" in res.remediation
+    assert rt.check_column_scope("SELECT id FROM analytics..orders", _org(engine)) is None
+    assert rt.check_catalog_scope("SELECT id FROM analytics..orders", _org(engine), "analytics") is None
 
 
 def test_an_older_runtime_without_the_check_skips_it(monkeypatch):
