@@ -518,9 +518,11 @@ class BatchError(ValueError):
     would let the batch report success with that change missing, so apply() refuses the batch (#538)."""
 
 
-_VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move"}
+_VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move", "add"}
 # exclude == reject; include == set unreviewed + clear sign-off (model-explorer verbs)
 # move == {op:move, kind:table, name, area, to_area}: the table changes owning area (see _move_table)
+# add == {op:add, kind:relationship, from_table, to_table, from_column + to_column | on, relationship}:
+#        a new join, written unreviewed where its two tables' areas say (see _add_join)
 
 # The `area` that names the datasource-level lists (cross_subject_area_metrics / _entities) rather
 # than a subject area. Introspection never names an area like this (`build._area_key` strips "_").
@@ -542,7 +544,11 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             if op.get("op") == "move" and not op.get("area"):
                 # Resolved now, so the log records the area the table left as well as the one it joined.
                 op = {**op, "area": _resolve_area(root, op)}
-            _, before = _apply_one(root, op, signer, role, backups, res.notes)
+            if op.get("op") == "add" and not op.get("name"):
+                op = {**op, "name": f"{op.get('from_table') or '?'}->{op.get('to_table') or '?'}"}
+            path, before = _apply_one(root, op, signer, role, backups, res.notes)
+            if op.get("op") == "add" and path.name == "relationships.yaml":
+                op = {**op, "area": path.parent.name}   # where the join landed, for the label and the log
             res.applied.append(_op_label(op))
             logged.append({**op, "before": before})
         except BatchError as e:
@@ -651,6 +657,11 @@ def _apply_one(root: Path, op: dict, signer, role,
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
         return _move_table(root, op, area, backups, notes if notes is not None else []), None
+
+    if action == "add":
+        if kind != "relationship":
+            raise ValueError("add applies to joins only (kind: relationship); add metrics with `sm add`")
+        return _add_join(root, op, backups), None
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -1143,6 +1154,85 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
             plan["rewrite"].append((path, key, keep))
     plan["final"] = _land_joins(root, plan)
     return plan
+
+
+# The fields an `add` op may give its join; a sign-off is never one of them.
+_ADD_JOIN_FIELDS = ("from_table", "from_column", "to_table", "to_column", "from_schema", "to_schema",
+                    "on", "join_type", "relationship", "description")
+
+
+def _table_columns(root: Path, area: str, ref: tuple[str, str]) -> dict[str, str]:
+    """The columns of the table `ref` in `area`'s tables/ folder, lowercased -> as written."""
+    from .models import table_key
+
+    for tf in sorted((_area_dir(root, area) / "tables").glob("*.yaml")):
+        doc = _load(tf) or {}
+        if _same_table(ref, table_key(str(doc.get("name") or tf.stem), doc.get("schema"))):
+            return {str(c.get("name")).lower(): str(c.get("name"))
+                    for c in doc.get("columns") or [] if isinstance(c, dict) and c.get("name")}
+    return {}
+
+
+def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Path:
+    """Write the join an `add` op describes, unreviewed (#512). Its two tables' areas decide where:
+    that area's relationships.yaml when they share one, else the cross-area joins. A table or column
+    the model doesn't have fails the batch; the same join already in the model is skipped."""
+    from .models import table_key
+
+    entry = {k: op[k] for k in _ADD_JOIN_FIELDS if op.get(k) not in (None, "")}
+    entry.update(confidence="proposed", review_state="unreviewed")
+    try:
+        Relationship(**entry)
+    except Exception as e:
+        raise BatchError(f"not a valid join: {e}") from e
+    owners = _owners(root)
+    ends = {}
+    on_cols = {"from": [], "to": []}
+    if entry.get("on"):
+        from .runtime import join_column_pairs
+        for f, t in join_column_pairs(Relationship(**entry)) or []:
+            on_cols["from"].append(f)
+            on_cols["to"].append(t)
+    for side in ("from", "to"):
+        ref = table_key(entry[f"{side}_table"], entry.get(f"{side}_schema"))
+        hits = sorted({k for k in owners if _same_table(ref, k)})
+        if len(hits) != 1:
+            raise BatchError(
+                f"no table {entry[f'{side}_table']!r} in the model" if not hits else
+                f"table {entry[f'{side}_table']!r} is in {len(hits)} schemas; give {side}_schema")
+        ends[side] = (hits[0], owners[hits[0]])
+        cols = _table_columns(root, owners[hits[0]], hits[0])
+        col = entry.get(f"{side}_column")
+        for c in [col] if col else on_cols[side]:
+            if c.lower() not in cols:
+                raise BatchError(f"table {entry[f'{side}_table']!r} has no column {c!r}")
+        if col:
+            entry[f"{side}_column"] = cols[col.lower()]
+        if hits[0][0] and not entry.get(f"{side}_schema"):
+            entry[f"{side}_schema"] = _area_tables(root)[1].get(hits[0], hits[0][0])
+    for path, key in [*((_area_dir(root, a) / "relationships.yaml", "relationships") for a in _listed_areas(root)),
+                      (root / "cross_subject_area_relationships.yaml", "edges"),
+                      (root / "datasource.yaml", "cross_subject_area_relationships")]:
+        if path.exists() and any(isinstance(r, dict) and _same_join_entry(r, entry)
+                                 for r in _entries(_load(path) or {}, key)):
+            raise ValueError(f"join {_rel_label(entry)} is already in the model ({path.name}); skipped")
+    fa, ta = ends["from"][1], ends["to"][1]
+    if fa == ta:
+        path, key = _area_dir(root, fa) / "relationships.yaml", "relationships"
+    else:
+        entry.update(from_subject_area=fa, to_subject_area=ta)
+        CrossSubjectAreaRelationship(**entry)
+        path, key = root / "cross_subject_area_relationships.yaml", "edges"
+    _snapshot(backups, path)
+    _append_entries(path, key, [entry])
+    return path
+
+
+def _append_entries(path: Path, key: str, entries: list[dict]) -> None:
+    """Append join entries to a relationships file's list, keeping whatever else the file holds."""
+    doc = _load(path) if path.exists() else None
+    lst = _entries(doc, key) if doc is not None else []
+    _dump(path, {**(doc if isinstance(doc, dict) else {}), key: [*lst, *entries]})
 
 
 def _same_join_entry(a: dict, b: dict) -> bool:
@@ -1663,32 +1753,30 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
                 continue
             path = _area_dir(root, area) / "relationships.yaml"
             backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-            doc = _load(path) if path.exists() else None
-            lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
+            good = []
             for r in rels:
                 try:
                     Relationship(**r)
                 except Exception as e:
                     res.skipped.append({"item": _rel_label(r), "reason": str(e)})
                     continue
-                lst.append(r)
+                good.append(r)
                 res.applied.append(f"rel {area}/{_rel_label(r)}")
-            _dump(path, {"relationships": lst})
+            _append_entries(path, "relationships", good)
 
         if cross:
             path = root / "cross_subject_area_relationships.yaml"
             backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-            doc = _load(path) if path.exists() else None
-            edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
+            good = []
             for r in cross:
                 try:
                     CrossSubjectAreaRelationship(**r)
                 except Exception as e:
                     res.skipped.append({"item": _rel_label(r), "reason": str(e)})
                     continue
-                edges.append(r)
+                good.append(r)
                 res.applied.append(f"xrel {_rel_label(r)}")
-            _dump(path, {"edges": edges})
+            _append_entries(path, "edges", good)
     except Exception as e:
         _restore(backups)
         res.applied = []

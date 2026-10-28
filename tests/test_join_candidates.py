@@ -1,0 +1,218 @@
+"""Introspection reports the joins it tested on the data but didn't write (#512).
+
+A column no join covers is tested against every other table's one-column key when its name or its
+type matches, with a bounded match-rate probe. What the data bears out is listed in the report and in
+`.introspect/join_candidates.json` as a ready `add` op; nothing is written to the model. Synthetic,
+generic names only.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pydantic")
+pytest.importorskip("sqlglot")
+yaml = pytest.importorskip("yaml")
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
+if str(PKG_SRC) not in sys.path:
+    sys.path.insert(0, str(PKG_SRC))
+
+from semantic_model import cli, curate  # noqa: E402
+from semantic_model import introspect as I  # noqa: E402
+
+# orders.cust_ref holds customers' ids with no foreign key; orders.product_code mostly misses
+# products.sku; orders.dealer_id names `dealers` but none of its values are there (sparse data).
+_SCHEMA = (
+    "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
+    "CREATE TABLE products(sku TEXT PRIMARY KEY, label TEXT);"
+    "CREATE TABLE dealers(id INTEGER PRIMARY KEY, name TEXT);"
+    "CREATE TABLE orders(id INTEGER PRIMARY KEY, cust_ref INTEGER, product_code TEXT, dealer_id INTEGER,"
+    " amount REAL);"
+    "INSERT INTO customers VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+    "INSERT INTO products VALUES ('p1', 'x'), ('p2', 'y');"
+    "INSERT INTO dealers VALUES (100, 'd');"
+    "INSERT INTO orders VALUES (1, 1, 'zz', NULL, 2.0), (2, 2, 'qq', NULL, 3.0), (3, 3, 'p1', NULL, 1.0),"
+    " (4, 1, 'yy', NULL, 5.0);"
+)
+_FK_SCHEMA = (
+    "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
+    "CREATE TABLE stores(id INTEGER PRIMARY KEY, city TEXT);"
+    "CREATE TABLE orders(id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id),"
+    " store_ref INTEGER);"
+    "INSERT INTO customers VALUES (1, 'a'), (2, 'b');"
+    "INSERT INTO stores VALUES (7, 'x'), (8, 'y');"
+    "INSERT INTO orders VALUES (1, 1, 7), (2, 2, 8);"
+)
+_CUST_REF = "main.orders.cust_ref->main.customers.id"
+
+
+def _db(tmp_path: Path, schema: str) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    db = tmp_path / "shop.db"
+    con = sqlite3.connect(db)
+    con.executescript(schema)
+    con.commit()
+    con.close()
+    return db
+
+
+def _runner(db: Path, seen: list[str] | None = None):
+    def run(sql: str) -> list[dict]:
+        if seen is not None:
+            seen.append(sql)
+        con = sqlite3.connect(db)
+        try:
+            cur = con.execute(sql)
+            names = [d[0] for d in cur.description or []]
+            return [dict(zip(names, row)) for row in cur.fetchall()]
+        finally:
+            con.close()
+    return run
+
+
+def _build(tmp_path: Path, schema: str = _SCHEMA, **kw):
+    db = _db(tmp_path, schema) if not (tmp_path / "shop.db").exists() else tmp_path / "shop.db"
+    out = tmp_path / "demo"
+    org, report = I.introspect("demo", "sqlite", runner=_runner(db, kw.pop("seen", None)),
+                               artifacts_dir=tmp_path, out_dir=out, **kw)
+    return org, report, out
+
+
+def _joins(org) -> set[tuple]:
+    return {(r.from_table, r.from_column, r.to_table, r.to_column)
+            for sa in org.subject_areas for r in sa.relationships} | {
+        (r.from_table, r.from_column, r.to_table, r.to_column) for r in org.cross_subject_area_relationships}
+
+
+def _candidates(out: Path) -> dict:
+    return json.loads((out / ".introspect" / "join_candidates.json").read_text())
+
+
+def test_an_undeclared_matching_column_is_a_candidate_and_is_not_written(tmp_path):
+    org, report, out = _build(tmp_path)
+    assert ("orders", "cust_ref", "customers", "id") not in _joins(org)
+    doc = _candidates(out)
+    [cand] = [c for c in doc["candidates"] if c["id"] == _CUST_REF]
+    assert cand["op"] == {"op": "add", "kind": "relationship", "from_table": "orders", "from_column": "cust_ref",
+                          "to_table": "customers", "to_column": "id", "relationship": "many_to_one",
+                          "from_schema": "main", "to_schema": "main",
+                          "description": "found by introspection: " + cand["evidence"]["summary"]}
+    assert cand["evidence"]["found_by"] == "type"
+    assert (cand["evidence"]["matched"], cand["evidence"]["sampled"], cand["evidence"]["match_rate"]) == (3, 3, 1.0)
+    text = report.render()
+    assert "## join candidates" in text
+    assert f"+ {_CUST_REF}: 100.0% of sampled orders.cust_ref values found in customers.id" in text
+    assert "--candidate <id>" in text and str(out) in doc["how_to_accept"]
+
+
+def test_a_low_overlap_pair_is_reported_as_rejected_not_offered(tmp_path):
+    _, report, out = _build(tmp_path)
+    doc = _candidates(out)
+    low = {c["id"]: c for c in doc["low_overlap"]}
+    rejected = "main.orders.product_code->main.products.sku"
+    assert rejected in low and rejected not in {c["id"] for c in doc["candidates"]}
+    assert low[rejected]["evidence"]["match_rate"] == 0.25
+    assert f"- {rejected} (low overlap, not offered): 25.0%" in report.render()
+
+
+def test_the_name_guessed_join_is_written_as_before_and_not_listed(tmp_path):
+    # 4A: `dealer_id` beside `dealers` is still written unreviewed on the name alone.
+    org, _, out = _build(tmp_path)
+    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_column == "dealer_id"]
+    assert (r.to_table, r.review_state, r.confidence) == ("dealers", "unreviewed", "inferred")
+    doc = _candidates(out)
+    assert not any("dealer_id" in c["id"] for c in doc["candidates"] + doc["low_overlap"])
+
+
+def test_the_scan_leaves_the_written_model_as_it_was(tmp_path, monkeypatch):
+    _build(tmp_path / "a")
+    monkeypatch.setattr(I, "_scan_join_candidates", lambda *a, **k: None)
+    _build(tmp_path / "b")
+
+    def files(root: Path) -> dict:
+        return {p.relative_to(root): p.read_text() for p in sorted(root.rglob("*.yaml"))
+                if ".introspect" not in p.parts and ".snapshots" not in p.parts}
+    a, b = files(tmp_path / "a" / "demo"), files(tmp_path / "b" / "demo")
+    assert a.keys() == b.keys()
+    stamp = ("signed_off_at", "generated_at", "introspected_at", "org_id")   # time- or randomly-set
+    strip = lambda t: "\n".join(ln for ln in t.splitlines() if not ln.strip().startswith(stamp))  # noqa: E731
+    assert {k: strip(v) for k, v in a.items()} == {k: strip(v) for k, v in b.items()}
+
+
+def test_candidates_are_found_beside_declared_foreign_keys(tmp_path):
+    org, report, out = _build(tmp_path, _FK_SCHEMA)
+    assert report.mode_per_capability["relationships"] == "catalog"
+    assert ("orders", "customer_id", "customers", "id") in _joins(org)
+    ids = {c["id"] for c in _candidates(out)["candidates"]}
+    assert "main.orders.store_ref->main.stores.id" in ids
+    assert not any("customer_id" in i for i in ids)   # the declared FK covers it
+
+
+def test_the_probe_cap_stops_the_scan_and_says_so(tmp_path, monkeypatch):
+    monkeypatch.setattr(I, "JOIN_CANDIDATE_PROBE_CAP", 1)
+    _, report, out = _build(tmp_path)
+    doc = _candidates(out)
+    assert doc["cap_hit"] is True and doc["probes"] == 1
+    assert report.join_candidate_cap_hit
+    assert "stopped after 1 probes" in report.render()
+
+
+def test_the_probes_are_bounded_reads(tmp_path):
+    seen: list[str] = []
+    _build(tmp_path, seen=seen)
+    probes = [s for s in seen if "AS sampled" in s]
+    assert probes
+    assert all(s.lstrip().upper().startswith("SELECT") and f"LIMIT {I._CANDIDATE_SAMPLE}" in s for s in probes)
+
+
+def test_a_dry_run_writes_no_candidates_file(tmp_path):
+    _, report, out = _build(tmp_path, dry_run=True)
+    assert report.join_candidates
+    assert not (out / ".introspect" / "join_candidates.json").exists()
+
+
+def test_accepting_a_candidate_takes_one_curate_call_and_a_refresh_stops_listing_it(tmp_path, capsys):
+    _, _, out = _build(tmp_path)
+    path = out / ".introspect" / "join_candidates.json"
+    assert cli.main(["curate", str(out), "--ops-file", str(path), "--candidate", _CUST_REF]) == 0
+    res = json.loads(capsys.readouterr().out)
+    assert res["applied"] and res["validated"]
+    rel = yaml.safe_load((out / "subject_areas" / "demo" / "relationships.yaml").read_text())["relationships"]
+    [added] = [r for r in rel if r.get("from_column") == "cust_ref"]
+    assert added["review_state"] == "unreviewed"
+    assert curate.history(out)[0]["op"] == "add"
+
+    # the refresh keeps it and tests that column no more
+    _build(tmp_path, append=True)
+    assert _CUST_REF not in {c["id"] for c in _candidates(out)["candidates"]}
+
+
+def test_a_candidates_file_needs_a_named_candidate(tmp_path, capsys):
+    _, _, out = _build(tmp_path)
+    path = out / ".introspect" / "join_candidates.json"
+    with pytest.raises(SystemExit):
+        cli.main(["curate", str(out), "--ops-file", str(path)])
+    assert _CUST_REF in json.loads(capsys.readouterr().out)["candidates"]
+    with pytest.raises(SystemExit):
+        cli.main(["curate", str(out), "--ops-file", str(path), "--candidate", "nope"])
+
+
+def test_a_pair_is_offered_once_and_a_small_number_is_not_taken_for_a_reference(tmp_path):
+    schema = (
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, owner_email TEXT UNIQUE, age INTEGER);"
+        "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT UNIQUE);"
+        "INSERT INTO accounts VALUES (1, 'a@example.com', 2), (2, 'b@example.com', 1);"
+        "INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com');"
+    )
+    _, _, out = _build(tmp_path, schema)
+    doc = _candidates(out)
+    ids = [c["id"] for c in doc["candidates"]]
+    assert ids == ["main.accounts.owner_email->main.users.email"]   # not also users.email->accounts
+    assert not any(".age->" in c["id"] for c in doc["candidates"] + doc["low_overlap"])

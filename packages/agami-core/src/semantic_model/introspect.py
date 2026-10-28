@@ -122,6 +122,19 @@ _OVERLAP_PROBE_MAX_ROWS = 3_000_000
 # COUNT(DISTINCT) each), on the same budget as the declared-FK overlap confirmation.
 _UNIQUE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
 _DATA_UNIQUE_NOTE = "no constraint declares it — looks one-to-one, confirm"
+# The wider join-candidate scan (#512): one match-rate probe per column/key pair, at most this many
+# per run, each over a bounded sample of the column's distinct values. Its candidates are only
+# reported, never written to the model.
+JOIN_CANDIDATE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
+_CANDIDATE_SAMPLE = 1000
+# A candidate whose sampled values are found in the key at this rate or above is offered as a join.
+_CANDIDATE_MIN_MATCH = 0.95
+_KEY_TYPES = frozenset({"integer", "string", "uuid"})
+# Names of numbers that aren't references: a small `age` or `year` falls inside any id range.
+_NOT_A_REFERENCE_RE = re.compile(
+    r"(^|_)(age|year|yr|month|day|week|hour|minute|qty|quantity|count|cnt|amount|total|price|score|rank|"
+    r"level|size|duration|version|position|sort|seq)s?($|_)", re.IGNORECASE)
+JOIN_CANDIDATES_FILE = "join_candidates.json"
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -155,6 +168,11 @@ class IntrospectReport:
     # a warehouse that is often load timestamps nobody asks a question about.
     large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
+    # Joins tested on the data but not written (#512): each an `add` op plus its evidence.
+    join_candidates: list[dict] = field(default_factory=list)
+    join_candidates_low: list[dict] = field(default_factory=list)
+    join_candidate_probes: int = 0
+    join_candidate_cap_hit: bool = False
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
     files_unchanged: int = 0
@@ -177,12 +195,26 @@ class IntrospectReport:
             *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
+            *self._render_join_candidates(),
             "## notes",
             *[f"  - {n}" for n in self.notes],
             f"## files ({len(self.files_written)} written, {self.files_unchanged} already up to date)",
             *[f"  {f}" for f in self.files_written[:60]],
         ]
         return "\n".join(lines)
+
+    def _render_join_candidates(self) -> list[str]:
+        if not (self.join_candidates or self.join_candidates_low or self.join_candidate_cap_hit):
+            return []
+        out = [f"## join candidates (tested on the data, not written; {self.join_candidate_probes} probe(s))"]
+        out += [f"  + {c['id']}: {c['evidence']['summary']}" for c in self.join_candidates]
+        out += [f"  - {c['id']} (low overlap, not offered): {c['evidence']['summary']}"
+                for c in self.join_candidates_low]
+        if self.join_candidates:
+            out.append(f"  accept one: {_accept_command(self.out_dir)}")
+        if self.join_candidate_cap_hit:
+            out.append(f"  stopped after {JOIN_CANDIDATE_PROBE_CAP} probes: columns past the cap were not tested")
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +484,8 @@ def introspect(
     _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
     if prev_rels:
         rels = list(prev_rels) + rels
+    _progress(pp, "join candidates: testing columns no join covers…")
+    _scan_join_candidates(dialect, runner, rels, built, report, sg)
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -519,6 +553,8 @@ def introspect(
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
     report.files_unchanged = len(wr.files_unchanged)
+    if not dry_run:
+        write_join_candidates(out, report)
     return org, report
 
 
@@ -1956,6 +1992,185 @@ def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str]
         return int(float(res[0].get("matched", 0))) > 0
     except (ValueError, TypeError):
         return False
+
+
+def overlap_rate_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
+                     sample: int = _CANDIDATE_SAMPLE) -> str:
+    """How many of a bounded sample of `ft.fc`'s distinct values are found in `tt.tc`, beside the
+    sample's size: `overlap_sql` with the denominator a match rate needs. Read-only and bounded."""
+    fq_from = dialect.qualified(ft.schema_name, ft.name)
+    fq_to = dialect.qualified(tt.schema_name, tt.name)
+    col_f, col_t = dialect.quote_ident(fc), dialect.quote_ident(tc)
+    picked = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", sample)
+    return (f"SELECT (SELECT COUNT(*) FROM ({picked}) s) AS sampled, COUNT(*) AS matched FROM ({picked}) src "
+            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)")
+
+
+def _overlap_rate(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table,
+                  tc: str) -> Optional[tuple[int, int]]:
+    """(matched, sampled), or None when the probe fails or returns nothing readable."""
+    res = _try(runner, overlap_rate_sql(dialect, ft, fc, tt, tc))
+    if not res:
+        return None
+    try:
+        return int(float(res[0].get("matched") or 0)), int(float(res[0].get("sampled") or 0))
+    except (ValueError, TypeError):
+        return None
+
+
+def _single_keys(t: Table) -> list[str]:
+    """The columns that are a key of `t` on their own: a one-column grain, then one-column unique keys."""
+    keys = [t.grain[0]] if len(t.grain) == 1 else []
+    return keys + [k[0] for k in t.unique_keys if len(k) == 1 and k[0] not in keys]
+
+
+def _name_related(col: str, target: Table, key: str) -> bool:
+    """The column is named for the key: the same name (other than a bare `id`), or `<stem>_id` with a
+    stem the target table is named after, as the name-matched probe reads it."""
+    c, k, tn = col.lower(), key.lower(), target.name.lower()
+    if c == k and k != "id":
+        return True
+    stem = c[:-3] if c.endswith("_id") else None
+    return bool(stem) and (stem in tn or tn in stem or tn.rstrip("s") == stem.rstrip("s"))
+
+
+def _name_hint(col: str, target: Table) -> bool:
+    """The column's first word starts the target's name (`cust_ref`, `customers`): probed earlier."""
+    word = col.lower().split("_")[0]
+    return len(word) >= 3 and target.name.lower().startswith(word)
+
+
+def _candidate_pairs(rels: list[Relationship], tables: list[Table],
+                     dialect: Optional[str]) -> list[tuple[int, Table, Column, Table, str]]:
+    """Every (priority, table, column, target, key) the wider scan tests: a column no join reads from,
+    against another table's one-column key, when the name matches the key's or the type does.
+    Name matches first, so the cap is spent on the likeliest pairs."""
+    covered = {(r.from_schema, bare_name(r.from_table).lower(), fc.lower())
+               for r in rels for fc, _tc in _column_pairs(r, dialect) or []}
+    keys = [(u, k, next((c for c in u.columns if c.name == k), None))
+            for u in tables if u.review_state != "rejected" for k in _single_keys(u)]
+    out = []
+    for t in tables:
+        if t.review_state == "rejected":
+            continue
+        for c in t.columns:
+            if (c.primary_key or c.review_state == "rejected" or c.type not in _KEY_TYPES
+                    or {(t.schema_name, t.name.lower(), c.name.lower()),
+                        (None, t.name.lower(), c.name.lower())} & covered):
+                continue
+            # A measure, a date or a coded list matches any key of its type by chance.
+            measure = (c.aggregation in ("additive", "averageable") or c.date_format or c.choice_field
+                       or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
+            for u, k, kc in keys:
+                if u is t or kc is None or kc.type not in _KEY_TYPES:
+                    continue
+                if _name_related(c.name, u, k):
+                    prio = 0
+                elif kc.type == c.type and not measure:
+                    prio = 1 if _name_hint(c.name, u) else 2
+                else:
+                    continue
+                out.append((prio, t, c, u, k))
+    out.sort(key=lambda p: (p[0], p[1].schema_name or "", p[1].name, p[2].name, p[3].schema_name or "",
+                            p[3].name, p[4]))
+    return out
+
+
+def _qualified_column(t: Table, column: str) -> str:
+    return f"{t.schema_name}.{t.name}.{column}" if t.schema_name else f"{t.name}.{column}"
+
+
+def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, int]],
+               found_by: str) -> dict:
+    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence."""
+    if hit is None:
+        summary = "the probe could not compare the two columns"
+    else:
+        matched, sampled = hit
+        rate = matched / sampled if sampled else 0.0
+        summary = (f"{rate:.1%} of sampled {t.name}.{c.name} values found in {u.name}.{k} "
+                   f"({matched} of {sampled} distinct values)")
+    op = {"op": "add", "kind": "relationship", "from_table": t.name, "from_column": c.name,
+          "to_table": u.name, "to_column": k,
+          "relationship": build.infer_cardinality(t, u, [c.name], [k])}
+    if t.schema_name:
+        op["from_schema"] = t.schema_name
+    if u.schema_name:
+        op["to_schema"] = u.schema_name
+    op["description"] = f"found by introspection: {summary}"
+    evidence = {"found_by": found_by, "summary": summary}
+    if hit is not None:
+        evidence.update(matched=hit[0], sampled=hit[1],
+                        match_rate=round(hit[0] / hit[1], 4) if hit[1] else 0.0)
+    return {"id": f"{_qualified_column(t, c.name)}->{_qualified_column(u, k)}", "op": op,
+            "evidence": evidence}
+
+
+def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relationship],
+                          tables: list[Table], report: IntrospectReport,
+                          sqlglot_dialect: Optional[str] = None) -> None:
+    """Test columns no join covers against other tables' keys and report what the data bears out (#512).
+
+    Nothing is written to the model: a candidate is listed in the report and join_candidates.json for
+    a person to accept with one `sm curate` call. Every probe is a bounded, read-only sample, at most
+    JOIN_CANDIDATE_PROBE_CAP per run, and a FROM table too large to scan is skipped."""
+    # Its own count beside the uniqueness probes' `_ProbeBudget`, so neither cap eats into the other.
+    left = JOIN_CANDIDATE_PROBE_CAP
+    found: set[tuple] = set()   # columns already offered: one join per column is enough to review
+    offered: set[tuple] = set()   # (from, to) column pairs, so a pair isn't offered again reversed
+    too_big: set[str] = set()
+    for prio, t, c, u, k in _candidate_pairs(rels, tables, sqlglot_dialect):
+        col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
+        if col in found or (key, col) in offered:
+            continue
+        if _too_big_to_probe(t):
+            too_big.add(_qualified(t))
+            continue
+        if left <= 0:
+            report.join_candidate_cap_hit = True
+            report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
+                                "columns past the cap were not tested")
+            break
+        left -= 1
+        report.join_candidate_probes += 1
+        hit = _overlap_rate(dialect, runner, t, c.name, u, k)
+        cand = _candidate(t, c, u, k, hit, "name" if prio == 0 else "type")
+        if hit is not None and hit[1] and hit[0] / hit[1] >= _CANDIDATE_MIN_MATCH:
+            found.add(col)
+            offered.add((col, key))
+            report.join_candidates.append(cand)
+        elif prio == 0 or (hit is not None and hit[0]):
+            # A type-only pair with no value in common is noise, not a near miss.
+            report.join_candidates_low.append(cand)
+    if too_big:
+        report.notes.append(f"join candidates: skipped {len(too_big)} table(s) over "
+                            f"{_OVERLAP_PROBE_MAX_ROWS:,} rows: {', '.join(sorted(too_big)[:8])}")
+
+
+def _accept_command(out: str) -> str:
+    return f"sm curate {out} --ops-file {Path(out) / '.introspect' / JOIN_CANDIDATES_FILE} --candidate <id>"
+
+
+def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]:
+    """Write the run's join candidates to `<model>/.introspect/join_candidates.json`, replacing the last
+    run's so the file never lists a join this run didn't test. Best-effort, like the progress log."""
+    import json
+
+    path = out / ".introspect" / JOIN_CANDIDATES_FILE
+    doc = {
+        "how_to_accept": _accept_command(str(out)),
+        "probes": report.join_candidate_probes,
+        "probe_cap": JOIN_CANDIDATE_PROBE_CAP,
+        "cap_hit": report.join_candidate_cap_hit,
+        "candidates": report.join_candidates,
+        "low_overlap": report.join_candidates_low,
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return path
 
 
 # ---------------------------------------------------------------------------
