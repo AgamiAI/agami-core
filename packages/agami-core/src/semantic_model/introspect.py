@@ -696,6 +696,13 @@ def _personal_column(c: Column) -> bool:
     return c.sensitive or bool(_VALUE_SUSPECT_CAVEATS & set(c.caveats))
 
 
+def _personal_list(c: Column) -> bool:
+    """`c`'s list keys are personal values themselves. Checked on the list, not only the sample:
+    a declared list of digit-only phone numbers survives an empty or unreadable sample."""
+    keys = list(c.choice_field or {})
+    return any(pii.personal_value(v) for v in keys) or pii.value_suspect_caveat(c.name, c.type, keys) is not None
+
+
 def _clear_choice(c: Column) -> None:
     """Drop `c`'s value list and the caveats `_set_choice` wrote from it, which quote its values."""
     values = list(c.choice_field or {})
@@ -1050,7 +1057,7 @@ def _build_table(
                         skip=declared.rejected, nocase=declared.nocase, report=report,
                         sample=probe_sample if mode == "probe" else None)
     for c in cols:
-        if c.choice_field and (_personal_column(c) or any(pii.personal_value(v) for v in c.choice_field)):
+        if c.choice_field and (_personal_column(c) or _personal_list(c)):
             _clear_choice(c)  # its keys would be personal values written into the model
 
     column_groups = build.maybe_column_groups(cols)

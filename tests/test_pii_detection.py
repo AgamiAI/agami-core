@@ -455,3 +455,37 @@ def test_introspect_tz_midnight_dob_and_camel_case_id(tmp_path):
     assert pii.DOB_SUSPECT_CAVEAT in t.get_column("bornOn").caveats
     assert pii.PHONE_SUSPECT_CAVEAT not in t.get_column("customerId").caveats
     assert "events.customerId (values look like phone numbers)" not in rep.suspected_columns
+
+
+def _no_sample(kind):
+    def sample(sql):
+        if kind == "fail":
+            raise RuntimeError("permission denied")
+        return []
+    return sample
+
+
+@pytest.mark.parametrize("kind", ["empty", "fail"])
+@pytest.mark.parametrize("source", ["check", "enum"])
+def test_a_declared_list_of_digit_phones_is_dropped_without_a_sample(tmp_path, kind, source):
+    phones = ("5550100111", "5550100222")
+    check = f"CHECK ((reach = ANY (ARRAY['{phones[0]}'::text, '{phones[1]}'::text])))"
+    runner = make_catalog_runner(
+        tables=["events"],
+        columns={"events": [col("id", "integer", nullable=False),
+                            col("reach", "USER-DEFINED" if source == "enum" else "text"),
+                            col("customerId", "text"), col("status", "text")]},
+        checks=[check.replace("reach", '"customerId"'),
+                *([check] if source == "check" else []),
+                "CHECK ((status = ANY (ARRAY['open'::text, 'closed'::text])))"],
+        enums=[{"column_name": "reach", "enum_value": v} for v in phones] if source == "enum" else None,
+        sample=_no_sample(kind))
+    t, rep = _events(tmp_path, runner)
+    reach = t.get_column("reach")
+    assert reach.choice_field is None
+    assert not any(p in k for k in reach.caveats for p in phones)
+    assert rep.render().count("5550100") == 0
+    assert t.get_column("customerId").choice_field == dict.fromkeys(phones, "")  # an ID, not phones
+    assert t.get_column("status").choice_field == {"open": "", "closed": ""}
+    written = "".join(p.read_text() for p in (tmp_path / "shop").rglob("*") if p.is_file())
+    assert written.count("5550100") == len(phones)  # only customerId's list
