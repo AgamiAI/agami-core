@@ -491,7 +491,13 @@ def introspect(
     # validated first: writing an invalid merge would replace a curated model with a broken one.
     if prev is not None and not dry_run:
         from . import validator as V
-        if not V.validate(org).ok:
+        unreadable = build.unloadable(org)
+        if unreadable:
+            report.notes.insert(0, "NOT WRITTEN: the merged model wouldn't load once written "
+                                   f"({unreadable[0]}); the existing model is unchanged")
+            dry_run = True
+            report.dry_run = True
+        elif not V.validate(org).ok:
             report.notes.insert(0, "NOT WRITTEN: the merged model doesn't validate; the existing model is unchanged")
             dry_run = True
             report.dry_run = True

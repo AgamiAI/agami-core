@@ -328,3 +328,65 @@ def test_a_metric_follows_its_tables_when_they_arrive_by_separate_moves(tmp_path
     assert "order" in {e.name for e in org.subject_area("fulfilment").entities}
     assert "units_per_order" not in {m.name for m in org.subject_area("sales").metrics}
     assert "metric units_per_order moved from sales: every table it reads is now in fulfilment" in res.notes
+
+
+def test_a_batch_undone_by_a_later_op_reports_no_notes(tmp_path):
+    root = _model(tmp_path)
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    res = curate.apply(root, [{"op": "move", "kind": "table", "name": "order_items", "to_area": "lines"},
+                              {"op": "approve", "kind": "metric", "name": "no such metric"}])
+    assert res.errors and not res.applied and not res.notes, res.as_dict()
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+_SIGNED = {"review_state": "approved", "signed_off_by": "you@example.com", "signed_off_role": "owner",
+           "signed_off_at": "2026-01-01T00:00:00Z"}
+
+
+def _catalog_holds(root: Path, **extra) -> None:
+    (root / "subject_areas" / "catalog" / "relationships.yaml").write_text(yaml.safe_dump(
+        {"relationships": [_join("order_items", "product_id", "products", **extra)]}))
+
+
+@pytest.mark.parametrize("cross_extra,area_extra,kept", [
+    ({}, {}, "unreviewed"),
+    (_SIGNED, {}, "approved"),            # the moved copy is signed: it replaces the one in place
+    ({}, _SIGNED, "approved"),            # the copy in place is signed: it stays
+])
+def test_a_move_never_lands_a_join_the_area_already_holds(tmp_path, cross_extra, area_extra, kept):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(cross_extra)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **area_extra)
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    rels = loader.load_datasource(root, include_rejected=True).subject_area("catalog").relationships
+    same = [r for r in rels if (r.from_table, r.to_table) == ("order_items", "products")]
+    assert len(same) == 1 and same[0].review_state == kept
+    assert "join order_items->products was already in area 'catalog'; kept one copy" in res.notes
+
+
+def test_a_move_is_refused_when_two_copies_of_a_join_are_signed_differently(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_SIGNED)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **{**_SIGNED, "relationship": "one_to_one"})
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    res = _move(root, "order_items", "catalog")
+    assert not res.applied and "signed off differently" in res.skipped[0]["reason"], res.as_dict()
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+def test_a_join_that_turns_cross_area_is_not_added_twice(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"].append(   # a stray copy of sales' own join
+        _join("order_items", "order_id", "orders", from_subject_area="sales", to_subject_area="sales"))
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    cross = loader.load_datasource(root).cross_subject_area_relationships
+    assert [(r.from_subject_area, r.to_subject_area) for r in cross
+            if (r.from_table, r.to_table) == ("order_items", "orders")] == [("catalog", "sales")]

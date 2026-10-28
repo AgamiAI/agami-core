@@ -1275,3 +1275,14 @@ def test_enrich_from_sample_samples_a_table_whose_only_text_column_is_a_key():
     I._enrich_from_sample(D.get_dialect("sqlite"), lambda sql: calls.append(sql) or sample,
                           None, "t", cols)
     assert len(calls) == 1 and cols[0].date_format == "iso8601"
+
+
+def test_grouping_does_not_depend_on_the_order_tables_arrive_in():
+    # A batched build lists the last batch's tables first; a tie must not fall differently for it.
+    tables = [_t("p_hub"), _t("q_x"), _t("r_y")]
+    rels = [_j("q_x", "p_hub"), _j("r_y", "p_hub")]
+
+    def names(ts):
+        return sorted(sorted(t.name for t in g) for g in build.group_by_joins(ts, rels, max_size=2))
+
+    assert names(tables) == names(list(reversed(tables)))

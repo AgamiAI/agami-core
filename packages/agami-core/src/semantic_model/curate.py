@@ -551,7 +551,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             res.skipped.append({"op": _op_label(op), "reason": str(e)})
     if res.errors:
         _restore(list(backups.items()))
-        res.applied = []
+        res.applied, res.notes = [], []  # the notes describe changes just undone
         return res
 
     # validate the whole model after the batch
@@ -617,8 +617,6 @@ def _resolve_area(root: Path, op: dict) -> str:
             hits.append(area)
     if len(hits) == 1:
         return hits[0]
-    if not hits and kind in _KINDS and _find_cross_item(root, kind, name) is not None:
-        return CROSS_AREA
     if not hits:
         raise FileNotFoundError(
             f"no {kind} named {name!r} in any subject area (looked in: {', '.join(areas) or 'none'})")
@@ -653,16 +651,6 @@ def _apply_one(root: Path, op: dict, signer, role,
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
         return _move_table(root, op, area, backups, notes if notes is not None else []), None
-
-    if area == CROSS_AREA and kind in _KINDS:
-        hit = _find_cross_item(root, kind, name)
-        if hit is None:
-            raise FileNotFoundError(f"no cross-area {kind} named {name!r}")
-        path, key, doc, item = hit
-        _snapshot(backups, path)
-        before = _set_trust(item, op, new_state, signer, role)
-        _dump(path, doc)
-        return path, before
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -772,18 +760,19 @@ _CROSS_ITEMS = {"metric": ("cross_subject_area_metrics", "cross_subject_area_met
 
 def _find_item(root: Path, kind: str, name: str, area: Optional[str]) -> tuple:
     """(path, list key or None, file doc, entry) of the one entity / metric an op names. With an area,
-    only that area's file, as before; without one, every area and the cross-area lists."""
+    only that area's file, as before; `CROSS_AREA`, only the cross-area lists; without one, every area
+    and the cross-area lists."""
     # entities/metrics are stored under the SLUGGED name (write_items uses _slug) — a multi-word name
     # ("total event sales") must find total_event_sales.yaml. _slug is idempotent.
     sub, stem = _KINDS[kind][0], _slug(name)
-    if area:
+    if area and area != CROSS_AREA:
         path = _area_dir(root, area) / sub / f"{stem}.yaml"
         if not path.exists():
             raise FileNotFoundError(f"no {kind} named {name!r} in area {area!r}")
         doc = _load(path)
         return path, None, doc, doc
     found: list[tuple[str, Path, Optional[str], Any, dict]] = []
-    for a in _area_names(root):
+    for a in ([] if area == CROSS_AREA else _area_names(root)):
         path = _area_dir(root, a) / sub / f"{stem}.yaml"
         if path.exists():
             doc = _load(path)
@@ -903,19 +892,6 @@ def _cross_places(root: Path, kind: str) -> list[tuple[Path, str]]:
     sub = _KINDS[kind][0]
     return [(root / f"cross_subject_area_{sub}.yaml", sub),
             (root / "datasource.yaml", f"cross_subject_area_{sub}")]
-
-
-def _find_cross_item(root: Path, kind: str, name: str):
-    """(path, key, doc, item) for the cross-area metric / entity named `name`, else None."""
-    for path, key in _cross_places(root, kind):
-        if not path.exists():
-            continue
-        doc = _load(path) or {}
-        items = doc.get(key, []) if isinstance(doc, dict) else (doc if isinstance(doc, list) else [])
-        for it in items or []:
-            if isinstance(it, dict) and _slug(str(it.get("name") or "")) == _slug(name):
-                return path, key, (doc if isinstance(doc, dict) else {key: items}), it
-    return None
 
 
 def _same_table(ref: tuple[str, str], table: tuple[str, str]) -> bool:
@@ -1165,27 +1141,78 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
                 keep.append({**out, "from_subject_area": fa, "to_subject_area": ta})
         if changed:
             plan["rewrite"].append((path, key, keep))
+    plan["final"] = _land_joins(root, plan)
     return plan
 
 
-def _write_joins(root: Path, plan: dict, backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
-    for path, key, keep in plan["rewrite"]:
-        # Read again: a new area was listed in datasource.yaml after the plan read it.
-        doc = _load(path) or {}
-        _snapshot(backups, path)
-        _dump(path, {**doc, key: keep} if isinstance(doc, dict) else {key: keep})
+def _same_join_entry(a: dict, b: dict) -> bool:
+    """Whether two join entries are one edge: introspection's identity rule, plus the same `on`."""
+    from types import SimpleNamespace
+
+    from .introspect import _same_join
+
+    def ns(r: dict) -> Any:
+        return SimpleNamespace(**{k: r.get(k) for k in ("from_table", "to_table", "from_column", "to_column",
+                                                        "from_schema", "to_schema")})
+
+    return (_same_join(ns(a), ns(b))
+            and " ".join(str(a.get("on") or "").split()).lower() == " ".join(str(b.get("on") or "").split()).lower())
+
+
+def _kept_copy(have: dict, moved: dict) -> dict:
+    """Which of two copies of one join to keep: the one a person decided on, else the one in place.
+    Two decided copies that say different things are refused rather than one picked silently."""
+    def decided(r: dict) -> bool:
+        return r.get("review_state") in ("approved", "rejected")
+
+    if decided(have) and decided(moved):
+        if any(have.get(k) != moved.get(k) for k in ("review_state", "relationship", "join_type")):
+            raise ValueError(
+                f"join {moved.get('from_table')}->{moved.get('to_table')} is already where it would move, "
+                "signed off differently; approve or reject one copy so they agree, then move the table")
+        return have
+    return moved if decided(moved) else have
+
+
+def _land_joins(root: Path, plan: dict) -> dict:
+    """Every join list the move changes, as it will be written: {(path, key): list}. A moved join
+    already where it lands is kept once (`_kept_copy`), so it is never served twice. Raises before
+    anything is written when two copies conflict."""
+    final: dict[tuple[Path, str], list] = {(p, k): list(keep) for p, k, keep in plan["rewrite"]}
+
+    def current(path: Path, key: str) -> list:
+        if (path, key) not in final:
+            final[(path, key)] = list(_entries(_load(path) or {}, key)) if path.exists() else []
+        return final[(path, key)]
+
+    def merge(places: list[tuple[Path, str]], incoming: list[dict], where: str) -> None:
+        for r in incoming:
+            hit = next(((pk, i) for pk in places for i, c in enumerate(current(*pk))
+                        if isinstance(c, dict) and _same_join_entry(c, r)), None)
+            if hit is None:
+                current(*places[0]).append(r)
+                continue
+            pk, i = hit
+            final[pk][i] = _kept_copy(final[pk][i], r)
+            plan.setdefault("notes", []).append(
+                f"join {r.get('from_table')}->{r.get('to_table')} was already in {where}; kept one copy")
+
     for area, rels in plan["into_area"].items():
-        path = _area_dir(root, area) / "relationships.yaml"
-        doc = _load(path) if path.exists() else None
-        _snapshot(backups, path)
-        current = (doc.get("relationships") or []) if isinstance(doc, dict) else (doc or [])
-        _dump(path, {**(doc if isinstance(doc, dict) else {}), "relationships": [*current, *rels]})
+        merge([(_area_dir(root, area) / "relationships.yaml", "relationships")], rels, f"area {area!r}")
     if plan["into_cross"]:
-        xfile = plan["xfile"]
-        doc = _load(xfile) if xfile.exists() else None
-        _snapshot(backups, xfile)
-        current = (doc.get("edges") or []) if isinstance(doc, dict) else (doc or [])
-        _dump(xfile, {**(doc if isinstance(doc, dict) else {}), "edges": [*current, *plan["into_cross"]]})
+        ds = (root / "datasource.yaml", "cross_subject_area_relationships")
+        merge([(plan["xfile"], "edges"), ds], plan["into_cross"], "the cross-area joins")
+    return final
+
+
+def _write_joins(root: Path, plan: dict, backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
+    for (path, key), rels in plan["final"].items():
+        # Read again: a new area was listed in datasource.yaml after the plan read it.
+        doc = _load(path) if path.exists() else None
+        if (isinstance(doc, dict) and _entries(doc, key) == rels) or (doc is None and not rels):
+            continue
+        _snapshot(backups, path)
+        _dump(path, {**(doc if isinstance(doc, dict) else {}), key: rels})
     notes.extend(plan.get("notes", []))
 
 

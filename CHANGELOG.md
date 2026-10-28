@@ -22,7 +22,12 @@ below corresponds to one such version.
   hub table that half the database joins doesn't pull everything into one area; no group passes the
   area size limit, and ties go to the tables sharing more words in their names and descriptions.
   Tables with no joins go with tables sharing their whole first name word. Area names are the
-  tables' own words. Only new proposals change: an existing model is never regrouped.
+  tables' own words, and the grouping no longer depends on the order the tables arrive in. Only
+  proposals change: a curated model is never regrouped, while a model whose areas are still exactly
+  the engine's (a batched first build, or one built by an earlier release and never edited) is
+  regrouped by `introspect --append`. A join whose two tables end up in one area is written as that
+  area's join, and a refresh that would write a file the model can't load back is refused, with the
+  model left as it was.
 
 - **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
   On a large onboarding these `<table>_<column>_rate` metrics were 698 of the 706 it suggested and
@@ -46,7 +51,8 @@ below corresponds to one such version.
   was reported applied and validated and then never served. The error now lists the model's areas.
   `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
   `_entities.yaml`), validated like any other add, and those items can be signed off through
-  `sm curate`. Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
+  `sm curate`, where `"area": "_cross"` reads only the cross-area lists and otherwise acts as an op
+  with no area does (a missing name, or one in both places, fails the batch). Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
   never defined twice.
 
 - **Column scope checks an unqualified column that sits beside a CTE or subquery (#339).** When a
@@ -86,8 +92,9 @@ below corresponds to one such version.
   its table by a bare name shared by two schemas is resolved by the area it sits in and gets the
   schema written; a move with a join on the table whose other end matches tables in two schemas is
   refused, with nothing written. A join to a table no area defines stays where it is, and `notes`
-  says so. The batch is validated and undone on failure (folders it created included), logged with
-  both areas, and committed when the model is its own git repository. The model explorer has a
+  says so. A join the target area already holds is kept once, the signed-off copy if one is, and a
+  move is refused when two signed-off copies disagree. The batch is validated and undone on failure
+  (folders it created included, and no `notes` reported), logged with both areas, and committed when the model is its own git repository. The model explorer has a
   **Move to area** control on every table that queues the op.
 
 - **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit

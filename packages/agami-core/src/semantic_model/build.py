@@ -436,6 +436,8 @@ def group_by_joins(tables: list[Table], rels: list[Relationship],
     more words in their names and descriptions. A joined table left alone goes to the neighbouring
     group it joins most that has room, else into a pool of such tables. A table with no joins goes with the group holding the
     most tables that share its whole first name word, else in a group of its own."""
+    # Ties fall to table order, so sort: a batched build lists its tables in batch order.
+    tables = sorted(tables, key=lambda t: (t.schema_name or "", t.name))
     n = len(tables)
     index = {(t.schema_name, t.name): i for i, t in enumerate(tables)}
     by_bare: dict[str, list[int]] = defaultdict(list)
@@ -583,10 +585,19 @@ def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
             and here(bare_name(r.to_table), r.to_schema))
 
 
+def _as_area_rel(r: Relationship) -> Relationship:
+    """A join as an area holds it. A batched build re-proposes areas over joins that include the last
+    batch's cross-area ones, and one whose ends now share an area must lose its area endpoints, which
+    an area's relationships.yaml can't carry."""
+    if not isinstance(r, CrossSubjectAreaRelationship):
+        return r
+    return Relationship(**r.model_dump(exclude_none=True, by_alias=True, exclude={"from_subject_area", "to_subject_area"}))
+
+
 def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: str) -> SubjectArea:
     table_names = {t.name for t in tables}
     keys = {(t.schema_name, t.name) for t in tables}
-    area_rels = [r for r in rels if _rel_in_area(r, keys, table_names)]
+    area_rels = [_as_area_rel(r) for r in rels if _rel_in_area(r, keys, table_names)]
     return SubjectArea(
         name=name,
         description=f"Auto-proposed subject area covering: {', '.join(sorted(table_names))}.",
@@ -690,6 +701,32 @@ def _model_dump(model) -> dict:
     """
     return model.model_dump(exclude_none=True, by_alias=True,
                             exclude={"for_questions_about"})
+
+
+def unloadable(org: Datasource) -> list[str]:
+    """What `write_tree` would write that the loader can't read back: each object, as written, re-read
+    as the type the loader builds from its file. The validator checks the objects in memory, where an
+    area join can still be a cross-area one whose extra keys only fail once read from disk."""
+    from .models import Entity, Metric, StorageConnection
+
+    def bad(kind: type, obj: Any, where: str) -> list[str]:
+        try:
+            kind(**_model_dump(obj))
+            return []
+        except Exception as e:
+            return [f"{where}: {e}"]
+
+    out = [e for sc in org.storage_connections for e in bad(StorageConnection, sc, f"storage {sc.name}")]
+    out += [e for r in org.cross_subject_area_relationships
+            for e in bad(CrossSubjectAreaRelationship, r, f"cross-area join {r.from_table}->{r.to_table}")]
+    for sa in org.subject_areas:
+        out += [e for tr in sa.tables for e in bad(TableRef, tr, f"{sa.name} reference to {tr.table}")]
+        out += [e for t in sa.tables_defined for e in bad(Table, t, f"{sa.name}/tables/{t.name}")]
+        out += [e for x in sa.entities for e in bad(Entity, x, f"{sa.name}/entities/{x.name}")]
+        out += [e for m in sa.metrics for e in bad(Metric, m, f"{sa.name}/metrics/{m.name}")]
+        out += [e for r in sa.relationships
+                for e in bad(Relationship, r, f"{sa.name} join {r.from_table}->{r.to_table}")]
+    return out
 
 
 @dataclass
