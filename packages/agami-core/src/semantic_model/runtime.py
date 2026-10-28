@@ -488,6 +488,8 @@ def _is_catalog_relation(tbl: "exp.Table", dialect: "str | None") -> bool:
     """A read-only catalog view a profiling run may read: the structure views of `information_schema`
     (BigQuery puts it in the table name), the structure tables of `pg_catalog`, and SQLite's schema
     table."""
+    if _default_schema(tbl):
+        return False  # `db..x` reads the connecting user's default schema, refused like any `db..table`
     schema, name = _engine_name(tbl.args.get("db"), dialect), _engine_name(tbl.this, dialect)
     # Only BigQuery spells the view as one dotted name; elsewhere `"information_schema.x"` is an
     # ordinary quoted table.
@@ -1985,7 +1987,9 @@ def check_catalog_scope(sql: str, org: Datasource,
         if written is None or not tbl.name or id(tbl) in cte_refs:
             continue
         resolved = _resolve_table(sidx, tbl, decls, dialect)
-        if not isinstance(resolved, tuple):
+        # A catalog view reaches this gate only under the build profile, which exempts it from table
+        # scope (#523); another catalog's view lists another database's structure.
+        if not isinstance(resolved, tuple) and not _is_catalog_relation(tbl, dialect):
             continue  # undeclared or ambiguous: the table-scope gate's to refuse
         if (connection_catalog is None or _tkey(written.name) != _tkey(connection_catalog)
                 or not _part_names(written, connection_catalog, dialect)):

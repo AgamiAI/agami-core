@@ -384,3 +384,74 @@ def test_order_by_a_name_that_only_case_folds_to_an_alias_reads_the_column(model
     same = 'SELECT kv.key, COUNT(*) AS "n" FROM orders o, jsonb_each(o.payload) AS kv GROUP BY kv.key ORDER BY n'
     ran, executor = _run(same, build_profile=True)
     assert ran.status == "ok", ran.refusal
+
+
+# ------------------------------------------------- beside table identity (#337, merged with #523)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT t.table_name FROM demo..information_schema.tables t",
+    "SELECT o.id FROM demo..orders o",
+    # A catalog view in another database lists that database's structure.
+    "SELECT t.table_name FROM other_db.information_schema.tables t",
+    "SELECT c.relname FROM other_db.pg_catalog.pg_class c",
+])
+def test_table_identity_refusals_hold_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+def test_a_catalog_view_in_the_connections_own_database_runs_under_build_profile(model):
+    ran, _ = _run("SELECT t.table_name FROM demo.information_schema.tables t", build_profile=True)
+    assert ran.status == "ok", ran.refusal
+
+
+@pytest.mark.parametrize(("engine", "sql", "connection", "refused"), [
+    ("Snowflake", "SELECT t.table_name FROM other_db.information_schema.tables t", "ANALYTICS", True),
+    ("Snowflake", "SELECT t.table_name FROM analytics.information_schema.tables t", "ANALYTICS", False),
+    ("Snowflake", "SELECT t.table_name FROM analytics.information_schema.tables t", None, True),
+    ("BigQuery", "SELECT t.table_name FROM `other-project.ds.INFORMATION_SCHEMA.TABLES` t", "acme-project", True),
+    ("BigQuery", "SELECT t.table_name FROM `acme-project.ds.INFORMATION_SCHEMA.TABLES` t", "acme-project", False),
+    ("BigQuery", "SELECT t.table_name FROM ds.INFORMATION_SCHEMA.TABLES t", None, False),
+])
+def test_the_catalog_check_judges_a_catalog_views_database(engine, sql, connection, refused):
+    from semantic_model import models as m
+    from semantic_model import runtime
+
+    table = m.Table(name="orders", schema="sales", storage_connection="c", grain=["id"],
+                    description="orders", columns=[m.Column(name="id", type="integer")])
+    org = m.Datasource(datasource="acme",
+                       storage_connections=[m.StorageConnection(name="c", storage_type=engine)],
+                       subject_areas=[m.SubjectArea(name="sales", tables_defined=[table])])
+    res = runtime.check_catalog_scope(sql, org, connection)
+    assert (res is not None) is refused
+    assert res is None or res.rule == guardrail.RULE_TABLE_SCOPE
+
+
+def test_the_default_schema_spelling_is_never_a_catalog_relation():
+    import sqlglot
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    tbl = sqlglot.parse_one("SELECT name FROM db..sqlite_master", read="sqlite").find(exp.Table)
+    assert runtime._is_catalog_relation(tbl, "sqlite") is False
+
+
+@pytest.mark.parametrize("dialect", [
+    "postgres", "snowflake", "oracle", "duckdb", "tsql", "bigquery", "sqlite", "databricks", "trino",
+])
+def test_the_catalog_name_rule_agrees_with_the_table_name_rule(dialect):
+    """`_engine_name` (catalog views, ORDER BY aliases) and `_part_names` (declared tables) agree on a
+    name stored in the engine's own folded case, which is how every catalog name is stored."""
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    stored = "ORDERS" if dialect in ("snowflake", "oracle") else "orders"
+    want = runtime._engine_name(exp.Identifier(this=stored, quoted=True), dialect)
+    for spelling in ("orders", "ORDERS", "Orders"):
+        for quoted in (False, True):
+            ident = exp.Identifier(this=spelling, quoted=quoted)
+            by_table_rule = (spelling.lower() == stored.lower()
+                             and runtime._part_names(ident, stored, dialect))
+            assert (runtime._engine_name(ident, dialect) == want) is by_table_rule, (spelling, quoted)
