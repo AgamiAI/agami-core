@@ -577,11 +577,13 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
                 op = {**op, "area": _resolve_area(root, op)}
             where, before, staled = _apply_one(root, op, signer, role, backups, res.notes)
             res.applied.append(_op_label(op))
+            # datasource.yaml holds several lists, so an index alone doesn't say which entry it is.
+            slot = (op.get("kind"), where)
             # An approve after the edit, in the same batch, signs off the edited definition.
             if staled:
-                stale[where] = _op_label(op).split(" ", 1)[1]
+                stale[slot] = _op_label(op).split(" ", 1)[1]
             elif op.get("op") != "edit":
-                stale.pop(where, None)
+                stale.pop(slot, None)
             logged.append({**op, "before": before, **({"made_stale": True} if staled else {})})
         except BatchError as e:
             res.errors.append(f"{_op_label(op)}: {e}")

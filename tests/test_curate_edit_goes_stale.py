@@ -27,6 +27,7 @@ from semantic_model import cli, curate  # noqa: E402
 from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
+from test_curate_cross_area_resolution import _CROSS_METRIC, _JOIN, _model  # noqa: E402
 from test_model_explorer_bulk_reject import DOM, NODE, needs_node  # noqa: E402
 
 SIGNED = {"review_state": "approved", "signed_off_by": "you@example.com",
@@ -307,6 +308,17 @@ def test_a_log_that_does_not_reach_the_approval_says_changes_not_recorded(root, 
     assert item["review_state"] == "stale"
     assert item["changes_since_approval"] == {"recorded": False, "changes": [],
                                               "summary": "changes not recorded"}
+
+
+def test_an_edit_of_one_datasource_list_does_not_hide_another_lists_stale_entry(tmp_path):
+    _model(tmp_path, cross=[{**_JOIN, **SIGNED}],
+           ds_extra={"cross_subject_area_metrics": [{**_CROSS_METRIC, **SIGNED}]})
+    res = curate.apply(tmp_path, [
+        {"op": "edit", "kind": "metric", "name": "billed customers", "field": "unit", "value": "count"},
+        {"op": "approve", "kind": "relationship", "name": "invoices->customers",
+         "at": "2026-10-27T10:00:00Z"}], signer="you@example.com", role="owner")
+    assert res.validated, res.as_dict()
+    assert [s.rsplit("/", 1)[-1] for s in res.stale] == ["billed customers"]
 
 
 def test_a_hand_edited_stale_item_says_changes_not_recorded(root):
