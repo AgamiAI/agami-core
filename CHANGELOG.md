@@ -14,6 +14,17 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **The `measured_figure` check also finds ranges, counts in words and figures tied to now
+  (#541).** Model text such as "values range 49–142 here", "covers twelve of forty sites", "about
+  1,200 sites", "40 sites today", "1,204 orders carry no region" or "hundreds of rows have no region"
+  passed the check. It now finds numeric ranges stated as seen in the data, counts written in words
+  (up to the thousands, plus "a dozen" and "hundreds of"), hedged figures, figures with a unit or
+  next to "here", "today", "currently" or "as of", and counts inside a caveat sentence. Statements
+  about how a formula behaves ("returns 0 because no row meets the threshold"), its literals ("ELSE
+  0", "divide by 100"), scales ("ranges 0–100"), bounds ("more than 5 users", "top 10 customers"),
+  years, versions and labels ("status 9 rows") are not flagged, and "2 rows per order" is no longer
+  read as a count. It stays a warning.
+
 - **Sensitive-column detection reads whole words, checks sampled values and looks inside JSON
   (#516).** A new build split column names into words, so `phoneme_error_rate`, `mobile_sessions`,
   `headphones_sold`, `adobe_campaign_id` and `ip_address` are no longer flagged (they stay in the
