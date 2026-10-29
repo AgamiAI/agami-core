@@ -112,21 +112,35 @@ def render(
     return out
 
 
+def _read_items(path: str) -> tuple[object, list]:
+    """A file's parsed JSON and its items: a bare array (one area's `sm seed-validate`) or the
+    combined `{areas, items, totals}` object it prints for several areas."""
+    with open(os.path.expanduser(path), encoding="utf-8") as f:
+        doc = json.load(f)
+    items = doc.get("items") if isinstance(doc, dict) else doc
+    if not isinstance(items, list):
+        raise ValueError(f"{path}: must hold a JSON array of items or an object with an "
+                         f"'items' array, got {type(doc).__name__}")
+    return doc, items
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--title", required=True,
                    help="Dashboard title (e.g., 'Seed examples · default')")
     p.add_argument("--profile", required=True, help="Active profile name")
-    p.add_argument("--items-file", required=True,
-                   help="Path to a JSON file containing the items[] array")
+    p.add_argument("--items-file", required=True, action="append",
+                   help="JSON items from `sm seed-validate`: one area's array or the combined "
+                        "object for several areas (repeatable; files render in the order given)")
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
-    with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
-        items = json.load(f)
-    if not isinstance(items, list):
-        sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
+    try:
+        files = [(path, *_read_items(path)) for path in args.items_file]
+    except ValueError as e:
+        sys.stderr.write(f"--items-file {e}\n")
         return 1
+    items = [it for _, _, file_items in files for it in file_items]
 
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,15 +153,17 @@ def main() -> int:
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
     # failed write never leaves the items file truncated; non-fatal (the HTML already embeds the
-    # normalized numbering), so a write failure warns rather than aborting the render.
-    items_path = os.path.expanduser(args.items_file)
-    try:
-        tmp_path = items_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(items, f)
-        os.replace(tmp_path, items_path)
-    except OSError as e:
-        sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
+    # normalized numbering), so a write failure warns rather than aborting the render. Each file
+    # keeps its own shape; several files share the one numbering.
+    for path, doc, _ in files:
+        items_path = os.path.expanduser(path)
+        try:
+            tmp_path = items_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            os.replace(tmp_path, items_path)
+        except OSError as e:
+            sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
     print(f"Wrote {out_path} ({len(items)} example{'s' if len(items) != 1 else ''})")
     return 0
 

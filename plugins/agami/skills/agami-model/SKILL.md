@@ -115,6 +115,7 @@ It prints `{data, anomalies, needs_judgment}`:
 - `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
 - `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
+- An example the user wants dropped rather than edited → `sm remove-example "$ROOT" --question "<area>/<question>"` (repeat `--question`; with no `--area` one call covers every area, and a bare question found in more than one area is refused, not rejected everywhere).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
 - `data.datasource_md` — the full datasource.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/datasource.md` (overwrite; human narrative only).
 - `data.signer` / `data.role` — the curator identity for `--signer`/`--role` (recorded on every op; required on an approve). **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the Phase 0 ask.
