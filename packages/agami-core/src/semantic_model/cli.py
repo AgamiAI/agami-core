@@ -1781,7 +1781,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
 
-    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
+    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
     sp.add_argument("root")
     sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
@@ -1822,7 +1822,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
     sp.add_argument("root")
     sp.add_argument("--kind", required=True, choices=["metric", "entity"])
-    sp.add_argument("--area", required=True)
+    sp.add_argument("--area", required=True,
+                    help="a subject area datasource.yaml lists, or _cross for items that span areas "
+                         "(the datasource's cross_subject_area_metrics / _entities)")
     sp.add_argument("--file", required=True, help="JSON: a list of items (or {metrics:[…]}/{entities:[…]})")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
