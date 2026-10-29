@@ -113,6 +113,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     # suspected tier (review aid; never auto-marks).
                     "suspected_pii": (not c.sensitive) and _B.suspected_reason(c.name, c.caveats) is not None,
                     "unit": c.unit, "caveats": c.caveats,
+                    "placeholders": [p.model_dump(exclude_none=True) for p in c.placeholders],
                     "date_format": c.date_format, "timezone": c.timezone,
                     "group": col_group.get(c.name, ""),
                 })
@@ -324,6 +325,8 @@ def main() -> int:
             for t in sc.get("tables", []):
                 pending += sum(1 for f in t.get("fields", [])
                                if f.get("description_source") == "ai_unknown" and not f.get("excluded"))
+                pending += sum(1 for f in t.get("fields", []) if not f.get("excluded")
+                               for p in f.get("placeholders", []) if p.get("review_state") == "unreviewed")
         initial = "review" if pending > 0 else "tables"
     manifest["initial_tab"] = initial
     if not manifest["schemas"]:

@@ -81,13 +81,43 @@ def review_queue(org: Datasource) -> dict[str, Any]:
             item = _rel_item(getattr(rel, "from_subject_area", None), rel)
             item["cross_area"] = True
             rule2.append(item)
+    held = placeholder_queue(org)
 
     return {
         "rule_1": rule1,            # metrics — sign-off required before queries use them
         "rule_2": rule2,            # joins / entities — lazy, self-approve as queried
-        "counts": {"rule_1": len(rule1), "rule_2": len(rule2),
-                   "total": len(rule1) + len(rule2)},
+        # values that may be placeholders — a person says what each means; never bulk-approved
+        "placeholders": held,
+        "counts": {"rule_1": len(rule1), "rule_2": len(rule2), "placeholders": len(held),
+                   "total": len(rule1) + len(rule2) + len(held)},
     }
+
+
+def placeholder_queue(org: Datasource) -> list[dict]:
+    """Every placeholder introspection found that nobody has answered yet (#445), with the
+    question to ask in plain words. Columns and tables someone excluded are left out."""
+    from .placeholders import MEANINGS
+    out: list[dict] = []
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if t.review_state in ("rejected", "stale"):
+                continue
+            for c in t.columns:
+                if c.review_state in ("rejected", "stale"):
+                    continue
+                for p in c.placeholders:
+                    if p.review_state != "unreviewed":
+                        continue
+                    rows = f" on {p.rows:,} row{'' if p.rows == 1 else 's'}" if p.rows else ""
+                    out.append({
+                        "kind": "placeholder", "area": sa.name, "name": t.name,
+                        "schema": t.schema_name, "column": c.name, "value": p.value,
+                        "reason": p.reason, "rows": p.rows,
+                        "question": (f"{t.name}.{c.name} holds '{p.value}'{rows} ({p.reason}). "
+                                     "Is it Unknown, still-current, or not-set — or real data?"),
+                        "meanings": dict(MEANINGS),
+                    })
+    return out
 
 
 def _tab(obj) -> str:
@@ -647,6 +677,8 @@ def _apply_one(root: Path, op: dict, signer, role,
     area = op.get("area")
     if not area and kind in ("table", "subject_area"):
         area = _resolve_area(root, op)
+    if not area and kind == "placeholder":
+        area = _resolve_area(root, {**op, "kind": "table"})
 
     new_state = {"approve": "approved", "include": "unreviewed",
                  "reject": "rejected", "exclude": "rejected"}.get(action)
@@ -655,6 +687,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
         return _move_table(root, op, area, backups, notes if notes is not None else []), None
+
+    if kind == "placeholder":
+        return _apply_placeholder(root, area, op, new_state, signer, role, backups)
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -720,6 +755,54 @@ def _apply_one(root: Path, op: dict, signer, role,
         return path, before
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def _apply_placeholder(root: Path, area: str, op: dict, new_state: Optional[str], signer, role,
+                       backups: "dict[Path, Optional[str]]") -> tuple[Path, Any]:
+    """Record what a person says a placeholder value means (#445): `approve` with a `meaning`
+    (unknown / current / not_set) and their sign-off, `reject` for a value that is real data, or
+    `include` to ask again. The column's caveat in words follows the meaning. Op shape:
+    {op, kind: placeholder, area?, name: <table>, column, value, meaning?}."""
+    from .placeholders import MEANINGS, caveat
+
+    action, meaning = op.get("op"), op.get("meaning")
+    if action not in ("approve", "reject", "include"):
+        raise ValueError("a placeholder takes approve (with a meaning), reject (it is real data) or include")
+    if op.get("column") is None or op.get("value") is None:
+        raise ValueError("a placeholder op needs column + value")
+    value = str(op["value"])
+    if action == "approve":
+        if meaning not in MEANINGS:
+            raise ValueError(f"meaning must be one of {', '.join(MEANINGS)}")
+        if not signer or not role or role == "system":
+            raise ValueError("a placeholder's meaning is a person's choice: sign it off with --signer and --role")
+    elif meaning:
+        raise ValueError("only approve records a meaning")
+    path = _area_dir(root, area) / "tables" / f"{op['name']}.yaml"
+    _snapshot(backups, path)
+    doc = _load(path)
+    col = next((c for c in doc.get("columns", []) if c.get("name") == op["column"]), None)
+    if col is None:
+        raise ValueError(f"column {op['column']} not found")
+    entries = col.get("placeholders") or []
+    entry = next((p for p in entries if str(p.get("value")) == value), None)
+    if entry is None:
+        if action != "approve":
+            raise ValueError(f"no placeholder {value!r} on {op['name']}.{op['column']}")
+        entry = {"value": value, "reason": "named by a person"}  # a person may know one the scan missed
+        entries.append(entry)
+    before = entry.get("meaning") or entry.get("review_state")
+    old = entry.get("meaning")
+    caveats = [c for c in col.get("caveats") or [] if not (old and c == caveat(value, old))]
+    _set_trust(entry, op, new_state, signer, role)
+    entry.pop("meaning", None)
+    entry["confidence"] = "proposed"
+    if action == "approve":
+        entry["meaning"], entry["confidence"] = meaning, "confirmed"
+        caveats.append(caveat(value, meaning))
+    col["caveats"], col["placeholders"] = caveats, entries
+    _dump(path, doc)
+    return path, before
 
 
 # The fields that say which rows a join meets; a description edit changes none of them.

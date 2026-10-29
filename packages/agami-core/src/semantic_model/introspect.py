@@ -58,10 +58,12 @@ _GRAIN_PROBE_MAX_ROWS = 5_000_000
 
 from . import build, pii
 from . import dialects as D
+from . import placeholders as P
 from .models import (
     Column,
     Datasource,
     PerformanceHints,
+    Placeholder,
     Relationship,
     StorageConnection,
     Table,
@@ -157,6 +159,8 @@ class IntrospectReport:
     sensitive_columns: int = 0
     # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
     suspected_columns: list[str] = field(default_factory=list)
+    # Values that look like placeholders and wait for a person to say what they mean (#445).
+    placeholders: list[str] = field(default_factory=list)
     # (display text, (schema, table, column lower-cased)) per sample finding, so a refresh can drop
     # the ones it did not apply; the text alone is ambiguous across schemas.
     sample_findings: list[tuple[str, tuple]] = field(default_factory=list, repr=False)
@@ -184,6 +188,9 @@ class IntrospectReport:
             f"sensitive columns: {self.sensitive_columns}",
             *([f"suspected personal data (review): {', '.join(self.suspected_columns)}"]
               if self.suspected_columns else []),
+            *([f"possible placeholder values ({len(self.placeholders)}) — ask what each one means:"]
+              if self.placeholders else []),
+            *(f"  - {p}" for p in self.placeholders),
             "## notes",
             *[f"  - {n}" for n in self.notes],
             f"## files ({len(self.files_written)} written, {self.files_unchanged} already up to date)",
@@ -282,9 +289,10 @@ def introspect(
     budget = _CountBudget(_COUNT_BUDGET_S)
     reads = _ReadBudget(DISTINCT_READ_CAP)
     keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
+    samples: dict[tuple, tuple] = {}   # (schema, table) -> (sample, est_rows), for the placeholder scan
     for i, (schema, table) in enumerate(pairs, 1):
         t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads,
-                         keys_unread)
+                         keys_unread, samples)
         built.append(t)
         if i % _step == 0 or i == len(pairs):
             _progress(pp, f"columns+grain {i}/{len(pairs)}")
@@ -460,6 +468,10 @@ def introspect(
     _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
     if prev_rels:
         rels = list(prev_rels) + rels
+    # Placeholder values (#445), on the small and dimension tables this run read: a dimension is the
+    # one side of a join, so this waits for the joins.
+    _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
+                       samples, reads, report, sg)
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -1122,6 +1134,7 @@ def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
     conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
     reads: Optional[_ReadBudget] = None, keys_unread: Optional[set] = None,
+    samples: Optional[dict] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
     probe_sample: list = []
@@ -1162,9 +1175,11 @@ def _build_table(
     # in probe mode) → date encoding/timezone, personal data, and value lists read from the data on
     # a small table.
     declared = _apply_declared_values(dialect, runner, schema, table, cols)
-    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, reads=reads,
-                        skip=declared.rejected, nocase=declared.nocase, report=report,
-                        sample=probe_sample if mode == "probe" else None)
+    sample = _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, reads=reads,
+                                 skip=declared.rejected, nocase=declared.nocase, report=report,
+                                 sample=probe_sample if mode == "probe" else None)
+    if samples is not None and _placeholder_size_ok(sample, est_rows):
+        samples[(schema, table)] = (sample, est_rows)  # kept for the placeholder scan, once joins are known
     for c in cols:
         if c.choice_field and (_personal_column(c) or _personal_list(c)):
             _clear_choice(c)  # its keys would be personal values written into the model
@@ -2135,7 +2150,7 @@ def _enrich_from_sample(
     *, est_rows: Optional[int] = None, reads: Optional[_ReadBudget] = None,
     skip: frozenset[str] | set[str] = frozenset(), nocase: frozenset[str] | set[str] = frozenset(),
     report: Optional[IntrospectReport] = None, sample: Optional[list] = None,
-) -> None:
+) -> list:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
     (b) on a small table, a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns
     the catalog declared nothing for (the LLM enrichment fills the labels), read with one bounded
@@ -2150,11 +2165,11 @@ def _enrich_from_sample(
     pii_cands = [c for c in cols if c.type in ("string", "json", "date", "timestamp")
                  or (c.type == "integer" and not c.primary_key and not _looks_time_named(c.name))]
     if not date_cands and not choice_cands and not iso_text_cands and not pii_cands:
-        return
+        return sample or []
     if sample is None:
         sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
-        return
+        return sample
     _pii_from_sample(schema, table, pii_cands, sample, report)
     for c in date_cands:
         df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
@@ -2196,6 +2211,132 @@ def _enrich_from_sample(
         if cd:
             c.description = cd
             c.description_source = "metadata"  # authoritative deterministic fact (not an LLM guess)
+    return sample
+
+
+_PLACEHOLDER_TOP = 10   # most frequent values read per column
+_KEY_NAME_RE = re.compile(r"(^|_)(id|key|sk|fk|code)$", re.IGNORECASE)
+_YEAR_NAME_RE = re.compile(r"(^|_)(year|yr)$|^(fiscal_)?year_", re.IGNORECASE)
+
+
+def _placeholder_size_ok(sample: list, est_rows: Optional[int]) -> bool:
+    """Small, or under the large-table line so it may still be scanned once it proves a dimension."""
+    return _sample_covers_values(sample, est_rows) or (est_rows is not None and 0 <= est_rows < _LARGE_TABLE_ROWS)
+
+
+def _placeholder_kinds(c: Column, sample: list, join_cols: set[str]) -> set[str]:
+    """What the placeholder scan checks `c` as (`date`, `year`, `key`, `code`); empty to skip it.
+    A personal column is never read: its values would be written into the model and the report."""
+    if c.review_state in ("rejected", "stale") or _personal_column(c) or (c.choice_field and _personal_list(c)):
+        return set()
+    kinds: set[str] = set()
+    if c.type in ("date", "timestamp") or c.date_format in ("yyyymmdd", "iso8601"):
+        kinds.add("date")
+    elif c.type == "integer" and _YEAR_NAME_RE.search(c.name):
+        kinds.add("year")
+    if c.type not in ("integer", "string") or kinds:
+        return kinds
+    if c.primary_key or c.name.lower() in join_cols or _KEY_NAME_RE.search(c.name):
+        kinds.add("key")
+    values = [row.get(c.name) for row in sample if row.get(c.name) is not None]
+    distinct = len(set(values))
+    # values that repeat: a code list, not free text or names
+    if c.choice_field or (values and distinct <= ENUM_MAX_DISTINCT and 2 * distinct <= len(values)):
+        kinds.add("code")
+    return kinds
+
+
+def _scan_placeholders(
+    dialect: D.Dialect, runner: Runner, tables: list[Table], rels: list[Relationship],
+    samples: dict[tuple, tuple], reads: _ReadBudget, report: IntrospectReport, sg: Optional[str],
+) -> None:
+    """Find placeholder values on the small and dimension tables read this run, and record each one
+    on its column, unreviewed, for a person to say what it means (#445).
+
+    One bounded read per key, date, year and code column, on the run's value-read budget, and the
+    table's existing sample for "far from the rest". A dimension is the one side of a join, scanned
+    only below the large-table line. A meaning a person gave, or a value they said is real data, is
+    kept as it is on a refresh; an unconfirmed value the scan no longer finds is dropped."""
+    if not samples:
+        return
+    dims: set[tuple] = set()
+    join_cols: dict[tuple, set[str]] = {}
+    for r in rels:
+        if r.relationship == "many_to_one":
+            dims.add(table_key(r.to_table, r.to_schema))
+        elif r.relationship == "one_to_many":
+            dims.add(table_key(r.from_table, r.from_schema))
+        for fc, tc in _column_pairs(r, sg) or []:
+            join_cols.setdefault(table_key(r.from_table, r.from_schema), set()).add(fc.lower())
+            join_cols.setdefault(table_key(r.to_table, r.to_schema), set()).add(tc.lower())
+    found: dict[tuple, dict[str, list[P.Finding]]] = {}
+    skipped = 0
+    for t in tables:
+        key = (t.schema_name, t.name)
+        if key in found or key not in samples or t.review_state in ("rejected", "stale"):
+            continue
+        sample, est_rows = samples[key]
+        tk = table_key(t.name, t.schema_name)
+        if not (_sample_covers_values(sample, est_rows) or tk in dims or ("", tk[1]) in dims):
+            continue
+        per = found[key] = {}
+        joins = join_cols.get(tk, set()) | join_cols.get(("", tk[1]), set())
+        for c in t.columns:
+            kinds = _placeholder_kinds(c, sample, joins)
+            if not kinds:
+                continue
+            if reads.left <= 0:
+                skipped += 1
+                continue
+            reads.left -= 1
+            rows = _try(runner, dialect.placeholder_scan_sql(t.schema_name, t.name, c.name, c.type,
+                                                             _PLACEHOLDER_TOP))
+            if rows is None:
+                continue  # not read: what the column holds is unknown, so nothing is dropped either
+            top = [(str(r.get("v")), int(float(r.get("n") or 0))) for r in rows if r.get("v") is not None]
+            first = rows[0] if rows else {}
+            lo, hi = first.get("lo"), first.get("hi")
+            total = int(float(first.get("total") or 0)) if first else 0
+            rest = [str(row.get(c.name)) for row in sample if row.get(c.name) not in (None, "")]
+            per[c.name.lower()] = P.find(kinds, top, None if lo in (None, "") else str(lo),
+                                         None if hi in (None, "") else str(hi), total, rest,
+                                         yyyymmdd=c.date_format == "yyyymmdd")
+    if skipped:
+        report.notes.append(f"{skipped} column(s) not checked for placeholder values: the run's "
+                            f"{DISTINCT_READ_CAP} value reads were used up")
+    listed: set[tuple] = set()
+    for t in tables:
+        per = found.get((t.schema_name, t.name))
+        if per is None:
+            continue
+        for i, c in enumerate(t.columns):
+            if c.name.lower() not in per:
+                continue
+            merged = _merged_placeholders(c.placeholders, per[c.name.lower()])
+            if merged != c.placeholders:
+                t.columns[i] = c.model_copy(update={"placeholders": merged})
+            for p in merged:
+                if p.review_state == "unreviewed" and (t.schema_name, t.name, c.name, p.value) not in listed:
+                    listed.add((t.schema_name, t.name, c.name, p.value))
+                    rows_note = f"; {p.rows:,} row{'' if p.rows == 1 else 's'}" if p.rows else ""
+                    report.placeholders.append(f"{t.name}.{c.name} = '{p.value}' ({p.reason}{rows_note})")
+
+
+def _merged_placeholders(old: list[Placeholder], findings: list[P.Finding]) -> list[Placeholder]:
+    """`old` with what this scan found: a person's answers stay, an unconfirmed value stays only
+    while it is still found (with its fresh count), and a new value is added unreviewed."""
+    now = {f.value: f for f in findings}
+    out: list[Placeholder] = []
+    for p in old:
+        if p.review_state != "unreviewed":
+            out.append(p)
+        elif p.value in now:
+            f = now[p.value]
+            out.append(p if (p.reason, p.rows) == (f.reason, f.rows)
+                       else p.model_copy(update={"reason": f.reason, "rows": f.rows}))
+    have = {p.value for p in old}
+    out += [Placeholder(value=f.value, reason=f.reason, rows=f.rows) for f in findings if f.value not in have]
+    return out
 
 
 def _pii_from_sample(

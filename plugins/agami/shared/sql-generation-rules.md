@@ -101,6 +101,25 @@ Use predictable alias patterns:
 
 Reuse an alias only as a whole `ORDER BY` or `GROUP BY` item. In `WHERE`, `HAVING` or a later `SELECT` expression, write the expression out (`HAVING SUM(amount) > 1000`, not `HAVING revenue > 1000`) or filter in an outer query: the engine may read a same-named table column there instead of the alias, so the column check refuses it.
 
+
+### 11. Placeholder Values
+A column's `placeholders` lists stored values a person said stand for something else, each with a `meaning` and a `how`. Nothing filters them for you, and an automatic filter would be wrong, so follow the meaning for the question asked:
+
+| `meaning` | What it is | How to write the SQL |
+|---|---|---|
+| `unknown` | A stand-in member for a missing one (a date row keyed `-99999` dated `2099-12-31`), there so joins keep their fact rows | Leave it out of a breakdown (`GROUP BY` that column, or a column of that row), a date range and a latest/earliest (`MAX`/`MIN`); keep its rows in a grand total. Exclude it with the key: `WHERE d.date_key <> -99999`. |
+| `current` | An open-ended end date on the row that is still in force (`valid_to = '9999-12-31'`) | An "as of now" question wants exactly these rows (`WHERE valid_to = '9999-12-31'`). Never report the value as a real date or as the latest one, and leave it out of a duration or `MAX` over that column. |
+| `not_set` | Nothing was recorded (`'-'`, `'N/A'`, `1900-01-01`) | Treat it like `NULL`: `NULLIF(col, '-')`, or leave it out where `NULL` would drop out (counts of known values, averages, `MIN`/`MAX`, breakdowns). |
+
+```sql
+-- "Sales by fiscal year", where date_dim.date_key -99999 is `unknown`
+SELECT d.fiscal_year, SUM(s.amount) AS total_sales_amount
+FROM sales s JOIN date_dim d ON s.date_key = d.date_key
+WHERE d.date_key <> -99999
+GROUP BY d.fiscal_year
+```
+
+When you leave a placeholder out of a breakdown, say so in one line with the answer (for example, that sales with an unknown date are counted in the total but not in any year).
 ---
 
 ## Growth / Period-Over-Period Queries
