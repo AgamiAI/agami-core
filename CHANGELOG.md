@@ -12,6 +12,23 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **An example can be tagged with several metrics, and is found under each (#546).** A prompt
+  example's tag held one metric name (`metric: revenue`), so an example computing two metrics could
+  be linked to only one of them. It is now a list, `metrics: [revenue, order count]`; a single
+  `metric:` and a `metrics:` given as one string still read. `sm add-example` and `sm seed-examples`
+  write one metric as `metric:`, as before, and several as `metrics:`; the examples a call doesn't
+  name are written back as they were, so existing files don't change. Each tagged metric must be one
+  the model declares, by name: an example naming another is refused and listed in `skipped` (in
+  `rejected` for `sm seed-examples`). `get_prompt_examples` takes `metric_names` and `sm examples`
+  takes `--metric` (repeatable): the examples tagged with more of those metrics rank first, then
+  by the question as before. Without them the ranking is unchanged.
+
+  **Reading a model:** a release older than this one serves a `metrics:` list unchanged but cannot
+  rank by it, so upgrade the server before or with a model whose examples carry several metrics.
+  Examples with one metric are written as `metric:`, which every release reads.
+
 ## [0.9.21] — 2026-10-29
 
 ### Fixed

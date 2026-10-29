@@ -17,10 +17,17 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
-from semantic_model.models import Datasource, OrgRecord, stored_identity, table_key
+from semantic_model.models import (
+    Datasource,
+    OrgRecord,
+    example_metric_hits,
+    metric_tag_key,
+    stored_identity,
+    table_key,
+)
 from store import Store
 
 # The per-datasource model tables write_datasource clears before a re-seed (so a redeploy
@@ -460,6 +467,20 @@ def _tokens(s: str | None) -> set[str]:
     return set(_WORD_RE.findall((s or "").lower()))
 
 
+def metric_ranked(
+    rows: list[Any], metrics: Any, doc_of: Callable[[Any], dict[str, Any]]
+) -> list[Any]:
+    """`rows` with the examples tagged with more of `metrics` first, in their order otherwise (#546).
+
+    A stable sort on the tag count alone, after the word-overlap one: an example tagged with two
+    metrics is found under either, and with no `metrics` asked for the order is untouched.
+    """
+    wanted = {metric_tag_key(m) for m in metrics or [] if isinstance(m, str) and m.strip()}
+    if not wanted:
+        return rows
+    return sorted(rows, key=lambda r: example_metric_hits(doc_of(r), wanted), reverse=True)
+
+
 def example_id(ex: dict[str, Any]) -> str:
     """The example's identity, derived from its own content: `question` + `sql`, 12 hex characters —
     the construction `compute_model_hash` uses (`snapshot.py::_hash_and_manifest`).
@@ -537,10 +558,13 @@ def select_examples(
     top_k: int = 10,
     char_budget: int = _EXAMPLES_CHAR_BUDGET,
     org_id: str = DEFAULT_ORG,
+    metrics: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Scope to the org's datasource (+ area, plus the cross-area bucket), rank by word-overlap on
     the question, and cap to top-K within a char budget — so a large library never floods the
-    context. No embeddings (that tier is deploy-time + off by default)."""
+    context. No embeddings (that tier is deploy-time + off by default).
+
+    `metrics` ranks the examples tagged with more of them first (`metric_ranked`)."""
     # Ordered so that examples tying on overlap are capped the same way on every read: the ranking
     # sort below is stable, so without it the rows past the cap followed the engine's row order (#203).
     # By id alone: ids are hex, so every engine's collation sorts them alike, and it is the order the
@@ -560,6 +584,7 @@ def select_examples(
     q = _tokens(query)
     if q:
         rows = sorted(rows, key=lambda r: len(q & _tokens(r["question"])), reverse=True)
+    rows = metric_ranked(rows, metrics, lambda r: json.loads(r["doc"]))
     out: list[dict[str, Any]] = []
     used = 0
     for r in rows[:top_k]:

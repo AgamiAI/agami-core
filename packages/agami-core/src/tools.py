@@ -3133,7 +3133,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     _call_misses.set(None)
     # The same shape repair and refusal as `get_datasource_schema`: an `area` sent as a list was
     # dropped, and the caller got every area's examples while believing it had narrowed to one.
-    args, malformed = _normalized_args(args, keys=("area",))
+    args, malformed = _normalized_args(args, keys=("area", "metric_names"))
     if malformed is not None:
         return malformed
     # Same refusal as `get_datasource_schema` for an omission with several datasources served (#327):
@@ -3168,6 +3168,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
                 area=args.get("area"),
                 top_k=top_k,
                 org_id=_current_org_id(),
+                metrics=args.get("metric_names"),
             )
         finally:
             store.close()
@@ -3245,7 +3246,8 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
         )
     top_k = args.get("top_k")
     examples = _rank_local_examples(
-        docs, query=args.get("query"), top_k=10 if top_k is None else int(top_k)
+        docs, query=args.get("query"), top_k=10 if top_k is None else int(top_k),
+        metrics=args.get("metric_names"),
     )
     return json.dumps(
         {
@@ -3296,7 +3298,7 @@ def _with_example_ids(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _rank_local_examples(
-    docs: list[dict[str, Any]], *, query: Any, top_k: int
+    docs: list[dict[str, Any]], *, query: Any, top_k: int, metrics: Any = None
 ) -> list[dict[str, Any]]:
     """The local library ranked and capped exactly as `model_store.select_examples` ranks and caps
     the served one: by word overlap with `query`, ties in id order, at most `top_k`, within the same
@@ -3308,7 +3310,7 @@ def _rank_local_examples(
     ranks rows from the store, and reusing its tokenizer, id and budget here is what keeps the
     two from drifting.
     """
-    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens
+    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens, metric_ranked
 
     rows = sorted(docs, key=lambda d: d["id"])
     wanted = _tokens(query if isinstance(query, str) else None)
@@ -3317,6 +3319,7 @@ def _rank_local_examples(
         rows = sorted(
             rows, key=lambda d: len(wanted & _tokens(str(d.get("question") or ""))), reverse=True
         )
+    rows = metric_ranked(rows, metrics, lambda d: d)
     out: list[dict[str, Any]] = []
     used = 0
     for doc in rows[: max(top_k, 0)]:
@@ -5685,7 +5688,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "a stable `id` — send one of them as `example.id` on execute_sql, with `example.use` "
             "'followed' or 'shown_only' (a hosted deployment refuses a statement without it), and "
             "cite it as a `basis` ref too when you followed it. "
-            "Pass the user's question as `query`."
+            "Pass the user's question as `query`, and the metrics it uses as `metric_names`."
         ),
         "inputSchema": {
             "type": "object",
@@ -5724,6 +5727,15 @@ TOOLS: dict[str, dict[str, Any]] = {
                         "Max examples to return. Applied on a served deployment (default 10, "
                         "within a ~20,000-char budget); the local file path returns the curated "
                         "YAML whole and ignores it."
+                    ),
+                },
+                "metric_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Metric names the question uses, as get_datasource_schema gave them. "
+                        "Examples tagged with more of them rank first; an example tagged with "
+                        "several metrics is found under any one of them."
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,

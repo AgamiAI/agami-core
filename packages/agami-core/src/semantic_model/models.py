@@ -116,6 +116,32 @@ def stored_identity(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     return (parts[-2] if len(parts) > 1 else ""), parts[-1]
 
 
+def metric_tag_key(name: Any) -> str:
+    """A metric name as an example's tag is compared: case and spacing folded."""
+    return " ".join(str(name).split()).casefold()
+
+
+def example_metrics(ex: dict[str, Any]) -> list[str]:
+    """The metrics a prompt example is tagged with, in order and without repeats (#546).
+
+    Read from `metrics` (a list, or one name as a string) and from the single `metric` older files
+    carry, so either spelling, or both, reads as one list.
+    """
+    raw = ex.get("metrics")
+    names = list(raw) if isinstance(raw, list) else [raw]
+    names.append(ex.get("metric"))
+    out: dict[str, str] = {}
+    for n in names:
+        if isinstance(n, str) and n.strip():
+            out.setdefault(metric_tag_key(n), n.strip())
+    return list(out.values())
+
+
+def example_metric_hits(ex: dict[str, Any], wanted: set[str]) -> int:
+    """How many of the `wanted` metric keys (`metric_tag_key`) the example is tagged with."""
+    return len(wanted & {metric_tag_key(n) for n in example_metrics(ex)})
+
+
 # ---------------------------------------------------------------------------
 # Shared enums / literals
 # ---------------------------------------------------------------------------
