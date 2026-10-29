@@ -2791,9 +2791,25 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # one-to-one was reported as a fan trap because a sibling many-to-one between the same two
     # tables was also in the list, while the joins section of the same receipt, which reads the
     # written key, called the join one-to-one. The written key names the edge.
-    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0])
+    def columns_of(table: str) -> "set[str] | None":
+        hit = tidx.get(table)
+        return {c.name.lower() for c in hit[0].columns} if hit else None
+
+    declared_rels = rels
+    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0], columns_of)
+    # A join written on only part of a declared composite key repeats rows on BOTH sides, which the
+    # one-way fan rule below cannot say, so such an edge is taken out of it and reported on its own.
+    # Read against every declaration: which ones `_edges_as_written` kept depends on all the joins.
+    partial, unclear = _partial_key_joins(declared_rels, tree, tables_in_scope, _dialect_of(org)[0], columns_of)
+    if partial:
+        rels = [r for r in rels if id(r) not in partial]
 
     sites = _aggregate_sites(tree, tables_in_scope, scope, visible)
+    if unclear:
+        sites = [site._replace(resolved=False, unresolved_because=(
+            "a USING or NATURAL join may equate only part of a composite key, and which table one of "
+            "its columns comes from could not be told")) if site.resolved and site.sources & unclear else site
+            for site in sites]
     # The set the detectors read, derived from the sites rather than walked again — the two must
     # agree about which aggregates exist, and deriving is how that is guaranteed rather than hoped.
     agg_sources = {t for site in sites for t in site.sources}
@@ -2875,6 +2891,26 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 attached[i].append(Finding(
                     risk, reason=reason,
                     triggering_joins=[f"{measure} (1) <- {mt} (N)" for mt in many],
+                    aggregate=site.aggregate,
+                ))
+
+        # PARTIAL KEY: either side's measure is repeated, since each row may match several.
+        for rel, written, needed in partial.values():
+            ends = {_bare(rel.from_table), _bare(rel.to_table)}
+            label = f"{shown(_bare(rel.from_table))} -> {shown(_bare(rel.to_table))}"
+            short = (f"joins {label} on {' AND '.join(written)} only; the declared join needs "
+                     f"{' AND '.join(needed)}, so each row can match several and rows repeat")
+            for i, site in enumerate(sites):
+                hit = sorted(site.sources & ends)
+                if not hit:
+                    continue
+                measure = shown(hit[0])
+                risk = "fan_out_invariant" if _is_fan_immune(site.node) else "fan_trap"
+                reason = (f"fan trap: aggregating {measure!r}, which {short}."
+                          if risk == "fan_trap" else
+                          f"fan out: {short}; this aggregate's value is unchanged by that duplication.")
+                attached[i].append(Finding(
+                    risk, reason=reason, triggering_joins=[f"{label} (partial key)"],
                     aggregate=site.aggregate,
                 ))
 
@@ -5580,6 +5616,65 @@ def _reduced_on(text: str, dialect: "str | None") -> "frozenset[frozenset[tuple[
     return pairs
 
 
+def model_dialect(org: "Datasource | None") -> "str | None":
+    """The sqlglot dialect `org`'s model text is read in, or None when its engine is unknown."""
+    return _dialect_of(org)[0]
+
+
+def join_key_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tuple[str, str]] | None":
+    """The (from column, to column) pairs a join is keyed on, in the order written.
+
+    The pair form is one pair. An `on:` join yields one pair per conjunct, read with the same parse
+    `_declared_pairs` uses, so a composite key written as `on:` is seen by every caller that used to
+    read `from_column`/`to_column` alone. None when the `on:` is anything but column equalities
+    between its own two tables (a CAST, a fixed value, a bind marker) or will not parse: such a
+    join has no column pairs to report. A self-join keeps each equality's written order."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return [(rel.from_column, rel.to_column)]
+    pairs = _on_key_pairs(rel.on or "", _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table)), dialect)
+    return list(pairs) if pairs is not None else None
+
+
+def join_column_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tuple[str, str]] | None":
+    """`join_key_pairs`, but a fixed-value condition such as `customers_curr.current_flag = 'Y'` is
+    passed over rather than making the answer None: the columns a join is keyed on, for callers that
+    only ask which columns it uses (hidden columns, reference grouping, retyped columns). The ones
+    that compare joins for identity keep the strict reading."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return [(rel.from_column, rel.to_column)]
+    pairs = _on_key_pairs(rel.on or "", _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table)), dialect,
+                          skip_fixed=True)
+    return list(pairs) if pairs is not None else None
+
+
+@functools.lru_cache(maxsize=1024)
+def _on_key_pairs(text: str, ft: str, tt: str, dialect: "str | None",
+                  skip_fixed: bool = False) -> "tuple[tuple[str, str], ...] | None":
+    """The `on:` half of `join_key_pairs`, remembered like `_reduced_on`: model text, one parse each."""
+    if not _HAVE_SQLGLOT or _BIND_MARKER.search(text):
+        return None
+    predicate = _parse_declared_predicate(text, dialect)
+    if predicate is None:
+        return None
+    out: list[tuple[str, str]] = []
+    for conj in _and_conjuncts(predicate):
+        lhs, rhs = (conj.this, conj.expression) if isinstance(conj, exp.EQ) else (None, None)
+        if skip_fixed and lhs is not None and (
+                (isinstance(lhs, exp.Column) and _literal_key(rhs) is not None)
+                or (isinstance(rhs, exp.Column) and _literal_key(lhs) is not None)):
+            continue
+        if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column)):
+            return None
+        sides = (_tkey(lhs.table), _tkey(rhs.table))
+        if sides == (ft, tt):
+            out.append((lhs.name, rhs.name))
+        elif sides == (tt, ft):
+            out.append((rhs.name, lhs.name))
+        else:
+            return None
+    return tuple(out) or None
+
+
 def _join_condition(join: "exp.Join") -> "str | None":
     """The condition THIS join wrote, serialized for a label — None when it wrote none.
 
@@ -6311,33 +6406,153 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
 
 
 def _written_join_pairs(
-    tree: "exp.Select", scope_map: dict[str, str]
+    tree: "exp.Select", scope_map: dict[str, str], columns: "Callable[[str], set[str] | None] | None" = None
 ) -> dict[frozenset[str], frozenset[frozenset[tuple[str, str]]]]:
     """THIS SELECT's own explicit joins as the column pairs each one wrote, keyed by the unordered
     pair of tables it connects: the same reading as `_joined_table_pairs`, keeping the columns. The
     same pinning rule too: only an ON that names its own join's two relations counts, and a pair an
     unqualified column kept this layer from resolving contributes nothing."""
     out: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+    for tables, pairs, _kind in _each_written_join(tree, scope_map, columns):
+        out.setdefault(tables, set()).update(pairs)
+    return {tables: frozenset(pairs) for tables, pairs in out.items()}
+
+
+def _each_written_join(
+    tree: "exp.Select", scope_map: dict[str, str], columns: "Callable[[str], set[str] | None] | None" = None,
+    unread: "list[tuple[str, frozenset[str], str]] | None" = None,
+) -> "list[tuple[frozenset[str], frozenset[frozenset[tuple[str, str]]], str]]":
+    """`_written_join_pairs` one join at a time: (tables, the pairs that join wrote, its kind such as
+    SEMI or ANTI, '' for a plain join). Kept apart so two joins to two aliases of a table, each on
+    half a key, aren't read as one join on all of it. A self-join (`nodes n JOIN nodes p`) is keyed
+    by its one table; `USING` and `NATURAL` columns count when the relations they come from are known
+    (`_using_pairs`), and each one that can't be placed goes into `unread` as (the joined table, the
+    tables it may come from, the join's kind)."""
+    out = []
+    frm = tree.args.get("from_") or tree.args.get("from")
+    prior = [frm.this.alias_or_name] if isinstance(frm, exp.From) and frm.this is not None else []
+    # A column a USING join merged, by name: the aliases it now stands for, or None when unknown.
+    merged: "dict[str, set[str] | None]" = {}
     for join in tree.args.get("joins") or ():
-        on = join.args.get("on")
+        alias = join.this.alias_or_name
+        right = scope_map.get(alias, _relation_name(join.this))
+        kind = str(join.args.get("kind") or "").upper()
+        on, using = join.args.get("on"), join.args.get("using")
+        sources, prior = list(prior), prior + [alias]
         if on is None:
+            natural = str(join.args.get("method") or "").upper() == "NATURAL"
+            if using or natural:
+                names = ([col.name.lower() for col in using] if using
+                         else _natural_columns(alias, sources, scope_map, columns, merged))
+                lost: list = []
+                per = _using_pairs(names, alias, sources, scope_map, columns, merged, lost)
+                out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
+                if unread is not None:
+                    unread.extend((_tkey(_bare(right)), frozenset(cands), kind) for cands in lost)
             continue
-        right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
         names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
         if right not in names or len(names - {right}) > 1:
             continue
         # This join's fixed-value conditions on its own alias travel with its key, so a declared
         # condition join compares whole here too (see `_fixed_value_pairs`).
-        fixed = _fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+        fixed = _fixed_value_pairs(on, scope_map, {alias})
+        per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
         for pair in _predicate_pairs(on, scope_map):
             tables = frozenset(table for table, _column in pair)
             if len(tables) == 2:
-                out.setdefault(tables, set()).update({pair, *fixed})
-    return {tables: frozenset(pairs) for tables, pairs in out.items()}
+                per.setdefault(tables, set()).update({pair, *fixed})
+        for pair in _self_join_pairs(on, scope_map, alias):
+            per.setdefault(frozenset({next(iter(pair))[0]}), set()).update({pair, *fixed})
+        out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
+    return out
+
+
+def _self_join_pairs(on: "exp.Expression", scope_map: dict[str, str],
+                     alias: str) -> "set[frozenset[tuple[str, str]]]":
+    """The equalities of a join's ON between its own alias and ANOTHER alias of the same table:
+    `n.parent_id = p.id` in `nodes n JOIN nodes p`. `_predicate_pairs` can't tell these from a
+    condition within one row, since both ends resolve to `nodes`; the aliases can."""
+    out = set()
+    for conj in _and_conjuncts(on):
+        if not isinstance(conj, exp.EQ):
+            continue
+        lhs, rhs = conj.this, conj.expression
+        if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column) and lhs.table and rhs.table):
+            continue
+        if lhs.table == rhs.table or alias not in (lhs.table, rhs.table):
+            continue
+        lt, rt = (_tkey(_bare(scope_map.get(c.table, c.table))) for c in (lhs, rhs))
+        if lt == rt:
+            out.add(frozenset({(lt, lhs.name.lower()), (rt, rhs.name.lower())}))
+    return out
+
+
+def _using_pairs(
+    names: "list[str] | None", alias: str, sources: list[str], scope_map: dict[str, str],
+    columns: "Callable[[str], set[str] | None] | None", merged: "dict[str, set[str] | None]",
+    lost: list,
+) -> "dict[frozenset[str], set[frozenset[tuple[str, str]]]]":
+    """A `JOIN ... USING (a, b)` as the pairs it joins on, `names` None when the columns can't be told.
+
+    A column an earlier USING merged stands for every relation it merged (`a JOIN b USING (k) JOIN c
+    USING (k)` equates c.k with a.k and b.k); any other comes from the one relation before the join
+    whose modelled columns include it, or from the only relation there is. A column whose source
+    can't be told adds the tables it may come from to `lost` and no pair, and `merged` records it
+    as unknown for the joins after this one."""
+    right = _tkey(_bare(scope_map.get(alias, alias)))
+
+    def key(a: str) -> str:
+        return _tkey(_bare(scope_map.get(a, a)))
+
+    per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+    if names is None:
+        lost.append({key(s) for s in sources})
+        return per
+    for name in names:
+        group, groups, maybe = merged.get(name, set()), [], []
+        if name in merged and group is None:
+            maybe = list(sources)
+        elif len(sources) == 1:
+            groups = [set(sources)]
+        else:
+            for s in sources:
+                if s in group:
+                    continue
+                known = columns(key(s)) if columns is not None else None
+                if known is None:
+                    maybe.append(s)
+                elif name in known:
+                    groups.append({s})
+            if group:
+                groups.append(group)
+        if len(groups) != 1 or maybe:
+            lost.append({key(s) for s in [*maybe, *(a for g in groups for a in g)] or sources})
+            merged[name] = None
+            continue
+        for a in sorted(groups[0]):
+            per.setdefault(frozenset({key(a), right}), set()).add(frozenset({(key(a), name), (right, name)}))
+        merged[name] = groups[0] | {alias}
+    return per
+
+
+def _natural_columns(
+    alias: str, sources: list[str], scope_map: dict[str, str],
+    columns: "Callable[[str], set[str] | None] | None", merged: "dict[str, set[str] | None]",
+) -> "list[str] | None":
+    """The columns a NATURAL join equates: the joined relation's modelled columns that a relation
+    before it has too. None when any of those relations' columns aren't known."""
+    if columns is None:
+        return None
+    mine = columns(_tkey(_bare(scope_map.get(alias, alias))))
+    before = [columns(_tkey(_bare(scope_map.get(s, s)))) for s in sources]
+    if mine is None or any(k is None for k in before):
+        return None
+    return sorted(c for c in mine if c in merged or any(c in k for k in before))
 
 
 def _edges_as_written(
-    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None"
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None",
+    columns: "Callable[[str], set[str] | None] | None" = None,
 ) -> list[Relationship]:
     """The declared edges the fan and chasm detectors may lean on, given the joins the statement
     wrote.
@@ -6359,7 +6574,7 @@ def _edges_as_written(
     The declared side is reduced with `_declared_pairs`, whose None means "cannot be compared" and
     is treated here as "does not match", never as a wildcard.
     """
-    written = _written_join_pairs(tree, scope_map)
+    written = _written_join_pairs(tree, scope_map, columns)
     if not written:
         return rels
     by_pair: dict[frozenset[str], list[Relationship]] = {}
@@ -6380,6 +6595,62 @@ def _edges_as_written(
         if not matching or rel in matching:
             kept.append(rel)
     return kept
+
+
+def _partial_key_joins(
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None",
+    columns: "Callable[[str], set[str] | None] | None" = None,
+) -> "tuple[dict[int, tuple[Relationship, list[str], list[str]]], set[str]]":
+    """The declared composite-key joins this SELECT wrote only PART of, by id: each with the columns
+    it wrote and the ones the declaration needs, named from the join's FROM side (#510). Beside them,
+    the tables of a composite key a `USING`/`NATURAL` join may have written part of, when which
+    relation a column came from can't be told: their aggregates are undetermined, not clean.
+
+    `rels` is every declaration, and each written join is read on its own: one that matches some
+    declaration whole (a declared single-column join, or the whole key) repeats nothing that
+    declaration doesn't already say; one that writes some but not all of a key is partial."""
+    # A SEMI or ANTI join returns each row at most once, so it can't repeat one.
+    lost: list[tuple[str, frozenset[str], str]] = []
+    joins = [(tables, pairs) for tables, pairs, kind in _each_written_join(tree, scope_map, columns, lost)
+             if kind not in ("SEMI", "ANTI")]
+    if not joins and not lost:
+        return {}, set()
+    declared = [(rel, d) for rel in rels if (d := _declared_pairs(rel, dialect)) is not None]
+    composite = {_rel_tables(rel) for rel, d in declared if len(_endpoint_pairs(rel, d)) > 1}
+    unclear = {t for right, cands, kind in lost if kind not in ("SEMI", "ANTI")
+               for c in cands if frozenset({c, right}) in composite for t in (c, right)}
+    out: dict[int, tuple[Relationship, list[str], list[str]]] = {}
+    for tables, pairs in joins:
+        between = [(rel, d) for rel, d in declared if _rel_tables(rel) == tables]
+        if any(d <= pairs for _rel, d in between):
+            continue
+        for rel, d in between:
+            keys = _endpoint_pairs(rel, d)
+            used = keys & pairs
+            if rel.on and len(keys) > 1 and used and used != keys and id(rel) not in out:
+                out[id(rel)] = (rel, *_partial_names(rel, keys, used, dialect))
+    return out, unclear
+
+
+def _endpoint_pairs(rel: Relationship,
+                    declared: "frozenset[frozenset[tuple[str, str]]]") -> "set[frozenset[tuple[str, str]]]":
+    """The declared pairs that join a column of one end to a column of the other: not a fixed value,
+    and not a condition within one table (`customers.billing_region = customers.region`). A self-join
+    declaration can't tell the last apart, so all its column pairs count."""
+    ends = _rel_tables(rel)
+    return {p for p in declared
+            if not _is_fixed_value(p) and (len(ends) == 1 or {t for t, _c in p} == ends)}
+
+
+def _partial_names(rel: Relationship, keys: "set[frozenset[tuple[str, str]]]",
+                   used: "set[frozenset[tuple[str, str]]]", dialect: "str | None") -> tuple[list[str], list[str]]:
+    """The columns a partial join wrote and the ones its declaration needs, by FROM-side name."""
+    ft, tt = _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table))
+    named = [(f, p) for f, t in join_key_pairs(rel, dialect) or []
+             if (p := frozenset({(ft, f.lower()), (tt, t.lower())})) in keys]
+    if len(named) != len(keys):   # an `on:` with a fixed value or a filter too: name each pair by its FROM-side column
+        named = [(next((c for t, c in sorted(p) if t == ft), sorted(p)[0][1]), p) for p in sorted(keys, key=sorted)]
+    return [_echo_name(f) for f, p in named if p in used], [_echo_name(f) for f, _ in named]
 
 
 # `apply_default_filters` was deleted here by ACE-042: declared filters are business logic, not a
@@ -7434,6 +7705,9 @@ __all__ = [
     "pre_flight_check",
     "assemble_receipt",
     "assemble_refusal_receipt",
+    "join_key_pairs",
+    "join_column_pairs",
+    "model_dialect",
     # Re-exported for the chokepoint, which reaches them through this module rather than
     # importing `sql_dialect` directly: `execute_sql` is vendored into the plugin while this
     # package resolves separately, so it reads what it needs off one module it already has.

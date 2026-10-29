@@ -12,8 +12,11 @@ Canonical catalog result columns the engine expects:
     columns(s, t)    -> rows with: column_name, data_type, is_nullable,
                                    ordinal_position, numeric_scale (nullable)
     primary_keys(s,t)-> rows with: column_name            (ordered by key position)
-    foreign_keys(s)  -> rows with: from_table, from_column, to_table, to_column
+    foreign_keys(s)  -> rows with: from_table, from_column, to_table, to_column,
+                                   constraint_name, key_ordinal
                                    (+ optional from_schema, to_schema — schema-ful dialects)
+                        One row per column of a key: introspection groups a key's rows by
+                        (from_schema, from_table, constraint_name), in key_ordinal order.
     row_estimate(s,t)-> rows with: estimated_rows         (or None to skip)
 
 Three catalog families:
@@ -134,14 +137,17 @@ class Dialect:
         reserved word, or a case the engine would fold away. A plain name stays bare, so a binding
         reads the way a person would write it. On an upper-folding engine an all-lower name stays
         bare too, as hand-written models spell upper-case catalog names that way."""
-        low = name.lower()
-        if not _PLAIN_IDENT_RE.match(name) or low in _RESERVED_WORDS or low in self.reserved_extra:
+        if not _PLAIN_IDENT_RE.match(name) or self.reserves(name):
             return self.quote_ident(name)
         if self.folds_unquoted == "lower" and name != name.lower():
             return self.quote_ident(name)
         if self.folds_unquoted == "upper" and name not in (name.lower(), name.upper()):
             return self.quote_ident(name)
         return name
+
+    def reserves(self, name: str) -> bool:
+        """Whether this engine reserves `name` (any case), so it must be quoted to be a name."""
+        return name.lower() in _RESERVED_WORDS or name.lower() in self.reserved_extra
 
     def quote_lit(self, s: str) -> str:
         if self.backslash_escapes:
@@ -285,14 +291,44 @@ class Dialect:
         )
 
     def sql_foreign_keys(self, schema: str) -> str:
-        # Also returns from_schema / to_schema so introspect can flag cross-schema joins and
-        # resolve a target unambiguously when two schemas share a table name. ccu.table_schema
-        # is the REFERENCED (to) table's schema; it may differ from the constraint's schema.
+        # The referenced column is matched by POSITION (referential_constraints names the key the
+        # FK points at, position_in_unique_constraint the column in it). constraint_column_usage
+        # carries no position, so joining it on the constraint name alone paired every column of a
+        # composite key with every referenced column. Also returns from_schema / to_schema so
+        # introspect can flag cross-schema joins; the referenced table's schema may differ.
+        return (
+            "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
+            "kcu.table_schema AS from_schema, "
+            "ukc.table_name AS to_table, ukc.column_name AS to_column, "
+            "ukc.table_schema AS to_schema, "
+            "kcu.constraint_name AS constraint_name, kcu.ordinal_position AS key_ordinal "
+            "FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON tc.constraint_name = kcu.constraint_name "
+            "AND tc.table_schema = kcu.table_schema "
+            "JOIN information_schema.referential_constraints rc "
+            "ON rc.constraint_name = tc.constraint_name "
+            "AND rc.constraint_schema = tc.constraint_schema "
+            "JOIN information_schema.key_column_usage ukc "
+            "ON ukc.constraint_name = rc.unique_constraint_name "
+            "AND ukc.constraint_schema = rc.unique_constraint_schema "
+            "AND ukc.ordinal_position = kcu.position_in_unique_constraint "
+            "WHERE tc.constraint_type = 'FOREIGN KEY' "
+            f"AND tc.table_schema = {self.quote_lit(schema)} "
+            "ORDER BY kcu.table_name, kcu.constraint_name, kcu.ordinal_position"
+        )
+
+    def sql_foreign_keys_unpaired(self, schema: str) -> Optional[str]:
+        """The generic FK query as it was before #510, for a catalog without referential_constraints
+        or position_in_unique_constraint (an old Redshift may lack them). Its rows don't say how a
+        composite key's columns pair. None for a dialect with its own FK query."""
+        if type(self).sql_foreign_keys is not Dialect.sql_foreign_keys:
+            return None
         return (
             "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
             "kcu.table_schema AS from_schema, "
             "ccu.table_name AS to_table, ccu.column_name AS to_column, "
-            "ccu.table_schema AS to_schema "
+            "ccu.table_schema AS to_schema, kcu.constraint_name AS constraint_name "
             "FROM information_schema.table_constraints tc "
             "JOIN information_schema.key_column_usage kcu "
             "ON tc.constraint_name = kcu.constraint_name "
@@ -413,6 +449,7 @@ class PostgreSQL(Dialect):
         return (
             "SELECT c.relname AS from_table, fa.attname AS from_column, fn.nspname AS from_schema, "
             "rc.relname AS to_table, ra.attname AS to_column, rn.nspname AS to_schema, "
+            "con.conname AS constraint_name, k.ord AS key_ordinal, "
             "'FOREIGN KEY' AS constraint_type "
             "FROM pg_constraint con "
             "JOIN pg_class c ON c.oid = con.conrelid "
@@ -607,10 +644,12 @@ class MySQL(Dialect):
             "SELECT table_name AS from_table, column_name AS from_column, "
             "table_schema AS from_schema, "
             "referenced_table_name AS to_table, referenced_column_name AS to_column, "
-            "referenced_table_schema AS to_schema "
+            "referenced_table_schema AS to_schema, "
+            "constraint_name AS constraint_name, ordinal_position AS key_ordinal "
             "FROM information_schema.key_column_usage "
             f"WHERE table_schema = {self.quote_lit(schema)} "
-            "AND referenced_table_name IS NOT NULL"
+            "AND referenced_table_name IS NOT NULL "
+            "ORDER BY table_name, constraint_name, ordinal_position"
         )
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -737,7 +776,8 @@ class Trino(Dialect):
         return "SELECT NULL AS column_name WHERE 1=0"
 
     def sql_foreign_keys(self, schema: str) -> str:
-        return "SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column WHERE 1=0"
+        return ("SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column, "
+                "NULL AS constraint_name, NULL AS key_ordinal WHERE 1=0")
 
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         return None
@@ -796,8 +836,24 @@ class SQLServer(Dialect):
         return super().flag_rate_expr(col, boolean=False)
 
     def sql_foreign_keys(self, schema: str) -> str:
-        # SQL Server's constraint_column_usage works for FK targets.
-        return super().sql_foreign_keys(schema)
+        # sys.foreign_key_columns pairs each column with its referenced column; SQL Server's
+        # key_column_usage has no position_in_unique_constraint for the generic query to match on.
+        return (
+            "SELECT tp.name AS from_table, cp.name AS from_column, sp.name AS from_schema, "
+            "tr.name AS to_table, cr.name AS to_column, sr.name AS to_schema, "
+            "fk.name AS constraint_name, fkc.constraint_column_id AS key_ordinal, "
+            "'FOREIGN KEY' AS constraint_type "
+            "FROM sys.foreign_keys fk "
+            "JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id "
+            "JOIN sys.tables tp ON tp.object_id = fkc.parent_object_id "
+            "JOIN sys.schemas sp ON sp.schema_id = tp.schema_id "
+            "JOIN sys.columns cp ON cp.object_id = fkc.parent_object_id AND cp.column_id = fkc.parent_column_id "
+            "JOIN sys.tables tr ON tr.object_id = fkc.referenced_object_id "
+            "JOIN sys.schemas sr ON sr.schema_id = tr.schema_id "
+            "JOIN sys.columns cr ON cr.object_id = fkc.referenced_object_id AND cr.column_id = fkc.referenced_column_id "
+            f"WHERE sp.name = {self.quote_lit(schema)} "
+            "ORDER BY tp.name, fk.name, fkc.constraint_column_id"
+        )
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
@@ -897,15 +953,43 @@ class BigQuery(Dialect):
         return None  # BigQuery has no unique constraint
 
     def sql_foreign_keys(self, schema: str) -> str:
+        # No REFERENTIAL_CONSTRAINTS here, so the referenced column is found among the referenced
+        # table's own primary-key columns (rk) at the FK column's position_in_unique_constraint;
+        # matching CONSTRAINT_COLUMN_USAGE on the constraint name alone crossed a composite key's
+        # columns. Only this dataset's keys are readable: a single-column key (kn.n = 1) keeps the
+        # name-only pairing, which is exact for one column, so a key into another dataset is kept;
+        # a composite key there has no positions, so its rows come back with no constraint name
+        # and are left ungrouped for review.
+        ds = f"`{schema}`.INFORMATION_SCHEMA"
         return (
             "SELECT kcu.table_name AS from_table, kcu.column_name AS from_column, "
-            "ccu.table_name AS to_table, ccu.column_name AS to_column "
-            f"FROM `{schema}`.INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
-            f"JOIN `{schema}`.INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu "
+            "kcu.table_schema AS from_schema, "
+            "ccu.table_name AS to_table, ccu.column_name AS to_column, "
+            "ccu.table_schema AS to_schema, "
+            "CASE WHEN kn.n = 1 OR rk.column_name IS NOT NULL THEN kcu.constraint_name END AS constraint_name, "
+            "kcu.ordinal_position AS key_ordinal "
+            f"FROM {ds}.TABLE_CONSTRAINTS tc "
+            f"JOIN {ds}.KEY_COLUMN_USAGE kcu "
             "ON tc.constraint_name = kcu.constraint_name "
-            f"JOIN `{schema}`.INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu "
+            f"JOIN {ds}.CONSTRAINT_COLUMN_USAGE ccu "
             "ON tc.constraint_name = ccu.constraint_name "
-            "WHERE tc.constraint_type = 'FOREIGN KEY'"
+            f"JOIN (SELECT table_name, constraint_name, COUNT(*) AS n FROM {ds}.KEY_COLUMN_USAGE "
+            "GROUP BY table_name, constraint_name) kn "
+            "ON kn.table_name = kcu.table_name AND kn.constraint_name = kcu.constraint_name "
+            "LEFT JOIN (SELECT k.table_schema, k.table_name, k.column_name, k.ordinal_position "
+            f"FROM {ds}.KEY_COLUMN_USAGE k JOIN {ds}.TABLE_CONSTRAINTS c "
+            "ON c.constraint_name = k.constraint_name AND c.table_name = k.table_name "
+            "AND c.constraint_type <> 'FOREIGN KEY') rk "
+            "ON rk.table_schema = ccu.table_schema AND rk.table_name = ccu.table_name "
+            "AND rk.column_name = ccu.column_name "
+            "AND rk.ordinal_position = kcu.position_in_unique_constraint "
+            f"LEFT JOIN (SELECT DISTINCT table_schema, table_name FROM {ds}.TABLE_CONSTRAINTS "
+            "WHERE constraint_type <> 'FOREIGN KEY') rpk "
+            "ON rpk.table_schema = ccu.table_schema AND rpk.table_name = ccu.table_name "
+            # a composite key whose referenced key is readable keeps only its position-matched rows
+            "WHERE tc.constraint_type = 'FOREIGN KEY' "
+            "AND (kn.n = 1 OR rk.column_name IS NOT NULL OR rpk.table_name IS NULL) "
+            "ORDER BY kcu.table_name, kcu.constraint_name, kcu.ordinal_position"
         )
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -987,13 +1071,16 @@ class SQLite(Dialect):
     def sql_foreign_keys(self, schema: str) -> str:
         # foreign_key_list is per-table; the engine special-cases SQLite to call
         # sql_foreign_keys_for_table per table. This whole-schema form is unused.
-        return "SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column WHERE 1=0"
+        return ("SELECT NULL AS from_table, NULL AS from_column, NULL AS to_table, NULL AS to_column, "
+                "NULL AS constraint_name, NULL AS key_ordinal WHERE 1=0")
 
     def sql_foreign_keys_for_table(self, table: str) -> str:
+        # `id` numbers each foreign key of the table and `seq` its columns, so they group a key.
         return (
             f"SELECT {self.quote_lit(table)} AS from_table, \"from\" AS from_column, "
-            "\"table\" AS to_table, \"to\" AS to_column "
-            f"FROM pragma_foreign_key_list({self.quote_lit(table)})"
+            "\"table\" AS to_table, \"to\" AS to_column, "
+            "id AS constraint_name, seq AS key_ordinal "
+            f"FROM pragma_foreign_key_list({self.quote_lit(table)}) ORDER BY id, seq"
         )
 
     def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
@@ -1087,14 +1174,18 @@ class Oracle(Dialect):
     def sql_foreign_keys(self, schema: str) -> str:
         return (
             "SELECT ac.table_name AS from_table, acc.column_name AS from_column, "
-            "rcc.table_name AS to_table, rcc.column_name AS to_column "
+            "ac.owner AS from_schema, "
+            "rcc.table_name AS to_table, rcc.column_name AS to_column, rcc.owner AS to_schema, "
+            "ac.constraint_name AS constraint_name, acc.position AS key_ordinal "
             "FROM all_constraints ac "
             "JOIN all_cons_columns acc ON ac.constraint_name = acc.constraint_name "
             "AND ac.owner = acc.owner "
             "JOIN all_cons_columns rcc ON ac.r_constraint_name = rcc.constraint_name "
+            "AND ac.r_owner = rcc.owner "
             "AND acc.position = rcc.position "
             "WHERE ac.constraint_type = 'R' "
-            f"AND ac.owner = {self.quote_lit(schema)}"
+            f"AND ac.owner = {self.quote_lit(schema)} "
+            "ORDER BY ac.table_name, ac.constraint_name, acc.position"
         )
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:

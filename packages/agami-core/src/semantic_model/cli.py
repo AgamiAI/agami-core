@@ -1513,12 +1513,13 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             tindex.setdefault(t.name.lower(), (t, sa.name))
+    from .runtime import join_column_pairs, model_dialect
+    sg = model_dialect(org)
     existing = set()
-    for sa in org.subject_areas:
-        for r in sa.relationships:
-            existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
-    for r in org.cross_subject_area_relationships:
-        existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+    # Every column a join is keyed on, a composite `on:` join's included (#510).
+    for r in [*(r for sa in org.subject_areas for r in sa.relationships), *org.cross_subject_area_relationships]:
+        for fc, _tc in join_column_pairs(r, sg) or []:
+            existing.add((r.from_table.lower(), fc.lower(), r.to_table.lower()))
 
     intra: dict = defaultdict(list)
     cross: list = []
@@ -1780,7 +1781,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
 
-    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
+    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
     sp.add_argument("root")
     sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
@@ -1821,7 +1822,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
     sp.add_argument("root")
     sp.add_argument("--kind", required=True, choices=["metric", "entity"])
-    sp.add_argument("--area", required=True)
+    sp.add_argument("--area", required=True,
+                    help="a subject area datasource.yaml lists, or _cross for items that span areas "
+                         "(the datasource's cross_subject_area_metrics / _entities)")
     sp.add_argument("--file", required=True, help="JSON: a list of items (or {metrics:[…]}/{entities:[…]})")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)

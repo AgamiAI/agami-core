@@ -397,42 +397,161 @@ def infer_cardinality(
 
 
 # ---------------------------------------------------------------------------
-# Subject-area proposal (prefix-family clustering; one table per area)
+# Subject-area proposal (join-graph grouping; one owner per table)
 # ---------------------------------------------------------------------------
 
 
-def _singularize(token: str) -> str:
-    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
-        return token[:-1]
-    return token
+def _first_token(name: str) -> str:
+    # Kept as written: stripping a trailing "s" made "supplie", "statu" and "analysi" (#513).
+    return re.split(r"[_\s]", bare_name(name))[0].lower() or "misc"
 
 
 def cluster_by_family(names: list[str]) -> dict[str, str]:
-    """Map each table name -> an area key, grouping by first-token (singularized)
-    then merging prefix-families (one key being a prefix of another)."""
-    raw_key: dict[str, str] = {}
-    for name in names:
-        bare = bare_name(name)
-        token = _singularize(re.split(r"[_\s]", bare)[0].lower())
-        raw_key[name] = token or "misc"
+    """Map each table name -> its first name word. Only a whole word groups tables: `pro_x` is not
+    put with `products` and `promotions` because one name starts with the other's word."""
+    return {name: _first_token(name) for name in names}
 
-    canonical: dict[str, str] = {}
-    for k in sorted(set(raw_key.values()), key=len):
-        target = k
-        for root in canonical.values():
-            if k.startswith(root) or root.startswith(k):
-                target = min(root, k, key=len)
-                break
-        canonical[k] = target
 
-    def resolve(k: str) -> str:
-        seen: set[str] = set()
-        while canonical.get(k, k) != k and k not in seen:
-            seen.add(k)
-            k = canonical[k]
-        return k
+_STOP_WORDS = frozenset({"and", "the", "for", "with", "from", "per", "each", "one", "row", "rows",
+                         "table", "this", "that", "are", "has", "its", "data"})
 
-    return {name: resolve(raw_key[name]) for name in names}
+
+def _words(t: Table) -> set[str]:
+    text = f"{bare_name(t.name)} {t.description or ''}".lower()
+    return {w for w in re.split(r"[^a-z0-9]+", text) if len(w) > 2 and w not in _STOP_WORDS}
+
+
+# Below 1, modularity favours fewer, larger groups: at 1 it cuts a five-table chain in two.
+_RESOLUTION = 0.5
+
+
+def group_by_joins(tables: list[Table], rels: list[Relationship],
+                   max_size: int = SINGLE_AREA_MAX) -> list[list[Table]]:
+    """Group tables by the joins between them, with no target number of groups.
+
+    Groups start as single tables and the two joined groups that most raise the graph's modularity
+    are merged, until no merge raises it. That keeps a connected database apart at its weakest links:
+    a hub that half the tables join (customers, staff) doesn't pull them all into one group, as plain
+    connected components would. A merge past `max_size` is never made. Ties go to the pair sharing
+    more words in their names and descriptions. A joined table left alone goes to the neighbouring
+    group it joins most that has room, else into a pool of such tables. A table with no joins goes with the group holding the
+    most tables that share its whole first name word, else in a group of its own."""
+    # Ties fall to table order, so sort: a batched build lists its tables in batch order.
+    tables = sorted(tables, key=lambda t: (t.schema_name or "", t.name))
+    n = len(tables)
+    index = {(t.schema_name, t.name): i for i, t in enumerate(tables)}
+    by_bare: dict[str, list[int]] = defaultdict(list)
+    for i, t in enumerate(tables):
+        by_bare[t.name].append(i)
+
+    def at(table: str, schema: Optional[str]) -> Optional[int]:
+        bare = bare_name(table)
+        if schema is not None and (schema, bare) in index:
+            return index[(schema, bare)]
+        hits = by_bare.get(bare, [])
+        return hits[0] if len(hits) == 1 else None
+
+    weight: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    for r in rels:
+        a, b = at(r.from_table, r.from_schema), at(r.to_table, r.to_schema)
+        if a is not None and b is not None and a != b:
+            weight[a][b] += 1
+            weight[b][a] += 1
+    joined = sorted(weight)
+    total = sum(sum(w.values()) for w in weight.values())   # 2m
+    words = [_words(t) for t in tables]
+    tokens = [_first_token(t.name) for t in tables]
+
+    groups: dict[int, list[int]] = {i: [i] for i in joined}
+    degree = {i: sum(weight[i].values()) for i in joined}
+    links = {i: dict(weight[i]) for i in joined}            # group -> {group: join weight}
+
+    def shared(g: int, h: int) -> int:
+        return len(set().union(*(words[i] for i in groups[g])) & set().union(*(words[i] for i in groups[h])))
+
+    while True:
+        best, best_key = None, None
+        for g in groups:
+            for h, w in links[g].items():
+                if h <= g or len(groups[g]) + len(groups[h]) > max_size:
+                    continue
+                gain = w / total - _RESOLUTION * degree[g] * degree[h] / (total * total)
+                if gain <= 1e-12:
+                    continue
+                key = (round(gain, 12), shared(g, h), -min(g, h))
+                if best_key is None or key > best_key:
+                    best, best_key = (g, h), key
+        if best is None:
+            break
+        g, h = best
+        groups[g] += groups.pop(h)
+        degree[g] += degree.pop(h)
+        for k, w in links.pop(h).items():
+            if k == g:
+                continue
+            links[g][k] = links[g].get(k, 0) + w
+            links[k][g] = links[k].get(g, 0) + w
+            links[k].pop(h, None)
+        links[g].pop(h, None)
+
+    # A joined table still alone was refused by the size limit or by every neighbour: put it with the
+    # neighbouring group it joins most that has room, else pool those of one cluster by name word.
+    comp = {i: i for i in joined}
+
+    def croot(i: int) -> int:
+        while comp[i] != i:
+            comp[i] = comp[comp[i]]
+            i = comp[i]
+        return i
+
+    for a in joined:
+        for b in weight[a]:
+            comp[croot(a)] = croot(b)
+    owner = {i: g for g, members in groups.items() for i in members}
+    pooled: dict[int, list[int]] = defaultdict(list)
+    for i in [g for g, members in groups.items() if len(members) == 1]:
+        near = [(w, len(words[i] & set().union(*(words[m] for m in groups[owner[k]]))), -owner[k], owner[k])
+                for k, w in weight[i].items()
+                if owner[k] in groups and 1 < len(groups[owner[k]]) < max_size]  # a pooled one's is gone
+        del groups[i]
+        if near:
+            g = max(near)[3]
+            groups[g].append(i)
+            owner[i] = g
+        else:
+            pooled[croot(i)].append(i)
+    for members in pooled.values():
+        members.sort(key=lambda i: (tokens[i], tables[i].name))
+        for k in range(0, len(members), max_size):
+            groups[members[k]] = members[k:k + max_size]
+
+    for i in sorted(set(range(n)) - set(joined), key=lambda i: tables[i].name):
+        same = [r for r, members in groups.items()
+                if len(members) < max_size and any(tokens[m] == tokens[i] for m in members)]
+        if same:
+            best_group = max(same, key=lambda r: (sum(tokens[m] == tokens[i] for m in groups[r]), r >= 0, -r))
+            groups[best_group].append(i)
+        else:
+            groups[-1 - i] = [i]
+    return [[tables[i] for i in sorted(members)] for members in sorted(groups.values(), key=min)]
+
+
+def _group_name(members: list[Table], rels: list[Relationship]) -> str:
+    """The first name word most of the group's tables share; on a tie, a one-word table's name (the
+    entity itself, `orders` over `order_items`), then that of its most-joined table."""
+    names = {t.name for t in members}
+    degree: dict[str, int] = defaultdict(int)
+    for r in rels:
+        f, t = bare_name(r.from_table), bare_name(r.to_table)
+        if f in names and t in names and f != t:
+            degree[f] += 1
+            degree[t] += 1
+    count: dict[str, int] = defaultdict(int)
+    for t in members:
+        count[_first_token(t.name)] += 1
+    hub = max(members, key=lambda t: (count[_first_token(t.name)], _first_token(t.name) == t.name.lower(),
+                                      degree[t.name], [-ord(c) for c in t.name]))
+    return _first_token(hub.name)
 
 
 def make_table_ref(conn: str, table: Table) -> TableRef:
@@ -461,15 +580,26 @@ def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
     don't both match an area just because the bare name `products` is present. Schemaless
     relationships (SQLite / legacy) fall back to bare-name membership."""
     def here(table: str, schema) -> bool:
-        return (schema, table) in keys if schema is not None else table in bare
-    return (here(bare_name(r.from_table), r.from_schema)
-            and here(bare_name(r.to_table), r.to_schema))
+        name = bare_name(table)
+        if schema is None and "." in table:   # a schema written in the name (`crm.shipments`) is stated too
+            return (table.split(".")[-2], name) in keys or (None, name) in keys
+        return (schema, name) in keys if schema is not None else name in bare
+    return here(r.from_table, r.from_schema) and here(r.to_table, r.to_schema)
+
+
+def _as_area_rel(r: Relationship) -> Relationship:
+    """A join as an area holds it. A batched build re-proposes areas over joins that include the last
+    batch's cross-area ones, and one whose ends now share an area must lose its area endpoints, which
+    an area's relationships.yaml can't carry."""
+    if not isinstance(r, CrossSubjectAreaRelationship):
+        return r
+    return Relationship(**r.model_dump(exclude_none=True, by_alias=True, exclude={"from_subject_area", "to_subject_area"}))
 
 
 def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: str) -> SubjectArea:
     table_names = {t.name for t in tables}
     keys = {(t.schema_name, t.name) for t in tables}
-    area_rels = [r for r in rels if _rel_in_area(r, keys, table_names)]
+    area_rels = [_as_area_rel(r) for r in rels if _rel_in_area(r, keys, table_names)]
     return SubjectArea(
         name=name,
         description=f"Auto-proposed subject area covering: {', '.join(sorted(table_names))}.",
@@ -488,7 +618,7 @@ def propose_subject_areas(
     natural domains, and (critically) this keeps same-named tables in different schemas
     (e.g. `billing.products` vs `crm.products`) in separate area dirs so neither is lost to
     a bare-name write collision. A single-schema DB keeps the old behavior: one area when
-    small, else prefix-family clustering.
+    small, else grouped by its joins (`group_by_joins`).
     """
     notes: list[str] = []
     schemas = sorted({t.schema_name for t in tables if t.schema_name})
@@ -505,14 +635,18 @@ def propose_subject_areas(
     if len(tables) <= SINGLE_AREA_MAX:
         notes.append(f"{len(tables)} tables -> single subject area {profile.lower()!r}")
         return [make_area(profile.lower(), tables, rels, conn)], notes
-    mapping = cluster_by_family([t.name for t in tables])
-    by_area = defaultdict(list)
-    for t in tables:
-        by_area[mapping[t.name]].append(t)
+    by_area = {}
+    for members in group_by_joins(tables, rels):
+        name = base = _area_key(_group_name(members, rels))
+        k = 2
+        while name in by_area:
+            name, k = f"{base}_{k}", k + 1
+        by_area[name] = members
     areas = [make_area(a, members, rels, conn) for a, members in sorted(by_area.items())]
     notes.append(
-        f"{len(tables)} tables -> {len(areas)} areas by prefix-family (one owner each); "
-        "cross-area joins become cross_subject_area_relationships. PROPOSAL — review."
+        f"{len(tables)} tables -> {len(areas)} areas by their joins (grouped where tables join each other "
+        "most; one with no joins goes with tables sharing its first name word); cross-area joins become "
+        "cross_subject_area_relationships. PROPOSAL — review."
     )
     return areas, notes
 
@@ -569,6 +703,32 @@ def _model_dump(model) -> dict:
     """
     return model.model_dump(exclude_none=True, by_alias=True,
                             exclude={"for_questions_about"})
+
+
+def unloadable(org: Datasource) -> list[str]:
+    """What `write_tree` would write that the loader can't read back: each object, as written, re-read
+    as the type the loader builds from its file. The validator checks the objects in memory, where an
+    area join can still be a cross-area one whose extra keys only fail once read from disk."""
+    from .models import Entity, Metric, StorageConnection
+
+    def bad(kind: type, obj: Any, where: str) -> list[str]:
+        try:
+            kind(**_model_dump(obj))
+            return []
+        except Exception as e:
+            return [f"{where}: {e}"]
+
+    out = [e for sc in org.storage_connections for e in bad(StorageConnection, sc, f"storage {sc.name}")]
+    out += [e for r in org.cross_subject_area_relationships
+            for e in bad(CrossSubjectAreaRelationship, r, f"cross-area join {r.from_table}->{r.to_table}")]
+    for sa in org.subject_areas:
+        out += [e for tr in sa.tables for e in bad(TableRef, tr, f"{sa.name} reference to {tr.table}")]
+        out += [e for t in sa.tables_defined for e in bad(Table, t, f"{sa.name}/tables/{t.name}")]
+        out += [e for x in sa.entities for e in bad(Entity, x, f"{sa.name}/entities/{x.name}")]
+        out += [e for m in sa.metrics for e in bad(Metric, m, f"{sa.name}/metrics/{m.name}")]
+        out += [e for r in sa.relationships
+                for e in bad(Relationship, r, f"{sa.name} join {r.from_table}->{r.to_table}")]
+    return out
 
 
 @dataclass
@@ -944,7 +1104,7 @@ __all__ = [
     "SENSITIVE_RE", "detect_sensitive", "detect_money_column", "suggest_unit", "name_currency",
     "name_words",
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
-    "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
+    "infer_cardinality", "cluster_by_family", "group_by_joins", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
     "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "canonical_description",
     "write_tree", "WriteReport",
