@@ -369,6 +369,31 @@ def test_an_edit_of_one_datasource_list_does_not_hide_another_lists_stale_entry(
     assert [s.rsplit("/", 1)[-1] for s in res.stale] == ["billed customers"]
 
 
+def _two_joins(root: Path) -> None:
+    """A second approved orders -> customers join, on vendor_id."""
+    tables = root / "subject_areas" / "sales" / "tables" / "orders.yaml"
+    doc = yaml.safe_load(tables.read_text())
+    doc["columns"] += [{"name": "vendor_id", "type": "integer"}, {"name": "seller_id", "type": "integer"}]
+    tables.write_text(yaml.safe_dump(doc))
+    rels = root / "subject_areas" / "sales" / "relationships.yaml"
+    doc = yaml.safe_load(rels.read_text())
+    doc["relationships"].append({**doc["relationships"][0], "from_column": "vendor_id"})
+    rels.write_text(yaml.safe_dump(doc))
+
+
+def test_two_joins_on_one_table_pair_keep_their_own_column_edits(root):
+    _two_joins(root)
+    assert curate.apply(root, [_edit("relationship", "orders->customers", "from_column", "buyer_id",
+                                     from_column="customer_id")]).validated
+    assert curate.apply(root, [_edit("relationship", "orders->customers", "from_column", "seller_id",
+                                     from_column="vendor_id")]).validated
+    shown = {it["from_column"]: [c["text"] for c in it["changes_since_approval"]["changes"]]
+             for it in curate.review_queue(L.load_datasource(root), root=root)["rule_2"]
+             if it["kind"] == "relationship"}
+    assert shown == {"buyer_id": ["from column changed from customer_id to buyer_id"],
+                     "seller_id": ["from column changed from vendor_id to seller_id"]}
+
+
 def test_a_hand_edited_stale_item_says_changes_not_recorded(root):
     _set_state(root, "metric", review_state="stale")
     (item,) = curate.review_queue(L.load_datasource(root), root=root)["rule_1"]

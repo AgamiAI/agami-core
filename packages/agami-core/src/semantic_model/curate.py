@@ -2125,6 +2125,10 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
         # Walking back, an edit of a field that names the entry (a join's columns) named it by the old value.
         prior = dict(ident)
         if entry.get("op") == "edit" and entry.get("field") in prior:
+            # Only an edit that left the entry as it now is can be this entry's: two joins on one
+            # table pair can each have had a column edited from the other's value.
+            if not _same_value(entry["field"], entry.get("value"), ident[entry["field"]]):
+                continue
             prior[entry["field"]] = entry.get("before")
         if not _names_entry(kind, entry, prior):
             continue
@@ -2144,6 +2148,15 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
                               "text": SOME_NOT_RECORDED})
             return found
     return None
+
+
+def _same_value(field: str, a: Any, b: Any) -> bool:
+    """Whether two values of an identity field name the same thing, compared as `_matching_joins`
+    compares them: tables and names exactly, columns and schemas case-insensitively, an `on` with its
+    whitespace collapsed as well."""
+    if field in ("name", "from_table", "to_table"):
+        return a == b
+    return " ".join(str(a or "").split()).lower() == " ".join(str(b or "").split()).lower()
 
 
 def _moved_with(kind: str, entry: dict, ident: dict, areas: set) -> bool:
