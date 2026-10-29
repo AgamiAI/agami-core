@@ -77,9 +77,8 @@ _pip_try() {
 # is version-pinned and moves on every update.) Install source by layout — dev editable → the
 # published package on an index (lights up once agami-core is on PyPI) → pinned git (public
 # repo, no auth) → git main. First success wins.
-# Verify the REAL entrypoint (`semantic_model.cli`), not just the package — the bundled `lib/`
-# ships a stub `semantic_model` (only __init__ + units, no cli) that satisfies a bare `import
-# semantic_model` and would let a stub/partial install pass this check. Probe from a neutral cwd (`cd /`)
+# Verify the REAL entrypoint (`semantic_model.cli`), not just the package — a bare `import
+# semantic_model` would let a partial install pass this check. Probe from a neutral cwd (`cd /`)
 # so a `semantic_model` in the caller's cwd can't shadow the installed package (`python -c` puts cwd on
 # sys.path[0]).
 _imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot, yaml' ) 2>/dev/null; }
@@ -188,9 +187,8 @@ if [ "${1:-}" = "install" ]; then
 fi
 
 ensure_pkg
-# Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd (notably the bundled stub in
-# the plugin's lib/) can't shadow the installed package via `python -m` putting cwd on sys.path[0]. The
-# CLI's path args are absolute (the skill passes <artifacts_dir> absolute), so cwd is irrelevant to what
+# Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
+# package via `python -m` putting cwd on sys.path[0]. The CLI's path args are absolute (the skill passes <artifacts_dir> absolute), so cwd is irrelevant to what
 # it does. PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the
 # portable guarantee.
 export PYTHONSAFEPATH=1

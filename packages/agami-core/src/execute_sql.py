@@ -3022,7 +3022,7 @@ def _receipt_for(sql: str, profile: str, *, bounded: bool) -> Receipt:
     actually executed.
 
     Degrades rather than crashes, three ways, because every one of them is a real deployment. The
-    vendored plugin mirror ships ``semantic_model/__init__.py`` and ``units.py`` and no runtime at
+    vendored plugin mirror ships ``units.py`` (as ``_semantic_model_units.py``) and no runtime at
     all, so the guarded import is the same one ``_model_safety`` makes for the same reason; a local
     install legitimately has no model yet; and an assembler that raises must cost the caller its
     receipt, never its answer.
