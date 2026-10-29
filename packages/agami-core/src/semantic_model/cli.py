@@ -640,7 +640,9 @@ def cmd_remove_example(args) -> int:
                                  signer=args.signer, role=args.role)
     prefix = f"example (rejected) {args.area}/"
     done = {a[len(prefix):] for a in res.applied}
-    examples = [{"area": args.area, "question": e["question"], **({"id": e["id"]} if e.get("id") else {}),
+    # An unquoted `id: 0` is an authored id; only a missing or empty one is absent (as write_examples).
+    examples = [{"area": args.area, "question": e["question"],
+                 **({"id": e["id"]} if e.get("id") is not None and str(e["id"]) != "" else {}),
                  "status": "rejected"}
                 for e in list_prompt_examples(args.root, args.area, include_rejected=True)
                 if (e or {}).get("question") in done]

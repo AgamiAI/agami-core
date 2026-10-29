@@ -966,6 +966,23 @@ def test_remove_example_names_each_question_in_full_and_says_it_is_kept(tmp_path
     assert rc2 == 1 and "note" not in json.loads(out2) and json.loads(out2)["examples"] == []
 
 
+def test_remove_example_keeps_an_authored_id_of_zero(tmp_path):
+    """`id: 0` is an authored id and is named; an empty id names nothing and is left out."""
+    _model(tmp_path)
+    (tmp_path / "prompt_examples" / "s").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text(
+        "examples:\n"
+        "- id: 0\n  question: How many orders?\n  sql: SELECT COUNT(*) FROM orders\n"
+        "- id: ''\n  question: Total billed?\n  sql: SELECT SUM(total) FROM orders\n")
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "s",
+                    "--question", "How many orders?", "--question", "Total billed?"])
+    assert rc == 0
+    assert sorted(json.loads(out)["examples"], key=lambda e: e["question"]) == [
+        {"area": "s", "question": "How many orders?", "id": 0, "status": "rejected"},
+        {"area": "s", "question": "Total billed?", "status": "rejected"},
+    ]
+
+
 def _help(args: list[str]) -> str:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
