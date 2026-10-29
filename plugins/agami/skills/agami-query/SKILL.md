@@ -447,8 +447,9 @@ Format every cell per its column's `type` and **`unit`** (both come from `get_ta
 | `decimal` / `integer` | `chf` | `CHF 148.95` (no symbol convention; show code + space) |
 | `decimal` / `integer` | other ISO 4217 code | `<UPPERCASE_CODE> <number>` — show the code as a prefix (`SEK 148.95`, `BRL 148.95`). Never strip the unit silently. |
 | `decimal` | `percent` | `12.4%` (1 decimal) |
-| `decimal` | (other / none) | `1,234.56` (commas, 2 decimals) |
-| `integer` | (no currency unit) | `1,234` (commas, no decimals) |
+| `decimal` | (other / none) | `1,234.5` (commas, the value's own decimals with trailing zeros dropped: a NUMERIC `0.12500000` shows `0.125`) |
+| `integer` | (no currency unit) | `1,234` (commas, no decimals; a negative is `-719`) |
+| `integer` / `string` | — (a year, a ZIP/postal code, an id, a key, a choice field) | as written — `2011`, `07094`, never `2,011` or `7,094`. `sm prepare` returns these columns as `labels`. |
 | `date` | — | **`May 6, 2026`** (`MMM D, YYYY`) — never raw ISO `2026-05-06`, never epoch numbers |
 | `timestamp` | — | **`May 6, 2026 3:14 PM`** (`MMM D, YYYY h:mm A`) — never raw ISO with `T` separator, never microsecond precision |
 | `integer` / `string` | `epoch_s`/`epoch_ms`/`epoch_us`/`epoch_ns`, `yyyymmdd` | a **date encoding** — `format-table` renders it human-readably (epoch → `YYYY-MM-DD HH:MM:SS UTC`) deterministically; don't hand-format. **In the SQL, convert it** (`to_timestamp(created_ts)` for epoch_s, `to_timestamp(created_ts/1000)` for ms, etc.) so filters/grouping work and the result is a real date. |
@@ -521,9 +522,9 @@ For multi-section: a 1–3 sentence executive summary across all sections (the s
 
 **Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 30 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" format-table --csv-file "<artifacts_dir>/local/tmp/agami-result.csv" --units "$PREPARE_UNITS"
+bash "$AGAMI_PLUGIN_ROOT/scripts/sm" format-table --csv-file "<artifacts_dir>/local/tmp/agami-result.csv" --units "$PREPARE_UNITS" --labels "$PREPARE_LABELS"
 ```
-`prepare`'s `units` is keyed by output column and **traced through the SQL** — so `SUM(amount) AS total_outstanding` correctly carries amount's currency (a bare name match would miss the summed total). `format-table` then formats every numeric cell in full via `units.py` (symbol + Indian/western grouping, exact decimals) and passes non-numbers through. Same map + formatter the **MCP** uses, so verification numbers are identical regardless of host/LLM. (If a header was prettified in 3c, key the units to the prettified name.) Wide tables (> 8 cols) → vertical layout + "wide table — see HTML for the full grid".
+`prepare`'s `units` is keyed by output column and **traced through the SQL** — so `SUM(amount) AS total_outstanding` correctly carries amount's currency (a bare name match would miss the summed total), and only a column that has a unit gets one. Its `labels` lists the output columns that hold a year, a code or an id, which `format-table` shows as written instead of grouping. `format-table` then formats every numeric cell in full via `units.py` (symbol + Indian/western grouping, exact decimals) and passes non-numbers through. Same map + formatter the **MCP** uses, so verification numbers are identical regardless of host/LLM. (If a header was prettified in 3c, key the units to the prettified name.) Wide tables (> 8 cols) → vertical layout + "wide table — see HTML for the full grid".
 
 **Cap the chat preview at 30 rows** per Phase 3c — even when the user asked for "all leads with credit rating > 700" and the result is 4,213 rows, the chat shows the first 30 and points them at the CSV + HTML report. The full set lives in the artifacts on disk. The footer line ("Showing first 30 of 4,213 rows · full set in CSV: …") is the contract that tells the user where to find everything.
 

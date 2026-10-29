@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import datetime as _dt
 import re
-from typing import NamedTuple, Optional
+from decimal import Decimal
+from typing import Iterable, NamedTuple, Optional
 
 # ISO code -> symbol. Extend freely; unknown codes fall back to the bare code.
 CURRENCY_SYMBOLS: dict[str, str] = {
@@ -75,6 +76,13 @@ def _group_western(int_part: str) -> str:
     digits = int_part[::-1]
     chunks = [digits[i:i + 3] for i in range(0, len(digits), 3)]
     return ",".join(chunks)[::-1]
+
+
+def _group_number(text: str) -> str:
+    """Western-group a plain decimal string, sign and fraction kept: `-1234.5` -> `-1,234.5`."""
+    sign = "-" if text.startswith("-") else ""
+    int_part, dot, frac = text.lstrip("+-").partition(".")
+    return f"{sign}{_group_western(int_part)}{dot}{frac}"
 
 
 def _group_indian(int_part: str) -> str:
@@ -158,11 +166,8 @@ def format_value(value, unit: Optional[str]) -> str:
     if not unit:
         return str(value)
     # generic unit label
-    if num == int(num):
-        grouped = _group_western(str(int(num)))
-    else:
-        grouped = str(num)
-    return f"{grouped} {unit}"
+    plain = _plain_number(value)
+    return f"{_group_number(plain) if plain is not None else str(value)} {unit}"
 
 
 def _format_currency(num: float, cu: CurrencyUnit) -> str:
@@ -180,45 +185,81 @@ def _format_currency(num: float, cu: CurrencyUnit) -> str:
     return f"{'-' if num < 0 else ''}{CURRENCY_SYMBOLS[cu.code]}{grouped}{'.' + frac if frac else ''}{suffix}{rate}"
 
 
-def _looks_numeric(s: str) -> bool:
-    t = (s or "").strip().replace(",", "")
-    if t in ("", "-", "+"):
-        return False
-    try:
-        float(t)
-        return True
-    except ValueError:
-        return False
+_NUMBER_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
+# A number never prints with a leading zero, so `07094` or `001` is a code read as a string.
+_LEADING_ZERO_RE = re.compile(r"^[+-]?0\d")
+
+
+def _plain_number(value) -> Optional[str]:
+    """The value as a plain decimal string with no exponent and no trailing fractional zeros
+    (`Decimal('12.50000000')` -> `12.5`), or None when it is not a number. Exact: a NUMERIC(38)
+    value or a big id never goes through a float."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        value = repr(value)
+    if isinstance(value, (int, Decimal)):
+        d = Decimal(value)
+    else:
+        s = str(value).strip().replace(",", "")
+        if not _NUMBER_RE.match(s) or _LEADING_ZERO_RE.match(s):
+            return None
+        d = Decimal(s)
+    if not d.is_finite():
+        return None
+    text = format(d, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "+0") else text
 
 
 def format_cell(value, unit: Optional[str]) -> str:
     """One result cell, formatted EXACTLY (no abbreviation, no precision loss) — for
     verification surfaces. A unit'd column → `format_value`; a bare number → grouped
-    in full; anything else passes through unchanged."""
+    in full, trailing fractional zeros dropped; anything else (a code like `07094`
+    included) passes through unchanged."""
     if unit:
         return format_value(value, unit)
-    s = "" if value is None else str(value)
-    if _looks_numeric(s):
-        n = float(s.replace(",", ""))
-        if n == int(n):
-            return _group_western(str(int(n)))
-        # keep the source's exact decimals — don't round
-        ip, fp = s.replace(",", "").lstrip("-").split(".") if "." in s else (s.replace(",", "").lstrip("-"), "")
-        grouped = _group_western(ip)
-        return ("-" if n < 0 else "") + grouped + ("." + fp if fp else "")
-    return s
+    plain = _plain_number(value)
+    if plain is not None:
+        return _group_number(plain)
+    return "" if value is None else str(value)
 
 
-# A number in a column NAMED like a year, a period or an identifier is a label, not a quantity:
-# `2024` grouped as `2,024`, or an id as `1,234,567`, misreads it. Matched on the header's words.
+# A number in a column NAMED like a period or an identifier is a label, not a quantity: an id
+# grouped as `1,234,567` misreads it. Matched on the header's words. Years are below.
 _LABEL_COLUMN_RE = re.compile(
-    r"(^|_)(year|years|yr|fy|fiscal_year|quarter|qtr|month|period|week|day_of_week|"
+    r"(^|_)(quarter|qtr|month|period|week|day_of_week|"
     r"id|key|code|nbr|number|num|no|zip|zipcode|postal_code)$"
 )
 
 
 def _names_a_label(header: str) -> bool:
-    return bool(_LABEL_COLUMN_RE.search(re.sub(r"[^a-z0-9]+", "_", header.lower()).strip("_")))
+    return bool(_LABEL_COLUMN_RE.search(_snake(header)))
+
+
+def _snake(header: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", header.lower()).strip("_")
+
+
+# A year or a postal code in a name (`year_built`, `ship_zip5`) is only trusted when every value has
+# that shape too: `sales_last_year` holds money, not years.
+_YEAR_WORD_RE = re.compile(r"(^|_)(year|yr|fy)s?(_|$)")
+_POSTAL_WORD_RE = re.compile(r"(^|_)(zip|zipcode|zip5|postal|postcode|pincode)(_|$)")
+_YEAR_VALUE_RE = re.compile(r"^[12]\d{3}(\.0+)?$")
+_CODE_VALUE_RE = re.compile(r"^\d+(\.0+)?$")
+
+
+def _values_are_labels(header: str, values: list) -> bool:
+    words = _snake(header)
+    if _YEAR_WORD_RE.search(words):
+        shape = _YEAR_VALUE_RE
+    elif _POSTAL_WORD_RE.search(words):
+        shape = _CODE_VALUE_RE
+    else:
+        return False
+    seen = [str(v).strip() for v in values if v is not None and str(v).strip() != ""]
+    return bool(seen) and all(shape.match(v) for v in seen)
 
 
 def _as_label(value) -> str:
@@ -228,15 +269,21 @@ def _as_label(value) -> str:
         return ""
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
+    if isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value():
+        return str(int(value))
     return str(value)
 
 
-def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = None) -> list[list[str]]:
+def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = None,
+                labels: Optional[Iterable[str]] = None) -> list[list[str]]:
     """Every cell formatted the way an answer shows it: a unit'd column with its symbol and
-    grouping, a column named like a year or an id as a label, any other number grouped.
+    grouping, a label column (a year, a code, an id) as written, any other number grouped.
+    `labels` names the label columns the model knows of, by output name or position (`#i`), as
+    `runtime.resolve_result_labels` returns them; a column named like a year or an id is one too.
     `format_table` renders these, and `sm seed-validate`'s preview shows them, so a value
     looks the same in the preview someone validates as in the answer they later get."""
     units = units or {}
+    known = set(labels or ())
     cols = [str(h) for h in headers]
 
     def _unit_for(i: int) -> Optional[str]:
@@ -245,23 +292,30 @@ def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = No
         h = cols[i] if i < len(cols) else ""
         return units.get(h) or units.get(f"#{i}")
 
+    def _is_label(i: int) -> bool:
+        h = cols[i] if i < len(cols) else ""
+        if h in known or f"#{i}" in known or _names_a_label(h):
+            return True
+        return _values_are_labels(h, [r[i] for r in rows if i < len(r)])
+
+    width = max([len(cols)] + [len(r) for r in rows])
+    label_cols = {i for i in range(width) if not _unit_for(i) and _is_label(i)}
+
     def _fmt(i: int, c) -> str:
-        u = _unit_for(i)
-        if not u and _names_a_label(cols[i] if i < len(cols) else ""):
-            return _as_label(c)
-        return format_cell(c, u)
+        return _as_label(c) if i in label_cols else format_cell(c, _unit_for(i))
 
     return [[_fmt(i, c) for i, c in enumerate(r)] for r in rows]
 
 
-def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None) -> str:
+def format_table(headers: list[str], rows: list[list], units: Optional[dict] = None,
+                 labels: Optional[Iterable[str]] = None) -> str:
     """Render a GitHub-flavoured markdown table with every numeric cell formatted
     deterministically and in full (exact value, thousands/lakh grouping, currency
     symbol) — never abbreviated. `units` maps a header to its unit (currency code or
     label). The query skill and the MCP both call this so the numbers a user verifies
     are identical regardless of which LLM renders the surrounding answer."""
     cols = [str(h) for h in headers]
-    fmt_rows = format_rows(headers, rows, units)
+    fmt_rows = format_rows(headers, rows, units, labels)
     head = "| " + " | ".join(cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body = "\n".join("| " + " | ".join(c.replace("|", "\\|") for c in r) + " |" for r in fmt_rows)

@@ -14,6 +14,19 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Numbers in the examples preview and in query answers are formatted by their column's type and
+  unit (#547).** A year shows as `2011`, not `2,011`; a ZIP code read as text keeps its leading
+  zero (`07094`); `-719` no longer shows as `-,719`; a NUMERIC value drops its trailing zeros
+  (`0.12500000000000000000` shows `0.125`), while a money column keeps its symbol, grouping and
+  two decimals. A column the model types as text, a key, a `dimension` or a choice field, and a
+  year taken out of a date, is shown as written; without the model, a column named like a year or
+  a postal code is shown as written only when every value has that shape. A column now gets a unit
+  only when that column has one: a CASE takes it from the values it returns, not from a money
+  column in its condition, a bare column is read from its own table, and the difference of two
+  dates is not a date, so a duration in days no longer shows as dollars. `sm prepare` returns these
+  label columns as `labels`, and `sm format-table --labels` takes them. Big integers are no longer
+  rounded through a float. Reports built by `csv_to_sections.py` follow the same rules.
+
 - **Sensitive-column detection reads whole words, checks sampled values and looks inside JSON
   (#516).** A new build split column names into words, so `phoneme_error_rate`, `mobile_sessions`,
   `headphones_sold`, `adobe_campaign_id` and `ip_address` are no longer flagged (they stay in the

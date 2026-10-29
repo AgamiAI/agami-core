@@ -282,6 +282,8 @@ def cmd_prepare(args) -> int:
         # {output_column: unit}, traced through the caller's own statement — feed straight to
         # `format-table --units` so summed/aliased currency formats correctly.
         "units": RT.resolve_result_units(org, sql),
+        # the output columns holding a year, a code or an id — `format-table --labels`
+        "labels": sorted(RT.resolve_result_labels(org, sql)),
     })
     return 0
 
@@ -1086,7 +1088,8 @@ def cmd_format_table(args) -> int:
         return 0
     headers, rows = reader[0], reader[1:]
     unit_map = json.loads(args.units) if args.units else {}
-    print(units.format_table(headers, rows, unit_map))
+    labels = json.loads(args.labels) if args.labels else []
+    print(units.format_table(headers, rows, unit_map, labels))
     return 0
 
 
@@ -1249,15 +1252,17 @@ def cmd_seed_validate(args) -> int:
                 data = rows[1:]
                 # trace each output column → unit through the seed's SQL, then format every
                 # cell exactly like the query path (units.format_table): a unit'd column gets
-                # its symbol/grouping, a bare number gets grouping; non-numbers pass through.
-                unit_map = {}
+                # its symbol/grouping, a year or a code is shown as written, a bare number gets
+                # grouping; non-numbers pass through.
+                unit_map, labels = {}, set()
                 if fmt_org is not None:
                     try:
                         unit_map = RT.resolve_result_units(fmt_org, sql)
+                        labels = RT.resolve_result_labels(fmt_org, sql)
                     except Exception:
-                        unit_map = {}
+                        unit_map, labels = {}, set()
                 if data:
-                    data = units.format_rows(headers, data, unit_map)
+                    data = units.format_rows(headers, data, unit_map, labels)
                 item["row_headers"] = headers
                 item["row_count"] = len(data)
                 item["row_preview"] = data[:cap]
@@ -1895,6 +1900,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("format-table", help="format a result CSV into a deterministic markdown table (exact numbers)")
     sp.add_argument("--csv-file", default=None, help="result CSV (header row + rows); omit to read stdin")
     sp.add_argument("--units", default=None, help='JSON header->unit map, e.g. {"outstanding":"INR"}')
+    sp.add_argument("--labels", default=None,
+                    help='JSON list of label columns shown as written (a year, a code), e.g. ["ship_year"]')
     sp.set_defaults(func=cmd_format_table)
 
     sp = sub.add_parser("seed-examples", help="validate candidate seeds against the live DB + write the passing ones")
