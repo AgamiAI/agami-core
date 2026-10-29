@@ -118,7 +118,7 @@ It prints `{data, anomalies, needs_judgment}`:
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
 - `data.datasource_md` — the full datasource.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/datasource.md` (overwrite; human narrative only).
-- `data.signer` / `data.role` — the curator identity for `--signer`/`--role` on every approve. **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the Phase 0 ask.
+- `data.signer` / `data.role` — the curator identity for `--signer`/`--role` (recorded on every op; required on an approve). **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the Phase 0 ask.
 
 **If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a schema prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (re-copy that block from the dashboard). Don't apply a partial block.
 
@@ -152,7 +152,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
-`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table) and `stale` when an edit sent approved items back to review.
+`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0. They are recorded in `curation_log.jsonl` on every op the batch applies (exclude, include, approve, reject and edit); an approve also stamps them on the item as its sign-off, while an edit that changes what an approved item computes or connects sends it back to review as `stale` instead of re-stamping it. Resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp. Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table) and `stale` when an edit sent approved items back to review.
 
 **Success** (`validated: true`):
 - Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*

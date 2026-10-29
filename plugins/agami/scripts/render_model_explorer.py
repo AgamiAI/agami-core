@@ -124,7 +124,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "sensitive": c.sensitive,
                     # broader "might be PII" the strict flag missed — drives the PII tab's
                     # suspected tier (review aid; never auto-marks).
-                    "suspected_pii": (not c.sensitive) and _B.suspected_pii(c.name),
+                    "suspected_pii": (not c.sensitive) and _B.suspected_reason(c.name, c.caveats) is not None,
                     "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
                     "group": col_group.get(c.name, ""),

@@ -2,7 +2,7 @@
 determine it, and the two entry points agree about everything else.
 
 `python3 -m execute_sql` is the invocation the plugin README documents, and it resolves the vendored
-stdlib-only slice, which ships `semantic_model/__init__.py` and `units.py` and no runtime at all.
+stdlib-only slice, which ships `units.py` (privately named) and no `semantic_model` runtime at all.
 Table scope, the `SELECT *` ban and column scope therefore cannot run there. `_receipt_for` already
 conceded exactly that, returning `undetermined_receipt(RECEIPT_NO_RUNTIME)` — so the executor
 published "I could not determine what this statement reaches" and then executed it anyway. Principle
@@ -392,14 +392,29 @@ def test_a_package_that_raises_is_not_reported_as_a_package_that_is_absent(
 _BROKEN_RUNTIME = "raise RuntimeError('forced: installed and raising while importing')\n"
 
 
-def _broken_slice(root: Path) -> Path:
+def _broken_slice(root: Path, src: Path = VENDORED_LIB) -> Path:
     """A copy of the vendored slice whose `semantic_model.runtime` raises a non-ImportError."""
     import shutil
 
     lib = root / "brokenlib"
-    shutil.copytree(VENDORED_LIB, lib, ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(src, lib, ignore=shutil.ignore_patterns("__pycache__"))
+    # The slice ships no `semantic_model` package (#539), but a checkout that predates that can
+    # still hold `lib/semantic_model/__pycache__/`, and copytree keeps the folder around it.
+    (lib / "semantic_model").mkdir(exist_ok=True)
+    (lib / "semantic_model" / "__init__.py").write_text("")
     (lib / "semantic_model" / "runtime.py").write_text(_BROKEN_RUNTIME)
     return lib
+
+
+def test_the_broken_slice_builds_over_a_leftover_package_cache(tmp_path: Path) -> None:
+    import shutil
+
+    old_checkout = tmp_path / "lib"
+    shutil.copytree(VENDORED_LIB, old_checkout, ignore=shutil.ignore_patterns("__pycache__"))
+    (old_checkout / "semantic_model" / "__pycache__").mkdir(parents=True)
+    (old_checkout / "semantic_model" / "__pycache__" / "units.cpython-312.pyc").write_bytes(b"")
+    lib = _broken_slice(tmp_path, old_checkout)
+    assert (lib / "semantic_model" / "runtime.py").read_text() == _BROKEN_RUNTIME
 
 
 def test_the_broken_package_refusal_survives_the_wire_it_travels(tmp_path: Path) -> None:
