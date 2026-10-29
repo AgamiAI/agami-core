@@ -1788,7 +1788,8 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
         q = (e or {}).get("question", "")
         if q.strip() in wanted and e.get("status") != "rejected":
             e["status"] = "rejected"
-            res.applied.append(f"example (rejected) {area}/{q[:50]}")
+            # the whole question: two that open alike must stay tellable apart (#550)
+            res.applied.append(f"example (rejected) {area}/{q}")
     for missing in sorted(wanted - present):
         res.skipped.append({"item": missing, "reason": "no example with that question"})
     if not res.applied:
