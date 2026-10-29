@@ -306,8 +306,23 @@ def test_a_log_that_does_not_reach_the_approval_says_changes_not_recorded(root, 
         log.write_bytes(b"\xff not json\n")
     (item,) = curate.review_queue(L.load_datasource(root), root=root)["rule_2"]
     assert item["review_state"] == "stale"
-    assert item["changes_since_approval"] == {"recorded": False, "changes": [],
+    assert item["changes_since_approval"] == {"recorded": False, "complete": False, "changes": [],
                                               "summary": "changes not recorded"}
+
+
+def test_an_unreadable_line_after_the_staling_edit_marks_the_changes_incomplete(root):
+    assert curate.apply(root, [BINDING]).validated
+    assert curate.apply(root, [_edit("metric", "revenue", "unit", "USD")]).validated
+    log = root / curate.CURATION_LOG
+    lines = log.read_bytes().splitlines()
+    log.write_bytes(b"\n".join([*lines[:-1], b"\xff not json"]) + b"\n")
+    (item,) = curate.review_queue(L.load_datasource(root), root=root)["rule_1"]
+    since = item["changes_since_approval"]
+    assert since["recorded"] is True and since["complete"] is False
+    assert [c["text"] for c in since["changes"]] == [
+        "binding (SQLite) changed from SUM(orders.amount) to SUM(orders.amount) - SUM(orders.discount)",
+        "some changes not recorded"]
+    assert since["summary"].endswith("; some changes not recorded")
 
 
 def test_a_mapping_attribute_change_is_shown(root):

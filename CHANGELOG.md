@@ -39,16 +39,17 @@ below corresponds to one such version.
   the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
   tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
   read from `curation_log.jsonl` (e.g. "binding (sqlite) changed from SUM(amount) to SUM(amount) -
-  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it. This supersedes
-  #559's re-stamp of a person's structural join edit as their approval (#511): the edited join goes
-  stale instead, and a refresh still leaves it alone, since it re-labels only the joins introspection
-  approved itself, and never merges an edited split join into a database's composite foreign key
-  (`composite foreign key not applied: … edited since its approval`); a refresh that lowers a stale
-  join's confidence because a column's type changed keeps it `stale`, and a stale `on:` join keeps
-  its confidence. A table move (#513) keeps a stale join, metric or entity stale with its old signer,
-  and the review surfaces still show what changed; when a move finds two copies of one join, a stale
-  copy counts as a person's sign-off, so it is kept over an engine-approved one, and a move where it
-  disagrees with a copy a person signed off is refused.
+  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it ("some changes not
+  recorded" after the changes it could read, when a line since the edit can't be read). This
+  supersedes #559's re-stamp of a person's structural join edit as their approval (#511): the edited
+  join goes stale instead, and a refresh still leaves it alone, since it re-labels only the joins
+  introspection approved itself, and never merges an edited split join into a database's composite
+  foreign key (`composite foreign key not applied: … edited since its approval`); a refresh that
+  lowers a stale join's confidence because a column's type changed keeps it `stale`, and a stale
+  `on:` join keeps its confidence. A table move (#513) keeps a stale join, metric or entity stale
+  with its old signer, and the review surfaces still show what changed; when a move finds two copies
+  of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
+  and a move where it disagrees with a copy a person signed off is refused.
 
 - **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
   single-schema database of more than 24 tables used to get one area per table-name prefix, with

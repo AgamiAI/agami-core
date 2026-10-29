@@ -2041,6 +2041,7 @@ _JOIN_IDENTITY = ("from_table", "to_table", "from_column", "to_column", "on", "f
 _FIELD_LABELS = {"bindings": "binding", "relationship": "cardinality", "maps_to": "maps to",
                  "on": "join condition"}
 NOT_RECORDED = "changes not recorded"
+SOME_NOT_RECORDED = "some changes not recorded"
 
 
 def _identity(kind: str, obj: Any) -> dict:
@@ -2101,13 +2102,17 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
                            *, log: Optional[list] = None) -> Optional[list[dict]]:
     """The edits made to a stale metric, entity or join since its approval, oldest first, read from the
     curation log: each `{field, before, after, by, at, text}`. None when the log doesn't reach back to
-    the edit that took the approval away (no log, a trimmed one, or a hand edit) (#537)."""
+    the edit that took the approval away (no log, a trimmed one, or a hand edit) (#537). When a line
+    after that edit can't be read, the list ends with a `field: None` entry saying "some changes not
+    recorded", since that line may have been one."""
     lines = log if log is not None else _read_log_lines(Path(root))
     ident = _identity(kind, obj)
     areas = {area} if area else set()
     found: list[dict] = []
+    unreadable = False
     for entry in reversed(lines):
         if not isinstance(entry, dict):
+            unreadable = True
             continue
         if areas and _moved_with(kind, entry, ident, areas):
             # Before the move the entry lived where its table did, or among the cross-area joins.
@@ -2134,6 +2139,9 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
                       for text in _change_lines(entry)]
         if entry.get("made_stale"):
             found.reverse()
+            if unreadable:
+                found.append({"field": None, "before": None, "after": None, "by": None, "at": None,
+                              "text": SOME_NOT_RECORDED})
             return found
     return None
 
@@ -2153,8 +2161,9 @@ def since_approval(root: str | Path, kind: str, area: Optional[str], obj: Any,
     """`changes_since_approval` as the review surfaces show it, "changes not recorded" when unknown."""
     changes = changes_since_approval(root, kind, area, obj, log=log)
     if changes is None:
-        return {"recorded": False, "changes": [], "summary": NOT_RECORDED}
-    return {"recorded": True, "changes": changes, "summary": "; ".join(c["text"] for c in changes)}
+        return {"recorded": False, "complete": False, "changes": [], "summary": NOT_RECORDED}
+    return {"recorded": True, "complete": not any(c["field"] is None for c in changes),
+            "changes": changes, "summary": "; ".join(c["text"] for c in changes)}
 
 
 def has_model_curation(root: str | Path) -> bool:
@@ -2170,4 +2179,5 @@ def has_model_curation(root: str | Path) -> bool:
 
 __all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
            "write_items", "CROSS_AREA", "add_examples", "validate_seeds", "set_key_terminology",
-           "history", "changes_since_approval", "since_approval", "read_log", "ApplyResult"]
+           "history", "changes_since_approval", "since_approval", "read_log", "NOT_RECORDED",
+           "SOME_NOT_RECORDED", "ApplyResult"]
