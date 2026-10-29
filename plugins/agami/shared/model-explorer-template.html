@@ -2974,8 +2974,11 @@
       const _joinByq = {};
       [...(manifest.relationships || []), ...(manifest.cross_relationships || [])]
         .forEach(r => { _joinByq[r.qname] = r; });
+      // A join's identity as the queued edits leave it: each op names the join as it stands when that
+      // op runs, so the second column edit and the approval follow the first edit's new column.
+      const _joinNow = {};
       const withJoinIdentity = (qname, o) => {
-        const r = o.kind === 'relationship' ? _joinByq[qname] : null;
+        const r = o.kind === 'relationship' ? (_joinNow[qname] || _joinByq[qname]) : null;
         if (!r) return o;
         const id = {};
         if (r.from_column) id.from_column = r.from_column;
@@ -2991,7 +2994,7 @@
         if (o.op === 'approve') {
           const it = _byq[qname];
           if (it && mootReason(it)) return;  // skip moot approval
-          approvals.push(withJoinIdentity(qname, _approveAt ? { ...o, at: _approveAt } : o));
+          approvals.push([qname, _approveAt ? { ...o, at: _approveAt } : o]);
         } else opList.push(withJoinIdentity(qname, o));
       });
       Object.entries(edits).forEach(([qname, e]) => {
@@ -2999,11 +3002,15 @@
           const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
           if (e.column) op.column = e.column;
           opList.push(withJoinIdentity(qname, op));
+          if (e.kind === 'relationship' && _joinByq[qname]
+              && ['from_column', 'to_column', 'on', 'from_schema', 'to_schema'].includes(field)) {
+            _joinNow[qname] = { ...(_joinNow[qname] || _joinByq[qname]), [field]: e.fields[field] };
+          }
         });
       });
       // Approvals go after the edits: approving an item you also edited signs off the edited version,
       // where an edit applied after the approval would send it straight back to review.
-      opList.push(...approvals);
+      approvals.forEach(([qname, o]) => opList.push(withJoinIdentity(qname, o)));
       // After every op that names the table by its current area.
       Object.values(moves).forEach(o => opList.push(o));
       if (opList.length) { lines.push('curate-ops:'); lines.push(JSON.stringify(opList)); }

@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import parse_model_feedback as F  # noqa: E402
 from semantic_model import cli, curate  # noqa: E402
 from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
@@ -487,3 +488,23 @@ def test_the_explorer_sends_approvals_after_edits(root):
     block = out["block"]
     ops = json.loads(block.split("curate-ops:\n", 1)[1].split("\n", 1)[0])
     assert [o["op"] for o in ops] == ["edit", "approve"]
+
+
+@needs_node
+def test_the_explorer_approves_a_join_under_the_column_it_was_edited_to(root):
+    _set_state(root, "relationship", review_state="unreviewed")
+    out = _page(root, """
+      activeTab = 'review'; reviewSubTab = 'eyes'; renderAll(); signOff.email = 'you@example.com';
+      const r = manifest.relationships[0];
+      edits[r.qname] = { kind: 'relationship', area: r.area, name: relName(r),
+                         fields: { from_column: 'buyer_id', relationship: 'one_to_one' } };
+      toggleApprove('relationship', r);
+      console.log(JSON.stringify({ block: feedback() }));""")
+    data, _, needs = F.parse(out["block"])
+    assert needs is None
+    assert [(o["op"], o.get("from_column")) for o in data["ops"]] == [
+        ("edit", "customer_id"), ("edit", "buyer_id"), ("approve", "buyer_id")]
+    res = curate.apply(root, data["ops"], signer="you@example.com", role="owner")
+    assert res.validated and not res.skipped, res.as_dict()
+    join = _state(root, "relationship")
+    assert (join.from_column, join.relationship, join.review_state) == ("buyer_id", "one_to_one", "approved")
