@@ -294,3 +294,40 @@ def test_a_slug_only_name_still_resolves_and_a_duplicate_exact_name_still_fails(
         yaml.safe_dump(_CROSS_METRIC))
     res = curate.apply(tmp_path / "m2", [{"op": "reject", "kind": "metric", "name": "billed customers"}])
     assert not res.applied and "is in 2 places (billing, cross-area)" in res.errors[0], res.as_dict()
+
+
+# --- an explicit `area: "_cross"` behaves as the area-less op that resolves to the cross-area lists ----
+
+
+def test_clearing_caveats_through_cross_drops_the_key(tmp_path):
+    _model(tmp_path, cross=[_JOIN])
+    (tmp_path / "cross_subject_area_metrics.yaml").write_text(yaml.safe_dump(
+        {"metrics": [{**_CROSS_METRIC, "caveats": ["no value before the first invoice"]}]}))
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "area": curate.CROSS_AREA,
+                                   "name": "billed customers", "field": "caveats", "value": []}], **_SIGN)
+    assert res.validated and res.applied, res.as_dict()
+    doc = yaml.safe_load((tmp_path / "cross_subject_area_metrics.yaml").read_text())
+    assert "caveats" not in doc["metrics"][0]
+
+
+def test_cross_refuses_an_item_in_both_cross_area_places(tmp_path):
+    _model(tmp_path, cross=[_JOIN], ds_extra={"cross_subject_area_metrics": [_CROSS_METRIC]})
+    (tmp_path / "cross_subject_area_metrics.yaml").write_text(yaml.safe_dump({"metrics": [_CROSS_METRIC]}))
+    before = _snapshot(tmp_path)
+    res = curate.apply(tmp_path, [{"op": "approve", "kind": "metric", "area": curate.CROSS_AREA,
+                                   "name": "billed customers", "at": "2026-01-01T00:00:00Z"}], **_SIGN)
+    assert not res.applied and "is in 2 places" in res.errors[0], res.as_dict()
+    assert _snapshot(tmp_path) == before
+
+
+def test_cross_with_a_missing_item_fails_the_batch(tmp_path):
+    _model(tmp_path, cross=[_JOIN], ds_extra={"cross_subject_area_metrics": [_CROSS_METRIC]})
+    before = _snapshot(tmp_path)
+    res = curate.apply(tmp_path, [
+        {"op": "approve", "kind": "metric", "area": curate.CROSS_AREA, "name": "billed customers",
+         "at": "2026-01-01T00:00:00Z"},
+        {"op": "approve", "kind": "entity", "area": curate.CROSS_AREA, "name": "no such entity"},
+    ], **_SIGN)
+    assert not res.applied and not res.skipped and "no entity named 'no such entity'" in res.errors[0]
+    assert _snapshot(tmp_path) == before
+
