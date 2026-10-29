@@ -162,7 +162,9 @@ below corresponds to one such version.
   ready `add` op; `sm curate <model> --ops-file <that file> --candidate <id>` adds one. These
   candidates are never written to the model, so a refresh writes the same model as before. Each test
   is a read-only query over at most 1,000 sampled values, at most 300 per run, skipping tables over
-  3,000,000 rows; the report says when the cap stopped the scan.
+  3,000,000 rows; the report says when the cap stopped the scan. A column flagged sensitive, or whose
+  sampled values look personal, is never tested at either end, and the report and the file carry only
+  names and counts, never a sampled value.
 
 - **A table can move to another subject area, keeping its joins, metrics and entities (#513).**
   The curate op `{"op":"move","kind":"table","name":"<table>","area":"<from>","to_area":"<to>"}`

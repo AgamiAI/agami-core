@@ -2109,12 +2109,15 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table],
                for r in rels for fc, _tc in _column_pairs(r, dialect) or []}
     keys = [(u, k, next((c for c in u.columns if c.name == k), None))
             for u in tables if u.review_state != "rejected" for k in _single_keys(u)]
+    # A personal column is never probed at either end: the scan must not read personal data (#516).
+    keys = [(u, k, kc) for u, k, kc in keys if kc is not None and not _personal_column(kc)]
     out = []
     for t in tables:
         if t.review_state == "rejected":
             continue
         for c in t.columns:
             if (c.primary_key or c.review_state == "rejected" or c.type not in _KEY_TYPES
+                    or _personal_column(c)
                     or {(t.schema_name, t.name.lower(), c.name.lower()),
                         (None, t.name.lower(), c.name.lower())} & covered):
                 continue
@@ -2122,7 +2125,7 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table],
             measure = (c.aggregation in ("additive", "averageable") or c.date_format or c.choice_field
                        or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
             for u, k, kc in keys:
-                if u is t or kc is None or kc.type not in _KEY_TYPES:
+                if u is t or kc.type not in _KEY_TYPES:
                     continue
                 if _name_related(c.name, u, k):
                     prio = 0

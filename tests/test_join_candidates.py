@@ -206,13 +206,54 @@ def test_a_candidates_file_needs_a_named_candidate(tmp_path, capsys):
 
 def test_a_pair_is_offered_once_and_a_small_number_is_not_taken_for_a_reference(tmp_path):
     schema = (
-        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, owner_email TEXT UNIQUE, age INTEGER);"
-        "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT UNIQUE);"
-        "INSERT INTO accounts VALUES (1, 'a@example.com', 2), (2, 'b@example.com', 1);"
-        "INSERT INTO users VALUES (1, 'a@example.com'), (2, 'b@example.com');"
+        "CREATE TABLE accounts(id INTEGER PRIMARY KEY, region_code TEXT UNIQUE, age INTEGER);"
+        "CREATE TABLE regions(code TEXT PRIMARY KEY, label TEXT);"
+        "INSERT INTO accounts VALUES (1, 'north', 2), (2, 'south', 1);"
+        "INSERT INTO regions VALUES ('north', 'n'), ('south', 's');"
     )
     _, _, out = _build(tmp_path, schema)
     doc = _candidates(out)
     ids = [c["id"] for c in doc["candidates"]]
-    assert ids == ["main.accounts.owner_email->main.users.email"]   # not also users.email->accounts
+    assert ids == ["main.accounts.region_code->main.regions.code"]   # not also regions.code->accounts
     assert not any(".age->" in c["id"] for c in doc["candidates"] + doc["low_overlap"])
+
+
+# Personal columns at either end: `orders.contact_email` holds the same text as `invites.code` (so a
+# type match with full overlap), and `users.email` is a one-column key `accounts.owner_email` names.
+_PERSONAL_SCHEMA = (
+    "CREATE TABLE invites(code TEXT PRIMARY KEY, label TEXT);"
+    "CREATE TABLE orders(id INTEGER PRIMARY KEY, contact_email TEXT);"
+    "CREATE TABLE users(id INTEGER PRIMARY KEY, email TEXT UNIQUE);"
+    "CREATE TABLE accounts(id INTEGER PRIMARY KEY, owner_email TEXT);"
+    "INSERT INTO invites VALUES ('ann@example.com', 'a'), ('bob@example.com', 'b');"
+    "INSERT INTO orders VALUES (1, 'ann@example.com'), (2, 'bob@example.com');"
+    "INSERT INTO users VALUES (1, 'ann@example.com'), (2, 'bob@example.com');"
+    "INSERT INTO accounts VALUES (1, 'ann@example.com'), (2, 'bob@example.com');"
+)
+
+
+def test_a_sensitive_column_is_never_probed_or_listed(tmp_path):
+    seen: list[str] = []
+    org, report, out = _build(tmp_path, _PERSONAL_SCHEMA, seen=seen)
+    cols = {(n, c.name): c for sa in org.subject_areas for n in ("orders", "users")
+            if sa.defined_table(n) for c in sa.defined_table(n).columns}
+    assert cols[("orders", "contact_email")].sensitive and cols[("users", "email")].sensitive
+    probes = [s for s in seen if "AS sampled" in s]
+    assert not any("contact_email" in s or "email" in s for s in probes)
+    doc = _candidates(out)
+    assert not any("email" in c["id"] for c in doc["candidates"] + doc["low_overlap"])
+    assert "email" not in "\n".join(report._render_join_candidates())
+
+
+def test_the_candidates_file_holds_counts_and_names_never_sampled_values(tmp_path):
+    schema = (
+        "CREATE TABLE customers(code TEXT PRIMARY KEY, name TEXT);"
+        "CREATE TABLE orders(id INTEGER PRIMARY KEY, cust_code TEXT);"
+        "INSERT INTO customers VALUES ('CX-7781', 'a'), ('CX-7782', 'b'), ('CX-7783', 'c');"
+        "INSERT INTO orders VALUES (1, 'CX-7781'), (2, 'CX-7782'), (3, 'QZ-0001');"
+    )
+    _, report, out = _build(tmp_path, schema)
+    doc = _candidates(out)
+    assert {c["id"] for c in doc["candidates"] + doc["low_overlap"]} == {"main.orders.cust_code->main.customers.code"}
+    text = (out / ".introspect" / "join_candidates.json").read_text() + report.render()
+    assert not any(v in text for v in ("CX-77", "QZ-0001"))
