@@ -1036,6 +1036,72 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
     assert rc2 == 1 and json.loads(out2)["skipped"]
 
 
+def test_remove_example_names_each_question_in_full_and_says_it_is_kept(tmp_path):
+    """Two questions that open with the same 60 characters are both named in full, and the
+    output says the examples are marked rejected and kept, not deleted (#550)."""
+    from semantic_model import curate
+    _model(tmp_path)
+    stem = "What was the total billed amount across every order placed by "
+    assert len(stem) >= 60
+    q1, q2 = stem + "customers in the north region?", stem + "customers in the south region?"
+    curate.add_examples(tmp_path, "s", [
+        {"question": q1, "sql": "SELECT SUM(total) FROM orders"},
+        {"question": q2, "sql": "SELECT SUM(total) FROM orders", "id": "ex-south"},
+    ])
+
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "s", "--question", q1, "--question", q2])
+    assert rc == 0
+    res = json.loads(out)
+    assert sorted(res["rejected"]) == sorted([f"example (rejected) s/{q1}", f"example (rejected) s/{q2}"])
+    assert sorted(res["examples"], key=lambda e: e["question"]) == [
+        {"area": "s", "question": q1, "status": "rejected"},
+        {"area": "s", "question": q2, "id": "ex-south", "status": "rejected"},
+    ]
+    assert "marked rejected (kept for audit)" in res["note"] and "not deleted" in res["note"]
+    # the curation log names each one in full too
+    log = [json.loads(line) for line in (tmp_path / curate.CURATION_LOG).read_text().splitlines()]
+    assert {e["name"] for e in log if e.get("op") == "reject"} == {q1, q2}
+
+    # nothing rejected → no note claiming something was kept
+    rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
+    assert rc2 == 1 and "note" not in json.loads(out2) and json.loads(out2)["examples"] == []
+
+
+def test_remove_example_keeps_an_authored_id_of_zero(tmp_path):
+    """`id: 0` is an authored id and is named; an empty id names nothing and is left out."""
+    _model(tmp_path)
+    (tmp_path / "prompt_examples" / "s").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text(
+        "examples:\n"
+        "- id: 0\n  question: How many orders?\n  sql: SELECT COUNT(*) FROM orders\n"
+        "- id: ''\n  question: Total billed?\n  sql: SELECT SUM(total) FROM orders\n")
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "s",
+                    "--question", "How many orders?", "--question", "Total billed?"])
+    assert rc == 0
+    assert sorted(json.loads(out)["examples"], key=lambda e: e["question"]) == [
+        {"area": "s", "question": "How many orders?", "id": 0, "status": "rejected"},
+        {"area": "s", "question": "Total billed?", "status": "rejected"},
+    ]
+
+
+def _help(args: list[str]) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+        cli.main(args)
+    return " ".join(buf.getvalue().split())
+
+
+def test_remove_example_help_says_it_marks_rejected_and_keeps():
+    text = _help(["remove-example", "--help"])
+    assert "rejected" in text and "kept in prompt_examples/<area>/examples.yaml for audit, not deleted" in text
+
+
+def test_curate_help_says_signer_is_recorded_on_every_op():
+    text = _help(["curate", "--help"])
+    assert "for approve ops" not in text
+    assert "recorded in the curation log on every op" in text
+
+
 def test_apply_reverts_writes_without_git_on_validation_failure(tmp_path):
     # apply()'s revert must NOT depend on a git repo (the artifacts dir usually isn't one).
     # A batch whose later op makes the model invalid rolls back the earlier valid write too.

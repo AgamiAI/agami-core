@@ -12,8 +12,8 @@ identical wherever the model is exercised. Subcommands:
     preflight <root> --sql SQL            — fan-trap / chasm-trap pre-flight check
     seed-validate <root> --area A --profile P — run every written seed via execute_sql
                                             (safety pass on) → examples-validation items
-    remove-example <root> --area A --question Q — reject example(s) by question
-                                            (status: rejected — kept for audit, off runtime)
+    remove-example <root> --area A --question Q — mark example(s) rejected by question
+                                            (kept in the file for audit, not deleted)
 
 Every subcommand emits JSON on stdout (so callers parse one shape) except
 `validate`, which prints a human report and sets the exit code (0 ok, 1 errors).
@@ -635,9 +635,23 @@ def cmd_remove_example(args) -> int:
     audit but dropped from the runtime ranker. The packaged path for the dashboard's
     `reject N`, so a skill never hand-rewrites examples.yaml to drop an example."""
     from . import curate
+    from .loader import list_prompt_examples
     res = curate.remove_examples(args.root, args.area, args.question,
                                  signer=args.signer, role=args.role)
-    _print_json({"rejected": res.applied, "skipped": res.skipped,
+    prefix = f"example (rejected) {args.area}/"
+    done = {a[len(prefix):] for a in res.applied}
+    # An unquoted `id: 0` is an authored id; only a missing or empty one is absent (as write_examples).
+    examples = [{"area": args.area, "question": e["question"],
+                 **({"id": e["id"]} if e.get("id") is not None and str(e["id"]) != "" else {}),
+                 "status": "rejected"}
+                for e in list_prompt_examples(args.root, args.area, include_rejected=True)
+                if (e or {}).get("question") in done]
+    note = ({"note": f"marked rejected (kept for audit): {len(examples)} example(s) stay in "
+                     f"prompt_examples/{args.area}/examples.yaml with status: rejected, not deleted, "
+                     "and are no longer offered as examples for a question"} if examples else {})
+    # `rejected` keeps its old shape (one label per example) for callers that parse it; the
+    # detail is added beside it.
+    _print_json({"rejected": res.applied, "examples": examples, **note, "skipped": res.skipped,
                  "validated": res.validated, "committed": res.committed, **_commit_note(res)})
     return 0 if (res.applied or not res.skipped) else 1
 
@@ -1785,8 +1799,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("ops", nargs="?", metavar="OPS_FILE", help="JSON file: a list of op objects (or {ops:[...]}); relative to the current folder")
     sp.add_argument("--ops-file", help="the same file, named by flag (give this or OPS_FILE, not both)")
-    sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
-    sp.add_argument("--role", default=None, help="sign-off role for approve ops")
+    sp.add_argument("--signer", default=None,
+                    help="who made the changes: recorded in the curation log on every op; an approve, "
+                         "or an edit of an approved join's tables, columns or cardinality, also stamps it on the "
+                         "item as its sign-off (an approve needs it)")
+    sp.add_argument("--role", default=None, help="the signer's role, recorded and stamped with --signer")
     sp.set_defaults(func=cmd_curate, after_parse=lambda a, extra, sp=sp: _one_ops_file(sp, a, extra))
 
     sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
@@ -1840,7 +1857,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
 
-    sp = sub.add_parser("remove-example", help="reject prompt example(s) by question (status: rejected — kept for audit, dropped from the runtime ranker)")
+    sp = sub.add_parser(
+        "remove-example",
+        help="mark prompt example(s) rejected by question: kept in examples.yaml for audit, not deleted",
+        description="Marks each named example rejected (status: rejected). It is kept in "
+                    "prompt_examples/<area>/examples.yaml for audit, not deleted, and no longer "
+                    "offered as an example for a question.")
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
     sp.add_argument("--question", required=True, action="append",
