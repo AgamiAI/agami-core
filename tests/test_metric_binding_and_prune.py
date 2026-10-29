@@ -104,6 +104,75 @@ def test_binding_column_check_flags_a_typo_an_unused_cte_or_a_star_would_hide(sq
     assert len(res.warnings) == 1 and "['cst']" in res.warnings[0], res.warnings
 
 
+def _warns(org) -> list[str]:
+    res = V.ValidationResult()
+    V._check_metric_binding_columns(org, res)
+    return res.warnings
+
+
+def _orders(schema, *cols, name="orders"):
+    return m.Table(name=name, schema=schema, storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True),
+        *(m.Column(name=c, type="decimal") for c in cols)])
+
+
+def _two_schemas(source_tables, binding):
+    # sales.orders and archive.orders share a name but not their columns (#500)
+    met = m.Metric(name="orders_total", calculation="total", source_tables=source_tables,
+                   bindings={"PostgreSQL": binding})
+    sa = m.SubjectArea(name="s", tables_defined=[_orders("sales", "cost"),
+                                                 _orders("archive", "legacy_cost")],
+                       metrics=[met])
+    return m.Datasource(datasource="t", subject_areas=[sa])
+
+
+def test_binding_column_check_resolves_a_schema_qualified_source_table():
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["s.orders"],
+                   bindings={"PostgreSQL": "SUM(cst)"})
+    assert any("cst" in w for w in _warns(_org(met)))
+
+
+def test_binding_column_check_accepts_a_correct_qualified_binding():
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["S.Orders"],
+                   bindings={"PostgreSQL": "SUM(cost)"})
+    assert not _warns(_org(met))
+
+
+def test_binding_column_check_keeps_same_named_tables_in_different_schemas_apart():
+    warnings = _warns(_two_schemas(["sales.orders"], "SUM(legacy_cost)"))
+    assert len(warnings) == 1 and "['legacy_cost']" in warnings[0], warnings
+    assert not _warns(_two_schemas(["archive.orders"], "SUM(legacy_cost)"))
+
+
+def test_binding_column_check_bare_source_reads_every_table_of_that_name():
+    # bare `orders` may be either schema's table: only a column on neither is suspect
+    assert not _warns(_two_schemas(["orders"], "SUM(cost) + SUM(legacy_cost)"))
+    assert "['cst']" in _warns(_two_schemas(["orders"], "SUM(cst)"))[0]
+
+
+def test_binding_column_check_resolves_a_table_whose_name_embeds_its_schema():
+    # `name: public.orders` with no schema field, the shape introspected models use
+    def org(source, binding):
+        met = m.Metric(name="orders_total", calculation="total", source_tables=[source],
+                       bindings={"PostgreSQL": binding})
+        sa = m.SubjectArea(name="s", tables_defined=[_orders(None, "cost", name="public.orders")],
+                           metrics=[met])
+        return m.Datasource(datasource="t", subject_areas=[sa])
+
+    for source in ("orders", "public.orders"):
+        assert "['cst']" in _warns(org(source, "SUM(cst)"))[0]
+        assert not _warns(org(source, "SUM(cost)"))
+    # another schema's `orders` isn't this one
+    assert not _warns(org("archive.orders", "SUM(cst)"))
+
+
+def test_binding_column_check_qualified_source_falls_back_to_a_schema_less_table():
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["main.orders"],
+                   bindings={"PostgreSQL": "SUM(cst)"})
+    sa = m.SubjectArea(name="s", tables_defined=[_orders(None, "cost")], metrics=[met])
+    assert "['cst']" in _warns(m.Datasource(datasource="t", subject_areas=[sa]))[0]
+
+
 def test_loader_still_hides_a_metric_whose_subquery_reads_a_hidden_column(tmp_path):
     # The loader keeps the alias-blind column set: a metric reading a stale column through a
     # derived table must not be served.
