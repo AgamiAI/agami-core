@@ -2070,12 +2070,19 @@ def _names_entry(kind: str, entry: dict, ident: dict) -> bool:
     return True
 
 
+def _mapping(x: dict) -> str:
+    """`table.column`, with the mapping's other set attributes (primary, default_filter), which an
+    edit can change on their own."""
+    extra = [k if v is True else f"{k} {_shown(v)}" for k, v in x.items()
+             if k not in ("table", "column") and v not in (None, False, "", [], {})]
+    return f"{x.get('table')}.{x.get('column')}" + (f" ({', '.join(extra)})" if extra else "")
+
+
 def _shown(v: Any) -> str:
     if v in (None, "", [], {}):
         return "(none)"
     if isinstance(v, list):
-        return ", ".join(f"{x.get('table')}.{x.get('column')}" if isinstance(x, dict) and "table" in x
-                         else str(x) for x in v)
+        return ", ".join(_mapping(x) if isinstance(x, dict) and "table" in x else str(x) for x in v)
     return v if isinstance(v, str) else json.dumps(v, default=str)
 
 

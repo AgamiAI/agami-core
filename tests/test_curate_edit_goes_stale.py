@@ -291,7 +291,7 @@ def test_all_items_shows_the_changes_too(root):
     (ent,) = [it for it in items if it["kind"] == "entity"]
     assert ent["tab"] == "review"
     assert ent["changes_since_approval"]["changes"][0]["text"] == \
-        "maps to changed from customers.id to customers.email"
+        "maps to changed from customers.id (primary) to customers.email (primary)"
 
 
 @pytest.mark.parametrize("damage", ["missing", "trimmed", "garbled"])
@@ -308,6 +308,18 @@ def test_a_log_that_does_not_reach_the_approval_says_changes_not_recorded(root, 
     assert item["review_state"] == "stale"
     assert item["changes_since_approval"] == {"recorded": False, "changes": [],
                                               "summary": "changes not recorded"}
+
+
+def test_a_mapping_attribute_change_is_shown(root):
+    unprimary = _edit("entity", "customer", "maps_to", [{"table": "customers", "column": "id"}])
+    assert curate.apply(root, [unprimary]).validated
+    (ent,) = [it for it in curate.review_queue(L.load_datasource(root), root=root)["rule_2"]
+              if it["kind"] == "entity"]
+    assert ent["review_state"] == "stale"
+    assert ent["changes_since_approval"]["changes"][0]["text"] == \
+        "maps to changed from customers.id (primary) to customers.id"
+    assert curate._shown([{"table": "customers", "column": "id", "default_filter": "active = 1"}]) == \
+        "customers.id (default_filter active = 1)"
 
 
 def test_an_edit_naming_a_metric_by_another_spelling_is_still_its_history(root):
