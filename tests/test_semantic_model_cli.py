@@ -1198,3 +1198,93 @@ def test_add_example_reads_its_file_as_utf8_whatever_the_platform_default(tmp_pa
     assert [e["question"] for e in list_prompt_examples(root, "sales")] == [question]
     saved = (root / "prompt_examples" / "sales" / "examples.yaml").read_bytes()
     assert question.encode("utf-8") in saved
+
+
+_SPANNING = {"name": "items_per_order", "description": "Items per order",
+             "calculation": "order items divided by orders",
+             "bindings": {"PostgreSQL": "COUNT(order_items.id) / COUNT(DISTINCT orders.id)"},
+             "source_tables": ["order_items", "orders"]}
+
+
+def test_add_refuses_an_area_the_model_does_not_list(tmp_path):
+    # the loader reads only listed areas: a file written elsewhere was reported applied and never served
+    _model(tmp_path)
+    (tmp_path / "items.json").write_text(json.dumps([_SPANNING]))
+    rc, out = _run(["add", str(tmp_path), "--kind", "metric", "--area", "cross_area",
+                    "--file", str(tmp_path / "items.json")])
+    d = json.loads(out)
+    assert rc == 1 and not d["applied"] and not d["validated"]
+    assert "'cross_area' is not a subject area" in d["errors"][0] and "lists: s" in d["errors"][0]
+    assert "--area _cross" in d["errors"][0]
+    assert not (tmp_path / "subject_areas" / "cross_area").exists()
+
+
+def test_add_to_the_cross_cutting_area_is_loaded_and_served(tmp_path, monkeypatch):
+    import tools
+    from semantic_model import curate
+    from semantic_model.loader import load_datasource
+
+    root = tmp_path / "xadd"
+    root.mkdir()
+    _model(root)
+    (root / "items.json").write_text(json.dumps([_SPANNING]))
+    rc, out = _run(["add", str(root), "--kind", "metric", "--area", "_cross",
+                    "--file", str(root / "items.json")])
+    assert rc == 0 and json.loads(out)["applied"] == ["metric _cross/items_per_order"], out
+    assert [m.name for m in load_datasource(root).cross_subject_area_metrics] == ["items_per_order"]
+    # adding it again replaces it rather than duplicating it
+    assert _run(["add", str(root), "--kind", "metric", "--area", "_cross",
+                 "--file", str(root / "items.json")])[0] == 0
+    assert len(yaml.safe_load((root / "cross_subject_area_metrics.yaml").read_text())["metrics"]) == 1
+
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    reply, _ = json.JSONDecoder().raw_decode(tools.tool_get_datasource_schema({"datasource": "xadd"}))
+    assert [(m["name"], m["area"]) for m in reply["metrics"]] == [("items_per_order", None)]
+
+    # and it can be signed off like any other metric, by area or without one
+    res = curate.apply(root, [{"op": "approve", "kind": "metric", "name": "items_per_order",
+                               "at": "2026-01-01T00:00:00Z"}], signer="you@example.com", role="analyst")
+    assert res.validated and res.applied, res.as_dict()
+    assert load_datasource(root).cross_subject_area_metrics[0].review_state == "approved"
+
+
+def test_re_adding_an_inline_cross_cutting_item_replaces_it_in_place(tmp_path):
+    from semantic_model import curate
+    from semantic_model.loader import load_datasource
+
+    _model(tmp_path)
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [{**_SPANNING, "description": "old"}]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [{**_SPANNING, "description": "new"}])
+    assert res.validated and res.applied, res.as_dict()
+    assert not (tmp_path / "cross_subject_area_metrics.yaml").exists()
+    assert [m.description for m in load_datasource(tmp_path).cross_subject_area_metrics] == ["new"]
+
+
+def test_a_failed_cross_cutting_write_restores_both_files(tmp_path, monkeypatch):
+    import types
+
+    from semantic_model import curate
+
+    _model(tmp_path)
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [_SPANNING]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    (tmp_path / "cross_subject_area_metrics.yaml").write_text(yaml.safe_dump({"metrics": [_SPANNING]}))
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.yaml")}
+    monkeypatch.setattr(curate.V, "validate", lambda *a, **k: types.SimpleNamespace(ok=False, errors=["forced"]))
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [{**_SPANNING, "description": "new"}])
+    assert res.errors == ["forced"] and not res.applied
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.yaml")} == before
+
+
+def test_add_refuses_a_cross_cutting_item_that_breaks_the_model(tmp_path):
+    _model(tmp_path)
+    before = (tmp_path / "datasource.yaml").read_text()
+    from semantic_model import curate
+    bad = {**_SPANNING, "bindings": {"PostgreSQL": "{no_such_metric} / 2"}, "base_metrics": ["no_such_metric"]}
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [bad])
+    assert not res.validated and res.errors and not res.applied
+    assert not (tmp_path / "cross_subject_area_metrics.yaml").exists()
+    assert (tmp_path / "datasource.yaml").read_text() == before
