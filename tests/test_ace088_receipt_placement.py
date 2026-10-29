@@ -582,7 +582,7 @@ print(receipt.tables.undetermined)
 
 
 def test_the_vendored_mirror_degrades_to_an_undetermined_receipt():
-    """`plugins/agami/lib/semantic_model/` ships `__init__.py` and `units.py` and nothing else, so
+    """`plugins/agami/lib/` ships no `semantic_model` package (only `units.py`, privately named), so
     there is no runtime to assemble a receipt with — on the layout that runs on whatever `python3`
     the user already has. The guarded import is the same one `_model_safety` makes, and the outcome
     is a receipt that says why rather than an executor that crashes."""
