@@ -399,6 +399,33 @@ def test_a_declared_list_of_personal_values_is_dropped(tmp_path):
     assert org.subject_areas[0].defined_table("people").get_column("owner").choice_field is None
 
 
+def test_a_declared_list_with_any_phone_key_is_dropped(tmp_path):
+    # Two of three keys are digit-only phones: under the column-level 80% share, so judged per key.
+    def check(column: str, values: tuple[str, ...]) -> str:
+        quoted = ", ".join(f"'{v}'::text" for v in values)
+        return f"CHECK (({column} = ANY (ARRAY[{quoted}])))"
+
+    runner = make_catalog_runner(
+        tables=["contacts"],
+        columns={"contacts": [col("id", "integer", nullable=False), col("reach", "text"), col("status", "text"),
+                              col("priority", "text"), col("tracking_code", "text")]},
+        checks=[check("reach", ("5550100111", "5550100222", "unknown")),
+                check("status", ("open", "closed")),
+                check("priority", ("1", "2", "99", "2024", "123456789")),
+                check("tracking_code", ("5550100111", "5550100222"))],
+        estimate="50000",
+    )
+    org, _ = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    t = org.subject_areas[0].defined_table("contacts")
+    reach = t.get_column("reach")
+    assert reach.choice_field is None
+    assert not any("555" in k for k in reach.caveats)
+    assert t.get_column("status").choice_field == {"open": "", "closed": ""}
+    # Short digit codes are not phone length, and an identifier column's digits are not a phone.
+    assert set(t.get_column("priority").choice_field) == {"1", "2", "99", "2024", "123456789"}
+    assert set(t.get_column("tracking_code").choice_field) == {"5550100111", "5550100222"}
+
+
 def test_a_value_suspect_column_gets_no_list_read_from_the_data(tmp_path):
     seen: list[str] = []
     # Digit-only phone numbers: suspected from the sample, yet each value alone passes as a code.

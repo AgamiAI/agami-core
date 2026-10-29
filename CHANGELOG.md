@@ -27,7 +27,7 @@ below corresponds to one such version.
   name used as a key) is shown as `*`. Postgres JSON read through the CLI is recognised too. A column
   holding emails or phone numbers (digit-only ones included), or flagged or suspected as personal,
   gets no value list, whether read from the data or declared by an enum type or CHECK; a list
-  whose own values are phone numbers is dropped even when the sample is empty or unreadable. No sampled
+  with even one key that is a phone number is dropped, even when the sample is empty or unreadable. No sampled
   value is written to the model or the report. A birth date stored as a timestamp at midnight is
   recognised with or without a time zone (`Z`, `+05:30`), and digit-only values in an identifier
   column (`customerId`, `trackingCode`, `id_number`) are not read as phone numbers. `ipv4_address`/`IPv4Address` stay suspected-only. An existing

@@ -808,7 +808,8 @@ def _personal_list(c: Column) -> bool:
     """`c`'s list keys are personal values themselves. Checked on the list, not only the sample:
     a declared list of digit-only phone numbers survives an empty or unreadable sample."""
     keys = list(c.choice_field or {})
-    return any(pii.personal_value(v) for v in keys) or pii.value_suspect_caveat(c.name, c.type, keys) is not None
+    return (any(pii.personal_value(v) or pii.phone_key(c.name, c.type, v) for v in keys)
+            or pii.value_suspect_caveat(c.name, c.type, keys) is not None)
 
 
 def _clear_choice(c: Column) -> None:

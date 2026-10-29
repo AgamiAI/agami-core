@@ -256,6 +256,12 @@ def looks_like_phones(column_name: str, values: Iterable[Any]) -> bool:
     return _share(_present(values), lambda v: _phone_like(v, digits_ok))
 
 
+def phone_key(column_name: str, column_type: str, v: Any) -> bool:
+    """One list key that reads as a phone number on this column: bare digits count unless the
+    column is an identifier. Judged per key, as one key written into the model is one leak."""
+    return column_type in ("string", "integer") and _phone_like(str(v).strip(), not _id_named(column_name))
+
+
 def _plausible_birth(v: str) -> bool:
     m = _DATE_ONLY_RE.match(v)
     if not m:
