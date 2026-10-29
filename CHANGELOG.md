@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`metric_binding_unknown_column` resolves schema-qualified source tables (#500).** The check
+  looked a metric's `source_tables` up by bare table name, so `s.orders` matched nothing and a typo'd
+  column in its binding was never reported, and `sales.orders` and `archive.orders` shared one column
+  set, so a column on the other schema's table hid a typo. A qualified source now finds that schema's
+  table (or a schema-less definition of the name), a bare one every table of that name, and a table
+  whose name embeds its schema (`name: public.orders`) is found either way. It stays a warning.
+
 ### Changed
 
 - **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
