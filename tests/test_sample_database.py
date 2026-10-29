@@ -80,8 +80,12 @@ def test_customer_names_are_unique(db):
 
 
 def test_full_name_is_not_sensitive():
-    """full_name is the display label for a customer — it must be queryable; only
-    email/phone are sensitive."""
+    """In the committed, hand-curated sample model, full_name is the display label for a
+    customer and is deliberately left unflagged; only email/phone are sensitive. A NEW build
+    flags a `full_name` column (#516): the curated model keeps its own choice, as every existing
+    model keeps its flags on refresh."""
+    from semantic_model import build
+    assert build.detect_sensitive("customers", "full_name")
     org = L.load_datasource(MODEL_DIR)
     cols = {c.name: c for area in org.subject_areas for t in area.tables_defined for c in t.columns if t.name == "customers"}
     assert cols["full_name"].sensitive is False
