@@ -30,30 +30,15 @@ from .models import (
     bare_name,
 )
 
-# Strongly-PII column-name patterns — sensitive regardless of table.
-STRONG_PII_RE = re.compile(
-    r"(dob|birth|phone|mobile|email|address|aadhaar|aadhar|\bpan\b|\bssn\b|passport|"
-    r"pincode|\bzip\b|account_?no|card_?no|salary|income)",
-    re.IGNORECASE,
+# Name and value rules for personal data live in `pii`; re-exported here for callers.
+from .pii import (
+    STRONG_PII_RE,
+    WEAK_PII_RE,
+    detect_sensitive,
+    suspected_pii,
+    suspected_reason,
 )
-# Weakly-PII patterns — only sensitive inside a PII-ish table (a "name" column on
-# a product table is not PII; on a person table it is).
-WEAK_PII_RE = re.compile(r"(\bname\b|first_?name|last_?name|full_?name|surname)", re.IGNORECASE)
-# Broader "might be PII" tokens for the SUSPECTED tier — a review aid only, never auto-flags.
-# General privacy concepts (not a customer's schema): identity, contact, location, demographics.
-_EXTRA_PII_RE = re.compile(
-    r"(gender|\bsex\b|ip_?address|\bip\b|latitude|longitude|\bgeo\b|national_?id|tax_?id|"
-    r"licen[cs]e|user_?name|nationality|ethnicit|religion|marital|emergency_?contact|"
-    r"next_?of_kin|date_?of_?birth|maiden)", re.IGNORECASE)
 
-
-def suspected_pii(column_name: str) -> bool:
-    """A BROADER 'might be PII' heuristic than `detect_sensitive` — surfaces columns the strict
-    flag may have MISSED (e.g. `first_name` in a non-PII-named table like `sys_user`, which the
-    table-gated weak rule skips), so a reviewer can confirm. A review aid; never auto-marks
-    sensitive. General privacy vocabulary, not vendor-specific."""
-    return bool(STRONG_PII_RE.search(column_name) or WEAK_PII_RE.search(column_name)
-                or _EXTRA_PII_RE.search(column_name))
 # Back-compat alias (some callers import SENSITIVE_RE).
 SENSITIVE_RE = STRONG_PII_RE
 
@@ -255,17 +240,6 @@ def canonical_description(column_name: str, values: list) -> Optional[str]:
     if _LOCALE_NAME_RE.search(column_name) and most(_LOCALE_VAL_RE):
         return "Language / locale code (e.g. en, en_US, pt-BR)."
     return None
-
-
-def detect_sensitive(table_name: str, column_name: str) -> bool:
-    """Strongly-PII column names (email/phone/dob/ssn/address/…) are sensitive
-    regardless of table. Weakly-PII names (name/first_name/…) are sensitive only
-    inside a PII-ish table, to avoid flagging e.g. a product `name`."""
-    if STRONG_PII_RE.search(column_name):
-        return True
-    table_pii = table_name.upper() == "PII" or bool(STRONG_PII_RE.search(table_name)) \
-        or bool(WEAK_PII_RE.search(table_name))
-    return bool(WEAK_PII_RE.search(column_name)) and table_pii
 
 
 # Role groups — assigned from STRUCTURAL column signals (PK, foreign_key, choice_field,
@@ -1101,11 +1075,12 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
 
 
 __all__ = [
-    "SENSITIVE_RE", "detect_sensitive", "detect_money_column", "suggest_unit", "name_currency",
-    "name_words",
+    "SENSITIVE_RE", "STRONG_PII_RE", "WEAK_PII_RE", "detect_sensitive", "detect_money_column",
+    "suggest_unit", "name_currency", "name_words",
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
     "infer_cardinality", "cluster_by_family", "group_by_joins", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
-    "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "canonical_description",
+    "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "suspected_reason",
+    "canonical_description",
     "write_tree", "WriteReport",
 ]
