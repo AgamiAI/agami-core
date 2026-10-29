@@ -859,9 +859,28 @@ def test_curate_takes_the_ops_file_as_a_second_positional(model_and_work):
     assert _orders_description(root) == "positional"
 
 
+def test_curate_takes_the_positional_ops_file_after_an_option(model_and_work):
+    # argparse fills an optional positional with the first run of positionals; `ops.json` comes later
+    root, work = model_and_work
+    (work / "ops.json").write_text(json.dumps(_describe_op("after an option")))
+    rc, out, err = _sm(["curate", str(root), "--signer", "you@example.com", "ops.json", "--role", "analyst"], work)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "after an option"
+
+
+def test_curate_still_refuses_a_stray_extra_argument(model_and_work, capsys):
+    root, _ = model_and_work
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["curate", str(root), "--signer", "you@example.com", "a.json", "b.json"])
+    assert exit_.value.code == 2
+    assert "unrecognized arguments: b.json" in capsys.readouterr().err
+
+
 def test_curate_refuses_two_ops_files_and_none(model_and_work, capsys):
     root, _ = model_and_work
-    for argv in (["curate", str(root), "a.json", "--ops-file", "b.json"], ["curate", str(root)]):
+    for argv in (["curate", str(root), "a.json", "--ops-file", "b.json"], ["curate", str(root)],
+                 ["curate", str(root), "--signer", "you@example.com", "a.json", "--ops-file", "b.json"],
+                 ["curate", str(root), "--signer", "you@example.com"]):
         with pytest.raises(SystemExit) as exit_:
             cli.main(argv)
         assert exit_.value.code == 2

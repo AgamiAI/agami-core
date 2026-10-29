@@ -1783,12 +1783,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
     sp.add_argument("root")
-    ops_src = sp.add_mutually_exclusive_group(required=True)
-    ops_src.add_argument("ops", nargs="?", metavar="OPS_FILE", help="JSON file: a list of op objects (or {ops:[...]}); relative to the current folder")
-    ops_src.add_argument("--ops-file", help="the same file, named by flag")
+    sp.add_argument("ops", nargs="?", metavar="OPS_FILE", help="JSON file: a list of op objects (or {ops:[...]}); relative to the current folder")
+    sp.add_argument("--ops-file", help="the same file, named by flag (give this or OPS_FILE, not both)")
     sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
     sp.add_argument("--role", default=None, help="sign-off role for approve ops")
-    sp.set_defaults(func=cmd_curate)
+    sp.set_defaults(func=cmd_curate, after_parse=lambda a, extra, sp=sp: _one_ops_file(sp, a, extra))
 
     sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
     sp.add_argument("root")
@@ -1998,10 +1997,36 @@ def _enter_caller_cwd() -> None:
             pass  # the folder is gone: stay put, and a relative path's error names where it looked
 
 
+def _one_ops_file(sp: argparse.ArgumentParser, args: argparse.Namespace, extra: list[str]) -> list[str]:
+    """Take `curate`'s OPS_FILE from the leftovers and require exactly one ops file. argparse fills an
+    optional positional in the first run of positionals, so in `curate root --signer x ops.json` the
+    file is left over."""
+    if args.ops is None:
+        at = next((i for i, a in enumerate(extra) if not a.startswith("-")), None)
+        if at is not None:
+            args.ops = extra.pop(at)
+    if args.ops is not None and args.ops_file is not None:
+        sp.error("argument --ops-file: not allowed with argument OPS_FILE")
+    if args.ops is None and args.ops_file is None:
+        sp.error("one of the arguments OPS_FILE --ops-file is required")
+    return extra
+
+
+def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    after = getattr(args, "after_parse", None)
+    if after is not None:
+        extra = after(args, extra)
+    if extra:
+        parser.error("unrecognized arguments: " + " ".join(extra))
+    return args
+
+
 def main(argv=None) -> int:
     _utf8_stdio()
     _enter_caller_cwd()
-    args = build_parser().parse_args(argv)
+    args = _parse_args(argv)
     try:
         return args.func(args)
     except FileNotFoundError as e:
