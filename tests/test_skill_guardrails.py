@@ -54,3 +54,10 @@ def test_connect_profiles_with_the_build_profile_not_no_safety():
     connect = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(encoding="utf-8")
     assert "--build-profile" in connect
     assert "SELECT c1, c2, … FROM <t> LIMIT 5" in connect
+
+
+def test_connect_profiles_under_the_resolved_interpreter():
+    # A bare `python` can be a different interpreter from Phase 0a.5's `$PY`, one without the package or driver.
+    connect = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(encoding="utf-8")
+    commands = [c for c in re.findall(r"`([^`\n]*-m execute_sql[^`\n]*)`", connect) if "--build-profile" in c]
+    assert commands and all(c.startswith('"$PY" -m execute_sql') for c in commands), commands

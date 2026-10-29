@@ -32,9 +32,9 @@ below corresponds to one such version.
   manifest (#523).** A failing statement told a builder only a fixed sentence, often "an unexpected
   error" (exit 6). Run from your own command line, that sentence is now followed by
   `Database error: <the database's first line>` (and the SQLSTATE where the driver gives one), with
-  credentials (any `password`, `secret`, `token` or key field, escaped or quoted), hosts and IPv4/IPv6
-  addresses redacted and HINT, DETAIL and CONTEXT lines dropped. Exit codes
-  are unchanged. A hosted server and the MCP tool still return the fixed sentence alone. In
+  credentials (any `password`, `secret`, `token` or key field, escaped or quoted, and the login named in
+  `for user 'sa'` however short), hosts and IPv4/IPv6 addresses redacted and HINT, DETAIL and
+  CONTEXT lines dropped. Exit codes are unchanged. A hosted server and the MCP tool still return the fixed sentence alone. In
   `--batch`, a malformed item is recorded as failed and the rest still run, an item whose output
   cannot be written stays in the manifest with its error, its CSV is emptied so no earlier rows are
   left behind, run files and the manifest are written whole or not at all, and the manifest is

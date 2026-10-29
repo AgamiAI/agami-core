@@ -214,3 +214,35 @@ def test_an_escaped_or_less_common_credential_is_redacted_whole(text):
 def test_a_profile_value_is_redacted_however_the_driver_escapes_it(key, value, echoed):
     line = execute_sql._db_error_first_line(f"login failed near {echoed} for this role", None, {key: value})
     assert _FAKE_SECRET not in line and "<redacted>" in line
+
+
+# Built at runtime like the values above: a short login, as SQL Server's `sa`.
+_SHORT_LOGIN = "s" + "a"
+
+
+@pytest.mark.parametrize("text", [
+    f"Login failed for user '{_SHORT_LOGIN}'.",
+    f'FATAL: password authentication failed for user "{_SHORT_LOGIN}"',
+    f'FATAL: role "{_SHORT_LOGIN}" does not exist',
+])
+def test_a_short_login_is_redacted_in_a_quoted_user_context(text):
+    line = execute_sql._db_error_first_line(text, "28000", {"user": _SHORT_LOGIN})
+    assert f"'{_SHORT_LOGIN}'" not in line and f'"{_SHORT_LOGIN}"' not in line and "<redacted>" in line
+
+
+def test_a_short_profile_value_is_not_replaced_elsewhere():
+    # The length cutoff stays for bare text: `sa` inside "usage" is not the login.
+    line = execute_sql._db_error_first_line("invalid usage of a cursor", None, {"user": _SHORT_LOGIN})
+    assert line == "invalid usage of a cursor"
+
+
+def test_a_profile_value_that_is_part_of_a_key_name_does_not_hide_the_key():
+    line = execute_sql._db_error_first_line(f"auth failed: access_token={_FAKE_SECRET} dbname=demo", None,
+                                            {"user": "token"})
+    assert _FAKE_SECRET not in line and "access_token=<redacted>" in line
+
+
+def test_a_password_equal_to_a_common_word_does_not_stop_the_login_being_redacted():
+    line = execute_sql._db_error_first_line(f'password authentication failed for user "{_SHORT_LOGIN}"', None,
+                                            {_PW_KEY: "user", "user": _SHORT_LOGIN})
+    assert f'"{_SHORT_LOGIN}"' not in line and "<redacted>" in line

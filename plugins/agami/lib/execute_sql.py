@@ -1549,12 +1549,18 @@ _SECRET_KEY_WORDS = r"\w*(?:password|passwd|pwd|secret|token|api_?key|access_?ke
 # has none; an unquoted one runs past backslash-escaped whitespace.
 _SQ_VALUE = r"'(?:[^'\\]|\\.|'')*(?:'|$)"
 _DQ_VALUE = r'"(?:[^"\\]|\\.|"")*(?:"|$)'
+# The value of a credential-named `key=value` field, quoted or not.
+_KEY_VALUE_RE = re.compile(rf"\b(?:{_SECRET_KEY_WORDS}|host|hostaddr|user|username)\s*=\s*"
+                           rf"({_SQ_VALUE}|{_DQ_VALUE}|(?:\\.|[^\s\\])+\\?)", re.IGNORECASE)
+# A quoted login or host, as `Login failed for user 'sa'` or `role "demo"`, redacted whatever its length.
+_QUOTED_LOGIN_RE = re.compile(rf"\b(?:server at|host|user|username|role|login)\s+({_SQ_VALUE}|{_DQ_VALUE})",
+                              re.IGNORECASE)
+# A shorter profile value is matched only through the two patterns above: on its own it is too likely
+# to be an ordinary word in the message.
+_MIN_PROFILE_VALUE_LEN = 3
 _REDACT_PATTERNS = (
     # A DSN or any URL: scheme://… can carry a user, a password and a host at once.
     (re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE), _REDACTED),
-    (re.compile(rf"\b({_SECRET_KEY_WORDS}|host|hostaddr|user|username)\s*=\s*"
-                rf"({_SQ_VALUE}|{_DQ_VALUE}|(?:\\.|[^\s\\])+\\?)", re.IGNORECASE), r"\1=" + _REDACTED),
-    (re.compile(rf"\b(server at|host|user|role)\s+{_DQ_VALUE}", re.IGNORECASE), r'\1 "' + _REDACTED + '"'),
     (re.compile(r"\S+@\S+"), _REDACTED),
     (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), _REDACTED),
 )
@@ -1588,6 +1594,36 @@ def _escaped_spellings(value: str) -> set[str]:
     return {value, backslashed, value.replace("'", "''"), value.replace('"', '""')}
 
 
+def _credential_spans(line: str, creds: dict[str, Any] | None) -> list[tuple[int, int]]:
+    """Where credentials sit in `line`, all found in the unredacted text.
+
+    Found together rather than substituted one after another, so a profile value that is also part
+    of a key name (`user: token` in `access_token=...`) cannot rewrite the key before its value is
+    found; a profile value must also stand as a whole word."""
+    spans = [m.span(1) for m in _KEY_VALUE_RE.finditer(line)]
+    for m in _QUOTED_LOGIN_RE.finditer(line):
+        start, end = m.span(1)
+        closed = end - start >= 2 and line[end - 1] == line[start]
+        spans.append((start + 1, end - 1 if closed else end))
+    for k, v in (creds or {}).items():
+        if _is_secret_cred_key(k) and v and len(str(v)) >= _MIN_PROFILE_VALUE_LEN:
+            for spelling in _escaped_spellings(str(v)):
+                spans += [m.span() for m in re.finditer(rf"(?<!\w){re.escape(spelling)}(?!\w)", line)]
+    return spans
+
+
+def _redact_spans(line: str, spans: list[tuple[int, int]]) -> str:
+    merged: list[list[int]] = []
+    for start, end in sorted(s for s in spans if s[1] > s[0]):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    for start, end in reversed(merged):
+        line = line[:start] + _REDACTED + line[end:]
+    return line
+
+
 def _db_error_first_line(text: str | None, sqlstate: str | None,
                          creds: dict[str, Any] | None) -> str | None:
     """The database's first line, with credentials and hosts redacted and the SQLSTATE beside it.
@@ -1598,11 +1634,7 @@ def _db_error_first_line(text: str | None, sqlstate: str | None,
                  if ln.strip() and not ln.strip().lower().startswith(_DETAIL_SKIP_PREFIXES)), "")
     if not line:
         return None
-    secrets = sorted({spelling for k, v in (creds or {}).items()
-                      if _is_secret_cred_key(k) and v and len(str(v)) >= 3
-                      for spelling in _escaped_spellings(str(v))}, key=len, reverse=True)
-    for secret in secrets:
-        line = line.replace(secret, _REDACTED)
+    line = _redact_spans(line, _credential_spans(line, creds))
     for pattern, replacement in _REDACT_PATTERNS:
         line = pattern.sub(replacement, line)
     line = _IPV6_CANDIDATE.sub(_redact_ipv6, line)
