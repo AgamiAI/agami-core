@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
+  The folder held a partial copy of the model package (`semantic_model/` with only `__init__.py` and
+  `units.py`). With `lib/` as the working folder, or first on the import path, Python loaded that
+  copy instead of the installed package: `python -m semantic_model.cli` failed with `No module named
+  semantic_model.cli`, and the query runner refused every statement with `model_unavailable`. The
+  folder now ships `units.py` as `_semantic_model_units.py`, so nothing there can stand in for the
+  installed package. Runs from anywhere else are unchanged.
+
 - **`sm remove-example` names each example in full and says it keeps them (#550).** It cut each
   question to about 50 characters, so two that opened the same way couldn't be told apart; its
   `rejected` labels and the curation log now carry the whole question. The output also adds an
