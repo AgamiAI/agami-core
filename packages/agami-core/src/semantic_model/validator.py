@@ -1448,7 +1448,7 @@ def _null_filled_columns(sql: str, storage_type: str) -> list:
         )
         if not constant or next(fill.this.find_all(exp.AggFunc), None) is not None:
             continue
-        if _averages_present_values(fill):
+        if _averages_present_values(fill, _identifier_fold(storage_type)):
             continue
         found.extend(fill.this.find_all(exp.Column))
     return found
@@ -1484,14 +1484,31 @@ def _is_number(node, value: Optional[float] = None) -> bool:
         return False
 
 
-def _column_identity(node) -> Optional[tuple[str, ...]]:
-    """A column as written, qualifier included (`a.score` and `b.score` differ), or None."""
+def _identifier_fold(storage_type: str) -> Optional[str]:
+    """How the engine folds an unquoted name ("lower" / "upper"), where it keeps a quoted one's
+    case; None where it matches names case-insensitively. An engine we do not know keeps quoted
+    case, so two differently quoted names are never taken for one."""
+    from .dialects import get_dialect
+
+    try:
+        return get_dialect(storage_type).folds_unquoted
+    except ValueError:
+        return "lower"
+
+
+def _column_identity(node, fold: Optional[str]) -> Optional[tuple[str, ...]]:
+    """A column as the engine resolves it, qualifier included (`a.score` and `b.score` differ), or
+    None. `fold` is `_identifier_fold`'s: on PostgreSQL `"Score"` is not `score`."""
     from sqlglot import expressions as exp
 
     node = _strip_scale(node)
     if not isinstance(node, exp.Column) or not node.name:
         return None
-    return tuple(part.name.lower() for part in node.parts)
+    return tuple(
+        part.name if fold and part.args.get("quoted")
+        else part.name.upper() if fold == "upper" else part.name.lower()
+        for part in node.parts
+    )
 
 
 def _terms(node) -> list:
@@ -1504,7 +1521,7 @@ def _terms(node) -> list:
     return [node]
 
 
-def _zero_filled_sum(node) -> Optional[list]:
+def _zero_filled_sum(node, fold: Optional[str]) -> Optional[list]:
     """The columns `node` adds up as `SUM(COALESCE(col, 0) [+ COALESCE(col2, 0) ...])` (or a sum of
     such SUMs), or None when it is any other shape: a fallback other than 0 changes the total, and
     another aggregate (`AVG(COALESCE(col, 0))`) counts the filled rows."""
@@ -1518,14 +1535,14 @@ def _zero_filled_sum(node) -> Optional[list]:
             if not (isinstance(fill, exp.Coalesce) and len(fill.expressions) == 1
                     and _is_number(fill.expressions[0], 0)):
                 return None
-            col = _column_identity(fill.this)
+            col = _column_identity(fill.this, fold)
             if col is None:
                 return None
             cols.append(col)
     return cols
 
 
-def _present_count(term) -> Optional[tuple[str, ...]]:
+def _present_count(term, fold: Optional[str]) -> Optional[tuple[str, ...]]:
     """The column `term` counts the present values of: `COUNT(col)`,
     `COUNT(CASE WHEN col IS NOT NULL THEN 1 END)` or `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`."""
     from sqlglot import expressions as exp
@@ -1533,9 +1550,12 @@ def _present_count(term) -> Optional[tuple[str, ...]]:
     if not isinstance(term, (exp.Count, exp.Sum)):
         return None
     if isinstance(term, exp.Count) and isinstance(term.this, exp.Column):
-        return _column_identity(term.this)
+        return _column_identity(term.this, fold)
     case = term.this
-    if not isinstance(case, exp.Case) or len(case.args.get("ifs") or []) != 1:
+    # Only a searched CASE: `CASE 0 WHEN col IS NOT NULL ...` compares 0 with the test's truth
+    # value, so it counts the missing rows.
+    if (not isinstance(case, exp.Case) or case.args.get("this") is not None
+            or len(case.args.get("ifs") or []) != 1):
         return None
     default = case.args.get("default")
     # COUNT counts a 0 too, so only SUM may take ELSE 0
@@ -1552,10 +1572,10 @@ def _present_count(term) -> Optional[tuple[str, ...]]:
         cond = None
     if cond is None or not isinstance(cond.expression, exp.Null):
         return None
-    return _column_identity(cond.this)
+    return _column_identity(cond.this, fold)
 
 
-def _present_counts(node) -> Optional[list]:
+def _present_counts(node, fold: Optional[str]) -> Optional[list]:
     """The columns a denominator counts the present values of, every term of it a supported count
     (optionally inside `NULLIF(..., 0)`), or None: `COUNT(*)` counts the missing rows too."""
     from sqlglot import expressions as exp
@@ -1565,14 +1585,14 @@ def _present_counts(node) -> Optional[list]:
         node = node.this
     cols = []
     for term in _terms(node):
-        col = _present_count(term)
+        col = _present_count(term, fold)
         if col is None:
             return None
         cols.append(col)
     return cols
 
 
-def _averages_present_values(fill) -> bool:
+def _averages_present_values(fill, fold: Optional[str]) -> bool:
     """True when the fill sits in the numerator of a division that averages the present values,
     `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: the numerator only zero-fills columns
     inside a SUM and the denominator only counts the present values of those same columns. The zero
@@ -1584,8 +1604,8 @@ def _averages_present_values(fill) -> bool:
     while node.parent is not None and not isinstance(node.parent, exp.Query):
         parent = node.parent
         if isinstance(parent, exp.Div) and node.arg_key == "this":
-            filled = _zero_filled_sum(parent.this)
-            counted = _present_counts(parent.expression)
+            filled = _zero_filled_sum(parent.this, fold)
+            counted = _present_counts(parent.expression, fold)
             return bool(filled) and counted is not None and set(filled) == set(counted)
         node = parent
     return False

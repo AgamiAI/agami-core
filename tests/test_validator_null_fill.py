@@ -228,9 +228,26 @@ def test_a_fill_divided_by_the_count_of_present_values_is_left_alone(binding):
     "/ NULLIF(SUM(CASE WHEN staff_count IS NOT NULL THEN 2 ELSE 0 END), 0)",
     "SUM(COALESCE(staff_count, 0)) / NULLIF(SUM(CASE WHEN staff_count IS NULL THEN 1 ELSE 0 END), 0)",
     "SUM(COALESCE(staff_count, 0)) / NULLIF(SUM(CASE WHEN staff_count > 0 THEN 1 ELSE 0 END), 0)",
+    # a simple CASE compares 0 with the test's truth value, so it counts the missing rows
+    "SUM(COALESCE(staff_count, 0)) * 1.0 "
+    "/ NULLIF(SUM(CASE 0 WHEN staff_count IS NOT NULL THEN 1 ELSE 0 END), 0)",
+    "SUM(COALESCE(staff_count, 0)) / NULLIF(COUNT(CASE 1 WHEN staff_count IS NOT NULL THEN 1 END), 0)",
 ])
 def test_a_denominator_that_does_not_count_only_present_values_still_warns(binding):
     assert len(_warnings(_org(binding))) == 1
+
+
+@pytest.mark.parametrize("storage_type,binding,warns", [
+    # PostgreSQL keeps a quoted name's case: "Staff_Count" is another column
+    ("PostgreSQL", 'SUM(COALESCE("staff_count", 0)) * 1.0 / NULLIF(COUNT("Staff_Count"), 0)', True),
+    ("PostgreSQL", 'SUM(COALESCE("staff_count", 0)) * 1.0 / NULLIF(COUNT(STAFF_COUNT), 0)', False),
+    ("Snowflake", 'SUM(COALESCE("STAFF_COUNT", 0)) * 1.0 / NULLIF(COUNT("staff_count"), 0)', True),
+    ("Snowflake", 'SUM(COALESCE("STAFF_COUNT", 0)) * 1.0 / NULLIF(COUNT(staff_count), 0)', False),
+    # an engine that matches names case-insensitively
+    ("SQLite", 'SUM(COALESCE("staff_count", 0)) * 1.0 / NULLIF(COUNT("Staff_Count"), 0)', False),
+])
+def test_a_quoted_name_is_matched_as_the_engine_matches_it(storage_type, binding, warns):
+    assert len(_warnings(_org(binding, storage_type=storage_type))) == int(warns)
 
 
 def test_the_skill_and_the_shape_doc_show_the_present_values_form():

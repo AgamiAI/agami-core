@@ -32,9 +32,9 @@ AREA = "sales"
 CODE = "metric_binding_nested_aggregate"
 
 
-def _write_model(root: Path, metrics: tuple[dict, ...] = ()) -> None:
-    """A one-table PostgreSQL model on disk, with `metrics` written straight to YAML (as an existing
-    model would hold them, bypassing `sm add`)."""
+def _write_model(root: Path, metrics: tuple[dict, ...] = (), storage_type: str = "PostgreSQL") -> None:
+    """A one-table model on disk, with `metrics` written straight to YAML (as an existing model
+    would hold them, bypassing `sm add`)."""
     sa = root / "subject_areas" / AREA
     (root / "datasources" / "c").mkdir(parents=True)
     (sa / "tables").mkdir(parents=True)
@@ -45,7 +45,7 @@ def _write_model(root: Path, metrics: tuple[dict, ...] = ()) -> None:
         "subject_areas": [f"subject_areas/{AREA}"],
     }))
     (root / "datasources" / "c" / "storage.yaml").write_text(
-        yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+        yaml.safe_dump({"name": "c", "storage_type": storage_type}))
     (sa / "subject_area.yaml").write_text(yaml.safe_dump({
         "name": AREA,
         "tables": [{"storage_connection": "c", "schema": "public", "table": "orders"}],
@@ -62,9 +62,9 @@ def _write_model(root: Path, metrics: tuple[dict, ...] = ()) -> None:
         (sa / "metrics" / f"{met['name']}.yaml").write_text(yaml.safe_dump(met))
 
 
-def _metric(name: str, binding: str, **extra) -> dict:
+def _metric(name: str, binding: str, storage_type: str = "PostgreSQL", **extra) -> dict:
     return {"name": name, "description": "A metric.", "calculation": "x",
-            "bindings": {"PostgreSQL": binding}, "source_tables": ["orders"], **extra}
+            "bindings": {storage_type: binding}, "source_tables": ["orders"], **extra}
 
 
 NESTED = "AVG(SUM(amount))"
@@ -83,6 +83,8 @@ CASES = [
     pytest.param("SUM(amount) FILTER (WHERE amount > 0)", False, id="filter-aggregate"),
     pytest.param("PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY amount)", False, id="plain-percentile"),
     pytest.param("SUM(SUM(amount)) OVER ()", False, id="window-over-aggregate"),
+    pytest.param("RANK() OVER (ORDER BY SUM(amount))", False, id="window-ordered-by-aggregate"),
+    pytest.param("AVG(SUM(amount) OVER ())", True, id="window-in-aggregate"),
     pytest.param("SUM(COALESCE(amount, 0)) / NULLIF(COUNT(amount), 0)", False, id="present-values"),
 ]
 
@@ -250,3 +252,84 @@ def test_a_binding_that_does_not_parse_is_never_flagged():
     assert D.binding_problems("AVG({revenue})", "PostgreSQL") == []
     assert D.binding_problems("SUM(amount", "PostgreSQL") == []
     assert D.binding_problems("AVG(SUM(amount))", "NoSuchEngine") == []
+
+
+def test_a_derived_metric_over_a_base_nested_in_within_group_stays_an_error():
+    # Expanding the base used to raise first, so only its WITHIN GROUP problem was seen and the
+    # AVG around it was downgraded to a warning.
+    assert _derived_findings("AVG({revenue})", base=PERCENTILE_OF_SUM) == [("error", "derived_metric")]
+
+
+def test_a_window_function_inside_an_aggregate_is_refused_with_the_reason():
+    assert [str(p) for p in D.binding_problems("AVG(SUM(amount) OVER ())", "SQLite")] == [
+        "the window function SUM(...) OVER (...) is nested inside AVG(...)"]
+    assert _derived_findings("AVG({revenue})", base="SUM(amount) OVER ()") == [
+        ("error", "derived_metric")]
+    hit = RT.resolve_metrics("d", _derived_org("AVG({revenue})", base="SUM(amount) OVER ()"))[0]
+    assert "window function SUM(...) OVER (...)" in hit["binding_problem"]
+
+
+def test_the_window_verdicts_match_what_sqlite_runs():
+    import sqlite3
+
+    db = sqlite3.connect(":memory:")
+    db.executescript("CREATE TABLE orders (amount INT); INSERT INTO orders VALUES (1), (2);")
+    for binding in ("AVG(SUM(amount) OVER ())", "SUM(SUM(amount)) OVER ()",
+                    "RANK() OVER (ORDER BY SUM(amount))"):
+        try:
+            db.execute(f"SELECT {binding} FROM orders").fetchall()
+            runs = True
+        except sqlite3.OperationalError:
+            runs = False
+        assert bool(D.binding_problems(binding, "SQLite")) is not runs, binding
+
+
+def test_a_batch_reads_the_model_once_whatever_its_size(tmp_path, monkeypatch):
+    calls = []
+    real = curate.load_datasource
+    monkeypatch.setattr(curate, "load_datasource", lambda *a, **k: calls.append(1) or real(*a, **k))
+
+    def reads(root: Path, n: int) -> int:
+        _write_model(root)
+        calls.clear()
+        items = [_metric("revenue", "SUM(amount)")] + [
+            _metric(f"d{i}", f"{{revenue}} * {i}", base_metrics=["revenue"]) for i in range(n)]
+        res = curate.write_items(root, AREA, "metric", items)
+        assert res.validated and len(res.applied) == n + 1
+        return len(calls)
+
+    assert reads(tmp_path / "one", 1) == reads(tmp_path / "many", 8)
+
+
+ORACLE_GROUPED = "(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)"
+
+
+@pytest.mark.parametrize("storage_type,binding,nested", [
+    pytest.param("Oracle", ORACLE_GROUPED, False, id="oracle-grouped"),
+    pytest.param("Oracle", "AVG(SUM(amount))", True, id="oracle-bare"),
+    pytest.param("Oracle", "(SELECT AVG(SUM(amount)) FROM orders)", True, id="oracle-no-group-by"),
+    pytest.param("Oracle", "(SELECT MAX(AVG(SUM(amount))) FROM orders GROUP BY customer_id)", True,
+                 id="oracle-three-levels"),
+    pytest.param("Oracle", "(SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount)) "
+                 "FROM orders GROUP BY customer_id)", True, id="oracle-within-group"),
+    pytest.param("SQLite", ORACLE_GROUPED, True, id="sqlite-grouped"),
+    pytest.param("PostgreSQL", ORACLE_GROUPED, True, id="postgres-grouped"),
+])
+def test_oracle_alone_runs_two_levels_in_a_grouped_select(storage_type, binding, nested, tmp_path):
+    assert bool(D.binding_problems(binding, storage_type)) is nested
+
+    _write_model(tmp_path / "add", storage_type=storage_type)
+    res = curate.write_items(tmp_path / "add", AREA, "metric", [_metric("m1", binding, storage_type)])
+    assert bool(res.skipped) is nested
+
+    _write_model(tmp_path / "existing", (_metric("m1", binding, storage_type),), storage_type)
+    org = loader.load_datasource(tmp_path / "existing", include_rejected=True)
+    assert any(f.code == CODE for f in V.validate(org).findings) is nested
+    assert ("binding_problem" in RT.resolve_metrics("m1", org)[0]) is nested
+
+
+
+def test_a_nested_aggregates_own_within_group_is_reported_once_under_it():
+    assert [str(p) for p in D.binding_problems(f"AVG({PERCENTILE_OF_SUM})", "PostgreSQL")] == [
+        "PERCENTILE_CONT(...) is nested inside AVG(...)",
+        "SUM(...) is nested inside PERCENTILE_CONT(...) WITHIN GROUP (ORDER BY ...)"]

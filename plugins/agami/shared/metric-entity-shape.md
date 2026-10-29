@@ -149,9 +149,15 @@ PostgreSQL.
 
 `sm add` and `sm curate` refuse a new or edited binding that puts an aggregate inside another in
 the same SELECT, including in a `WITHIN GROUP (ORDER BY ...)` or `FILTER (WHERE ...)` clause
-(`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount))`), because the database refuses every
-query that uses it. An aggregate over a subquery that groups first is fine. A metric already in the
-model that nests aggregates gets a `metric_binding_nested_aggregate` warning instead.
+(`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount))`), or a window function inside an
+aggregate (`AVG(SUM(amount) OVER ())`), because the database refuses every query that uses it. An
+aggregate over a subquery that groups first is fine, and so is a window over an aggregate
+(`SUM(SUM(amount)) OVER ()`). The one exception is an Oracle binding: Oracle runs two levels of
+aggregate in the argument of a SELECT that has its own GROUP BY, so
+`(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is accepted there. A bare
+`AVG(SUM(amount))` has no GROUP BY of its own and is still refused on Oracle, as is a third level,
+and the same binding for any other engine is refused. A metric already in the model that nests
+aggregates gets a `metric_binding_nested_aggregate` warning instead.
 
 **An average of the values that exist.** A missing value is not a zero, so don't fill it before
 averaging. For one column write `AVG(col)`: it already leaves missing values out. For several
@@ -168,7 +174,8 @@ division on PostgreSQL, SQLite and SQL Server (scores 1 and 2 give 1, not 1.5). 
 missing score is not counted in the denominator, so it changes nothing, and `metric_null_filled`
 does not warn on this shape: a `SUM` of `COALESCE(col, 0)` terms in the numerator whose denominator
 counts only the present values of the same columns, written the same way (`a.score` is not
-`b.score`), with `COUNT(col)` or `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`. Any other
+`b.score`, and on PostgreSQL, Snowflake and Oracle a quoted `"Score"` is not `score`), with
+`COUNT(col)` or the searched `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`. Any other
 fallback than 0, another aggregate such as `AVG(COALESCE(col, 0))` (it averages the invented zeros),
 or a denominator term such as `COUNT(*)` that counts the missing rows still warns.
 

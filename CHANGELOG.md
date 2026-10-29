@@ -19,21 +19,29 @@ below corresponds to one such version.
   every query that used it, while the check for derived metrics refused a legal aggregate over a
   subquery and missed a `SUM` inside a percentile's `WITHIN GROUP`. The rule is now judged per
   SELECT: an aggregate directly inside another, or in its `WITHIN GROUP` or `FILTER` clause, is
-  refused; an aggregate over a derived table or a scalar subquery is not. `sm add` and a `curate`
-  edit of a metric's `bindings` refuse such a binding with the reason, and write nothing for it.
-  A metric already in a model gets a `metric_binding_nested_aggregate` warning, never an error, so
-  no model that validated before stops validating; a derived metric nested in its argument is still
-  the `derived_metric` error it was. `resolve_metrics` names why a matched metric will not run, and
-  a database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
+  refused, and so is a window function inside an aggregate (`AVG(SUM(amount) OVER ())`); an
+  aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate. The
+  one exception is Oracle, which runs two levels of aggregate in the argument of a SELECT with its
+  own GROUP BY: an Oracle binding `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is
+  accepted, while a bare `AVG(SUM(amount))`, a third level, or that binding on any other engine is
+  still refused. `sm add` and a `curate` edit of a metric's `bindings` refuse such a binding with
+  the reason, and write nothing for it. A metric already in a model gets a
+  `metric_binding_nested_aggregate` warning, never an error, so no model that validated before stops
+  validating; a derived metric nested in its argument is still the `derived_metric` error it was,
+  also when its base only nests in a `WITHIN GROUP`. An `sm add` batch reads the model once, not
+  once per derived metric. `resolve_metrics` names why a matched metric will not run, and a
+  database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
   Snowflake, BigQuery, Databricks, SQL Server and MySQL) is answered with a sentence naming the
   rewrite, with the same failure kind and exit code as before. `metric_null_filled` no longer warns
   on an average of the values present, `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: a
   numerator that only zero-fills columns inside a `SUM`, over a denominator that only counts the
-  present values of those same columns (a qualifier included, so `a.score` is not `b.score`). Any
-  other fallback, another aggregate or a term such as `COUNT(*)` keeps the warning. The metric
-  guidance shows that form for several columns, with the `* 1.0` that stops integer division. An
-  `sm add` batch judges a derived metric with the batch's other metrics known, whatever their order,
-  and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in the argument, not in a clause.
+  present values of those same columns (a qualifier included, so `a.score` is not `b.score`, and on
+  PostgreSQL, Snowflake and Oracle a quoted `"Score"` is not `score`), counted with `COUNT(col)` or
+  a searched `CASE WHEN col IS NOT NULL`. Any other fallback, another aggregate or a term such as
+  `COUNT(*)` keeps the warning. The metric guidance shows that form for several columns, with the `*
+  1.0` that stops integer division. An `sm add` batch judges a derived metric with the batch's other
+  metrics known, whatever their order, and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in
+  the argument, not in a clause.
 
 - **`metric_binding_unknown_column` resolves schema-qualified source tables (#500).** The check
   looked a metric's `source_tables` up by bare table name, so `s.orders` matched nothing and a typo'd

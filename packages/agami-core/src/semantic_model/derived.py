@@ -61,14 +61,31 @@ def is_derived(metric) -> bool:
     return any(binding_refs(b) for b in (getattr(metric, "bindings", None) or {}).values())
 
 
-def expand_binding(metric, storage_type: str, idx: dict, *, _stack: Optional[list] = None) -> str:
+def expand_binding(metric, storage_type: str, idx: dict) -> str:
     """Recursively expand a metric's `{base}` placeholders for `storage_type` into
     standalone SQL. Raises DerivedError on a cycle, an unknown base, a base that
     lacks a binding for this dialect, or a second-order (case-b) nesting."""
-    _stack = list(_stack or [])
-    if metric.name in _stack:
+    expanded = _expand(metric, storage_type, idx, [])
+    # Judged once, on the whole expansion: a base's own nesting must not hide the one its
+    # enclosing metric adds (AVG over a percentile of a SUM).
+    problems = binding_problems(expanded, storage_type)
+    if problems:
+        raise NestedAggregateError(
+            f"metric {metric.name!r} composes an aggregate of an aggregate "
+            f"({'; '.join(map(str, problems))}; a second-order statistic) but has no "
+            "`inner_grain` declared. To support it, set `inner_grain` (the dimension the base is "
+            "grouped by) and bind it as OUTERAGG({base}) — the CTE is then synthesized (see "
+            "synthesize_second_order).",
+            problems,
+        )
+    return expanded
+
+
+def _expand(metric, storage_type: str, idx: dict, stack: list) -> str:
+    """`expand_binding` without the nesting check."""
+    if metric.name in stack:
         raise DerivedError(
-            "derived metric cycle: " + " -> ".join(_stack + [metric.name])
+            "derived metric cycle: " + " -> ".join(stack + [metric.name])
         )
     binding = (getattr(metric, "bindings", None) or {}).get(storage_type)
     if binding is None:
@@ -83,33 +100,25 @@ def expand_binding(metric, storage_type: str, idx: dict, *, _stack: Optional[lis
             raise DerivedError(
                 f"metric {metric.name!r} references unknown base metric {ref!r}"
             )
-        inner = expand_binding(base, storage_type, idx, _stack=_stack + [metric.name])
+        inner = _expand(base, storage_type, idx, stack + [metric.name])
         return "(" + inner + ")"
 
-    expanded = PLACEHOLDER_RE.sub(_sub, binding)
-    problems = binding_problems(expanded, storage_type)
-    if problems:
-        raise NestedAggregateError(
-            f"metric {metric.name!r} composes an aggregate of an aggregate "
-            f"({problems[0]}; a second-order statistic) but has no `inner_grain` declared. To "
-            "support it, set `inner_grain` (the dimension the base is grouped by) and bind it as "
-            "OUTERAGG({base}) — the CTE is then synthesized (see synthesize_second_order).",
-            problems,
-        )
-    return expanded
+    return PLACEHOLDER_RE.sub(_sub, binding)
 
 
 class BindingProblem(NamedTuple):
-    """One aggregate written inside another aggregate of the same SELECT."""
+    """One aggregate, or window function, written inside another aggregate of the same SELECT."""
 
     outer: str    # the enclosing aggregate's name, e.g. "AVG"
     inner: str    # the nested aggregate's name, e.g. "SUM"
     clause: str   # where it sits: "argument", "within_group" or "filter"
+    window: bool = False  # the nested call is a window function, `SUM(x) OVER ()`
 
     def __str__(self) -> str:
         where = {"within_group": " WITHIN GROUP (ORDER BY ...)",
                  "filter": " FILTER (WHERE ...)"}.get(self.clause, "")
-        return f"{self.inner}(...) is nested inside {self.outer}(...){where}"
+        inner = f"the window function {self.inner}(...) OVER (...)" if self.window else f"{self.inner}(...)"
+        return f"{inner} is nested inside {self.outer}(...){where}"
 
 
 def _aggregate_unit(agg):
@@ -137,18 +146,60 @@ def _is_aggregate(node) -> bool:
 
 
 def _nested_in(unit, agg):
-    """The aggregates directly inside `unit` in the same SELECT. A subquery is a scope of its own
-    and is not entered, and neither is a window function: an aggregate over a derived table or a
-    scalar subquery is legal SQL."""
+    """The aggregates and window functions directly inside `unit` in the same SELECT. A subquery is
+    a scope of its own and is not entered: an aggregate over a derived table or a scalar subquery is
+    legal SQL. A window function is yielded, not entered, since no engine allows one inside an
+    aggregate; a window over an aggregate, `SUM(SUM(x)) OVER ()`, never reaches here."""
     from sqlglot import expressions as exp
 
     for child in unit.iter_expressions():
-        if isinstance(child, (exp.Query, exp.Window)):
+        if isinstance(child, exp.Query):
             continue
-        if child is not agg and _is_aggregate(child):
-            yield child
+        call = child
+        # a nested aggregate's own WITHIN GROUP / FILTER belongs to it, not to `agg`
+        while isinstance(call, (exp.WithinGroup, exp.Filter, exp.IgnoreNulls, exp.RespectNulls)):
+            call = call.this
+        if isinstance(child, exp.Window) or (call is not agg and _is_aggregate(call)):
+            yield child if isinstance(child, exp.Window) else call
             continue
         yield from _nested_in(child, agg)
+
+
+def _call_name(node) -> str:
+    """The function a nested call names; for a window, the function under OVER."""
+    from sqlglot import expressions as exp
+
+    while isinstance(node, (exp.Window, exp.WithinGroup, exp.Filter, exp.IgnoreNulls, exp.RespectNulls)):
+        node = node.this
+    return node.sql_name() if isinstance(node, exp.Func) else "?"
+
+
+def _grouped_select(node) -> bool:
+    """Whether the SELECT `node` belongs to has a GROUP BY."""
+    from sqlglot import expressions as exp
+
+    scope = node.parent
+    while scope is not None and not isinstance(scope, exp.Query):
+        scope = scope.parent
+    return isinstance(scope, exp.Select) and scope.args.get("group") is not None
+
+
+def _oracle_allows(agg, inner, clause: str, storage_type: str) -> bool:
+    """Oracle accepts two levels of aggregate in the argument of a grouped SELECT,
+    `SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id`. A bare binding has no GROUP BY of
+    its own and still nests, and a third level is refused there too."""
+    from sqlglot import expressions as exp
+
+    if storage_type != "Oracle" or clause != "argument" or not _is_aggregate(inner):
+        return False
+    if not _grouped_select(agg) or next(_nested_in(_aggregate_unit(inner), inner), None) is not None:
+        return False
+    outer = _aggregate_unit(agg).parent
+    while outer is not None and not isinstance(outer, exp.Query):
+        if _is_aggregate(outer):
+            return False
+        outer = outer.parent
+    return True
 
 
 def _clause_of(inner, agg) -> str:
@@ -176,14 +227,17 @@ def _clause_of(inner, agg) -> str:
 def binding_problems(sql: str, storage_type: str) -> list[BindingProblem]:
     """The one rule for whether a metric binding nests aggregates (#519), judged per SELECT.
 
-    An aggregate directly inside another aggregate of the same SELECT is refused by every engine
-    (`AVG(SUM(a))`), and so is one in the aggregate's WITHIN GROUP or FILTER clause
-    (`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(a))`). An aggregate over a derived table or a
+    An aggregate directly inside another aggregate of the same SELECT is refused (`AVG(SUM(a))`),
+    and so is one in the aggregate's WITHIN GROUP or FILTER clause
+    (`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(a))`) and a window function inside an
+    aggregate (`AVG(SUM(a) OVER ())`). The one exception is Oracle, which runs two levels of
+    aggregate in the argument when that SELECT has a GROUP BY. An aggregate over a derived table or a
     scalar subquery is legal and is not a problem. Parsed in the binding's own engine; a binding
     that does not parse (a `{placeholder}`, an engine with no grammar) yields nothing, so this never
     blocks on what it cannot read."""
     try:
         import sqlglot
+        from sqlglot import expressions as exp
         from sqlglot.errors import ErrorLevel
 
         from .sql_dialect import sqlglot_dialect
@@ -198,7 +252,11 @@ def binding_problems(sql: str, storage_type: str) -> list[BindingProblem]:
     for agg in [n for n in tree.walk() if _is_aggregate(n)]:
         unit = _aggregate_unit(agg)
         for inner in _nested_in(unit, agg):
-            problems.append(BindingProblem(agg.sql_name(), inner.sql_name(), _clause_of(inner, agg)))
+            clause = _clause_of(inner, agg)
+            if _oracle_allows(agg, inner, clause, storage_type):
+                continue
+            problems.append(BindingProblem(agg.sql_name(), _call_name(inner), clause,
+                                           isinstance(inner, exp.Window)))
     return problems
 
 
