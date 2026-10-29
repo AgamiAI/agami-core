@@ -21,6 +21,25 @@ below corresponds to one such version.
   folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
   (`sm curate <root> ops.json`, before or after the other options); `--ops-file` still works, and giving both is a usage error.
 
+- **Sensitive-column detection reads whole words, checks sampled values and looks inside JSON
+  (#516).** A new build split column names into words, so `phoneme_error_rate`, `mobile_sessions`,
+  `headphones_sold`, `adobe_campaign_id` and `ip_address` are no longer flagged (they stay in the
+  suspected list), while `customer_name`, `contact_name`, `first_name`, `customer_ssn`, `zip_code`,
+  `pan_number` and `e_mail` now are. Every other name the old rule flagged is still flagged. The
+  table's one sample (now taken for any table with text or JSON columns) also flags a column whose
+  values are mostly email addresses, lists phone-number-shaped and birth-date-shaped columns as
+  suspected (with a caveat on the column, shown by `sm sensitive` and the explorer's PII tab), and
+  flags a JSON column whose keys hold personal data, with a caveat naming the key paths
+  (`Contains personal data at: email, contact.phone`); a key that may itself be data (a person's
+  name used as a key) is shown as `*`. Postgres JSON read through the CLI is recognised too. A column
+  holding emails or phone numbers (digit-only ones included), or flagged or suspected as personal,
+  gets no value list, whether read from the data or declared by an enum type or CHECK; a list
+  with even one key that is a phone number is dropped, even when the sample is empty or unreadable. No sampled
+  value is written to the model or the report. A birth date stored as a timestamp at midnight is
+  recognised with or without a time zone (`Z`, `+05:30`), and digit-only values in an identifier
+  column (`customerId`, `trackingCode`, `id_number`) are not read as phone numbers. `ipv4_address`/`IPv4Address` stay suspected-only. An existing
+  model keeps its flags on refresh; no model field is added.
+
 - **`metric_binding_unknown_column` resolves schema-qualified source tables (#500).** The check
   looked a metric's `source_tables` up by bare table name, so `s.orders` matched nothing and a typo'd
   column in its binding was never reported, and `sales.orders` and `archive.orders` shared one column
