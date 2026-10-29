@@ -35,7 +35,29 @@ below corresponds to one such version.
   `sm add` batch judges a derived metric with the batch's other metrics known, whatever their order,
   and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in the argument, not in a clause.
 
+- **`metric_binding_unknown_column` resolves schema-qualified source tables (#500).** The check
+  looked a metric's `source_tables` up by bare table name, so `s.orders` matched nothing and a typo'd
+  column in its binding was never reported, and `sales.orders` and `archive.orders` shared one column
+  set, so a column on the other schema's table hid a typo. A qualified source now finds that schema's
+  table (or a schema-less definition of the name), a bare one every table of that name, and a table
+  whose name embeds its schema (`name: public.orders`) is found either way. It stays a warning.
+
 ### Changed
+
+- **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
+  single-schema database of more than 24 tables used to get one area per table-name prefix, with
+  any name starting with a shorter one's prefix pulled in (`pro_x` with `products`) and names
+  singularised by dropping an "s" (`supplie`, `statu`). Tables are now grouped where they join each
+  other most densely (greedy modularity over the join graph), with no target number of areas, so a
+  hub table that half the database joins doesn't pull everything into one area; no group passes the
+  area size limit, and ties go to the tables sharing more words in their names and descriptions.
+  Tables with no joins go with tables sharing their whole first name word. Area names are the
+  tables' own words, and the grouping no longer depends on the order the tables arrive in. Only
+  proposals change: a curated model is never regrouped, while a model whose areas are still exactly
+  the engine's (a batched first build, or one built by an earlier release and never edited) is
+  regrouped by `introspect --append`. A join whose two tables end up in one area is written as that
+  area's join, and a refresh that would write a file the model can't load back is refused, with the
+  model left as it was.
 
 - **`sm suggest-metrics` no longer proposes a share-of-true rate for every boolean column (#530).**
   On a large onboarding these `<table>_<column>_rate` metrics were 698 of the 706 it suggested and
@@ -51,6 +73,53 @@ below corresponds to one such version.
   `--profile` test run as every other proposal. Rate metrics already in a model are not changed; the
   explorer's Review tab can reject them in bulk. The agami-connect skill requests a rate only when the
   customer's definitions name it.
+
+### Fixed
+
+- **`sm add` refuses a subject area the model doesn't list, and takes `--area _cross` (#513).**
+  The loader reads only the areas `datasource.yaml` lists, so a metric added under any other name
+  was reported applied and validated and then never served. The error now lists the model's areas.
+  `--area _cross` writes the datasource's cross-area list (`cross_subject_area_metrics.yaml`, or
+  `_entities.yaml`), validated like any other add, and those items can be signed off through
+  `sm curate`, where `"area": "_cross"` reads only the cross-area lists and otherwise acts as an op
+  with no area does (a missing name, or one in both places, fails the batch). Re-adding an item that `datasource.yaml` holds inline replaces it there, so one name is
+  never defined twice.
+
+- **A foreign key over several columns is now one join on all of them, and a query joining on only
+  some of them is flagged (#510).** Introspection wrote each column of a composite key as its own
+  approved many-to-one join, and either one used alone repeats rows (981 became 2,502 in one
+  database). Every dialect's foreign-key query now returns the constraint name and column position,
+  and the generic `information_schema` query (Redshift, Snowflake, DuckDB, Databricks) and BigQuery's
+  match the referenced column by position, which they used to pair with every column of the key.
+  Where a catalog can't run the generic one (an older Redshift may lack
+  `position_in_unique_constraint`), introspection falls back to the query it used before, keeps its
+  single-column keys as before, and leaves out a composite key with a note rather than guess how its
+  columns pair; the report says when the fallback was used. A
+  key is written as one `on:` join, its cardinality read from the whole key; single-column joins are
+  unchanged. Where a catalog gives no constraint name, the columns are still kept apart but left for
+  review. A refresh replaces the split joins introspection approved for such a key with the one
+  join and lists that in the preview; if a person signed off any of them, nothing changes for that
+  key and the preview says so. On the receipt, a join written on part of a declared composite key
+  makes an aggregate on either side `multiplied`, with a `fan_trap` naming the missing columns; the
+  query still runs. Code that read only `from_column`/`to_column` now reads every column of an
+  `on:` join too (adding reference joins no longer raises on one), and the validator warns when an
+  `on:` names a column its table doesn't define. A join that is a key equality plus a fixed value
+  (`... AND customers_curr.current_flag = 'Y'`) is not a composite key: its receipt and refresh are
+  as before, its key column counts as a referenced column, and hiding that column now hides the
+  join. BigQuery and Oracle keys are kept apart per dataset/owner, a BigQuery key into another
+  dataset keeps its single-column join, and an `on:` now also parses in the engine's own grammar
+  (`` `OrderId` ``). A refresh keeps a single-column FK the catalog declares beside a composite
+  one, and only an `on:` join introspection signed goes back to review when a column is retyped.
+  The partial-key check reads each join on its own (an aliased self-join and a `USING` join too),
+  skips SEMI/ANTI joins and a join another declaration names whole, and counts only the equalities
+  between the join's two tables. A column an earlier `USING` or `NATURAL` join merged counts for
+  every table it merged, and one whose table can't be told leaves the aggregate `undetermined`. A
+  key column or table named after a reserved word (`order`) is quoted in the `on:`, and a refresh
+  matches a split join by its schema even when the schema is written in the table name
+  (`crm.shipments`), and keeps such a join in its own schema's area only.
+  A refresh's relabelling
+  from the database's keys (#511) labels a composite join from all its columns, and a split join the
+  refresh replaces is not also listed as relabelled.
 
 ### Fixed
 
@@ -79,6 +148,25 @@ below corresponds to one such version.
   refused where they ran before.
 
 ### Added
+
+- **A table can move to another subject area, keeping its joins, metrics and entities (#513).**
+  The curate op `{"op":"move","kind":"table","name":"<table>","area":"<from>","to_area":"<to>"}`
+  (`"schema"` too when two schemas share the name) moves the table and its area entry, and creates
+  the target area when the model doesn't have it. A join that now spans two areas becomes a
+  cross-area join, and a cross-area join whose two tables now share an area moves into it. Metrics
+  and entities on that table move with it when every table they read is now in the new area; one
+  that also reads a table outside it stays, and the result's `notes` names it; one left in another
+  area moves too once all its tables have reached the new area by separate moves. A join that names
+  its table by a bare name shared by two schemas is resolved by the area it sits in and gets the
+  schema written; a move with a join on the table whose other end matches tables in two schemas is
+  refused, with nothing written. A join to a table no area defines stays where it is, and `notes`
+  says so. A join the target area already holds is kept once: a copy a person signed off over one
+  the engine approved, and that over an unreviewed one, taking a description only the other copy
+  has; `notes` says which was kept. A move is refused when two copies a person signed off disagree.
+  A composite-key `on:` join moves intact beside another join between the same tables. The batch is
+  validated and undone on failure (folders it created included, and no `notes` reported), logged
+  with both areas, and committed when the model is its own git repository. The model explorer has a
+  **Move to area** control on every table that queues the op.
 
 - **A metric can carry `caveats` (#524).** Tables and columns could, metrics could not, so a limit
   of a metric's formula ("gives no value when the start date is missing") went into its description
