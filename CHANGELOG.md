@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.21] — 2026-10-29
+
 ### Fixed
 
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
