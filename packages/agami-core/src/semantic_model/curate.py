@@ -293,10 +293,11 @@ def sensitive_columns(org: Datasource) -> dict:
 
 
 def suspected_sensitive_columns(org: Datasource) -> dict:
-    """Columns the strict flag may have MISSED — `build.suspected_pii` matches the name but the
-    column isn't marked `sensitive` (e.g. `first_name` in a non-PII-named table). Surfaced so a
-    PII review catches false NEGATIVES, not just confirms hits. Excludes already-sensitive and
-    rejected columns. A review aid — never auto-marks."""
+    """Columns the strict flag may have MISSED — `build.suspected_pii` matches the name, or the
+    introspection sample left a phone / birth-date caveat, but the column isn't marked
+    `sensitive` (e.g. `first_name` in a non-PII-named table). Surfaced so a PII review catches
+    false NEGATIVES, not just confirms hits. Excludes already-sensitive and rejected columns.
+    `reason` says which rule listed it. A review aid — never auto-marks."""
     from . import build as B
     cols: list[dict] = []
     for sa in org.subject_areas:
@@ -304,9 +305,12 @@ def suspected_sensitive_columns(org: Datasource) -> dict:
             if getattr(t, "review_state", "approved") == "rejected":
                 continue
             for c in t.columns:
-                if (not c.sensitive and B.suspected_pii(c.name)
-                        and getattr(c, "review_state", "approved") != "rejected"):
-                    cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
+                if c.sensitive or getattr(c, "review_state", "approved") == "rejected":
+                    continue
+                reason = B.suspected_reason(c.name, c.caveats)
+                if reason:
+                    cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
+                                 "reason": reason})
     return {"count": len(cols), "columns": cols}
 
 
