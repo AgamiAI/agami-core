@@ -575,7 +575,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             if op.get("op") == "move" and not op.get("area"):
                 # Resolved now, so the log records the area the table left as well as the one it joined.
                 op = {**op, "area": _resolve_area(root, op)}
-            where, before, staled = _apply_one(root, op, signer, role, backups, res.notes)
+            where, before, staled, resolved = _apply_one(root, op, signer, role, backups, res.notes)
             res.applied.append(_op_label(op))
             # datasource.yaml holds several lists, so an index alone doesn't say which entry it is.
             slot = (op.get("kind"), where)
@@ -584,7 +584,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
                 stale[slot] = _op_label(op).split(" ", 1)[1]
             elif op.get("op") != "edit":
                 stale.pop(slot, None)
-            logged.append({**op, "before": before, **({"made_stale": True} if staled else {})})
+            logged.append({**op, "before": before, **resolved, **({"made_stale": True} if staled else {})})
         except BatchError as e:
             res.errors.append(f"{_op_label(op)}: {e}")
         except Exception as e:
@@ -668,9 +668,10 @@ def _resolve_area(root: Path, op: dict) -> str:
 
 def _apply_one(root: Path, op: dict, signer, role,
                backups: "Optional[dict[Path, Optional[str]]]" = None,
-               notes: Optional[list[str]] = None) -> tuple[Any, Any, bool]:
+               notes: Optional[list[str]] = None) -> tuple[Any, Any, bool, dict]:
     """Apply one op; return where the entry it changed lives, the value it replaced (for the curation
-    log), and whether the op sent an approved entry back to review."""
+    log), whether the op sent an approved entry back to review, and the fields to add to its log entry
+    (the declared name a metric or entity op resolved to, when the op spelt it differently)."""
     if backups is None:
         backups = {}
     action = op.get("op")
@@ -693,7 +694,7 @@ def _apply_one(root: Path, op: dict, signer, role,
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
         moved = _move_table(root, op, area, backups, notes if notes is not None else [])
-        return (moved, None), None, False
+        return (moved, None), None, False, {}
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -719,7 +720,7 @@ def _apply_one(root: Path, op: dict, signer, role,
             # The file's own `name`: it can carry the schema (`public.wide`) the op's name leaves out.
             _reconcile_ambiguity_groups(root, path, str(doc.get("name") or name), doc.get("schema"),
                                         old_groups, doc.get("column_groups") or {}, backups)
-        return (path, op.get("column")), before, False
+        return (path, op.get("column")), before, False, {}
 
     if kind in ("entity", "metric"):
         path, key, doc, item = _find_item(root, kind, name, area)
@@ -731,7 +732,10 @@ def _apply_one(root: Path, op: dict, signer, role,
             item.pop("caveats", None)
         staled = _stale_on_edit(kind, prior, item, op)
         _dump(path, {key: doc} if isinstance(doc, list) else doc)
-        return (path, _position(_entries(doc, key), item) if key else None), before, staled
+        # The log's history matches by declared name, as `_find_item` resolves (`revenue ($)` vs `revenue (%)`).
+        declared = prior.get("name")
+        resolved = {"declared_name": declared} if declared and declared != name else {}
+        return (path, _position(_entries(doc, key), item) if key else None), before, staled, resolved
 
     if kind == "subject_area":
         # edit-only (e.g. set the area's `description`) — a subject area carries no trust block,
@@ -750,7 +754,7 @@ def _apply_one(root: Path, op: dict, signer, role,
         before = doc.get(fld)
         doc[fld] = val
         _dump(path, doc)
-        return (path, None), before, False
+        return (path, None), before, False, {}
 
     if kind == "relationship":
         path, key, doc, rels, hit = _find_join(root, op, area)
@@ -759,7 +763,7 @@ def _apply_one(root: Path, op: dict, signer, role,
         before = _set_trust(hit, op, new_state, signer, role)
         staled = _stale_on_edit(kind, prior, hit, op)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
-        return (path, _position(rels, hit)), before, staled
+        return (path, _position(rels, hit)), before, staled, {}
 
     raise ValueError(f"unknown kind {kind!r}")
 
@@ -2050,7 +2054,8 @@ def _names_entry(kind: str, entry: dict, ident: dict) -> bool:
     """Whether a logged op named the entry that had identity `ident` when the op ran, the way
     `_find_join` / `_find_item` matched it then."""
     if kind != "relationship":
-        return _slug(str(entry.get("name") or "")) == _slug(str(ident.get("name") or ""))
+        # The declared name the op resolved to; distinct names can share a slug (`revenue ($)`, `revenue (%)`).
+        return (entry.get("declared_name") or entry.get("name")) == ident.get("name")
     if entry.get("name") != f"{ident.get('from_table')}->{ident.get('to_table')}":
         return False
     for k in ("from_column", "to_column"):

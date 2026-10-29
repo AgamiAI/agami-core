@@ -310,6 +310,27 @@ def test_a_log_that_does_not_reach_the_approval_says_changes_not_recorded(root, 
                                               "summary": "changes not recorded"}
 
 
+def test_an_edit_naming_a_metric_by_another_spelling_is_still_its_history(root):
+    assert curate.apply(root, [_edit("metric", "Revenue", "unit", "USD")]).validated
+    (item,) = curate.review_queue(L.load_datasource(root), root=root)["rule_1"]
+    assert [c["text"] for c in item["changes_since_approval"]["changes"]] == ["unit changed from (none) to USD"]
+
+
+def test_two_metrics_sharing_a_slug_keep_their_own_changes(tmp_path):
+    signed = {**_CROSS_METRIC, **SIGNED}
+    _model(tmp_path, cross=[_JOIN], ds_extra={"cross_subject_area_metrics": [
+        {**signed, "name": "revenue ($)"},
+        {**signed, "name": "revenue (%)", "bindings": {"PostgreSQL": "AVG(invoices.id)"}}]})
+    assert curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "name": "revenue ($)",
+                                    "field": "unit", "value": "USD"}]).validated
+    assert curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "name": "revenue (%)",
+                                    "field": "unit", "value": "percent"}]).validated
+    shown = {it["name"]: [c["text"] for c in it["changes_since_approval"]["changes"]]
+             for it in curate.review_queue(L.load_datasource(tmp_path), root=tmp_path)["rule_1"]}
+    assert shown == {"revenue ($)": ["unit changed from (none) to USD"],
+                     "revenue (%)": ["unit changed from (none) to percent"]}
+
+
 def test_an_edit_of_one_datasource_list_does_not_hide_another_lists_stale_entry(tmp_path):
     _model(tmp_path, cross=[{**_JOIN, **SIGNED}],
            ds_extra={"cross_subject_area_metrics": [{**_CROSS_METRIC, **SIGNED}]})
