@@ -41,6 +41,46 @@ def test_non_currency_units_and_passthrough():
     assert units.format_value(None, "USD") == ""
 
 
+def test_scaled_and_rate_currency_units():
+    assert units.format_value(12.5, "USD_millions") == "$12.5M"
+    assert units.format_value(1234.5, "usd_million") == "$1,234.5M"
+    assert units.format_value(1234567.25, "INR_thousands") == "₹12,34,567.25K"
+    assert units.format_value(12.5, "INR_crores") == "₹12.5Cr"
+    assert units.format_value(-3, "EUR_billions") == "-€3B"
+    assert units.format_value(120, "USD/day") == "$120.00/day"
+    assert units.format_value(3.25, "USD_millions/year") == "$3.25M/year"
+    assert units.format_cell("12.5", "USD_millions") == "$12.5M"
+    assert units.parse_unit("USD_millions/year") == ("USD", "millions", "year")
+    assert units.currency_symbol("GBP/week") == "£"
+
+
+@pytest.mark.parametrize("unit", ["USD_MILLIONS", "usd_millions", "USD_MILLION", "Usd_Millions/YEAR"])
+def test_scaled_unit_parses_in_any_case(unit):
+    assert units.parse_unit(unit)[:2] == ("USD", "millions")
+    assert units.format_value(12.5, unit).startswith("$12.5M")
+
+
+def test_chart_formats_scaled_units_in_any_case():
+    # the chart's JS parser mirrors parse_unit; the same capitalisations must format alike
+    import re
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    html = (PKG_SRC.parent.parent.parent / "plugins" / "agami" / "shared" / "chart-template.html").read_text()
+    js = re.search(r"const CURRENCY_SYMBOLS = \{.*?\n    function fmtUnit\(.*?\n    \}\n", html, re.S).group(0)
+    probe = js + "for (const u of ['USD_millions','USD_MILLIONS','usd_millions','USD_MILLION']) console.log(fmtUnit(12.5, u));"
+    out = subprocess.run([node, "-e", probe], capture_output=True, text=True, timeout=30)
+    assert out.stdout.split() == ["$12.5M"] * 4, out.stderr
+
+
+@pytest.mark.parametrize("unit", ["widgets", "USD_bogus", "USD/fortnight", "XYZ_millions"])
+def test_unparseable_unit_stays_a_label(unit):
+    assert units.parse_unit(unit) is None
+    assert units.format_value(5, unit) == f"5 {unit}"
+
+
 def test_format_cell_is_exact_never_abbreviated():
     # verification surface: full value, grouping, currency symbol — NO abbreviation/rounding
     assert units.format_cell("21620870000.50", "INR") == "₹21,62,08,70,000.50"

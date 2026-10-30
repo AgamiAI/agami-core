@@ -649,13 +649,17 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
                    # the same two things every other field here is made of. Neither can carry a
                    # sampled value, and the two assertions below are what says so rather than this
                    # sentence.
-                   "scope", "filters"})}
+                   "scope", "filters",
+                   # `scan_risk` (#451) is a sentence built from the model's own table name and
+                   # row ESTIMATE (the `rows` field above) and the statement's join structure, or
+                   # null: no sampled value can reach it either.
+                   "scan_risk"})}
 
     numbers = [v for v in _leaves(sections) if isinstance(v, int) and not isinstance(v, bool)]
     assert set(numbers) <= {ROW_ESTIMATE}
     # The statement's own literal is data-shaped; it reaches the receipt nowhere.
     assert CTE_LITERAL in CTE_SQL
-    assert CTE_LITERAL not in json.dumps(sections)
+    assert not re.search(rf"\b{CTE_LITERAL}\b", json.dumps(sections))  # whole token (#489)
 
 
 # --- the whole of what the assembler returns --------------------------------

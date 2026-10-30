@@ -142,11 +142,20 @@ _SHARED_INSTRUCTIONS = (
     "Flow: (1) list_datasources, then get_datasource_schema for the datasource the question "
     "touches (it sizes itself — pass `area` or `dataset_names` to SCOPE it, `query` to rank "
     "metrics; a `dataset_names` call also returns those tables' joins and metrics, so it is what "
-    "you need to write the SQL). (2) Examples-first — call get_prompt_examples with the user's "
+    "you need to write the SQL; joins to tables you didn't name come as key lists under "
+    "`joins_to_other_tables`, so name every table you will query). (2) Examples-first — call get_prompt_examples with the user's "
     "question as `query` and mirror the closest match; use metric `calculation`/`binding` "
     "verbatim. (3) execute_sql (the safety pass runs inside it; "
     "a table's declared `default_filters` are NOT applied — write one into the SQL yourself if "
     "the question needs it). (4) Read the returned `receipt`.\n"
+    "Ambiguities: when the schema returns `ambiguities` and the user's question matches one's "
+    "`when` without already settling it, follow its `behaviour`. `ask`: before running SQL, ask "
+    "the user which option they mean, listing the option labels (default first). "
+    "`answer_and_offer`: answer with the `default` option, say which one you used, and offer "
+    "the others. Each option's `how` says how to write the SQL for it; it is for you, not the "
+    "user. Ask and offer in the user's terms, using the option labels, and never name tables, "
+    "columns, subject areas or column groups. An entry under `ambiguity_signposts` isn't open "
+    "yet: if the question matches its `when`, make the call its `open` names before writing SQL.\n"
     "Columns: write the statement from the columns the schema returned for those tables, and "
     "nothing else. **Name every column you PROJECT — never a bare `*` or `t.*`**, in the outer "
     "query, a subquery and a CTE body alike: a star returns columns the statement never names, so "
@@ -154,6 +163,8 @@ _SHARED_INSTRUCTIONS = (
     "projection. Name them even where the same list appears a few lines above. `COUNT(*)` and "
     "other aggregates over `*` are fine — there the star is inside the call and the projection is "
     "the aggregate, so it is not affected by any of this. "
+    "Reuse a select-list alias only as a whole ORDER BY or GROUP BY item; in WHERE, HAVING or a "
+    "later select item write its expression out, or filter in an outer query. "
     "A plausible name is not a declared one, and a column missing from the table's "
     "own entry is out of scope however obvious it looks beside the ones that are there. The same "
     "holds for area, table and metric names: copy them from a response, never from the user's "
@@ -457,7 +468,12 @@ _call_misses: ContextVar[list[dict[str, Any]] | None] = ContextVar(
 
 
 def _note_miss(
-    kind: str, name: str, did_you_mean: list[str] | None = None, value: Any = None
+    kind: str,
+    name: str,
+    did_you_mean: list[str] | None = None,
+    value: Any = None,
+    *,
+    hinted: bool = False,
 ) -> None:
     """Publish one name the model lacked, beside the reply and never in it.
 
@@ -477,6 +493,10 @@ def _note_miss(
         entry["did_you_mean"] = list(did_you_mean)
     if isinstance(value, str):
         entry["value"] = value
+    # Whether the reply carried a wrong-kind hint for it (#567): without it, an entry whose
+    # `did_you_mean` is empty reads as "the caller was given nothing" when it was told what the name is.
+    if hinted:
+        entry["hinted"] = True
     misses = _call_misses.get()
     if misses is None:
         misses = []
@@ -989,8 +1009,9 @@ def _count_local_examples(examples_dir: Path) -> int:
 
     Read through the loader's own `list_prompt_examples`, so a file is counted in whichever shape
     the loader accepts (a bare list, or `{examples: [...]}`) rather than a second copy of that rule.
-    Rejected examples count, because the local `get_prompt_examples` returns the file whole. A file
-    that cannot be read counts nothing: a pointer is not worth failing the schema call over."""
+    Rejected examples do not count, matching the served count and what the local
+    `get_prompt_examples` now returns. A file that cannot be read counts nothing: a pointer is not
+    worth failing the schema call over."""
     if not examples_dir.is_dir():
         return 0
     from semantic_model import loader as L
@@ -1000,7 +1021,7 @@ def _count_local_examples(examples_dir: Path) -> int:
         if not area_dir.is_dir():
             continue
         try:
-            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name, include_rejected=True))
+            total += len(L.list_prompt_examples(examples_dir.parent, area_dir.name))
         except Exception:
             continue
     return total
@@ -1582,6 +1603,9 @@ def _metric_full(
         "other_names": list(m.other_names or []),
         "review_state": m.review_state,
     }
+    caveats = getattr(m, "caveats", None)
+    if caveats:
+        out["caveats"] = list(caveats)
     if key and key != m.name:
         out["selector"] = key
     binding = (m.bindings or {}).get(engine) if engine else None
@@ -1614,23 +1638,103 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
     an agent acts on is a TABLE NAME — which is what `dataset_names` takes — and the one
     parameter an area would serve is `area`, which the instructions tell clients to omit.
     """
-    # Names are published BARE, which is the only form the next call can honour: `_resolve_scope`
-    # strips every qualifier from `dataset_names`, and the bare name then resolves first-match. A
-    # qualified node would look precise and select a different table — publishing `public.orders`
-    # and receiving `archive.orders` is worse than publishing an ambiguity the caller can see.
-    #
-    # So where one name is declared under two schemas, both edges land on one node here. That is a
-    # fiction only in the sense the whole path is one: `dataset_names` cannot tell those tables
-    # apart either. #258 is the fix — the served model has no schema column at all, so the
-    # qualifier is gone before this tool answers. When it lands, this block should publish the
-    # qualified name, and `models.table_key` is the comparison to do it with.
+    # A node is the name `dataset_names` resolves back to that table: bare, unless the name is
+    # declared under more than one schema, then `schema.table` (#258). A bare node there would put
+    # two tables' edges on one name, and passing it back returns both.
+    from semantic_model.models import table_key
+
+    schemas: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            sch, bare = table_key(t.name, t.schema_name)
+            schemas.setdefault(bare, set()).add(sch)
+
+    def node(table: str, schema: str | None) -> str:
+        bare = _bare_name(table)
+        sch = table_key(table, schema)[0]
+        return f"{sch}.{bare}" if sch and len(schemas.get(bare.lower(), ())) > 1 else bare
+
     joins: dict[str, set[str]] = {}
     for r in org.cross_subject_area_relationships:
         if scope.level != "datasource" and scope.area not in (r.from_subject_area,
                                                               r.to_subject_area):
             continue
-        joins.setdefault(_bare_name(r.from_table), set()).add(_bare_name(r.to_table))
+        joins.setdefault(node(r.from_table, r.from_schema), set()).add(
+            node(r.to_table, r.to_schema))
     return {t: sorted(v) for t, v in sorted(joins.items())}
+
+
+# Column-detail keys that make a column worth sending in full even when its group wasn't asked for:
+# a caveat, a cleaning rule or a date encoding changes how the column must be written, and a
+# sensitive flag changes whether it may be projected.
+_ALWAYS_FULL_KEYS = ("caveats", "value_transform", "sensitive", "date_format", "timezone")
+
+
+def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> None:
+    """For each table with column groups, send its groups and only the columns every query needs in
+    full; the rest arrive when the caller names their group (#449).
+
+    A wide table sent column by column was most of a scoped reply: a 150-column fact table ran to
+    ~23K chars, for a question that reads eight of them. Each group carries its description and its
+    column NAMES, so every column stays visible (a column-scope repair still finds it) and the
+    caller can pick what to fetch. Always in full: the grain, columns a metric in this reply binds,
+    and columns with a caveat, a value transform or a sensitive flag. `column_groups=[...]` adds
+    whole groups, by bare name (any table) or `table.group`. Tables without groups are unchanged.
+    """
+    from semantic_model.models import table_key
+
+    # By identity, as the reply keys tables: `public.orders` where the name is ambiguous (#258).
+    groups_of = {table_key(t.name, t.schema_name): (t.column_groups, t.column_group_descriptions,
+                                                    t.grain)
+                 for sa in org.subject_areas for t in sa.tables_defined if t.column_groups}
+
+    def names(asked_table: "str | None", key: tuple[str, str]) -> bool:
+        """Whether a `table.group` request's table is this one: bare, or with its schema."""
+        if asked_table is None:
+            return True
+        schema, bare = table_key(asked_table)
+        return bare == key[1] and (not schema or schema == key[0])
+
+    # Folded, and matched as whole names in the metric text rather than by an identifier regex, so a
+    # quoted `"Order Total"` or a binding written in another case still counts.
+    metric_text = " ".join(str(m.get("binding") or m.get("calculation") or "")
+                           for m in result.get("metrics") or []).lower()
+    asked = {(r.rsplit(".", 1)[0] if "." in r else None, r.rsplit(".", 1)[-1])
+             for r in requested if isinstance(r, str) and r}
+    unknown = set(asked)
+    for name, tinfo in (result.get("tables") or {}).items():
+        key = table_key(name, tinfo.get("schema")) if isinstance(tinfo, dict) else None
+        if key is not None and key not in groups_of and not key[0]:
+            # An entry carrying no schema is the one grouped table of that name, if there is one.
+            same = [k for k in groups_of if k[1] == key[1]]
+            key = same[0] if len(same) == 1 else key
+        if key not in groups_of or not isinstance(tinfo.get("columns"), list):
+            continue
+        groups, descs, grain = groups_of[key]
+        metric_words = {c["name"] for c in tinfo["columns"] if metric_text and re.search(
+            rf"(?<![\w]){re.escape(c['name'].lower())}(?![\w])", metric_text)}
+        shown = {c["name"] for c in tinfo["columns"]}  # already narrowed by the area's exposure
+        wanted = {g for t, g in asked if g in groups and names(t, key)}
+        unknown -= {(t, g) for t, g in asked if g in groups and names(t, key)}
+        in_wanted = {c for g in wanted for c in groups[g]}
+        grouped = {c for cols in groups.values() for c in cols}
+        tinfo["columns"] = [
+            c for c in tinfo["columns"]
+            # A column in no group is sent in full, so it stays named (groups need not cover a
+            # table under the 30-column line).
+            if c["name"] in grain or c["name"] in metric_words or c["name"] in in_wanted
+            or c["name"] not in grouped
+            or any(k in c for k in _ALWAYS_FULL_KEYS)
+        ]
+        tinfo["column_groups"] = {
+            g: {"description": descs.get(g, ""), "columns": [c for c in cols if c in shown]}
+            for g, cols in groups.items() if any(c in shown for c in cols)
+        }
+        tinfo["columns_in_full"] = ("keys, metric columns, columns with a caveat or cleaning rule, "
+                                    "and any group you named; ask for others with "
+                                    "column_groups=[\"<group>\"] (or \"<table>.<group>\")")
+    if unknown:
+        result["unknown_column_groups"] = sorted(f"{t}.{g}" if t else g for t, g in unknown)
 
 
 def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any]:
@@ -1651,10 +1755,15 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
     not override that: forcing a named table into the declared area returns "not found in scope"
     for any table outside it, while its metrics stay advertised — a silent hide.
     """
-    area_of = {t.name: sa.name for sa in org.subject_areas for t in sa.tables_defined}
+    # By the tables a name resolves to, not by its spelling (#258): `public.orders` is owned by the
+    # area defining that table, and a bare name declared under two schemas is asked of each copy's
+    # area, so neither copy is looked for in the other's.
+    area_of = {id(t): sa.name for sa in org.subject_areas for t in sa.tables_defined}
     by_area: dict[str | None, list[str]] = {}
-    for t in table_names:
-        by_area.setdefault(area_of.get(t), []).append(t)
+    for name in table_names:
+        owners = dict.fromkeys(area_of.get(id(t)) for t in L._find_tables(org, name, index=index))
+        for grp_area in owners or (None,):
+            by_area.setdefault(grp_area, []).append(name)
     contexts: dict[str, Any] = {}
     relationships: list[Any] = []
     seen: set[tuple] = set()
@@ -1672,9 +1781,13 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
             # whose two tables land in different area groups arrives once per group. Dedupe on the
             # endpoints rather than the whole dict: two genuinely distinct edges between the same
             # pair differ by their join columns, which are part of the key.
+            # The schemas too: with `public.orders` and `archive.orders` returned for one bare
+            # name, each copy's identical-looking join to `customers` is its own edge (#258).
             key = (
                 rel.get("from_table"),
+                rel.get("from_schema"),
                 rel.get("to_table"),
+                rel.get("to_schema"),
                 rel.get("from_column"),
                 rel.get("to_column"),
                 rel.get("on"),
@@ -1682,7 +1795,84 @@ def _table_contexts(org, table_names: list[str], L, index=None) -> dict[str, Any
             if key not in seen:
                 seen.add(key)
                 relationships.append(rel)
-    return {"tables": contexts, "relationships": relationships}
+    # Merged only now, after the dedupe above, which keys on each raw edge's join columns (#449).
+    return {"tables": contexts, "relationships": L._merge_lean_pairs(relationships)}
+
+
+_FLIP = {"many_to_one": "one_to_many", "one_to_many": "many_to_one"}
+# Which side an outer join keeps follows the endpoints: `a LEFT JOIN b` read from b is `b RIGHT JOIN a`.
+_FLIP_JOIN = {"LEFT": "RIGHT", "RIGHT": "LEFT"}
+
+
+def _compact_other_joins(
+    relationships: list[dict[str, Any]], requested: set[str], schemas: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a table reply's joins (#477): edges between two requested tables stay in full; an edge
+    to a table the caller didn't request becomes one compact entry per (table, requested table,
+    cardinality), listing its keys as `"requested_col=other_col"`.
+
+    Those edges were most of a table reply, and a caller's SQL almost always uses only the tables it
+    asked for. The compact entry still says how to join, so the rare statement that reaches a
+    further table needs no second call. Cardinality is stated from the requested table's side,
+    because that is the side a join would multiply. An edge with its own `on` condition (a join on a
+    natural key that also filters to the current version) keeps that condition verbatim under `on`.
+    Only a non-default `executable` stays in `relationships`: it says the join runs elsewhere."""
+    from semantic_model.models import table_key
+
+    returned_keys = {table_key(n, sch) for n, sch in schemas.items()}
+    kept: list[dict[str, Any]] = []
+    grouped: dict[tuple, dict[str, list[str]]] = {}
+    for r in relationships:
+        frm, to = r.get("from_table"), r.get("to_table")
+        # Bare names: an edge may still be written `schema.table`, and a qualified name that missed
+        # here would compact a join between two requested tables, or read it from the wrong side.
+        frm_in = _bare_name(frm or "") in requested or frm in requested
+        to_in = _bare_name(to or "") in requested or to in requested
+        # Only a nonblank `on` is a condition join, as the model reads it; `on: ""` beside keys is not.
+        cond = (r.get("on") or "").strip()
+        if (frm_in and to_in) or "executable" in r:
+            kept.append(r)
+            continue
+        forward = frm_in
+        near, far = (frm, to) if forward else (to, frm)
+        # Edges are gathered by bare name, so one may start from a same-named table in another
+        # schema. Compacted, it would read as a join from the table this reply returned: keep it whole.
+        # So does one whose schema no returned table confirms, including a returned table with no
+        # schema of its own: compacted, `from: orders` would lose the schema the edge declares.
+        near_schema = r.get("from_schema") if forward else r.get("to_schema")
+        if near_schema and table_key(near or "", near_schema) not in returned_keys:
+            kept.append(r)
+            continue
+        # Two returned tables share the near name (`public.orders` and `archive.orders`): a compact
+        # `from: orders` could not say which one the join leaves from, so the edge stays whole.
+        near_bare = _bare_name(near or "").lower()
+        if sum(1 for _, bare in returned_keys if bare == near_bare) > 1:
+            kept.append(r)
+            continue
+        rel, join_type = r.get("relationship"), r.get("join_type")
+        if not forward:
+            rel = _FLIP.get(rel, rel)
+            join_type = _FLIP_JOIN.get((join_type or "LEFT").upper(), join_type)
+        far_schema = r.get("to_schema") if forward else r.get("from_schema")
+        # A condition join and a key join to the same table are separate entries, so a reader never
+        # wonders whether `keys` and `on` are alternatives or meant together.
+        key = (far, near, rel, join_type, far_schema, bool(cond))
+        slot = grouped.setdefault(key, {"keys": [], "on": []})
+        if cond:
+            slot["on"].append(r["on"])
+            continue
+        pairs = r.get("column_pairs") or [[r.get("from_column"), r.get("to_column")]]
+        slot["keys"].extend(f"{a}={b}" if forward else f"{b}={a}" for a, b in pairs)
+    compact: list[dict[str, Any]] = []
+    for (far, near, rel, join_type, far_schema, _), slot in grouped.items():
+        item: dict[str, Any] = {"table": far, "from": near, "relationship": rel}
+        item.update({k: v for k, v in slot.items() if v})
+        if far_schema and far_schema != schemas.get(near, schemas.get(_bare_name(near or ""))):
+            item["schema"] = far_schema
+        if join_type and join_type.upper() != "LEFT":
+            item["join_type"] = join_type
+        compact.append(item)
+    return kept, compact
 
 
 def _bare_name(name: str) -> str:
@@ -1736,21 +1926,39 @@ class _ModelNames(NamedTuple):
     # from a metric really named `revenue (net)`.
     metric_keys: dict[str, "tuple[str, str | None]"]  # key -> (metric name, area or None)
     folded_tables: frozenset[str]  # casefolded bare table names, for "is this a table at all"
+    # area -> its own tables like its name (#567). Filled on first use: one call can pass the same
+    # area in thousands of spellings, and each would otherwise run the matcher again.
+    area_guesses: dict[str, list[str]]
+    # area -> every table it defines. `tables` keeps only the FIRST defining area per name (it is
+    # what `area_of` answers), so a table two areas define would vanish from the second's guesses.
+    area_tables: dict[str, list[str]]
+    qualified: dict[str, list[str]]  # bare table name -> `schema.table` per schema declaring it
+    qualified_area: dict[str, str]  # `schema.table` -> the area that defines it
 
     @classmethod
     def of(cls, org) -> "_ModelNames":
         from semantic_model import loader as L
+        from semantic_model.models import stored_identity
 
         tables: dict[str, str] = {}
+        area_tables: dict[str, list[str]] = {}
         columns: dict[str, list[str]] = {}
+        qualified: dict[str, list[str]] = {}
+        qualified_area: dict[str, str] = {}
         for sa in org.subject_areas:
             for t in sa.tables_defined:
                 bare = _bare_name(t.name)
                 tables.setdefault(bare, sa.name)
+                area_tables.setdefault(sa.name, []).append(bare)
+                schema = stored_identity(t.name, t.schema_name)[0]
+                if schema and f"{schema}.{bare}" not in qualified.get(bare, []):
+                    qualified.setdefault(bare, []).append(f"{schema}.{bare}")
+                if schema:
+                    qualified_area.setdefault(f"{schema}.{bare}", sa.name)
                 # Only the columns `get_datasource_schema` would show: a table read in its owning
                 # area exposes the column groups that area's TableRef names, and a hint naming a
                 # column outside them would disclose what the schema response deliberately hides.
-                exposed = L._exposed_groups_for(sa, t.name)
+                exposed = L._exposed_groups_for(sa, t)
                 for c in L._visible_columns(t, exposed):
                     columns.setdefault(c.name.casefold(), []).append(bare)
         metric_keys = {k: (m.name, a) for k, (m, a) in _all_metrics(org).items()}
@@ -1760,6 +1968,10 @@ class _ModelNames(NamedTuple):
             columns,
             metric_keys,
             frozenset(t.casefold() for t in tables),
+            {},
+            area_tables,
+            qualified,
+            qualified_area,
         )
 
     def area_of(self, table: str) -> "str | None":
@@ -1767,23 +1979,30 @@ class _ModelNames(NamedTuple):
 
         Folding case here once told a caller `'Orders' is in subject area 'sales'` — true of
         `orders`, and a name that still resolved nowhere on retry. A case-only miss is a typo, and
-        `did_you_mean` is what answers it.
+        `did_you_mean` is what answers it. A declared `schema.table` is that table's area, not the
+        area of whichever same-named table came first (#258).
         """
-        return self.tables.get(_bare_name(table))
+        return self.qualified_area.get(table) or self.tables.get(_bare_name(table))
 
-    def table_hint(self, name: str) -> "str | None":
+    def table_hint(self, name: str, *, suggest: bool = True) -> "str | None":
         """Why `name` is not a table, when it is a real name of another kind.
 
         Only when no table answers to it in any case: a name can be an area AND a table
         (`payments`), and there `Payments` is a case typo of the table — telling the caller it "is a
         subject area, not a table" would be false.
+
+        `suggest=False` keeps the hint plain: past `_SUGGESTED_MISSES` nothing is searched, so the
+        prose must not offer a table the structured `did_you_mean` and the activity log never got.
         """
         folded = name.casefold()
         if _bare_name(folded) in self.folded_tables:
             return None
         area = next((a for a in self.areas if a.casefold() == folded), None)
         if area:
-            return f"{area!r} is a subject area, not a table: pass it as `area`."
+            lead = f"{area!r} is a subject area, not a table: pass it as `area`"
+            if suggest and (near := self.area_table_guesses(name)):
+                return f"{lead}, or did you mean {', '.join(repr(g) for g in near)}?"
+            return f"{lead}."
         holders = self.columns.get(_bare_name(name).casefold())
         if holders:
             listed = ", ".join(sorted(set(holders))[:5])
@@ -1804,8 +2023,19 @@ class _ModelNames(NamedTuple):
         """The refusal for a table scope in which no named table exists."""
         # A name past the cap is left out rather than given `[]`: an empty list says "searched,
         # nothing close", and these were not searched.
-        hints = {n: h for n in names if (h := self.table_hint(n))}
-        guesses = {n: self.table_guesses(n) for n in names[:_SUGGESTED_MISSES] if n not in hints}
+        hints = {
+            n: h
+            for i, n in enumerate(names)
+            if (h := self.table_hint(n, suggest=i < _SUGGESTED_MISSES))
+        }
+        # A hinted name gets a list only when its own area holds a table like it (#567); otherwise it
+        # stays out, as before, and its hint stands alone.
+        guesses = {
+            n: near
+            for n in names[:_SUGGESTED_MISSES]
+            if (near := self.area_table_guesses(n) if n in hints else self.table_guesses(n))
+            or n not in hints
+        }
         # Named in prose only up to the cap too: past it the count is the caller's own number, and
         # a statement of thousands of names is not thousands of sentences of refusal.
         sentences = [
@@ -1814,7 +2044,9 @@ class _ModelNames(NamedTuple):
         ]
         # Searched up to the cap, so a name there gets a list, empty when a hint stood in for it.
         for i, n in enumerate(names):
-            _note_miss("table", n, guesses.get(n, []) if i < _SUGGESTED_MISSES else None)
+            _note_miss(
+                "table", n, guesses.get(n, []) if i < _SUGGESTED_MISSES else None, hinted=n in hints
+            )
         if len(names) > _SUGGESTED_MISSES:
             sentences.append(f"And {len(names) - _SUGGESTED_MISSES} more unknown table name(s).")
         if not any(guesses.values()) and not hints:
@@ -1842,18 +2074,18 @@ class _ModelNames(NamedTuple):
         return ""
 
     def unresolvable_entry(self, name: str) -> dict[str, Any]:
-        """A table the model defines that `dataset_names` still cannot address (#258).
+        """A table name the model defines, qualified with a schema it is not declared in (#258).
 
-        Its own `name` carries its schema, the index keys it in full, and `dataset_names` arrives
-        bare — so neither spelling reaches it. The bare "not found in scope" left an agent that had
-        copied the name exactly with no next move; its area always lists it.
+        Not a typo, so no guesses: the name is right and the schema is not, and the spellings that
+        do resolve are the next move. Answering with the copy in another schema instead is what
+        handed a caller `archive.orders` when it asked for `public.orders`.
         """
-        area = self.tables[_bare_name(name)]
-        return {
-            "error": "not found in scope",
-            "hint": f"{name!r} is defined in subject area {area!r} but cannot be selected by name "
-            f"yet: call with area={area!r} to get it.",
-        }
+        bare = _bare_name(name)
+        spellings = self.qualified.get(bare, [])
+        where = (f"it is declared as {', '.join(repr(q) for q in spellings)}." if spellings
+                 else f"it is declared without a schema, so pass {bare!r}.")
+        return {"error": "not found in scope",
+                "hint": f"{bare!r} is not declared in that schema; {where}"}
 
     def unknown_table_entry(self, name: str) -> dict[str, Any]:
         """The per-table miss beside tables that did resolve."""
@@ -1863,6 +2095,9 @@ class _ModelNames(NamedTuple):
         hint = self.table_hint(name)
         if hint:
             entry["hint"] = hint
+            # Beside an area hint, only that area's own tables (#567), never a model-wide guess.
+            if near := self.area_table_guesses(name):
+                entry["did_you_mean"] = near
         elif guesses := self.table_guesses(name):
             entry["did_you_mean"] = guesses
         return entry
@@ -1915,6 +2150,26 @@ class _ModelNames(NamedTuple):
     def table_guesses(self, name: str) -> list[str]:
         return _did_you_mean(name, self.tables)
 
+    def area_table_guesses(self, name: str) -> list[str]:
+        """The tables like `name` inside the area `name` names, when it names one (#567).
+
+        Models often name an area after its main table with a suffix (area `orders`, table
+        `orders_v`), and a caller asking for the area by its table's name wants that table. Only the
+        area's OWN tables, the ones it defines: a near-miss elsewhere in the model is the unrelated
+        guess the hint exists to avoid. Matched against those tables alone, so a closer name in
+        another area can never crowd one out of the top few. Memoized per area, since the answer
+        depends only on the area and not on how the caller spelled it.
+        """
+        folded = name.casefold()
+        if _bare_name(folded) in self.folded_tables:
+            return []
+        area = next((a for a in self.areas if a.casefold() == folded), None)
+        if area is None:
+            return []
+        if area not in self.area_guesses:
+            self.area_guesses[area] = _did_you_mean(area, self.area_tables.get(area, []))
+        return list(self.area_guesses[area])
+
 
 class Scope(NamedTuple):
     """The scope the caller DECLARED, resolved once per request.
@@ -1926,7 +2181,7 @@ class Scope(NamedTuple):
 
     level: str  # "datasource" | "area" | "table"
     area: "str | None"  # the declared area; None at datasource scope
-    tables: tuple[str, ...]  # bare names, schema stripped; empty unless level == "table"
+    tables: tuple[str, ...]  # as the caller wrote them, schema kept (#258); empty unless level == "table"
 
 
 def _resolve_scope(args: dict[str, Any]) -> Scope:
@@ -1949,7 +2204,8 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
     """
     area = args.get("area")
     area = area.strip() if isinstance(area, str) and area.strip() else None
-    tables = tuple(_bare_name(str(n)) for n in (args.get("dataset_names") or []))
+    # The qualifier is kept: it is what tells `public.orders` from `archive.orders` (#258).
+    tables = tuple(str(n).strip() for n in (args.get("dataset_names") or []) if str(n).strip())
     if tables:
         return Scope("table", area, tables)
     if area:
@@ -1960,7 +2216,7 @@ def _resolve_scope(args: dict[str, Any]) -> Scope:
 # The mode ladder plus `auto`, from the one table that defines the ladder.
 _SCHEMA_MODES = ("auto", *_SCHEMA_MODE_DOWNGRADE)
 # Every key `_normalized_args` repairs; a tool passes the subset it actually takes.
-_SHAPED_KEYS = ("dataset_names", "metric_names", "area", "mode")
+_SHAPED_KEYS = ("dataset_names", "metric_names", "column_groups", "ambiguity_names", "area", "mode")
 
 
 def _normalized_args(
@@ -1986,7 +2242,7 @@ def _normalized_args(
         error = {"kind": "invalid_argument", "remediation": remediation, **extra}
         return fixed, json.dumps({"error": error}, separators=REPLY_SEPARATORS)
 
-    for key in ("dataset_names", "metric_names"):
+    for key in ("dataset_names", "metric_names", "column_groups", "ambiguity_names"):
         if key not in keys:
             continue
         value = fixed.get(key)
@@ -2118,6 +2374,189 @@ def _areas_owning(org, tables: set[str]) -> set[str]:
     return out
 
 
+def _add_ambiguities(result: dict[str, Any], org, scope: "Scope",
+                     metrics: dict[str, tuple[Any, str | None]] | None = None,
+                     forced: "list[str] | None" = None) -> None:
+    """The model's declared ambiguities, disclosed progressively (#473, #477).
+
+    An entry for the whole datasource rides every reply in full. One tied to tables, column groups,
+    columns or metrics arrives in full only with a reply that opens one of them, or that names it in
+    `ambiguity_names`; any other reply that reaches it carries a signpost: its name, its `when`, and
+    the call that opens it, which asks for it by name. Opening by name means following a signpost
+    never depends on how a table, group or area would resolve. Left out when there are none, so a
+    model without any replies as before."""
+    if scope.level == "datasource":
+        in_scope = None
+    elif scope.level == "area":
+        sa = org.subject_area(scope.area) if scope.area else None
+        in_scope = ({_bare_name(t.name) for t in sa.tables_defined} | {_bare_name(r.table) for r in sa.tables}
+                    if sa else set())
+    else:
+        in_scope = {_bare_name(t) for t in scope.tables}
+    in_scope = None if in_scope is None else {t.lower() for t in in_scope}
+    opened = _opened_in_reply(result)
+    # Every defined table by bare, folded name, built once per reply rather than once per entry.
+    # Every definition by identity, with what its owning area lets a table request show (None =
+    # every group). Same-named tables in two schemas stay apart: an anchor naming a schema is
+    # checked against that schema's copy, a bare one against every copy (#477).
+    from semantic_model.models import table_key
+
+    copies: dict[str, list[tuple[str, Any, set[str] | None]]] = {}
+    for sa in org.subject_areas:
+        refs = {table_key(r.table, r.schema_name): r for r in sa.tables}
+        for t in sa.tables_defined:
+            k = table_key(t.name, t.schema_name)
+            ref = refs.get(k) or refs.get(("", k[1]))
+            allowed = ({g.lower() for g in ref.expose_column_groups}
+                       if ref is not None and ref.expose_column_groups else None)
+            same = [c for c in copies.get(k[1], []) if c[0] != k[0]]
+            # A later area's copy of the same table wins, as in `_table_contexts`.
+            copies[k[1]] = same + [(k[0], t, allowed)]
+    # The metrics in this reply's scope, by canonical name, whether or not they're shown.
+    scoped_metrics = {m.name for m, _area in (metrics or {}).values()}
+    named = set(forced or [])
+    full, signposts = [], []
+    for a in getattr(org, "ambiguities", []):
+        if not a.anchored() or a.name in named:
+            full.append(_ambiguity_entry(a))
+            continue
+        status = _ambiguity_reach(a, opened, in_scope, copies, scoped_metrics)
+        if status == "open":
+            full.append(_ambiguity_entry(a))
+        elif status == "reached":
+            signposts.append({"name": a.name, "when": a.when,
+                              "open": {"datasource": result.get("datasource"), "ambiguity_names": [a.name]}})
+    if full:
+        result["ambiguities"] = full
+    if signposts:
+        result["ambiguity_signposts"] = signposts
+    unknown = sorted(named - {a.name for a in getattr(org, "ambiguities", [])})
+    if unknown:
+        result["unknown_ambiguity_names"] = unknown
+    if full or signposts:
+        # Beside the entries, not only in the server instructions: a client may cut those short,
+        # and a model rule or example that picks one option otherwise reads as already settled.
+        result["ambiguities_note"] = _AMBIGUITIES_NOTE + (_SIGNPOSTS_NOTE if signposts else "")
+
+
+def _ambiguities_by_name(org, profile: str, names: list[str], model_version: Any) -> str:
+    """The reply to a signpost's call: the named entries in full, and any name that isn't one."""
+    by_name = {a.name: a for a in getattr(org, "ambiguities", [])}
+    found = [_ambiguity_entry(by_name[n]) for n in names if n in by_name]
+    result: dict[str, Any] = {"datasource": profile}
+    if found:
+        result["ambiguities"] = found
+        result["ambiguities_note"] = _AMBIGUITIES_NOTE
+    unknown = [n for n in names if n not in by_name]
+    if unknown:
+        result["unknown_ambiguity_names"] = unknown
+    result["model_version"] = model_version
+    return json.dumps(result, separators=REPLY_SEPARATORS, default=str)
+
+
+def _ambiguity_entry(a) -> dict[str, Any]:
+    return a.model_dump(exclude_defaults=True) | {"behaviour": a.behaviour}
+
+
+def _opened_in_reply(result: dict[str, Any]) -> dict[str, Any]:
+    """What this reply has opened: per table, keyed by `table_key` so two schemas' copies of one
+    name stay apart (#258), the columns it sends in full (None = every column, for a table it doesn't
+    group); and the metrics it sends in full."""
+    from semantic_model.models import table_key
+
+    tables: dict[tuple[str, str], set[str] | None] = {}
+    for name, tinfo in (result.get("tables") if isinstance(result.get("tables"), dict) else {}).items():
+        if not isinstance(tinfo, dict) or not isinstance(tinfo.get("columns"), list):
+            continue
+        full_cols = {c["name"].lower() for c in tinfo["columns"] if isinstance(c, dict) and "name" in c}
+        key = table_key(name, tinfo.get("schema"))
+        tables[key] = full_cols if tinfo.get("column_groups") else None
+    metrics = {m.get("name") for m in result.get("metrics") or [] if isinstance(m, dict)}
+    return {"tables": tables, "metrics": metrics}
+
+
+def _ambiguity_reach(a, opened: dict[str, Any], in_scope: set[str] | None,
+                     copies: dict[str, list[tuple[str, Any, set[str] | None]]],
+                     scoped_metrics: set[str]) -> str:
+    """"open" when this reply opens something the entry is tied to; "reached" when it touches the
+    entry without opening it (a signpost goes out); "out" when the entry is outside its scope, or
+    tied only to what no table request could show."""
+    tables = opened["tables"]
+    from semantic_model.models import table_key
+
+    def split(ref: str) -> tuple[str, str, str]:
+        t, part = ref.rsplit(".", 1)
+        schema, bare = table_key(t)
+        return schema, bare, part
+
+    def candidates(schema: str, bare: str) -> list:
+        found = copies.get(bare, [])
+        return [c for c in found if not schema or c[0] in (schema, "")] or ([] if schema else found)
+
+    def groups_of(table) -> dict:
+        return table.column_groups or {}
+
+    def column_reachable(schema: str, bare: str, col: str) -> bool:
+        # Under a restriction the loader serves only the exposed groups' columns, grouped or not.
+        for _s, table, allowed in candidates(schema, bare):
+            holding = [g for g, cs in groups_of(table).items() if col.lower() in {c.lower() for c in cs}]
+            if allowed is None or any(g.lower() in allowed for g in holding):
+                return True
+        return False
+
+    def group_reachable(schema: str, bare: str, group: str) -> bool:
+        return any(allowed is None or group.lower() in allowed
+                   for _s, _t, allowed in candidates(schema, bare))
+
+    def opened_copies(schema: str, bare: str) -> list[set[str] | None]:
+        """What the reply opened of each copy of `bare` the anchor can mean: its schema's, or any."""
+        return [v for (s, b), v in tables.items()
+                if b == bare and (not schema or s in (schema, ""))]
+
+    def column_open(schema: str, bare: str, col: str) -> bool:
+        return any(v is None or col.lower() in v for v in opened_copies(schema, bare))
+
+    def group_open(schema: str, bare: str, group: str) -> bool:
+        for full in opened_copies(schema, bare):
+            if full is None:
+                return True
+            for _s, table, _allowed in candidates(schema, bare):
+                cs = next((v for g, v in groups_of(table).items() if g.lower() == group.lower()), None)
+                if cs and all(c.lower() in full for c in cs):
+                    return True
+        return False
+
+    table_refs = {_bare_name(x).lower() for x in a.applies_to}
+    # An anchor without its table is malformed: skipped here, as the loader skips it, and left for
+    # the validator to report, so it can never break a schema request. One no table request can
+    # show would never open, so it can't justify a signpost either.
+    cols = [c for c in map(split, (r for r in a.columns if "." in r)) if column_reachable(*c)]
+    grps = [g for g in map(split, (r for r in a.column_groups if "." in r)) if group_reachable(*g)]
+    if not (table_refs or cols or grps or a.metrics):
+        return "out"
+    if (any(opened_copies("", t) for t in table_refs) or any(column_open(*c) for c in cols)
+            or any(group_open(*g) for g in grps) or set(a.metrics) & opened["metrics"]):
+        return "open"
+    anchor_tables = table_refs | {b for _s, b, _ in cols} | {b for _s, b, _ in grps}
+    # A metric in this reply's scope reaches the entry whether or not the reply lists it.
+    reached = in_scope is None or bool(anchor_tables & in_scope) or bool(set(a.metrics) & scoped_metrics)
+    return "reached" if reached else "out"
+
+
+_AMBIGUITIES_NOTE = (
+    "If the question matches an entry's `when` and does not itself say which option it means, "
+    "follow the entry's `behaviour` even where a rule or example picks one option: `ask` = ask "
+    "the user before running SQL, listing the option labels; `answer_and_offer` = answer with "
+    "the default, say so, and offer the others. Use the labels, never table or column names."
+)
+# Added only when a reply carries signposts, so a reply without them pays nothing for it.
+_SIGNPOSTS_NOTE = (
+    " An entry under `ambiguity_signposts` is one you haven't opened yet: if the question matches "
+    "its `when`, call get_datasource_schema with its `open` arguments before writing SQL, and "
+    "the full entry comes back."
+)
+
+
 def _schema_payload(
     org,
     profile: str,
@@ -2127,6 +2566,7 @@ def _schema_payload(
     L,
     scope: Scope,
     index=None,
+    ambiguity_names: "list[str] | None" = None,
 ) -> dict[str, Any]:
     """Build the structured schema payload at the given verbosity, WITHIN `scope`.
 
@@ -2159,7 +2599,7 @@ def _schema_payload(
         # table bridges the areas, so the agent knows what to ask for next.
         #
         # The join mechanics (columns, `on`, cardinality, trust) stay off this tier deliberately:
-        # a `dataset_names` call returns them in full on its own `relationships` block, so
+        # a `dataset_names` call returns them on its own `relationships` and `joins_to_other_tables`, so
         # repeating every relationship object here would restate what the next call states better.
         "cross_area_relationships": _cross_area_map(org, scope),
         **_metric_index_fields(metrics),
@@ -2197,8 +2637,11 @@ def _schema_payload(
             for sa in areas
         ]
     if mode == "full":
+        # Each table's display name, `schema.table` where the bare one is ambiguous, so the area's
+        # own copy comes back and not every same-named table (#258).
         result["tables"] = _table_contexts(
-            org, [t.name for sa in areas for t in sa.tables_defined], L, index=index
+            org, [L.display_name(org, t, index=index) for sa in areas for t in sa.tables_defined],
+            L, index=index,
         )["tables"]
     # metrics in full: the matched set (a query/metric_names limits them); else every metric in
     # full mode (back-compat); else none (rely on metric_index).
@@ -2207,6 +2650,9 @@ def _schema_payload(
     result["metrics"] = [
         _metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected if n in metrics
     ]
+    # Last, once `tables` and `metrics` are in: an entry is open only if this reply opens what it is
+    # tied to, and a signpost whose call returned the same signpost would loop (#477).
+    _add_ambiguities(result, org, scope, metrics, ambiguity_names)
     return result
 
 
@@ -2275,7 +2721,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     <=50, index 51+); a hard ~60K-char budget then downgrades one rung at a time
     (full→summary→index) even for an explicit `mode="full"`, setting `truncated=true`.
     `metric_index` (name->description for every described metric in scope, the rest counted) +
-    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context: whole on
+    `large_tables` are always present. Plus datasource.md / USER_MEMORY.md domain context, in the
+    JSON as `domain_context` (#477): whole on
     the overview, cut to the tables in scope on the `area` and table tiers (#419).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
@@ -2330,6 +2777,12 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
 
     from semantic_model import loader as L
 
+    # A signpost's call (#477): just the entries it names, so opening one never depends on how a
+    # table, group or area would resolve, and costs a few hundred characters.
+    if args.get("ambiguity_names") and not any(
+            args.get(k) for k in ("area", "dataset_names", "metric_names", "query", "column_groups")):
+        return _ambiguities_by_name(org, profile, args["ambiguity_names"], model_version)
+
     requested_mode = (args.get("mode") or "auto").lower()
     scope = _resolve_scope(args)
     # Checked before the tables it would scope: with `area` misspelt every named table looks
@@ -2347,18 +2800,12 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # A table that is not in the declared area makes the two halves contradict each other, and
         # answering anyway would echo a scope the response does not have.
         #
-        # The area's names are gathered once and each table looked up in them: rescanning the area
-        # per named table cost seconds on a wide area, for a list whose length nothing bounds.
-        in_area = {
-            _bare_name(n)
-            for sa in org.subject_areas
-            if sa.name == scope.area
-            for n in [
-                *(d.name for d in sa.tables_defined),
-                *(getattr(r, "table", "") for r in sa.tables),
-            ]
-        }
-        misplaced = list(dict.fromkeys(t for t in scope.tables if t not in in_area))
+        # Each table is looked up through the index, by identity (#258): `archive.orders` is not in
+        # an area holding only `public.orders`. Rescanning the area per named table cost seconds on
+        # a wide area, for a list whose length nothing bounds.
+        tindex = L.build_table_index(org)
+        in_area = {t: L._find_tables(org, t, scope.area, index=tindex) for t in scope.tables}
+        misplaced = list(dict.fromkeys(t for t, found in in_area.items() if not found))
         if misplaced:
             names = _ModelNames.of(org)
             # A table in NO area is a typo, not a misplacement: "not in subject area X" is true of
@@ -2385,6 +2832,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 searched = [] if t in shown else None
                 if names.area_of(t) is not None:
                     _note_miss("misplaced_table", t, searched)
+                elif t in shown and names.table_hint(t):
+                    # What the reply showed for it (#567): the hint, and the area's own tables.
+                    _note_miss("table", t, names.area_table_guesses(t), hinted=True)
                 else:
                     _note_miss("table", t, guesses.get(t, searched))
             return json.dumps(
@@ -2447,15 +2897,21 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         # Explicit table scope — full detail for the named tables, no budget downgrade. Build the
         # O(1) name→table index so this resolves each table by lookup, not a per-table rescan
         # (scalability-audit finding P12).
-        ctx = _table_contexts(org, list(scope.tables), L, index=L.build_table_index(org))
+        tindex = L.build_table_index(org)
+        wanted = list(scope.tables)
+        if scope.area:
+            # The declared area's own copy of each name, so a bare `orders` in `sales` returns that
+            # area's table and not every schema's (#258). Misplaced names were refused above.
+            wanted = list(dict.fromkeys(
+                L.display_name(org, t, index=tindex)
+                for n in scope.tables for t in L._find_tables(org, n, scope.area, index=tindex)))
+        ctx = _table_contexts(org, wanted, L, index=tindex)
         # The loader's own verdict on each name, so "unknown" means exactly what it failed to find.
         missing = [n for n, t in ctx["tables"].items() if isinstance(t, dict) and "error" in t]
         if missing:
             names = names or _ModelNames.of(org)
-            # Only a name the model does not define is a caller's mistake. One it DOES define but
-            # the loader could not resolve — a table whose own `name` carries its schema, which the
-            # index keys in full while `dataset_names` arrives bare (#258) — is not refused, since
-            # that would suggest the very name the caller already sent. It is told to use its area.
+            # Only a name the model does not define is a typo. One it DOES define, qualified with a
+            # schema it is not declared in (#258), is told the spellings that resolve instead.
             unknown = [n for n in missing if names.area_of(n) is None]
             if unknown and len(unknown) == len(ctx["tables"]):
                 # Same rule as an unknown `area`: a scope that does not exist is refused, never
@@ -2472,7 +2928,11 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
                 searched = (
                     ctx["tables"][n].get("did_you_mean", []) if i < _SUGGESTED_MISSES else None
                 )
-                _note_miss("table", n, searched)
+                hinted = i < _SUGGESTED_MISSES and "hint" in ctx["tables"][n]
+                _note_miss("table", n, searched, hinted=hinted)
+        requested = {_bare_name(n) for n in ctx["tables"]} | set(ctx["tables"])
+        schemas = {n: t.get("schema") for n, t in ctx["tables"].items() if isinstance(t, dict)}
+        kept_joins, other_joins = _compact_other_joins(ctx["relationships"], requested, schemas)
         result: dict[str, Any] = {
             "datasource": profile,
             "organization": org.description or None,
@@ -2481,16 +2941,21 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
             "tables": ctx["tables"],
             # The two blocks this call used to compute and throw away. Without them the call whose
             # whole purpose is per-table detail returned columns and no way to join them — while
-            # this tool's own description promised both. `relationships` ships as the loader
-            # produced it — in full for an edge between two requested tables, as the join alone
-            # for one reaching a table the caller has no columns for; `metrics` is re-projected
+            # this tool's own description promised both. `relationships` carries every edge
+            # between two requested tables in full; edges to other tables travel compactly under
+            # `joins_to_other_tables` (#477). `metrics` is re-projected
             # through `_metric_full` rather than shipped raw, because the loader's dump carries the
             # whole per-dialect `bindings` dict and this surface sends one engine's binding.
-            "relationships": ctx["relationships"],
+            # Joins to tables the caller didn't request travel compactly (#477).
+            "relationships": kept_joins,
             "metrics": [_metric_full(metrics[n][0], metrics[n][1], engine, n) for n in selected],
             **_metric_index_fields(metrics),
             "large_tables": _large_tables(org),
         }
+        if other_joins:
+            result["joins_to_other_tables"] = other_joins
+        _group_wide_columns(result, org, args.get("column_groups") or [])
+        _add_ambiguities(result, org, scope, metrics, args.get("ambiguity_names"))
         # `subject_areas` and `cross_area_relationships` are deliberately absent here, as they
         # always have been: a caller that named its tables is not asking for the area map, and
         # `relationships` above answers "how do I join these" better than the org-level edge list,
@@ -2516,7 +2981,8 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         index = L.build_table_index(org) if mode == "full" else None
         truncated = False
         while True:
-            result = _schema_payload(org, profile, mode, matched, metrics, L, scope, index=index)
+            result = _schema_payload(org, profile, mode, matched, metrics, L, scope, index=index,
+                                     ambiguity_names=args.get("ambiguity_names"))
             if pointer:
                 result["prompt_examples"] = pointer
             if dialect:
@@ -2558,7 +3024,10 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     # What execute_sql must be sent back on a hosted deployment (#364).
     result["model_version"] = model_version
 
-    parts = [json.dumps(result, separators=REPLY_SEPARATORS, default=str)]
+    # The prose rides INSIDE the JSON, as `domain_context` (#477): it used to follow the object as
+    # text, which a client's JSON parser rejects ("Extra data"), so a reply offloaded to a file
+    # couldn't be read back as one document.
+    parts: list[str] = []
     # Domain context = the human's datasource.md narrative + the model-DERIVED summary
     # (subject areas, conventions, decoded glossary) assembled fresh from the structured model.
     # Source (datasource.md / USER_MEMORY.md text) comes from the DB under the DB backend, files
@@ -2590,7 +3059,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
         glossary_tables=scoped,
     )
     if domain_context:
-        parts.append(f"\n## Domain context\n{domain_context}")
+        parts.append(f"## Domain context\n{domain_context}")
         if scoped is not None:
             parts.append(
                 "\nThis is the domain context for the tables in scope. Glossary terms for other "
@@ -2600,7 +3069,9 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str:
     user_mem = _distill_for_llm(user_md_raw)
     if user_mem:
         parts.append(f"\n## USER_MEMORY.md (cross-database preferences)\n{user_mem}")
-    return "\n".join(parts)
+    if parts:
+        result["domain_context"] = "\n".join(parts).strip()
+    return json.dumps(result, separators=REPLY_SEPARATORS, default=str)
 
 
 def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
@@ -2614,7 +3085,8 @@ def _scope_tables(org, scope: Scope) -> "frozenset[str] | None":
     # the `TableRef`s naming it are kept, so a reference alone does not mean the table is live.
     known = {t.name.rsplit(".", 1)[-1] for sa in org.subject_areas for t in sa.tables_defined}
     if scope.level == "table":
-        return frozenset(t for t in scope.tables if t in known)
+        # `dataset_names` keeps a schema qualifier now (#258); a glossary term names the bare table.
+        return frozenset(_bare_name(t) for t in scope.tables) & known
     if scope.level == "area":
         sa = org.subject_area(scope.area)
         if sa is None:
@@ -2654,8 +3126,8 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
 
     DB serving (hosted, AGAMI_DB_URL set): scope to the datasource, rank by word-overlap on
     `query`, and cap to `top_k` within a char budget — so a large library (e.g. accumulated
-    corrections) never floods the context. Local serving (files): returns the curated examples.yaml
-    verbatim (small; the client reads YAML directly), `query`/`top_k` accepted for parity.
+    corrections) never floods the context. Local serving (files): the same ranking, cap and reply
+    shape over the curated examples.yaml files (`_rank_local_examples`).
     """
     # Cleared on entry, as `execute_guarded` clears its outcome: see `_note_miss`.
     _call_misses.set(None)
@@ -2722,16 +3194,47 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     _area = args.get("area")
     # Always a string or None here: `_normalized_args` repaired or refused every other shape.
     wanted = _area.strip() if isinstance(_area, str) else ""
-    blocks: list[str] = []
-    if ex_dir.is_dir():
-        for ex_file in sorted(ex_dir.glob("*/examples.yaml")):
+    files = sorted(ex_dir.glob("*/examples.yaml")) if ex_dir.is_dir() else []
+    docs: list[dict[str, Any]] = []
+    if files:
+        # Only when there is a library to read: the empty reply needs no YAML parser, and a bare
+        # install without the model dependencies still answers it.
+        try:
+            from semantic_model.loader import list_prompt_examples
+        except ImportError:
+            return json.dumps(
+                {
+                    "error": {
+                        "kind": "driver_missing",
+                        "remediation": "semantic model deps not installed. Run: pip install -r "
+                        "plugins/agami/scripts/semantic_model/requirements.txt",
+                    }
+                },
+                separators=REPLY_SEPARATORS,
+            )
+        # The model's own area order first, as a deploy reads them, then any other folder; ids are
+        # resolved across the whole library in that order BEFORE `area` narrows it, so a scoped call
+        # and a served one keep the same copy of an id two areas share.
+        listed = _model_area_order(artifacts / profile)
+        files.sort(key=lambda f: (listed.index(f.parent.name) if f.parent.name in listed
+                                  else len(listed), f.parent.name))
+        for ex_file in files:
             area = ex_file.parent.name
-            if wanted and area != wanted:
+            # One area's file that will not decode or parse costs that area, not the call (#236).
+            try:
+                found = list_prompt_examples(ex_dir.parent, area)
+            except Exception as e:  # noqa: BLE001 - any unreadable file is skipped the same way
+                _LOG.warning("examples for area %r unreadable: %s", area, type(e).__name__)
                 continue
-            text = _read_text(ex_file)
-            if text and text.strip():
-                blocks.append(f"## subject area: {area}\n```yaml\n{text}\n```")
-    if not blocks:
+            docs += [
+                {**e, "area": e.get("area") or area, "_dir": area} for e in found if isinstance(e, dict)
+            ]
+    docs = [
+        {k: v for k, v in d.items() if k != "_dir"}
+        for d in _with_example_ids(docs)
+        if not wanted or d["_dir"] == wanted
+    ]
+    if not docs:
         return json.dumps(
             {
                 "examples": [],
@@ -2740,12 +3243,89 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
             },
             separators=REPLY_SEPARATORS,
         )
-    header = (
-        f"# Few-shot NL→SQL examples for datasource '{profile}'  (source: {ex_dir})\n"
-        f"# Each block is one subject area's curated library. Match on the question, "
-        f"then reuse the tagged tables/columns/SQL shape.\n"
+    top_k = args.get("top_k")
+    examples = _rank_local_examples(
+        docs, query=args.get("query"), top_k=10 if top_k is None else int(top_k)
     )
-    return header + "\n" + "\n\n".join(blocks) + "\n"
+    return json.dumps(
+        {
+            "datasource": profile,
+            "examples": examples,
+            "count": len(examples),
+            "model_version": _model_version(profile),
+        },
+        separators=REPLY_SEPARATORS,
+        default=str,
+    )
+
+
+def _model_area_order(root: Path) -> list[str]:
+    """The subject areas `datasource.yaml` lists, in its order, by directory name; [] when it can't be
+    read (the examples are still served, alphabetically)."""
+    try:
+        import yaml
+
+        doc = yaml.safe_load((root / "datasource.yaml").read_text(encoding="utf-8")) or {}
+        refs = doc.get("subject_areas") or [] if isinstance(doc, dict) else []
+        # A malformed entry (`2024`, `{path: null}`) is skipped, never a failure of the call.
+        return [
+            Path(ref if isinstance(ref, str) else str((ref or {}).get("path") or "")).name
+            for ref in refs
+            if isinstance(ref, (str, dict))
+        ]
+    except Exception:  # noqa: BLE001 - an unreadable model only costs the ordering
+        return []
+
+
+def _with_example_ids(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`docs` with their `id`, the first of two equal ids kept: an id written into the file is kept,
+    else the content-derived one, as `model_store.write_examples` stores them on a served deployment."""
+    if not docs:
+        return []
+    from model_store import example_id
+
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for d in docs:
+        authored = d.get("id")
+        key = str(authored) if authored not in (None, "") else example_id(d)
+        if key not in seen:
+            seen.add(key)
+            out.append({**d, "id": key})
+    return out
+
+
+def _rank_local_examples(
+    docs: list[dict[str, Any]], *, query: Any, top_k: int
+) -> list[dict[str, Any]]:
+    """The local library ranked and capped exactly as `model_store.select_examples` ranks and caps
+    the served one: by word overlap with `query`, ties in id order, at most `top_k`, within the same
+    character budget, each with its content-derived `id`.
+
+    The local path used to return every area's file verbatim, so a library of a few hundred
+    examples sent tens of thousands of characters on every call whatever the question, and the
+    same client got a different shape locally than served. The served path is not touched: it
+    ranks rows from the store, and reusing its tokenizer, id and budget here is what keeps the
+    two from drifting.
+    """
+    from model_store import _EXAMPLES_CHAR_BUDGET, _tokens
+
+    rows = sorted(docs, key=lambda d: d["id"])
+    wanted = _tokens(query if isinstance(query, str) else None)
+    if wanted:
+        # `str`: a YAML question like `2024` loads as a number, and one entry must not fail the call.
+        rows = sorted(
+            rows, key=lambda d: len(wanted & _tokens(str(d.get("question") or ""))), reverse=True
+        )
+    out: list[dict[str, Any]] = []
+    used = 0
+    for doc in rows[: max(top_k, 0)]:
+        size = len(json.dumps(doc, default=str))
+        if out and used + size > _EXAMPLES_CHAR_BUDGET:
+            break
+        out.append(doc)
+        used += size
+    return out
 
 
 def _classify_exit(code: int) -> str:
@@ -2801,10 +3381,10 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
 
     Relayed only when BOTH hold:
 
-      * the exit code is one the child's CLI contract produces from a `Failure`
-        (`execute_sql.EXIT_TO_FAILURE_KIND`, 2-11). Those are the codes `main` reaches by
-        writing `env.failure.message`, so the text is something the child classified and chose. Any
-        other code — a Python-level crash exiting 1, a signal, a code we do not know — means the
+      * the exit code is one of the AUTHORED configuration codes (2, 3), whose text is this
+        module's own remediation; every other code the child's contract produces (4-11) is rebuilt
+        from the code instead, below. Any other code — a Python-level crash exiting 1, a signal,
+        a code we do not know — means the
         child never got that far, so its stderr is whatever happened to be on the way out.
       * the text carries no Python traceback. Belt and braces on the rule above, and the concrete
         thing that used to land here: before `execute_guarded` was made total, a malformed
@@ -2817,9 +3397,12 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     needs, and it is the same text the in-process path surfaces from `ExecutorError.msg` — the two
     paths agreeing on it is a property this slice exists to keep.
 
-    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039).** For every code whose message
-    the child derives from `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the
-    exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
+    **The sanitized band is RECONSTRUCTED, never relayed (ACE-039)**, with exact-match exceptions: a
+    `syntax` failure whose line is exactly one of `sql_dialect_rules.FIX_MESSAGES` (#566), a fixed set
+    built from our own rules, and a `syntax` or `other` failure whose line wholly matches one of
+    `execute_sql.SQLSTATE_MESSAGE_PATTERNS` (#561, #583), our templates with a five-character code,
+    so nothing else in the stream can pass. For every code whose message the child derives from
+    `_ERROR_MESSAGES`, the parent can rebuild that exact sentence from the exit code alone, so relaying stderr for those codes buys nothing and carries real risk: stderr
     is a *shared* stream, and the child writes to it before the failure line. The concrete case was
     `_model_safety`'s `[agami] applied default_filters: …` notice — it put a declared row-level
     predicate, which the caller never sent, into `failure.message` on the DEFAULT transport, while
@@ -2844,7 +3427,51 @@ def _child_failure_message(returncode: int, stderr: str | None) -> str:
     # the parent needs, and the child's stream never touches the caller's answer.
     kind = EXIT_TO_FAILURE_KIND.get(returncode)
     if returncode not in _AUTHORED_EXIT_CODES and kind in _ERROR_MESSAGES:
+        # One exception to rebuilding, and it relays nothing the child chose freely: a dialect
+        # rule's message (#566) is relayed only when a line is EXACTLY one of the messages built from
+        # our own rules. The parent cannot rebuild it from the code, since only the child saw which
+        # construct the database rejected; an exact match means no other byte of the stream passes.
+        if kind == "syntax":
+            from execute_sql import SQLSTATE_MESSAGE_PATTERNS
+            from sql_dialect_rules import FIX_MESSAGES
+
+            fix = next((line.strip() for line in text.splitlines() if line.strip() in FIX_MESSAGES), None)
+            if fix is not None:
+                return fix
+            # The same exactness for a SQLSTATE sentence (#561): a whole line built from one of our
+            # templates and a five-character code, which is all the parent cannot rebuild.
+            coded = next(
+                (
+                    line.strip()
+                    for line in text.splitlines()
+                    if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+                ),
+                None,
+            )
+            if coded is not None:
+                return coded
         return _ERROR_MESSAGES[kind]
+    if kind == "other":
+        # Rebuilt too (#583). `other` has no entry in `_ERROR_MESSAGES`, so it used to fall to the
+        # relay below with the authored codes, and the caller got the child's WHOLE stderr: any line a
+        # library logged before the failure line included. The child writes one of two kinds of
+        # sentence for it: the generic one, rebuilt here, or a SQLSTATE sentence (#561), relayed only
+        # as an exact match like the `syntax` ones above.
+        from execute_sql import SQLSTATE_MESSAGE_PATTERNS
+
+        coded = next(
+            (
+                line.strip()
+                for line in text.splitlines()
+                if any(p.fullmatch(line.strip()) for p in SQLSTATE_MESSAGE_PATTERNS)
+            ),
+            None,
+        )
+        if coded is not None:
+            return coded
+        if text and text != UNEXPECTED_FAILURE_MESSAGE:
+            _LOG.error("forked executor exited %s (other); raw stderr: %s", returncode, text)
+        return UNEXPECTED_FAILURE_MESSAGE
     classified = returncode in EXIT_TO_FAILURE_KIND
     # `Traceback (most recent call last):` is the stable header of every Python traceback, and a
     # `  File "…", line N` frame is the line that carries the absolute path. Either one is enough.
@@ -3159,10 +3786,21 @@ def _point_to_declaring_datasource(env: Envelope, sql: str | None, profile: str 
         tree = getattr(ctx, "tree", None)
         if tree is None:
             return env
-        declared = set(RT._model_table_index(org))
+        from semantic_model.models import table_key
+
+        # By schema and name, not bare name (#258): `staging.orders` is not declared because
+        # `sales.orders` is, and the hint must look for the table the statement named.
+        keys = {table_key(t.name, t.schema_name)
+                for sa in org.subject_areas for t in sa.tables_defined}
         ctes = {name.lower() for name in RT._cte_names(tree)}
-        referenced = {ref.bare.lower() for ref in RT._table_references(tree) if ref.bare} - ctes
-        undeclared = sorted(referenced - declared)
+        referenced = {ref.written.lower() for ref in RT._table_references(tree)
+                      if ref.bare and ref.written.lower() not in ctes}
+
+        def _declared(written: str) -> bool:
+            schema, bare = table_key(written)
+            return any(k[1] == bare and (not schema or k[0] == schema) for k in keys)
+
+        undeclared = sorted(w for w in referenced if not _declared(w))
         if not undeclared:
             return env
         # Every referenced table, not only the undeclared ones: a datasource is only worth naming if it
@@ -3657,6 +4295,8 @@ def _bounded_missed(misses: list[dict[str, Any]] | None) -> str | None:
         if "value" in miss:
             entry["value"], value_cut = _audit_text(miss["value"], AUDIT_MISS_NAME_MAX_CHARS)
             truncated = truncated or value_cut
+        if miss.get("hinted") is True:
+            entry["hinted"] = True  # a flag, never the hint's prose
         # Absent or None means never searched, and stays absent; a lone value is one suggestion.
         offered = miss.get("did_you_mean")
         if offered is not None:
@@ -4939,10 +5579,13 @@ TOOLS: dict[str, dict[str, Any]] = {
             "the current scope, and the response reports that scope; "
             "`metrics_without_description` counts the rest, which come back in full with their "
             "tables and are matched by `query`. `mode=auto` (default) picks "
-            "verbosity (full/summary/index) under a char budget. Plus datasource.md / "
-            "USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
+            "verbosity (full/summary/index) under a char budget. `domain_context` carries the "
+            "datasource.md / USER_MEMORY.md context — the full glossary only without `area`/`dataset_names`; "
             "scoped calls carry the terms for their tables. Use metric `calculation`/`binding` VERBATIM (`binding` is "
-            "already this deployment's dialect). "
+            "already this deployment's dialect). `ambiguities`, when present, lists questions the "
+            "model owner marked as having more than one meaning, opened by this reply's scope, and "
+            "`ambiguity_signposts` the ones it reaches without opening; see the server instructions "
+            "and `ambiguities_note` for what to do. "
             # These four ride in the table context on every call and were described nowhere, so a
             # declared filter was first met on the receipt — after the statement it belonged in had
             # already run. Naming them here puts them in front of the agent while it writes SQL.
@@ -4997,6 +5640,26 @@ TOOLS: dict[str, dict[str, Any]] = {
                         "names (no schema), exactly as listed; case-sensitive."
                     ),
                 },
+                "column_groups": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "With `dataset_names`: full detail for these column groups of a wide "
+                        "table. A wide table's reply lists its groups (description + column names) "
+                        "and sends only key, metric and caveat columns in full; name a group to get "
+                        "the rest. A bare group name applies to every requested table; "
+                        "`table.group` to one."
+                    ),
+                },
+                "ambiguity_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Declared ambiguities to return in full, by name: what an "
+                        "`ambiguity_signposts` entry's `open` asks for. Alone, the reply is just "
+                        "those entries."
+                    ),
+                },
                 "query": {
                     "type": "string",
                     "description": (
@@ -5026,9 +5689,10 @@ TOOLS: dict[str, dict[str, Any]] = {
         "handler": tool_get_prompt_examples,
         "read_only": True,
         "description": (
-            "Fetch the curated few-shot NL→SQL examples for a datasource, grouped by subject area. "
+            "Fetch the curated few-shot NL→SQL examples for a datasource, ranked by the question and "
+            "capped (`top_k`, default 10), each with its `area`. "
             "Use before generating SQL to ground dialect and house style; match on the question, "
-            "then reuse the tagged tables/columns/SQL. On a served deployment each example carries "
+            "then reuse the tagged tables/columns/SQL. Each example carries "
             "a stable `id` — send one of them as `example.id` on execute_sql, with `example.use` "
             "'followed' or 'shown_only' (a hosted deployment refuses a statement without it), and "
             "cite it as a `basis` ref too when you followed it. "
@@ -5165,6 +5829,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "unless status is 'matched'. kind 'reference' is one per column the statement READ, "
             "`{kind, column}` plus `sensitive: true` where it applies, and it never carries a "
             "metric.\n"
+            "`receipt.tables.items[].scan_risk` — a sentence, or null, when that table is large "
+            "(about a million rows or more) and the statement pulls it in from the outer side of a "
+            "join from a smaller table: tell the user, and offer the faster-shaped query it "
+            "suggests. Advisory, never a refusal.\n"
             "`receipt.tables.items[].filters` — one entry per declared `default_filters` of that "
             "table reference, each `{expr, status}` with status applied / omitted / undetermined, "
             "per REFERENCE and scoped by the sibling `scope` field ('main' or 'cte:<name>', each "

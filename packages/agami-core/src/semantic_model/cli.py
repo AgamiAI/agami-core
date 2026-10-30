@@ -12,8 +12,8 @@ identical wherever the model is exercised. Subcommands:
     preflight <root> --sql SQL            — fan-trap / chasm-trap pre-flight check
     seed-validate <root> --area A --profile P — run every written seed via execute_sql
                                             (safety pass on) → examples-validation items
-    remove-example <root> --area A --question Q — reject example(s) by question
-                                            (status: rejected — kept for audit, off runtime)
+    remove-example <root> --area A --question Q — mark example(s) rejected by question
+                                            (kept in the file for audit, not deleted)
 
 Every subcommand emits JSON on stdout (so callers parse one shape) except
 `validate`, which prints a human report and sets the exit code (0 ok, 1 errors).
@@ -86,6 +86,10 @@ def cmd_validate(args) -> int:
     # exists for it even with rejected included.
     org = L.load_datasource(args.root, include_rejected=True)
     res = V.validate(org)
+    unknown = L.unknown_datasource_keys(args.root)
+    if unknown:
+        # A warning, not an error (#575): the model still loads, but those fields are not served.
+        res.warn("unknown_datasource_key", L.unknown_keys_message(unknown))
     print(V.format_result(res))
     ok = res.ok
     # Deployment-level pass (F16 / ACE-072): when the profile sits under a deployment with an
@@ -463,6 +467,14 @@ def cmd_review_items(args) -> int:
     return 0
 
 
+def cmd_history(args) -> int:
+    """The model's curation log, newest first: each change with when it was made, who made it, the
+    value it replaced and the model version it produced — the history a profile outside git keeps (#528)."""
+    from . import curate
+    _print_json(curate.history(args.root, limit=args.limit))
+    return 0
+
+
 def cmd_curate_gate(args) -> int:
     """The Phase-4 curate gate decision in ONE call: count still-queryable PII columns
     + pending pre-seed sign-offs, and say whether to open the explorer. Replaces the
@@ -623,9 +635,23 @@ def cmd_remove_example(args) -> int:
     audit but dropped from the runtime ranker. The packaged path for the dashboard's
     `reject N`, so a skill never hand-rewrites examples.yaml to drop an example."""
     from . import curate
+    from .loader import list_prompt_examples
     res = curate.remove_examples(args.root, args.area, args.question,
                                  signer=args.signer, role=args.role)
-    _print_json({"rejected": res.applied, "skipped": res.skipped,
+    prefix = f"example (rejected) {args.area}/"
+    done = {a[len(prefix):] for a in res.applied}
+    # An unquoted `id: 0` is an authored id; only a missing or empty one is absent (as write_examples).
+    examples = [{"area": args.area, "question": e["question"],
+                 **({"id": e["id"]} if e.get("id") is not None and str(e["id"]) != "" else {}),
+                 "status": "rejected"}
+                for e in list_prompt_examples(args.root, args.area, include_rejected=True)
+                if (e or {}).get("question") in done]
+    note = ({"note": f"marked rejected (kept for audit): {len(examples)} example(s) stay in "
+                     f"prompt_examples/{args.area}/examples.yaml with status: rejected, not deleted, "
+                     "and are no longer offered as examples for a question"} if examples else {})
+    # `rejected` keeps its old shape (one label per example) for callers that parse it; the
+    # detail is added beside it.
+    _print_json({"rejected": res.applied, "examples": examples, **note, "skipped": res.skipped,
                  "validated": res.validated, "committed": res.committed, **_commit_note(res)})
     return 0 if (res.applied or not res.skipped) else 1
 
@@ -634,7 +660,9 @@ def cmd_suggest_units(args) -> int:
     """List the numeric **money** columns (so a currency `unit` can be stamped) using the
     tested name matcher — never a hand-rolled regex that mis-handles `count` inside
     `discount`. Skips columns that already carry a `unit`. Emits
-    {money_columns: [{area, table, column, type}]} for the caller to confirm + apply."""
+    {money_columns: [{area, table, column, type, suggested_unit}]}, where `suggested_unit`
+    is the unit the name spells out (`revenue_usd_millions` -> `USD_millions`) or null, for
+    the caller to show, confirm and apply."""
     from . import build as B
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
@@ -643,26 +671,27 @@ def cmd_suggest_units(args) -> int:
         for t in sa.tables_defined:
             for c in t.columns:
                 if not c.unit and c.type in numeric and B.detect_money_column(c.name):
-                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type})
+                    money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
+                                  "suggested_unit": B.suggest_unit(c.name)})
     _print_json({"money_columns": money})
     return 0
 
 
 def cmd_set_units(args) -> int:
-    """The APPLY half of suggest-units: stamp a currency/unit on every detected money column in
+    """The APPLY half of suggest-units: stamp a currency/unit on detected money columns in
     ONE validated curate batch — so a skill never pipes suggest-units JSON through a hand-rolled
     script (the fragile glue that broke on empty stdin). Detects the same money columns (tested
-    matcher); `--columns` overrides detection for non-obvious names; `--area` scopes it."""
+    matcher); a detected column whose name states its currency gets that unit, the rest get
+    `--currency`/`--unit`. Detection only PLANS: it writes nothing until `--yes`, so a guess is
+    always reviewed. `--columns` names the columns outright (applying the reviewed plan to just
+    those): each keeps the unit its name states, the rest get the given unit; `--area` scopes it."""
     from . import build as B
     from . import curate
     unit = args.currency or args.unit
-    if not unit:
-        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>"})
-        return 1
+    explicit = set(args.columns or [])
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
-    explicit = set(args.columns or [])
-    ops = []
+    plan = []
     for sa in org.subject_areas:
         if args.area and sa.name != args.area:
             continue
@@ -673,38 +702,235 @@ def cmd_set_units(args) -> int:
                 if explicit:
                     if f"{t.name}.{c.name}" not in explicit and c.name not in explicit:
                         continue
+                    col_unit = B.suggest_unit(c.name) or unit
                 elif not (c.type in numeric and B.detect_money_column(c.name)):
                     continue
-                ops.append({"op": "edit", "kind": "table", "area": sa.name, "name": t.name,
-                            "column": c.name, "field": "unit", "value": unit})
-    if not ops:
+                else:
+                    col_unit = B.suggest_unit(c.name) or unit
+                plan.append({"area": sa.name, "table": t.name, "column": c.name, "unit": col_unit})
+    if not plan:
         _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
         return 0
+    missing = [f"{p['table']}.{p['column']}" for p in plan if not p["unit"]]
+    if missing:
+        _print_json({"set": 0, "error": "pass --currency <ISO> or --unit <name>: these names "
+                     "state no currency", "columns": missing})
+        return 1
+    if not (explicit or args.yes):
+        _print_json({"set": 0, "planned": plan,
+                     "next": "nothing written: show this plan, then re-run with --yes to apply "
+                             "it, or with the same --currency/--unit plus --columns <table.col …> to apply "
+                             "only some (each keeps the unit planned for it)"})
+        return 0
+    ops = [{"op": "edit", "kind": "table", "area": p["area"], "name": p["table"],
+            "column": p["column"], "field": "unit", "value": p["unit"]} for p in plan]
     res = curate.apply(args.root, ops)
-    _print_json({"set": len(res.applied), "unit": unit, "errors": res.errors})
+    _print_json({"set": len(res.applied), "unit": unit,
+                 "units": {f"{p['table']}.{p['column']}": p["unit"] for p in plan},
+                 "errors": res.errors})
     return 0 if res.validated else 1
 
 
+# A test run reads at most this many rows of a table: enough to see a constant or broken binding,
+# bounded so it is never a full scan of a large table.
+_TEST_RUN_ROWS = 10000
+
+
+def _num(v) -> Optional[float]:
+    try:
+        return None if v is None or str(v).strip() == "" else float(v)
+    except ValueError:
+        return None
+
+
+def _test_run_sql(table, dialect, props: list[dict]) -> str:
+    """One bounded statement that evaluates every proposal on `table`: each one's AVG (its binding)
+    with the MIN and MAX of the per-row value it averages, over a sample of the columns they read."""
+    cols = sorted({c for p in props for c in p["_proposal"]["columns"]})
+    if table.source_type == "sql":
+        # Newlines keep a trailing `--` comment in the table's SQL from swallowing the `)`.
+        src = f"(\n{table.sql.strip().rstrip(';').rstrip()}\n) src"
+    else:
+        src = dialect.qualified(table.schema_name, table.name)
+    inner = dialect.limited(f"SELECT {', '.join(dialect.ident(c) for c in cols)} FROM {src}",
+                            _TEST_RUN_ROWS)
+    parts = []
+    for i, p in enumerate(props):
+        v = p["_proposal"]["row_expr"]
+        parts += [f"AVG({v}) AS m{i}", f"MIN({v}) AS m{i}_min", f"MAX({v}) AS m{i}_max"]
+    return f"SELECT {', '.join(parts)}, COUNT(*) AS n_rows FROM ({inner}) sample_rows"
+
+
+def _test_run_table(runner, table, dialect, props: list[dict]) -> dict[str, dict]:
+    """name → {value, min, max, rows} or {error}. One statement for the table; only when it fails
+    does each proposal run on its own, so one broken binding does not hide the others' results."""
+    def run(batch: list[dict]) -> dict[str, dict]:
+        row = (runner(_test_run_sql(table, dialect, batch)) or [{}])[0]
+        return {p["name"]: {"value": _num(row.get(f"m{i}")), "min": _num(row.get(f"m{i}_min")),
+                            "max": _num(row.get(f"m{i}_max")), "rows": _num(row.get("n_rows"))}
+                for i, p in enumerate(batch)}
+    try:
+        return run(props)
+    except Exception as e:  # noqa: BLE001 — a failed read is reported per proposal, not raised
+        if len(props) == 1:
+            return {props[0]["name"]: {"error": str(e)}}
+    out: dict[str, dict] = {}
+    for p in props:
+        out.update(_test_run_table(runner, table, dialect, [p]))
+    return out
+
+
+def _test_run_flags(table_name: str, result: dict) -> list[dict]:
+    """Flags a successful test run raises: a degenerate result, or too few rows to trust it."""
+    from . import build as B
+    flags = []
+    if result["value"] is None:
+        flags.append(B._flag("degenerate", "no row gives a value (the result is NULL)"))
+    elif result["min"] is not None and result["min"] == result["max"]:
+        flags.append(B._flag("degenerate", f"every row gives {result['min']:g}, so the result is "
+                             "a constant (a constant or all-zero column)"))
+    rows = result["rows"]
+    if rows is not None and rows < B.TINY_TABLE_ROWS:
+        flags.append(B._flag("low_confidence", f"{table_name} has {rows:g} rows "
+                             f"(under {B.TINY_TABLE_ROWS})"))
+    return flags
+
+
+# How many flag columns the flag_rates summary lists by name; the rest are counted.
+_LISTED_FLAG_COLUMNS = 20
+
+
+def _parse_flag_rates(values: Optional[list[str]]) -> tuple[bool, set[tuple[str, str]], list[str]]:
+    """(all, {(table, column)} lowercased, errors) from `--flag-rates` values, each `all` or a
+    comma-separated list of [schema.]table.column."""
+    every, wanted, errors = False, set(), []
+    for tok in (x.strip() for v in values or () for x in v.split(",")):
+        if not tok:
+            continue
+        if tok.lower() == "all":
+            every = True
+        elif "." in tok and all(tok.split(".")):
+            # The column is after the last dot: what precedes it is the table, schema-qualified
+            # or a table name that itself holds a dot.
+            table, _, column = tok.lower().rpartition(".")
+            wanted.add((table, column))
+        else:
+            errors.append(f"--flag-rates {tok}: name a column as table.column "
+                          "(or schema.table.column), or pass all")
+    return every, wanted, errors
+
+
+def _qualified_table(t) -> str:
+    return f"{t.schema_name}.{t.name}" if t.schema_name else t.name
+
+
+def _flag_rate_problem(name: str, c) -> Optional[str]:
+    """Why a `--flag-rates` column can get no proposal (un-described or not a flag), else None."""
+    from . import build as B
+    if c.description_source == "ai_unknown":
+        return (f"--flag-rates {name}: the column is un-described (ai_unknown); describe it, "
+                "then re-run")
+    if c.primary_key or not (c.type == "boolean" or (c.type == "integer"
+                                                     and B._FLAG_NAME_RE.match(c.name))):
+        return f"--flag-rates {name}: not a boolean or flag column (type {c.type})"
+    return None
+
+
+def _resolve_flag_rates(areas: list, wanted: set[tuple[str, str]], area: Optional[str]
+                        ) -> tuple[dict, list[str], dict[str, list[str]]]:
+    """Each `--flag-rates` selector's column: ({(area, table, schema): {column}} lowercased,
+    errors, {selector: matches} for a selector naming more than one table's column). A selector's
+    table is the table name or schema.name."""
+    hits: dict = {sel: [] for sel in wanted}
+    for sa in areas:
+        for t in sa.tables_defined:
+            keys = {t.name.lower(), _qualified_table(t).lower()}
+            for sel in wanted:
+                if sel[0] in keys:
+                    hits[sel] += [(sa.name, t, c) for c in t.columns if c.name.lower() == sel[1]]
+    asked: dict = {}
+    errors: list[str] = []
+    ambiguous: dict[str, list[str]] = {}
+    for sel in sorted(wanted):
+        name = ".".join(sel)
+        found = hits[sel]
+        if len(found) > 1:
+            ambiguous[name] = sorted(f"{a}: {_qualified_table(t)}.{c.name}" for a, t, c in found)
+        elif not found:
+            errors.append(f"--flag-rates {name}: no such column in the model"
+                          + (f" (in --area {area})" if area else ""))
+        elif problem := _flag_rate_problem(name, found[0][2]):
+            errors.append(problem)
+        else:
+            a, t, c = found[0]
+            asked.setdefault((a, t.name, t.schema_name), set()).add(c.name.lower())
+    return asked, errors, ambiguous
+
+
+def _flag_rate_summary(columns: list[str]) -> dict:
+    """One entry for the flag columns given no rate, in place of a proposal for each (#530)."""
+    out: dict = {"available": len(columns), "columns": columns[:_LISTED_FLAG_COLUMNS]}
+    if len(columns) > _LISTED_FLAG_COLUMNS:
+        out["more"] = len(columns) - _LISTED_FLAG_COLUMNS
+    if columns:
+        out["hint"] = (f"{len(columns)} boolean column(s) could each have a share-of-true metric; "
+                       "add one with --flag-rates <table.column>[,...] or --flag-rates all")
+    return out
+
+
 def cmd_suggest_metrics(args) -> int:
-    """Infer a sensible per-table metric set — flag rates and start→end durations, never a plain
-    COUNT/SUM/AVG (#406) — and write them PROPOSED/unreviewed for bulk sign-off in the explorer,
-    instead of asking the user to pick ~4 upfront. An unsigned metric is still used, and the answer
-    warns that it is unreviewed (Rule 1), so every proposal is worth a person's glance."""
+    """Infer a sensible per-table metric set — start→end durations, never a plain COUNT/SUM/AVG
+    (#406) — and PRINT them; `--write` saves them proposed/unreviewed for bulk
+    sign-off in the explorer. An unsigned metric is still used, and the answer warns that it is
+    unreviewed (Rule 1), so nothing is written until a person has seen the list (#514).
+
+    `--profile` test-runs every binding first (one bounded read per table, opt-in because a billed
+    warehouse charges for it): one that errors is never written, and a degenerate result (constant,
+    all zero or NULL) is flagged. A flagged proposal — degenerate, a tiny table, an ambiguous or
+    audit-column pairing — is written only when `--names` names it.
+
+    A share-of-true rate per boolean column is proposed only for the columns `--flag-rates` names
+    (or every one with `--flag-rates all`): proposed for each by default, they were nearly all the
+    suggested metrics on a large onboarding while the business defined one (#530). The output's
+    `flag_rates` counts the columns left out instead. `--cite` records where a requested rate is
+    defined in its description."""
     from . import build as B
     from . import curate
     from . import dialects as D
+    flag_all, flag_wanted, flag_errors = _parse_flag_rates(args.flag_rates)
+    cite = (args.cite or "").strip().rstrip(".").strip()
+    if cite and not (flag_all or flag_wanted):
+        _print_json({"error": "--cite records where a requested flag rate is defined; pass it "
+                              "with --flag-rates <table.column>"})
+        return 2
     org = L.load_datasource(args.root)
+    if not org.storage_connections:
+        _print_json({"error": "the model declares no storage connection, so there is no dialect "
+                              "to write bindings in"})
+        return 2
     conn_type = {sc.name: sc.storage_type for sc in org.storage_connections}
-    default_type = org.storage_connections[0].storage_type if org.storage_connections else "PostgreSQL"
-    _dcache: dict = {}
+    default_type = org.storage_connections[0].storage_type
+    dialects: dict = {}
+    for st in set(conn_type.values()):
+        try:
+            dialects[st] = D.get_dialect(st)
+        except ValueError as e:
+            _print_json({"error": f"no SQL dialect for storage type {st!r}: {e}"})
+            return 2
 
-    def _dialect(st: str):
-        if st not in _dcache:
-            try:
-                _dcache[st] = D.get_dialect(st)
-            except Exception:
-                _dcache[st] = D.get_dialect("postgresql")
-        return _dcache[st]
+    areas = [sa for sa in org.subject_areas if not args.area or sa.name == args.area]
+    flag_asked, flag_problems, ambiguous = _resolve_flag_rates(areas, flag_wanted, args.area)
+    if ambiguous:
+        # Refused before anything runs, so a rate is never written to the wrong table as well.
+        _print_json({"error": "a --flag-rates name matches more than one column; qualify the "
+                              "table as schema.table.column, or pass --area",
+                     "ambiguous": ambiguous})
+        return 2
+    # A name in more than one table is listed schema-qualified, so the summary's names select.
+    name_count: dict[str, int] = {}
+    for sa in areas:
+        for t in sa.tables_defined:
+            name_count[t.name.lower()] = name_count.get(t.name.lower(), 0) + 1
 
     # Every metric name on disk, rejected ones included. `org` drops rejected entries, which is
     # right for choosing what to propose on (never a rejected table or column), but `write_items`
@@ -712,52 +938,114 @@ def cmd_suggest_metrics(args) -> int:
     # metric a person had rejected and reset it to unreviewed, undoing the rejection.
     on_disk = {sa.name: {m.name for m in sa.metrics}
                for sa in L.load_datasource(args.root, include_rejected=True).subject_areas}
+    runner = None
+    if args.profile:
+        from . import introspect as INTRO
+        runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    named = set(args.names or [])
 
-    suggested = written = skipped_opaque = 0
-    errors: list[str] = []
-    for sa in org.subject_areas:
-        if args.area and sa.name != args.area:
-            continue
+    proposals: list[dict] = []
+    written = skipped_opaque = 0
+    errors: list[str] = flag_errors + flag_problems
+    flag_available: list[str] = []
+    flag_present: list[str] = []
+    for sa in areas:
         existing = set(on_disk.get(sa.name, ()))
         items: list[dict] = []
         for t in sa.tables_defined:
             # columns agami couldn't read yield no metric until described — count them so the
             # user knows describing the "couldn't read" pile unlocks more metrics on a re-run.
-            # A flag would have been a rate; a start or end timestamp half of a duration.
+            # A start or end timestamp would have been half of a duration; a flag a rate, when
+            # every flag's rate was asked for.
             skipped_opaque += sum(
                 1 for c in t.columns
                 if c.description_source == "ai_unknown" and not c.primary_key
-                and (c.type == "boolean"
-                     or (c.type == "integer" and B._FLAG_NAME_RE.match(c.name))
+                and ((flag_all and (c.type == "boolean" or (c.type == "integer"
+                                                             and B._FLAG_NAME_RE.match(c.name))))
                      or (c.type in B._TS_TYPES and (B._START_NAME_RE.search(c.name)
                                                     or B._END_NAME_RE.search(c.name)))))
-            st = conn_type.get(t.storage_connection, default_type)
-            for met in B.suggest_metrics(t, _dialect(st), max_per_table=args.max_per_table):
-                if met["name"] in existing:
-                    continue
-                existing.add(met["name"])
-                items.append(met)
-                suggested += 1
-        if items:
+            asked_here = flag_asked.get((sa.name, t.name, t.schema_name), set())
+            asked = [c for c in B.flag_columns(t) if flag_all or c.name.lower() in asked_here]
+            label = _qualified_table(t) if name_count[t.name.lower()] > 1 else t.name
+            rate_names = {B.flag_rate_name(t.name, c.name) for c in asked}
+            if not flag_all:
+                flag_present += sorted(n for n in rate_names if n in existing)
+            flag_available += [f"{label}.{c.name}" for c in B.flag_columns(t)
+                               if B.flag_rate_name(t.name, c.name) not in rate_names | existing]
+            dialect = dialects[conn_type.get(t.storage_connection, default_type)]
+            props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table,
+                                                  flag_rates=[c.name for c in asked])
+                     if m["name"] not in existing and (not named or m["name"] in named)]
+            existing.update(m["name"] for m in props)
+            results = _test_run_table(runner, t, dialect, props) if runner and props else {}
+            for met in props:
+                extra = met.pop("_proposal")
+                entry = {"name": met["name"], "subject_area": sa.name, "source_table": t.name,
+                         "binding": next(iter(met["bindings"].values())),
+                         "calculation": met["calculation"], "flags": extra["flags"]}
+                if cite and met["name"] in rate_names:
+                    met["description"] = f"Defined in: {cite}."
+                    entry["description"] = met["description"]
+                res = results.get(met["name"])
+                if res and "error" in res and t.source_type == "sql":
+                    # The table's own SQL may be what failed, so the binding is unproven rather
+                    # than broken: kept out unless named, like any other flagged proposal.
+                    entry["test_run"] = None
+                    entry["flags"].append(B._flag(
+                        "not_test_run", "defined by SQL; its bindings could not be test-run "
+                        f"({res['error']})"))
+                elif res and "error" in res:
+                    entry["error"] = res["error"]
+                elif res:
+                    entry["test_run"] = res
+                    if res["rows"] is not None:
+                        # The live count replaces the stored estimate's low_confidence.
+                        entry["flags"] = [f for f in entry["flags"] if f["flag"] != "low_confidence"]
+                    entry["flags"] += _test_run_flags(t.name, res)
+                entry["write"] = "error" not in entry and (not entry["flags"]
+                                                           or met["name"] in named)
+                proposals.append(entry)
+                if entry["write"]:
+                    items.append(met)
+        if args.write and items:
             res = curate.write_items(args.root, sa.name, "metric", items)
             written += len(res.applied)
             errors += res.errors
-    note = ("flag rates & durations proposed — review & sign off in the explorer (/agami-model); "
-            "give each one you keep a one-line description")
+    if args.write:
+        note = ("metrics written — review & sign off in the explorer (/agami-model); "
+                "give each one you keep a one-line description")
+    else:
+        note = ("dry run: nothing written — show these to the user, then re-run with --write "
+                "(add --names <metric> … to keep only some, or to keep a flagged one)")
+    if not runner:
+        note += (". Bindings were NOT test-run against the database — pass --profile <name> to run "
+                 "each one first (one bounded read per table; billed on a pay-per-scan warehouse)")
     if skipped_opaque:
         note += (f". {skipped_opaque} column(s) skipped as un-described (ai_unknown) — describe "
                  "them, then re-run suggest-metrics to pick up their metrics (incremental, no dupes)")
-    _print_json({"suggested": suggested, "written": written,
-                 "skipped_opaque": skipped_opaque, "errors": errors, "note": note})
+    out = {"dry_run": not args.write, "test_run": runner is not None,
+           "suggested": len(proposals), "would_write": sum(p["write"] for p in proposals),
+           "written": written, "skipped_opaque": skipped_opaque, "errors": errors,
+           "proposals": proposals, "flag_rates": _flag_rate_summary(flag_available),
+           "note": note}
+    if flag_present:
+        # Asked for by name but kept as it is, so a --cite run says why nothing changed.
+        out["flag_rates"]["already_in_model"] = flag_present
+    unknown = sorted(named - {p["name"] for p in proposals})
+    if unknown:
+        out["unknown_names"] = unknown
+    _print_json(out)
     return 0 if not errors else 1
 
 
 def cmd_describe_file(args) -> int:
-    """Apply many column descriptions from a lightweight TSV — one per line,
-    `<table.column>` or `<area.table.column>` then a TAB then the description — as ONE validated
-    curate batch. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
-    generator script to build ops. `source:ai` → ai_unvalidated (earns trust through use)."""
+    """Apply many column descriptions from a file as ONE validated curate batch — a TSV
+    (`<table.column>` or `<area.table.column>`, a TAB, the description), or a CSV / JSON data
+    dictionary. So a skill emits a flat list (cheap, auditable) instead of authoring a Python
+    generator script to build ops. `--source ai` (default) → ai_unvalidated (earns trust through
+    use); `--source metadata` → metadata, the customer's own dictionary text."""
     from . import curate
+    from . import dictionary as DD
     if args.file:
         p = Path(args.file).expanduser()
         try:
@@ -770,27 +1058,31 @@ def cmd_describe_file(args) -> int:
             return 2
     else:
         text = sys.stdin.read()
-    ops = []
-    for ln in text.splitlines():
-        if not ln.strip() or ln.lstrip().startswith("#") or "\t" not in ln:
-            continue
-        loc, desc = (p.strip() for p in ln.split("\t", 1))
-        segs = loc.split(".")
-        if not desc or len(segs) not in (2, 3):
-            continue
-        op = {"op": "edit", "kind": "table", "field": "description", "value": desc, "source": "ai"}
-        if len(segs) == 3:
-            op["area"], op["name"], op["column"] = segs
-        else:
-            op["name"], op["column"] = segs
-        ops.append(op)
-    if not ops:
-        _print_json({"described": 0, "reason": "no valid '<loc>\\t<description>' lines"})
+    fmt = DD.format_for(args.file, args.format)
+    try:
+        rows = DD.parse(text, fmt)
+    except ValueError as exc:  # bad JSON or CSV quoting, a CSV without the needed header
+        _print_json({"error": f"could not read the {fmt.upper()} file: {exc}"})
+        return 2
+    root = Path(args.root).expanduser()
+    if not (root / "datasource.yaml").is_file() or not (root / "subject_areas").is_dir():
+        # otherwise every row comes back no_table with exit 0, as if the dictionary were the problem
+        _print_json({"error": f"no semantic model at {root.resolve()} (needs datasource.yaml and "
+                              "subject_areas/)"})
+        return 2
+    m = DD.match(root, rows, source=args.source)
+    report = {"unmatched": m["unmatched"], "kept_human": m["kept_human"],
+              "case_corrected": m["case_corrected"],
+              "schema_prefix_stripped": m["schema_prefix_stripped"]}
+    if not m["ops"]:
+        _print_json({"described": 0, "reason": "no row matched a column of the model", **report,
+                     "skipped": [], "errors": []})
         return 0
-    res = curate.apply(args.root, ops)
+    res = curate.apply(root, m["ops"])
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
-    _print_json({"described": len(res.applied), "skipped": res.skipped, "errors": res.errors})
+    _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
+                 "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1058,8 +1350,11 @@ def cmd_enrich_metadata(args) -> int:
 
     preset = args.preset or MS.detect_preset(model_tables)
     if not preset:
-        _print_json({"enriched": False, "reason": "no metadata preset detected — pass --preset"})
-        return 1
+        # most databases carry no in-DB dictionary; that is nothing to do, not a failure (#526)
+        _print_json({"enriched": False,
+                     "reason": "no metadata preset applies to this database — nothing to do "
+                               "(pass --preset to name one)"})
+        return 0
     sources = MS.usable_sources(preset, model_tables)
     if not sources:
         _print_json({"enriched": False, "preset": preset,
@@ -1138,7 +1433,7 @@ def cmd_enrich_metadata(args) -> int:
         refs_declared = len(ref_map)
         if ref_map:
             intra, cross, refs_skipped_target, refs_unverified = _build_verified_references(
-                org, runner, dialect, ref_map)
+                org, runner, dialect, ref_map, declared=set(decls))
             if intra or cross:
                 rres = curate.add_relationships(root, intra=intra, cross=cross)
                 refs_added = len(rres.applied)
@@ -1160,11 +1455,15 @@ def cmd_enrich_metadata(args) -> int:
     return 0 if not errors else 1
 
 
-def _build_verified_references(org, runner, dialect, ref_map: dict) -> tuple[dict, list, int, int]:
+def _build_verified_references(org, runner, dialect, ref_map: dict,
+                                declared: Optional[set[str]] = None) -> tuple[dict, list, int, int]:
     """Turn a `field → target` map (preset known graph ∪ dictionary declarations) into reference
     relationships, applied to EVERY modelled column with that name (inheritance-aware), and VERIFY
     each candidate by value-overlap against the live data before keeping it:
-      overlap holds            → confirmed + system-approved (the standard join matches THIS data),
+      overlap holds            → confirmed + system-approved when THIS database's dictionary declares
+                                 the reference (`declared`, its own foreign key); a reference only the
+                                 preset assumes stays inferred/unreviewed — matching values are
+                                 evidence, not a declaration (#509),
       overlap can't be checked → inferred/unreviewed (target/from too big to scan, or probe cap hit),
       overlap FAILS            → DROPPED (the standard join doesn't apply to this export — never
                                  blindly trust the preset).
@@ -1195,11 +1494,16 @@ def _build_verified_references(org, runner, dialect, ref_map: dict) -> tuple[dic
                 if verified is False:
                     continue  # standard join doesn't hold in this data → drop
                 spec = {"from_table": t.name, "from_column": c.name, "to_table": ttab.name}
-                if verified:
+                if verified and c.name.lower() in (declared or set()):
                     spec.update(confidence="confirmed", review_state="approved",
                                 signed_off_by="agami_enrich", signed_off_role="system",
                                 signed_off_at=INTRO._NOW,
                                 description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (value-overlap verified)")
+                elif verified:
+                    spec.update(confidence="inferred", review_state="unreviewed",
+                                description=f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} "
+                                            "(preset's standard join, values overlap; not declared "
+                                            "by this database — confirm)")
                 else:
                     unverified += 1
                     spec["description"] = f"reference: {c.name} → {ttab.name}.{ttab.grain[0]} (not overlap-verified — confirm)"
@@ -1213,19 +1517,23 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     `(intra: {area: [rel,…]}, cross: [xrel,…], skipped_target_count)`. SELF-references are kept
     (a hierarchical `parent → same table` is a real join). Edges whose TARGET isn't modelled are
     skipped and COUNTED (so pruning that drops a join target is reported, not silent). Already-
-    present edges are skipped. References are `many_to_one` to the target's grain, written
+    present edges are skipped. References point at the target's grain, labelled from both sides'
+    keys (`build.infer_cardinality`), written
     `inferred`/`unreviewed` (authoritative declaration, signed off in the explorer)."""
     from collections import defaultdict
+
+    from . import build as B
     tindex: dict = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             tindex.setdefault(t.name.lower(), (t, sa.name))
+    from .runtime import join_column_pairs, model_dialect
+    sg = model_dialect(org)
     existing = set()
-    for sa in org.subject_areas:
-        for r in sa.relationships:
-            existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
-    for r in org.cross_subject_area_relationships:
-        existing.add((r.from_table.lower(), r.from_column.lower(), r.to_table.lower()))
+    # Every column a join is keyed on, a composite `on:` join's included (#510).
+    for r in [*(r for sa in org.subject_areas for r in sa.relationships), *org.cross_subject_area_relationships]:
+        for fc, _tc in join_column_pairs(r, sg) or []:
+            existing.add((r.from_table.lower(), fc.lower(), r.to_table.lower()))
 
     intra: dict = defaultdict(list)
     cross: list = []
@@ -1248,7 +1556,7 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
         existing.add(key)
         base = {"from_table": ft, "from_column": fc, "to_table": tt, "to_column": ttab.grain[0],
                 "from_schema": ftab.schema_name, "to_schema": ttab.schema_name,
-                "relationship": "many_to_one", "join_type": "LEFT",
+                "relationship": B.infer_cardinality(ftab, ttab, [fc], [ttab.grain[0]]), "join_type": "LEFT",
                 # per-spec trust (a verified candidate is confirmed/approved); defaults otherwise
                 "confidence": spec.get("confidence", "inferred"),
                 "review_state": spec.get("review_state", "unreviewed"),
@@ -1487,12 +1795,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
 
-    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit ops (validated)")
+    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
     sp.add_argument("root")
     sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
-    sp.add_argument("--signer", default=None, help="sign-off email for approve ops")
-    sp.add_argument("--role", default=None, help="sign-off role for approve ops")
+    sp.add_argument("--signer", default=None,
+                    help="who made the changes: recorded in the curation log on every op; an approve, "
+                         "or an edit of an approved join's tables, columns or cardinality, also stamps it on the "
+                         "item as its sign-off (an approve needs it)")
+    sp.add_argument("--role", default=None, help="the signer's role, recorded and stamped with --signer")
     sp.set_defaults(func=cmd_curate)
+
+    sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
+    sp.add_argument("root")
+    sp.add_argument("--limit", type=int, default=None, help="show only the newest N entries")
+    sp.set_defaults(func=cmd_history)
 
     sp = sub.add_parser("approve-queue",
                         help="sign off the whole pending review queue in one call (no-browser path)")
@@ -1523,7 +1839,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("add", help="create metric/entity YAMLs from a JSON file (validated, revertable)")
     sp.add_argument("root")
     sp.add_argument("--kind", required=True, choices=["metric", "entity"])
-    sp.add_argument("--area", required=True)
+    sp.add_argument("--area", required=True,
+                    help="a subject area datasource.yaml lists, or _cross for items that span areas "
+                         "(the datasource's cross_subject_area_metrics / _entities)")
     sp.add_argument("--file", required=True, help="JSON: a list of items (or {metrics:[…]}/{entities:[…]})")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
@@ -1538,7 +1856,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
 
-    sp = sub.add_parser("remove-example", help="reject prompt example(s) by question (status: rejected — kept for audit, dropped from the runtime ranker)")
+    sp = sub.add_parser(
+        "remove-example",
+        help="mark prompt example(s) rejected by question: kept in examples.yaml for audit, not deleted",
+        description="Marks each named example rejected (status: rejected). It is kept in "
+                    "prompt_examples/<area>/examples.yaml for audit, not deleted, and no longer "
+                    "offered as an example for a question.")
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
     sp.add_argument("--question", required=True, action="append",
@@ -1547,25 +1870,44 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example)
 
-    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch")
+    sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch; prints the plan and writes nothing without --yes or --columns")
     sp.add_argument("root")
-    sp.add_argument("--currency", default=None, help="ISO currency code (USD/EUR/INR/…)")
+    sp.add_argument("--currency", default=None,
+                    help="currency unit: an ISO code, optionally scaled and/or a rate (USD, USD_millions, USD/day, USD_millions/year)")
     sp.add_argument("--unit", default=None, help="non-currency unit (cents/percent/days/…)")
+    sp.add_argument("--yes", action="store_true",
+                    help="apply the detected plan (without it, detection only prints the plan)")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--columns", nargs="*", default=None,
-                    help="explicit table.column (or bare column) list — overrides money detection")
+                    help="explicit table.column (or bare column) list — overrides money detection; a name that states its currency keeps that unit")
     sp.set_defaults(func=cmd_set_units)
 
-    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (flag rates and start→end durations, never a plain count/sum/avg) as proposed/unreviewed for bulk sign-off — replaces ask-for-4")
+    sp = sub.add_parser("suggest-metrics", help="infer per-table measures (start→end durations, and flag rates only when --flag-rates asks; never a plain count/sum/avg) and print them; --write saves them proposed/unreviewed for bulk sign-off — replaces ask-for-4")
     sp.add_argument("root")
     sp.add_argument("--area", default=None, help="restrict to one subject area")
     sp.add_argument("--max-per-table", type=int, default=10, dest="max_per_table",
                     help="cap measures per table")
+    sp.add_argument("--write", action="store_true",
+                    help="save the unflagged proposals (and any named with --names); default is a dry run")
+    sp.add_argument("--names", nargs="+", default=None, metavar="METRIC",
+                    help="only these proposals; a named one is written even when flagged (never when its binding errors)")
+    sp.add_argument("--profile", default=None,
+                    help="test-run every binding against this profile's database first (one bounded read per table)")
+    sp.add_argument("--flag-rates", nargs="+", default=None, dest="flag_rates", metavar="TABLE.COLUMN",
+                    help="also propose a share-of-true rate for these boolean columns (table.column or schema.table.column, comma- or space-separated; a name matching more than one table is refused), or 'all' for every one; none by default")
+    sp.add_argument("--cite", default=None, metavar="SOURCE",
+                    help="with --flag-rates: the document that defines the requested rates; their description says 'Defined in: SOURCE.'")
     sp.set_defaults(func=cmd_suggest_metrics)
 
-    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description, stdin or --file) in one validated batch — no generator script")
+    sp = sub.add_parser("describe-file", help="apply many column descriptions from a TSV (loc<TAB>description), CSV or JSON data dictionary (stdin or --file) in one validated batch — no generator script; unmatched rows are listed")
     sp.add_argument("root")
-    sp.add_argument("--file", default=None, help="TSV path (default: read stdin)")
+    sp.add_argument("--file", default=None, help="TSV / CSV / JSON path, format from the extension (default: read TSV from stdin)")
+    sp.add_argument("--format", choices=["tsv", "csv", "json"], default=None,
+                    help="override the format the file extension implies")
+    sp.add_argument("--source", choices=["ai", "metadata"], default="ai",
+                    help="ai (default): generated text, stamped ai_unvalidated. metadata: taken as written "
+                         "from the customer's dictionary, stamped metadata; not checked against the data "
+                         "(see #564); never replaces a description a person wrote")
     sp.set_defaults(func=cmd_describe_file)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")

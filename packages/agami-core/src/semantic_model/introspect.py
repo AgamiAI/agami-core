@@ -29,8 +29,9 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -55,7 +56,7 @@ _MAX_DATE_FILTER_COLS = 6
 # ordinary dimension/operational tables while catching the giant fact tables.
 _GRAIN_PROBE_MAX_ROWS = 5_000_000
 
-from . import build
+from . import build, pii
 from . import dialects as D
 from .models import (
     Column,
@@ -65,6 +66,7 @@ from .models import (
     StorageConnection,
     Table,
     bare_name,
+    table_key,
 )
 
 Runner = Callable[[str], list[dict]]
@@ -99,6 +101,12 @@ class _Row(dict):
 SCRIPT_DIR = Path(__file__).resolve().parent.parent  # plugins/agami/scripts
 SAMPLE_ROWS = 500
 ENUM_MAX_DISTINCT = 25
+# A list declared in the catalog (an enum type, a CHECK ... IN) is exact, so it is kept far past the
+# cap on a list read from the data.
+DECLARED_MAX_VALUES = 200
+# Each value list read from the data is one DISTINCT query; this bounds them per run, so a wide model
+# can't fire thousands.
+DISTINCT_READ_CAP = 1000
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
 # Safety valve for confirming DECLARED-but-unenforced catalog FKs (Redshift/Databricks/Trino)
 # by value-overlap: each confirmation is one sequential COUNT probe, so a schema that declares
@@ -110,6 +118,10 @@ FK_OVERLAP_PROBE_CAP = 300
 # guard that stops a 50-table Redshift introspect from crawling for half an hour on big fact
 # tables (incident/task/metric_instance). Mirrors the grain-probe size guard.
 _OVERLAP_PROBE_MAX_ROWS = 3_000_000
+# Per-run cap on the uniqueness probes that check a join's many side on the data (one
+# COUNT(DISTINCT) each), on the same budget as the declared-FK overlap confirmation.
+_UNIQUE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
+_DATA_UNIQUE_NOTE = "no constraint declares it — looks one-to-one, confirm"
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -138,9 +150,19 @@ class IntrospectReport:
     relationship_count: int = 0
     subject_areas: list[str] = field(default_factory=list)
     deep_tables: list[str] = field(default_factory=list)
+    # Tables at or above the large-table line: name -> (estimated rows, its date columns).
+    # Listed so whoever builds the model confirms the filters; the seed is every date column, and on
+    # a warehouse that is often load timestamps nobody asks a question about.
+    large_tables: dict[str, tuple[int, list[str]]] = field(default_factory=dict)
     sensitive_columns: int = 0
+    # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
+    suspected_columns: list[str] = field(default_factory=list)
+    # (display text, (schema, table, column lower-cased)) per sample finding, so a refresh can drop
+    # the ones it did not apply; the text alone is ambiguous across schemas.
+    sample_findings: list[tuple[str, tuple]] = field(default_factory=list, repr=False)
     notes: list[str] = field(default_factory=list)
     files_written: list[str] = field(default_factory=list)
+    files_unchanged: int = 0
     # On a refresh of an existing model: what changed structurally, per table. Empty on a first build.
     changes: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     new_tables: list[str] = field(default_factory=list)
@@ -157,10 +179,14 @@ class IntrospectReport:
             *(f"changed {t}: " + "; ".join(f"{k} {', '.join(v)}" for k, v in c.items())
               for t, c in self.changes.items()),
             f"deep tables: {', '.join(self.deep_tables) or '(none)'}",
+            *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
+              for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
+            *([f"suspected personal data (review): {', '.join(self.suspected_columns)}"]
+              if self.suspected_columns else []),
             "## notes",
             *[f"  - {n}" for n in self.notes],
-            f"## files ({len(self.files_written)})",
+            f"## files ({len(self.files_written)} written, {self.files_unchanged} already up to date)",
             *[f"  {f}" for f in self.files_written[:60]],
         ]
         return "\n".join(lines)
@@ -227,6 +253,7 @@ def introspect(
     if isinstance(dialect, D.BigQuery):
         dialect = D.BigQuery(region=bigquery_region)
     conn_name = f"{profile}_{dialect.name.lower()}"
+    sg = _sqlglot_name(dialect)
     artifacts_dir = Path(artifacts_dir)
     out = Path(out_dir) if out_dir else (artifacts_dir / profile)
 
@@ -251,14 +278,24 @@ def introspect(
 
     # 2. per-table columns + grain
     built: list[Table] = []
-    grain_by_table: dict[str, set[str]] = {}
     _step = max(1, len(pairs) // 10)   # throttle the heartbeat to ~10 lines, not one per table
+    budget = _CountBudget(_COUNT_BUDGET_S)
+    reads = _ReadBudget(DISTINCT_READ_CAP)
+    keys_unread: set[tuple] = set()   # (schema, table) whose unique keys couldn't be read
     for i, (schema, table) in enumerate(pairs, 1):
-        t = _build_table(dialect, runner, schema, table, conn_name, report)
+        t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads,
+                         keys_unread)
         built.append(t)
-        grain_by_table[t.name] = set(t.grain)
         if i % _step == 0 or i == len(pairs):
             _progress(pp, f"columns+grain {i}/{len(pairs)}")
+    if budget.skipped:
+        report.notes.append(
+            f"{budget.skipped} table(s) left unsized: exact row counts stopped after {_COUNT_BUDGET_S:.0f}s "
+            "in total; build those tables in a separate run to size them")
+    if reads.skipped:
+        report.notes.append(
+            f"{reads.skipped} column(s) got no value list: the run's {DISTINCT_READ_CAP} DISTINCT reads were "
+            "used up; build those tables in a separate run to list their values")
 
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
@@ -269,7 +306,6 @@ def introspect(
     empty = [t.name for t in unreadable]
     if empty:
         built = [t for t in built if t.columns]
-        grain_by_table = {t.name: set(t.grain) for t in built}
         report.notes.append(
             f"dropped {len(empty)} table(s) with no readable columns (not found / bad allowlist): "
             + ", ".join(empty[:8]) + (" …" if len(empty) > 8 else ""))
@@ -298,6 +334,8 @@ def introspect(
     # sign-offs survive (#437). Runs on a dry run too, which is how a refresh is previewed.
     prev: Optional[Datasource] = None
     prev_rels: list[Relationship] = []
+    unread: list[Table] = []   # merged tables whose keys were kept, not re-read
+    probe_budget = _ProbeBudget()   # one cap across the refresh's recheck and the new joins
     skip_keys: set = set()
     fresh_keys: set[tuple] = set()   # (schema, name): a bare name can exist in two schemas
     if refreshing:
@@ -323,10 +361,21 @@ def introspect(
                 fresh_keys.add((t.schema_name, t.name))
                 report.new_tables.append(_qualified(t))
                 continue
-            m, change = _merge_table(old, t)
+            keys_read = (t.schema_name, t.name) not in keys_unread
+            if not keys_read:
+                report.notes.append(f"unique keys not re-read for {_qualified(old)}: kept the stored ones")
+            m, change = _merge_table(old, t, keys_read=keys_read)
+            _drop_sample_findings(report, t.schema_name, t.name, {c.name for c in old.columns})
+            if not keys_read:
+                unread.append(m)
+            # Already large, so its filters were settled when the seed was first offered and the
+            # merge keeps them: listing the fresh seed would ask again about a table already answered.
+            if old.performance_hints and (old.performance_hints.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
+                report.large_tables.pop(t.name, None)
             merged.append(m)
             for area, copy in copies[(old.schema_name, old.name)]:
-                per_area[(area, (old.schema_name, old.name))] = m if copy is old else _merge_table(copy, t)[0]
+                per_area[(area, (old.schema_name, old.name))] = (
+                    m if copy is old else _merge_table(copy, t, keys_read=keys_read)[0])
             for r in change.get("retyped", []):
                 retyped[((m.schema_name or "").lower(), m.name.lower(), r.split(":")[0].lower())] = _qualified(m)
             if change:
@@ -377,33 +426,44 @@ def introspect(
         for key, t in existing.items():
             if key not in batch_keys:        # keep prior tables (don't re-query)
                 built.append(t)
-        grain_by_table = {t.name: set(t.grain) for t in built}
         for sa in prev.subject_areas:
             prev_rels.extend(sa.relationships)
         prev_rels.extend(prev.cross_subject_area_relationships)
         # Joins on a column whose type changed go back to review: a confirmed join on mismatched
         # types is refused by the validator, which would make the refresh impossible to write.
         for r in prev_rels:
-            hit = _retyped_end(retyped, r.from_schema, r.from_table, r.from_column) \
-                or _retyped_end(retyped, r.to_schema, r.to_table, r.to_column)
-            if hit and r.confidence == "confirmed":
+            hit = next((h for fc, tc in _column_pairs(r, sg) or []
+                        for h in (_retyped_end(retyped, r.from_schema, r.from_table, fc),
+                                  _retyped_end(retyped, r.to_schema, r.to_table, tc)) if h), None)
+            # The validator type-checks only the column-pair form; an `on:` join someone wrote or
+            # signed is theirs, so only one introspection itself signed goes back to review.
+            if hit and r.confidence == "confirmed" and (not r.on or r.signed_off_role == "system"):
                 r.confidence, r.review_state = "proposed", "unreviewed"
-                report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(
-                    f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column}")
-        report.notes.append(
-            f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
-            f"{len(built)} total")
+                report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(_join_label(r, sg))
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap). Use the FULL built set's
     # (schema, table) pairs so an --append batch builds relationships across the whole union, not
     # just its own batch (covers every schema present).
     _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
     rel_pairs = [(t.schema_name, t.name) for t in built]
-    rels = _build_relationships(dialect, runner, rel_pairs, built, grain_by_table, report, pp=pp)
-    if prev_rels:   # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
-        rels = list(prev_rels) + [
-            r for r in rels
-            if not any(_same_join(r, p) for p in prev_rels)]
+    rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp)
+    if prev_rels:
+        # A database key over several columns replaces the engine's own split joins for it (#510).
+        dropped, rels = _merge_split_joins(rels, prev_rels, report, sg)
+        if dropped:
+            prev = _without_joins(prev, dropped)
+            prev_rels = [r for r in prev_rels if id(r) not in dropped]
+        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg)
+        # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
+        rels = [r for r in rels if not any(_same_join(r, p, sg) for p in prev_rels)]
+    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
+    if prev_rels:
+        rels = list(prev_rels) + rels
+    if refreshing:   # counted after the join merge and relabel, which are changes too
+        report.notes.append(
+            f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
+            f"{len(built)} total")
     report.table_count = len(built)
     report.relationship_count = len(rels)
     _progress(pp, f"done: {len(built)} tables, {len(rels)} relationships")
@@ -420,7 +480,7 @@ def introspect(
     if prev_for_areas is None:
         # Every table, as a one-shot build would: a later batch's join can reveal an FK column in a
         # table an earlier batch built, and nobody has curated the grouping yet.
-        _regroup_columns_with_references(built, rels)
+        _regroup_columns_with_references(built, rels, sg)
         # 4. propose subject areas + cross-area edges
         areas, notes = build.propose_subject_areas(built, rels, conn_name, profile)
         report.notes.extend(notes)
@@ -443,14 +503,20 @@ def introspect(
             org = prev.model_copy(update={"subject_areas": areas, "cross_subject_area_relationships": cross})
     else:
         # Regroup only the tables this run created: an existing table's column groups are curation.
-        _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels)
+        _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels, sg)
         org = _refresh_existing(prev, built, rels[len(prev_rels):], fresh_keys, profile, report, per_area)
 
     # 5. write (backing up any legacy model at the profile root). An append onto an existing model is
     # validated first: writing an invalid merge would replace a curated model with a broken one.
     if prev is not None and not dry_run:
         from . import validator as V
-        if not V.validate(org).ok:
+        unreadable = build.unloadable(org)
+        if unreadable:
+            report.notes.insert(0, "NOT WRITTEN: the merged model wouldn't load once written "
+                                   f"({unreadable[0]}); the existing model is unchanged")
+            dry_run = True
+            report.dry_run = True
+        elif not V.validate(org).ok:
             report.notes.insert(0, "NOT WRITTEN: the merged model doesn't validate; the existing model is unchanged")
             dry_run = True
             report.dry_run = True
@@ -460,6 +526,7 @@ def introspect(
         _remove_moved_table_files(org, out)
     wr = build.write_tree(org, out, dry_run=dry_run)
     report.files_written = wr.files_written
+    report.files_unchanged = len(wr.files_unchanged)
     return org, report
 
 
@@ -477,22 +544,113 @@ def _retyped_end(retyped: dict[tuple, str], schema: Optional[str], table: str, c
     return None
 
 
-def _same_join(a: Relationship, b: Relationship) -> bool:
+def _same_join(a: Relationship, b: Relationship, dialect: Optional[str] = None) -> bool:
     """Whether two joins are the same edge, for de-duplicating an append. Both ends' tables (bare,
-    whatever `schema.table` spelling was stored) and columns must match; schemas must agree where
+    whatever `schema.table` spelling was stored) and column pairs must match; schemas must agree where
     both joins state one — so `crm.products` isn't taken for `billing.products` — while a join
-    stored without a schema (curation may omit it) still matches the catalog's copy of itself."""
-    def low(v: Optional[str]) -> str:
-        return (v or "").lower()
+    stored without a schema (curation may omit it) still matches the catalog's copy of itself.
+    An `on:` join compares by the column pairs it reads (`dialect` is the engine's sqlglot name),
+    and by its text when it isn't plain column equalities."""
+    return _same_tables(a, b) and _pair_set(a, dialect) == _pair_set(b, dialect)
 
-    def same_schema(x: Optional[str], y: Optional[str]) -> bool:
-        return not x or not y or x.lower() == y.lower()
 
-    return (low(bare_name(a.from_table)) == low(bare_name(b.from_table))
-            and low(a.from_column) == low(b.from_column)
-            and low(bare_name(a.to_table)) == low(bare_name(b.to_table))
-            and low(a.to_column) == low(b.to_column)
-            and same_schema(a.from_schema, b.from_schema) and same_schema(a.to_schema, b.to_schema))
+def _same_tables(a: Relationship, b: Relationship) -> bool:
+    """Whether two joins connect the same two tables. A schema embedded in the table name
+    (`crm.shipments`) counts as stated, so it isn't matched to `billing.shipments`."""
+    def same(x: tuple[str, str], y: tuple[str, str]) -> bool:
+        return x[1] == y[1] and (not x[0] or not y[0] or x[0] == y[0])
+
+    return (same(table_key(a.from_table, a.from_schema), table_key(b.from_table, b.from_schema))
+            and same(table_key(a.to_table, a.to_schema), table_key(b.to_table, b.to_schema)))
+
+
+def _pair_set(r: Relationship, dialect: Optional[str]) -> frozenset:
+    pairs = _key_pairs(r, dialect)
+    if pairs is None:
+        return frozenset({" ".join((r.on or "").lower().split())})
+    return frozenset((f.lower(), t.lower()) for f, t in pairs)
+
+
+def _key_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[str, str]]]:
+    from .runtime import join_key_pairs
+    return join_key_pairs(r, dialect)
+
+
+def _column_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[str, str]]]:
+    """The columns a join is keyed on, passing over a fixed-value condition (`x.flag = 'Y'`)."""
+    from .runtime import join_column_pairs
+    return join_column_pairs(r, dialect)
+
+
+def _sqlglot_name(dialect: D.Dialect) -> Optional[str]:
+    """The sqlglot grammar for this engine's model text (an `on:` join), or None when unmapped."""
+    from .sql_dialect import DialectUnresolved, sqlglot_dialect
+    try:
+        return sqlglot_dialect(dialect.name)
+    except DialectUnresolved:
+        return None
+
+
+def _join_label(r: Relationship, dialect: Optional[str] = None) -> str:
+    """How a refresh report names a join: `a.x -> b.y`, or every column of a composite one."""
+    pairs = _key_pairs(r, dialect)
+    if pairs is None:
+        return f"{r.from_table} -> {r.to_table} ON {r.on}"
+    return (f"{r.from_table}.({', '.join(f for f, _ in pairs)}) -> {r.to_table}.({', '.join(t for _, t in pairs)})"
+            if len(pairs) > 1 else f"{r.from_table}.{pairs[0][0]} -> {r.to_table}.{pairs[0][1]}")
+
+
+_MERGED_JOINS = "joins merged into one composite join (the database's foreign key spans all their columns)"
+_UNMERGED_JOINS = "composite foreign key not applied"
+
+
+def _merge_split_joins(
+    fresh: list[Relationship], prev_rels: list[Relationship], report: IntrospectReport,
+    dialect: Optional[str],
+) -> tuple[set[int], list[Relationship]]:
+    """On a refresh, a freshly read composite foreign key against the model's joins between the same
+    two tables whose columns are part of it — the split joins an older build wrote, each of which
+    repeats rows used alone. When the engine approved every one of them they go and the composite
+    join replaces them; when a person signed off any of them nothing changes for that key and the
+    composite join is not added. Both are listed in the refresh report. Returns the ids of the
+    model's joins to drop and the fresh joins to keep."""
+    dropped: set[int] = set()
+    kept: list[Relationship] = []
+    for c in fresh:
+        pairs = _key_pairs(c, dialect) if c.on else None
+        want = {(f.lower(), t.lower()) for f, t in pairs or []}
+        # A join the catalog still declares on its own (a single-column FK beside the composite
+        # one) is not a split of this key: it stays.
+        covered = [p for p in prev_rels
+                   if len(want) > 1 and id(p) not in dropped and _same_tables(c, p)
+                   and (got := _pair_set(p, dialect)) and got < want
+                   and not any(_same_join(p, f, dialect) for f in fresh)]
+        if not covered:
+            kept.append(c)
+            continue
+        where = f"{c.from_schema}.{c.from_table}" if c.from_schema else c.from_table
+        key = " AND ".join(f for f, _ in pairs)
+        people = [p for p in covered if not _engine_approved(p)]
+        if people:
+            why = ", ".join(sorted({f"signed off by {p.signed_off_by}" if p.signed_off_by
+                                    else "not approved by introspection" for p in people}))
+            report.changes.setdefault(where, {}).setdefault(_UNMERGED_JOINS, []).append(
+                f"{c.from_table} → {c.to_table} ({key}): not changed: {why}")
+            continue
+        parts = " + ".join(f"({', '.join(f for f, _ in _key_pairs(p, dialect) or [])})" for p in covered)
+        report.changes.setdefault(where, {}).setdefault(_MERGED_JOINS, []).append(
+            f"{c.from_table} → {c.to_table}: {parts} → {key}")
+        dropped.update(id(p) for p in covered)
+        kept.append(c)
+    return dropped, kept
+
+
+def _without_joins(org: Datasource, dropped: set[int]) -> Datasource:
+    """`org` without the joins whose ids are in `dropped`, every other object shared."""
+    areas = [sa.model_copy(update={"relationships": [r for r in sa.relationships if id(r) not in dropped]})
+             for sa in org.subject_areas]
+    cross = [r for r in org.cross_subject_area_relationships if id(r) not in dropped]
+    return org.model_copy(update={"subject_areas": areas, "cross_subject_area_relationships": cross})
 
 
 def _qualified(t: Table) -> str:
@@ -560,7 +718,8 @@ def _areas_untouched(prev: Datasource, root: Path) -> bool:
         return False
     # Saved examples live under their area's name, and any curation leaves a log or a description:
     # a batched first build has none of these until it finishes, so their presence means "curated".
-    if (root / "curation_log.jsonl").exists() or any((root / "prompt_examples").rglob("*.yaml")):
+    from .curate import has_model_curation
+    if has_model_curation(root) or any((root / "prompt_examples").rglob("*.yaml")):
         return False
     if any(t.description or any(c.description for c in t.columns)
            for sa in prev.subject_areas for t in sa.tables_defined):
@@ -575,12 +734,13 @@ def _areas_untouched(prev: Datasource, root: Path) -> bool:
     return True
 
 
-def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]:
+def _merge_table(old: Table, fresh: Table, *, keys_read: bool = True) -> tuple[Table, dict[str, list[str]]]:
     """`old` with the structure `fresh` read from the database, and the curation kept.
 
     A column the database still has keeps every field but its type; a new one arrives as
     introspection built it; one the database no longer has stays, marked `stale`, so a description or
-    sign-off is never silently lost and a person decides. Returns the merged table and what changed."""
+    sign-off is never silently lost and a person decides. `keys_read` False keeps `old`'s unique keys,
+    since a failed read is not the database dropping them. Returns the merged table and what changed."""
     fresh_by = {c.name.lower(): c for c in fresh.columns}
     old_names = {c.name.lower() for c in old.columns}
     cols: list[Column] = []
@@ -615,7 +775,11 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
     restored_table = old.review_state == "stale"
     if restored_table:
         change.setdefault("table", []).append("back in the database")
-    update = {"columns": cols, "column_groups": groups, "grain": grain,
+    unique_keys = _merged_unique_keys(fresh if keys_read else old, cols, change)
+    if unique_keys != old.unique_keys:
+        change.setdefault("unique keys", []).append(
+            "; ".join(", ".join(k) for k in unique_keys) or "(none)")
+    update = {"columns": cols, "column_groups": groups, "grain": grain, "unique_keys": unique_keys,
               "performance_hints": _merged_hints(old.performance_hints, fresh.performance_hints)}
     if restored_table:
         update["review_state"] = "approved"
@@ -630,6 +794,55 @@ def _merge_table(old: Table, fresh: Table) -> tuple[Table, dict[str, list[str]]]
         update["column_group_descriptions"] = {**build.column_group_descriptions(groups), **old.column_group_descriptions}
     merged = old.model_copy(update=update)
     return merged, {k: v for k, v in change.items() if v}
+
+
+_VALUE_SUSPECT_CAVEATS = frozenset(pii.VALUE_SUSPECT_CAVEATS)
+
+
+def _personal_column(c: Column) -> bool:
+    """Flagged sensitive, or its sampled values look personal."""
+    return c.sensitive or bool(_VALUE_SUSPECT_CAVEATS & set(c.caveats))
+
+
+def _personal_list(c: Column) -> bool:
+    """`c`'s list keys are personal values themselves. Checked on the list, not only the sample:
+    a declared list of digit-only phone numbers survives an empty or unreadable sample."""
+    keys = list(c.choice_field or {})
+    return (any(pii.personal_value(v) or pii.phone_key(c.name, c.type, v) for v in keys)
+            or pii.value_suspect_caveat(c.name, c.type, keys) is not None)
+
+
+def _clear_choice(c: Column) -> None:
+    """Drop `c`'s value list and the caveats `_set_choice` wrote from it, which quote its values."""
+    values = list(c.choice_field or {})
+    quoting = {_lookalike_caveat(values), _case_insensitive_caveat(values),
+               _case_insensitive_caveat(values, accents=True)}
+    c.choice_field = None
+    c.caveats = [k for k in c.caveats if k not in quoting]
+
+
+def _drop_sample_findings(report: IntrospectReport, schema: Optional[str], table: str, kept: set[str]) -> None:
+    """A refresh keeps an existing column as it was, so what the sample found on it was not applied.
+    Matched like the merge matches columns: by schema and table, column case-insensitively."""
+    gone = {(schema, table, c.lower()) for c in kept}
+    keep: list[tuple[str, tuple]] = []
+    for text, key in report.sample_findings:
+        if key not in gone:
+            keep.append((text, key))
+            continue
+        for lst in (report.suspected_columns, report.notes):
+            if text in lst:
+                lst.remove(text)  # one occurrence: another schema's same-named finding stays
+    report.sample_findings = keep
+
+
+def _merged_unique_keys(fresh: Table, cols: list[Column], change: dict) -> list[list[str]]:
+    """`fresh`'s unique keys (the database's as it reports them now, or the stored ones when they
+    couldn't be read), in the merged table's column spelling. A key on a dropped column is gone with it."""
+    gone = {n.lower() for n in change["dropped"]}
+    by_lower = {c.name.lower(): c.name for c in cols}
+    return [[by_lower[k.lower()] for k in key] for key in fresh.unique_keys
+            if all(k.lower() in by_lower and k.lower() not in gone for k in key)]
 
 
 def _retyped(c: Column, f: Column, change: dict) -> Column:
@@ -648,13 +861,20 @@ def _retyped(c: Column, f: Column, change: dict) -> Column:
 
 
 def _merged_hints(old, fresh):
-    """Row-count hints from the new reading (a table grows); a curated filter list is kept."""
+    """Row-count hints from the new reading (a table grows); a curated filter list is kept.
+
+    Kept even when empty once the table was already large: that is when the seed was offered, and an
+    empty list then is the answer "it is narrowed through a joined table, not a column of its own",
+    which re-seeding every date column would undo. Otherwise an empty list takes the fresh seed, so
+    a table that has only now grown large gets one."""
     if fresh is None:
         return old
     if old is None:
         return fresh
+    was_large = (old.estimated_row_count or 0) >= _LARGE_TABLE_ROWS
     return fresh.model_copy(update={
-        "recommended_filters": old.recommended_filters or fresh.recommended_filters,
+        "recommended_filters": (old.recommended_filters if old.recommended_filters or was_large
+                                else fresh.recommended_filters),
         "indexes": fresh.indexes or old.indexes,
     })
 
@@ -900,15 +1120,17 @@ def _discover_tables(
 
 def _build_table(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
-    conn_name: str, report: IntrospectReport,
+    conn_name: str, report: IntrospectReport, budget: Optional[_CountBudget] = None,
+    reads: Optional[_ReadBudget] = None, keys_unread: Optional[set] = None,
 ) -> Table:
     # columns: catalog first, probe fallback
-    cols, mode = _columns(dialect, runner, schema, table)
+    probe_sample: list = []
+    cols, mode = _columns(dialect, runner, schema, table, probe_sample=probe_sample)
     report.mode_per_capability.setdefault("columns", mode)
 
     # Estimate row count ONCE up front (a catalog stat — instant, zero scan). Reused for
     # the grain-probe size guard below AND for performance_hints, so we never fetch twice.
-    est_rows = _estimate_rows(dialect, runner, schema, table)
+    est_rows = _estimate_rows(dialect, runner, schema, table, budget)
 
     # grain: catalog PKs, else uniqueness probe (skipped on very large tables — see _grain)
     grain, gmode = _grain(dialect, runner, schema, table, cols, est_rows=est_rows)
@@ -920,6 +1142,12 @@ def _build_table(
             f"each id column. A composite/absent grain is expected for a fact table this "
             f"size; set it by hand if you know the key."
         )
+    unique_keys = _unique_keys(dialect, runner, schema, table, cols, grain, est_rows=est_rows)
+    if unique_keys is None:
+        # Unknown, not none: a refresh keeps the stored keys rather than read this as their removal.
+        unique_keys = []
+        if keys_unread is not None and cols:
+            keys_unread.add((schema, table))
     pk_set = set(grain)
     for c in cols:
         c.primary_key = c.name in pk_set
@@ -930,10 +1158,16 @@ def _build_table(
             c.sensitive = True
             report.sensitive_columns += 1
 
-    # One live sample → date encoding/timezone AND choice_field skeletons for low-cardinality
-    # coded columns (so catalog-mode coded columns get an enum skeleton the LLM labels, not
-    # just the probe-mode path).
-    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows)
+    # Value lists the catalog declares, on a table of any size; then one live sample (the probe's,
+    # in probe mode) → date encoding/timezone, personal data, and value lists read from the data on
+    # a small table.
+    declared = _apply_declared_values(dialect, runner, schema, table, cols)
+    _enrich_from_sample(dialect, runner, schema, table, cols, est_rows=est_rows, reads=reads,
+                        skip=declared.rejected, nocase=declared.nocase, report=report,
+                        sample=probe_sample if mode == "probe" else None)
+    for c in cols:
+        if c.choice_field and (_personal_column(c) or _personal_list(c)):
+            _clear_choice(c)  # its keys would be personal values written into the model
 
     column_groups = build.maybe_column_groups(cols)
     column_group_descriptions = build.column_group_descriptions(column_groups) if column_groups else {}
@@ -948,19 +1182,24 @@ def _build_table(
         )
 
     # On a large table, seed `recommended_filters` with the date/time columns — the natural
-    # way to narrow a scan. The query path's scan-risk warning then fires only when a query
-    # lacks a filter on one of these (and can name the column). Real index / partition /
-    # clustering keys are layered in per-dialect separately.
+    # way to narrow a scan, shown to the caller beside the table in `large_tables`. A seed, not a
+    # decision: the report lists it so the person building the model keeps the column a question
+    # would actually filter on. Real index / partition / clustering keys are layered in
+    # per-dialect separately.
     if perf and (perf.estimated_row_count or 0) >= _LARGE_TABLE_ROWS:
         date_cols = [c.name for c in cols if c.type in ("date", "timestamp", "time")]
         if 1 <= len(date_cols) <= _MAX_DATE_FILTER_COLS:
             perf.recommended_filters = date_cols
+        # Every large table, whatever the seed did: the question is which of its dates a question
+        # means, and a table with more dates than the seed takes still has one.
+        report.large_tables[table] = (perf.estimated_row_count, date_cols)
 
     return Table(
         name=table,
         schema=schema,
         storage_connection=conn_name,
         grain=grain,
+        unique_keys=unique_keys,
         description="",  # LLM enrichment fills this in
         column_groups=column_groups,
         column_group_descriptions=column_group_descriptions,
@@ -970,8 +1209,11 @@ def _build_table(
 
 
 def _columns(
-    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
+    *, probe_sample: Optional[list] = None,
 ) -> tuple[list[Column], str]:
+    """The columns and how they were read. In probe mode the probe's sample rows are put in
+    `probe_sample`, so enrichment reuses them instead of reading the table again."""
     sql = dialect.sql_columns(schema, table)
     # `_try` answers None for a FAILED read and [] for a table with no columns. One failure is
     # retried: on a wide build over a VPN or tunnel a single dropped connection otherwise fell through
@@ -989,12 +1231,15 @@ def _columns(
             cols.append(Column(name=r["column_name"], type=ctype, description=""))
         return cols, "catalog"
     # probe: header for names, sample for types
-    return _probe_columns(dialect, runner, schema, table), "probe"
+    pcols, sample = _probe_columns(dialect, runner, schema, table)
+    if probe_sample is not None:
+        probe_sample.extend(sample)
+    return pcols, "probe"
 
 
 def _probe_columns(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
-) -> list[Column]:
+) -> tuple[list[Column], list]:
     header = _try(runner, dialect.header_sql(schema, table)) or []
     names: list[str]
     if header and isinstance(header, list):
@@ -1004,30 +1249,76 @@ def _probe_columns(
     else:
         names = []
     sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
-    covers = _sample_covers_values(sample, None)  # no size estimate yet: only a whole-table read counts
     if not names and sample:
         names = list(sample[0].keys())
     cols: list[Column] = []
+    # Value lists come later, from `_enrich_from_sample`, as for a catalog-read table.
     for n in names:
         values = [row.get(n) for row in sample if row.get(n) not in (None, "")]
-        cols.append(Column(name=n, type=_infer_value_type(values), description="",
-                            choice_field=_maybe_choice(values) if covers else None))
-    return cols
+        cols.append(Column(name=n, type=_infer_value_type(values), description=""))
+    return cols, sample
+
+
+# The fallback counts run one table after another, each under the per-statement limit, so a catalog
+# of hundreds of views could spend hours on them. One budget per run bounds the total; tables past
+# it stay unknown, exactly as before the fallback existed.
+_COUNT_BUDGET_S = 600.0
+
+
+@dataclass
+class _CountBudget:
+    seconds_left: float
+    skipped: int = 0
+
+
+@dataclass
+class _ReadBudget:
+    left: int
+    skipped: int = 0
 
 
 def _estimate_rows(
-    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str,
+    budget: Optional[_CountBudget] = None,
 ) -> Optional[int]:
-    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan.
-    None when the dialect has no estimate query or the stat is missing/unparseable."""
+    """Row count from the catalog statistics (pg_class.reltuples, etc.) — instant, no scan — and,
+    when the catalog has no usable figure, an exact count instead (#451).
+
+    A view has no statistics on any engine: Redshift's `svv_table_info` lists only tables, and
+    Postgres reports `reltuples` 0 or -1 (by version) for a view or a table it has never analysed. Read as-is,
+    a fact view with millions of rows came back unknown (or as empty), so it never reached `large_tables` and
+    never got the `recommended_filters` the scan-risk check names. The count is a read-only query,
+    bounded by the same statement limit as every introspection read; if it is refused or runs out of
+    time the size stays unknown, as before. None also when the dialect deliberately offers no
+    estimate query at all."""
     q = dialect.sql_row_estimate(schema, table)
     if not q:
         return None
-    est = _try(runner, q)
-    if not est or est[0].get("estimated_rows") in (None, ""):
+    est = _rows_from(_try(runner, q))
+    if est is not None and est > 0:
+        return est
+    count_q = dialect.sql_row_count(schema, table)
+    if count_q and count_q != q:
+        # A distinct count was tried, so its answer replaces the catalog's: when it fails, the size
+        # is unknown, never the catalog's 0 (an unanalysed table with rows would read as empty).
+        if budget is not None and budget.seconds_left <= 0:
+            budget.skipped += 1
+            return None
+        started = time.monotonic()
+        try:
+            return _rows_from(_try(runner, count_q))
+        finally:
+            if budget is not None:
+                budget.seconds_left -= time.monotonic() - started
+    # The estimate query was itself the exact count (no catalog statistics on this engine).
+    return est if est is not None and est >= 0 else None
+
+
+def _rows_from(rows: Optional[list[dict]]) -> Optional[int]:
+    if not rows or rows[0].get("estimated_rows") in (None, ""):
         return None
     try:
-        return int(float(est[0]["estimated_rows"]))
+        return int(float(rows[0]["estimated_rows"]))
     except (ValueError, TypeError):
         return None
 
@@ -1064,9 +1355,203 @@ def _grain(
     return [], "probe"
 
 
+def _unique_keys(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+    grain: list[str], *, est_rows: Optional[int] = None,
+) -> Optional[list[list[str]]]:
+    """The table's unique keys other than its grain, in the column spelling `cols` uses, or None
+    when a catalog read or a data check failed and the keys are unknown.
+
+    Where the engine declares unique keys without enforcing them, a key is kept only when the data
+    bears it out, the way an unenforced foreign key is confirmed by overlap: a single-column key
+    whose non-null values are all distinct, on a table under the grain probe's size guard."""
+    sql = dialect.sql_unique_keys(schema, table)
+    if not sql:
+        return []
+    rows = _try(runner, sql)
+    if rows is None:
+        return None
+    if not rows:
+        return []
+    by_lower = {c.name.lower(): c.name for c in cols}
+    named: dict[str, list[str]] = {}
+    for r in rows:
+        name, col = r.get("constraint_name"), r.get("column_name")
+        if name in (None, ""):
+            continue
+        # An expression part has no column name; "" keeps the whole key out, not a shortened one.
+        named.setdefault(str(name), []).append(
+            "" if col in (None, "") else by_lower.get(str(col).lower(), ""))
+    grain_set = {g.lower() for g in grain}
+    keys: list[list[str]] = []
+    for key in named.values():
+        if not all(key) or len(set(key)) != len(key):
+            continue   # a column the table doesn't list (an expression, a hidden column)
+        if {k.lower() for k in key} == grain_set or any(set(k) == set(key) for k in keys):
+            continue
+        keys.append(key)
+    if dialect.unique_enforced:
+        return keys
+    if est_rows is not None and est_rows >= _GRAIN_PROBE_MAX_ROWS:
+        return []
+    kept = []
+    for key in keys:
+        if len(key) != 1:
+            continue
+        res = _try(runner, dialect.count_distinct_sql(schema, table, key[0]))
+        if res is None:
+            return None
+        if _all_distinct(res) is not None:
+            kept.append(key)
+    return kept
+
+
+def _distinct_rows(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, column: str,
+) -> Optional[int]:
+    """How many non-null rows `column` has when every one of their values is distinct, else None."""
+    return _all_distinct(_try(runner, dialect.count_distinct_sql(schema, table, column)))
+
+
+def _all_distinct(res: Optional[list[dict]]) -> Optional[int]:
+    """`_distinct_rows` read off a probe's result rows."""
+    if not res:
+        return None
+    try:
+        total = int(float(res[0].get("total", 0)))
+        distinct = int(float(res[0].get("distinct_count", 0)))
+        nulls = int(float(res[0].get("null_count", 0)))
+    except (ValueError, TypeError):
+        return None
+    filled = total - nulls
+    return filled if filled > 0 and distinct == filled else None
+
+
+def _endpoint(tables: list[Table], name: str, schema: Optional[str]) -> Optional[Table]:
+    """The modelled table a join end names. `name` may embed its schema (`legacy.users`); a join
+    that states a schema reads only that schema's table (or a schema-less one), never another's;
+    a name two schemas share, written with none, reads neither."""
+    want_schema, want = table_key(name, schema)
+    cands = [t for t in tables if table_key(t.name, t.schema_name)[1] == want]
+    if want_schema:
+        cands = [t for t in cands if table_key(t.name, t.schema_name)[0] in (want_schema, "")]
+    return cands[0] if len(cands) == 1 else None
+
+
+@dataclass
+class _ProbeBudget:
+    """The uniqueness probes left for one run, shared by every pass that spends them."""
+    left: int = _UNIQUE_PROBE_CAP
+    noted: bool = False
+
+
+def _suggest_data_unique(
+    dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
+) -> None:
+    """Check each join's many side on the data when no key settles it, and flag a join whose
+    values turn out unique for review. The label is left as it is: data that is unique today is not
+    a promise, so a person confirms the join is one-to-one (#511)."""
+    budget = budget if budget is not None else _ProbeBudget()
+    for r in rels:
+        hit = _many_side(r, tables)
+        if hit is None:
+            continue
+        if budget.left <= 0:
+            if not budget.noted:
+                budget.noted = True
+                report.notes.append(
+                    f"stopped checking joins' values for uniqueness after {_UNIQUE_PROBE_CAP} probes")
+            return
+        table, column = hit
+        budget.left -= 1
+        rows = _distinct_rows(dialect, runner, table.schema_name, table.name, column)
+        if rows is not None:
+            _flag_one_to_one(r, table, column, rows)
+
+
+def _many_side(r: Relationship, tables: list[Table]) -> Optional[tuple[Table, str]]:
+    """The table and column on the many side of a join whose one side is a key and whose many
+    side no key settles, when it is small enough to check on the data."""
+    if r.on or not (r.from_column and r.to_column) or r.relationship not in ("many_to_one", "one_to_many"):
+        return None
+    if _DATA_UNIQUE_NOTE in (r.description or ""):
+        return None
+    ft = _endpoint(tables, r.from_table, r.from_schema)
+    tt = _endpoint(tables, r.to_table, r.to_schema)
+    if ft is None or tt is None:
+        return None
+    one, many, col = (tt, ft, r.from_column) if r.relationship == "many_to_one" else (ft, tt, r.to_column)
+    one_col = r.to_column if r.relationship == "many_to_one" else r.from_column
+    if not one.unique_on([one_col]) or many.unique_on([col]):
+        return None
+    perf = many.performance_hints
+    if perf is None or perf.estimated_row_count is None or _too_big_to_probe(many):
+        return None   # a whole-table scan of a table of unknown size is not one to start blind
+    return many, col
+
+
+def _flag_one_to_one(r: Relationship, table: Table, column: str, rows: int) -> None:
+    note = f"values of {table.name}.{column} unique on {rows:,} rows; {_DATA_UNIQUE_NOTE}"
+    r.description = f"{r.description}; {note}" if r.description else note
+    r.review_state = "unreviewed"
+    r.signed_off_by = r.signed_off_at = r.signed_off_role = None
+
+
+def _engine_approved(r: Relationship) -> bool:
+    """A join introspection created and approved itself, which nobody has signed or edited since."""
+    return (r.review_state == "approved" and r.signed_off_by == "agami_introspect"
+            and r.signed_off_role == "system")
+
+
+def _key_reason(t: Table, cols: list[str]) -> str:
+    return "primary key" if [g.lower() for g in t.grain] == [c.lower() for c in cols] else "unique constraint"
+
+
+def _recheck_engine_joins(
+    dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
+    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None,
+) -> None:
+    """On a refresh, label each join the engine approved itself from the database's keys as they
+    are now, and list every one whose label that changes. A join a person signed off or edited is
+    never touched, nor one on a table whose keys this run couldn't read (`keys_unread`), and one
+    only the data says is one-to-one is flagged for review, not relabelled. A composite `on:` join
+    is labelled from all its columns; one that isn't plain column equalities is left alone."""
+    unread = {id(t) for t in keys_unread or []}
+    for r in rels:
+        pairs = _key_pairs(r, sg) if _engine_approved(r) else None
+        if not pairs:
+            continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
+        ft = _endpoint(tables, r.from_table, r.from_schema)
+        tt = _endpoint(tables, r.to_table, r.to_schema)
+        if ft is None or tt is None or id(ft) in unread or id(tt) in unread:
+            continue
+        card = build.infer_cardinality(ft, tt, fc, tc)
+        if card == r.relationship:
+            continue
+        why = ", ".join(sorted({_key_reason(t, c) for t, c in ((ft, fc), (tt, tc))
+                                if t.unique_on(c)})) or "no key on the join columns"
+        label = (f"{r.from_table}.{r.from_column} → {r.to_table}.{r.to_column}"
+                 if r.from_column else _join_label(r, sg))
+        report.changes.setdefault(_qualified(ft), {}).setdefault(
+            "joins corrected from the database's constraints", []).append(
+            f"{label}: {r.relationship} → {card} ({why})")
+        r.relationship = card
+    engine = [r for r in rels if _engine_approved(r)]
+    _suggest_data_unique(dialect, runner, engine, tables, report, budget)
+    for r in engine:
+        if not _engine_approved(r):
+            ft = _endpoint(tables, r.from_table, r.from_schema)
+            report.changes.setdefault(_qualified(ft) if ft else r.from_table, {}).setdefault(
+                "joins to review", []).append(
+                f"{r.from_table}.{r.from_column} -> {r.to_table}.{r.to_column} (values unique; looks one-to-one)")
+
+
 def _build_relationships(
     dialect: D.Dialect, runner: Runner, pairs: list[tuple[Optional[str], str]],
-    tables: list[Table], grain_by_table: dict[str, set[str]], report: IntrospectReport,
+    tables: list[Table], report: IntrospectReport,
     pp: Optional[Path] = None,
 ) -> list[Relationship]:
     # catalog FKs per schema
@@ -1080,11 +1565,22 @@ def _build_relationships(
                 catalog_ok = True
                 catalog_fks.extend(rows)
     else:
+        unpaired: list[str] = []
         for s in (schemas or {None}):
             rows = _try(runner, dialect.sql_foreign_keys(s)) if s else None
+            fallback = dialect.sql_foreign_keys_unpaired(s) if s and rows is None else None
+            if fallback:
+                rows = _try(runner, fallback)
+                if rows is not None:
+                    unpaired.append(s)
+                    rows = _single_column_fks(rows, report)
             if rows is not None:
                 catalog_ok = True
                 catalog_fks.extend(rows)
+        if unpaired:
+            report.notes.append(
+                f"foreign keys in {', '.join(sorted(unpaired))} read with the older catalog query: this "
+                "database's catalog has no column positions for them, so only single-column keys were kept")
 
     tables_by_name: dict[str, list[Table]] = {}
     for t in tables:
@@ -1095,12 +1591,16 @@ def _build_relationships(
     outside_model = 0
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
-        _fk_step = max(1, len(catalog_fks) // 10)   # ~10 heartbeat lines over the (slow) FK pass
-        for _fi, fk in enumerate(catalog_fks, 1):
-            if _fi % _fk_step == 0 or _fi == len(catalog_fks):
-                _progress(pp, f"relationships: declared FK {_fi}/{len(catalog_fks)}")
-            ft, fc, tt, tc = fk.get("from_table"), fk.get("from_column"), fk.get("to_table"), fk.get("to_column")
-            if not (ft and fc and tt and tc):
+        fk_keys = _fk_groups(catalog_fks)
+        _fk_step = max(1, len(fk_keys) // 10)   # ~10 heartbeat lines over the (slow) FK pass
+        for _fi, (key_rows, grouped) in enumerate(fk_keys, 1):
+            if _fi % _fk_step == 0 or _fi == len(fk_keys):
+                _progress(pp, f"relationships: declared FK {_fi}/{len(fk_keys)}")
+            fk = key_rows[0]
+            ft, tt = fk.get("from_table"), fk.get("to_table")
+            fc = [r.get("from_column") for r in key_rows]
+            tc = [r.get("to_column") for r in key_rows]
+            if not (ft and tt and all(fc) and all(tc)):
                 continue
             # The catalog lists every FK in the schema, including ones to tables the prune step
             # dropped or to a schema not introspected; a join to a table the model lacks is unusable.
@@ -1113,7 +1613,9 @@ def _build_relationships(
             from_schema = fk.get("from_schema") or _schema_of(ft, tables_by_name)
             to_schema = fk.get("to_schema") or _schema_of(tt, tables_by_name, prefer=from_schema, report=report)
             cross = bool(from_schema and to_schema and from_schema != to_schema)
-            card = build.infer_cardinality(ft, tt, [fc], [tc], grain_by_table)
+            fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
+            tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
+            card = build.infer_cardinality(fobj, tobj, fc, tc)   # every column of a composite key
             # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap.
             # The catalog's FK is a *declaration*, not a guarantee, so probe the data: if the
             # child values actually live in the parent key, treat it like an enforced FK
@@ -1123,16 +1625,17 @@ def _build_relationships(
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
             overlap_confirmed = False
             if not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP:
-                fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
-                tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
                 # Skip the scan on huge FROM tables (the slow case on Redshift fact tables) —
                 # leave the declared FK inferred/unreviewed rather than full-scan to confirm it.
                 if fobj is not None and tobj is not None and not _too_big_to_probe(fobj):
                     overlap_probes += 1
-                    if _overlaps(dialect, runner, fobj, fc, tobj, tc):
+                    one = len(fc) == 1   # a single column keeps the probe it always had
+                    if _overlaps(dialect, runner, fobj, fc[0] if one else fc, tobj, tc[0] if one else tc):
                         confidence = "confirmed"
                         overlap_confirmed = True
-            trusted = dialect.fk_enforced or overlap_confirmed
+            # A key whose rows came without a constraint name can't be told from separate keys,
+            # and used alone each column of a composite one repeats rows: never trusted (#510).
+            trusted = (dialect.fk_enforced or overlap_confirmed) and grouped
             # trusted joins are sound structure -> auto-approve with a system sign-off (don't
             # flood the review queue); unconfirmed ones need a glance.
             # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
@@ -1145,11 +1648,15 @@ def _build_relationships(
                     desc = "declared FK, confirmed by value-overlap probe"
             else:
                 kw = {"review_state": "unreviewed"}
+            if not grouped:
+                desc = _UNGROUPED_FK
             if cross:
                 desc = f"crosses schemas: {from_schema} → {to_schema} (declared FK) — confirm it belongs in this model"
                 report.notes.append(f"cross-schema relationship: {from_schema}.{ft} → {to_schema}.{tt} (declared FK)")
+            ends = ({"from_column": fc[0], "to_column": tc[0]} if len(fc) == 1
+                    else {"on": _composite_on(dialect, ft, fc, tt, tc)})
             rels.append(Relationship(
-                from_table=ft, from_column=fc, to_table=tt, to_column=tc,
+                from_table=ft, to_table=tt, **ends,
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
             ))
@@ -1157,6 +1664,10 @@ def _build_relationships(
             report.notes.append(
                 f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
                 "remaining declared FKs left unreviewed for sign-off on /agami-model")
+        if any(not grouped for _, grouped in fk_keys):
+            report.notes.append(
+                "the catalog didn't say which foreign-key columns belong to one key, so joins with "
+                "several columns between the same two tables were kept apart and left for review")
         if outside_model:
             report.notes.append(
                 f"skipped {outside_model} declared foreign key(s) to tables outside the model "
@@ -1169,27 +1680,110 @@ def _build_relationships(
         report.notes.append(
             "no declared foreign keys were visible in the catalog — relationships are inferred "
             "from column names and values; review them before relying on them")
-        rels.extend(_probe_relationships(dialect, runner, tables, grain_by_table, report))
+        rels.extend(_probe_relationships(dialect, runner, tables, report))
 
     # Tier 2 — name-based reference promotion. A `<x>_id` column whose target table is
     # identifiable by name becomes an inferred/unreviewed join even WITHOUT value overlap
     # (which under-detects on sparse data). Conservative + type-checked, and `unreviewed` so
     # it's discoverable but never asserted as fact — the user signs it off (or it self-approves
     # through use). This is what lifts a sparse demo from ~9 joins toward the real graph.
-    rels.extend(_promote_reference_fields(tables, grain_by_table, rels, report))
+    rels.extend(_promote_reference_fields(tables, rels, report, _sqlglot_name(dialect)))
     return rels
 
 
-def _regroup_columns_with_references(tables: list[Table], rels: list[Relationship]) -> None:
+_UNGROUPED_FK = ("declared FK column; the catalog didn't say which columns form one key, so the key's "
+                 "columns couldn't be grouped — if it spans several columns, join on all of them")
+
+
+def _single_column_fks(rows: list[dict], report: IntrospectReport) -> list[dict]:
+    """The older FK query's rows, one per single-column key. Its rows pair every column of a
+    composite key with every referenced column, so nothing in them says which pairs are right: such
+    a key is left out, with a note, rather than joined on a guess."""
+    keys: dict[tuple, list[dict]] = {}
+    for r in rows:
+        name = r.get("constraint_name")
+        # Without a name, every key between the same two tables may be one composite key.
+        tail = (str(name),) if name is not None and str(name) != "" else (r.get("to_schema"), r.get("to_table"))
+        keys.setdefault((r.get("from_schema"), r.get("from_table"), *tail), []).append(r)
+    out: list[dict] = []
+    for k, g in keys.items():
+        label = f"{k[1]}.{k[2]}" if len(k) == 3 else f"{k[1]} → {k[3]}"
+        # DuckDB's constraint_column_usage lists the key's own columns, not the ones it references.
+        if any((r.get("from_schema"), r.get("from_table"), r.get("from_column"))
+               == (r.get("to_schema"), r.get("to_table"), r.get("to_column")) for r in g):
+            report.notes.append(f"foreign key {label} not read: the catalog names its own column as the "
+                                "one it references")
+        elif len({(r.get("from_column"), r.get("to_schema"), r.get("to_table"), r.get("to_column"))
+                  for r in g}) == 1:
+            out.append({**g[0], "key_ordinal": 1})
+        elif len({r.get("from_column") for r in g}) > 1:
+            report.notes.append(f"composite foreign key {label} not read: this database's catalog doesn't "
+                                "say how its columns pair")
+        else:
+            report.notes.append(f"foreign key {label} not read: the catalog names more than one column it "
+                                "references")
+    return out
+
+
+def _fk_groups(rows: list[dict]) -> list[tuple[list[dict], bool]]:
+    """The catalog's FK rows as one entry per key, in catalog order: its rows in key order, and
+    whether they could be grouped. A row carries its constraint's name and its column's position in
+    the key; grouped by (from_schema, from_table, constraint_name), a key over several columns is one
+    entry. A row with no constraint name stands alone, and is ungroupable when another such row
+    joins the same two tables — it may be one column of a composite key."""
+    def ordinal(r: dict) -> float:
+        try:
+            return float(r.get("key_ordinal"))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def tables(r: dict) -> tuple:
+        return (r.get("from_schema"), r.get("from_table"), r.get("to_schema"), r.get("to_table"))
+
+    entries: dict[tuple, list[dict]] = {}
+    for i, r in enumerate(rows):
+        name = r.get("constraint_name")
+        named = name is not None and str(name) != ""
+        entries.setdefault((r.get("from_schema"), r.get("from_table"), str(name)) if named else (i,), []).append(r)
+    loose = [g[0] for k, g in entries.items() if len(k) == 1]
+    per_pair: dict[tuple, int] = {}
+    for r in loose:
+        per_pair[tables(r)] = per_pair.get(tables(r), 0) + 1
+    return [(sorted(g, key=ordinal), True) if len(k) > 1 else (g, per_pair[tables(g[0])] == 1)
+            for k, g in entries.items()]
+
+
+# Names written unquoted in a composite join: the spelling an unquoted name folds to on the engine.
+_LOWER_IDENT = re.compile(r"[a-z_][a-z0-9_]*")
+_UPPER_IDENT = re.compile(r"[A-Z_][A-Z0-9_]*")
+_FOLDS_UPPER = {"Snowflake", "Oracle"}
+_FOLDS_LOWER = {"PostgreSQL", "Redshift", "Trino"}
+
+
+def _composite_on(dialect: D.Dialect, ft: str, fc: list[str], tt: str, tc: list[str]) -> str:
+    """A composite key's join condition, `ft.a = tt.x AND ft.b = tt.y`, on bare table names (the
+    receipt matches a written join to it by bare name). A name an unquoted spelling wouldn't reach
+    on this engine, or a word it reserves (`order`), is quoted."""
+    def q(name: str) -> str:
+        plain = (bool(_UPPER_IDENT.fullmatch(name)) if dialect.name in _FOLDS_UPPER
+                 else bool(_LOWER_IDENT.fullmatch(name)) if dialect.name in _FOLDS_LOWER
+                 else bool(_LOWER_IDENT.fullmatch(name) or _UPPER_IDENT.fullmatch(name)))
+        return name if plain and not dialect.reserves(name) else dialect.quote_ident(name)
+    return " AND ".join(f"{q(ft)}.{q(f)} = {q(tt)}.{q(t)}" for f, t in zip(fc, tc))
+
+
+def _regroup_columns_with_references(
+    tables: list[Table], rels: list[Relationship], dialect: Optional[str] = None,
+) -> None:
     """Re-derive column_groups (+ descriptions) for deep tables now that relationships exist, so
-    each table's FK (FROM-side) columns land in the `references` group. Mutates `tables` in place;
-    a no-op for narrow tables (no groups) and tables with no outgoing simple-FK joins. Schema-aware
-    so a same-named table in another schema doesn't borrow the wrong references."""
+    each table's FK (FROM-side) columns land in the `references` group — every column of a composite
+    key's `on:` join too. Mutates `tables` in place; a no-op for narrow tables (no groups) and tables
+    with no outgoing column-keyed joins. Schema-aware so a same-named table in another schema doesn't
+    borrow the wrong references."""
     ref_by_table: dict[tuple, set[str]] = {}
     for r in rels:
-        if not r.from_column:   # skip on:-expression joins (no single FROM column)
-            continue
-        ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(r.from_column)
+        for fc, _tc in _column_pairs(r, dialect) or []:   # an `on:` on an expression names no column
+            ref_by_table.setdefault((r.from_schema, bare_name(r.from_table)), set()).add(fc)
     for t in tables:
         if not t.column_groups:   # only deep tables carry groups
             continue
@@ -1227,8 +1821,8 @@ def _infer_reference_target(stem: str, by_name: dict, from_table: Table) -> Opti
 
 
 def _promote_reference_fields(
-    tables: list[Table], grain_by_table: dict[str, set[str]],
-    existing: list[Relationship], report: IntrospectReport,
+    tables: list[Table], existing: list[Relationship], report: IntrospectReport,
+    dialect: Optional[str] = None,
 ) -> list[Relationship]:
     """Promote `<x>_id` reference columns to inferred/unreviewed joins when the target table is
     identifiable by name and key-type-compatible — never requiring value overlap. Conservative:
@@ -1236,11 +1830,12 @@ def _promote_reference_fields(
     by_name: dict[str, list[Table]] = {}
     for t in tables:
         by_name.setdefault(t.name.lower(), []).append(t)
-    # schema-aware key so a same-named table in another schema doesn't suppress promotion here
-    seen = {(r.from_schema, r.from_table, r.from_column) for r in existing}
+    # schema-aware key so a same-named table in another schema doesn't suppress promotion here; every
+    # column of a composite key counts, or one of them would be promoted to a join of its own
+    seen = {(r.from_schema, r.from_table, fc) for r in existing for fc, _tc in _column_pairs(r, dialect) or []}
     out: list[Relationship] = []
     for t in tables:
-        grain = set(t.grain)   # THIS table's key (grain_by_table is keyed by bare name → ambiguous)
+        grain = set(t.grain)
         for c in t.columns:
             mo = _REF_ID_RE.match(c.name)
             if not mo or c.primary_key or c.name in grain or (t.schema_name, t.name, c.name) in seen:
@@ -1252,7 +1847,7 @@ def _promote_reference_fields(
             to_pk = next((tc for tc in target.columns if tc.name == to_col), None)
             if to_pk is not None and to_pk.type != c.type:   # key-type mismatch → not a real ref
                 continue
-            card = build.infer_cardinality(t.name, target.name, [c.name], [to_col], grain_by_table)
+            card = build.infer_cardinality(t, target, [c.name], [to_col])
             out.append(Relationship(
                 from_table=t.name, from_column=c.name, to_table=target.name, to_column=to_col,
                 from_schema=t.schema_name, to_schema=target.schema_name,
@@ -1310,16 +1905,14 @@ def _pick_target(cands: list[Table], prefer: Optional[str]) -> Optional[Table]:
 
 
 def _probe_relationships(
-    dialect: D.Dialect, runner: Runner, tables: list[Table],
-    grain_by_table: dict[str, set[str]], report: IntrospectReport,
+    dialect: D.Dialect, runner: Runner, tables: list[Table], report: IntrospectReport,
 ) -> list[Relationship]:
     tables_by_name: dict[str, list[Table]] = {}
     for t in tables:
         tables_by_name.setdefault(t.name, []).append(t)
-    # candidate target keys: single-column grains. (grain_by_table is bare-name-keyed, so its
-    # key column is best-effort under a cross-schema name clash — the actual target Table is
-    # resolved schema-aware below, which is what the overlap probe + schema stamp depend on.)
-    targets = {name: next(iter(g)) for name, g in grain_by_table.items() if len(g) == 1}
+    # candidate targets: names with a single-column grain; the key column is read off the Table
+    # resolved schema-aware below, so a same-named table in another schema can't lend its key.
+    targets = [name for name, ts in tables_by_name.items() if any(len(x.grain) == 1 for x in ts)]
     rels: list[Relationship] = []
     for t in tables:
         for c in t.columns:
@@ -1328,14 +1921,15 @@ def _probe_relationships(
                 continue
             stem = low[:-3] if low.endswith("_id") else None
             # match a target table whose name resembles the stem
-            for tgt_name, tgt_col in targets.items():
+            for tgt_name in targets:
                 if tgt_name == t.name:
                     continue
                 tn = tgt_name.lower()
                 if stem and (stem in tn or tn in stem or tn.rstrip("s") == stem.rstrip("s")):
                     tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
-                    if tgt is None:
+                    if tgt is None or len(tgt.grain) != 1:
                         continue
+                    tgt_col = tgt.grain[0]
                     if _overlaps(dialect, runner, t, c.name, tgt, tgt_col):
                         cross = bool(t.schema_name and tgt.schema_name and t.schema_name != tgt.schema_name)
                         desc = "inferred by name+type match + value-overlap probe"
@@ -1348,8 +1942,7 @@ def _probe_relationships(
                             from_table=t.name, from_column=c.name,
                             to_table=tgt_name, to_column=tgt_col,
                             from_schema=t.schema_name, to_schema=tgt.schema_name,
-                            relationship=build.infer_cardinality(
-                                t.name, tgt_name, [c.name], [tgt_col], grain_by_table),
+                            relationship=build.infer_cardinality(t, tgt, [c.name], [tgt_col]),
                             join_type="LEFT", confidence="proposed", review_state="unreviewed",
                             description=desc,
                         ))
@@ -1365,23 +1958,34 @@ def _too_big_to_probe(t: Table) -> bool:
     return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
-def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> str:
+def overlap_sql(dialect: D.Dialect, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
     `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
     join check, which hands every probe to the execution tier, emits exactly the probe introspection
     already trusts rather than a second spelling of it.
 
     The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
-    engines too; it used to apply only where the row-limit keyword was `LIMIT`."""
+    engines too; it used to apply only where the row-limit keyword was `LIMIT`.
+
+    A key over several columns (lists) samples their value combinations and matches all of them."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
-    col_f = dialect.quote_ident(fc)
-    col_t = dialect.quote_ident(tc)
-    sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
-    return (
-        f"SELECT COUNT(*) AS matched FROM ({sample}) src "
-        f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
-    )
+    if isinstance(fc, str) and isinstance(tc, str):
+        col_f = dialect.quote_ident(fc)
+        col_t = dialect.quote_ident(tc)
+        sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
+        return (
+            f"SELECT COUNT(*) AS matched FROM ({sample}) src "
+            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
+        )
+    fcs = [fc] if isinstance(fc, str) else fc
+    tcs = [tc] if isinstance(tc, str) else tc
+    cols_f = [dialect.quote_ident(c) for c in fcs]
+    picked = ", ".join(f"{c} AS v{i}" for i, c in enumerate(cols_f))
+    present = " AND ".join(f"{c} IS NOT NULL" for c in cols_f)
+    match = " AND ".join(f"t.{dialect.quote_ident(c)} = src.v{i}" for i, c in enumerate(tcs))
+    sample = dialect.limited(f"SELECT DISTINCT {picked} FROM {fq_from} WHERE {present}", 50)
+    return f"SELECT COUNT(*) AS matched FROM ({sample}) src WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE {match})"
 
 
 def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc: str) -> str:
@@ -1403,7 +2007,7 @@ def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc:
     )
 
 
-def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
+def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> bool:
     """Sample from-column values and check they exist in the target key."""
     res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
     if not res:
@@ -1447,6 +2051,38 @@ def _looks_time_named(name: str) -> bool:
     return bool(_DATE_NAME_RE.search(name or ""))
 
 
+# A whole value that is an ISO date or timestamp, nothing before or after it.
+_STRICT_ISO_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-](\d{2}):?(\d{2}))?)?$")
+# A text column whose name says nothing about dates is claimed only on this much evidence.
+_ISO_TEXT_MIN_VALUES = 20
+
+
+def _is_strict_iso(value: str) -> bool:
+    m = _STRICT_ISO_RE.match(value)
+    if not m:
+        return False
+    y, mo, d, hh, mi, ss, oh, om = m.groups()
+    try:
+        date(int(y), int(mo), int(d))
+    except ValueError:
+        return False  # 2024-13-45 has the shape but is no date
+    if oh is not None and (int(oh) > 23 or int(om) > 59):
+        return False  # +25:00 / +05:99 is no UTC offset
+    return hh is None or (int(hh) < 24 and int(mi) < 60 and (ss is None or int(ss) < 60))
+
+
+def _sniff_iso_text(values: list) -> tuple[Optional[str], Optional[str]]:
+    """(date_format, timezone) for a text column whose name is not date-like: iso8601 only when
+    at least _ISO_TEXT_MIN_VALUES sampled values are present and every one is a real ISO date or
+    timestamp. Without the name to go on, a single version string or note rules the column out."""
+    vals = [str(v).strip() for v in values if v not in (None, "")]
+    if len(vals) < _ISO_TEXT_MIN_VALUES or not all(_is_strict_iso(v) for v in vals):
+        return (None, None)
+    return ("iso8601", "offset-aware" if any(_OFFSET_RE.search(v) for v in vals) else None)
+
+
 def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Optional[str]]:
     """Sniff a column's date storage encoding + timezone from sample values, returning
     (date_format, timezone). Conservative — an encoded date (epoch/yyyymmdd/iso) is only
@@ -1481,9 +2117,9 @@ def _sniff_date(name: str, ctype: str, values: list) -> tuple[Optional[str], Opt
     return (None, None)
 
 
-# A value list is only as complete as the rows it was built from. The sample is the first
-# SAMPLE_ROWS rows the engine returns — not a fair draw — so a list is built only when that is the
-# whole table, or the catalog says the table is small enough that its first rows are most of it.
+# A value list read from the data is a DISTINCT over the whole column, so it is complete; it is
+# still read only on a table small enough for that to be cheap: the sample was the whole table, or
+# the catalog says the table is small.
 _CHOICE_FULL_TABLE_MAX_ROWS = SAMPLE_ROWS * 20
 
 
@@ -1496,42 +2132,61 @@ def _sample_covers_values(sample: list, est_rows: Optional[int]) -> bool:
 
 def _enrich_from_sample(
     dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
-    *, est_rows: Optional[int] = None,
+    *, est_rows: Optional[int] = None, reads: Optional[_ReadBudget] = None,
+    skip: frozenset[str] | set[str] = frozenset(), nocase: frozenset[str] | set[str] = frozenset(),
+    report: Optional[IntrospectReport] = None, sample: Optional[list] = None,
 ) -> None:
     """ONE live sample → (a) date_format/timezone on date-candidate columns, and
-    (b) a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns (the LLM
-    enrichment fills the labels). (b) is the catalog-mode counterpart of probe mode's
-    `_maybe_choice` — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
-    `severity`) never get an enum skeleton, so the decode can only ever live in prose."""
+    (b) on a small table, a `choice_field` skeleton `{value: ""}` on low-cardinality CODED columns
+    the catalog declared nothing for (the LLM enrichment fills the labels), read with one bounded
+    DISTINCT per column — without it, a catalog DB's coded columns (e.g. a ServiceNow integer
+    `severity`) never get an enum skeleton, so the decode can only ever live in prose. `skip` names
+    (lowercased) the columns whose declared list was rejected: they get no list at all."""
     date_cands = [c for c in cols if c.type in ("date", "timestamp", "time")
                   or (c.type in ("integer", "decimal", "string") and _looks_time_named(c.name))]
-    # choice candidates: codeable columns with no choice_field yet, that aren't keys, dates,
-    # or free-text-ish. A short integer/string column with few distinct values is an enum.
-    # Exclude reference-named `*_id`/`sys_id` columns by NAME: introspection never populates
-    # Column.foreign_key, so that guard alone wouldn't catch a low-cardinality `dealer_id`
-    # (few dealers) — which is a JOIN target, not an enum to decode.
-    choice_cands = [c for c in cols
-                    if c.choice_field is None and not c.primary_key and c.foreign_key is None
-                    and c.type in ("integer", "string") and not _looks_time_named(c.name)
-                    and not _NOT_CHOICE_NAME_RE.search(c.name)]
-    if not date_cands and not choice_cands:
+    iso_text_cands = [c for c in cols if c.type == "string" and not _looks_time_named(c.name)]
+    choice_cands = [c for c in cols if _data_choice_candidate(c) and c.name.lower() not in skip]
+    # An integer column too: phone numbers stored as digits (and probe mode types digit text so).
+    pii_cands = [c for c in cols if c.type in ("string", "json", "date", "timestamp")
+                 or (c.type == "integer" and not c.primary_key and not _looks_time_named(c.name))]
+    if not date_cands and not choice_cands and not iso_text_cands and not pii_cands:
         return
-    sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
+    if sample is None:
+        sample = _try(runner, dialect.sample_sql(schema, table, SAMPLE_ROWS)) or []
     if not sample:
         return
+    _pii_from_sample(schema, table, pii_cands, sample, report)
     for c in date_cands:
         df, tz = _sniff_date(c.name, c.type, [row.get(c.name) for row in sample])
         if df:
             c.date_format = df
         if tz:
             c.timezone = tz
+    for c in iso_text_cands:
+        df, tz = _sniff_iso_text([row.get(c.name) for row in sample])
+        if df:
+            c.date_format = df
+        if tz:
+            c.timezone = tz
+    # a column of dates is a date, not a list of codes to decode; a personal one is never listed
+    choice_cands = [c for c in choice_cands if not c.date_format and not _personal_column(c)]
     if not _sample_covers_values(sample, est_rows):
-        choice_cands = []  # first rows of a big table: a list here would state values it never saw
+        choice_cands = []  # a big table: DISTINCT would scan it, and a partial list would mislead
     for c in choice_cands:
-        ch = _maybe_choice([row.get(c.name) for row in sample])
+        if reads is not None:
+            if reads.left <= 0:
+                reads.skipped += 1
+                continue
+            reads.left -= 1
+        rows = _try(runner, dialect.distinct_sql(schema, table, c.name, ENUM_MAX_DISTINCT + 1))
+        if rows is None or len(rows) > ENUM_MAX_DISTINCT:
+            continue  # more values than a list holds: none, rather than an incomplete one
+        seen = sum(1 for row in sample if row.get(c.name) not in (None, ""))
+        ch = _maybe_choice([r.get("v") for r in rows], rows=seen)
         # only genuinely code-like: skip long free-text values (names, descriptions, ids).
         if ch and all(len(str(k)) <= 40 for k in ch):
-            c.choice_field = ch
+            _set_choice(c, ch, case_insensitive=dialect.case_insensitive_compare or c.name.lower() in nocase,
+                        accents=dialect.accent_insensitive_compare)
     # Deterministic descriptions for universal coded formats (currency/country/timezone/locale) —
     # fills a column the LLM would otherwise leave `ai_unknown`, on any database. Only when blank.
     for c in cols:
@@ -1541,6 +2196,355 @@ def _enrich_from_sample(
         if cd:
             c.description = cd
             c.description_source = "metadata"  # authoritative deterministic fact (not an LLM guess)
+
+
+def _pii_from_sample(
+    schema: Optional[str], table: str, cols: list[Column], sample: list[dict],
+    report: Optional[IntrospectReport],
+) -> None:
+    """Flag or list personal data from the sampled VALUES: email-shaped values and JSON keys
+    flag the column, phone- and birth-date-shaped values list it as suspected. Only reasons
+    and key paths are recorded — never a sampled value."""
+    for c in cols:
+        values = [row.get(c.name) for row in sample]
+        paths = pii.json_pii_paths(table, values) if c.type in ("string", "json") else []
+        flag_note = None
+        if paths:
+            caveat = pii.json_pii_caveat(paths)
+            if caveat not in c.caveats:
+                c.caveats = [*c.caveats, caveat]
+            flag_note = f"{table}.{c.name}: flagged sensitive — JSON keys hold personal data ({', '.join(paths)})"
+        elif c.type == "string" and not c.sensitive and pii.looks_like_emails(values):
+            flag_note = f"{table}.{c.name}: flagged sensitive — its sampled values are email addresses"
+        if flag_note:
+            if not c.sensitive:
+                c.sensitive = True
+                if report is not None:
+                    report.sensitive_columns += 1
+            if report is not None:
+                report.notes.append(flag_note)
+                report.sample_findings.append((flag_note, (schema, table, c.name.lower())))
+            continue
+        if c.sensitive:
+            continue
+        caveat = pii.value_suspect_caveat(c.name, c.type, values)
+        if caveat:
+            if caveat not in c.caveats:
+                c.caveats = [*c.caveats, caveat]
+            if report is not None:
+                text = f"{table}.{c.name} ({pii.VALUE_SUSPECT_CAVEATS[caveat]})"
+                report.suspected_columns.append(text)
+                report.sample_findings.append((text, (schema, table, c.name.lower())))
+
+
+# Keys, surrogate keys and years: low-cardinality on a small table, never codes to decode.
+_NOT_DATA_CHOICE_NAME_RE = re.compile(r"_(key|sk|fk)$|(^|_)year$", re.IGNORECASE)
+
+
+def _data_choice_candidate(c: Column) -> bool:
+    """A column whose values may be read from the data into a list: a codeable column with no list
+    yet that isn't a key, a measure, a date or a year. Reference-named `*_id` columns are excluded by
+    NAME: introspection never populates Column.foreign_key, so that guard alone wouldn't catch a
+    low-cardinality `dealer_id` (few dealers) — a JOIN target, not an enum to decode."""
+    return (c.choice_field is None and not c.primary_key and c.foreign_key is None
+            and c.type in ("integer", "string")
+            and c.aggregation not in ("additive", "averageable")
+            and not _looks_time_named(c.name)
+            and not _NOT_CHOICE_NAME_RE.search(c.name)
+            and not _NOT_DATA_CHOICE_NAME_RE.search(c.name))
+
+
+def _set_choice(
+    c: Column, choice: dict[str, str], *, case_insensitive: bool = False, accents: bool = False,
+) -> None:
+    c.choice_field = choice
+    notes = [_lookalike_caveat(list(choice))]
+    if case_insensitive:
+        notes.append(_case_insensitive_caveat(list(choice), accents=accents))
+    for note in notes:
+        if note and note not in c.caveats:
+            c.caveats.append(note)
+
+
+def _case_insensitive_caveat(values: list[str], *, accents: bool = False) -> Optional[str]:
+    """On an engine that compares strings ignoring case, a listed value also finds its other
+    capitalisations (and DISTINCT returns only one of them), so the list is not every spelling."""
+    v = next((v for v in values if any(ch.isalpha() for ch in v)), None)
+    if v is None:
+        return None
+    if accents:
+        return (f"this database compares values case- and accent-insensitively: '{v}' also matches "
+                "other capitalisations and accented spellings")
+    return f"this database compares values case-insensitively: '{v}' also matches other capitalisations"
+
+
+def _lookalike_caveat(values: list[str]) -> Optional[str]:
+    """A caveat naming the stored values that differ only by spacing or case: a query must match the
+    one it means exactly, and 'Open' finds none of the 'Open ' rows."""
+    groups: dict[str, list[str]] = {}
+    for v in values:
+        groups.setdefault(" ".join(v.split()).casefold(), []).append(v)
+    clashes = [", ".join(f"'{v}'" for v in g) for g in groups.values() if len(g) > 1]
+    if not clashes:
+        return None
+    return f"values differ only by spacing or case: {'; '.join(clashes)} — match them exactly"
+
+
+@dataclass
+class _Declared:
+    values: dict[str, list[str]]  # lowercased column name -> the values declared for it
+    rejected: set[str]            # a declaration was found but no list can be kept: none at all
+    checked: set[str]             # the list came from a CHECK, so it compares as the column does
+    nocase: set[str]              # SQLite columns declared COLLATE NOCASE
+
+
+def _apply_declared_values(
+    dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str, cols: list[Column],
+) -> _Declared:
+    """A `choice_field` skeleton, in declared order, on each column whose values the catalog declares.
+    A list with a value the column's type can't hold is rejected, so the model stays writable."""
+    from .validator import _value_matches_type
+
+    declared = _declared_values(dialect, runner, schema, table)
+    # Declarations are matched by lowercased name, so with both `status` and "STATUS" on one table
+    # neither can be told apart: no declared list for either, and the data step may read each.
+    folded = [c.name.lower() for c in cols]
+    collide = {k for k in folded if folded.count(k) > 1}
+    declared.rejected -= collide
+    for c in cols:
+        key = c.name.lower()
+        values = declared.values.get(key)
+        if not values or c.choice_field is not None or key in collide:
+            continue
+        if not all(_value_matches_type(v, c.type) for v in values):
+            declared.rejected.add(key)
+            continue
+        _set_choice(c, {v: "" for v in values}, case_insensitive=key in declared.checked and (
+            dialect.case_insensitive_compare or key in declared.nocase),
+            accents=dialect.accent_insensitive_compare)
+    return declared
+
+
+def _declared_values(dialect: D.Dialect, runner: Runner, schema: Optional[str], table: str) -> _Declared:
+    """The values each column's enum type or a simple CHECK constraint allows.
+
+    Catalog reads only, so they run on a table of any size. A column two constraints give different
+    lists, or more than DECLARED_MAX_VALUES values, is rejected: it gets no list, not even one read
+    from the data, since the data would show only the values in use."""
+    found: dict[str, list[str]] = {}
+    clash: set[str] = set()
+    checked: set[str] = set()
+    nocase: set[str] = set()
+
+    def put(name: str, values: list[str]) -> None:
+        values = list(dict.fromkeys(v for v in values if v != ""))
+        key = name.lower()
+        if key in found and found[key] != values:
+            clash.add(key)
+        found.setdefault(key, values)
+
+    q = dialect.sql_enum_values(schema, table)
+    if q:
+        per: dict[str, list[str]] = {}
+        for r in _try(runner, q) or []:
+            name = r.get("column_name")
+            if not name:
+                continue
+            if r.get("enum_value") is not None:
+                per.setdefault(name, []).append(str(r.get("enum_value")))
+            elif r.get("column_type"):
+                per[name] = _enum_type_values(str(r.get("column_type")))
+        for name, values in per.items():
+            put(name, values)
+    q = dialect.sql_check_constraints(schema, table)
+    if q:
+        rows = _try(runner, q)
+        fallback = dialect.sql_check_constraints_fallback(schema, table)
+        if rows is None and fallback:
+            rows = _try(runner, fallback)
+        for r in rows or []:
+            text = str(r.get("check_clause") or "")
+            if dialect.name == "MySQL":
+                text = _mysql_check_text(text)
+            for name, values in _check_lists(text, dialect):
+                put(name, values)
+                checked.add(name.lower())
+            if dialect.name == "SQLite":
+                nocase |= _nocase_columns(text)
+    rejected = {k for k, v in found.items() if k in clash or len(v) > DECLARED_MAX_VALUES}
+    values = {k: v for k, v in found.items() if k not in rejected and v}
+    return _Declared(values, rejected, checked, nocase)
+
+
+def _mysql_check_text(text: str) -> str:
+    """MySQL 8's information_schema escapes each quote and backslash of a CHECK once more
+    (`_utf8mb4\\'open\\'`); undo that when every quote is escaped. MariaDB's text is plain."""
+    if "'" not in text or re.search(r"(?<!\\)'", text):
+        return text
+    return re.sub(r"\\(['\\])", r"\1", text)
+
+
+def _nocase_columns(create_sql: str) -> set[str]:
+    """Lowercased names of the columns a SQLite CREATE TABLE declares COLLATE NOCASE."""
+    import sqlglot
+    from sqlglot import exp
+    from sqlglot.errors import ErrorLevel
+
+    try:
+        tree = sqlglot.parse_one(create_sql, dialect="sqlite", error_level=ErrorLevel.RAISE)
+    except Exception:
+        return set()
+    return {cd.name.lower() for cd in tree.find_all(exp.ColumnDef)
+            for k in (con.kind for con in cd.constraints)
+            if isinstance(k, exp.CollateColumnConstraint) and k.this is not None
+            and k.this.name.upper() == "NOCASE"}
+
+
+_ENUM_TYPE_RE = re.compile(r"^\s*enum\s*\((.*)\)\s*$", re.IGNORECASE | re.DOTALL)
+_QUOTED_RE = re.compile(r"'((?:[^'\\]|''|\\.)*)'", re.DOTALL)
+
+
+# MySQL's string-literal escapes; any other `\x` stands for `x`.
+_MYSQL_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "Z": "\x1a", "\\": "\\", "'": "'"}
+
+
+def _enum_type_values(column_type: str) -> list[str]:
+    """The values of a MySQL/MariaDB `enum('a','b')` column type, quotes and escapes undone."""
+    m = _ENUM_TYPE_RE.match(column_type)
+    if not m:
+        return []
+    return [re.sub(r"\\(.)", lambda e: _MYSQL_ESCAPES.get(e.group(1), e.group(1)), v.replace("''", "'"))
+            for v in _QUOTED_RE.findall(m.group(1))]
+
+
+_CHECK_WORD_RE = re.compile(r"^\s*CHECK\b", re.IGNORECASE)
+_CHECK_TAIL_RE = re.compile(r"\s+(NOT\s+VALID|NO\s+INHERIT)(\s+(NOT\s+VALID|NO\s+INHERIT))?\s*$", re.IGNORECASE)
+
+
+def _check_lists(text: str, dialect: D.Dialect) -> list[tuple[str, list[str]]]:
+    """(column, values) for each CHECK in `text` that only lists one column's allowed literals —
+    `col IN ('a', 'b')`, `col = 'a' OR col = 'b'`, Postgres's `col = ANY (ARRAY[...])` — parsed in
+    the engine's dialect. Any other CHECK (a range, two columns, a function) declares no list.
+    `text` is one CHECK's expression, or SQLite's whole CREATE TABLE statement."""
+    import sqlglot
+    from sqlglot import exp
+    from sqlglot.errors import ErrorLevel
+
+    from .sql_dialect import DialectUnresolved, sqlglot_dialect
+
+    try:
+        sg = sqlglot_dialect(dialect.name)
+    except DialectUnresolved:
+        return []
+    body = _CHECK_TAIL_RE.sub("", _CHECK_WORD_RE.sub("", text.strip()))
+    if not body:
+        return []
+    try:
+        tree = sqlglot.parse_one(body, dialect=sg, error_level=ErrorLevel.RAISE)
+    except Exception:
+        return []
+    if isinstance(tree, exp.Create):
+        exprs = [c.this for c in tree.find_all(exp.CheckColumnConstraint)]
+    else:
+        exprs = [tree]
+    exact_decimal = dialect.name in _EXACT_DECIMAL_DIALECTS
+    return [hit for hit in (_listed_values(e, exact_decimal=exact_decimal) for e in exprs) if hit]
+
+
+# Engines whose NUMERIC/DECIMAL with no precision or scale holds any number exactly (MySQL's and SQL
+# Server's default to a scale of 0, DuckDB's to 3).
+_EXACT_DECIMAL_DIALECTS = frozenset({"PostgreSQL", "Oracle", "SQLite"})
+
+
+def _listed_values(e, *, exact_decimal: bool = False) -> Optional[tuple[str, list[str]]]:
+    from sqlglot import exp
+
+    T = exp.DataType.Type
+
+    def lossless(to, x) -> bool:  # casting the number literal `x` to `to` keeps its value
+        while isinstance(x, exp.Paren):
+            x = x.this
+        num = x.this if isinstance(x, exp.Neg) else x
+        if not isinstance(num, exp.Literal) or num.is_string:
+            return False
+        if re.fullmatch(r"\d+", str(num.this)) or to.this in (T.FLOAT, T.DOUBLE):
+            return True
+        return exact_decimal and to.this in (T.DECIMAL, T.BIGDECIMAL) and not to.expressions
+
+    def stringy(to) -> bool:  # a string type with no length, which can't truncate a value
+        return to.this in exp.DataType.TEXT_TYPES | {exp.DataType.Type.BPCHAR} and not to.expressions
+
+    def bare(x, literal_side: bool = False):
+        # Unwrap only casts that can't change which values match: to a string type (Postgres
+        # writes `(status)::text = ANY (...)`), or, for a literal, a number to a number type or an
+        # array to an array of either. CAST(status AS INTEGER) IN (1, 2) also admits '01'.
+        while isinstance(x, (exp.Paren, exp.Cast)):
+            if isinstance(x, exp.Cast):
+                to, inner = x.to, x.this
+                while isinstance(inner, exp.Paren):
+                    inner = inner.this
+                ok = stringy(to)
+                if literal_side and not ok:
+                    if to.this == exp.DataType.Type.ARRAY:
+                        el = to.expressions[0] if to.expressions else None
+                        ok = el is not None and (stringy(el) or (
+                            el.this in exp.DataType.NUMERIC_TYPES and isinstance(inner, exp.Array)
+                            and all(lossless(el, v) for v in inner.expressions)))
+                    elif to.this in exp.DataType.NUMERIC_TYPES:
+                        ok = lossless(to, inner)
+                if not ok:
+                    return x
+            x = x.this
+        return x
+
+    def terms(x):
+        x = bare(x)
+        if isinstance(x, exp.Or):
+            return terms(x.this) + terms(x.expression)
+        return [x]
+
+    def literal(x) -> Optional[str]:
+        x = bare(x, literal_side=True)
+        if isinstance(x, exp.Introducer):  # MySQL's _utf8mb4'low'
+            x = x.expression
+        if isinstance(x, exp.Neg) and isinstance(x.this, exp.Literal) and not x.this.is_string:
+            return f"-{x.this.this}"
+        if isinstance(x, exp.National):  # T-SQL's N'low'
+            return str(x.this)
+        if isinstance(x, exp.Literal):
+            return str(x.this)
+        return None
+
+    name: Optional[str] = None
+    values: list[str] = []
+    for t in terms(e):
+        if isinstance(t, exp.In) and not t.args.get("query") and not t.args.get("unnest"):
+            col, lits = bare(t.this), list(t.expressions)
+        elif isinstance(t, exp.EQ):
+            col, rhs = bare(t.this), bare(t.expression)
+            if not isinstance(col, exp.Column):
+                col, rhs = rhs, col
+            if isinstance(rhs, exp.Any):  # Postgres stores IN (...) as = ANY (ARRAY[...])
+                arr = bare(rhs.this, literal_side=True)
+                if not isinstance(arr, exp.Array):
+                    return None
+                lits = list(arr.expressions)
+            else:
+                lits = [rhs]
+        else:
+            return None
+        if not isinstance(col, exp.Column) or not lits:
+            return None
+        if name is None:
+            name, quoted = col.name, col.this.quoted
+        elif (name != col.name if quoted or col.this.quoted else name.lower() != col.name.lower()):
+            return None  # a quoted name is exact: `status` and "STATUS" are two columns
+        for lit in lits:
+            v = literal(lit)
+            if v is None:
+                return None
+            values.append(v)
+    return (name, values) if name else None
 
 
 def _infer_value_type(values: list) -> str:
@@ -1560,13 +2564,20 @@ def _infer_value_type(values: list) -> str:
     return "string"
 
 
-def _maybe_choice(values: list) -> Optional[dict[str, str]]:
-    vals = [str(v).strip() for v in values if str(v).strip() != ""]
+def _maybe_choice(values: list, rows: Optional[int] = None) -> Optional[dict[str, str]]:
+    """A `{value: ""}` skeleton from a column's values, or None when they don't look like codes.
+
+    `rows` is how many rows hold them (default: one per value). Values are kept exactly as stored:
+    a query must match 'Open ' to find those rows, so trimming it would list a value that isn't there."""
+    vals = [str(v) for v in values if v is not None and str(v) != ""]
     distinct = sorted(set(vals))
-    # At least TWO distinct values. The sample is the first rows the engine returns, not a fair draw,
-    # so one value seen there says nothing about the column — and a list of one ("current_flag: N"
-    # on a table that is mostly Y) is worse than none: whoever writes the SQL filters on it.
-    if not (1 < len(distinct) <= ENUM_MAX_DISTINCT and len(vals) >= max(10, 2 * len(distinct))):
+    # At least TWO distinct values: a list of one ("current_flag: N") says nothing a filter needs.
+    # And enough rows that the values repeat — a few rows of unique names are not codes.
+    n = len(vals) if rows is None else rows
+    if not (1 < len(distinct) <= ENUM_MAX_DISTINCT and n >= max(10, 2 * len(distinct))):
+        return None
+    # A list key is written into the model, so a column holding emails or phone numbers gets none.
+    if any(pii.personal_value(v) for v in distinct):
         return None
     # GUID/UUID-valued columns are join keys, not enums — a real enum (severity 1/2/3, status
     # open/closed) never holds identifier values. One such distinct value disqualifies the column.

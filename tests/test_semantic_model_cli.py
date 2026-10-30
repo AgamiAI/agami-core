@@ -69,7 +69,7 @@ def _run(args):
 
 def test_set_units_stamps_currency_on_money_columns(tmp_path):
     _model(tmp_path)
-    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD"])
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD", "--yes"])
     d = json.loads(out)
     assert rc == 0 and d["unit"] == "USD" and d["set"] >= 1, d
     orders = yaml.safe_load((tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())
@@ -94,9 +94,69 @@ def test_set_units_columns_override_detection(tmp_path):
 
 def test_set_units_is_idempotent(tmp_path):
     _model(tmp_path)
-    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] >= 1
+    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD", "--yes"])[1])["set"] >= 1
     # re-running skips columns that already carry a unit → nothing re-stamped
-    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["set"] == 0
+    assert json.loads(_run(["set-units", str(tmp_path), "--currency", "USD", "--yes"])[1])["set"] == 0
+
+
+def _orders_cols(root: Path) -> dict:
+    t = yaml.safe_load((root / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())
+    return {c["name"]: c for c in t["columns"]}
+
+
+def _add_order_columns(root: Path, *cols: dict) -> None:
+    p = root / "subject_areas" / "s" / "tables" / "orders.yaml"
+    t = yaml.safe_load(p.read_text())
+    t["columns"].extend(cols)
+    p.write_text(yaml.safe_dump(t))
+
+
+def test_set_units_without_yes_only_prints_the_plan(tmp_path):
+    _model(tmp_path)
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD"])
+    d = json.loads(out)
+    assert rc == 0 and d["set"] == 0, d
+    assert {(p["table"], p["column"], p["unit"]) for p in d["planned"]} == {("orders", "total", "USD")}
+    assert "unit" not in _orders_cols(tmp_path)["total"]   # nothing written
+
+
+def test_set_units_uses_the_unit_a_name_states(tmp_path):
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "revenue_usd_millions", "type": "decimal"},
+                       {"name": "total_minutes", "type": "integer"})
+    d = json.loads(_run(["set-units", str(tmp_path), "--currency", "EUR"])[1])
+    assert {p["column"]: p["unit"] for p in d["planned"]} == {
+        "total": "EUR", "revenue_usd_millions": "USD_millions"}
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "EUR", "--yes"])
+    assert rc == 0 and json.loads(out)["set"] == 2, out
+    cols = _orders_cols(tmp_path)
+    assert cols["revenue_usd_millions"]["unit"] == "USD_millions" and cols["total"]["unit"] == "EUR"
+    assert "unit" not in cols["total_minutes"]
+
+
+def test_set_units_columns_write_only_those(tmp_path):
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "gross_usd", "type": "decimal"})
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "USD", "--columns", "orders.total"])
+    assert rc == 0 and json.loads(out)["set"] == 1, out
+    cols = _orders_cols(tmp_path)
+    assert cols["total"]["unit"] == "USD" and "unit" not in cols["gross_usd"]
+
+
+def test_set_units_columns_keep_each_planned_unit(tmp_path):
+    # D11: applying a subset of a reviewed plan writes what the plan showed, not --currency
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "revenue_usd_millions", "type": "decimal"},
+                       {"name": "amount_total", "type": "decimal"})
+    plan = json.loads(_run(["set-units", str(tmp_path), "--currency", "EUR"])[1])["planned"]
+    planned = {p["column"]: p["unit"] for p in plan}
+    assert planned["revenue_usd_millions"] == "USD_millions" and planned["amount_total"] == "EUR"
+    rc, out = _run(["set-units", str(tmp_path), "--currency", "EUR", "--columns",
+                    "orders.revenue_usd_millions", "orders.amount_total"])
+    assert rc == 0 and json.loads(out)["set"] == 2, out
+    cols = _orders_cols(tmp_path)
+    assert cols["revenue_usd_millions"]["unit"] == "USD_millions"
+    assert cols["amount_total"]["unit"] == "EUR" and "unit" not in cols["total"]
 
 
 def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path):
@@ -114,7 +174,9 @@ def test_suggest_metrics_writes_rates_proposed_and_no_plain_aggregates(tmp_path)
                             "description_source": "ai_unknown"})
     items.write_text(yaml.safe_dump(spec))
 
-    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    # --write: the default is a dry run since #514; this test is about what gets written.
+    # --flag-rates all: no rate is proposed unasked since #530.
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write", "--flag-rates", "all"])
     d = json.loads(out)
     assert rc == 0 and d["written"] == 1, d
     assert d["skipped_opaque"] == 2, d
@@ -144,7 +206,9 @@ def test_suggest_metrics_never_resurrects_a_rejected_metric(tmp_path):
                 "review_state": "rejected"}
     (mets / "order_items_is_gift_rate.yaml").write_text(yaml.safe_dump(rejected))
 
-    rc, out = _run(["suggest-metrics", str(tmp_path)])
+    # --write and --flag-rates all, or the run would write nothing anyway and the test would
+    # prove nothing (#514, #530).
+    rc, out = _run(["suggest-metrics", str(tmp_path), "--write", "--flag-rates", "all"])
 
     assert rc == 0 and json.loads(out)["written"] == 0, out
     on_disk = yaml.safe_load((mets / "order_items_is_gift_rate.yaml").read_text())
@@ -173,6 +237,166 @@ def test_describe_file_reports_an_unreadable_path_as_json(tmp_path):
     _model(tmp_path)
     rc, out = _run(["describe-file", str(tmp_path), "--file", str(tmp_path)])
     assert rc == 2 and "could not read" in json.loads(out)["error"]
+
+
+def _cols(root: Path, table: str) -> dict:
+    doc = yaml.safe_load((root / "subject_areas" / "s" / "tables" / f"{table}.yaml").read_text())
+    return {c["name"]: c for c in doc["columns"]}
+
+
+def test_describe_file_tsv_reports_lines_it_cannot_apply(tmp_path):
+    # #522: a malformed line, a missing table / column and an empty description used to vanish
+    _model(tmp_path)
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("orders.total\tTotal order value\n"
+                   "malformed-no-tab\n"
+                   "nope.total\tx\n"
+                   "orders.nope\tx\n"
+                   "orders.id\t \n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1, d
+    assert [(u["at"], u["reason"]) for u in d["unmatched"]] == [
+        ("line 2", "malformed"), ("line 3", "no_table"), ("line 4", "no_column"),
+        ("line 5", "empty_description")]
+
+
+def test_describe_file_csv_as_metadata(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text('Table,Column,Description,Schema\n'
+                        'orders,total,"Order value, tax included\nin USD",public\n'
+                        'ORDER_ITEMS,QTY,Units ordered,\n'
+                        'customers,id,Customer key,\n')
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 2, d
+    total = _cols(tmp_path, "orders")["total"]
+    assert total["description"] == "Order value, tax included\nin USD"
+    assert total["description_source"] == "metadata"
+    qty = _cols(tmp_path, "order_items")["qty"]
+    assert qty["description_source"] == "metadata"    # wrong case → the model's own spelling
+    assert d["case_corrected"] == [{"entry": "ORDER_ITEMS.QTY", "applied_to": "s.order_items.qty"}]
+    assert [u["reason"] for u in d["unmatched"]] == ["no_table"]
+
+
+def test_describe_file_metadata_keeps_a_description_a_person_wrote(tmp_path):
+    _model(tmp_path)
+    from semantic_model import curate
+    curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "orders", "column": "total",
+                             "field": "description", "value": "What finance calls revenue"}])
+    js = tmp_path / "dict.json"
+    js.write_text(json.dumps({"orders.total": "Order value", "s.orders.id": "Order key"}))
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(js)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1 and d["kept_human"] == ["s.orders.total"], d
+    cols = _cols(tmp_path, "orders")
+    assert cols["total"]["description"] == "What finance calls revenue"
+    assert cols["total"]["description_source"] == "human"
+    assert cols["id"]["description_source"] == "metadata"
+
+
+def test_describe_file_json_list_and_format_override(tmp_path):
+    _model(tmp_path)
+    js = tmp_path / "dict.txt"     # extension says TSV; --format says JSON
+    js.write_text(json.dumps([{"table": "orders", "column": "total", "description": "Order value"},
+                              {"table": "orders"}, "junk"]))
+    rc, out = _run(["describe-file", str(tmp_path), "--format", "json", "--file", str(js)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1, d
+    assert _cols(tmp_path, "orders")["total"]["description_source"] == "ai_unvalidated"
+    assert [u["reason"] for u in d["unmatched"]] == ["malformed", "malformed"]
+
+
+def test_describe_file_ambiguous_table_needs_an_area(tmp_path):
+    _model(tmp_path)
+    other = tmp_path / "subject_areas" / "t"
+    (other / "tables").mkdir(parents=True)
+    (other / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "archive", "storage_connection": "c",
+        "columns": [{"name": "total", "type": "decimal"}]}))
+    rows = [{"at": "row 2", "area": "", "schema": "", "table": "orders", "column": "total",
+             "description": "x"},
+            {"at": "row 3", "area": "", "schema": "archive", "table": "orders", "column": "total",
+             "description": "x"}]
+    from semantic_model import dictionary
+    m = dictionary.match(tmp_path, rows, source="metadata")
+    assert [u["reason"] for u in m["unmatched"]] == ["ambiguous_table"]
+    assert [(o["area"], o["name"]) for o in m["ops"]] == [("t", "orders")]
+
+
+def test_describe_file_reports_a_csv_without_the_needed_header(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text("name,text\norders.total,x\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--file", str(csv_path)])
+    assert rc == 2 and "missing: table, column, description" in json.loads(out)["error"]
+
+
+def test_describe_file_refuses_a_root_with_no_model(tmp_path):
+    tsv = tmp_path / "desc.tsv"
+    tsv.write_text("orders.total\tTotal order value\n")
+    rc, out = _run(["describe-file", str(tmp_path / "missing"), "--file", str(tsv)])
+    d = json.loads(out)
+    assert rc == 2 and "no semantic model" in d["error"] and "unmatched" not in d
+
+
+@pytest.mark.parametrize("text, detail", [
+    ('table,column,description\norders,total,"never closed\norders,id,Order key\n', "unexpected end of data"),
+    ('table,column,description\norders,total,"quoted"tail\n', "expected after"),
+])
+def test_describe_file_refuses_a_csv_with_broken_quoting(tmp_path, text, detail):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text(text)
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 2 and "could not read the CSV file" in d["error"] and detail in d["error"], d
+    assert "description" not in _cols(tmp_path, "orders")["total"]
+
+
+def test_describe_file_reports_a_csv_row_with_more_fields_than_the_header(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text("table,column,description\norders,total,Order value, tax included\n"
+                        "orders,id,Order key\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 1, d
+    [u] = d["unmatched"]
+    assert u["reason"] == "malformed" and "more fields than the header" in u["detail"]
+    assert "description" not in _cols(tmp_path, "orders")["total"]
+
+
+def test_describe_file_matches_a_table_that_carries_its_schema_in_its_name(tmp_path):
+    _model(tmp_path)
+    path = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    doc = yaml.safe_load(path.read_text())
+    doc.pop("schema")
+    doc["name"] = "public.orders"
+    path.write_text(yaml.safe_dump(doc))
+    from semantic_model import dictionary
+    m = dictionary.match(tmp_path, [{"at": "row 2", "area": "", "schema": "public", "table": "orders",
+                                     "column": "total", "description": "x"}], source="metadata")
+    assert not m["unmatched"], m["unmatched"]
+    assert [(o["name"], o["column"]) for o in m["ops"]] == [("orders", "total")]
+
+
+def test_describe_file_strips_a_schema_prefix_the_model_has(tmp_path):
+    _model(tmp_path)
+    csv_path = tmp_path / "dict.csv"
+    csv_path.write_text("table,column,description\nPUBLIC.ORDERS,TOTAL,Order value\n"
+                        "public.order_items,qty,Units ordered\nstaging.orders,id,Order key\n")
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(csv_path)])
+    d = json.loads(out)
+    assert rc == 0 and d["described"] == 2, d
+    assert d["schema_prefix_stripped"] == [
+        {"entry": "PUBLIC.ORDERS.TOTAL", "applied_to": "s.orders.total"},
+        {"entry": "public.order_items.qty", "applied_to": "s.order_items.qty"}]
+    assert d["case_corrected"] == []
+    [u] = d["unmatched"]
+    assert u["reason"] == "no_table" and u["detail"] == "schema 'staging' is not in the model"
+    assert _cols(tmp_path, "orders")["total"]["description_source"] == "metadata"
 
 
 def test_prepare_does_not_apply_default_filters(tmp_path):
@@ -711,6 +935,72 @@ def test_remove_example_rejects_for_audit_and_drops_from_runtime(tmp_path):
     assert rc2 == 1 and json.loads(out2)["skipped"]
 
 
+def test_remove_example_names_each_question_in_full_and_says_it_is_kept(tmp_path):
+    """Two questions that open with the same 60 characters are both named in full, and the
+    output says the examples are marked rejected and kept, not deleted (#550)."""
+    from semantic_model import curate
+    _model(tmp_path)
+    stem = "What was the total billed amount across every order placed by "
+    assert len(stem) >= 60
+    q1, q2 = stem + "customers in the north region?", stem + "customers in the south region?"
+    curate.add_examples(tmp_path, "s", [
+        {"question": q1, "sql": "SELECT SUM(total) FROM orders"},
+        {"question": q2, "sql": "SELECT SUM(total) FROM orders", "id": "ex-south"},
+    ])
+
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "s", "--question", q1, "--question", q2])
+    assert rc == 0
+    res = json.loads(out)
+    assert sorted(res["rejected"]) == sorted([f"example (rejected) s/{q1}", f"example (rejected) s/{q2}"])
+    assert sorted(res["examples"], key=lambda e: e["question"]) == [
+        {"area": "s", "question": q1, "status": "rejected"},
+        {"area": "s", "question": q2, "id": "ex-south", "status": "rejected"},
+    ]
+    assert "marked rejected (kept for audit)" in res["note"] and "not deleted" in res["note"]
+    # the curation log names each one in full too
+    log = [json.loads(line) for line in (tmp_path / curate.CURATION_LOG).read_text().splitlines()]
+    assert {e["name"] for e in log if e.get("op") == "reject"} == {q1, q2}
+
+    # nothing rejected → no note claiming something was kept
+    rc2, out2 = _run(["remove-example", str(tmp_path), "--area", "s", "--question", "no such q?"])
+    assert rc2 == 1 and "note" not in json.loads(out2) and json.loads(out2)["examples"] == []
+
+
+def test_remove_example_keeps_an_authored_id_of_zero(tmp_path):
+    """`id: 0` is an authored id and is named; an empty id names nothing and is left out."""
+    _model(tmp_path)
+    (tmp_path / "prompt_examples" / "s").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "prompt_examples" / "s" / "examples.yaml").write_text(
+        "examples:\n"
+        "- id: 0\n  question: How many orders?\n  sql: SELECT COUNT(*) FROM orders\n"
+        "- id: ''\n  question: Total billed?\n  sql: SELECT SUM(total) FROM orders\n")
+    rc, out = _run(["remove-example", str(tmp_path), "--area", "s",
+                    "--question", "How many orders?", "--question", "Total billed?"])
+    assert rc == 0
+    assert sorted(json.loads(out)["examples"], key=lambda e: e["question"]) == [
+        {"area": "s", "question": "How many orders?", "id": 0, "status": "rejected"},
+        {"area": "s", "question": "Total billed?", "status": "rejected"},
+    ]
+
+
+def _help(args: list[str]) -> str:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), pytest.raises(SystemExit):
+        cli.main(args)
+    return " ".join(buf.getvalue().split())
+
+
+def test_remove_example_help_says_it_marks_rejected_and_keeps():
+    text = _help(["remove-example", "--help"])
+    assert "rejected" in text and "kept in prompt_examples/<area>/examples.yaml for audit, not deleted" in text
+
+
+def test_curate_help_says_signer_is_recorded_on_every_op():
+    text = _help(["curate", "--help"])
+    assert "for approve ops" not in text
+    assert "recorded in the curation log on every op" in text
+
+
 def test_apply_reverts_writes_without_git_on_validation_failure(tmp_path):
     # apply()'s revert must NOT depend on a git repo (the artifacts dir usually isn't one).
     # A batch whose later op makes the model invalid rolls back the earlier valid write too.
@@ -808,6 +1098,15 @@ def test_suggest_units_finds_money_columns(tmp_path):
     assert ("orders", "total") in names            # numeric + money-named
     assert ("order_items", "qty") not in names      # a count, not money
     assert all(c["column"] != "id" for c in cols)   # ids excluded
+
+
+def test_suggest_units_suggests_the_unit_a_name_states(tmp_path):
+    _model(tmp_path)
+    _add_order_columns(tmp_path, {"name": "revenue_usd_millions", "type": "decimal"},
+                       {"name": "duration_minutes", "type": "integer"})
+    cols = {c["column"]: c["suggested_unit"]
+            for c in json.loads(_run(["suggest-units", str(tmp_path)])[1])["money_columns"]}
+    assert cols == {"total": None, "revenue_usd_millions": "USD_millions"}
 
 
 def _model_with_pending(root: Path) -> None:
@@ -916,3 +1215,93 @@ def test_add_example_reads_its_file_as_utf8_whatever_the_platform_default(tmp_pa
     assert [e["question"] for e in list_prompt_examples(root, "sales")] == [question]
     saved = (root / "prompt_examples" / "sales" / "examples.yaml").read_bytes()
     assert question.encode("utf-8") in saved
+
+
+_SPANNING = {"name": "items_per_order", "description": "Items per order",
+             "calculation": "order items divided by orders",
+             "bindings": {"PostgreSQL": "COUNT(order_items.id) / COUNT(DISTINCT orders.id)"},
+             "source_tables": ["order_items", "orders"]}
+
+
+def test_add_refuses_an_area_the_model_does_not_list(tmp_path):
+    # the loader reads only listed areas: a file written elsewhere was reported applied and never served
+    _model(tmp_path)
+    (tmp_path / "items.json").write_text(json.dumps([_SPANNING]))
+    rc, out = _run(["add", str(tmp_path), "--kind", "metric", "--area", "cross_area",
+                    "--file", str(tmp_path / "items.json")])
+    d = json.loads(out)
+    assert rc == 1 and not d["applied"] and not d["validated"]
+    assert "'cross_area' is not a subject area" in d["errors"][0] and "lists: s" in d["errors"][0]
+    assert "--area _cross" in d["errors"][0]
+    assert not (tmp_path / "subject_areas" / "cross_area").exists()
+
+
+def test_add_to_the_cross_cutting_area_is_loaded_and_served(tmp_path, monkeypatch):
+    import tools
+    from semantic_model import curate
+    from semantic_model.loader import load_datasource
+
+    root = tmp_path / "xadd"
+    root.mkdir()
+    _model(root)
+    (root / "items.json").write_text(json.dumps([_SPANNING]))
+    rc, out = _run(["add", str(root), "--kind", "metric", "--area", "_cross",
+                    "--file", str(root / "items.json")])
+    assert rc == 0 and json.loads(out)["applied"] == ["metric _cross/items_per_order"], out
+    assert [m.name for m in load_datasource(root).cross_subject_area_metrics] == ["items_per_order"]
+    # adding it again replaces it rather than duplicating it
+    assert _run(["add", str(root), "--kind", "metric", "--area", "_cross",
+                 "--file", str(root / "items.json")])[0] == 0
+    assert len(yaml.safe_load((root / "cross_subject_area_metrics.yaml").read_text())["metrics"]) == 1
+
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    reply, _ = json.JSONDecoder().raw_decode(tools.tool_get_datasource_schema({"datasource": "xadd"}))
+    assert [(m["name"], m["area"]) for m in reply["metrics"]] == [("items_per_order", None)]
+
+    # and it can be signed off like any other metric, by area or without one
+    res = curate.apply(root, [{"op": "approve", "kind": "metric", "name": "items_per_order",
+                               "at": "2026-01-01T00:00:00Z"}], signer="you@example.com", role="analyst")
+    assert res.validated and res.applied, res.as_dict()
+    assert load_datasource(root).cross_subject_area_metrics[0].review_state == "approved"
+
+
+def test_re_adding_an_inline_cross_cutting_item_replaces_it_in_place(tmp_path):
+    from semantic_model import curate
+    from semantic_model.loader import load_datasource
+
+    _model(tmp_path)
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [{**_SPANNING, "description": "old"}]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [{**_SPANNING, "description": "new"}])
+    assert res.validated and res.applied, res.as_dict()
+    assert not (tmp_path / "cross_subject_area_metrics.yaml").exists()
+    assert [m.description for m in load_datasource(tmp_path).cross_subject_area_metrics] == ["new"]
+
+
+def test_a_failed_cross_cutting_write_restores_both_files(tmp_path, monkeypatch):
+    import types
+
+    from semantic_model import curate
+
+    _model(tmp_path)
+    ds = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    ds["cross_subject_area_metrics"] = [_SPANNING]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    (tmp_path / "cross_subject_area_metrics.yaml").write_text(yaml.safe_dump({"metrics": [_SPANNING]}))
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("*.yaml")}
+    monkeypatch.setattr(curate.V, "validate", lambda *a, **k: types.SimpleNamespace(ok=False, errors=["forced"]))
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [{**_SPANNING, "description": "new"}])
+    assert res.errors == ["forced"] and not res.applied
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("*.yaml")} == before
+
+
+def test_add_refuses_a_cross_cutting_item_that_breaks_the_model(tmp_path):
+    _model(tmp_path)
+    before = (tmp_path / "datasource.yaml").read_text()
+    from semantic_model import curate
+    bad = {**_SPANNING, "bindings": {"PostgreSQL": "{no_such_metric} / 2"}, "base_metrics": ["no_such_metric"]}
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric", [bad])
+    assert not res.validated and res.errors and not res.applied
+    assert not (tmp_path / "cross_subject_area_metrics.yaml").exists()
+    assert (tmp_path / "datasource.yaml").read_text() == before

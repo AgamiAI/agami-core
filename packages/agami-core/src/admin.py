@@ -1042,7 +1042,7 @@ def _metric_card_html(m: Any) -> str:
     return (
         f'<div class="mcard"><div class="nm">{ui.esc(m.name)}{alias_html}{unit}</div>'
         f'<div class="muted" style="font-size:13px">{ui.esc(m.description or "")}</div>'
-        f'<span class="calc">{calc}</span></div>'
+        f'<span class="calc">{calc}</span>{_caveat_callout(m.caveats)}</div>'
     )
 
 
@@ -1293,7 +1293,7 @@ def _qualified(schema: str | None, table: str) -> str:
 
 def _cross_rel_row_html(r: Any) -> str:
     """One cross-area relationship: schema-qualified from→to, the join columns, cardinality, trust."""
-    on = f"{ui.esc(r.from_column)} = {ui.esc(r.to_column)}" if r.from_column and r.to_column else ""
+    on = f"{ui.esc(r.from_column)} = {ui.esc(r.to_column)}" if r.from_column and r.to_column else ui.esc(r.on or "")
     meta = " · ".join(p for p in (on, ui.esc(str(r.join_type)), ui.esc(str(r.confidence))) if p)
     return (
         f'<div class="rel"><span class="mono">{_qualified(r.from_schema, r.from_table)}</span>'

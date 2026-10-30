@@ -111,7 +111,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                     "sensitive": c.sensitive,
                     # broader "might be PII" the strict flag missed — drives the PII tab's
                     # suspected tier (review aid; never auto-marks).
-                    "suspected_pii": (not c.sensitive) and _B.suspected_pii(c.name),
+                    "suspected_pii": (not c.sensitive) and _B.suspected_reason(c.name, c.caveats) is not None,
                     "unit": c.unit, "caveats": c.caveats,
                     "date_format": c.date_format, "timezone": c.timezone,
                     "group": col_group.get(c.name, ""),
@@ -123,7 +123,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                               if t.performance_hints else None),
                 "review_state": t.review_state, "origin": "", "excluded": t_excluded,
                 "yaml_path": f"subject_areas/{sa.name}/tables/{t.name}.yaml",
-                "grain": t.grain, "caveats": t.caveats, "default_filters": t.default_filters,
+                "grain": t.grain, "unique_keys": t.unique_keys, "caveats": t.caveats, "default_filters": t.default_filters,
                 "synonyms": [], "area": sa.name, "db_schema": t.schema_name or "",
                 # ordered group names for the wide-table grouped field view (empty on
                 # narrow tables — the UI then just lists fields flat)
@@ -151,7 +151,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "non_additive_dimensions": mm.non_additive_dimensions,
                 "semi_additive_agg": mm.semi_additive_agg,
                 "source_tables": mm.source_tables, "primary_table": mm.primary_table,
-                "description": mm.description,
+                "description": mm.description, "caveats": mm.caveats,
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
                 "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
@@ -328,7 +328,7 @@ def main() -> int:
     manifest["initial_tab"] = initial
     if not manifest["schemas"]:
         sys.stderr.write(
-            f"agami: no schemas found in {profile_dir}. Run /agami-connect first.\n"
+            f"agami: no subject areas found in {profile_dir}. Run /agami-connect first.\n"
         )
         return 1
 
@@ -349,7 +349,7 @@ def main() -> int:
 
     print(
         f"Wrote {out_path} "
-        f"({_plural(t['schemas'], 'schema')} · {_plural(t['tables'], 'table')} · "
+        f"({_plural(t['schemas'], 'subject area')} · {_plural(t['tables'], 'table')} · "
         f"{_plural(t['fields'], 'field')}; "
         f"{t['excluded_tables']} tables + {t['excluded_fields']} columns currently excluded)"
     )

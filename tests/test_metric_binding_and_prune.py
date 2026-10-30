@@ -61,6 +61,136 @@ def test_binding_column_check_catches_excluded_column_metric():
     assert any("is_active" in w for w in res.warnings)
 
 
+@pytest.mark.parametrize("sql", [
+    # a derived table's alias, read qualified and bare
+    "SELECT AVG(s.r) FROM (SELECT id, SUM(cost) / COUNT(*) AS r FROM orders GROUP BY id) s",
+    "SELECT AVG(r) FROM (SELECT id, SUM(cost) AS r FROM orders GROUP BY id) s",
+    # a CTE's alias
+    "WITH per AS (SELECT id, SUM(cost) AS tot FROM orders GROUP BY id) SELECT AVG(per.tot) FROM per",
+    # a select-list alias in the same SELECT's HAVING / ORDER BY
+    "SELECT id, SUM(cost) AS total FROM orders GROUP BY id HAVING total > 0 ORDER BY total",
+    # an alias read through a star over a derived table that projects it
+    "SELECT SUM(s.r) FROM (SELECT * FROM (SELECT cost AS r FROM orders) x) s",
+    "SELECT SUM(s.cost) FROM (SELECT * FROM orders) s",
+])
+def test_binding_column_check_ignores_aliases(sql):
+    met = m.Metric(name="orders_avg", calculation="avg", source_tables=["orders"],
+                   bindings={"PostgreSQL": sql})
+    res = V.ValidationResult()
+    V._check_metric_binding_columns(_org(met), res)
+    assert not res.warnings, res.warnings
+
+
+def test_binding_column_check_still_flags_a_typo_inside_a_subquery():
+    met = m.Metric(name="orders_avg", calculation="avg", source_tables=["orders"],
+                   bindings={"PostgreSQL": "SELECT AVG(s.r) FROM (SELECT id, SUM(cst) AS r FROM orders GROUP BY id) s"})
+    res = V.ValidationResult()
+    V._check_metric_binding_columns(_org(met), res)
+    assert len(res.warnings) == 1 and "['cst']" in res.warnings[0]
+
+
+@pytest.mark.parametrize("sql", [
+    # a CTE the SELECT never reads doesn't make `cst` an alias
+    "WITH unused AS (SELECT 1 AS cst) SELECT SUM(cst) FROM orders",
+    # a star over a base table passes its columns through, so a typo read through it is still one
+    "SELECT SUM(s.cst) FROM (SELECT * FROM orders) s",
+    "SELECT SUM(cst) FROM (SELECT * FROM orders) s",
+])
+def test_binding_column_check_flags_a_typo_an_unused_cte_or_a_star_would_hide(sql):
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["orders"],
+                   bindings={"PostgreSQL": sql})
+    res = V.ValidationResult()
+    V._check_metric_binding_columns(_org(met), res)
+    assert len(res.warnings) == 1 and "['cst']" in res.warnings[0], res.warnings
+
+
+def _warns(org) -> list[str]:
+    res = V.ValidationResult()
+    V._check_metric_binding_columns(org, res)
+    return res.warnings
+
+
+def _orders(schema, *cols, name="orders"):
+    return m.Table(name=name, schema=schema, storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True),
+        *(m.Column(name=c, type="decimal") for c in cols)])
+
+
+def _two_schemas(source_tables, binding):
+    # sales.orders and archive.orders share a name but not their columns (#500)
+    met = m.Metric(name="orders_total", calculation="total", source_tables=source_tables,
+                   bindings={"PostgreSQL": binding})
+    sa = m.SubjectArea(name="s", tables_defined=[_orders("sales", "cost"),
+                                                 _orders("archive", "legacy_cost")],
+                       metrics=[met])
+    return m.Datasource(datasource="t", subject_areas=[sa])
+
+
+def test_binding_column_check_resolves_a_schema_qualified_source_table():
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["s.orders"],
+                   bindings={"PostgreSQL": "SUM(cst)"})
+    assert any("cst" in w for w in _warns(_org(met)))
+
+
+def test_binding_column_check_accepts_a_correct_qualified_binding():
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["S.Orders"],
+                   bindings={"PostgreSQL": "SUM(cost)"})
+    assert not _warns(_org(met))
+
+
+def test_binding_column_check_keeps_same_named_tables_in_different_schemas_apart():
+    warnings = _warns(_two_schemas(["sales.orders"], "SUM(legacy_cost)"))
+    assert len(warnings) == 1 and "['legacy_cost']" in warnings[0], warnings
+    assert not _warns(_two_schemas(["archive.orders"], "SUM(legacy_cost)"))
+
+
+def test_binding_column_check_bare_source_reads_every_table_of_that_name():
+    # bare `orders` may be either schema's table: only a column on neither is suspect
+    assert not _warns(_two_schemas(["orders"], "SUM(cost) + SUM(legacy_cost)"))
+    assert "['cst']" in _warns(_two_schemas(["orders"], "SUM(cst)"))[0]
+
+
+def test_binding_column_check_resolves_a_table_whose_name_embeds_its_schema():
+    # `name: public.orders` with no schema field, the shape introspected models use
+    def org(source, binding):
+        met = m.Metric(name="orders_total", calculation="total", source_tables=[source],
+                       bindings={"PostgreSQL": binding})
+        sa = m.SubjectArea(name="s", tables_defined=[_orders(None, "cost", name="public.orders")],
+                           metrics=[met])
+        return m.Datasource(datasource="t", subject_areas=[sa])
+
+    for source in ("orders", "public.orders"):
+        assert "['cst']" in _warns(org(source, "SUM(cst)"))[0]
+        assert not _warns(org(source, "SUM(cost)"))
+    # another schema's `orders` isn't this one
+    assert not _warns(org("archive.orders", "SUM(cst)"))
+
+
+def test_binding_column_check_qualified_source_falls_back_to_a_schema_less_table():
+    met = m.Metric(name="orders_total", calculation="total", source_tables=["main.orders"],
+                   bindings={"PostgreSQL": "SUM(cst)"})
+    sa = m.SubjectArea(name="s", tables_defined=[_orders(None, "cost")], metrics=[met])
+    assert "['cst']" in _warns(m.Datasource(datasource="t", subject_areas=[sa]))[0]
+
+
+def test_loader_still_hides_a_metric_whose_subquery_reads_a_hidden_column(tmp_path):
+    # The loader keeps the alias-blind column set: a metric reading a stale column through a
+    # derived table must not be served.
+    from semantic_model import build
+
+    t = m.Table(name="customers", schema="main", storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True),
+        m.Column(name="spend", type="decimal", review_state="stale")])
+    sub = "SELECT AVG(s.r) FROM (SELECT id, SUM(spend) AS r FROM customers GROUP BY id) s"
+    sa = m.SubjectArea(name="shop", description="Curated.", tables_defined=[t],
+                       tables=[build.make_table_ref("c", t)],
+                       metrics=[m.Metric(name="AvgSpend", calculation="avg", source_tables=["customers"],
+                                         bindings={"SQLite": sub})])
+    build.write_tree(m.Datasource(datasource="shop", version=1, subject_areas=[sa], storage_connections=[
+        m.StorageConnection(name="c", storage_type="SQLite", storage_config={})]), tmp_path / "shop")
+    assert L.load_datasource(tmp_path / "shop").subject_areas[0].metrics == []
+
+
 # --- column_group pruning on exclusion --------------------------------------
 
 def test_prune_column_groups_drops_excluded_columns_and_empty_groups():

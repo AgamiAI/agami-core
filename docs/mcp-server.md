@@ -25,8 +25,8 @@ Four tools, mirroring the hosted connector so the client experience is identical
 | Tool | What it does |
 |---|---|
 | `list_datasources` | Enumerate local profiles (credential sections) and whether each has a model. |
-| `get_datasource_schema` | Return the semantic model, narrowed by the scope you give. `area` → one subject area; `dataset_names` → those tables, with their columns, **their joins**, and the metrics that apply to them; neither → the whole datasource. `query`/`metric_names` rank and select which metrics come back in detail — they do not narrow. `metric_index` lists the described metrics in the current scope (`metrics_without_description` counts the rest, which come back with their tables), and the response reports that scope. Plus `datasource.md` / `USER_MEMORY.md`. |
-| `get_prompt_examples` | Return the curated `examples.yaml` few-shot library. |
+| `get_datasource_schema` | Return the semantic model, narrowed by the scope you give. `area` → one subject area; `dataset_names` → those tables, with their columns, **their joins**, and the metrics that apply to them; neither → the whole datasource. `query`/`metric_names` rank and select which metrics come back in detail — they do not narrow. `metric_index` lists the described metrics in the current scope (`metrics_without_description` counts the rest, which come back with their tables), and the response reports that scope. Plus `datasource.md` / `USER_MEMORY.md`, as the `domain_context` field. |
+| `get_prompt_examples` | Return the curated few-shot examples ranked by `query` and capped at `top_k` (default 10), each with its `id` and `area`, in the same shape a served deployment returns. |
 | `execute_sql` | Run **one read-only** `SELECT` / `WITH...SELECT` locally and return `{columns, rows, row_count, ...}`. DML/DDL/multi-statement are rejected. |
 
 The NL→SQL *intelligence* stays on the client side (the model generates SQL from
