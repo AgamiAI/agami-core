@@ -21,6 +21,10 @@ below corresponds to one such version.
   folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
   (`sm curate <root> ops.json`, before or after the other options); `--ops-file` still works, and giving both is a usage error.
 
+## [0.9.21] — 2026-10-29
+
+### Fixed
+
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
   The folder held a partial copy of the model package (`semantic_model/` with only `__init__.py` and
   `units.py`). With `lib/` as the working folder, or first on the import path, Python loaded that
