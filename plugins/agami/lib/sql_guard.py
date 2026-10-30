@@ -784,6 +784,26 @@ def _recon_niladic_hit(neutral: _Neutralized) -> re.Match[str] | None:
     return None
 
 
+def statement_fingerprint(sql: str | None) -> str | None:
+    """`sql` with comments and string literals blanked and whitespace collapsed, or None when it
+    cannot be read.
+
+    Two statements share a fingerprint only when they differ in literal values, comments and spacing
+    alone, so a fingerprint names a query's shape: the tables, columns, functions and operators are
+    all still in it, case and all. That is what lets `execute_sql` recognise one of agami's own
+    catalog queries without trusting who sent it (#523).
+    """
+    if not sql or not sql.strip():
+        return None
+    try:
+        text = _neutralize(sql).text
+    except _GuardReject:
+        return None
+    if text.endswith(";"):
+        text = text[:-1]
+    return " ".join(text.split()) or None
+
+
 def check_no_recon(sql: str | None) -> Refusal | None:
     """Return ``None`` when ``sql`` calls no metadata / recon function, else a ``Refusal``.
 

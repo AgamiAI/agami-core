@@ -68,12 +68,15 @@ import argparse
 import configparser
 import contextlib
 import csv
+import io
+import ipaddress
 import json
 import logging
 import os
 import re
 import stat
 import sys
+import tempfile
 import threading
 import urllib.parse
 import uuid
@@ -1529,6 +1532,150 @@ _DEFAULT_MAX_ROWS = 1000  # rows a result may hold before the transfer bound ref
 # eventually serializes.
 _last_error_detail: ContextVar[str | None] = ContextVar("_last_error_detail", default=None)
 
+# The database's own first line, redacted, for the local command line only (#523). `main` writes it
+# under the fixed sentence; nothing puts it on an Envelope, so the MCP tool and the hosted server
+# never see it. Cleared on entry like the carrier above.
+_last_error_cli_detail: ContextVar[str | None] = ContextVar("_last_error_cli_detail", default=None)
+# Set by `main` on a local command line, the one place the detail is shown, so no served caller spends
+# time redacting a line nobody reads.
+_cli_detail_wanted: ContextVar[bool] = ContextVar("_cli_detail_wanted", default=False)
+
+# Set by the MCP tool on the executor it forks: that child's stderr is relayed to the caller, so it
+# must write exactly what it wrote before #523 and refuse `--build-profile`.
+SERVED_CHILD_ENV = "AGAMI_SERVED_CHILD"
+
+_DETAIL_SKIP_PREFIXES = ("hint:", "detail:", "context:")
+_REDACTED = "<redacted>"
+# Any key that names a credential (`access_token`, `client_secret`, `sslpassword`, ...).
+_SECRET_KEY_WORDS = r"\w*(?:password|passwd|pwd|secret|token|api_?key|access_?key|private_?key|credential)\w*"
+# A quoted value runs to its closing quote past `\'` and `''` escapes, or to the end of the line when it
+# has none; an unquoted one runs past backslash-escaped whitespace.
+_SQ_VALUE = r"'(?:[^'\\]|\\.|'')*(?:'|$)"
+_DQ_VALUE = r'"(?:[^"\\]|\\.|"")*(?:"|$)'
+# The value of a credential-named `key=value` field, quoted or not.
+_KEY_VALUE_RE = re.compile(rf"\b(?:{_SECRET_KEY_WORDS}|host|hostaddr|user|username)\s*=\s*"
+                           rf"({_SQ_VALUE}|{_DQ_VALUE}|(?:\\.|[^\s\\])+\\?)", re.IGNORECASE)
+# A quoted login or host, as `Login failed for user 'sa'` or `role "demo"`, redacted whatever its length.
+_QUOTED_LOGIN_RE = re.compile(rf"\b(?:server at|host|user|username|role|login)\s+({_SQ_VALUE}|{_DQ_VALUE})",
+                              re.IGNORECASE)
+# How much of the first line is redacted. The patterns below can rescan a long run with no spaces, so
+# they never see more than this; it still leaves the 300 characters shown after redaction shortens it.
+_DETAIL_WINDOW = 1200
+# A shorter profile value is matched only through the two patterns above: on its own it is too likely
+# to be an ordinary word in the message.
+_MIN_PROFILE_VALUE_LEN = 3
+_REDACT_PATTERNS = (
+    # A DSN or any URL: scheme://… can carry a user, a password and a host at once.
+    (re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.IGNORECASE), _REDACTED),
+    (re.compile(r"\S+@\S+"), _REDACTED),
+    (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b"), _REDACTED),
+)
+# An IPv6 candidate, full, compressed or scoped (`fe80::1%eth0`); `_redact_ipv6` keeps only what parses
+# as an address, so a time such as `12:30:45` survives.
+_IPV6_CANDIDATE = re.compile(r"(?<![\w:])[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?:%[\w.-]+)?(?![\w:])",
+                             re.IGNORECASE)
+
+
+def _redact_ipv6(match: "re.Match[str]") -> str:
+    try:
+        ipaddress.IPv6Address(match.group(0).split("%", 1)[0])
+    except ValueError:
+        return match.group(0)
+    return _REDACTED
+# Credential fields whose values never appear in the detail, however the driver words its message,
+# besides every field whose name says it holds a credential.
+_SECRET_CRED_KEYS = ("password", "user", "username", "host", "account", "token", "access_token",
+                     "private_key", "private_key_path", "credentials_path", "http_path", "dsn", "url",
+                     "service_account_path")
+_SECRET_CRED_KEY_RE = re.compile(_SECRET_KEY_WORDS, re.IGNORECASE)
+
+
+def _is_secret_cred_key(key: Any) -> bool:
+    return key in _SECRET_CRED_KEYS or bool(_SECRET_CRED_KEY_RE.fullmatch(str(key)))
+
+
+def _escaped_spellings(value: str) -> set[str]:
+    """`value` as written raw and as a driver may echo it inside quotes."""
+    backslashed = value.replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"')
+    return {value, backslashed, value.replace("'", "''"), value.replace('"', '""')}
+
+
+def _credential_spans(line: str, creds: dict[str, Any] | None) -> list[tuple[int, int]]:
+    """Where credentials sit in `line`, all found in the unredacted text.
+
+    Found together rather than substituted one after another, so a profile value that is also part
+    of a key name (`user: token` in `access_token=...`) cannot rewrite the key before its value is
+    found; a profile value must also stand as a whole word."""
+    spans = [m.span(1) for m in _KEY_VALUE_RE.finditer(line)]
+    for m in _QUOTED_LOGIN_RE.finditer(line):
+        start, end = m.span(1)
+        closed = end - start >= 2 and line[end - 1] == line[start]
+        spans.append((start + 1, end - 1 if closed else end))
+    for spelling in _secret_profile_spellings(creds):
+        spans += [m.span() for m in re.finditer(rf"(?<!\w){re.escape(spelling)}(?!\w)", line)]
+    return spans
+
+
+def _secret_profile_spellings(creds: dict[str, Any] | None) -> set[str]:
+    return {spelling for k, v in (creds or {}).items()
+            if _is_secret_cred_key(k) and v and len(str(v)) >= _MIN_PROFILE_VALUE_LEN
+            for spelling in _escaped_spellings(str(v))}
+
+
+def _detail_window(line: str, creds: dict[str, Any] | None) -> str:
+    """The start of a long line, cut where no credential can be left half shown.
+
+    The cut drops the word it lands in, since each pattern matches within one word, and then the
+    start of a profile value with a space in it, which the whole-value match would no longer find."""
+    if len(line) <= _DETAIL_WINDOW:
+        return line
+    end = _DETAIL_WINDOW
+    while end and not line[end].isspace():
+        end -= 1
+    cut = line[:end]
+    for spelling in _secret_profile_spellings(creds):
+        for k in range(min(len(spelling) - 1, len(cut)), 0, -1):
+            before = cut[-k - 1] if k < len(cut) else ""
+            if cut.endswith(spelling[:k]) and not (before.isalnum() or before == "_"):
+                cut = cut[:-k]
+                break
+    return cut or _REDACTED
+
+
+def _redact_spans(line: str, spans: list[tuple[int, int]]) -> str:
+    merged: list[list[int]] = []
+    for start, end in sorted(s for s in spans if s[1] > s[0]):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    for start, end in reversed(merged):
+        line = line[:start] + _REDACTED + line[end:]
+    return line
+
+
+def _db_error_first_line(text: str | None, sqlstate: str | None,
+                         creds: dict[str, Any] | None) -> str | None:
+    """The database's first line, with credentials and hosts redacted and the SQLSTATE beside it.
+
+    Only the first line: the lines after it are where a driver puts HINT, DETAIL and CONTEXT, and a
+    HINT can name a column the statement never sent."""
+    line = next((ln.strip() for ln in (text or "").splitlines()
+                 if ln.strip() and not ln.strip().lower().startswith(_DETAIL_SKIP_PREFIXES)), "")
+    if not line:
+        return None
+    line = _detail_window(line, creds)
+    line = _redact_spans(line, _credential_spans(line, creds))
+    for pattern, replacement in _REDACT_PATTERNS:
+        line = pattern.sub(replacement, line)
+    line = _IPV6_CANDIDATE.sub(_redact_ipv6, line)
+    line = " ".join(line.split())[:300]
+    return f"{line} (SQLSTATE {sqlstate})" if sqlstate else line
+
+
+def _served_child() -> bool:
+    return os.environ.get(SERVED_CHILD_ENV) == "1"
+
 # The identity the executor's connection reported for THIS call, for the audit row only. A
 # ContextVar for every reason the one above is, including the clear-on-entry — an identity left
 # behind by an earlier call in this context would put the wrong person on a row they never ran.
@@ -2540,7 +2687,26 @@ def _write_refusal(refusal: Refusal) -> None:
     sys.stderr.write("\n")
 
 
-def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusal | None]:
+def _builtin_catalog_query(sql: str) -> bool:
+    """Whether `sql` is one of agami's own catalog queries that call a catalog function (#523).
+
+    Matched by fingerprint, so only the literal values may differ from the query `dialects` builds:
+    a statement an agent wrote, or one of these with anything added, does not match. False whenever
+    the list cannot be loaded, so the recon gate stays shut."""
+    import sql_guard
+
+    try:
+        from semantic_model.dialects import catalog_function_queries
+
+        allowed = {sql_guard.statement_fingerprint(q) for q in catalog_function_queries()}
+    except Exception:
+        return False
+    fingerprint = sql_guard.statement_fingerprint(sql)
+    return fingerprint is not None and fingerprint in allowed
+
+
+def _model_safety(sql: str, profile: str, area: str | None, *,
+                  build_profile: bool = False) -> tuple[str, Refusal | None]:
     """Semantic-model safety pass before execution: the scope gates, over a model resolved from the
     DB (hosted) or disk (local).
 
@@ -2741,8 +2907,10 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
     # an empty-name table so that a CTE reference passes, and a table function arrives as precisely
     # that node, so it went through both. Same `getattr` reason as the gate above.
     check_scopable = getattr(RT, "check_scopable", None)
+    # `build_profile` (#523) is passed only when set, so every other call is the one it always was.
+    profiling = {"build_profile": True} if build_profile else {}
     if check_scopable is not None:
-        unscopable = check_scopable(sql, org, ctx=ctx)
+        unscopable = check_scopable(sql, org, ctx=ctx, **profiling)
         if unscopable is not None:
             return sql, unscopable
 
@@ -2752,7 +2920,7 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
     # Each gate returns the contract object itself and this layer only hands it back — there is no
     # second place where a refusal's reason, rule or wording could be chosen, and no serialization
     # between the gate and the Envelope for the two paths to disagree about.
-    ts = RT.check_table_scope(sql, org, ctx=ctx)
+    ts = RT.check_table_scope(sql, org, ctx=ctx, **profiling)
     if ts is not None:
         return sql, ts
 
@@ -3126,6 +3294,7 @@ def execute_guarded(
     executor: Executor,
     org_id: str | None = None,
     no_safety: bool = False,
+    build_profile: bool = False,
 ) -> Envelope:
     """The un-bypassable guarded envelope — the single execution chokepoint (REQ-002/REQ-014).
 
@@ -3172,6 +3341,7 @@ def execute_guarded(
     # be attributed to this one. The recorder reads it unconditionally; a stale value would put the
     # wrong error text on a row that succeeded.
     _last_error_detail.set(None)
+    _last_error_cli_detail.set(None)
     # Same reason, and the same load-bearing half: an identity reported by an earlier call in this
     # context must never be attributed to this one. This is the clear that makes the recorder's
     # unconditional read safe — without it a statement that reported nothing would inherit whoever
@@ -3210,9 +3380,13 @@ def execute_guarded(
     # that keeps it that way — a future rewrite would have to reintroduce the divergence past a name
     # that says what it is for.
     received_sql = sql
+    # The build-time profile (#523) is a local command-line mode. A served caller never reaches it
+    # from `main`, and one passing it in-process gets the full gates instead.
+    build_profile = build_profile and not _hosted()
     # The engine as the credentials name it, for answering a database error with the dialect rule
     # that explains it (#566). Unknown until the credentials load, which is after the gates.
     engine: str | None = None
+    creds: dict[str, Any] = {}
     try:
         # FIRST, above the read-only gate, because principle 7 records "every call ... whether it
         # executed or was refused" — so gating only execution would leave the refusals unrecorded
@@ -3243,7 +3417,7 @@ def execute_guarded(
         # are a hard gate for the same reason write and RCE protection are. Running second is what
         # makes the label deterministic when a name is on both lists (principle 9).
         refusal = sql_guard.check_no_recon(sql)
-        if refusal is not None:
+        if refusal is not None and not (build_profile and _builtin_catalog_query(sql)):
             return _envelope("refused", refusal=refusal,
                              receipt=_refusal_receipt(refusal, received_sql, profile))
         if not no_safety:
@@ -3253,7 +3427,8 @@ def execute_guarded(
             # caller's own statement. The assignment stays because the CONTRACT is "run what this
             # returns": reading the return value is what makes a reintroduced rewrite a receipt bug
             # rather than an executed-statement bug.
-            sql, verdict = _model_safety(sql, profile, area)
+            sql, verdict = (_model_safety(sql, profile, area, build_profile=True) if build_profile
+                            else _model_safety(sql, profile, area))
             if isinstance(verdict, Refusal):
                 return _envelope("refused", refusal=verdict,
                                  receipt=_refusal_receipt(verdict, received_sql, profile))
@@ -3356,6 +3531,9 @@ def execute_guarded(
         # ContextVar is read by `tools._record_execution` when the recorder shares this process, and
         # `_RAW_LOG` is the server-side trail everywhere else. Neither is the caller's channel.
         _last_error_detail.set(exc.msg)
+        if exc.code != FAILURE_KIND_TO_EXIT["sign_in_required"] and _cli_detail_wanted.get():
+            # A sign-in failure's text is the executor's own, not the database's.
+            _last_error_cli_detail.set(_db_error_first_line(exc.msg, sqlstate_of(exc), creds))
         _RAW_LOG.error("database error (audit detail): %s", exc.msg)
         message = _ERROR_MESSAGES.get(kind, UNEXPECTED_FAILURE_MESSAGE)
         # A construct this engine rejects, named by its own dialect rule (#566). The rule is our
@@ -3420,6 +3598,10 @@ def main() -> int:
                    help="Subject area for the semantic-model safety pass (pre-flight + scope + PII).")
     p.add_argument("--no-safety", action="store_true",
                    help="Skip the semantic-model safety pass.")
+    p.add_argument("--build-profile", action="store_true",
+                   help="Local model building only: also allow information_schema (and pg_catalog structure, "
+                        "SQLite's schema table) reads and JSON/array table functions over a column. Every "
+                        "other check still runs. Refused on a hosted server and from the MCP tool.")
     args = p.parse_args()
 
     # Silence the raw-detail logger for the whole CLI/child lifetime. Without this it falls through
@@ -3442,10 +3624,15 @@ def main() -> int:
     _LOG.addHandler(logging.NullHandler())
     _LOG.propagate = False
 
+    _cli_detail_wanted.set(not (_hosted() or _served_child()))
+    if args.build_profile and (_hosted() or _served_child()):
+        return _err("--build-profile is for building a model on your own machine; it is refused on a "
+                    "hosted server and from the MCP tool.")
+
     profile = args.profile or _resolve_default_profile()
     if args.batch:
         return _batch_main(Path(os.path.expanduser(args.batch)), profile, default_area=args.area,
-                          no_safety=args.no_safety,
+                          no_safety=args.no_safety, build_profile=args.build_profile,
                           manifest_path=Path(os.path.expanduser(args.manifest)) if args.manifest else None)
 
     if args.sql_file:
@@ -3460,7 +3647,8 @@ def main() -> int:
     # gate for EVERY caller (both MCP servers, the agami-query skill, cron), NOT bypassable via
     # --no-safety (which skips only the semantic-model pass, never write/RCE/DoS protection).
     env = execute_guarded(
-        sql, profile, args.area, executor=BUILTIN_EXECUTOR, no_safety=args.no_safety
+        sql, profile, args.area, executor=BUILTIN_EXECUTOR, no_safety=args.no_safety,
+        **({"build_profile": True} if args.build_profile else {}),
     )
 
     # The single print site: a three-way switch on the ONE Envelope `execute_guarded` returned.
@@ -3476,9 +3664,22 @@ def main() -> int:
         # CLI contract, which the agami-query skill's error classifier and `semantic_model.cli`
         # already read. Restructuring it would buy nothing in this slice.
         sys.stderr.write(f"{env.failure.message}\n")
+        detail = _local_db_detail()
+        if detail:
+            sys.stderr.write(f"Database error: {detail}\n")
         return FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT)
     _emit_result_csv(env.data)
     return 0
+
+
+def _local_db_detail() -> str | None:
+    """The redacted first line the database gave, for a person at their own command line (#523).
+
+    None on a hosted server and in the child the MCP tool forks, whose stderr reaches the caller:
+    there the fixed sentence stays the whole answer, as ACE-039 decided."""
+    if _hosted() or _served_child():
+        return None
+    return _last_error_cli_detail.get()
 
 
 def _batch_run_json_path(out: Path) -> Path:
@@ -3488,8 +3689,94 @@ def _batch_run_json_path(out: Path) -> Path:
     return out.with_name(name + ".run.json")
 
 
+def _batch_write_atomic(path: Path, text: str) -> None:
+    """Write a batch artifact whole or not at all, so a reader never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _batch_out_path(item: dict[str, Any]) -> Path:
+    return Path(os.path.expanduser(str(item["out"]))).resolve()
+
+
+def _batch_write_problem(exc: BaseException) -> str:
+    # strerror only: the exception's own text carries the path.
+    return f"the output could not be written: {getattr(exc, 'strerror', None) or type(exc).__name__}"
+
+
+def _batch_item_problem(item: Any) -> str | None:
+    """Why a plan item cannot be run as written, or None when it can."""
+    if not isinstance(item, dict):
+        return "is not an object"
+    if not item.get("out"):
+        return "has no `out`"
+    if not (item.get("sql") or item.get("sql_file")):
+        return "has neither `sql` nor `sql_file`"
+    return None
+
+
+def _batch_run_item(item: dict[str, Any], profile: str, default_area: str | None, no_safety: bool,
+                    build_profile: bool) -> tuple[Path, dict[str, Any]]:
+    """Run one well-formed plan item through the guard; write its CSV and return its outcome."""
+    # Relative paths resolve from the current directory, not the plan's folder; the manifest
+    # records the absolute path so a caller sees where each result actually landed.
+    out = _batch_out_path(item)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")
+    except OSError as exc:
+        _batch_write_atomic(out, "")
+        return out, {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"the statement file could not be read: {exc.strerror or exc}"}
+    env = execute_guarded(sql, profile, item.get("area") or default_area, executor=BUILTIN_EXECUTOR,
+                          no_safety=no_safety, **({"build_profile": True} if build_profile else {}))
+    if env.status == "ok":
+        buf = io.StringIO()
+        if env.data.columns:
+            writer = csv.writer(buf)
+            writer.writerow(env.data.columns)
+            for row in env.data.rows:
+                writer.writerow(row)
+        _batch_write_atomic(out, buf.getvalue())
+        return out, {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None, "rows": len(env.data.rows)}
+    _batch_write_atomic(out, "")
+    if env.status == "refused":
+        return out, {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
+                     "detail": getattr(env.refusal, "reason", None)}
+    run = {"status": "failed", "exit": FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT),
+           "kind": env.failure.kind, "rule": None, "detail": env.failure.message}
+    database_error = _local_db_detail()
+    if database_error:
+        run["database_error"] = database_error
+    return out, run
+
+
+def _batch_record(item: dict[str, Any], run: dict[str, Any]) -> Path | None:
+    """Write an item's run file, and empty its CSV unless it ran, so a failed item never leaves an
+    earlier run's rows behind. A write that fails is noted on `run` and never stops the plan."""
+    try:
+        out = _batch_out_path(item)
+        if run["status"] != "ok":
+            _batch_write_atomic(out, "")
+        _batch_write_atomic(_batch_run_json_path(out), json.dumps(run))
+        return out
+    except Exception as exc:  # noqa: BLE001 - the item is recorded however its files fare
+        run["artifact_error"] = _batch_write_problem(exc)
+        try:
+            return _batch_out_path(item)
+        except Exception:  # noqa: BLE001
+            return None
+
+
 def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_safety: bool,
-               manifest_path: Path | None) -> int:
+               manifest_path: Path | None, build_profile: bool = False) -> int:
     """Run a plan of statements in one process: the semantic model resolved once, the connection kept open,
     and EVERY item through `execute_guarded` on its own, so nothing is vetted once for many and
     every refusal is recorded. Reconcile's Phase 1.5 runs a row's statement check and its probes
@@ -3498,69 +3785,58 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
 
     Per item: `out` gets the CSV (empty when the item was refused or failed, which is how the
     ledger reads a probe that did not run), `<out>.run.json` gets the outcome in `run.json`'s shape,
-    and the manifest lists every item. Exit 0 when every item ran; otherwise the exit code the
-    single-statement door would have given the first item that did not.
+    and the manifest lists every item. A malformed item is recorded as failed and the rest still run,
+    and the manifest is written however the run ends (#523). Exit 0 when every item ran; otherwise
+    the exit code the single-statement door would have given the first item that did not.
     """
     global _BATCH_CONNECTIONS
-    try:
-        plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        sys.stderr.write(f"--batch: cannot read the plan: {exc}\n")
-        return 2
-    if not isinstance(plan, list) or not all(isinstance(item, dict) for item in plan):
-        sys.stderr.write("--batch: the plan must be a JSON list of objects\n")
-        return 2
-    for n, item in enumerate(plan, 1):
-        if not item.get("out"):
-            sys.stderr.write(f"--batch: item {n} has no `out`\n")
-            return 2
-        if not (item.get("sql") or item.get("sql_file")):
-            sys.stderr.write(f"--batch: item {n} has neither `sql` nor `sql_file`\n")
-            return 2
+    target = manifest_path or plan_path.with_name(plan_path.name + ".manifest.json")
     items: list[dict[str, Any]] = []
+    error: str | None = None
     first_bad = 0
     _BATCH_CONNECTIONS = {}
     try:
-        for n, item in enumerate(plan, 1):
-            ident = str(item.get("id") or n)
-            # Relative paths resolve from the current directory, not the plan's folder; the manifest
-            # records the absolute path so a caller sees where each result actually landed.
-            out = Path(os.path.expanduser(str(item["out"]))).resolve()
-            out.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")
-            except OSError as exc:
-                run = {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"the statement file could not be read: {exc.strerror or exc}"}
-                out.write_text("", encoding="utf-8")
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            error = f"cannot read the plan: {exc}"
+            plan = None
+        if not error and not isinstance(plan, list):
+            error, plan = "the plan must be a JSON list of objects", None
+        if error:
+            sys.stderr.write(f"--batch: {error}\n")
+            first_bad = 2
+        for n, item in enumerate(plan or [], 1):
+            ident = str(item.get("id") or n) if isinstance(item, dict) else str(n)
+            problem = _batch_item_problem(item)
+            out: Path | None = None
+            if problem is not None:
+                sys.stderr.write(f"--batch: item {n} {problem}\n")
+                run = {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"item {n} {problem}"}
             else:
-                env = execute_guarded(sql, profile, item.get("area") or default_area, executor=BUILTIN_EXECUTOR,
-                                      no_safety=no_safety)
-                if env.status == "ok":
-                    with out.open("w", newline="", encoding="utf-8") as fh:
-                        if env.data.columns:
-                            writer = csv.writer(fh)
-                            writer.writerow(env.data.columns)
-                            for row in env.data.rows:
-                                writer.writerow(row)
-                    run = {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None, "rows": len(env.data.rows)}
-                elif env.status == "refused":
-                    out.write_text("", encoding="utf-8")
-                    run = {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
-                           "detail": getattr(env.refusal, "reason", None)}
-                else:
-                    out.write_text("", encoding="utf-8")
-                    run = {"status": "failed", "exit": FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT),
-                           "kind": env.failure.kind, "rule": None, "detail": env.failure.message}
-            _batch_run_json_path(out).write_text(json.dumps(run), encoding="utf-8")
-            items.append({"id": ident, "out": str(out), **run})
-            if run["status"] != "ok" and not first_bad:
-                first_bad = int(run["exit"])
+                try:
+                    out, run = _batch_run_item(item, profile, default_area, no_safety, build_profile)
+                except OSError as exc:
+                    run = {"status": "failed", "exit": _DEFAULT_FAILURE_EXIT, "kind": "other", "rule": None,
+                           "detail": _batch_write_problem(exc)}
+                except Exception:
+                    # Value-free like the guarded path's catch-all: the text of an exception nobody
+                    # anticipated may carry a path or a DSN.
+                    _LOG.error("unhandled error running a batch item", exc_info=True)
+                    run = {"status": "failed", "exit": _DEFAULT_FAILURE_EXIT, "kind": "other", "rule": None,
+                           "detail": UNEXPECTED_FAILURE_MESSAGE}
+            if isinstance(item, dict) and item.get("out"):
+                out = _batch_record(item, run)
+            items.append({"id": ident, "out": str(out) if out is not None else None, **run})
+            if (run["status"] != "ok" or run.get("artifact_error")) and not first_bad:
+                first_bad = int(run["exit"]) or _DEFAULT_FAILURE_EXIT
     finally:
         _close_batch_connections()
-    manifest = {"profile": profile, "total": len(items), "ok": sum(1 for i in items if i["status"] == "ok"), "items": items}
-    target = manifest_path or plan_path.with_name(plan_path.name + ".manifest.json")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        manifest: dict[str, Any] = {"profile": profile, "total": len(items),
+                                    "ok": sum(1 for i in items if i["status"] == "ok"), "items": items}
+        if error:
+            manifest["error"] = error
+        _batch_write_atomic(target, json.dumps(manifest, indent=2))
     print(json.dumps(manifest))
     return 0 if first_bad == 0 else first_bad
 

@@ -207,10 +207,17 @@ def make_execute_sql_runner(
     tables an existing model declares, so once any model exists it refuses every one of them (#428):
     a second batch, a re-introspection and a new schema all came back with no readable columns. The
     always-on gate still runs, so these reads stay read-only. Everything that answers or validates
-    against the model (seed examples, enrichment) keeps the default and is confined as before."""
+    against the model (seed examples, enrichment) keeps the default and is confined as before.
+
+    They keep `--no-safety` rather than `--build-profile` alone (#523): probing reads tables the model
+    does not declare yet, probe mode samples with `SELECT *`, and catalogs such as Redshift's `svv_*`,
+    SQLite's `pragma_*` functions and Oracle's `ALL_*` views are not in the build profile.
+    `--build-profile` is added beside it, off a hosted server, so agami's own catalog queries that
+    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate."""
     exe = python or sys.executable
     script = str(SCRIPT_DIR / "execute_sql.py")
-    unscoped = ["--no-safety"] if building_the_model else []
+    hosted = bool(os.environ.get("AGAMI_DB_URL") or os.environ.get("APP_DATABASE_URL"))
+    unscoped = (["--no-safety"] + ([] if hosted else ["--build-profile"])) if building_the_model else []
 
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(

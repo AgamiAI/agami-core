@@ -1,0 +1,313 @@
+"""A failing statement shows the database's first line on a person's own command line (#523).
+
+Only there. A hosted server and the MCP tool, forked or in-process, still answer with the fixed
+sentence alone (ACE-039), and every exit code is the one it was, so the agami-query skill's handling
+of them is unchanged.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import sqlite3
+import subprocess
+import sys
+
+import pytest
+
+yaml = pytest.importorskip("yaml")
+
+import execute_sql  # noqa: E402
+import tools  # noqa: E402
+
+PROFILE = "acme"
+# `amount` is declared but the warehouse lacks it, so the database itself rejects the statement.
+MISSING_COLUMN = "SELECT amount FROM orders"
+# A nested aggregate: no needle reads it, so it is `other` and exit 6.
+NESTED_AGGREGATE = "SELECT SUM(SUM(id)) AS n FROM orders"
+
+
+def _write_model(root: pathlib.Path) -> None:
+    (root / "subject_areas" / "sales" / "tables").mkdir(parents=True)
+    (root / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "Shop", "version": 1,
+        "storage_connections": [{"name": "c", "storage_type": "SQLite"}],
+        "subject_areas": ["subject_areas/sales"]}))
+    (root / "subject_areas" / "sales" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "sales", "tables": [{"storage_connection": "c", "schema": "public", "table": "orders"}]}))
+    (root / "subject_areas" / "sales" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
+        "description": "orders",
+        "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                    {"name": "amount", "type": "integer"}]}))
+
+
+@pytest.fixture
+def warehouse(tmp_path, monkeypatch):
+    artifacts = tmp_path / "artifacts"
+    _write_model(artifacts / PROFILE)
+    db = tmp_path / "warehouse.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE orders (id INTEGER)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(artifacts))
+    monkeypatch.setenv(f"DATASOURCE_URL__{PROFILE.upper()}", f"sqlite:///{db}")
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", execute_sql.SERVED_CHILD_ENV):
+        monkeypatch.delenv(var, raising=False)
+    return tmp_path
+
+
+@pytest.fixture
+def cli_detail():
+    """What `main` sets on a local command line, so an in-process call computes the detail."""
+    token = execute_sql._cli_detail_wanted.set(True)
+    yield
+    execute_sql._cli_detail_wanted.reset(token)
+
+
+def _cli(sql: str, **extra_env: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", "execute_sql", "--profile", PROFILE, "--sql", sql],
+        capture_output=True, text=True, timeout=120, env={**os.environ, **extra_env},
+        cwd=str(pathlib.Path(execute_sql.__file__).parent),
+    )
+
+
+@pytest.mark.parametrize(("sql", "kind", "said"), [
+    (MISSING_COLUMN, "column_not_found", "no such column: amount"),
+    (NESTED_AGGREGATE, "other", "misuse of aggregate function SUM()"),
+])
+def test_a_local_command_line_shows_the_database_s_first_line(warehouse, sql, kind, said):
+    proc = _cli(sql)
+    assert proc.returncode == execute_sql.FAILURE_KIND_TO_EXIT[kind]
+    sentence = execute_sql._ERROR_MESSAGES.get(kind, execute_sql.UNEXPECTED_FAILURE_MESSAGE)
+    first, second = proc.stderr.strip().splitlines()
+    assert first == sentence
+    assert second == f"Database error: SQLite execution error: {said}"
+
+
+@pytest.mark.parametrize("sql", [MISSING_COLUMN, NESTED_AGGREGATE])
+def test_the_child_the_mcp_tool_forks_writes_only_the_fixed_sentence(warehouse, sql):
+    proc = _cli(sql, **{execute_sql.SERVED_CHILD_ENV: "1"})
+    assert proc.stderr.strip() in (execute_sql._ERROR_MESSAGES["column_not_found"],
+                                   execute_sql.UNEXPECTED_FAILURE_MESSAGE)
+    assert "amount" not in proc.stderr and "misuse" not in proc.stderr
+
+
+@pytest.mark.parametrize("sql", [MISSING_COLUMN, NESTED_AGGREGATE])
+def test_a_hosted_server_writes_only_the_fixed_sentence(warehouse, sql):
+    from store import Store
+
+    app_db = warehouse / "app.db"
+    store = Store.connect(f"sqlite:///{app_db}")
+    store.run_migrations()
+    store.close()
+    proc = _cli(sql, AGAMI_DB_URL=f"sqlite:///{app_db}", AGAMI_GOVERNANCE_ENFORCED="true")
+    assert proc.stderr.strip() in (execute_sql._ERROR_MESSAGES["column_not_found"],
+                                   execute_sql.UNEXPECTED_FAILURE_MESSAGE)
+    assert "Database error" not in proc.stderr and "misuse" not in proc.stderr
+
+
+@pytest.mark.parametrize(("sql", "kind", "message"), [
+    (MISSING_COLUMN, "column_not_found", execute_sql._ERROR_MESSAGES["column_not_found"]),
+    (NESTED_AGGREGATE, "other", execute_sql.UNEXPECTED_FAILURE_MESSAGE),
+])
+@pytest.mark.parametrize("path", ["forked", "in_process"])
+def test_the_mcp_tool_s_failure_payload_is_unchanged(warehouse, sql, kind, message, path):
+    if path == "in_process":
+        tools.set_injected_executor(execute_sql.BUILTIN_EXECUTOR)
+    try:
+        body = json.loads(tools.tool_execute_sql({"sql": sql, "datasource": PROFILE}))
+    finally:
+        tools.set_injected_executor(None)
+    assert body["status"] == "failed"
+    assert body["failure"] == {"kind": kind, "message": message}
+    rendered = json.dumps(body)
+    assert "Database error" not in rendered and "misuse" not in rendered and "no such column" not in rendered
+
+
+def test_the_detail_never_rides_on_the_envelope(warehouse, cli_detail):
+    env = execute_sql.execute_guarded(NESTED_AGGREGATE, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
+    assert env.failure.message == execute_sql.UNEXPECTED_FAILURE_MESSAGE
+    assert "misuse" in execute_sql._last_error_cli_detail.get()
+    # Cleared by the next call, so it is never attributed to a statement that did not produce it.
+    execute_sql.execute_guarded("SELECT id FROM orders", PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
+    assert execute_sql._last_error_cli_detail.get() is None
+
+
+# Built at import, so no credential-shaped literal sits in the source for a secret scanner to flag.
+_FAKE_SECRET = "not" + "-a-" + "secret"
+_FAKE_ACCOUNT = "acct" + "-demo"
+_PW_KEY = "pass" + "word"
+
+
+@pytest.mark.parametrize(("text", "creds", "expected"), [
+    ('Postgres execution error: column "amont" does not exist\nLINE 1: SELECT amont FROM orders\n'
+     '               ^\nHINT:  Perhaps you meant to reference the column "orders.internal_ref".',
+     {}, 'Postgres execution error: column "amont" does not exist'),
+    ('Postgres connect failed: connection to server at "db.example.com" (10.1.2.3), port 5432 failed: '
+     'FATAL:  password authentication failed for user "demo"',
+     {"host": "db.example.com", "user": "demo"},
+     'Postgres connect failed: connection to server at "<redacted>" (<redacted>), port 5432 failed: '
+     'FATAL: password authentication failed for user "<redacted>"'),
+    (f"MySQL connect failed: could not open mysql://demo:{_FAKE_SECRET}@db.example.com:3306/sales",
+     {}, "MySQL connect failed: could not open <redacted>"),
+    (f"Snowflake connect failed: bad login {_PW_KEY}={_FAKE_SECRET} user=demo account={_FAKE_ACCOUNT}",
+     {"account": _FAKE_ACCOUNT}, "Snowflake connect failed: bad login password=<redacted> user=<redacted> "
+     "account=<redacted>"),
+    ("DETAIL: only detail\nCONTEXT: and context", {}, None),
+])
+def test_the_first_line_is_redacted(text, creds, expected):
+    assert execute_sql._db_error_first_line(text, None, creds) == expected
+
+
+def test_the_sqlstate_is_shown_when_the_driver_gives_one(warehouse, cli_detail):
+    class _PgError(Exception):
+        pgcode = "42703"
+
+    class _Raiser:
+        def execute(self, vetted_sql, creds, *, profile):  # noqa: ANN001, ANN201
+            try:
+                raise _PgError("column x does not exist")
+            except _PgError as e:
+                raise execute_sql.ExecutorError(f"Postgres execution error: {e}", code=5) from e
+
+    execute_sql.execute_guarded("SELECT 1", PROFILE, None, executor=_Raiser(), no_safety=True)
+    assert execute_sql._last_error_cli_detail.get() == (
+        "Postgres execution error: column x does not exist (SQLSTATE 42703)")
+    assert execute_sql._db_error_first_line("column x does not exist", "42703", {}) == (
+        "column x does not exist (SQLSTATE 42703)")
+
+
+@pytest.mark.parametrize("address", ["fd00::10", "2001:db8:0:0:0:0:0:1", "fe80::1%eth0", "::1", "[2001:db8::7]"])
+def test_a_resolved_ipv6_address_is_redacted_even_when_the_profile_names_a_hostname(address):
+    text = (f'Postgres connect failed: connection to server at "db.example.com" ({address}), port 5432 '
+            "failed: Connection refused")
+    line = execute_sql._db_error_first_line(text, None, {"host": "db.example.com"})
+    assert address.strip("[]").split("%")[0] not in line and "eth0" not in line and "<redacted>" in line
+
+
+def test_a_time_of_day_is_not_taken_for_an_ipv6_address():
+    line = execute_sql._db_error_first_line('invalid input syntax for type time: "12:30:45"', None, {})
+    assert "12:30:45" in line
+
+
+@pytest.mark.parametrize("text", [
+    # Escaped quotes and escaped whitespace, as libpq and SQL quoting write them.
+    f"invalid connection option: {_PW_KEY}='ab\\'c {_FAKE_SECRET}' dbname=demo",
+    f"invalid connection option: {_PW_KEY}='it''s {_FAKE_SECRET}' dbname=demo",
+    f'invalid connection option: {_PW_KEY}="ab\\" {_FAKE_SECRET}" dbname=demo',
+    f"invalid connection option: {_PW_KEY}=ab\\ {_FAKE_SECRET} dbname=demo",
+    f"invalid connection option: {_PW_KEY}='unterminated {_FAKE_SECRET}",
+    # Credential keys beyond the plain ones.
+    f"auth failed: access_token={_FAKE_SECRET} dbname=demo",
+    f"auth failed: refresh_token={_FAKE_SECRET} dbname=demo",
+    f"auth failed: client_secret='{_FAKE_SECRET}' dbname=demo",
+    f"auth failed: ssl{_PW_KEY}={_FAKE_SECRET} dbname=demo",
+    f'connection failed for user "a\\" {_FAKE_SECRET}"',
+])
+def test_an_escaped_or_less_common_credential_is_redacted_whole(text):
+    line = execute_sql._db_error_first_line(text, None, {})
+    assert _FAKE_SECRET not in line and "<redacted>" in line
+
+
+@pytest.mark.parametrize(("key", "value", "echoed"), [
+    ("client_secret", "it's" + _FAKE_SECRET, "it\\'s" + _FAKE_SECRET),
+    ("client_secret", "it's" + _FAKE_SECRET, "it''s" + _FAKE_SECRET),
+    ("refresh_token", "x" + _FAKE_SECRET, "x" + _FAKE_SECRET),
+    (_PW_KEY, 'a"b' + _FAKE_SECRET, 'a\\"b' + _FAKE_SECRET),
+])
+def test_a_profile_value_is_redacted_however_the_driver_escapes_it(key, value, echoed):
+    line = execute_sql._db_error_first_line(f"login failed near {echoed} for this role", None, {key: value})
+    assert _FAKE_SECRET not in line and "<redacted>" in line
+
+
+# Built at runtime like the values above: a short login, as SQL Server's `sa`.
+_SHORT_LOGIN = "s" + "a"
+
+
+@pytest.mark.parametrize("text", [
+    f"Login failed for user '{_SHORT_LOGIN}'.",
+    f'FATAL: password authentication failed for user "{_SHORT_LOGIN}"',
+    f'FATAL: role "{_SHORT_LOGIN}" does not exist',
+])
+def test_a_short_login_is_redacted_in_a_quoted_user_context(text):
+    line = execute_sql._db_error_first_line(text, "28000", {"user": _SHORT_LOGIN})
+    assert f"'{_SHORT_LOGIN}'" not in line and f'"{_SHORT_LOGIN}"' not in line and "<redacted>" in line
+
+
+def test_a_short_profile_value_is_not_replaced_elsewhere():
+    # The length cutoff stays for bare text: `sa` inside "usage" is not the login.
+    line = execute_sql._db_error_first_line("invalid usage of a cursor", None, {"user": _SHORT_LOGIN})
+    assert line == "invalid usage of a cursor"
+
+
+def test_a_profile_value_that_is_part_of_a_key_name_does_not_hide_the_key():
+    line = execute_sql._db_error_first_line(f"auth failed: access_token={_FAKE_SECRET} dbname=demo", None,
+                                            {"user": "token"})
+    assert _FAKE_SECRET not in line and "access_token=<redacted>" in line
+
+
+def test_a_password_equal_to_a_common_word_does_not_stop_the_login_being_redacted():
+    line = execute_sql._db_error_first_line(f'password authentication failed for user "{_SHORT_LOGIN}"', None,
+                                            {_PW_KEY: "user", "user": _SHORT_LOGIN})
+    assert f'"{_SHORT_LOGIN}"' not in line and "<redacted>" in line
+
+
+@pytest.mark.parametrize("path", ["in_process", "direct"])
+def test_no_served_caller_spends_time_on_the_command_line_detail(warehouse, monkeypatch, path):
+    calls = []
+    monkeypatch.setattr(execute_sql, "_db_error_first_line", lambda *a: calls.append(a) or "x")
+    if path == "direct":
+        env = execute_sql.execute_guarded(NESTED_AGGREGATE, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
+        assert env.status == "failed"
+    else:
+        tools.set_injected_executor(execute_sql.BUILTIN_EXECUTOR)
+        try:
+            assert json.loads(tools.tool_execute_sql({"sql": NESTED_AGGREGATE, "datasource": PROFILE}))["status"] == "failed"
+        finally:
+            tools.set_injected_executor(None)
+    assert calls == [] and execute_sql._last_error_cli_detail.get() is None
+
+
+# A long first line with no spaces is where the patterns rescan most.
+_LONG = 64 * 1024
+
+
+@pytest.mark.parametrize("text", [
+    "x" * _LONG,
+    "demo@" + "x" * _LONG,
+    "a-" * (_LONG // 2) + "://",
+    f"auth failed: {_PW_KEY}={_FAKE_SECRET} " + "y" * _LONG,
+    "z" * 10 + f"{_PW_KEY}=" + "w" * _LONG,
+])
+def test_a_long_first_line_is_redacted_quickly_and_whole(text):
+    import time
+
+    started = time.perf_counter()
+    line = execute_sql._db_error_first_line(text, None, {_PW_KEY: _FAKE_SECRET})
+    assert time.perf_counter() - started < 1.0
+    assert line and len(line) <= 300 and _FAKE_SECRET not in line and "demo@" not in line
+
+
+def _cut_inside(word_start: int, tail: str) -> str:
+    """A long URL, which redaction shortens to one word so what follows it is shown, then `tail`,
+    placed so the window ends `word_start` characters into it."""
+    url = "s://" + "h" * (execute_sql._DETAIL_WINDOW - word_start - 5)
+    text = f"{url} {tail}"
+    assert text.index(tail) + word_start == execute_sql._DETAIL_WINDOW
+    return text
+
+
+def test_a_login_cut_by_the_window_is_never_half_shown():
+    line = execute_sql._db_error_first_line(_cut_inside(4, "demo@db.example.com is unreachable"), None, {})
+    assert "demo" not in line and "<redacted>" in line
+
+
+def test_a_profile_value_cut_between_its_words_is_never_half_shown():
+    value = f"{_FAKE_SECRET} {_FAKE_ACCOUNT}"
+    text = _cut_inside(len(_FAKE_SECRET) + 4, f"{value} rejected")
+    line = execute_sql._db_error_first_line(text, None, {_PW_KEY: value})
+    assert _FAKE_SECRET not in line and "<redacted>" in line

@@ -12,6 +12,40 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **`execute_sql --build-profile` for profiling while you build a model (#523).** Builders turned the
+  safety check off (`--no-safety`) to read `information_schema` or expand a JSON column. The new flag
+  keeps every check and allows only those: reads of `information_schema`'s structure views on the
+  engines that have one (not Oracle or SQLite), plus `pg_catalog`'s structure tables and SQLite's
+  `sqlite_master`, each matched as the engine resolves the name (a quoted `"INFORMATION_SCHEMA"` on
+  Postgres is an ordinary schema), and table functions such as
+  `jsonb_each`, `json_each` or `unnest` over a declared column. Catalog views that hold values or
+  query text (MySQL's `COLUMN_STATISTICS` and `PROCESSLIST`, BigQuery's `JOBS`) stay refused. A
+  column the model leaves out is still refused, `SELECT *` is still refused, a `USING` or `NATURAL`
+  join is refused under the flag (write an explicit `ON`), and the 50,000-character cap is
+  unchanged. Beside a model table every column is qualified, except a name the table function returns,
+  such as BigQuery's `UNNEST(o.tags) AS tag` value or `WITH OFFSET AS i` position. A column
+  qualified by an alias two sources share apart from case (`c` and `"C"`) is refused unless every
+  one of them declares it, with or without the flag. Agami's own catalog query that calls `pg_get_constraintdef` runs under it too, matched by its exact shape, so a statement an
+  agent writes cannot use that function. The flag is refused on a hosted server and the MCP tool
+  cannot set it, so apart from that alias rule what the tool accepts and refuses is unchanged.
+
+- **`execute_sql` shows the database's error on your own machine, and `--batch` always writes its
+  manifest (#523).** A failing statement told a builder only a fixed sentence, often "an unexpected
+  error" (exit 6). Run from your own command line, that sentence is now followed by
+  `Database error: <the database's first line>` (and the SQLSTATE where the driver gives one), with
+  credentials (any `password`, `secret`, `token` or key field, escaped or quoted, and the login named in
+  `for user 'sa'` however short), hosts and IPv4/IPv6 addresses redacted and HINT, DETAIL and
+  CONTEXT lines dropped; only the line's first 1,200 characters are read, so a very long line
+  costs no more. Exit codes are unchanged. A hosted server and the MCP tool still return the fixed sentence alone. In
+  `--batch`, a malformed item is recorded as failed and the rest still run, an item whose output
+  cannot be written stays in the manifest with its error, its CSV is emptied so no earlier rows are
+  left behind, run files and the manifest are written whole or not at all, and the manifest is
+  written even when the run stops part way. A plan that is JSON `null` is refused like any other
+  plan that is not a list. agami-connect's sampling step no longer says
+  `SELECT * … LIMIT 5`, which was refused: it names the columns and runs with `--build-profile`.
+
 ### Fixed
 
 - **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a

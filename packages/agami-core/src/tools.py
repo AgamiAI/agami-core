@@ -4514,10 +4514,18 @@ def _pass_child_env() -> dict[str, str]:
     Spelled as the canonical `true`/`false` rather than passing the operator's own text through, so
     the child parses a value this process has already resolved rather than repeating the resolution.
     """
-    from execute_sql import _model_pass_disabled, _resolve_row_cap, _resolve_timeout_s
+    from execute_sql import (
+        SERVED_CHILD_ENV,
+        _model_pass_disabled,
+        _resolve_row_cap,
+        _resolve_timeout_s,
+    )
 
     return {
         **os.environ,
+        # The child's stderr is relayed to the caller, so it keeps the fixed failure sentence and
+        # refuses the build-time profile (#523).
+        SERVED_CHILD_ENV: "1",
         # UTF-8 from the first byte the child writes, including a traceback raised before its `main`
         # can switch its streams: the parent decodes both streams as UTF-8. PYTHONIOENCODING too,
         # because an inherited one takes precedence over UTF-8 mode for the standard streams.

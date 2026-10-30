@@ -464,6 +464,20 @@ class PostgreSQL(Dialect):
             "ORDER BY c.relname, con.conname, k.ord"
         )
 
+    def sql_constraint_definitions(self, schema: str) -> str:
+        """Every constraint in `schema` with its definition as Postgres prints it. Any role can read
+        this, unlike the information_schema views, and only a `--build-profile` run lets it past the
+        recon gate (see `catalog_function_queries`)."""
+        return (
+            "SELECT c.relname AS table_name, con.conname AS constraint_name, "
+            "con.contype AS constraint_type, pg_get_constraintdef(con.oid) AS definition "
+            "FROM pg_catalog.pg_constraint con "
+            "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            f"WHERE n.nspname = {self.quote_lit(schema)} "
+            "ORDER BY c.relname, con.conname"
+        )
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT reltuples::bigint AS estimated_rows FROM pg_class c "
@@ -1215,6 +1229,19 @@ _REGISTRY: dict[str, Callable[[], Dialect]] = {
 }
 
 
+# Agami's own catalog queries that call a catalog function the recon gate refuses (#523). Each is
+# rendered with a stand-in literal: `execute_sql` compares fingerprints, which ignore literal values,
+# so the same query for any schema matches while any other statement does not.
+_CATALOG_FUNCTION_QUERIES: tuple[Callable[[], str], ...] = (
+    lambda: PostgreSQL().sql_constraint_definitions("schema"),
+)
+
+
+def catalog_function_queries() -> list[str]:
+    """The built-in catalog queries a `--build-profile` run may send past the recon gate."""
+    return [render() for render in _CATALOG_FUNCTION_QUERIES]
+
+
 def get_dialect(db_type: str) -> Dialect:
     """Resolve a credential db_type (or storage_type) to a Dialect instance."""
     key = (db_type or "").strip().lower().replace(" ", "")
@@ -1234,5 +1261,5 @@ __all__ = [
     "Dialect",
     "PostgreSQL", "Supabase", "Redshift", "MySQL", "Snowflake", "DuckDB",
     "Databricks", "Trino", "SQLServer", "BigQuery", "SQLite", "Oracle",
-    "get_dialect", "supported_db_types", "normalize_type",
+    "get_dialect", "supported_db_types", "normalize_type", "catalog_function_queries",
 ]
