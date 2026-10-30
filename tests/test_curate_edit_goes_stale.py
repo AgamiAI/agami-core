@@ -240,6 +240,51 @@ def test_an_approve_with_no_signer_cannot_reuse_the_lost_approval(root):
     assert (mm.review_state, mm.signed_off_by) == ("stale", "you@example.com")
 
 
+@pytest.mark.parametrize("op, kind", [(BINDING, "metric"), (MAPS, "entity"), (CARDINALITY, "relationship")],
+                         ids=["metric", "entity", "relationship"])
+def test_an_edit_of_review_state_cannot_re_approve_a_stale_item(root, op, kind):
+    assert curate.apply(root, [op]).stale
+    name = op["name"]
+    res = curate.apply(root, [_edit(kind, name, "review_state", "approved")])
+    assert not res.applied and "use an approve" in res.skipped[0]["reason"], res.as_dict()
+    assert _state(root, kind).review_state == "stale"
+    # A signed approve still re-approves it, in the approver's name.
+    assert curate.apply(root, [_approve(kind, name)], signer="another@example.com", role="owner").validated
+    item = _state(root, kind)
+    assert (item.review_state, item.signed_off_by) == ("approved", "another@example.com")
+
+
+_TRUST_EDITS = [("review_state", "approved"), ("review_state", "rejected"), ("signed_off_by", "x@example.com"),
+                ("signed_off_at", "2026-10-30T00:00:00Z"), ("signed_off_role", "owner"),
+                ("confidence", "confirmed"), ("migrated_from", "old")]
+
+
+@pytest.mark.parametrize("field, value", _TRUST_EDITS, ids=[f for f, _ in _TRUST_EDITS])
+@pytest.mark.parametrize("target", [
+    {"kind": "metric", "name": "revenue"}, {"kind": "entity", "name": "customer"},
+    {"kind": "relationship", "name": "orders->customers"}, {"kind": "table", "name": "orders"},
+    {"kind": "table", "name": "orders", "column": "amount"}],
+    ids=["metric", "entity", "relationship", "table", "column"])
+def test_no_edit_sets_a_sign_off_field(root, target, field, value):
+    before = {p: p.read_bytes() for p in root.rglob("*.yaml")}
+    res = curate.apply(root, [{"op": "edit", "area": "sales", **target, "field": field, "value": value}],
+                       signer="you@example.com", role="owner")
+    assert not res.applied and "use an approve" in res.skipped[0]["reason"], res.as_dict()
+    assert {p: p.read_bytes() for p in root.rglob("*.yaml")} == before
+
+
+@pytest.mark.parametrize("kind, name", [("metric", "billed customers"), ("relationship", "invoices->customers")])
+def test_no_edit_sets_a_cross_area_items_review_state(tmp_path, kind, name):
+    _model(tmp_path, cross=[{**_JOIN, **SIGNED, "review_state": "stale"}],
+           ds_extra={"cross_subject_area_metrics": [{**_CROSS_METRIC, **SIGNED, "review_state": "stale"}]})
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": kind, "name": name,
+                                   "field": "review_state", "value": "approved"}])
+    assert not res.applied and "use an approve" in res.skipped[0]["reason"], res.as_dict()
+    org = L.load_datasource(tmp_path, include_rejected=True)
+    items = org.cross_subject_area_metrics if kind == "metric" else org.cross_subject_area_relationships
+    assert [i.review_state for i in items] == ["stale"]
+
+
 def test_approve_queue_re_approves_a_stale_item_as_the_new_signer(root, capsys):
     assert curate.apply(root, [BINDING], signer="editor@example.com", role="analyst").validated
     assert cli.main(["approve-queue", str(root), "--signer", "another@example.com",

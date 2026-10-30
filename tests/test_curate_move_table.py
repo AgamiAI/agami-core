@@ -606,3 +606,102 @@ def test_a_move_logged_without_what_it_carried_says_changes_not_recorded(tmp_pat
     del lines[-1]["carried"]
     path.write_text("".join(json.dumps(e) + "\n" for e in lines))
     assert _revenue_history(root, "catalog")["summary"] == "changes not recorded"
+
+
+def _join_history(root: Path, frm: str, to: str, area) -> dict:
+    (it,) = [it for it in curate.review_queue(loader.load_datasource(root), root=root)["rule_2"]
+             if it["kind"] == "relationship" and (it["name"], it["area"]) == (f"{frm}->{to}", area)]
+    return it["changes_since_approval"]
+
+
+_EXECUTABLE = {"op": "edit", "kind": "relationship", "name": "order_items->products", "field": "executable"}
+
+
+def _edit_in_place(root: Path, value: str) -> None:
+    """Edit catalog's copy of order_items->products; the cross-area copy is set aside meanwhile, as
+    an op naming catalog would match both."""
+    path = root / "datasource.yaml"
+    ds = yaml.safe_load(path.read_text())
+    path.write_text(yaml.safe_dump({**ds, "cross_subject_area_relationships": []}))
+    assert curate.apply(root, [{**_EXECUTABLE, "area": "catalog", "value": value}], **_WHO).stale
+    path.write_text(yaml.safe_dump(ds))
+
+
+def test_a_merged_join_shows_only_the_kept_copys_changes(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_SIGNED)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_SIGNED)
+    # The copy in place is edited first; the moved copy's edit is newer.
+    _edit_in_place(root, "informational")
+    assert curate.apply(root, [{**_EXECUTABLE, "area": curate.CROSS_AREA, "value": "split"}], **_WHO).stale
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    assert any("kept one copy: the copy in place" in n for n in res.notes), res.notes
+    since = _join_history(root, "order_items", "products", "catalog")
+    assert [c["text"] for c in since["changes"]] == [
+        "executable changed from (none) to informational", curate.MERGED_COPY]
+    assert not since["complete"]
+    moved = json.loads((root / curate.CURATION_LOG).read_text().splitlines()[-1])
+    (landed,) = [j for j in moved["joins"] if j["after"]["to_table"] == "products"]
+    assert (landed["from"], landed["to"], landed["merged"], landed["kept"]) == \
+        ("catalog", "catalog", True, "in_place")
+
+
+def test_a_kept_moved_copy_shows_only_its_own_changes(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_SIGNED)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_ENGINE)
+    assert curate.apply(root, [{**_EXECUTABLE, "area": curate.CROSS_AREA, "value": "split"}], **_WHO).stale
+    # A later edit of the engine's copy in place, which the move discards.
+    _edit_in_place(root, "informational")
+    cat = yaml.safe_load((root / "subject_areas" / "catalog" / "relationships.yaml").read_text())
+    cat["relationships"][0].update(_ENGINE)   # back to the engine's approval, so the moved copy wins
+    (root / "subject_areas" / "catalog" / "relationships.yaml").write_text(yaml.safe_dump(cat))
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    assert any("kept one copy: the moved copy" in n for n in res.notes), res.notes
+    since = _join_history(root, "order_items", "products", "catalog")
+    assert [c["text"] for c in since["changes"]] == [
+        "executable changed from (none) to split", curate.MERGED_COPY]
+
+
+def test_moving_a_same_named_table_in_another_schema_does_not_mix_join_histories(tmp_path):
+    root = _model(tmp_path)
+    _area(root, "archive", ["orders", "customers"], schema="archive")
+    _table(root, "archive", "orders", ["customer_id"], schema="archive")
+    _table(root, "archive", "customers", [], schema="archive")
+    (root / "subject_areas" / "archive" / "relationships.yaml").write_text(yaml.safe_dump({
+        "relationships": [_join("orders", "customer_id", "customers", **_SIGNED)]}))
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/archive")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    rels = root / "subject_areas" / "sales" / "relationships.yaml"
+    doc = yaml.safe_load(rels.read_text())
+    doc["relationships"][0].update(_SIGNED)
+    rels.write_text(yaml.safe_dump(doc))
+    join = {"op": "edit", "kind": "relationship", "name": "orders->customers", "field": "executable"}
+    assert curate.apply(root, [{**join, "area": "sales", "value": "informational"}], **_WHO).stale
+    assert curate.apply(root, [{**join, "area": "archive", "value": "split"}], **_WHO).stale
+    res = _move(root, "orders", "catalog", area="archive", schema="archive")
+    assert res.validated, res.as_dict()
+    since = _join_history(root, "orders", "customers", "sales")
+    assert [c["text"] for c in since["changes"]] == ["executable changed from (none) to informational"]
+    assert since["complete"]
+
+
+def test_a_move_logged_without_its_joins_says_changes_not_recorded(tmp_path):
+    root = _model(tmp_path)
+    assert curate.apply(root, [{**_LINE_JOIN, "op": "approve", "area": "sales", "at": "2026-01-01T00:00:00Z"}],
+                        **_WHO).validated
+    assert curate.apply(root, [{**_LINE_JOIN, "op": "edit", "area": "sales", "field": "relationship",
+                                "value": "one_to_one"}], **_WHO).stale
+    assert _move(root, "order_items", "catalog").validated
+    path = root / curate.CURATION_LOG
+    lines = [json.loads(ln) for ln in path.read_text().splitlines()]
+    del lines[-1]["joins"]
+    path.write_text("".join(json.dumps(e) + "\n" for e in lines))
+    assert _join_history(root, "order_items", "orders", "catalog")["summary"] == "changes not recorded"

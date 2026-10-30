@@ -25,7 +25,10 @@ below corresponds to one such version.
   including any added later, counts as a change, and an edit that sets a field to the value it
   already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
   was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an
-  approve with no signer can't reuse them. In one batch an approve after the edit signs off the
+  approve with no signer can't reuse them. An edit can no longer set a sign-off field
+  (`review_state`, `signed_off_by`, `signed_off_at`, `signed_off_role`, `confidence`,
+  `migrated_from`) on any entry, so a stale item can't be re-approved under its old stamp: the op is
+  skipped and points to approve / reject / include. In one batch an approve after the edit signs off the
   edited version (the explorer now sends approvals after edits) and an edit after the approve leaves
   the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
   tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
@@ -42,7 +45,12 @@ below corresponds to one such version.
   of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
   and a move where it disagrees with a copy a person signed off is refused. A move's log entry lists
   the metrics and entities it carried (`carried`), and an item's changes follow it back only through
-  a move that carried it (a move logged without that list gives "changes not recorded"). An item's
+  a move that carried it (a move logged without that list gives "changes not recorded"). The log entry
+  also lists each join the move placed again (`joins`: where it was and is, its identity before and
+  after with its schemas, and, when it met a copy already there, that the copies were `merged` and
+  which was `kept`); a join's changes follow back only the copy kept, say the copies were merged and
+  the other copy's changes are not recorded, and ignore a move of a same-named table in another
+  schema. An item's
   changes come only from edits of that item: a cross-area metric or entity reads only edits of the
   datasource-level lists, and an op that named no area (or another one) logs the area it resolved
   to (`resolved_area`). `stale` names a moved item where it now is, and an approve after the move in

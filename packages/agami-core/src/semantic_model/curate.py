@@ -703,8 +703,8 @@ def _apply_one(root: Path, op: dict, signer, role,
     if action == "move":
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
-        carried, keys = _move_table(root, op, area, backups, notes if notes is not None else [])
-        return keys, None, False, {"carried": carried}
+        carried, joins, keys = _move_table(root, op, area, backups, notes if notes is not None else [])
+        return keys, None, False, {"carried": carried, "joins": joins}
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -1096,15 +1096,15 @@ def _check_new_area(root: Path, area: str) -> None:
 
 
 def _move_table(root: Path, op: dict, src: str, backups: "dict[Path, Optional[str]]",
-                notes: list[str]) -> tuple[list[dict], list[tuple]]:
+                notes: list[str]) -> tuple[list[dict], list[dict], list[tuple]]:
     """Move a table to another subject area, taking what is only about it along (#513).
 
     The table file and its subject_area.yaml entry move. Each join on it is placed again by the areas
     that now own its two ends: inside one area, or a cross-area join between two. A metric or entity
     that reads only this table moves with it; one that also reads another table stays and is listed
     in `notes`. The caller validates the whole model and restores every file on failure. Returns the
-    metrics and entities carried (`{kind, name, from}`, for the log) and each carried entry's
-    `(old key, new key, label)`."""
+    metrics and entities carried (`{kind, name, from}`, for the log), the joins placed again (see
+    `_land_joins`, for the log) and each carried entry's `(old key, new key, label)`."""
     from .models import table_key
 
     name, dst = op["name"], op.get("to_area")
@@ -1171,7 +1171,7 @@ def _move_table(root: Path, op: dict, src: str, backups: "dict[Path, Optional[st
     keys = [(old, new, f"relationship {new[1]}/{new[2]}->{new[3]}") for old, new in plan["moved"]]
     keys += [((c["kind"], c["from"], c["name"]), (c["kind"], dst, c["name"]), f"{c['kind']} {dst}/{c['name']}")
              for c in carried]
-    return carried, keys
+    return carried, plan["log"], keys
 
 
 def _join_ends(r: dict) -> tuple[tuple[str, str], tuple[str, str]]:
@@ -1187,7 +1187,13 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
     inside one area, or a cross-area join between two. Writes nothing; raises when a join on the
     table names an end that can't be resolved to one table."""
     xfile = root / "cross_subject_area_relationships.yaml"
-    plan: dict = {"rewrite": [], "into_area": {}, "into_cross": [], "xfile": xfile, "moved": []}
+    # "origin": id(landing entry) -> (its place, its identity) before the move, for the log.
+    plan: dict = {"rewrite": [], "into_area": {}, "into_cross": [], "xfile": xfile, "moved": [],
+                  "origin": {}, "log": []}
+
+    def came_from(out: dict, where: str, r: dict) -> dict:
+        plan["origin"][id(out)] = (where, _identity("relationship", r))
+        return out
 
     def label(r: dict) -> str:
         return f"{r.get('from_table')}->{r.get('to_table')}"
@@ -1227,9 +1233,10 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
             plan["moved"].append((_key("relationship", src, r),
                                   _key("relationship", fa if fa == ta else CROSS_AREA, out)))
             if fa == ta:
-                plan["into_area"].setdefault(fa, []).append(out)
+                plan["into_area"].setdefault(fa, []).append(came_from(out, src, r))
             else:
-                plan["into_cross"].append({**out, "from_subject_area": fa, "to_subject_area": ta})
+                plan["into_cross"].append(came_from({**out, "from_subject_area": fa, "to_subject_area": ta},
+                                                    src, r))
                 plan.setdefault("notes", []).append(f"join {label(r)} is now a cross-area join ({fa} -> {ta})")
         if len(keep) != len(rels):
             plan["rewrite"].append((srel, "relationships", keep))
@@ -1251,11 +1258,14 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
             plan["moved"].append((_key("relationship", CROSS_AREA, r),
                                   _key("relationship", fa if fa == ta else CROSS_AREA, out)))
             if fa == ta:
-                plan["into_area"].setdefault(fa, []).append(
-                    {k: v for k, v in out.items() if k not in ("from_subject_area", "to_subject_area")})
+                plan["into_area"].setdefault(fa, []).append(came_from(
+                    {k: v for k, v in out.items() if k not in ("from_subject_area", "to_subject_area")},
+                    CROSS_AREA, r))
                 plan.setdefault("notes", []).append(f"cross-area join {label(r)} is now inside area {fa!r}")
             else:
                 keep.append({**out, "from_subject_area": fa, "to_subject_area": ta})
+                plan["log"].append({"from": CROSS_AREA, "to": CROSS_AREA, "before": _identity("relationship", r),
+                                    "after": _identity("relationship", out)})
         if changed:
             plan["rewrite"].append((path, key, keep))
     plan["final"] = _land_joins(root, plan)
@@ -1298,11 +1308,12 @@ def _rank_words(r: dict) -> str:
         else _RANK_WORDS[_sign_off_rank(r)]
 
 
-def _kept_copy(have: dict, moved: dict) -> tuple[dict, str]:
+def _kept_copy(have: dict, moved: dict) -> tuple[dict, str, bool]:
     """Which of two copies of one join to keep, and why: the one a person signed off, else the
     engine-approved one, else the one in place. The kept copy takes a description (or
     `for_questions_about`) only the other has, when both say the same join. Two person-signed
-    copies that say different things are refused rather than one picked silently."""
+    copies that say different things are refused rather than one picked silently. The flag says
+    whether the moved copy is the one kept."""
     rh, rm = _sign_off_rank(have), _sign_off_rank(moved)
     agree = all(have.get(k) == moved.get(k) for k in ("review_state", "relationship", "join_type"))
     if rh == rm == 2 and not agree:
@@ -1314,13 +1325,17 @@ def _kept_copy(have: dict, moved: dict) -> tuple[dict, str]:
     if all(keep.get(k) == other.get(k) for k in ("relationship", "join_type")):
         keep = {**keep, **{k: other[k] for k in ("description", "for_questions_about")
                            if other.get(k) and not keep.get(k)}}
-    return keep, why
+    return keep, why, rm > rh
 
 
 def _land_joins(root: Path, plan: dict) -> dict:
     """Every join list the move changes, as it will be written: {(path, key): list}. A moved join
     already where it lands is kept once (`_kept_copy`), so it is never served twice. Raises before
-    anything is written when two copies conflict."""
+    anything is written when two copies conflict.
+
+    Each join that lands goes into `plan["log"]` as `{from, to, before, after}` (its places and
+    identities, schemas included), with `merged` and which copy was `kept` when it met a copy already
+    there: a stale join's history then follows only the copy kept."""
     final: dict[tuple[Path, str], list] = {(p, k): list(keep) for p, k, keep in plan["rewrite"]}
 
     def current(path: Path, key: str) -> list:
@@ -1328,23 +1343,31 @@ def _land_joins(root: Path, plan: dict) -> dict:
             final[(path, key)] = list(_entries(_load(path) or {}, key)) if path.exists() else []
         return final[(path, key)]
 
-    def merge(places: list[tuple[Path, str]], incoming: list[dict], where: str) -> None:
+    def merge(places: list[tuple[Path, str]], incoming: list[dict], where: str, to: str) -> None:
         for r in incoming:
+            src, before = plan["origin"][id(r)]
             hit = next(((pk, i) for pk in places for i, c in enumerate(current(*pk))
                         if isinstance(c, dict) and _same_join_entry(c, r)), None)
             if hit is None:
                 current(*places[0]).append(r)
+                plan["log"].append({"from": src, "to": to, "before": before,
+                                    "after": _identity("relationship", r)})
                 continue
             pk, i = hit
-            final[pk][i], why = _kept_copy(final[pk][i], r)
+            have = final[pk][i]
+            final[pk][i], why, moved_kept = _kept_copy(have, r)
+            plan["log"].append({"from": src if moved_kept else to, "to": to,
+                                "before": before if moved_kept else _identity("relationship", have),
+                                "after": _identity("relationship", final[pk][i]), "merged": True,
+                                "kept": "moved" if moved_kept else "in_place"})
             plan.setdefault("notes", []).append(
                 f"join {r.get('from_table')}->{r.get('to_table')} was already in {where}; kept one copy: {why}")
 
     for area, rels in plan["into_area"].items():
-        merge([(_area_dir(root, area) / "relationships.yaml", "relationships")], rels, f"area {area!r}")
+        merge([(_area_dir(root, area) / "relationships.yaml", "relationships")], rels, f"area {area!r}", area)
     if plan["into_cross"]:
         ds = (root / "datasource.yaml", "cross_subject_area_relationships")
-        merge([(plan["xfile"], "edges"), ds], plan["into_cross"], "the cross-area joins")
+        merge([(plan["xfile"], "edges"), ds], plan["into_cross"], "the cross-area joins", CROSS_AREA)
     return final
 
 
@@ -1550,6 +1573,10 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         fld, val = op.get("field"), op.get("value")
         if not fld:
             raise ValueError("edit op needs field")
+        if fld in _TRUST_FIELDS:
+            # An edit would set the sign-off without a signer, or re-approve a stale item under its old stamp.
+            raise ValueError(f"{fld} is part of the sign-off: use an approve, reject or include op "
+                             "(an approve needs --signer / --role), not an edit")
         before = doc.get(fld)
         # A generated description never replaces one a person wrote or the database's own dictionary
         # supplied — enrichment describes what is undescribed. A person can still overwrite either.
@@ -2090,6 +2117,7 @@ _FIELD_LABELS = {"bindings": "binding", "relationship": "cardinality", "maps_to"
                  "on": "join condition"}
 NOT_RECORDED = "changes not recorded"
 SOME_NOT_RECORDED = "some changes not recorded"
+MERGED_COPY = "merged with another copy of this join when a table moved; that copy's changes are not recorded"
 
 
 def _identity(kind: str, obj: Any) -> dict:
@@ -2165,9 +2193,24 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
             continue
         if areas and _is_move(entry):
             if kind == "relationship":
-                if entry.get("name") in (ident.get("from_table"), ident.get("to_table")):
-                    # Before the move the join lived where its table did, or among the cross-area joins.
-                    areas |= {entry.get("area"), CROSS_AREA}
+                joins = entry.get("joins")
+                if not isinstance(joins, list):
+                    if entry.get("name") in (ident.get("from_table"), ident.get("to_table")):
+                        return None   # logged before a move recorded the joins it placed
+                    continue
+                landed = next((j for j in joins if isinstance(j, dict) and j.get("to") in areas
+                               and isinstance(j.get("after"), dict) and isinstance(j.get("before"), dict)
+                               and all(_same_value(k, j["after"].get(k), ident.get(k)) for k in _JOIN_IDENTITY)),
+                              None)
+                if landed is None:
+                    continue   # the move didn't place this join (a same-named table in another schema)
+                if landed.get("merged"):
+                    found.append({"field": None, "before": None, "after": None, "by": entry.get("signer"),
+                                  "at": entry.get("at"), "text": MERGED_COPY})
+                # Before the move, only the copy kept is this join: the other copy's edits are not its own.
+                if landed.get("from") != landed.get("to"):
+                    areas = {landed.get("from")}
+                ident = dict(landed["before"])
             elif entry.get("to_area") in areas:
                 if not isinstance(entry.get("carried"), list):
                     return None   # logged before a move recorded what it carried
@@ -2262,4 +2305,4 @@ def has_model_curation(root: str | Path) -> bool:
 __all__ = ["review_queue", "all_items", "model_tree", "column_coverage", "apply",
            "write_items", "CROSS_AREA", "add_examples", "validate_seeds", "set_key_terminology",
            "history", "changes_since_approval", "since_approval", "read_log", "NOT_RECORDED",
-           "SOME_NOT_RECORDED", "ApplyResult"]
+           "SOME_NOT_RECORDED", "MERGED_COPY", "ApplyResult"]

@@ -373,8 +373,8 @@ def test_only_the_ops_that_took_are_logged(tmp_path):
 
 def test_a_batch_that_fails_validation_logs_nothing(tmp_path):
     _write_model(tmp_path, git=False)
-    res = curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "name": "order_count",
-                                   "field": "review_state", "value": "not-a-state"}])
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "relationship", "name": "orders->customers",
+                                   "field": "relationship", "value": "not-a-cardinality"}])
     assert not res.validated
     assert curate.history(tmp_path) == []
 
