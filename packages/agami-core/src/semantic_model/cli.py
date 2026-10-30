@@ -2022,11 +2022,17 @@ def _enter_caller_cwd() -> None:
 def _one_ops_file(sp: argparse.ArgumentParser, args: argparse.Namespace, extra: list[str]) -> list[str]:
     """Take `curate`'s OPS_FILE from the leftovers and require exactly one ops file. argparse fills an
     optional positional in the first run of positionals, so in `curate root --signer x ops.json` the
-    file is left over."""
+    file is left over. Python 3.12 also leaves a `--` and what follows it: each of those is a
+    positional, even one that starts with `-`."""
+    cut = extra.index("--") if "--" in extra else len(extra)
+    before, after = extra[:cut], extra[cut + 1:]
     if args.ops is None:
-        at = next((i for i, a in enumerate(extra) if not a.startswith("-")), None)
+        at = next((i for i, a in enumerate(before) if not a.startswith("-")), None)
         if at is not None:
-            args.ops = extra.pop(at)
+            args.ops = before.pop(at)
+        elif after:
+            args.ops = after.pop(0)
+    extra = before + after
     if args.ops is not None and args.ops_file is not None:
         sp.error("argument --ops-file: not allowed with argument OPS_FILE")
     if args.ops is None and args.ops_file is None:

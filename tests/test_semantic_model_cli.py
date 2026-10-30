@@ -887,6 +887,40 @@ def test_curate_refuses_two_ops_files_and_none(model_and_work, capsys):
         assert "OPS_FILE" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("name, head", [
+    ("ops.json", ["ROOT", "--signer", "you@example.com"]),
+    ("-ops.json", ["ROOT", "--signer", "you@example.com"]),
+    ("-ops.json", ["ROOT"]),
+    ("ops.json", ["--signer", "you@example.com", "ROOT"]),
+], ids=["option-first", "dash-named-option-first", "dash-named", "root-after-option"])
+def test_curate_takes_the_ops_file_after_the_end_of_options(model_and_work, monkeypatch, name, head):
+    root, work = model_and_work
+    (work / name).write_text(json.dumps(_describe_op(f"after -- as {name}")))
+    monkeypatch.chdir(work)
+    assert cli.main(["curate", *(str(root) if a == "ROOT" else a for a in head), "--", name]) == 0
+    assert _orders_description(root) == f"after -- as {name}"
+
+
+def test_sm_takes_the_ops_file_after_the_end_of_options(model_and_work):
+    root, work = model_and_work
+    (work / "-ops.json").write_text(json.dumps(_describe_op("through the launcher")))
+    rc, out, err = _sm(["curate", str(root), "--signer", "you@example.com", "--", "-ops.json"], work)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "through the launcher"
+
+
+def test_curate_after_the_end_of_options_still_refuses_extras_both_and_neither(model_and_work, capsys):
+    root, _ = model_and_work
+    sign = ["--signer", "you@example.com"]
+    for argv, said in ((["curate", str(root), *sign, "--", "a.json", "b.json"], "unrecognized arguments: b.json"),
+                       (["curate", str(root), "--ops-file", "a.json", "--", "b.json"], "OPS_FILE"),
+                       (["curate", str(root), *sign, "--"], "OPS_FILE")):
+        with pytest.raises(SystemExit) as exit_:
+            cli.main(argv)
+        assert exit_.value.code == 2
+        assert said in capsys.readouterr().err
+
+
 def test_a_vanished_caller_folder_leaves_the_cwd_alone(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGAMI_CALLER_CWD", str(tmp_path / "gone"))

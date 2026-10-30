@@ -19,7 +19,8 @@ below corresponds to one such version.
   argument resolved there too: `sm curate <root> --ops-file ops.json` looked for `/ops.json`, and a
   relative model root or output path failed the same way. The CLI now moves back to the caller's
   folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
-  (`sm curate <root> ops.json`, before or after the other options); `--ops-file` still works, and giving both is a usage error.
+  (`sm curate <root> ops.json`, before or after the other options, or after `--`, which also lets
+  a file name start with `-`); `--ops-file` still works, and giving both is a usage error.
 
 ## [0.9.21] — 2026-10-29
 
