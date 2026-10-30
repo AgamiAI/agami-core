@@ -29,7 +29,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import yaml
 
@@ -826,6 +826,7 @@ def _find_join(root: Path, op: dict, area: Optional[str]) -> tuple:
     # add_relationships writes them.
     cross = [(root / "datasource.yaml", "cross_subject_area_relationships"),
              (root / "cross_subject_area_relationships.yaml", "edges")]
+    dialect = _model_dialect(root)
 
     def search(area_names: list[str]) -> list:
         places = [(_area_dir(root, a) / "relationships.yaml", "relationships", a) for a in area_names]
@@ -839,7 +840,7 @@ def _find_join(root: Path, op: dict, area: Optional[str]) -> tuple:
                 rels = _entries(doc, key)
                 out += [(a or f"cross-area {hit.get('from_subject_area')}->{hit.get('to_subject_area')} "
                          f"in {path.name}", path, key, doc, rels, hit)
-                        for hit in _matching_joins(rels, frm, to, op)]
+                        for hit in _matching_joins(rels, frm, to, op, dialect)]
         return out
 
     found = search([area]) if area else []
@@ -867,11 +868,11 @@ def _find_join(root: Path, op: dict, area: Optional[str]) -> tuple:
     return found[0][1:]
 
 
-def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
+def _matching_joins(rels: list, frm: str, to: str, op: dict, dialect: Optional[str] = None) -> list:
     """The joins an op means: same two tables, narrowed by whichever of from_schema / to_schema /
-    from_column / to_column / `on` the op names (`on` compared with whitespace collapsed, so a re-wrapped condition still matches)."""
-    def norm(text) -> str:
-        return " ".join(str(text or "").split()).lower()
+    from_column / to_column / `on` the op names (`on` compared by `on_text_key`, so a re-wrapped
+    condition still matches and two that differ only in a literal's case stay apart)."""
+    from .models import on_text_key
 
     out = [r for r in rels if isinstance(r, dict) and r.get("from_table") == frm and r.get("to_table") == to]
     # The schemas tell apart same-named tables in two schemas (sales.orders vs archive.orders); a join
@@ -883,7 +884,8 @@ def _matching_joins(rels: list, frm: str, to: str, op: dict) -> list:
         if op.get(fld):
             out = [r for r in out if (r.get(fld) or "").lower() == str(op[fld]).lower()]
     if op.get("on"):
-        out = [r for r in out if norm(r.get("on")) == norm(op["on"])]
+        want = on_text_key(str(op["on"]), dialect)
+        out = [r for r in out if on_text_key(str(r.get("on") or ""), dialect) == want]
     return out
 
 
@@ -914,16 +916,37 @@ def _same_table(ref: tuple[str, str], table: tuple[str, str]) -> bool:
     return ref[1] == table[1] and (not ref[0] or not table[0] or ref[0] == table[0])
 
 
-def _owners(root: Path) -> dict[tuple[str, str], str]:
-    """(schema, table) -> the area whose tables/ folder holds it, over the areas the model lists."""
+_UNSERVED = ("rejected", "stale")   # a table copy in either state is never served by the loader
+
+
+def _table_docs(root: Path) -> Iterator[tuple[str, tuple[str, str], dict]]:
+    """(area, (schema, table), table file) for every table file of the areas the model lists."""
     from .models import table_key
 
-    out: dict[tuple[str, str], str] = {}
     for area in _listed_areas(root):
         for tf in sorted((_area_dir(root, area) / "tables").glob("*.yaml")):
             doc = _load(tf) or {}
-            out.setdefault(table_key(str(doc.get("name") or tf.stem), doc.get("schema")), area)
+            doc.setdefault("name", tf.stem)
+            yield area, table_key(str(doc["name"]), doc.get("schema")), doc
+
+
+def _served_areas(root: Path) -> dict[tuple[str, str], list[str]]:
+    """(schema, table) -> the areas serving a copy of it (not excluded, not stale), in listed order."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for area, k, doc in _table_docs(root):
+        if doc.get("review_state") not in _UNSERVED:
+            out.setdefault(k, []).append(area)
     return out
+
+
+def _owners(root: Path) -> dict[tuple[str, str], str]:
+    """(schema, table) -> the area whose tables/ folder holds it, over the areas the model lists: the
+    first area serving a copy, else (no copy served) the first holding one."""
+    out: dict[tuple[str, str], str] = {}
+    unserved: dict[tuple[str, str], str] = {}
+    for area, k, doc in _table_docs(root):
+        (unserved if doc.get("review_state") in _UNSERVED else out).setdefault(k, area)
+    return {**unserved, **out}
 
 
 def _owner_of(owners: dict, ref: tuple[str, str]) -> Optional[str]:
@@ -1165,17 +1188,20 @@ _ADD_JOIN_FIELDS = ("from_table", "from_column", "to_table", "to_column", "from_
                     "on", "join_type", "relationship", "description")
 
 
-def _stored_table(root: Path, area: str, ref: tuple[str, str]) -> tuple[dict, dict[str, str]]:
-    """The table file of `ref` in `area`'s tables/ folder, and its columns lowercased -> as written."""
-    from .models import table_key
-
-    for tf in sorted((_area_dir(root, area) / "tables").glob("*.yaml")):
-        doc = _load(tf) or {}
-        if _same_table(ref, table_key(str(doc.get("name") or tf.stem), doc.get("schema"))):
-            doc.setdefault("name", tf.stem)
-            return doc, {str(c.get("name")).lower(): str(c.get("name"))
-                         for c in doc.get("columns") or [] if isinstance(c, dict) and c.get("name")}
-    return {}, {}
+def _stored_table(root: Path, area: str, key: tuple[str, str]) -> tuple[dict, dict[str, str]]:
+    """The served table file of `key` in `area`, and the columns some served copy of it serves,
+    lowercased -> as written: the loader hides a join on a column no copy serves."""
+    doc: dict = {}
+    cols: dict[str, str] = {}
+    for a, k, d in _table_docs(root):
+        if k != key or d.get("review_state") in _UNSERVED:
+            continue
+        if a == area and not doc:
+            doc = d
+        for c in d.get("columns") or []:
+            if isinstance(c, dict) and c.get("name") and c.get("review_state") not in _UNSERVED:
+                cols.setdefault(str(c["name"]).lower(), str(c["name"]))
+    return doc, cols
 
 
 def _model_dialect(root: Path) -> Optional[str]:
@@ -1197,9 +1223,10 @@ def _model_dialect(root: Path) -> Optional[str]:
         return None
 
 
-def _on_columns(on: str, dialect: Optional[str]) -> list[tuple[str, str]]:
-    """(table, column) for every column an `on:` condition names, filters and casts included. Raises
-    BatchError when it doesn't parse or a column isn't qualified with its table."""
+def _on_columns(on: str, dialect: Optional[str]) -> list[tuple[str, str, str]]:
+    """(schema, table, column) for every column an `on:` condition names, filters and casts included,
+    the schema '' when the reference gives none. Raises BatchError when it doesn't parse or a column
+    isn't qualified with its table."""
     from sqlglot import exp
 
     from .runtime import _parse_declared_predicate
@@ -1211,7 +1238,7 @@ def _on_columns(on: str, dialect: Optional[str]) -> list[tuple[str, str]]:
     for c in predicate.find_all(exp.Column):
         if not c.table:
             raise BatchError(f"column {c.name!r} in the join condition needs its table: write <table>.{c.name}")
-        out.append((c.table, c.name))
+        out.append((c.db, c.table, c.name))
     return out
 
 
@@ -1219,7 +1246,7 @@ def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Pat
     """Write the join an `add` op describes, unreviewed (#512). Its two tables' areas decide where:
     that area's relationships.yaml when they share one, else the cross-area joins. A table or column
     the model doesn't have fails the batch; the same join already in the model is skipped."""
-    from .models import stored_identity, table_key
+    from .models import stored_identity
 
     entry = {k: op[k] for k in _ADD_JOIN_FIELDS if op.get(k) not in (None, "")}
     entry.update(confidence="proposed", review_state="unreviewed")
@@ -1227,30 +1254,18 @@ def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Pat
         Relationship(**entry)
     except Exception as e:
         raise BatchError(f"not a valid join: {e}") from e
-    owners = _owners(root)
-    ends = {}
-    on_cols: dict[str, list[str]] = {"from": [], "to": []}
-    if entry.get("on"):
-        sides = {"from": table_key(entry["from_table"], entry.get("from_schema"))[1],
-                 "to": table_key(entry["to_table"], entry.get("to_schema"))[1]}
-        for t, c in _on_columns(str(entry["on"]), _model_dialect(root)):
-            hit = [side for side, name in sides.items() if name == t.lower()]
-            if not hit:
-                raise BatchError(f"the join condition names {t}.{c}, but {t!r} is neither end of the join")
-            on_cols[hit[0]].append(c)
+    dialect = _model_dialect(root)
+    keys = _join_end_keys(root, entry)
+    areas = _join_areas(root, keys)
+    on_cols = _on_columns_by_end(str(entry.get("on") or ""), keys, dialect)
     for side in ("from", "to"):
-        ref = table_key(entry[f"{side}_table"], entry.get(f"{side}_schema"))
-        hits = sorted({k for k in owners if _same_table(ref, k)})
-        if len(hits) != 1:
-            raise BatchError(
-                f"no table {entry[f'{side}_table']!r} in the model" if not hits else
-                f"table {entry[f'{side}_table']!r} is in {len(hits)} schemas; give {side}_schema")
-        ends[side] = (hits[0], owners[hits[0]])
-        doc, cols = _stored_table(root, owners[hits[0]], hits[0])
+        doc, cols = _stored_table(root, areas[side], keys[side])
         col = entry.get(f"{side}_column")
-        for c in [col] if col else on_cols[side]:
+        # Every column the `on` names is checked, an explicit column or not: the validator only warns.
+        shown = f"{keys[side][0]}.{entry[f'{side}_table']}" if keys[side][0] else entry[f"{side}_table"]
+        for c in ([col] if col else []) + on_cols[side]:
             if c.lower() not in cols:
-                raise BatchError(f"table {entry[f'{side}_table']!r} has no column {c!r}")
+                raise BatchError(f"table {shown!r} has no column {c!r}")
         if col:
             entry[f"{side}_column"] = cols[col.lower()]
         # The model's own spelling, since the loader matches a join's tables case-sensitively.
@@ -1263,10 +1278,10 @@ def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Pat
     for path, key in [*((_area_dir(root, a) / "relationships.yaml", "relationships") for a in _listed_areas(root)),
                       (root / "cross_subject_area_relationships.yaml", "edges"),
                       (root / "datasource.yaml", "cross_subject_area_relationships")]:
-        if path.exists() and any(isinstance(r, dict) and _same_join_entry(r, entry)
+        if path.exists() and any(isinstance(r, dict) and _same_join_entry(r, entry, dialect)
                                  for r in _entries(_load(path) or {}, key)):
             raise ValueError(f"join {_rel_label(entry)} is already in the model ({path.name}); skipped")
-    fa, ta = ends["from"][1], ends["to"][1]
+    fa, ta = areas["from"], areas["to"]
     if fa == ta:
         path, key = _area_dir(root, fa) / "relationships.yaml", "relationships"
     else:
@@ -1278,6 +1293,58 @@ def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Pat
     return path
 
 
+def _join_end_keys(root: Path, entry: dict) -> dict[str, tuple[str, str]]:
+    """The served table each end of an added join names. A table no area serves (excluded or stale
+    everywhere) fails the batch: the loader would drop the join."""
+    from .models import table_key
+
+    served, held = _served_areas(root), _owners(root)
+    keys = {}
+    for side in ("from", "to"):
+        ref = table_key(entry[f"{side}_table"], entry.get(f"{side}_schema"))
+        hits = sorted({k for k in served if _same_table(ref, k)})
+        if len(hits) > 1:
+            raise BatchError(f"table {entry[f'{side}_table']!r} is in {len(hits)} schemas; give {side}_schema")
+        if not hits:
+            raise BatchError(
+                f"table {entry[f'{side}_table']!r} is excluded or stale in every area that has it; include it "
+                "before adding a join on it" if any(_same_table(ref, k) for k in held) else
+                f"no table {entry[f'{side}_table']!r} in the model")
+        keys[side] = hits[0]
+    return keys
+
+
+def _join_areas(root: Path, keys: dict[str, tuple[str, str]]) -> dict[str, str]:
+    """The area each end of an added join is placed by: one area serving both ends when there is one
+    (an in-area join), else the first area serving each."""
+    served = _served_areas(root)
+    both = [a for a in served[keys["from"]] if a in served[keys["to"]]]
+    if both:
+        return {"from": both[0], "to": both[0]}
+    return {side: served[k][0] for side, k in keys.items()}
+
+
+def _on_columns_by_end(on: str, keys: dict[str, tuple[str, str]], dialect: Optional[str]) -> dict[str, list[str]]:
+    """The columns an `on:` names, by the end of the join each belongs to, matched on schema and name.
+    A reference that could be either of two different tables fails the batch."""
+    from .models import table_key
+
+    out: dict[str, list[str]] = {"from": [], "to": []}
+    if not on:
+        return out
+    for schema, t, c in _on_columns(on, dialect):
+        ref = table_key(t, schema or None)
+        hit = [side for side, k in keys.items() if _same_table(ref, k)]
+        shown = f"{schema}.{t}" if schema else t
+        if not hit:
+            raise BatchError(f"the join condition names {shown}.{c}, but {shown!r} is neither end of the join")
+        if len(hit) > 1 and keys["from"] != keys["to"]:
+            raise BatchError(f"the join condition names {shown}.{c}, and {shown!r} could be either end of the "
+                             "join; qualify it with its schema")
+        out[hit[0]].append(c)
+    return out
+
+
 def _append_entries(path: Path, key: str, entries: list[dict]) -> None:
     """Append join entries to a relationships file's list, keeping whatever else the file holds."""
     doc = _load(path) if path.exists() else None
@@ -1285,7 +1352,7 @@ def _append_entries(path: Path, key: str, entries: list[dict]) -> None:
     _dump(path, {**(doc if isinstance(doc, dict) else {}), key: [*lst, *entries]})
 
 
-def _same_join_entry(a: dict, b: dict) -> bool:
+def _same_join_entry(a: dict, b: dict, dialect: Optional[str] = None) -> bool:
     """Whether two join entries are one edge: introspection's identity rule, plus the same `on`."""
     from types import SimpleNamespace
 
@@ -1296,7 +1363,8 @@ def _same_join_entry(a: dict, b: dict) -> bool:
     def ns(r: dict) -> Any:
         return SimpleNamespace(**{k: r.get(k) for k in Relationship.model_fields})
 
-    return _same_join(ns(a), ns(b)) and on_text_key(str(a.get("on") or "")) == on_text_key(str(b.get("on") or ""))
+    return (_same_join(ns(a), ns(b), dialect)
+            and on_text_key(str(a.get("on") or ""), dialect) == on_text_key(str(b.get("on") or ""), dialect))
 
 
 def _sign_off_rank(r: dict) -> int:
@@ -1337,6 +1405,7 @@ def _land_joins(root: Path, plan: dict) -> dict:
     already where it lands is kept once (`_kept_copy`), so it is never served twice. Raises before
     anything is written when two copies conflict."""
     final: dict[tuple[Path, str], list] = {(p, k): list(keep) for p, k, keep in plan["rewrite"]}
+    dialect = _model_dialect(root)
 
     def current(path: Path, key: str) -> list:
         if (path, key) not in final:
@@ -1346,7 +1415,7 @@ def _land_joins(root: Path, plan: dict) -> dict:
     def merge(places: list[tuple[Path, str]], incoming: list[dict], where: str) -> None:
         for r in incoming:
             hit = next(((pk, i) for pk in places for i, c in enumerate(current(*pk))
-                        if isinstance(c, dict) and _same_join_entry(c, r)), None)
+                        if isinstance(c, dict) and _same_join_entry(c, r, dialect)), None)
             if hit is None:
                 current(*places[0]).append(r)
                 continue

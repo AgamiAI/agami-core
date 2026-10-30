@@ -165,6 +165,155 @@ def test_filtered_joins_differing_only_in_a_literal_case_are_two_joins(model):
     assert sorted(r["on"][-3:] for r in _rels(model) if r.get("on")) == ["'Y'", "'y'"]
 
 
+def test_each_of_two_joins_differing_only_in_a_literal_case_is_approved_on_its_own(model):
+    on = "orders.cust_no = customers.cust_no AND customers.region = '{}'"
+    curate.apply(model, [_add(from_table="orders", to_table="customers", on=on.format(v)) for v in "Yy"])
+    approve = {"op": "approve", "kind": "relationship", "name": "orders->customers", "area": "sales",
+               "on": on.format("y"), "at": "2026-01-01T00:00:00Z"}
+    res = curate.apply(model, [approve], signer="you@example.com", role="data_lead")
+    assert res.validated and res.applied and not res.errors, res.as_dict()
+    states = {r["on"][-3:]: r["review_state"] for r in _rels(model) if r.get("on")}
+    assert states == {"'Y'": "unreviewed", "'y'": "approved"}
+    res = curate.apply(model, [{**approve, "op": "reject", "on": on.format("Y")}], signer="you@example.com",
+                       role="data_lead")
+    assert res.applied and not res.errors, res.as_dict()
+    assert {r["on"][-3:]: r["review_state"] for r in _rels(model) if r.get("on")} == {"'Y'": "rejected",
+                                                                                      "'y'": "approved"}
+
+
+@pytest.mark.parametrize("fields", [
+    {"from_column": "cust_ref", "on": "orders.cust_reff = customers.id"},
+    {"to_column": "id", "on": "orders.cust_ref = customers.idd"},
+])
+def test_the_join_condition_is_checked_beside_an_explicit_column(model, fields):
+    before = _snapshot(model)
+    res = curate.apply(model, [_add(from_table="orders", to_table="customers", **fields)])
+    assert res.errors and not res.applied and not res.validated, res.as_dict()
+    assert _snapshot(model) == before
+
+
+def _set_review_state(root: Path, area: str, table: str, state: str, column: str | None = None) -> None:
+    tf = root / "subject_areas" / area / "tables" / f"{table}.yaml"
+    doc = yaml.safe_load(tf.read_text())
+    target = next(c for c in doc["columns"] if c["name"] == column) if column else doc
+    target["review_state"] = state
+    tf.write_text(yaml.safe_dump(doc))
+
+
+@pytest.mark.parametrize("state", ["rejected", "stale"])
+def test_an_added_join_is_placed_by_the_served_copy_of_a_table(model, state):
+    # sales holds an excluded copy of customers; catalog serves it.
+    _table(model, "catalog", "customers", ["region", "cust_no"])
+    _set_review_state(model, "sales", "customers", state)
+    res = curate.apply(model, [_CUST_REF])
+    assert res.validated and res.applied == ["add relationship /orders->customers"], res.as_dict()
+    [edge] = yaml.safe_load((model / "cross_subject_area_relationships.yaml").read_text())["edges"]
+    assert (edge["from_subject_area"], edge["to_subject_area"]) == ("sales", "catalog")
+    org = loader.load_datasource(model)
+    assert ("orders", "cust_ref") in {(r.from_table, r.from_column) for r in org.cross_subject_area_relationships}
+    assert any(it.get("from_column") == "cust_ref" for it in curate.review_queue(org)["rule_2"])
+
+
+def test_a_moved_tables_joins_are_placed_by_the_served_copy_of_the_other_end(model):
+    _table(model, "catalog", "customers", ["region", "cust_no"])
+    _set_review_state(model, "sales", "customers", "rejected")
+    res = curate.apply(model, [{"op": "move", "kind": "table", "name": "orders", "area": "sales",
+                                "to_area": "catalog"}])
+    assert res.validated and not res.errors, res.as_dict()
+    assert [(r["from_table"], r["to_table"]) for r in _rels(model, "catalog")] == [("orders", "customers")]
+    assert not (model / "cross_subject_area_relationships.yaml").exists()
+
+
+@pytest.mark.parametrize("excluded", [("customers", None), ("orders", "cust_ref"), ("orders", "region")])
+def test_an_add_on_a_table_or_column_no_copy_serves_undoes_the_batch(model, excluded):
+    table, column = excluded
+    _set_review_state(model, "sales", table, "rejected", column)
+    before = _snapshot(model)
+    on = "orders.region = customers.region AND orders.cust_ref = customers.id"
+    res = curate.apply(model, [_CUST_REF if column != "region" else _add(from_table="orders",
+                                                                         to_table="customers", on=on)])
+    assert res.errors and not res.applied and not res.validated, res.as_dict()
+    assert _snapshot(model) == before
+
+
+def _schema_table(root: Path, area: str, schema: str, cols: list[str]) -> None:
+    d = root / "subject_areas" / area / "tables"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": schema, "storage_connection": "c", "grain": ["id"], "description": schema,
+        "columns": [{"name": "id", "type": "integer", "primary_key": True}]
+                   + [{"name": c, "type": "integer"} for c in cols]}))
+
+
+@pytest.fixture
+def two_schemas(model: Path) -> Path:
+    """sales serves crm.orders (source_key), catalog serves billing.orders (target_key)."""
+    (model / "subject_areas" / "sales" / "tables" / "orders.yaml").unlink()
+    (model / "subject_areas" / "sales" / "relationships.yaml").unlink()
+    _schema_table(model, "sales", "crm", ["source_key"])
+    _schema_table(model, "catalog", "billing", ["target_key"])
+    for area, schema in (("sales", "crm"), ("catalog", "billing")):
+        sap = model / "subject_areas" / area / "subject_area.yaml"
+        sa = yaml.safe_load(sap.read_text())
+        sa["tables"] = [t for t in sa["tables"] if t["table"] != "orders"] + [
+            {"storage_connection": "c", "schema": schema, "table": "orders"}]
+        sap.write_text(yaml.safe_dump(sa))
+    return model
+
+
+def _orders_to_orders(on: str) -> dict:
+    return _add(from_table="orders", from_schema="crm", to_table="orders", to_schema="billing", on=on)
+
+
+def test_a_join_condition_between_same_named_tables_matches_each_column_to_its_schema(two_schemas):
+    res = curate.apply(two_schemas, [_orders_to_orders("crm.orders.source_key = billing.orders.target_key")])
+    assert res.validated and res.applied, res.as_dict()
+    [edge] = yaml.safe_load((two_schemas / "cross_subject_area_relationships.yaml").read_text())["edges"]
+    assert (edge["from_schema"], edge["to_schema"]) == ("crm", "billing")
+
+
+@pytest.mark.parametrize("on", [
+    "crm.orders.source_key = billing.orders.source_key",   # billing.orders has no source_key
+    "orders.source_key = orders.target_key",               # either end: needs its schema
+])
+def test_a_join_condition_between_same_named_tables_is_checked_per_end(two_schemas, on):
+    before = _snapshot(two_schemas)
+    res = curate.apply(two_schemas, [_orders_to_orders(on)])
+    assert res.errors and not res.applied and not res.validated, res.as_dict()
+    assert _snapshot(two_schemas) == before
+
+
+def test_dollar_quoted_literals_differing_only_in_case_are_two_joins(model):
+    # The fixture's engine is PostgreSQL, whose $$..$$ is a string literal.
+    on = "orders.cust_no = customers.cust_no AND customers.region = $${}$$"
+    res = curate.apply(model, [_add(from_table="orders", to_table="customers", on=on.format(v)) for v in "Yy"])
+    assert len(res.applied) == 2 and not res.skipped, res.as_dict()
+
+
+@pytest.mark.parametrize("dialect, a, b", [
+    ("postgres", "b.f = $$Y$$", "b.f = $$y$$"),
+    ("postgres", "b.f = E'it\\'s Y'", "b.f = E'it\\'s y'"),
+    ("mysql", "b.f = 'it\\'s Y'", "b.f = 'it\\'s y'"),
+    ("tsql", "b.f = N'Y'", "b.f = N'y'"),
+    ("postgres", 'b."Flag" = 1', 'b."flag" = 1'),
+])
+def test_on_text_key_keeps_what_the_dialect_reads_case_sensitively(dialect, a, b):
+    from semantic_model.models import on_text_key
+
+    assert on_text_key(a, dialect) != on_text_key(b, dialect)
+
+
+@pytest.mark.parametrize("dialect, a, b", [
+    ("postgres", "B.F  =\n $$Y$$", "b.f = $$Y$$"),
+    ("duckdb", 'b."Flag" = 1', 'b."flag" = 1'),
+    (None, "A.X = B.Y AND b.f = 'Y'", "a.x = b.y and B.F = 'Y'"),
+])
+def test_on_text_key_still_folds_case_and_spacing_elsewhere(dialect, a, b):
+    from semantic_model.models import on_text_key
+
+    assert on_text_key(a, dialect) == on_text_key(b, dialect)
+
+
 def test_an_added_join_keeps_the_models_spelling_of_its_tables(model):
     res = curate.apply(model, [_add(from_table="ORDERS", from_column="cust_ref", to_table="Customers",
                                     to_column="ID", from_schema="PUBLIC")])
@@ -276,3 +425,15 @@ def test_the_explorer_add_join_form_takes_a_join_condition_and_refuses_an_incomp
     [op] = F.parse(out["block"])[0]["ops"]
     assert op["on"] == _COMPOSITE and "from_column" not in op
     assert curate.apply(model, [op]).validated
+
+
+def test_a_refresh_keeps_two_joins_whose_dollar_quoted_literals_differ_in_case():
+    from semantic_model.introspect import _same_join
+    from semantic_model.models import Relationship
+
+    def rel(v: str) -> Relationship:
+        return Relationship(from_table="orders", to_table="customers", relationship="many_to_one",
+                            on=f"orders.cust_no = customers.cust_no AND customers.region = $${v}$$")
+
+    assert not _same_join(rel("Y"), rel("y"), "postgres")
+    assert _same_join(rel("Y"), rel("Y"), "postgres")

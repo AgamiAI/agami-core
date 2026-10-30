@@ -22,9 +22,14 @@ below corresponds to one such version.
   the cross-area joins when they are in two areas. It is validated, logged in the curation history
   and listed in the review queue; an add never approves. The same join already in the model is
   skipped with a reason (an `on` that differs only in a quoted value's case, `'Y'` against `'y'`, is
-  another join; a refresh and a model spec now compare `on` conditions the same way), and a table or
-  column the model doesn't have fails the batch and undoes it, including every column an `on` names,
-  filters and casts too. The join keeps the model's spelling of its tables. The explorer's Joins tab
+  another join, with the engine's own string forms read as quoted values too, such as PostgreSQL's
+  `$$Y$$`, `E'..'` and `N'..'` and MySQL's backslash escapes, and a quoted name keeping its case
+  where the engine compares names by case; a refresh, a model spec and approve, reject, edit,
+  exclude and move compare `on` conditions the same way, so each such join is curated on its own),
+  and a table or column the model doesn't serve fails the batch and undoes it, including every column
+  an `on` names (beside an explicit column, filters and casts too), each matched to its end by schema
+  and name. The join is placed by the areas that serve its tables, never by an excluded or stale copy,
+  and keeps the model's spelling of its tables. A moved table's joins are placed the same way. The explorer's Joins tab
   has a **+ Add a join** form that queues the op. Introspection now tests each column no join covers
   against the other tables' one-column keys when the name or the type matches (`orders.cust_ref`
   against `customers.id`; a column with a value list, or one column of a key over several, when its

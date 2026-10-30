@@ -604,7 +604,7 @@ def _same_tables(a: Relationship, b: Relationship) -> bool:
 def _pair_set(r: Relationship, dialect: Optional[str]) -> frozenset:
     pairs = _key_pairs(r, dialect)
     if pairs is None:
-        return frozenset({on_text_key(r.on)})
+        return frozenset({on_text_key(r.on, dialect)})
     return frozenset((f.lower(), t.lower()) for f, t in pairs)
 
 

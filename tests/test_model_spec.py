@@ -1181,6 +1181,16 @@ def test_joins_whose_conditions_differ_only_in_a_literal_case_are_not_repeats(tm
     assert any(f"join {n} repeats join {n - 2}" in e for e in errors), errors
 
 
+def test_joins_whose_dollar_quoted_literals_differ_only_in_case_are_not_repeats(tmp_path):
+    # The introspected model's engine is PostgreSQL, whose $$..$$ is a string literal.
+    _introspected(tmp_path)
+    spec = _spec()
+    on = "sales_f.customer_key = customer_d.customer_key AND customer_d.segment = $${}$$"
+    spec["joins"] += [{"from_table": "sales_f", "to_table": "customer_d", "on": on.format(v)} for v in "Aa"]
+    errors = model_spec.apply_spec(tmp_path, spec, dry_run=True).errors
+    assert not any(f"join {len(spec['joins'])} repeats" in e for e in errors), errors
+
+
 def test_a_join_missing_a_table_is_skipped_not_a_crash(tmp_path):
     from semantic_model import curate
 

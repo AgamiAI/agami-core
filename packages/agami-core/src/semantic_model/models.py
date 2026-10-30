@@ -35,6 +35,7 @@ validator gives via `additionalProperties: false`.
 
 from __future__ import annotations
 
+import functools
 import re
 from typing import Any, Iterable, Literal, Optional
 
@@ -101,14 +102,50 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
 _SQL_STRING_RE = re.compile(r"'(?:[^']|'')*'")
 
 
-def on_text_key(on: Optional[str]) -> str:
+_LITERAL_TOKENS = ("STRING", "NATIONAL_STRING", "BYTE_STRING", "HEREDOC_STRING", "RAW_STRING",
+                   "HEX_STRING", "BIT_STRING", "UNICODE_STRING")
+
+
+def _fold_gap(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower())
+
+
+def on_text_key(on: Optional[str], dialect: Optional[str] = None) -> str:
     """An `on:` condition's text for comparing two joins: case and spacing folded outside string
-    literals only, since `b.flag = 'Y'` and `b.flag = 'y'` select different rows on most engines."""
-    text, out, at = on or "", [], 0
-    for m in _SQL_STRING_RE.finditer(text):
-        out += [re.sub(r"\s+", " ", text[at:m.start()].lower()), m.group(0)]
-        at = m.end()
-    out.append(re.sub(r"\s+", " ", text[at:].lower()))
+    literals only, since `b.flag = 'Y'` and `b.flag = 'y'` select different rows on most engines.
+
+    The literals are found by `dialect`'s own tokenizer, so `$$Y$$`, `E'..'`, `N'..'` and a
+    backslash-escaped quote are each one literal where the engine reads them so. A quoted identifier
+    keeps its case too, unless the dialect compares identifiers case-insensitively."""
+    return _on_text_key(on or "", dialect)
+
+
+@functools.lru_cache(maxsize=4096)
+def _on_text_key(text: str, dialect: Optional[str]) -> str:
+    try:
+        from sqlglot.dialects.dialect import Dialect, NormalizationStrategy
+        from sqlglot.tokens import TokenType
+
+        d = Dialect.get_or_raise(dialect)
+        tokens = d.tokenize(text)
+    except Exception:
+        # No sqlglot, or text the tokenizer can't read: the standard-SQL reading of literals.
+        out, at = [], 0
+        for m in _SQL_STRING_RE.finditer(text):
+            out += [_fold_gap(text[at:m.start()]), m.group(0)]
+            at = m.end()
+        out.append(_fold_gap(text[at:]))
+        return "".join(out).strip()
+    literal = {getattr(TokenType, n) for n in _LITERAL_TOKENS if hasattr(TokenType, n)}
+    keep_quoted = d.normalization_strategy is not NormalizationStrategy.CASE_INSENSITIVE
+    out, at = [], 0
+    for t in tokens:
+        raw = text[t.start:t.end + 1]
+        kept = t.token_type in literal or (keep_quoted and t.token_type is TokenType.IDENTIFIER)
+        # What lies between tokens (spacing, comments) is folded as before.
+        out += [_fold_gap(text[at:t.start]), raw if kept else raw.lower()]
+        at = t.end + 1
+    out.append(_fold_gap(text[at:]))
     return "".join(out).strip()
 
 
