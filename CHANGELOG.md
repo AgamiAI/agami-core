@@ -33,7 +33,40 @@ below corresponds to one such version.
   rank by it, so upgrade the server before or with a model whose examples carry several metrics.
   Examples with one metric are written as `metric:`, which every release reads.
 
+- **`seed-examples`, `seed-validate`, `remove-example` and the examples dashboard take several subject areas in one call (#544).**
+  Each command took one `--area`, so writing or checking the examples of a database with 30–50
+  areas took dozens of calls. Repeat `--area`, or leave it out for every area in the model, and the
+  command prints one result: the single-area fields, each area's own result labelled with its
+  `area`, and `totals`. One `--area` prints exactly what it printed before. `seed-examples` then
+  writes each seed to the area it names in an `area` field. `seed-validate` runs each area's seeds
+  through `execute_sql` scoped to that area, with the same per-statement limits. `remove-example`
+  takes a question as `<area>/<question>`, looked up in that area only, or matches it in whichever
+  area has it; a question that more than one area has is refused, with the areas, and nothing is
+  rejected. The dashboard renderer reads the combined `seed-validate` output, takes `--items-file`
+  more than once (a single area's file labelled `AREA=PATH`; an unlabelled one, or the same file
+  twice, is refused), and shows each card's area. An area the model doesn't have is refused with the list of valid ones, where one
+  `--area` used to run against an empty area (and `seed-examples` created its folder).
+
 ### Fixed
+
+- **`sm` resolves a relative path from the folder you run it in (#542).** The launcher runs the CLI
+  from `/` so nothing in your folder can shadow the installed package, and every relative path
+  argument resolved there too: `sm curate <root> --ops-file ops.json` looked for `/ops.json`, and a
+  relative model root or output path failed the same way. The CLI now moves back to the caller's
+  folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
+  (`sm curate <root> ops.json`, before or after the other options, or after `--`, which also lets
+  a file name start with `-`); `--ops-file` still works, and giving both is a usage error.
+
+- **The `measured_figure` check also finds ranges, counts in words and figures tied to now
+  (#541).** Model text such as "values range 49–142 here", "covers twelve of forty sites", "about
+  1,200 sites", "40 sites today", "1,204 orders carry no region" or "hundreds of rows have no region"
+  passed the check. It now finds numeric ranges stated as seen in the data, counts written in words
+  (up to the thousands, plus "a dozen" and "hundreds of"), hedged figures, figures with a unit or
+  next to "here", "today", "currently" or "as of", and counts inside a caveat sentence. Statements
+  about how a formula behaves ("returns 0 because no row meets the threshold"), its literals ("ELSE
+  0", "divide by 100"), scales ("ranges 0–100"), bounds ("more than 5 users", "top 10 customers"),
+  years used as dates ("since 2024"), versions and labels ("status 9 rows") are not flagged, and "2
+  rows per order" is no longer read as a count. It stays a warning.
 
 - **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a
   `VALUES` arm of a `UNION` as one more `SELECT`, so the receipt counted an extra arm and could

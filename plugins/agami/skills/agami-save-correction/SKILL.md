@@ -94,6 +94,8 @@ Required: `question`, `sql`. Optional scope tags (improve ranking): `tables`, `c
 
 This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 5 (model update) declines or fails.
 
+`add-example` replaces a same-question example only within `<area>`. If the wrong answer was saved as an example in a **different** area, reject that one in the same turn: `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" remove-example "$ROOT" --question "<that area>/<question>"` (with no `--area` it looks in every area; it keeps the example for audit, marked rejected).
+
 Surface: `✓ Correction appended to <artifacts_dir>/<profile>/prompt_examples/<area>/examples.yaml.`
 
 ---
