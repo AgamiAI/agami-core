@@ -444,13 +444,16 @@ class ApplyResult:
     stale: list[str] = field(default_factory=list)
     # What an op did beyond its target, or left alone, for the person to see (a moved table's joins).
     notes: list[str] = field(default_factory=list)
+    # Each table or column description whose provenance an op replaced: {item, from, to} (#549).
+    provenance_changed: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"applied": self.applied, "skipped": self.skipped, "errors": self.errors,
                 "validated": self.validated, "committed": self.committed,
                 **({"commit_note": self.commit_note} if self.commit_note else {}),
                 **({"stale": self.stale} if self.stale else {}),
-                **({"notes": self.notes} if self.notes else {})}
+                **({"notes": self.notes} if self.notes else {}),
+                **({"provenance_changed": self.provenance_changed} if self.provenance_changed else {})}
 
 
 def _area_dir(root: Path, area: str) -> Path:
@@ -627,6 +630,13 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
         return res
 
     res.stale = list(stale.values())
+    # A first description (no provenance before it) is not a change of whose words it is.
+    res.provenance_changed = [
+        {"item": _op_label({**e, "area": e.get("resolved_area") or e.get("area")}).split(" ", 1)[1],
+         "from": e["description_source_before"],
+         "to": e["description_source_after"]}
+        for e in logged
+        if e.get("description_source_before") not in (None, e.get("description_source_after"))]
     if res.applied:
         res.committed, res.commit_note = _record(root, f"curation: {len(res.applied)} change(s)",
                                                  logged, signer, role)
@@ -719,6 +729,7 @@ def _apply_one(root: Path, op: dict, signer, role,
         _snapshot(backups, path)
         doc = _load(path)
         old_groups = dict(doc.get("column_groups") or {})
+        source_before = _description_source_of(doc, op.get("column"))
         if op.get("column"):
             before = _set_column_field(doc, op["column"], op, new_state, signer, role)
         elif op.get("op") == "edit" and op.get("field") == "recommended_filters":
@@ -738,7 +749,12 @@ def _apply_one(root: Path, op: dict, signer, role,
             # The file's own `name`: it can carry the schema (`public.wide`) the op's name leaves out.
             _reconcile_ambiguity_groups(root, path, str(doc.get("name") or name), doc.get("schema"),
                                         old_groups, doc.get("column_groups") or {}, backups)
-        return [((kind, path, op.get("column")),) * 2 + (None,)], before, False, {}
+        logged = {}
+        if action == "edit" and op.get("field") in ("description", "description_source"):
+            logged = {"description_source_before": source_before,
+                      "description_source_after": _description_source_of(doc, op.get("column")),
+                      **_resolved_area(op, area)}
+        return [((kind, path, op.get("column")),) * 2 + (None,)], before, False, logged
 
     if kind in ("entity", "metric"):
         path, key, doc, item = _find_item(root, kind, name, area)
@@ -1598,25 +1614,13 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
                 and (doc.get("description") or "").strip()):
             raise ValueError(f"kept the existing {doc['description_source']} description "
                              "(a generated description doesn't replace it)")
-        doc[fld] = val
-        # Description provenance (advisory; see DescriptionSource in models.py). ONLY tables
-        # and columns carry `description_source`; relationships / metrics / entities have a
-        # `description` but no source field, so stamping it there would fail `extra=forbid`.
-        # An edit that sets a table/column `description` also stamps `description_source`:
-        #   source:"ai"       → ai_unvalidated (agami-connect LLM generation; earns trust via use)
-        #   source:"metadata" → metadata (read from the DB's own data dictionary — authoritative,
-        #                       trusted, NOT validated-through-use; see metadata_sources.py)
-        #   otherwise         → human (a person edited it, so it's trusted)
-        #   empty value → clear it. A direct edit of `description_source` itself
-        #   (e.g. confirm → "ai_validated") falls through the generic `doc[fld]=val`.
+        # ONLY tables and columns carry `description_source`; metrics / entities / joins have a
+        # `description` but no source field, so stamping it there would fail `extra=forbid`. A direct
+        # edit of `description_source` itself (e.g. confirm → "ai_validated") is the generic write.
         if fld == "description" and desc_source:
-            src = op.get("source")
-            doc["description_source"] = (
-                None if not (val or "").strip()
-                else "ai_unvalidated" if src == "ai"
-                else "metadata" if src == "metadata"
-                else "human"
-            )
+            doc["description_source"] = _description_source(doc.get("description_source"),
+                                                             op.get("source"), val)
+        doc[fld] = val
         return before
     before = doc.get("review_state")
     if new_state:
@@ -1635,6 +1639,32 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
             doc.pop(k, None)
     return before
+
+
+# An edit's `source` → the `description_source` it stamps (see DescriptionSource in models.py). `metadata`
+# is the database's own dictionary: authoritative, not validated through use (metadata_sources.py).
+_DESCRIPTION_SOURCES = {"ai": "ai_unvalidated", "metadata": "metadata", "human": "human"}
+
+
+def _description_source(prior: Optional[str], source: Any, text: Any) -> Optional[str]:
+    """The provenance a table or column description edit leaves. Without `source` the edit keeps the
+    provenance it found, so a typo fix leaves a dictionary's description `metadata` (#549); a first
+    description is a person's. `ai_unknown` marks a column with no description yet, so text written
+    into it is a first description, and an emptied description keeps the mark."""
+    if source is not None and source not in _DESCRIPTION_SOURCES:
+        raise ValueError(f"source {source!r} is not one of: {', '.join(_DESCRIPTION_SOURCES)}")
+    if not (text or "").strip():
+        return prior if prior == "ai_unknown" and source is None else None
+    if source is not None:
+        return _DESCRIPTION_SOURCES[source]
+    return prior if prior and prior != "ai_unknown" else "human"
+
+
+def _description_source_of(table_doc: dict, column: Optional[str]) -> Optional[str]:
+    if not column:
+        return table_doc.get("description_source")
+    return next((c.get("description_source") for c in table_doc.get("columns", [])
+                 if c.get("name") == column), None)
 
 
 def _set_column_field(table_doc: dict, col_name: str, op: dict, new_state, signer, role) -> Any:

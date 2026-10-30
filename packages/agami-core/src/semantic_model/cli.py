@@ -562,6 +562,11 @@ def _commit_note(res) -> dict:
     return {"commit_note": res.commit_note} if res.commit_note else {}
 
 
+def _provenance_note(res) -> dict:
+    """`provenance_changed` only when an op replaced a description's provenance (#549)."""
+    return {"provenance_changed": res.provenance_changed} if res.provenance_changed else {}
+
+
 def cmd_set_description(args) -> int:
     """Write the datasource's one-line description onto datasource.yaml — the line an agent routes a
     question by (#327). Onboarding calls this with the user's line or one generated from the enriched
@@ -1101,7 +1106,7 @@ def cmd_describe_file(args) -> int:
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
     _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
-                 "errors": res.errors})
+                 **_provenance_note(res), "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1603,10 +1608,12 @@ def cmd_enrich_metadata(args) -> int:
     # 1) descriptions + choice_field — one validated curate batch
     cols_applied = 0
     errors: list[str] = []
+    provenance: dict = {}
     if ops:
         res = curate.apply(root, ops)
         cols_applied = len(res.applied)
         errors += res.errors
+        provenance = _provenance_note(res)
 
     # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
     # the curate batch above touched only descriptions/choices, so the loaded `org` is still
@@ -1642,7 +1649,7 @@ def cmd_enrich_metadata(args) -> int:
                  "relationships_added_unverified": refs_unverified,
                  "reference_fields_known": refs_declared,
                  "relationships_skipped_target_not_modelled": refs_skipped_target,
-                 "errors": errors})
+                 **provenance, "errors": errors})
     return 0 if not errors else 1
 
 

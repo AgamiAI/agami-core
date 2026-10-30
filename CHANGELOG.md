@@ -93,6 +93,18 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A description edit without `source` keeps whose words the description is (#549).** A `sm curate`
+  edit to a table or column description that passed no `source` stamped it `description_source:
+  human`, so fixing a typo in a description from the customer's data dictionary silently dropped
+  its `metadata` origin. Such an edit now keeps the provenance it finds: `metadata` stays
+  `metadata`, and a description agami wrote stays `ai_unvalidated` and still comes up for a check.
+  A first description, or one written for a column agami couldn't read (`ai_unknown`), is `human`
+  as before. Changing provenance takes an explicit `source` (`human`, `metadata` or `ai`; any other
+  value is skipped), and `sm curate`, `sm describe-file` and `sm enrich-metadata` report each
+  change as `provenance_changed: [{item, from, to}]`. The curation log records
+  `description_source_before` and `description_source_after` on every description edit. A
+  correction saved through agami-save-correction now passes `source: human`.
+
 - **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
   query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
   every query that used it, while the check for derived metrics refused a legal aggregate over a
