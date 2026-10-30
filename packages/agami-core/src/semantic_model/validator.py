@@ -1235,9 +1235,10 @@ _W_UNDER_100 = (
     rf"(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|{_W_SMALL}))?"
     rf"|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|{_W_SMALL})"
 )
-# A bare "one" is left out: it is mostly "one row per order" or "one of", not a count.
+# A bare "one" is left out: it is mostly "one row per order" or "one of", not a count. As the rest of
+# a compound ("one hundred and one") it is part of the figure.
 _WORDS = (
-    rf"(?:(?:a|one|{_W_UNDER_100})\s+(?:hundred|thousand)(?:\s+(?:and\s+)?{_W_UNDER_100})?"
+    rf"(?:(?:a|one|{_W_UNDER_100})\s+(?:hundred|thousand)(?:\s+(?:and\s+)?(?:{_W_UNDER_100}|one))?"
     rf"|a\s+dozen|{_W_UNDER_100})"
 )
 _N_BARE = rf"(?:{_DIGITS}|{_WORDS}\b)"
@@ -1270,6 +1271,7 @@ _RANGE = (
     rf"(?P<btw>between\s+)?{_CUR}(?P<lo>{_N}){_UNIT}?(?P<sep>\s*[–—-]\s*|\s+(?:to|and)\s+){_CUR}"
     rf"(?P<hi>{_N_BARE})(?![\w-]|\.\d){_UNIT}?"
 )
+_MAGNITUDES = r"dozens|hundreds|thousands|millions|billions"
 _STATE = (
     r"(?:lacks?|(?:have|has|had|carr(?:y|ies)|are|is|were|was)\s+(?:still\s+)?(?:no|null|missing|"
     r"empty|blank|negative|zero|duplicated?|duplicates|orphaned|unmatched|unknown|invalid))\b"
@@ -1279,7 +1281,7 @@ _MEASURED_FIGURE_RES = (
     ("share", re.compile(rf"(?P<n>{_N})\s+(?:out\s+)?of\s+(?:the\s+)?(?:about\s+|~)?(?P<of>{_N})", re.I)),
     ("count", re.compile(rf"\bcover(?:s|ing)?\s+(?:only|about|roughly|just|~)\s*(?P<n>{_N})", re.I)),
     # "2 rows per order" is a grain, not a count.
-    ("count", re.compile(rf"(?P<n>{_N})\s+(?:rows|records)\b(?!\s+(?:per|for\s+each|each)\b)", re.I)),
+    ("rows", re.compile(rf"(?P<n>{_N})\s+(?:rows|records)\b(?!\s+(?:per|for\s+each|each)\b)", re.I)),
     (
         "count",
         re.compile(rf"\b(?:null|missing|empty|blank)\s+(?:on|in|for)\s+(?:about\s+|~)?(?P<n>{_N})", re.I),
@@ -1305,8 +1307,9 @@ _MEASURED_FIGURE_RES = (
     (
         "count",
         re.compile(
-            r"\b(?P<n>dozens|hundreds|thousands|millions)\s+of\s+"
-            rf"(?!(?:dollars|euros|pounds|cents|usd|eur|gbp|units)\b){_VOLUME_WORD}",
+            rf"\b(?P<n>{_MAGNITUDES})\s+of\s+"
+            # "hundreds of thousands of dollars": the next magnitude word is where the unit starts.
+            rf"(?!(?:dollars|euros|pounds|cents|usd|eur|gbp|units|{_MAGNITUDES})\b){_VOLUME_WORD}",
             re.I,
         ),
     ),
@@ -1357,6 +1360,17 @@ _PREV = re.compile(
     r"status|id|number|week|day|month|quarter|year|period|fy|q)|[<>=*/+#])\s*$",
     re.I,
 )
+# "populated with 1,204 rows" and "returns 829 rows" are counts; "with 0 rows" or "returns 1 row" is
+# still how the formula behaves.
+_WITH_RETURNS = re.compile(r"\b(?:with|returns?)\s*$", re.I)
+# A year is a date only where the words say so: "fiscal year 2024", "since 2024", "Q1 2024". "There
+# are 2024 rows" is a count.
+_YEAR_CONTEXT = re.compile(
+    r"(?:\b(?:as\s+of|in|during|from|through|thru|since|until|till|before|after|by|fiscal|fy|year|"
+    r"calendar|end\s+of|early|late|mid|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|"
+    r"july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[qh][1-4])(?:\s+the)?|-)\s*$",
+    re.I,
+)
 _SMALL_SHARE_CUE = re.compile(r"\b(?:only|just|here|today|currently|presently|so\s+far|as\s+of)\b", re.I)
 # "scores range 0–100" is the scale a value is defined on; "ranges 3 to 5 days" and "varies by tier"
 # state a rule.
@@ -1399,8 +1413,6 @@ def _sentence(text: str, start: int, end: int) -> str:
 def _range_counts(kind: str, m: re.Match, text: str) -> bool:
     if "and" in m.group("sep") and not m.group("btw"):
         return False  # "columns 3 and 5" is a list, not a range
-    if kind != "range":
-        return True
     lo, hi = _figure_value(m.group("lo")), _figure_value(m.group("hi"))
     if lo in _SCALE_LOW and hi in _SCALE_HIGH:
         return False
@@ -1416,10 +1428,12 @@ def _counts(kind: str, m: re.Match, text: str) -> bool:
     if groups.get("lo"):
         return _range_counts(kind, m, text)
     n = groups["n"]
-    if _PREV.search(text[max(0, m.start("n") - 30) : m.start("n")]):
+    before = text[max(0, m.start("n") - 30) : m.start("n")]
+    if _PREV.search(before):
+        if not (kind == "rows" and _WITH_RETURNS.search(before) and _figure_value(n) >= 2):
+            return False
+    if re.fullmatch(r"(?:19|20)\d\d", n) and _YEAR_CONTEXT.search(before):
         return False
-    if re.fullmatch(r"(?:19|20)\d\d", n):
-        return False  # a bare year ("as of 2024", "fiscal 2023 orders") is a date, not a count
     if kind == "now" and not (groups["u"] or groups["rest"].strip()):
         return False  # "a value of 1 here" names a code, not how many
     if kind == "state" and not groups["u"] and (_figure_value(n) < 2 or not groups["rest"]):

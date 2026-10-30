@@ -22,8 +22,8 @@ below corresponds to one such version.
   next to "here", "today", "currently" or "as of", and counts inside a caveat sentence. Statements
   about how a formula behaves ("returns 0 because no row meets the threshold"), its literals ("ELSE
   0", "divide by 100"), scales ("ranges 0–100"), bounds ("more than 5 users", "top 10 customers"),
-  years, versions and labels ("status 9 rows") are not flagged, and "2 rows per order" is no longer
-  read as a count. It stays a warning.
+  years used as dates ("since 2024"), versions and labels ("status 9 rows") are not flagged, and "2
+  rows per order" is no longer read as a count. It stays a warning.
 
 ## [0.9.21] — 2026-10-29
 

@@ -216,3 +216,44 @@ def test_a_range_in_a_caveat_produces_the_warning():
     [finding] = _found(org)
     assert finding.severity == "warning"
     assert finding.message.startswith("1 model text(s)") and "('range 49–142')" in finding.message
+
+
+# Review of #541: a compound ending in "one", explicit row counts after "with"/"returns", counts
+# that look like years, now-cued ranges that are definitions, and compound storage units.
+@pytest.mark.parametrize(
+    "text",
+    [
+        "one hundred and one rows",
+        "currently one hundred and one sites",
+        "The table is populated with 1,204 rows",
+        "The join returns 829 rows",
+        "There are 2024 rows",
+        "2024 of 5000 accounts have a value",
+        "hundreds of thousands of rows have no region",
+    ],
+)
+def test_a_count_the_review_found_missed_is_found(text):
+    assert V._measured_figure(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "scores range 0–100 here",
+        "currently 3 to 5 days depending on tier",
+        "values stored in hundreds of thousands of dollars",
+        "returns 0 rows when nothing matches",
+        "since 2024 the field is required",
+        "Q1 2024 orders are restated",
+    ],
+)
+def test_a_definition_the_review_found_flagged_is_not(text):
+    assert V._measured_figure(text) is None
+
+
+def test_a_count_that_looks_like_a_year_is_a_count_unless_used_as_a_date():
+    for year in range(1900, 2100):
+        assert V._measured_figure(f"There are {year} rows"), year
+        assert V._measured_figure(f"{year} of 5000 accounts have a value"), year
+        assert V._measured_figure(f"fiscal year {year} starts in April") is None, year
+        assert V._measured_figure(f"since {year} the field is required") is None, year
