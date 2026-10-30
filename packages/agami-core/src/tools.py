@@ -2817,7 +2817,7 @@ def _tool_get_datasource_schema(args: dict[str, Any]) -> str | NeedsInput:
                         ),
                     }
                 },
-                indent=2,
+                separators=REPLY_SEPARATORS,
             )
     if choices is not None:
         chosen = _accepted_datasource(answer, choices)
