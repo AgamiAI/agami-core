@@ -522,9 +522,11 @@ class BatchError(ValueError):
     would let the batch report success with that change missing, so apply() refuses the batch (#538)."""
 
 
-_VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move"}
+_VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move", "add"}
 # exclude == reject; include == set unreviewed + clear sign-off (model-explorer verbs)
 # move == {op:move, kind:table, name, area, to_area}: the table changes owning area (see _move_table)
+# add == {op:add, kind:relationship, from_table, to_table, from_column + to_column | on, relationship}:
+#        a new join, written unreviewed where its two tables' areas say (see _add_join)
 
 # The `area` that names the datasource-level lists (cross_subject_area_metrics / _entities) rather
 # than a subject area. Introspection never names an area like this (`build._area_key` strips "_").
@@ -546,7 +548,11 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             if op.get("op") == "move" and not op.get("area"):
                 # Resolved now, so the log records the area the table left as well as the one it joined.
                 op = {**op, "area": _resolve_area(root, op)}
-            _, before = _apply_one(root, op, signer, role, backups, res.notes)
+            if op.get("op") == "add" and not op.get("name"):
+                op = {**op, "name": f"{op.get('from_table') or '?'}->{op.get('to_table') or '?'}"}
+            path, before = _apply_one(root, op, signer, role, backups, res.notes)
+            if op.get("op") == "add" and path.name == "relationships.yaml":
+                op = {**op, "area": path.parent.name}   # where the join landed, for the label and the log
             res.applied.append(_op_label(op))
             logged.append({**op, "before": before})
         except BatchError as e:
@@ -655,6 +661,11 @@ def _apply_one(root: Path, op: dict, signer, role,
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
         return _move_table(root, op, area, backups, notes if notes is not None else []), None
+
+    if action == "add":
+        if kind != "relationship":
+            raise ValueError("add applies to joins only (kind: relationship); add metrics with `sm add`")
+        return _add_join(root, op, backups), None
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -1149,19 +1160,143 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
     return plan
 
 
+# The fields an `add` op may give its join; a sign-off is never one of them.
+_ADD_JOIN_FIELDS = ("from_table", "from_column", "to_table", "to_column", "from_schema", "to_schema",
+                    "on", "join_type", "relationship", "description")
+
+
+def _stored_table(root: Path, area: str, ref: tuple[str, str]) -> tuple[dict, dict[str, str]]:
+    """The table file of `ref` in `area`'s tables/ folder, and its columns lowercased -> as written."""
+    from .models import table_key
+
+    for tf in sorted((_area_dir(root, area) / "tables").glob("*.yaml")):
+        doc = _load(tf) or {}
+        if _same_table(ref, table_key(str(doc.get("name") or tf.stem), doc.get("schema"))):
+            doc.setdefault("name", tf.stem)
+            return doc, {str(c.get("name")).lower(): str(c.get("name"))
+                         for c in doc.get("columns") or [] if isinstance(c, dict) and c.get("name")}
+    return {}, {}
+
+
+def _model_dialect(root: Path) -> Optional[str]:
+    """The sqlglot grammar the model's SQL text is written in, or None when its engine isn't one known."""
+    from .sql_dialect import DialectUnresolved, sqlglot_dialect
+
+    doc = _load(root / "datasource.yaml") or {}
+    engines = set()
+    for sc in doc.get("storage_connections") or []:
+        if not isinstance(sc, dict):
+            continue
+        ref = sc.get("ref") or f"datasources/{sc.get('name')}/storage.yaml"
+        st = sc.get("storage_type") or ((_load(root / ref) or {}) if (root / ref).exists() else {}).get("storage_type")
+        if st:
+            engines.add(str(st))
+    try:
+        return sqlglot_dialect(engines.pop()) if len(engines) == 1 else None
+    except DialectUnresolved:
+        return None
+
+
+def _on_columns(on: str, dialect: Optional[str]) -> list[tuple[str, str]]:
+    """(table, column) for every column an `on:` condition names, filters and casts included. Raises
+    BatchError when it doesn't parse or a column isn't qualified with its table."""
+    from sqlglot import exp
+
+    from .runtime import _parse_declared_predicate
+
+    predicate = _parse_declared_predicate(on, dialect)
+    if predicate is None:
+        raise BatchError(f"the join condition {on!r} doesn't parse as SQL")
+    out = []
+    for c in predicate.find_all(exp.Column):
+        if not c.table:
+            raise BatchError(f"column {c.name!r} in the join condition needs its table: write <table>.{c.name}")
+        out.append((c.table, c.name))
+    return out
+
+
+def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Path:
+    """Write the join an `add` op describes, unreviewed (#512). Its two tables' areas decide where:
+    that area's relationships.yaml when they share one, else the cross-area joins. A table or column
+    the model doesn't have fails the batch; the same join already in the model is skipped."""
+    from .models import stored_identity, table_key
+
+    entry = {k: op[k] for k in _ADD_JOIN_FIELDS if op.get(k) not in (None, "")}
+    entry.update(confidence="proposed", review_state="unreviewed")
+    try:
+        Relationship(**entry)
+    except Exception as e:
+        raise BatchError(f"not a valid join: {e}") from e
+    owners = _owners(root)
+    ends = {}
+    on_cols: dict[str, list[str]] = {"from": [], "to": []}
+    if entry.get("on"):
+        sides = {"from": table_key(entry["from_table"], entry.get("from_schema"))[1],
+                 "to": table_key(entry["to_table"], entry.get("to_schema"))[1]}
+        for t, c in _on_columns(str(entry["on"]), _model_dialect(root)):
+            hit = [side for side, name in sides.items() if name == t.lower()]
+            if not hit:
+                raise BatchError(f"the join condition names {t}.{c}, but {t!r} is neither end of the join")
+            on_cols[hit[0]].append(c)
+    for side in ("from", "to"):
+        ref = table_key(entry[f"{side}_table"], entry.get(f"{side}_schema"))
+        hits = sorted({k for k in owners if _same_table(ref, k)})
+        if len(hits) != 1:
+            raise BatchError(
+                f"no table {entry[f'{side}_table']!r} in the model" if not hits else
+                f"table {entry[f'{side}_table']!r} is in {len(hits)} schemas; give {side}_schema")
+        ends[side] = (hits[0], owners[hits[0]])
+        doc, cols = _stored_table(root, owners[hits[0]], hits[0])
+        col = entry.get(f"{side}_column")
+        for c in [col] if col else on_cols[side]:
+            if c.lower() not in cols:
+                raise BatchError(f"table {entry[f'{side}_table']!r} has no column {c!r}")
+        if col:
+            entry[f"{side}_column"] = cols[col.lower()]
+        # The model's own spelling, since the loader matches a join's tables case-sensitively.
+        schema, name = stored_identity(str(doc["name"]), doc.get("schema"))
+        entry[f"{side}_table"] = name
+        if schema:
+            entry[f"{side}_schema"] = schema
+        else:
+            entry.pop(f"{side}_schema", None)
+    for path, key in [*((_area_dir(root, a) / "relationships.yaml", "relationships") for a in _listed_areas(root)),
+                      (root / "cross_subject_area_relationships.yaml", "edges"),
+                      (root / "datasource.yaml", "cross_subject_area_relationships")]:
+        if path.exists() and any(isinstance(r, dict) and _same_join_entry(r, entry)
+                                 for r in _entries(_load(path) or {}, key)):
+            raise ValueError(f"join {_rel_label(entry)} is already in the model ({path.name}); skipped")
+    fa, ta = ends["from"][1], ends["to"][1]
+    if fa == ta:
+        path, key = _area_dir(root, fa) / "relationships.yaml", "relationships"
+    else:
+        entry.update(from_subject_area=fa, to_subject_area=ta)
+        CrossSubjectAreaRelationship(**entry)
+        path, key = root / "cross_subject_area_relationships.yaml", "edges"
+    _snapshot(backups, path)
+    _append_entries(path, key, [entry])
+    return path
+
+
+def _append_entries(path: Path, key: str, entries: list[dict]) -> None:
+    """Append join entries to a relationships file's list, keeping whatever else the file holds."""
+    doc = _load(path) if path.exists() else None
+    lst = _entries(doc, key) if doc is not None else []
+    _dump(path, {**(doc if isinstance(doc, dict) else {}), key: [*lst, *entries]})
+
+
 def _same_join_entry(a: dict, b: dict) -> bool:
     """Whether two join entries are one edge: introspection's identity rule, plus the same `on`."""
     from types import SimpleNamespace
 
     from .introspect import _same_join
-    from .models import Relationship
+    from .models import Relationship, on_text_key
 
     # Every field, so whatever `_same_join` reads is there (a composite key's `on`, too).
     def ns(r: dict) -> Any:
         return SimpleNamespace(**{k: r.get(k) for k in Relationship.model_fields})
 
-    return (_same_join(ns(a), ns(b))
-            and " ".join(str(a.get("on") or "").split()).lower() == " ".join(str(b.get("on") or "").split()).lower())
+    return _same_join(ns(a), ns(b)) and on_text_key(str(a.get("on") or "")) == on_text_key(str(b.get("on") or ""))
 
 
 def _sign_off_rank(r: dict) -> int:
@@ -1667,32 +1802,30 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
                 continue
             path = _area_dir(root, area) / "relationships.yaml"
             backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-            doc = _load(path) if path.exists() else None
-            lst = doc.get("relationships", []) if isinstance(doc, dict) else (doc or [])
+            good = []
             for r in rels:
                 try:
                     Relationship(**r)
                 except Exception as e:
                     res.skipped.append({"item": _rel_label(r), "reason": str(e)})
                     continue
-                lst.append(r)
+                good.append(r)
                 res.applied.append(f"rel {area}/{_rel_label(r)}")
-            _dump(path, {"relationships": lst})
+            _append_entries(path, "relationships", good)
 
         if cross:
             path = root / "cross_subject_area_relationships.yaml"
             backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
-            doc = _load(path) if path.exists() else None
-            edges = doc.get("edges", []) if isinstance(doc, dict) else (doc or [])
+            good = []
             for r in cross:
                 try:
                     CrossSubjectAreaRelationship(**r)
                 except Exception as e:
                     res.skipped.append({"item": _rel_label(r), "reason": str(e)})
                     continue
-                edges.append(r)
+                good.append(r)
                 res.applied.append(f"xrel {_rel_label(r)}")
-            _dump(path, {"edges": edges})
+            _append_entries(path, "edges", good)
     except Exception as e:
         _restore(backups)
         res.applied = []

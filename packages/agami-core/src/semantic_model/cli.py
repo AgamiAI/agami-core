@@ -562,9 +562,30 @@ def cmd_set_description(args) -> int:
     return 0 if res.validated else 1
 
 
+def _candidate_ops(doc: dict, wanted: list[str]) -> list[dict]:
+    """The `add` ops of the named join candidates in a join_candidates.json (#512), or a JSON error."""
+    listed = {c.get("id"): c.get("op") for key in ("candidates", "low_overlap")
+              for c in doc.get(key) or [] if isinstance(c, dict)}
+    if not wanted:
+        _print_json({"error": "this is a join_candidates file; name the joins to add with --candidate <id>",
+                     "candidates": [c.get("id") for c in doc.get("candidates") or []]})
+        raise SystemExit(2)
+    missing = [w for w in wanted if w not in listed]
+    if missing:
+        _print_json({"error": f"no join candidate {', '.join(missing)} in the file",
+                     "candidates": sorted(i for i in listed if i)})
+        raise SystemExit(2)
+    return [listed[w] for w in wanted]
+
+
 def cmd_curate(args) -> int:
     from . import curate
     ops = _read_json_file(args.ops_file)
+    if isinstance(ops, dict) and ("candidates" in ops or "low_overlap" in ops):
+        ops = _candidate_ops(ops, args.candidate or [])
+    elif args.candidate:
+        _print_json({"error": "--candidate picks from a join_candidates.json; this file holds ops"})
+        return 2
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
     _stamp_approve_ops(ops)
@@ -1795,9 +1816,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
 
-    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
+    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move/add ops (validated)")
     sp.add_argument("root")
-    sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
+    sp.add_argument("--ops-file", required=True,
+                    help="JSON file: a list of op objects (or {ops:[...]}), or a join_candidates.json")
+    sp.add_argument("--candidate", action="append", default=None, metavar="ID",
+                    help="with a join_candidates.json: add the join candidate with this id (repeatable)")
     sp.add_argument("--signer", default=None,
                     help="who made the changes: recorded in the curation log on every op; an approve, "
                          "or an edit of an approved join's tables, columns or cardinality, also stamps it on the "

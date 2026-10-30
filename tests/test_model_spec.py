@@ -1168,6 +1168,19 @@ def test_the_same_join_written_twice_is_refused(tmp_path):
     assert any("join 6 repeats join 1" in e for e in res.errors), res.errors
 
 
+def test_joins_whose_conditions_differ_only_in_a_literal_case_are_not_repeats(tmp_path):
+    _introspected(tmp_path)
+    spec = _spec()
+    on = "sales_f.customer_key = customer_d.customer_key AND customer_d.segment = '{}'"
+    base = {"from_table": "sales_f", "to_table": "customer_d"}
+    spec["joins"] += [{**base, "on": on.format("A")}, {**base, "on": on.format("a")},
+                      {**base, "on": on.format("A").upper()}]
+    errors = model_spec.apply_spec(tmp_path, spec, dry_run=True).errors
+    n = len(spec["joins"])
+    assert not any(f"join {n - 1} repeats" in e for e in errors), errors
+    assert any(f"join {n} repeats join {n - 2}" in e for e in errors), errors
+
+
 def test_a_join_missing_a_table_is_skipped_not_a_crash(tmp_path):
     from semantic_model import curate
 

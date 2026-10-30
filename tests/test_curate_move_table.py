@@ -466,6 +466,26 @@ def test_moving_back_into_an_area_that_holds_the_on_join_keeps_one_copy(tmp_path
     assert V.validate(org).ok
 
 
+_FILTERED = "shipments.order_id = order_items.order_id AND order_items.qty = '{}'"
+
+
+@pytest.mark.parametrize("copy, kept", [(_FILTERED.format("Y").upper().replace("  ", " "), 1),
+                                        (_FILTERED.format("y"), 2)])
+def test_a_filtered_join_is_one_copy_only_when_its_literal_matches(tmp_path, copy, kept):
+    # SQL case and spacing don't make two joins; a literal's case does (`'Y'` and `'y'` are other rows).
+    root = _with_shipments(_model(tmp_path), _FILTERED.format("Y"))
+    assert _move(root, "shipments", "logistics").validated
+    rels_file = root / "subject_areas" / "sales" / "relationships.yaml"
+    rels = yaml.safe_load(rels_file.read_text())
+    rels["relationships"].append({"from_table": "shipments", "to_table": "order_items", "on": copy,
+                                  "relationship": "many_to_one", **_ENGINE})
+    rels_file.write_text(yaml.safe_dump(rels))
+    res = _move(root, "shipments", "sales")
+    assert res.validated, res.as_dict()
+    org = loader.load_datasource(root)
+    assert len([r for r in org.subject_area("sales").relationships if r.from_table == "shipments" and r.on]) == kept
+
+
 def test_a_join_that_turns_cross_area_is_not_added_twice(tmp_path):
     root = _model(tmp_path)
     ds = yaml.safe_load((root / "datasource.yaml").read_text())
