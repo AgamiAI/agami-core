@@ -498,7 +498,7 @@ def route_http(sql: str, profile: str = PROFILE) -> dict:
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
     }
-    with TestClient(mcp_http.create_app()) as client:
+    with TestClient(mcp_http.create_app(), base_url=BASE_URL) as client:
         init = client.post(
             "/mcp",
             headers=headers,

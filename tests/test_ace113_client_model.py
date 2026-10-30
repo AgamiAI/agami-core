@@ -152,9 +152,9 @@ def test_the_prop_is_declared_optional_on_every_tool():
 
 
 def test_the_schema_constrains_nothing_the_sdk_could_refuse_the_call_over():
-    """**The bound lives in the writer, never in the schema.** The MCP SDK validates `inputSchema`
-    before the handler runs, so a `maxLength` or an `enum` here would refuse the whole query over an
-    optional note rather than trim it."""
+    """**The bound lives in the writer, never in the schema.** The HTTP transport validates
+    `inputSchema` in `mcp_http.build_server` before the handler runs, so a `maxLength` or an `enum`
+    here would refuse the whole query over an optional note rather than trim it."""
     for name, schema in _schemas().items():
         prop = schema["properties"]["client_model"]
         assert set(prop) <= {"type", "description"}, (name, prop)

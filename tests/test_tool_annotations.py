@@ -8,7 +8,6 @@ rather than asserted here.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import subprocess
@@ -17,6 +16,7 @@ import sys
 import pytest
 from tools import TOOLS, register, require_thread_id, tool_annotations
 
+BASE = "https://agami.example.com"
 READ_ONLY = {"readOnlyHint": True, "destructiveHint": False}
 
 
@@ -88,19 +88,30 @@ def test_execute_sql_read_only_claim_is_backed_by_the_guard():
 
 
 def _listed_over_http(registry: dict | None = None) -> dict:
-    types = pytest.importorskip("mcp.types")
-    from mcp_http import build_server
+    """`tools/list` as a client receives it, over the real transport.
 
-    server = build_server(registry)
-    result = asyncio.run(server.request_handlers[types.ListToolsRequest](types.ListToolsRequest()))
-    return {t.name: t for t in result.root.tools}
+    Through the transport rather than the server object: SDK 2 keeps its handler table on a private
+    `_request_handlers`, and a test that reaches for it is asserting the SDK's internals rather than
+    what a client is sent. The wire is the contract here, so the wire is what this reads.
+    """
+    pytest.importorskip("mcp.types")
+    import mcp_http
+    from starlette.testclient import TestClient
+
+    from mcp_eras import MODERN, envelope, rpc
+
+    os.environ.setdefault("PUBLIC_BASE_URL", BASE)
+    app = mcp_http.create_app(extra_tools=registry)
+    with TestClient(app, base_url=BASE) as client:
+        response = rpc(client, MODERN, "tools/list")
+    assert response.status_code == 200, response.text
+    return {tool["name"]: tool for tool in envelope(response)["result"]["tools"]}
 
 
 def test_http_lists_the_hint_in_the_spec_field_names():
-    listed = _listed_over_http({**TOOLS, "log_note": _consumer_tool()})
-    wire = listed["execute_sql"].model_dump(by_alias=True, exclude_none=True)
-    assert wire["annotations"] == READ_ONLY
-    assert listed["log_note"].annotations is None
+    listed = _listed_over_http({"log_note": _consumer_tool()})
+    assert listed["execute_sql"]["annotations"] == READ_ONLY
+    assert "annotations" not in listed["log_note"]
 
 
 def test_create_app_refuses_a_non_bool_flag(monkeypatch):

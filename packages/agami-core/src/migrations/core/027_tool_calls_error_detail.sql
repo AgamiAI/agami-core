@@ -1,0 +1,21 @@
+-- Why a tool call crashed, where only an operator can read it (ACE-152).
+--
+-- A tool handler that raised used to send its exception's text to the client and keep nothing on the
+-- server: the row said `error_kind = 'exception'` and no more, and no log line was written. The HTTP
+-- transport now answers every crash with the fixed `Error executing tool <name>`, because the text is
+-- an enumeration channel for the reason 016 gives — a driver's error can name a column the caller never
+-- sent. Taking it off the wire without keeping it anywhere would leave an operator debugging a crash
+-- with nothing to read, so it is kept here, beside the failure it explains.
+--
+-- OPERATOR-ONLY, like `query_executions.error_detail` (016) and unlike `refusal_detail` (018), which is
+-- value-free by contract and showable. Nothing reads this column onto a page.
+--
+-- NULL on every call that did not raise: a call that returned has a body that says how it went. NULL
+-- on a row written before 027, and on a call recorded by a caller that states no reason.
+--
+-- BOUNDED BY THE WRITER (`tools.AUDIT_ERROR_DETAIL_MAX_CHARS`), on 015's argument: an exception's
+-- message is as unbounded as a driver's, and a crashing call must not become a way to grow the store.
+--
+-- Forward-only and portable (SQLite + Postgres). No `IF NOT EXISTS` — SQLite's ALTER does not accept
+-- it; re-run safety comes from the runner's applied-filename ledger. No index: nothing filters on it.
+ALTER TABLE tool_calls ADD COLUMN error_detail TEXT;
