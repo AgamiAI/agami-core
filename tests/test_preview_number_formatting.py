@@ -284,3 +284,71 @@ def test_count_star_keeps_the_positional_label(tmp_path):
     # a real star still turns positions off
     assert RT.resolve_result_labels(org, "SELECT s.*, postcode FROM stores s") == {"postcode"}
     assert RT.resolve_result_labels(org, "SELECT *, postcode FROM stores") == {"postcode"}
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT amount FROM orders WHERE EXISTS (SELECT 1 FROM stock_moves)",
+    "SELECT o.amount FROM orders o WHERE EXISTS (SELECT 1 FROM stock_moves o)",
+    "SELECT amount FROM orders WHERE id IN (SELECT id FROM stock_moves)",
+    # a derived table or a CTE still hands its table's column through
+    "SELECT amount FROM (SELECT amount FROM orders) t",
+    "WITH x AS (SELECT amount FROM orders) SELECT amount FROM x",
+])
+def test_a_subquery_in_a_predicate_binds_nothing_outside(tmp_path, sql):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == {"amount": "USD", "#0": "USD"}
+
+
+def test_a_predicate_subquery_never_lends_a_label(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    # stock_moves declares an id too, but only stores' id can reach the result
+    assert RT.resolve_result_labels(
+        org, "SELECT id FROM stores WHERE EXISTS (SELECT 1 FROM stock_moves WHERE amount > 0)") == {"id", "#0"}
+
+
+def test_a_quoted_column_matches_as_the_engine_matches_it(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    # SQLite reads "POSTCODE" as postcode, so it is the model's string column
+    assert RT.resolve_result_labels(org, 'SELECT s."POSTCODE" AS site FROM stores s') == {"site", "#0"}
+    assert RT.resolve_result_units(org, 'SELECT SUM("REVENUE") AS r FROM stores') == {"r": "USD", "#0": "USD"}
+
+
+def test_a_quoted_column_is_exact_where_the_engine_is(tmp_path):
+    _model(tmp_path)
+    storage = tmp_path / "datasources" / "c" / "storage.yaml"
+    storage.write_text(yaml.safe_dump({"name": "c", "storage_type": "PostgreSQL"}))
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_labels(org, 'SELECT s."POSTCODE" AS site FROM stores s') == set()
+    assert RT.resolve_result_labels(org, 'SELECT s."postcode" AS site FROM stores s') == {"site", "#0"}
+
+
+@pytest.mark.parametrize("expr", [
+    "COALESCE(SUM(revenue), CAST(0 AS DECIMAL(18,2)))",
+    "GREATEST(revenue, -1)",
+    "LEAST(revenue, (-1))",
+    "COALESCE(NULL, revenue)",
+    "SUM(DISTINCT CASE WHEN postcode = '1' THEN revenue ELSE 0 END)",
+    "SUM(DISTINCT revenue)",
+])
+def test_a_constant_or_distinct_takes_no_unit_away(tmp_path, expr):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, f"SELECT {expr} AS v FROM stores") == {"v": "USD", "#0": "USD"}
+
+
+@pytest.mark.parametrize("expr, label", [
+    ("COALESCE(NULL, postcode)", True),
+    ("COALESCE(postcode, 'none')", True),
+    ("MAX(DISTINCT postcode)", True),
+    ("COALESCE(NULL, EXTRACT(YEAR FROM opened_on))", True),
+    # a value that may come from a quantity is not a label
+    ("COALESCE(postcode, net_change)", False),
+    ("COALESCE(NULL, net_change)", False),
+])
+def test_a_value_function_is_a_label_when_everything_it_returns_is(tmp_path, expr, label):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert (RT.resolve_result_labels(org, f"SELECT {expr} AS v FROM stores") == {"v", "#0"}) is label

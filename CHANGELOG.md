@@ -25,10 +25,12 @@ below corresponds to one such version.
   column in its condition, a bare column is read from its own table (and schema), and the
   difference of two dates is not a date, so a duration in days no longer shows as dollars. A `0`
   or `NULL` branch, a window's `PARTITION BY` and a `FILTER`'s condition take no unit away, and
-  `GREATEST`, `LEAST`, `COALESCE` and `NULLIF` keep the unit or date encoding of what they
-  return. `sm prepare` returns these label columns as `labels`, and `sm format-table --labels`
-  takes them. Big integers are no longer rounded through a float. Reports built by
-  `csv_to_sections.py` follow the same rules.
+  `GREATEST`, `LEAST`, `COALESCE` and `NULLIF` keep the unit, date encoding or label of what they
+  return, whatever constant or `NULL` sits beside it. A table inside `WHERE EXISTS (…)` lends no
+  column to the outer SELECT, and a quoted column name matches as the engine matches it.
+  `sm prepare` returns these label columns as `labels`, and `sm format-table --labels` takes them.
+  Big integers are no longer rounded through a float. Reports built by `csv_to_sections.py` follow
+  the same rules.
 
 - **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a
   `VALUES` arm of a `UNION` as one more `SELECT`, so the receipt counted an extra arm and could

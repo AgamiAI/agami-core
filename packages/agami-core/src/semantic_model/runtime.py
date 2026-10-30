@@ -6560,6 +6560,23 @@ def _unanimous_tokens(org: Datasource) -> dict[str, str]:
             if len(toks) == 1 and next(iter(toks))}
 
 
+def _is_source_select(node: "exp.Select") -> bool:
+    """Whether a nested SELECT feeds its parent's rows, as a CTE body or a FROM/JOIN subquery (a set
+    operation's arms too), rather than standing in a predicate or a projection (`EXISTS (…)`)."""
+    parent = node.parent
+    while isinstance(parent, (exp.Subquery, exp.SetOperation, exp.Paren)):
+        parent = parent.parent
+    return isinstance(parent, (exp.From, exp.Join, exp.CTE))
+
+
+def _bound_tables(select: "exp.Select") -> list["exp.Table"]:
+    """The tables a SELECT's columns can read: its own FROM and JOINs and, through them, the derived
+    tables and CTEs those name. A table inside `WHERE EXISTS (…)` binds nothing out here."""
+    walk = select.walk(prune=lambda n: isinstance(n, exp.Select) and n is not select
+                       and not _is_source_select(n))
+    return [tbl for tbl in walk if isinstance(tbl, exp.Table)]
+
+
 def _display_lookup(org: Datasource, tree: "exp.Expression", select: "exp.Select"
                     ) -> "Callable[[exp.Column], Optional[Column]]":
     """The model Column a statement column reads, for its display unit or label. A table is known by
@@ -6570,7 +6587,7 @@ def _display_lookup(org: Datasource, tree: "exp.Expression", select: "exp.Select
     cte_refs = _cte_bindings(tree)
     cols_of: dict[frozenset, dict[str, Column]] = {}
     scope: dict[str, set] = {}
-    for tbl in select.find_all(exp.Table):
+    for tbl in _bound_tables(select):
         if not tbl.name:
             continue
         resolved = None if id(tbl) in cte_refs else _resolve_table(sidx, tbl, decls, dialect)
@@ -6584,7 +6601,8 @@ def _display_lookup(org: Datasource, tree: "exp.Expression", select: "exp.Select
             scope.setdefault(_tkey(f"{tbl.db}.{tbl.name}"), set()).add(binding)
 
     def lookup(col: "exp.Column") -> Optional[Column]:
-        quoted = _is_quoted(col)
+        # SQLite, MySQL, SQL Server and the rest match even a quoted column name ignoring case
+        quoted = _is_quoted(col) and dialect in _QUOTED_EXACT
         if col.table:
             bindings = scope.get(_tkey(f"{col.db}.{col.table}" if col.db else col.table), set())
             binding = next(iter(bindings)) if len(bindings) == 1 else None
@@ -6607,6 +6625,19 @@ def _star_projection(proj: "exp.Expression") -> bool:
 _VALUE_SELECTING = _exp_nodes("Greatest", "Least", "Coalesce", "Min", "Max") if _HAVE_SQLGLOT else ()
 
 
+def _is_bare_literal(e: "exp.Expression") -> bool:
+    """A constant, through casts, parentheses and a sign: `CAST(0 AS DECIMAL(18,2))`, `-1`, `NULL`.
+    It is written in whatever its neighbours are, so it neither gives nor takes a unit or a label."""
+    while isinstance(e, (exp.Paren, exp.Cast, exp.Neg)):
+        e = e.this
+    return isinstance(e, (exp.Literal, exp.Null))
+
+
+def _value_arguments(e: "exp.Expression") -> list["exp.Expression"]:
+    """The arguments a value-selecting function may return, constants left out."""
+    return [a for a in (e.this, *(e.args.get("expressions") or [])) if a is not None and not _is_bare_literal(a)]
+
+
 def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
     """Map each SELECT output column -> display unit, **tracing the SQL** (not matching
     names): an aggregate/expression over a column inherits that column's unit, so
@@ -6620,7 +6651,7 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
       - a CASE or IF takes its unit from the values it returns, never from its conditions, and
         a 0 or NULL branch takes nothing away; a window or FILTER takes it from its value;
       - GREATEST/LEAST/COALESCE/MIN/MAX/NULLIF return an argument, so they keep its unit or
-        date encoding;
+        date encoding, and a constant beside it (`CAST(0 AS DECIMAL(18,2))`, `-1`) takes none away;
       - COUNT(...), ratios (any division) and the difference of two dates get NO unit (a
         count / rate isn't money, and a duration isn't a date). Returns {} if the model
         carries no units or sqlglot can't parse.
@@ -6683,8 +6714,9 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
         if isinstance(e, _preserving):
             return _unit_of(e.this)
         if isinstance(e, _VALUE_SELECTING):
-            args = [e.this, *(e.args.get("expressions") or [])]
-            return _same([_unit_of(a) for a in args if not isinstance(a, (exp.Literal, exp.Null))])
+            return _same([_unit_of(a) for a in _value_arguments(e)])
+        if isinstance(e, exp.Distinct):                   # SUM(DISTINCT …) is its value
+            return _same([_unit_of(a) for a in e.expressions])
         if isinstance(e, (exp.Case, exp.If)):
             if isinstance(e, exp.If):
                 values = [e.args.get("true"), e.args.get("false")]
@@ -6757,7 +6789,7 @@ def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
     keyed by output name and by position (`#i`) like `resolve_result_units`, for
     `units.format_rows`. Read from the model: a projected column whose type is not numeric, a
     key, a `dimension`, a choice field; and a year taken out of a date. A value only passes
-    through MIN/MAX/COALESCE/CAST and keeps being that column. So `ship_year` stays `2011`, not
+    through MIN/MAX/COALESCE/CAST and keeps being that column; a NULL beside it changes nothing. So `ship_year` stays `2011`, not
     `2,011`, and a TEXT zip `07094` is never read as the number 7,094 (#547)."""
     tree = _parse_sql(sql, _dialect_of(org)[0])
     select = tree.find(exp.Select) if tree is not None else None
@@ -6766,20 +6798,25 @@ def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
     lookup = _display_lookup(org, tree, select)
     projs = list(select.expressions)
     has_star = any(_star_projection(p) for p in projs)
-    passing = (exp.Alias, exp.Paren, exp.Cast, exp.Min, exp.Max, exp.Coalesce, exp.AnyValue,
-               exp.Greatest, exp.Least, exp.Nullif, exp.Window, exp.Filter)
+    passing = (exp.Alias, exp.Paren, exp.Cast, exp.AnyValue, exp.Nullif, exp.Window, exp.Filter)
+
+    def _is_label(e: "exp.Expression") -> bool:
+        if _is_year_part(e):
+            return True
+        if isinstance(e, passing):
+            return _is_label(e.this)
+        if isinstance(e, _VALUE_SELECTING + (exp.Distinct,)):
+            # every column it may return is a label; a NULL or other constant beside them is neither
+            args = e.expressions if isinstance(e, exp.Distinct) else _value_arguments(e)
+            return bool(args) and all(_is_label(a) for a in args)
+        if isinstance(e, exp.Column):
+            found = lookup(e)
+            return found is not None and _is_label_column(found)
+        return False
 
     out: set[str] = set()
     for i, proj in enumerate(projs):
-        e = proj
-        while isinstance(e, passing) and not _is_year_part(e):
-            e = e.this
-        if isinstance(e, exp.Column):
-            found = lookup(e)
-            is_label = found is not None and _is_label_column(found)
-        else:
-            is_label = _is_year_part(e)
-        if not is_label:
+        if not _is_label(proj):
             continue
         if proj.alias_or_name:
             out.add(proj.alias_or_name)
