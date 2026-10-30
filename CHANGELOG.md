@@ -20,12 +20,15 @@ below corresponds to one such version.
   subquery and missed a `SUM` inside a percentile's `WITHIN GROUP`. The rule is now judged per
   SELECT: an aggregate directly inside another, or in its `WITHIN GROUP` or `FILTER` clause, is
   refused, and so is a window function inside an aggregate (`AVG(SUM(amount) OVER ())`); an
-  aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate. The
+  aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate.
+  An aggregate in a scalar subquery that reads only the outer query's columns belongs to the outer
+  query, as on PostgreSQL and SQLite, so `AVG((SELECT SUM(orders.amount)))` is refused, while one
+  that sums the subquery's own rows is not. The
   one exception is Oracle, which runs two levels of aggregate in the argument of a SELECT with its
   own GROUP BY: an Oracle binding `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is
   accepted, while a bare `AVG(SUM(amount))`, a third level, or that binding on any other engine is
-  still refused. `sm add` and a `curate` edit of a metric's `bindings` refuse such a binding with
-  the reason, and write nothing for it. A metric already in a model gets a
+  still refused. `sm add` (a subject area or `--area _cross`) and a `curate` edit of a metric's
+  `bindings` or `inner_grain` refuse such a binding with the reason, and write nothing for it. A metric already in a model gets a
   `metric_binding_nested_aggregate` warning, never an error, so no model that validated before stops
   validating; a derived metric nested in its argument is still the `derived_metric` error it was,
   also when its base only nests in a `WITHIN GROUP`. An `sm add` batch reads the model once, not

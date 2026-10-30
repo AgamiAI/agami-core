@@ -86,6 +86,24 @@ CASES = [
     pytest.param("RANK() OVER (ORDER BY SUM(amount))", False, id="window-ordered-by-aggregate"),
     pytest.param("AVG(SUM(amount) OVER ())", True, id="window-in-aggregate"),
     pytest.param("SUM(COALESCE(amount, 0)) / NULLIF(COUNT(amount), 0)", False, id="present-values"),
+    pytest.param("AVG((SELECT SUM(orders.amount)))", True, id="correlated-sum-in-avg"),
+    pytest.param("AVG((SELECT SUM(amount)))", True, id="subquery-without-from-in-avg"),
+    pytest.param("AVG((SELECT SUM(orders.amount) FROM orders o2))", True, id="sum-only-correlates"),
+    pytest.param("AVG((SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer_id = "
+                 "orders.customer_id))", False, id="subquery-sums-its-own-rows"),
+]
+
+# A scalar subquery's aggregate that reads only the outer query's columns is that query's, so it
+# nests in an aggregate around the subquery; one that reads its own rows does not.
+CORRELATED = [
+    "AVG((SELECT SUM(orders.amount)))",
+    "AVG((SELECT SUM(amount)))",
+    "AVG((SELECT SUM(orders.amount) FROM orders o2))",
+    "AVG((SELECT MAX((SELECT SUM(orders.amount))) FROM orders o2))",
+    "AVG((SELECT SUM(amount) FROM orders o2))",
+    "AVG((SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer_id = orders.customer_id))",
+    "AVG((SELECT SUM(orders.amount + o2.amount) FROM orders o2))",
+    "AVG((SELECT COUNT(*)))",
 ]
 
 
@@ -333,3 +351,69 @@ def test_a_nested_aggregates_own_within_group_is_reported_once_under_it():
     assert [str(p) for p in D.binding_problems(f"AVG({PERCENTILE_OF_SUM})", "PostgreSQL")] == [
         "PERCENTILE_CONT(...) is nested inside AVG(...)",
         "SUM(...) is nested inside PERCENTILE_CONT(...) WITHIN GROUP (ORDER BY ...)"]
+
+
+@pytest.mark.parametrize("binding", CORRELATED)
+def test_a_correlated_aggregate_verdict_matches_what_sqlite_runs(binding):
+    import sqlite3
+
+    db = sqlite3.connect(":memory:")
+    db.executescript("CREATE TABLE orders (customer_id INT, amount INT);"
+                     "INSERT INTO orders VALUES (1, 1), (2, 2);")
+    try:
+        db.execute(f"SELECT {binding} FROM orders").fetchall()
+        runs = True
+    except sqlite3.OperationalError:
+        runs = False
+    assert bool(D.binding_problems(binding, "SQLite")) is not runs
+
+
+def test_a_derived_metric_over_a_correlated_subquery_is_refused():
+    base = "SUM(orders.amount)"
+    assert _derived_findings("AVG((SELECT {revenue}))", base=base) == [("error", "derived_metric")]
+    hit = RT.resolve_metrics("d", _derived_org("AVG((SELECT {revenue}))", base=base))[0]
+    assert "SUM(...) is nested inside AVG(...)" in hit["binding_problem"]
+    # a subquery with its own rows stays legal
+    assert _derived_findings("AVG((SELECT {revenue} FROM orders o2))", base="SUM(o2.amount)") == []
+
+
+def _cross_file(root: Path) -> Path:
+    return root / "cross_subject_area_metrics.yaml"
+
+
+def test_a_cross_area_add_refuses_a_nested_binding(tmp_path, capsys):
+    _write_model(tmp_path)
+    items = tmp_path / "items.json"
+    items.write_text(json.dumps([_metric("avg_order_total", NESTED)]))
+    rc = cli.main(["add", str(tmp_path), "--kind", "metric", "--area", curate.CROSS_AREA,
+                   "--file", str(items)])
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 1 and out["applied"] == []
+    assert "SUM(...) is nested inside AVG(...)" in out["skipped"][0]["reason"]
+    assert not _cross_file(tmp_path).exists()
+
+
+@pytest.mark.parametrize("derived_first", [True, False])
+def test_a_cross_area_batch_judges_a_derived_metric_with_its_sibling_base(tmp_path, derived_first):
+    _write_model(tmp_path)
+    items = [_metric("avg_revenue", "AVG({revenue})", base_metrics=["revenue"]),
+             _metric("revenue", "SUM(amount)")]
+    res = curate.write_items(tmp_path, curate.CROSS_AREA, "metric",
+                             items if derived_first else items[::-1])
+    assert res.validated and res.applied == [f"metric {curate.CROSS_AREA}/revenue"]
+    assert [s["item"] for s in res.skipped] == ["avg_revenue"]
+    written = yaml.safe_load(_cross_file(tmp_path).read_text())["metrics"]
+    assert [x["name"] for x in written] == ["revenue"]
+
+
+def test_curate_refuses_dropping_the_inner_grain_that_makes_a_binding_legal(tmp_path):
+    _write_model(tmp_path, (_metric("daily_revenue", "SUM(amount)"),
+                            _metric("avg_daily_revenue", "AVG({daily_revenue})",
+                                    base_metrics=["daily_revenue"], inner_grain=["order_date"])))
+    path = tmp_path / "subject_areas" / AREA / "metrics" / "avg_daily_revenue.yaml"
+    before = path.read_text()
+    res = curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "area": AREA,
+                                   "name": "avg_daily_revenue", "field": "inner_grain", "value": []}])
+    assert not res.applied
+    assert "SUM(...) is nested inside AVG(...)" in res.skipped[0]["reason"]
+    assert path.read_text() == before

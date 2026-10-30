@@ -152,7 +152,10 @@ the same SELECT, including in a `WITHIN GROUP (ORDER BY ...)` or `FILTER (WHERE 
 (`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount))`), or a window function inside an
 aggregate (`AVG(SUM(amount) OVER ())`), because the database refuses every query that uses it. An
 aggregate over a subquery that groups first is fine, and so is a window over an aggregate
-(`SUM(SUM(amount)) OVER ()`). The one exception is an Oracle binding: Oracle runs two levels of
+(`SUM(SUM(amount)) OVER ()`). An aggregate in a scalar subquery counts as the outer query's when it
+reads only the outer query's columns, so `AVG((SELECT SUM(orders.amount)))` is refused too, while
+`AVG((SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer_id = orders.customer_id))`, which sums
+the subquery's own rows, is accepted. The one exception is an Oracle binding: Oracle runs two levels of
 aggregate in the argument of a SELECT that has its own GROUP BY, so
 `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is accepted there. A bare
 `AVG(SUM(amount))` has no GROUP BY of its own and is still refused on Oracle, as is a third level,

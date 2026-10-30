@@ -686,7 +686,8 @@ def _apply_one(root: Path, op: dict, signer, role,
         path, key, doc, item = _find_item(root, kind, name, area)
         _snapshot(backups, path)
         before = _set_trust(item, op, new_state, signer, role)
-        if kind == "metric" and action == "edit" and op.get("field") == "bindings":
+        # removing inner_grain turns OUTERAGG({base}) into a plain nested aggregate
+        if kind == "metric" and action == "edit" and op.get("field") in ("bindings", "inner_grain"):
             reason = _nested_aggregate_refusal(root, item)
             if reason:
                 raise ValueError(reason)  # before the dump: nothing is written for this op
@@ -1538,6 +1539,41 @@ def _nested_aggregate_refusal(root: Path, metric: "Metric | dict", batch: Option
     return D.nested_aggregate_reason(met.name, problems) if problems else None
 
 
+def _writable_items(root: Path, kind: str, items: list[dict], res: ApplyResult) -> list:
+    """The items of a `write_items` batch that may be written, structurally validated; each other
+    one is added to `res.skipped` with the reason, including a metric that nests aggregates."""
+    from . import derived as D
+
+    Model = _KINDS[kind][1]
+    parsed: list[tuple[dict, Any]] = []
+    for item in items:
+        # Strip grouping/locator metadata that callers (e.g. the model-dashboard
+        # "Add metric" form) attach but that isn't a model field. `area` is already
+        # passed as the `area` arg; `qname` is a UI locator. Without this, a dashboard
+        # new-metric fails with `extra_forbidden` on `area`.
+        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
+        try:
+            parsed.append((item, Model(**clean)))  # structural validation (required fields, enums, …)
+        except Exception as e:
+            parsed.append((item, e))
+    # every structurally valid metric of the batch, so a derived one is judged whatever the order
+    batch = {o.name: o for _, o in parsed if kind == "metric" and not isinstance(o, Exception)}
+    # loaded once for the batch: reloading per derived metric made a bulk add quadratic
+    context = (_model_context(root) if any(D.is_derived(o) or D.is_second_order(o)
+                                          for o in batch.values()) else None)
+    out = []
+    for item, obj in parsed:
+        if isinstance(obj, Exception):
+            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(obj)})
+            continue
+        reason = _nested_aggregate_refusal(root, obj, batch, context) if kind == "metric" else None
+        if reason:
+            res.skipped.append({"item": obj.name, "reason": reason})
+            continue
+        out.append(obj)
+    return out
+
+
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
                 *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
     """Create metric/entity YAML files from structured dicts — one validated,
@@ -1565,37 +1601,11 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
             f"{', '.join(listed) or 'none'}. Use one of those, or --area {CROSS_AREA} for a {kind} "
             "that spans subject areas.")
         return res
-    subdir, Model = _KINDS[kind]
+    subdir = _KINDS[kind][0]
     dest = _area_dir(root, area) / subdir
     backups: list[tuple[Path, Optional[str]]] = []  # (path, prior text or None if new)
 
-    parsed: list[tuple[dict, Any]] = []
-    for item in items:
-        # Strip grouping/locator metadata that callers (e.g. the model-dashboard
-        # "Add metric" form) attach but that isn't a model field. `area` is already
-        # passed as the `area` arg; `qname` is a UI locator. Without this, a dashboard
-        # new-metric fails with `extra_forbidden` on `area`.
-        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
-        try:
-            parsed.append((item, Model(**clean)))  # structural validation (required fields, enums, …)
-        except Exception as e:
-            parsed.append((item, e))
-    # every structurally valid metric of the batch, so a derived one is judged whatever the order
-    batch = {o.name: o for _, o in parsed if kind == "metric" and not isinstance(o, Exception)}
-    from . import derived as D
-
-    # loaded once for the batch: reloading per derived metric made a bulk add quadratic
-    context = (_model_context(root) if any(D.is_derived(o) or D.is_second_order(o)
-                                          for o in batch.values()) else None)
-
-    for item, obj in parsed:
-        if isinstance(obj, Exception):
-            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(obj)})
-            continue
-        reason = _nested_aggregate_refusal(root, obj, batch, context) if kind == "metric" else None
-        if reason:
-            res.skipped.append({"item": obj.name, "reason": reason})
-            continue
+    for obj in _writable_items(root, kind, items, res):
         path = dest / f"{_slug(obj.name)}.yaml"
         backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
         dest.mkdir(parents=True, exist_ok=True)
@@ -1632,7 +1642,6 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
     with datasource.yaml's own list, so an item of the same name is replaced where it already lives
     (removed from the other place if it is in both); a new one goes into the sidecar file."""
     res = ApplyResult()
-    sub, Model = _KINDS[kind]
     places = []   # [path, key, doc, items] per storage place, sidecar first
     for path, key in _cross_places(root, kind):
         doc = _load(path) if path.exists() else None
@@ -1644,13 +1653,7 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
     def has(place: list, slug: str) -> bool:
         return any(_slug(str((c or {}).get("name") or "")) == slug for c in place[3])
 
-    for item in items:
-        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
-        try:
-            obj = Model(**clean)
-        except Exception as e:
-            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
-            continue
+    for obj in _writable_items(root, kind, items, res):
         slug, dumped = _slug(obj.name), obj.model_dump(mode="json", exclude_none=True)
         home = inline if has(inline, slug) else side
         for i, place in enumerate(places):

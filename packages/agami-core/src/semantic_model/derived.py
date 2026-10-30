@@ -145,15 +145,78 @@ def _is_aggregate(node) -> bool:
     return not isinstance(_aggregate_unit(node).parent, exp.Window)
 
 
+def _selects_above(node) -> list:
+    """The SELECTs enclosing `node`, innermost first."""
+    from sqlglot import expressions as exp
+
+    return [a for a in _ancestors_until(node, None) if isinstance(a, exp.Select)]
+
+
+def _column_level(col):
+    """The SELECT whose FROM a column reference resolves to, or None for the query a bare binding
+    is placed in. Without a schema an unqualified column is taken to be the innermost FROM's, so a
+    subquery that may read its own rows is never judged correlated."""
+    from sqlglot import expressions as exp
+
+    qualifier = col.table.lower() if col.table else None
+    for sel in _selects_above(col):
+        sources = [sel.args.get("from_") or sel.args.get("from")] + list(sel.args.get("joins") or [])
+        sources = [s.this for s in sources if s is not None]
+        if qualifier is None:
+            if sources:
+                return sel
+        elif any(isinstance(s, (exp.Table, exp.Subquery)) and s.alias_or_name.lower() == qualifier
+                 for s in sources):
+            return sel
+    return None
+
+
+def _owning_select(agg):
+    """The SELECT an aggregate is evaluated over. Like PostgreSQL and SQLite, an aggregate in a
+    subquery whose arguments read only outer columns belongs to the nearest of those outer levels:
+    `AVG((SELECT SUM(orders.amount)))` nests SUM in AVG."""
+    from sqlglot import expressions as exp
+
+    levels = _selects_above(agg)
+    own = levels[0] if levels else None
+    unit = _aggregate_unit(agg)
+    cols = [c for c in unit.find_all(exp.Column)
+            if not any(isinstance(a, exp.Query) for a in _ancestors_until(c, unit))]
+    if not cols:
+        return own
+    found = [_column_level(c) for c in cols]
+    if any(f is own for f in found):
+        return own
+    return next((sel for sel in levels if any(f is sel for f in found)), None)
+
+
+def _ancestors_until(node, stop):
+    """`node`'s ancestors, up to (not including) `stop`."""
+    node = node.parent
+    while node is not None and node is not stop:
+        yield node
+        node = node.parent
+
+
+def _correlated_in(query, agg):
+    """The aggregates inside the subquery `query` that are evaluated over `agg`'s own SELECT."""
+    owner = _owning_select(agg)
+    for node in query.walk():
+        if _is_aggregate(node) and _owning_select(node) is owner:
+            yield node
+
+
 def _nested_in(unit, agg):
     """The aggregates and window functions directly inside `unit` in the same SELECT. A subquery is
-    a scope of its own and is not entered: an aggregate over a derived table or a scalar subquery is
-    legal SQL. A window function is yielded, not entered, since no engine allows one inside an
-    aggregate; a window over an aggregate, `SUM(SUM(x)) OVER ()`, never reaches here."""
+    a scope of its own: an aggregate over a derived table or a scalar subquery is legal SQL, and
+    only an aggregate in it that reads nothing but `agg`'s columns is nested (`_owning_select`).
+    A window function is yielded, not entered, since no engine allows one inside an aggregate; a
+    window over an aggregate, `SUM(SUM(x)) OVER ()`, never reaches here."""
     from sqlglot import expressions as exp
 
     for child in unit.iter_expressions():
         if isinstance(child, exp.Query):
+            yield from _correlated_in(child, agg)
             continue
         call = child
         # a nested aggregate's own WITHIN GROUP / FILTER belongs to it, not to `agg`
