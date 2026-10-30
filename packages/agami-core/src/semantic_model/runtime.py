@@ -522,11 +522,11 @@ def _bound_by_expansion(col: "exp.Column", dialect: "str | None") -> bool:
     qualified. The engine binds it there, never to an outer model table."""
     sel = _enclosing_select(col)
     key = _column_key(col.this, dialect)
-    if sel is None or not key:
+    # A function's own argument is read from the sources before it, never from what it returns.
+    if sel is None or not key or _source_index(col, sel) is not None:
         return False
     return any(key in (_source_column_names(src, {}, dialect) or set())
-               for src in _from_sources(sel)
-               if isinstance(src, (exp.Unnest, exp.Lateral)) or (isinstance(src, exp.Table) and not src.name))
+               for src in _from_sources(sel) if _is_table_function(src))
 
 
 def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
@@ -2174,14 +2174,34 @@ def check_column_scope(sql: str, org: Datasource,
                 for schema, cols in by_schema.items()}
     cte_refs = _cte_bindings(tree)
 
-    def bind_alias(sel_id: int, key: str, binding: Any) -> None:
+    def bind_alias(sel_id: int, key: str, binding: Any, spelling: tuple) -> None:
         # Aliases are looked up folded, but `c` and `"C"` are two sources where a quoted alias keeps
         # its case. Whichever was registered last would win, so keep both and judge against each.
+        alias_spellings.setdefault(sel_id, {}).setdefault(key, []).append(spelling)
         aliases = alias_by_select.setdefault(sel_id, {})
         prior = aliases.get(key, binding)
         known = list(prior.bindings) if isinstance(prior, _CollidedAlias) else [prior]
         aliases[key] = binding if prior == binding else (
             prior if binding in known else _CollidedAlias(tuple(known + [binding])))
+
+    def qualifier_binding(chain: list, key: str, written: tuple) -> Any:
+        """What a qualifier names, from the innermost select with an alias that folds to it. Where
+        that alias is spelt so the engine may not match it (`"O"` against `o` on Postgres), the
+        engine may read an enclosing select's source instead, so every candidate out to one it
+        certainly matches is kept, and a column must be declared on all of them."""
+        found: list = []
+        for s in chain:
+            binding = alias_by_select.get(id(s), {}).get(key)
+            if binding is None:
+                continue
+            for b in (binding.bindings if isinstance(binding, _CollidedAlias) else (binding,)):
+                if b not in found:
+                    found.append(b)
+            if any(_same_alias(sp, written, dialect) for sp in alias_spellings[id(s)][key]):
+                break
+        if not found:
+            return None
+        return found[0] if len(found) == 1 else _CollidedAlias(tuple(found))
 
     def _select_chain(node):
         """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
@@ -2203,10 +2223,12 @@ def check_column_scope(sql: str, org: Datasource,
     # An unresolvable physical table (undeclared or ambiguous — table scope refuses it) binds its
     # alias to False, so the qualifier is known to be a physical table rather than a CTE alias.
     alias_by_select: dict[int, dict[str, Any]] = {}  # id(select) -> {alias -> (schema, name) | False}
+    alias_spellings: dict[int, dict[str, list]] = {}  # id(select) -> {alias -> identifiers written}
     binding_of: dict[int, Any] = {}                  # id(physical Table node) -> its alias binding
     direct_phys: dict[int, set[tuple]] = {}          # id(select) -> {(schema, name) read directly}
     source_cols: dict[int, set[str]] = {}            # id(select) -> {column a non-physical source names}
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
+    groups_by_select: dict[int, list] = {}           # id(select) -> leaves of each FROM / JOIN item
     for tbl in tree.find_all(exp.Table):
         name = (tbl.name or "").lower()
         if not name:
@@ -2226,11 +2248,12 @@ def check_column_scope(sql: str, org: Datasource,
                     exact = binding + (frozenset(id(t) for t in named),)
                     declared[exact] = {_tkey(c.name) for t in named for c in t.columns}
                     binding = exact
-            bind_alias(id(sel), tbl.alias_or_name.lower(), binding)
+            bind_alias(id(sel), tbl.alias_or_name.lower(), binding,
+                       (tbl.args["alias"].this if tbl.alias else tbl.this,))
             if tbl.db and not tbl.alias:
                 # `sales_data.orders.amount` beside `staging.orders` in one FROM: both register
                 # under `orders`, which collides, so also register the qualified spelling.
-                bind_alias(id(sel), f"{tbl.db}.{name}".lower(), binding)
+                bind_alias(id(sel), f"{tbl.db}.{name}".lower(), binding, (tbl.args["db"], tbl.this))
             binding_of[id(tbl)] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
@@ -2296,7 +2319,7 @@ def check_column_scope(sql: str, org: Datasource,
             if names is None and id(inner) in binding_of:
                 for w in wrappers:  # `(customers) AS x`: x is that table
                     if w.alias:
-                        bind_alias(id(sel), w.alias.lower(), binding_of[id(inner)])
+                        bind_alias(id(sel), w.alias.lower(), binding_of[id(inner)], (w.args["alias"].this,))
             return leaves
         joins = inner.args["joins"]
         groups = [leaves_of(sel, inner)] + [leaves_of(sel, j.this) for j in joins]
@@ -2309,11 +2332,12 @@ def check_column_scope(sql: str, org: Datasource,
             leaves = [(ph, None) for ph, _ in leaves]
         for w in wrappers:
             if w.alias:
-                bind_alias(id(sel), w.alias.lower(), _JoinAlias(leaves))
+                bind_alias(id(sel), w.alias.lower(), _JoinAlias(leaves), (w.args["alias"].this,))
         return leaves
 
     for sel in tree.find_all(exp.Select):
         groups = [leaves_of(sel, src) for src in _from_sources(sel)]
+        groups_by_select[id(sel)] = groups
         judge_joins(sel, sel.args.get("joins") or [], groups)
         for _, names in (leaf for g in groups for leaf in g):
             if names is not None:
@@ -2333,13 +2357,13 @@ def check_column_scope(sql: str, org: Datasource,
         if col.table:
             # resolve the qualifier within the column's own scope, walking outward:
             # a correlated ref sees ancestor aliases; an inner alias shadows an outer.
-            quals = ([f"{col.db}.{col.table}".lower()] if col.db else []) + [col.table.lower()]
+            quals = ([(f"{col.db}.{col.table}".lower(), (col.args["db"], col.args["table"]))]
+                     if col.db else []) + [(col.table.lower(), (col.args["table"],))]
             phys = None
             # Each spelling across the whole chain before the next: an inner `staging.orders` must
             # not capture `sales_data.orders.col`, which the engine resolves to the outer table.
-            for q in quals:
-                phys = next((alias_by_select[id(s)][q] for s in chain
-                             if q in alias_by_select.get(id(s), {})), None)
+            for q, written in quals:
+                phys = qualifier_binding(chain, q, written)
                 if phys is not None:
                     break
             if phys is None:
@@ -2388,9 +2412,16 @@ def check_column_scope(sql: str, org: Datasource,
         ckey = _column_key(col.this, dialect)
         for s in scopes:
             local = {t for t in direct_phys.get(id(s), set()) if t in declared}
+            names_here = source_cols.get(id(s), set())
+            at = _source_index(col, s)
+            if at is not None:
+                # A table function's argument sees only the items before it, never its own outputs.
+                before = [leaf for g in groups_by_select.get(id(s), [])[:at] for leaf in g]
+                local = set(tables_of(before))
+                names_here = set().union(*(n for _, n in before if n is not None))
             # A merged name is the physical side's only where a table is in this scope; between
             # CTEs and subqueries alone it is theirs.
-            supplied = (ckey in source_cols.get(id(s), set())
+            supplied = (ckey in names_here
                         and (not local or ckey not in merged_by_select.get(id(s), set())))
             if any(lname in declared[t] for t in local) or supplied:
                 break  # declared, or named by a CTE / derived source (possibly ambiguous — the DB's call)
@@ -2421,9 +2452,9 @@ def check_column_scope(sql: str, org: Datasource,
         detail="query references column(s) not in the semantic model: " + _echo_identifiers(cols)
                + " — only columns declared on the model's tables may be queried.",
         remediation=_declared_listing(org, [c for c in cols if c not in collided], judged)
-                    + ("Two sources in one SELECT have aliases that differ only in case, so it is not "
-                       "known which one a column qualified by that alias reads; give each source its "
-                       "own alias. " if collided else "")
+                    + ("Two sources, in one SELECT or in a SELECT and one around it, have aliases that "
+                       "differ only in case, so it is not known which one a column qualified by that "
+                       "alias reads; give each source its own alias. " if collided else "")
                     + ("A select-list alias is read as itself only as a whole ORDER BY or GROUP BY "
                        "item; elsewhere write its expression out (HAVING SUM(amount) > 1000, not "
                        "HAVING revenue > 1000). " if alias_named else "")
@@ -4740,6 +4771,45 @@ def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
     return items + [j.this for j in sel.args.get("joins") or []]
 
 
+def _is_table_function(src: "exp.Expression") -> bool:
+    """A FROM / JOIN item that is a function call (a table function, UNNEST or LATERAL) rather than a
+    table or a subquery."""
+    return isinstance(src, (exp.Unnest, exp.Lateral)) or (isinstance(src, exp.Table) and not src.name)
+
+
+# Engines that fold or ignore the case of a table alias the same way everywhere. MySQL's depends on
+# `lower_case_table_names`, SQL Server's on the collation, and BigQuery's is not documented as either.
+_ALIAS_CASE_KNOWN = frozenset({"postgres", "redshift", "snowflake", "oracle", "duckdb", "sqlite",
+                               "databricks", "trino"})
+
+
+def _same_alias(spelling: tuple, written: tuple, dialect: "str | None") -> bool:
+    """Whether a qualifier as written certainly names an alias as registered."""
+    if len(spelling) != len(written):
+        return False
+    for a, b in zip(spelling, written):
+        if not (isinstance(a, exp.Identifier) and isinstance(b, exp.Identifier)):
+            return False
+        if (a.name, bool(a.quoted)) == (b.name, bool(b.quoted)):
+            continue
+        if dialect not in _ALIAS_CASE_KNOWN or _engine_name(a, dialect) != _engine_name(b, dialect):
+            return False
+    return True
+
+
+def _source_index(node: "exp.Expression", sel: "exp.Select") -> Optional[int]:
+    """The position of the table function among `sel`'s FROM / JOIN items whose argument `node` sits
+    in, or None."""
+    sources = _from_sources(sel)
+    p = node
+    while p is not None and p is not sel:
+        for i, src in enumerate(sources):
+            if p is src:
+                return i if _is_table_function(src) else None
+        p = p.parent
+    return None
+
+
 @functools.lru_cache(maxsize=None)
 def _dialect_object(dialect: "str | None") -> "Dialect":
     """One sqlglot Dialect per name: `get_or_raise` builds a new instance on every call."""
@@ -4799,6 +4869,40 @@ def _cte_output_names(cte: "exp.CTE", dialect: "str | None") -> "list[Optional[s
     return _renamed(_query_column_names(cte.this, dialect), own)
 
 
+# Postgres table functions with named outputs, and those returning a plain value, which Postgres names
+# after the table alias, or after the function without one.
+_PG_NAMED_OUTPUTS = {
+    **dict.fromkeys(("jsonb_each", "jsonb_each_text", "json_each", "json_each_text"), ("key", "value")),
+    **dict.fromkeys(("jsonb_array_elements", "jsonb_array_elements_text", "json_array_elements",
+                     "json_array_elements_text"), ("value",)),
+}
+_PG_PLAIN_VALUE_FUNCTIONS = frozenset({"unnest", "jsonb_object_keys", "json_object_keys", "generate_series",
+                                       "generate_subscripts"})
+
+
+def _pg_function_outputs(src: "exp.Expression",
+                         alias: "exp.Expression | None") -> "list[exp.Identifier] | None":
+    """The output names of a Postgres table function in FROM, before any alias column list, or None
+    when they are not known."""
+    fn = src.this if isinstance(src, (exp.Table, exp.Lateral)) else src
+    if isinstance(fn, exp.Unnest):
+        name = "unnest" if len(fn.expressions) == 1 else ""
+    elif isinstance(fn, exp.Anonymous):
+        name = (fn.name or "").lower()
+    elif isinstance(fn, exp.GenerateSeries):  # sqlglot names it EXPLODING_GENERATE_SERIES in FROM
+        name = "generate_series"
+    elif isinstance(fn, exp.Func) and not isinstance(fn, exp.Query):
+        name = fn.sql_name().lower()
+    else:
+        return None
+    if name in _PG_NAMED_OUTPUTS:
+        return [exp.to_identifier(n) for n in _PG_NAMED_OUTPUTS[name]]
+    if name in _PG_PLAIN_VALUE_FUNCTIONS:
+        own = alias.this if isinstance(alias, exp.TableAlias) else None
+        return [own if isinstance(own, exp.Identifier) else exp.to_identifier(name)]
+    return None
+
+
 def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
                          dialect: "str | None") -> Optional[set[str]]:
     """The `_column_key`s one FROM / JOIN item supplies, or None for a physical table, whose
@@ -4836,12 +4940,15 @@ def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
         names = _query_column_names(src.this, dialect)
     if names is not None:
         return {n for n in _renamed(names, renames) if n}
-    # A table function, UNNEST or VALUES: only an alias column list says what it returns. Postgres
-    # alone names a one-column FUNCTION's output after the table alias; VALUES is `column1` there,
-    # and other engines name a function's columns their own way (`value`, `generate_series`).
-    if (not renames and isinstance(alias, exp.TableAlias) and dialect == "postgres"
-            and not isinstance(src, exp.Values)):
-        renames = [_column_key(alias.this, dialect)]
+    # A table function, UNNEST or VALUES: an alias column list says what it returns, and on Postgres
+    # so do the function's own output names. There a bare table alias names the column only for a
+    # function that returns a plain value; for one with named outputs (`jsonb_each` gives `key` and
+    # `value`) it names the row, so `secret` beside it is still a table's column. An unknown function's
+    # outputs are not known, so it supplies only its list.
+    if dialect == "postgres" and not isinstance(src, exp.Values):
+        outputs = _pg_function_outputs(src, alias)
+        if outputs is not None:
+            renames = _renamed([_column_key(n, dialect) for n in outputs], renames)
     # BigQuery's `UNNEST(x) AS v WITH OFFSET AS i` also returns the position, under the offset alias.
     if isinstance(src, exp.Unnest) and isinstance(src.args.get("offset"), exp.Identifier):
         renames = [*renames, _column_key(src.args["offset"], dialect)]

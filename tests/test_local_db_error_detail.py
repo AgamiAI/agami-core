@@ -311,3 +311,10 @@ def test_a_profile_value_cut_between_its_words_is_never_half_shown():
     text = _cut_inside(len(_FAKE_SECRET) + 4, f"{value} rejected")
     line = execute_sql._db_error_first_line(text, None, {_PW_KEY: value})
     assert _FAKE_SECRET not in line and "<redacted>" in line
+
+
+def test_an_in_process_main_leaves_no_command_line_detail_behind(warehouse, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", PROFILE, "--sql", NESTED_AGGREGATE])
+    assert execute_sql.main() == execute_sql.FAILURE_KIND_TO_EXIT["other"]
+    assert "Database error:" in capsys.readouterr().err
+    assert execute_sql._cli_detail_wanted.get() is False

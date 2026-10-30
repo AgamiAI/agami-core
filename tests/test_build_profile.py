@@ -547,3 +547,75 @@ def test_a_bigquery_unnest_value_and_offset_alias_run_under_build_profile(sql):
 def test_a_bigquery_unnest_does_not_open_anything_else_under_build_profile(sql, rule):
     res = _gates(sql, _org("BigQuery"), build_profile=True)
     assert res is not None and res.rule == rule
+
+
+# ------------------------------------------------- what a table function's argument and alias name
+
+
+@pytest.mark.parametrize("sql", [
+    # The argument is read from `orders`, whatever the function's column list calls its outputs.
+    "SELECT kv.value FROM orders o, jsonb_each(secret) AS kv(secret, value)",
+    "SELECT kv.value FROM orders o CROSS JOIN LATERAL jsonb_each(secret) AS kv(secret, value)",
+    "SELECT u.secret FROM orders o, unnest(secret) AS u(secret)",
+    # `jsonb_each` returns `key` and `value`, and `jsonb_array_elements` `value`: a bare alias names
+    # the row, so `secret` is still `orders.secret`.
+    "SELECT secret FROM orders o, jsonb_each(o.payload) AS secret",
+    "SELECT secret FROM orders o CROSS JOIN LATERAL jsonb_each(o.payload) AS secret",
+    "SELECT secret FROM orders o, jsonb_array_elements(o.payload) AS secret",
+    # Postgres reads `o` from the outer query: the inner `"O"` is a different alias there.
+    'SELECT (SELECT o.secret FROM information_schema.columns AS "O" LIMIT 1) AS leaked FROM orders o',
+    'SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM information_schema.columns AS "O" '
+    "WHERE o.secret IS NULL)",
+])
+def test_a_left_out_column_behind_a_table_function_or_an_inner_alias_is_refused(model, sql):
+    env, executor = _run(sql, build_profile=True)
+    assert env.status == "refused" and not executor.seen, env
+    assert env.refusal.rule in (guardrail.RULE_COLUMN_SCOPE, guardrail.RULE_UNSCOPABLE)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT kv.key, kv.value FROM orders o, jsonb_each(o.payload) AS kv(key, value)",
+    "SELECT key, value FROM orders o, jsonb_each(o.payload) AS kv",
+    "SELECT k, value FROM orders o CROSS JOIN LATERAL jsonb_each(o.payload) AS kv(k)",
+    "SELECT value FROM orders o, jsonb_array_elements(o.payload) AS e",
+    "SELECT k FROM orders o, jsonb_object_keys(o.payload) AS k",
+    # The same alias, spelt the same, in the inner select: the engine reads the inner source.
+    "SELECT o.id, (SELECT c.column_name FROM information_schema.columns AS c LIMIT 1) AS n FROM orders o",
+    'SELECT o.id FROM orders "o" WHERE EXISTS (SELECT 1 FROM information_schema.columns c WHERE o.status = c.table_name)',
+])
+def test_a_table_function_s_real_outputs_and_distinct_aliases_still_run(model, sql):
+    ran, executor = _run(sql, build_profile=True)
+    assert ran.status == "ok", ran.refusal
+    assert executor.seen == [sql]
+
+
+def test_an_argument_is_never_vouched_for_by_its_own_outputs_or_a_later_table():
+    from semantic_model import runtime
+
+    org = _org("PostgreSQL")
+    for sql in ("SELECT kv.value FROM sales.orders o, jsonb_each(secret) AS kv(secret, value)",
+                # customers declares `secret`, but the argument cannot see it.
+                "SELECT kv.value FROM sales.orders o, jsonb_each(secret) AS kv, sales.customers c"):
+        res = runtime.check_column_scope(sql, org)
+        assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE, sql
+
+
+@pytest.mark.parametrize(("engine", "inner", "refused"), [
+    # customers declares `secret`, orders does not: the outer `o` may be the one read.
+    ("PostgreSQL", '"O"', True),
+    # MySQL's alias case depends on the server's settings, so even unquoted it is not known.
+    ("MySQL", "O", True),
+    # Postgres folds an unquoted `O` to `o`, so the inner customers is certainly the one read.
+    ("PostgreSQL", "O", False),
+    ("PostgreSQL", "o", False),
+])
+def test_an_inner_alias_differing_only_in_case_does_not_hide_the_outer_table(engine, inner, refused):
+    from semantic_model import runtime
+
+    sql = f"SELECT (SELECT o.secret FROM sales.customers AS {inner} LIMIT 1) AS x FROM sales.orders o"
+    res = runtime.check_column_scope(sql, _org(engine))
+    if refused:
+        assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+        assert "differ only in case" in res.remediation
+    else:
+        assert res is None

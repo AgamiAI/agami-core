@@ -3571,6 +3571,16 @@ def execute_guarded(
 
 
 def main() -> int:
+    # `_main` sets `_cli_detail_wanted` for this run only: an in-process caller (a test, a script)
+    # must not go on computing the command-line detail after `main` returns.
+    token = _cli_detail_wanted.set(False)
+    try:
+        return _main()
+    finally:
+        _cli_detail_wanted.reset(token)
+
+
+def _main() -> int:
     # One-shot migration of a legacy <artifacts_dir>/local into <artifacts_dir>/local/, then re-resolve
     # the paths (the migration can set the artifacts-dir pointer to a custom location).
     global CREDENTIALS_PATH, CONFIG_PATH
