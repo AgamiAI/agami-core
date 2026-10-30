@@ -345,6 +345,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_descriptions(org, res)
     _check_measured_figures(org, res)
     _check_derived_metrics(org, res)
+    _check_metric_nested_aggregates(org, res)
     _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
     _check_metric_avg_of_ratio(org, res)
@@ -1516,6 +1517,14 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
         for stype in (met.bindings or {}):
             try:
                 D.resolve_metric_sql(met, stype, idx, org)
+            except D.NestedAggregateError as e:
+                # Nesting in a WITHIN GROUP / FILTER / OVER clause, and SQL Server's subquery in
+                # an aggregate, are refused since #519. A model that validated before must keep
+                # validating, so those alone are a warning.
+                if all(p.clause != "argument" or p.subquery for p in e.problems):
+                    res.warn("metric_binding_nested_aggregate", str(e))
+                else:
+                    res.error("derived_metric", str(e))
             except D.DerivedError as e:
                 res.error("derived_metric", str(e))
         # grain sanity (first-order case-a only): a base sharing no source_table may be a
@@ -1534,6 +1543,24 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
                         "table — verify they're at the same grain (cross-grain composition "
                         "needs the grain-attributed planner, #4)",
                     )
+
+
+def _check_metric_nested_aggregates(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a plain metric's binding nests an aggregate inside another (#519), by the same
+    rule `sm add` and `curate` refuse a new or edited binding with. A warning, not an error, so a
+    model that validated before keeps validating; the database refuses the binding either way."""
+    from . import derived as D
+
+    idx = D.metric_index(org)
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or D.is_second_order(met):
+            continue  # `_check_derived_metrics` judges the expanded SQL
+        problems = D.metric_binding_problems(met, idx, org)
+        if problems:
+            res.warn("metric_binding_nested_aggregate", D.nested_aggregate_reason(met.name, problems))
 
 
 # Words that tell the reader a missing value really means zero, so filling it with a constant is
@@ -1620,8 +1647,167 @@ def _null_filled_columns(sql: str, storage_type: str) -> list:
         )
         if not constant or next(fill.this.find_all(exp.AggFunc), None) is not None:
             continue
+        if _averages_present_values(fill, _identifier_fold(storage_type)):
+            continue
         found.extend(fill.this.find_all(exp.Column))
     return found
+
+
+def _strip_scale(node):
+    """`node` without parentheses, a CAST or a multiplication by a numeric literal (`x * 1.0`), none
+    of which changes which values are added or counted."""
+    from sqlglot import expressions as exp
+
+    while True:
+        if isinstance(node, (exp.Paren, exp.Cast)):
+            node = node.this
+        elif isinstance(node, exp.Mul) and _is_number(node.this):
+            node = node.expression
+        elif isinstance(node, exp.Mul) and _is_number(node.expression):
+            node = node.this
+        else:
+            return node
+
+
+def _is_number(node, value: Optional[float] = None) -> bool:
+    """A numeric literal, equal to `value` when one is given."""
+    from sqlglot import expressions as exp
+
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if not (isinstance(node, exp.Literal) and node.is_number):
+        return False
+    try:
+        return value is None or float(node.name) == value
+    except ValueError:
+        return False
+
+
+def _identifier_fold(storage_type: str) -> Optional[str]:
+    """How the engine folds an unquoted name ("lower" / "upper"), where it keeps a quoted one's
+    case; None where it matches names case-insensitively. An engine we do not know keeps quoted
+    case, so two differently quoted names are never taken for one."""
+    from .dialects import get_dialect
+
+    try:
+        return get_dialect(storage_type).folds_unquoted
+    except ValueError:
+        return "lower"
+
+
+def _column_identity(node, fold: Optional[str]) -> Optional[tuple[str, ...]]:
+    """A column as the engine resolves it, qualifier included (`a.score` and `b.score` differ), or
+    None. `fold` is `_identifier_fold`'s: on PostgreSQL `"Score"` is not `score`."""
+    from sqlglot import expressions as exp
+
+    node = _strip_scale(node)
+    if not isinstance(node, exp.Column) or not node.name:
+        return None
+    return tuple(
+        part.name if fold and part.args.get("quoted")
+        else part.name.upper() if fold == "upper" else part.name.lower()
+        for part in node.parts
+    )
+
+
+def _terms(node) -> list:
+    """The operands of a chain of `+`."""
+    from sqlglot import expressions as exp
+
+    node = _strip_scale(node)
+    if isinstance(node, exp.Add):
+        return _terms(node.this) + _terms(node.expression)
+    return [node]
+
+
+def _zero_filled_sum(node, fold: Optional[str]) -> Optional[list]:
+    """The columns `node` adds up as `SUM(COALESCE(col, 0) [+ COALESCE(col2, 0) ...])` (or a sum of
+    such SUMs), or None when it is any other shape: a fallback other than 0 changes the total, and
+    another aggregate (`AVG(COALESCE(col, 0))`) counts the filled rows."""
+    from sqlglot import expressions as exp
+
+    cols = []
+    for term in _terms(node):
+        if not isinstance(term, exp.Sum):
+            return None
+        for fill in _terms(term.this):
+            if not (isinstance(fill, exp.Coalesce) and len(fill.expressions) == 1
+                    and _is_number(fill.expressions[0], 0)):
+                return None
+            col = _column_identity(fill.this, fold)
+            if col is None:
+                return None
+            cols.append(col)
+    return cols
+
+
+def _present_count(term, fold: Optional[str]) -> Optional[tuple[str, ...]]:
+    """The column `term` counts the present values of: `COUNT(col)`,
+    `COUNT(CASE WHEN col IS NOT NULL THEN 1 END)` or `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`."""
+    from sqlglot import expressions as exp
+
+    if not isinstance(term, (exp.Count, exp.Sum)):
+        return None
+    if isinstance(term, exp.Count) and isinstance(term.this, exp.Column):
+        return _column_identity(term.this, fold)
+    case = term.this
+    # Only a searched CASE: `CASE 0 WHEN col IS NOT NULL ...` compares 0 with the test's truth
+    # value, so it counts the missing rows.
+    if (not isinstance(case, exp.Case) or case.args.get("this") is not None
+            or len(case.args.get("ifs") or []) != 1):
+        return None
+    default = case.args.get("default")
+    # COUNT counts a 0 too, so only SUM may take ELSE 0
+    if not (default is None or isinstance(default, exp.Null)
+            or isinstance(term, exp.Sum) and _is_number(default, 0)):
+        return None
+    cond, then = case.args["ifs"][0].this, case.args["ifs"][0].args.get("true")
+    if not _is_number(then, 1):
+        return None
+    # `col IS NOT NULL` parses as Is(negate=True) in some dialects and Not(Is) in others.
+    if isinstance(cond, exp.Not):
+        cond = cond.this if isinstance(cond.this, exp.Is) else None
+    elif not (isinstance(cond, exp.Is) and cond.args.get("negate")):
+        cond = None
+    if cond is None or not isinstance(cond.expression, exp.Null):
+        return None
+    return _column_identity(cond.this, fold)
+
+
+def _present_counts(node, fold: Optional[str]) -> Optional[list]:
+    """The columns a denominator counts the present values of, every term of it a supported count
+    (optionally inside `NULLIF(..., 0)`), or None: `COUNT(*)` counts the missing rows too."""
+    from sqlglot import expressions as exp
+
+    node = _strip_scale(node)
+    if isinstance(node, exp.Nullif) and _is_number(node.expression, 0):
+        node = node.this
+    cols = []
+    for term in _terms(node):
+        col = _present_count(term, fold)
+        if col is None:
+            return None
+        cols.append(col)
+    return cols
+
+
+def _averages_present_values(fill, fold: Optional[str]) -> bool:
+    """True when the fill sits in the numerator of a division that averages the present values,
+    `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: the numerator only zero-fills columns
+    inside a SUM and the denominator only counts the present values of those same columns. The zero
+    then adds nothing to either side: the result is the average of the values that exist, not an
+    invented one (#519)."""
+    from sqlglot import expressions as exp
+
+    node = fill
+    while node.parent is not None and not isinstance(node.parent, exp.Query):
+        parent = node.parent
+        if isinstance(parent, exp.Div) and node.arg_key == "this":
+            filled = _zero_filled_sum(parent.this, fold)
+            counted = _present_counts(parent.expression, fold)
+            return bool(filled) and counted is not None and set(filled) == set(counted)
+        node = parent
+    return False
 
 
 def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:

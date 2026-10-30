@@ -49,6 +49,44 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
+  query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
+  every query that used it, while the check for derived metrics refused a legal aggregate over a
+  subquery and missed a `SUM` inside a percentile's `WITHIN GROUP`. The rule is now judged per
+  SELECT: an aggregate directly inside another, or in its `WITHIN GROUP` or `FILTER` clause, is
+  refused, and so is a window function inside an aggregate (`AVG(SUM(amount) OVER ())`); an
+  aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate.
+  An aggregate in a scalar subquery that reads only the outer query's columns belongs to the outer
+  query, as on PostgreSQL and SQLite, so `AVG((SELECT SUM(orders.amount)))` is refused, while one
+  that sums the subquery's own rows is not. A column's table is matched by schema and name as the
+  engine compares them (on PostgreSQL, Snowflake and Oracle a quoted alias keeps its case, so
+  `FROM orders AS "ORDERS"` does not hide an outer `orders`), and a source can be an aliased
+  `VALUES` list or a parenthesized table or join. A window function inside another window
+  function's argument or `OVER` clause (`SUM((SUM(amount) OVER ())) OVER ()`) is refused too. On
+  SQL Server, which refuses any subquery inside an aggregate, `AVG((SELECT SUM(amount) FROM
+  orders))` is refused with the derived-table rewrite; on a derived metric that is a warning. The
+  one exception is Oracle, which runs two levels of aggregate in the argument of a SELECT with its
+  own GROUP BY: an Oracle binding `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is
+  accepted, while a bare `AVG(SUM(amount))`, a third level, or that binding on any other engine is
+  still refused. `sm add` (a subject area or `--area _cross`) and a `curate` edit of a metric's
+  `bindings` or `inner_grain` refuse such a binding with the reason, and write nothing for it. A metric already in a model gets a
+  `metric_binding_nested_aggregate` warning, never an error, so no model that validated before stops
+  validating; a derived metric nested in its argument is still the `derived_metric` error it was,
+  also when its base only nests in a `WITHIN GROUP`. An `sm add` batch reads the model once, not
+  once per derived metric. `resolve_metrics` names why a matched metric will not run, and a
+  database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
+  Snowflake, BigQuery, Databricks, SQL Server and MySQL) is answered with a sentence naming the
+  rewrite, with the same failure kind and exit code as before. `metric_null_filled` no longer warns
+  on an average of the values present, `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: a
+  numerator that only zero-fills columns inside a `SUM`, over a denominator that only counts the
+  present values of those same columns (a qualifier included, so `a.score` is not `b.score`, and on
+  PostgreSQL, Snowflake and Oracle a quoted `"Score"` is not `score`), counted with `COUNT(col)` or
+  a searched `CASE WHEN col IS NOT NULL`. Any other fallback, another aggregate or a term such as
+  `COUNT(*)` keeps the warning. The metric guidance shows that form for several columns, with the `*
+  1.0` that stops integer division. An `sm add` batch judges a derived metric with the batch's other
+  metrics known, whatever their order, and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in
+  the argument, not in a clause.
+
 - **`sm` resolves a relative path from the folder you run it in (#542).** The launcher runs the CLI
   from `/` so nothing in your folder can shadow the installed package, and every relative path
   argument resolved there too: `sm curate <root> --ops-file ops.json` looked for `/ops.json`, and a

@@ -834,27 +834,31 @@ def resolve_metrics(
         if score > 0:
             # A derived metric surfaces its COMPOSED SQL (base placeholders resolved) so
             # the generator gets ready-to-run SQL and the single-source-of-truth holds.
-            # Fall back to the raw binding if expansion fails (validator gates the model).
+            # Fall back to the raw binding if expansion fails (validator gates the model), and say
+            # why, as for a binding the database would refuse (#519).
             bindings = mm.bindings
+            problem = None
             if _D.is_derived(mm) or _D.is_second_order(mm):
                 try:
                     bindings = _D.expanded_bindings(mm, idx, org)
-                except _D.DerivedError:
+                except _D.DerivedError as e:
                     bindings = mm.bindings
-            ranked.append(
-                (
-                    score,
-                    {
-                        "metric": mm.name,
-                        "subject_area": area_name,
-                        "score": round(score, 3),
-                        "calculation": mm.calculation,
-                        "bindings": bindings,
-                        "confidence": mm.confidence,
-                        **({"caveats": list(mm.caveats)} if mm.caveats else {}),
-                    },
-                )
-            )
+                    problem = str(e)
+            else:
+                nested = _D.metric_binding_problems(mm, idx, org)
+                problem = _D.nested_aggregate_reason(mm.name, nested) if nested else None
+            hit = {
+                "metric": mm.name,
+                "subject_area": area_name,
+                "score": round(score, 3),
+                "calculation": mm.calculation,
+                "bindings": bindings,
+                "confidence": mm.confidence,
+                **({"caveats": list(mm.caveats)} if mm.caveats else {}),
+            }
+            if problem:
+                hit["binding_problem"] = problem
+            ranked.append((score, hit))
     ranked.sort(key=lambda t: t[0], reverse=True)
     return [d for _, d in ranked[:top_k]]
 

@@ -57,7 +57,8 @@ def test_synthesized_sql_is_valid_and_not_nested():
     # parses cleanly and contains NO aggregate-inside-aggregate
     tree = sqlglot.parse_one(sql)
     assert tree is not None
-    assert not D._has_nested_aggregate(sql.replace("(SELECT", "").replace(")", ""))
+    # judged per SELECT, the synthesized statement itself passes the shared rule (#519)
+    assert D.binding_problems(sql, "PostgreSQL") == []
 
 
 def test_is_second_order_detection():
