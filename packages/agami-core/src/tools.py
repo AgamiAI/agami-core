@@ -1667,7 +1667,7 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
 # Column-detail keys that make a column worth sending in full even when its group wasn't asked for:
 # a caveat, a cleaning rule or a date encoding changes how the column must be written, and a
 # sensitive flag changes whether it may be projected.
-_ALWAYS_FULL_KEYS = ("caveats", "value_transform", "sensitive", "date_format", "timezone")
+_ALWAYS_FULL_KEYS = ("caveats", "placeholders", "value_transform", "sensitive", "date_format", "timezone")
 
 
 def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> None:
@@ -5582,7 +5582,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`caveats` and `value_transforms`. An entry in `default_filters` is the org's own "
             "definition of what that table means and is NOT applied to your SQL — read them HERE, "
             "while you are writing the statement, rather than meeting them on the receipt "
-            "afterwards. When the datasource has stored examples the response also carries "
+            "afterwards. A column's `placeholders` lists stored values a person said stand for "
+            "something else (`meaning` unknown / current / not_set), each with `how` to write the "
+            "SQL for it; follow it, as nothing filters them for you. "
+            "When the datasource has stored examples the response also carries "
             "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
             "get_prompt_examples, which ranks them — no example is sent here. The response names "
             "the engine under `dialect` and points at list_datasources for its `dialect_rules` "

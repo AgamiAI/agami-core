@@ -378,6 +378,23 @@ class Dialect:
         return self.limited(
             f"SELECT DISTINCT {c} AS v FROM {self.qualified(schema, table)} WHERE {c} IS NOT NULL", n)
 
+    def placeholder_value_expr(self, column: str, ctype: str) -> str:
+        """How the placeholder scan reads a column (quoted `column`, its ColumnType)."""
+        return column
+
+    def placeholder_scan_sql(self, schema: Optional[str], table: str, column: str, ctype: str,
+                             n: int) -> str:
+        """One read per column for the placeholder scan (#445): its `n` most frequent non-null
+        values (`v`, `n`), with its MIN (`lo`), MAX (`hi`) and row count (`total`) on every row."""
+        c = self.quote_ident(column)
+        v = self.placeholder_value_expr(c, ctype)
+        q = self.qualified(schema, table)
+        return self.limited(
+            f"SELECT g.v AS v, g.n AS n, m.lo AS lo, m.hi AS hi, m.total AS total FROM "
+            f"(SELECT {v} AS v, COUNT(*) AS n FROM {q} WHERE {c} IS NOT NULL GROUP BY {v}) g "
+            f"CROSS JOIN (SELECT MIN({v}) AS lo, MAX({v}) AS hi, COUNT(*) AS total FROM {q}) m "
+            f"ORDER BY g.n DESC, g.v", n)
+
     # --- type mapping ---
 
     def map_type(self, raw: str, numeric_scale: Optional[int] = None) -> ColumnType:
@@ -594,6 +611,10 @@ class MySQL(Dialect):
         "show", "signal", "spatial", "sql", "system", "trigger", "undo", "unlock", "unsigned",
         "usage", "use", "varying", "virtual", "while", "write", "xor", "year_month", "zerofill",
     })
+
+    def placeholder_value_expr(self, column: str, ctype: str) -> str:
+        # Some drivers crash fetching a zero date (0000-00-00); as text it reads safely.
+        return f"CAST({column} AS CHAR)" if ctype in ("date", "timestamp") else column
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound

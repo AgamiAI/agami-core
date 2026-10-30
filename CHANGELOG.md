@@ -12,6 +12,34 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Introspection finds placeholder values and asks what each one means (#445).** Warehouses carry
+  values that look like data: an Unknown dimension row keyed `-99999` and dated `2099-12-31`, a
+  `9999-12-31` valid-to on the current version of a row, `'-'` filler text. Answers counted them as
+  real, so a "by fiscal year" breakdown grew a year-2099 bar and a "latest date" came back as
+  2099-12-31. Introspection now reads one bounded query per key, date, year and code column of each
+  small table, and of each dimension (the one side of a join) under a million rows, on the existing
+  value-read budget, and flags a date before 1901 or more than 50 years ahead, a negative key among
+  positive ones, a `999999`-style value and filler text on a large share of rows. A big fact table
+  is not read, nor is a table whose sample could not be read and whose row count is unknown, nor
+  a column flagged sensitive or whose values look personal (on a refresh, by this run's reading
+  too). Each finding is
+  listed in the introspection report and in the `/agami-model` Review tab (and `sm review-queue`
+  under `placeholders`); agami-connect asks about each in plain words. The person's answer is
+  stored on the column (`placeholders`: `unknown`, `current` or `not_set`, signed off by them) with
+  a caveat in words, through a `kind: placeholder` curate op; `reject` says the value is real data.
+  `get_datasource_schema` and the table context serve each answered value with its meaning and how
+  to write the SQL for it, and the query rules say how to use each. Nothing filters a query, and
+  `sm approve-queue` never answers one. A refresh keeps every answer and doesn't ask again, and its
+  report lists a value found or no longer found under `changed <table>: placeholders`.
+
+  **Reading a model:** a column that sets `placeholders` (a finding waiting for an answer, or an
+  answer) is refused by a release older than this one, which does not know the key. Columns with
+  none stay readable, because the key is left out of the file when the list is empty, so a model
+  where nothing was found is written exactly as before. Upgrade every server that reads the model
+  (including deploy images) before building or refreshing one with this release.
+
 ### Fixed
 
 - **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a

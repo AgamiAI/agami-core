@@ -41,7 +41,7 @@
       { "name", "qname", "description", "row_count", "review_state", "excluded",
         "grain":[], "unique_keys":[[]], "caveats":[], "default_filters":[], "area", "schema",
         "fields": [ { "name", "qname", "type", "description", "review_state",
-                      "excluded", "sensitive", "unit", "caveats", "date_format", "timezone" } ] }
+                      "excluded", "sensitive", "unit", "caveats", "placeholders", "date_format", "timezone" } ] }
 -->
 <html lang="en">
 <head>
@@ -2130,6 +2130,57 @@
       out.sort((a, b) => rank(a) - rank(b));
       return out;
     }
+    // Values that may be placeholders (#445) — an Unknown member, an open-ended date, filler text.
+    // agami can't tell which, so the person picks a meaning; the choice is signed off like an approval.
+    function placeholderFindings() {
+      const out = [];
+      (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
+        if (t.excluded) return;
+        (t.fields || []).forEach(f => {
+          if (f.excluded) return;
+          (f.placeholders || []).forEach(p => {
+            if (p.review_state !== 'unreviewed') return;
+            out.push({ qname: s.name + '.' + t.name + '.' + f.name + '#placeholder:' + p.value,
+                       area: s.name, table: t.name, col: f.name, db_schema: t.db_schema,
+                       value: p.value, reason: p.reason || '', rows: p.rows });
+          });
+        });
+      }));
+      return out;
+    }
+    const PLACEHOLDER_CHOICES = [
+      { meaning: 'unknown', label: 'Unknown', tip: 'A stand-in for an unknown member: left out of breakdowns, date ranges and latest/earliest; kept in totals.' },
+      { meaning: 'current', label: 'Still current', tip: 'An open-ended row that is still current: the rows an “as of now” question wants.' },
+      { meaning: 'not_set', label: 'Not set', tip: 'Nothing was set: treated like an empty (NULL) value.' },
+    ];
+    function placeholderCard(ph) {
+      const card = el('div', { class: 'table-card' });
+      const h = el('div', { class: 'table-header static' });
+      const nameEl = el('div', { class: 'table-name' });
+      nameEl.appendChild(el('span', { class: 'schema-prefix', text: (ph.db_schema || ph.area) + '.' + ph.table + '.' }));
+      nameEl.appendChild(highlight(ph.col, searchQ));
+      h.appendChild(nameEl);
+      card.appendChild(h);
+      const body = el('div', { class: 'table-body', style: 'padding:10px 18px 12px;' });
+      const rows = ph.rows ? ` on ${ph.rows.toLocaleString()} row${ph.rows === 1 ? '' : 's'}` : '';
+      body.appendChild(el('div', { class: 'field-hint', text:
+        `${ph.table} has the value '${ph.value}' in ${ph.col}${rows} (${ph.reason}). What does it mean?` }));
+      const bar = el('div', { class: 'inline-edit-bar' });
+      const queued = ops[ph.qname];
+      const base = { kind: 'placeholder', area: ph.area, name: ph.table, column: ph.col, value: ph.value };
+      PLACEHOLDER_CHOICES.forEach(c => {
+        const on = queued && queued.meaning === c.meaning;
+        const b = btnSm((on ? '✓ ' : '') + c.label, () => { ops[ph.qname] = { op: 'approve', ...base, meaning: c.meaning }; renderAll(); }, on ? 'primary' : '');
+        b.title = c.tip;
+        bar.appendChild(b);
+      });
+      const real = queued && queued.op === 'reject';
+      bar.appendChild(btnSm((real ? '✓ ' : '') + 'Real data', () => { ops[ph.qname] = { op: 'reject', ...base }; renderAll(); }, real ? 'primary' : ''));
+      if (queued) bar.appendChild(btnSm('Undo', () => { delete ops[ph.qname]; renderAll(); }));
+      body.appendChild(bar);
+      card.appendChild(body);
+      return card;
+    }
     function describeCard(uc) {
       const isTable = uc.kind === 'table';
       const card = el('div', { class: 'table-card' + (effExcluded(uc) ? ' excluded' : '') });
@@ -2217,6 +2268,8 @@
       // separate "Couldn't read" sub-tab. They're describe-or-leave (no approve/reject).
       const unknown = unknownColumns().filter(uc => !searchQ
         || ((uc.col || '') + ' ' + uc.table).toLowerCase().includes(searchQ));
+      const placeholders = placeholderFindings().filter(ph => !searchQ
+        || (ph.col + ' ' + ph.table + ' ' + ph.value).toLowerCase().includes(searchQ));
 
       // sub-tab bar with counts ("Edited" appears only when non-empty)
       const order = ['eyes', 'looks'];
@@ -2224,7 +2277,7 @@
       order.push('approved', 'rejected');
       if (reviewSubTab === 'edited' && !groups.edited.items.length) reviewSubTab = 'eyes';
       if (reviewSubTab === 'unknown') reviewSubTab = 'eyes';  // retired sub-tab → eyes
-      const eyesCount = groups.eyes.items.length + unknown.length;  // couldn't-read counts here now
+      const eyesCount = groups.eyes.items.length + unknown.length + placeholders.length;  // couldn't-read counts here now
       const bar = el('div', { class: 'subtab-bar' });
       order.forEach(k => {
         const cnt = k === 'eyes' ? eyesCount : groups[k].items.length;
@@ -2244,6 +2297,9 @@
       const kindGroups = reviewKindGroups(g.items);
       if (isEyes && unknown.length) {
         kindGroups.push({ key: '__unknown', label: "Couldn't read", items: unknown, special: 'unknown' });
+      }
+      if (isEyes && placeholders.length) {
+        kindGroups.push({ key: '__placeholders', label: 'Placeholders', items: placeholders, special: 'placeholders' });
       }
       const totalItems = kindGroups.reduce((n, kg) => n + kg.items.length, 0);
       if (reviewKind !== 'all' && !kindGroups.some(kg => kg.key === reviewKind)) reviewKind = 'all';
@@ -2274,7 +2330,13 @@
       if (g.hint) sec.appendChild(el('div', { class: 'field-hint', style: 'padding:0 0 8px;', text: g.hint }));
 
       shown.forEach(kg => {
-        if (kg.special === 'unknown') {
+        if (kg.special === 'placeholders') {
+          sec.appendChild(kindSubhead('Placeholder values: what does each one mean?', kg.items, false));
+          sec.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 8px;', text:
+            'These values look like stand-ins rather than data. Pick what each one means; agami then writes queries to match. ' +
+            'Nothing is filtered automatically, and your choice is signed off with your email.' }));
+          kg.items.forEach(ph => sec.appendChild(placeholderCard(ph)));
+        } else if (kg.special === 'unknown') {
           // Opaque tables/columns — described via a one-line edit, or excluded so agami stops
           // considering them. Not approve/reject (there's no proposal to sign off on).
           const nTab = kg.items.filter(u => u.kind === 'table').length;
@@ -2713,7 +2775,9 @@
       const opRow = ([q, o]) => queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}` + (o.reason ? ` — ${o.reason}` : ''), () => delete ops[q]);
       [['metric', 'Metrics'], ['relationship', 'Joins'], ['entity', 'Entities']].forEach(([kind, label]) =>
         qGroup(label, opv.filter(([, o]) => o.kind === kind).map(opRow)));
-      qGroup('Other', opv.filter(([, o]) => !['metric', 'relationship', 'entity'].includes(o.kind)).map(opRow));
+      qGroup('Placeholders', opv.filter(([, o]) => o.kind === 'placeholder').map(([q, o]) =>
+        queueRow(o.op, o.op, `${o.name}.${o.column} '${o.value}' → ${o.meaning || 'real data'}`, () => delete ops[q])));
+      qGroup('Other', opv.filter(([, o]) => !['metric', 'relationship', 'entity', 'placeholder'].includes(o.kind)).map(opRow));
       qGroup('Moves', Object.entries(moves).map(([q, o]) =>
         queueRow('move', 'move', `move table ${o.area}.${o.name} → ${o.to_area}`, () => delete moves[q])));
 
@@ -2826,7 +2890,8 @@
     function tabCount(id) {
       const t = manifest.totals || {};
       switch (id) {
-        case 'review':   return reviewQueue().length + unknownColumns().length;
+        case 'review':   return reviewQueue().length + unknownColumns().length
+                                + placeholderFindings().filter(ph => !ops[ph.qname]).length;
         case 'areas':    return (manifest.subject_areas || []).length;
         case 'tables':   return t.tables || 0;
         case 'pii':      return piiRows().suspected.length;  // suspected = needs a human call
@@ -2903,7 +2968,7 @@
         if (c.inC) parts.push(`${c.inC} col${c.inC === 1 ? '' : 's'} incl`);
         const opVals = Object.values(ops);
         const nApprove = opVals.filter(o => o.op === 'approve').length;
-        const nReject = opVals.filter(o => o.op === 'exclude').length;
+        const nReject = opVals.filter(o => o.op === 'exclude' || o.op === 'reject').length;
         const nInc = opVals.filter(o => o.op === 'include').length;
         if (nApprove) parts.push(`${nApprove} approval${nApprove === 1 ? '' : 's'}`);
         if (nReject) parts.push(`${nReject} rejection${nReject === 1 ? '' : 's'}`);

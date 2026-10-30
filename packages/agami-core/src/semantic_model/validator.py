@@ -187,6 +187,7 @@ def _validate_area(
     _check_default_filters_columns(sa, ares)
     _check_value_transforms(sa, ares, dialect)
     _check_choice_fields(sa, ares)
+    _check_placeholders(sa, ares)
     _check_entity_mappings(sa, ares, defined)
     for rel in sa.relationships:
         _check_relationship(rel, sa, org, ares, cross=False, defined=defined, dialect=dialect)
@@ -863,6 +864,33 @@ def _check_choice_fields(sa: SubjectArea, res: ValidationResult) -> None:
                         f"key {key!r} is not a valid {col.type} value",
                         locator=f"{table.name}.{col.name}.choice_field",
                     )
+
+
+def _check_placeholders(sa: SubjectArea, res: ValidationResult) -> None:
+    """A placeholder's meaning is a person's choice (#445): it is set exactly when the entry is
+    approved, and an approval carries who signed it off."""
+    for table in sa.tables_defined:
+        for col in table.columns:
+            seen: set[str] = set()
+            for p in col.placeholders:
+                where = f"{table.name}.{col.name}.placeholders[{p.value!r}]"
+                if p.value in seen:
+                    res.error("placeholder_duplicate",
+                              f"table {table.name!r} column {col.name!r}: placeholder {p.value!r} is "
+                              "listed twice", locator=where)
+                seen.add(p.value)
+                if p.review_state == "approved":
+                    missing = [n for n in ("meaning", "signed_off_by", "signed_off_at", "signed_off_role")
+                               if not getattr(p, n)]
+                    if missing:
+                        res.error("placeholder_unsigned",
+                                  f"table {table.name!r} column {col.name!r}: placeholder {p.value!r} "
+                                  f"is approved but missing {missing}", locator=where)
+                elif p.meaning:
+                    res.error("placeholder_meaning_unapproved",
+                              f"table {table.name!r} column {col.name!r}: placeholder {p.value!r} has a "
+                              f"meaning but is {p.review_state}; a meaning is recorded only with a "
+                              "person's sign-off", locator=where)
 
 
 def _check_entity_mappings(

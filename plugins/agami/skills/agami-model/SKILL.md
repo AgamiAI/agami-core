@@ -137,9 +137,12 @@ It prints `{data, anomalies, needs_judgment}`:
   {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
   {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_discount", "reason": "not a real metric"},
   {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"},
-  {"op": "move",    "kind": "table", "area": "sales", "name": "shipments", "to_area": "fulfilment"}
+  {"op": "move",    "kind": "table", "area": "sales", "name": "shipments", "to_area": "fulfilment"},
+  {"op": "approve", "kind": "placeholder", "area": "sales", "name": "date_dim", "column": "date_key", "value": "-99999", "meaning": "unknown"}
 ]
 ```
+
+**Placeholder values** (the Review tab's **Placeholders** pile, #445) are stored values introspection thinks stand for something else — an Unknown row keyed `-99999`, a `9999-12-31` valid-to, `'-'` filler. The person picks what each means: `unknown` (left out of breakdowns, date ranges and latest/earliest, kept in totals), `current` (an open-ended row, what "as of now" questions want) or `not_set` (treated like NULL) — an `approve` op with that `meaning`, which also writes the meaning as a caveat on the column — or **Real data** (`reject`). An approval needs a person's `signed-off-by:` line; a `system` sign-off is refused. Nothing ever filters a query: the meaning is served with the column and the query path follows it.
 
 A `move` (the explorer's **Move to area**) gives the table a new owning area, created if the model doesn't have it yet. Its joins follow it (a join that now spans two areas becomes a cross-area join, and the reverse), and the metrics and entities on it move too once every table they read is in the new area. Ones that also read a table outside it stay; the result's `notes` lists them (*"left in sales: metric units_per_order also reads orders"*). A join the new area already holds is kept once: a person's sign-off over the engine's approval, and that over an unreviewed copy; two copies a person signed off that disagree refuse the move until one is approved or rejected to match. Pass `notes` on to the user verbatim; a batch that was undone reports none.
 
@@ -233,8 +236,9 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" approve-queue "$ROOT" --signer you@example.
 # --dry-run                          → print the approve ops without applying
 ```
 
+- **Placeholder values are never approved by it**: what one means is a person's choice. The output lists them under `placeholders_awaiting_choice` (one plain-words question each) — ask the person and write each answer with a `kind: placeholder` curate op (above).
 - **`--signer` and `--role` are required** — an approve must record *who* signed off (the validator rejects an approved entry with no sign-off stamp). The command self-stamps the `at` timestamp, so you don't build ops by hand.
-- Afterward `sm review-queue "$ROOT"` shows `counts.total: 0` and `sm curate-gate "$ROOT"` drops `preseed_count` to 0.
+- Afterward `sm review-queue "$ROOT"` shows `counts.total` at the number of placeholders still waiting (0 when none) and `sm curate-gate "$ROOT"` drops `preseed_count` to 0.
 - **PII does not block seeding.** `curate-gate` may still report `should_open_explorer: true` purely because sensitive columns remain queryable — that's **advisory** (your call to exclude or keep them), **not** a gate on seed generation. Only unreviewed **pre-seed** items (metrics/entities) block `seed-examples`; approving the queue clears that.
 
 ---

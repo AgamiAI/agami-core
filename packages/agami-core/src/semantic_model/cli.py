@@ -578,10 +578,19 @@ def cmd_approve_queue(args) -> int:
     path (the HTML explorer's CLI equivalent). Reads the same queue `review-queue` builds
     (Rule 1 metrics/named-filters + Rule 2 joins/entities), turns each item into a
     self-stamped `approve` op, and applies via curate.apply. `--kind` narrows to one item
-    type; `--dry-run` prints the ops without touching the model."""
+    type; `--dry-run` prints the ops without touching the model.
+
+    Placeholder values are never approved here: what one means is a person's choice, so they are
+    listed under `placeholders_awaiting_choice` for the person to answer (#445)."""
     from . import curate
     org = L.load_datasource(args.root)
     queue = curate.review_queue(org)
+    waiting = queue.get("placeholders", [])
+    held = ({"placeholders_awaiting_choice": [it["question"] for it in waiting],
+             "placeholder_note": "not approved: ask what each value means and record it with a "
+                                 "curate op {op: approve, kind: placeholder, name, column, value, "
+                                 "meaning: unknown|current|not_set}, or reject it as real data"}
+            if waiting else {})
     kinds = set(args.kind) if args.kind else None
     ops = [{"op": "approve", "kind": it["kind"], "area": it["area"],
             "name": it["name"], "at": _utc_now_iso(),
@@ -590,10 +599,10 @@ def cmd_approve_queue(args) -> int:
            for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
            if kinds is None or it["kind"] in kinds]
     if args.dry_run:
-        _print_json({"dry_run": True, "count": len(ops), "ops": ops})
+        _print_json({"dry_run": True, "count": len(ops), "ops": ops, **held})
         return 0
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
-    _print_json({"approved": len(ops), **res.as_dict()})
+    _print_json({"approved": len(ops), **res.as_dict(), **held})
     return 0 if res.validated else 1
 
 
