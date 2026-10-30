@@ -46,6 +46,14 @@ below corresponds to one such version.
   plan that is not a list. agami-connect's sampling step no longer says
   `SELECT * … LIMIT 5`, which was refused: it names the columns and runs with `--build-profile`.
 
+### Fixed
+
+- **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a
+  `VALUES` arm of a `UNION` as one more `SELECT`, so the receipt counted an extra arm and could
+  label a set operation's output columns against the wrong position. The `model` extra and the
+  semantic model's `requirements.txt` now pin `sqlglot>=20,<30.26` until the receipt reads the new
+  parse; an installed 30.26 is replaced by the latest earlier release on the next install.
+
 ## [0.9.21] — 2026-10-29
 
 ### Fixed
