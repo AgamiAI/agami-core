@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.21] — 2026-10-29
+
 ### Fixed
 
 - **The `measured_figure` check also finds ranges, counts in words and figures tied to now
