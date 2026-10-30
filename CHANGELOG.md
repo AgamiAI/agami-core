@@ -12,6 +12,38 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
+  `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
+  tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
+  approved` with the old signer and time, so a receipt reported a definition nobody approved as
+  signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
+  reports it as not signed off until someone re-approves it, which records the new signer and time.
+  Only `description`, `other_names`, a metric's `business_question`, a metric's or entity's `caveats`, an entity's
+  `plural`, and a join's `for_questions_about` keep the approval; every other field,
+  including any added later, counts as a change, and an edit that sets a field to the value it
+  already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
+  was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an
+  approve with no signer can't reuse them. In one batch an approve after the edit signs off the
+  edited version (the explorer now sends approvals after edits) and an edit after the approve leaves
+  the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
+  tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
+  read from `curation_log.jsonl` (e.g. "binding (sqlite) changed from SUM(amount) to SUM(amount) -
+  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it ("some changes not
+  recorded" after the changes it could read, when a line since the edit can't be read). This
+  supersedes #559's re-stamp of a person's structural join edit as their approval (#511): the edited
+  join goes stale instead, and a refresh still leaves it alone, since it re-labels only the joins
+  introspection approved itself, and never merges an edited split join into a database's composite
+  foreign key (`composite foreign key not applied: … edited since its approval`); a refresh that
+  lowers a stale join's confidence because a column's type changed keeps it `stale`, and a stale
+  `on:` join keeps its confidence. A table move (#513) keeps a stale join, metric or entity stale
+  with its old signer, and the review surfaces still show what changed; when a move finds two copies
+  of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
+  and a move where it disagrees with a copy a person signed off is refused.
+
+## [0.9.21] — 2026-10-29
+
 ### Fixed
 
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
@@ -58,34 +90,6 @@ below corresponds to one such version.
   whose name embeds its schema (`name: public.orders`) is found either way. It stays a warning.
 
 ### Changed
-
-- **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
-  `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
-  tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
-  approved` with the old signer and time, so a receipt reported a definition nobody approved as
-  signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
-  reports it as not signed off until someone re-approves it, which records the new signer and time.
-  Only `description`, `other_names`, a metric's `business_question`, a metric's or entity's `caveats`, an entity's
-  `plural`, and a join's `for_questions_about` keep the approval; every other field,
-  including any added later, counts as a change, and an edit that sets a field to the value it
-  already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
-  was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an
-  approve with no signer can't reuse them. In one batch an approve after the edit signs off the
-  edited version (the explorer now sends approvals after edits) and an edit after the approve leaves
-  the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
-  tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
-  read from `curation_log.jsonl` (e.g. "binding (sqlite) changed from SUM(amount) to SUM(amount) -
-  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it ("some changes not
-  recorded" after the changes it could read, when a line since the edit can't be read). This
-  supersedes #559's re-stamp of a person's structural join edit as their approval (#511): the edited
-  join goes stale instead, and a refresh still leaves it alone, since it re-labels only the joins
-  introspection approved itself, and never merges an edited split join into a database's composite
-  foreign key (`composite foreign key not applied: … edited since its approval`); a refresh that
-  lowers a stale join's confidence because a column's type changed keeps it `stale`, and a stale
-  `on:` join keeps its confidence. A table move (#513) keeps a stale join, metric or entity stale
-  with its old signer, and the review surfaces still show what changed; when a move finds two copies
-  of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
-  and a move where it disagrees with a copy a person signed off is refused.
 
 - **A wide database's proposed subject areas follow its joins, and keep the plural (#513).** A
   single-schema database of more than 24 tables used to get one area per table-name prefix, with
