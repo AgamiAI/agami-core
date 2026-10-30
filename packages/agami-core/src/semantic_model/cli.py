@@ -15,6 +15,9 @@ identical wherever the model is exercised. Subcommands:
     remove-example <root> --area A --question Q — mark example(s) rejected by question
                                             (kept in the file for audit, not deleted)
 
+`seed-examples`, `seed-validate` and `remove-example` take `--area` repeated, or none for every
+area; then they print one combined result (per-area entries labelled with the area, plus totals).
+
 Every subcommand emits JSON on stdout (so callers parse one shape) except
 `validate`, which prints a human report and sets the exit code (0 ok, 1 errors).
 """
@@ -22,6 +25,7 @@ Every subcommand emits JSON on stdout (so callers parse one shape) except
 from __future__ import annotations
 
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -210,7 +214,14 @@ def cmd_set_org(args) -> int:
 
 def cmd_examples(args) -> int:
     examples = L.list_prompt_examples(args.root, args.area)
-    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k)
+    org = None
+    if args.metric:
+        try:
+            org = L.load_datasource(args.root)
+        except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
+            org = None
+    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k, metrics=args.metric,
+                                     org=org, area=args.area)
     _print_json(
         {
             "high_confidence": RT.is_high_confidence(matches),
@@ -564,7 +575,7 @@ def cmd_set_description(args) -> int:
 
 def cmd_curate(args) -> int:
     from . import curate
-    ops = _read_json_file(args.ops_file)
+    ops = _read_json_file(args.ops_file or args.ops)
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
     _stamp_approve_ops(ops)
@@ -1202,6 +1213,8 @@ def cmd_seed_examples(args) -> int:
     runner = make_execute_sql_runner(args.profile)
     passing, rejected = curate.validate_seeds(cands, runner)
     res = curate.add_examples(args.root, args.area, passing) if passing else curate.ApplyResult()
+    # A seed the writer refused (an unknown metric tag) is rejected like one the database refused.
+    rejected += [{"question": s["item"], "error": s["reason"]} for s in res.skipped]
     _print_json({"added": res.applied, "written": res.validated,
                  "committed": res.committed, **_commit_note(res), "rejected": rejected})
     return 0
@@ -1278,6 +1291,176 @@ def cmd_seed_validate(args) -> int:
         items.append(item)
     _print_json(items)
     return 0
+
+
+# --- several subject areas per call (#544) -------------------------------------------------
+# One `--area` runs the single-area command above untouched, so its output stays what skills
+# parse. Several `--area`, or none (every area), run that same command once per area and fold
+# the results into one shape: per-area entries labelled with the area, plus totals.
+
+def _resolve_areas(args) -> Optional[list[str]]:
+    """The areas this call covers, in order: the `--area` names, or every area in the model.
+    Prints an `unknown_area` error and returns None when a named area isn't in the model."""
+    named = list(dict.fromkeys(args.area or []))
+    try:
+        valid = [sa.name for sa in L.load_datasource(args.root, include_rejected=True).subject_areas]
+    except Exception:
+        # A model that won't load (a broken or missing area file) can't list its areas; one named
+        # area still runs as before. No datasource.yaml at all means there is no model.
+        if len(named) == 1 and (Path(args.root) / "datasource.yaml").exists():
+            return named
+        raise
+    unknown = [a for a in named if a not in valid]
+    if unknown:
+        _print_json({"error": "unknown_area", "unknown": unknown, "valid_areas": valid,
+                     "message": f"no subject area named {', '.join(map(repr, unknown))}; "
+                                f"valid areas: {', '.join(valid) or '(none)'}"})
+        return None
+    return named or valid
+
+
+def _run_one_area(cmd, args, area: str, **overrides) -> tuple[int, Any]:
+    """Run a single-area command for `area` and return its exit code and parsed JSON output."""
+    sub = argparse.Namespace(**{**vars(args), "area": area, **overrides})
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = cmd(sub)
+    return rc, json.loads(buf.getvalue())
+
+
+def cmd_seed_validate_areas(args) -> int:
+    areas = _resolve_areas(args)
+    if areas is None:
+        return 1
+    if len(args.area or []) == 1:
+        return cmd_seed_validate(argparse.Namespace(**{**vars(args), "area": areas[0]}))
+    per_area, items = [], []
+    for area in areas:
+        _, area_items = _run_one_area(cmd_seed_validate, args, area)
+        per_area.append({"area": area, "examples": len(area_items),
+                         "errored": sum(1 for it in area_items if it.get("error"))})
+        items += [{"area": area, **it} for it in area_items]
+    _print_json({"areas": per_area, "items": items,
+                 "totals": {"areas": len(areas), "examples": len(items),
+                            "errored": sum(a["errored"] for a in per_area)}})
+    return 0
+
+
+def cmd_seed_examples_areas(args) -> int:
+    areas = _resolve_areas(args)
+    if areas is None:
+        return 1
+    if len(args.area or []) == 1:
+        return cmd_seed_examples(argparse.Namespace(**{**vars(args), "area": areas[0]}))
+    cands = _read_json_file(args.file)
+    if isinstance(cands, dict):
+        cands = cands.get("examples", cands.get("items", []))
+    # With several areas each candidate names its own; one that doesn't stops the call before
+    # anything is validated or written, so a seed never lands in a guessed area.
+    by_area: dict[str, list[dict]] = {}
+    misplaced = []
+    for c in cands:
+        area = (c or {}).get("area")
+        if area in areas:
+            by_area.setdefault(area, []).append({k: v for k, v in c.items() if k != "area"})
+        else:
+            misplaced.append({"question": (c or {}).get("question", "?"), "area": area})
+    if misplaced:
+        _print_json({"error": "seed_area_missing", "seeds": misplaced, "valid_areas": areas,
+                     "message": "with several areas (or none named) every seed needs an `area` "
+                                f"that is one of: {', '.join(areas)}"})
+        return 2
+    import tempfile
+    per_area = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for area in areas:
+            if area not in by_area:
+                continue
+            f = Path(tmp) / "seeds.json"
+            f.write_text(json.dumps(by_area[area]), encoding="utf-8")
+            rc, out = _run_one_area(cmd_seed_examples, args, area, file=str(f))
+            if rc != 0:
+                # A gate refusal is model-wide and no area has been written yet: report it as is.
+                _print_json(out)
+                return rc
+            per_area.append({"area": area, **out})
+    rejected = [{"area": a["area"], **r} for a in per_area for r in a.get("rejected", [])]
+    _print_json({"added": [x for a in per_area for x in a.get("added", [])],
+                 "written": any(a.get("written") for a in per_area),
+                 "committed": _all_committed([a for a in per_area if a.get("written")]),
+                 **_commit_notes(per_area),
+                 "rejected": rejected, "areas": per_area,
+                 "totals": {"areas": len(per_area),
+                            "added": sum(len(a.get("added", [])) for a in per_area),
+                            "rejected": len(rejected)}})
+    return 0
+
+
+def _all_committed(wrote: list[dict]) -> bool:
+    """True when something was written and every area that wrote committed it."""
+    return bool(wrote) and all(a.get("committed") for a in wrote)
+
+
+def _commit_notes(per_area: list[dict]) -> dict:
+    """The areas' `commit_note`s, each once, as the single-area output carries its one."""
+    notes = list(dict.fromkeys(a["commit_note"] for a in per_area if a.get("commit_note")))
+    return {"commit_note": " ".join(notes)} if notes else {}
+
+
+def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
+    """The areas `question` names an example in, and the question text to reject there.
+    `<area>/<question>` (the label `rejected` prints) names the area outright, even when that area
+    has no such question: another area's example is never the one meant."""
+    q = question.strip()
+    head, _, rest = q.partition("/")
+    if rest.strip() and head in known:
+        return [head], rest.strip()
+    return [a for a, questions in known.items() if q in questions], q
+
+
+def cmd_remove_example_areas(args) -> int:
+    areas = _resolve_areas(args)
+    if areas is None:
+        return 1
+    if len(args.area or []) == 1:
+        return cmd_remove_example(argparse.Namespace(**{**vars(args), "area": areas[0]}))
+    known = {a: {(e or {}).get("question", "").strip()
+                 for e in L.list_prompt_examples(args.root, a, include_rejected=True)} for a in areas}
+    by_area: dict[str, list[str]] = {}
+    ambiguous, missing = [], []
+    for question in args.question:
+        found, q = _match_question(known, question)
+        if len(found) == 1:
+            by_area.setdefault(found[0], []).append(q)
+        elif found:
+            ambiguous.append({"question": q, "areas": found})
+        elif q:
+            missing.append({"item": q, "reason": "no example with that question in any of the areas"})
+    if ambiguous:
+        # Rejecting it in every area that has it would drop examples the reviewer never saw.
+        _print_json({"refused": "ambiguous_question", "ambiguous": ambiguous,
+                     "message": "these questions name an example in more than one area; nothing "
+                                "was rejected. Name each as <area>/<question>, or pass --area."})
+        return 1
+    per_area = []
+    for area in areas:
+        if area in by_area:
+            _, out = _run_one_area(cmd_remove_example, args, area, question=by_area[area])
+            per_area.append({"area": area, **out})
+    rejected = [x for a in per_area for x in a["rejected"]]
+    examples = [x for a in per_area for x in a["examples"]]
+    skipped = missing + [s for a in per_area for s in a["skipped"]]
+    note = ({"note": f"marked rejected (kept for audit): {len(examples)} example(s) stay in their "
+                     "area's prompt_examples/<area>/examples.yaml with status: rejected, not deleted, "
+                     "and are no longer offered as examples for a question"} if examples else {})
+    _print_json({"rejected": rejected, "examples": examples, **note, "skipped": skipped,
+                 "validated": any(a["validated"] for a in per_area),
+                 "committed": _all_committed([a for a in per_area if a["rejected"]]),
+                 **_commit_notes(per_area),
+                 "areas": per_area,
+                 "totals": {"areas": len(per_area), "rejected": len(rejected),
+                            "skipped": len(skipped)}})
+    return 0 if (rejected or not skipped) else 1
 
 
 def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
@@ -1692,6 +1875,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area", required=True)
     sp.add_argument("--query", required=True)
     sp.add_argument("--top-k", type=int, default=5)
+    sp.add_argument("--metric", action="append", default=None,
+                    help="a metric the question uses, by name or by the selector get_datasource_schema gave "
+                         "(repeatable): examples tagged with it rank first")
     sp.set_defaults(func=cmd_examples)
 
     sp = sub.add_parser("preflight", help="fan-trap / chasm-trap pre-flight check")
@@ -1797,13 +1983,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
     sp.add_argument("root")
-    sp.add_argument("--ops-file", required=True, help="JSON file: a list of op objects (or {ops:[...]})")
+    sp.add_argument("ops", nargs="?", metavar="OPS_FILE", help="JSON file: a list of op objects (or {ops:[...]}); relative to the current folder")
+    sp.add_argument("--ops-file", help="the same file, named by flag (give this or OPS_FILE, not both)")
     sp.add_argument("--signer", default=None,
                     help="who made the changes: recorded in the curation log on every op; an approve, "
                          "or an edit of an approved join's tables, columns or cardinality, also stamps it on the "
                          "item as its sign-off (an approve needs it)")
     sp.add_argument("--role", default=None, help="the signer's role, recorded and stamped with --signer")
-    sp.set_defaults(func=cmd_curate)
+    sp.set_defaults(func=cmd_curate, after_parse=lambda a, extra, sp=sp: _one_ops_file(sp, a, extra))
 
     sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
     sp.add_argument("root")
@@ -1851,7 +2038,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
     sp.add_argument("--file", required=True,
-                    help="JSON list of {question, sql, [tables, columns, metric, source, status, created_at]}")
+                    help="JSON list of {question, sql, [tables, columns, metrics, source, status, created_at]}")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
@@ -1863,12 +2050,15 @@ def build_parser() -> argparse.ArgumentParser:
                     "prompt_examples/<area>/examples.yaml for audit, not deleted, and no longer "
                     "offered as an example for a question.")
     sp.add_argument("root")
-    sp.add_argument("--area", required=True)
+    sp.add_argument("--area", action="append", default=None,
+                    help="subject area (repeatable); omit for every area in the model. "
+                         "Several or none print one combined result: per-area entries plus totals")
     sp.add_argument("--question", required=True, action="append",
-                    help="exact question text of an example to reject (repeatable for several)")
+                    help="exact question text of an example to reject (repeatable for several); "
+                         "across several areas name it <area>/<question> unless only one area has it")
     sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
     sp.add_argument("--role", default=None)
-    sp.set_defaults(func=cmd_remove_example)
+    sp.set_defaults(func=cmd_remove_example_areas)
 
     sp = sub.add_parser("set-units", help="stamp a currency/unit on detected money columns — the apply half of suggest-units, one validated batch; prints the plan and writes nothing without --yes or --columns")
     sp.add_argument("root")
@@ -1921,20 +2111,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("seed-examples", help="validate candidate seeds against the live DB + write the passing ones")
     sp.add_argument("root")
-    sp.add_argument("--area", required=True)
+    sp.add_argument("--area", action="append", default=None,
+                    help="subject area (repeatable); omit for every area in the model. Several or "
+                         "none print one combined result, and each seed then names its `area`")
     sp.add_argument("--profile", required=True, help="credentials profile (for the live-DB validation)")
-    sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metric]}")
+    sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metrics]}")
     sp.add_argument("--after-review", action="store_true",
                     help="bypass the preseed-review gate (Phase 4c only — the user has already "
                          "been in the explorer and chose to proceed with items still unreviewed)")
-    sp.set_defaults(func=cmd_seed_examples)
+    sp.set_defaults(func=cmd_seed_examples_areas)
 
     sp = sub.add_parser("seed-validate", help="run every written seed against the live DB (through execute_sql's safety pass) + emit examples-validation items")
     sp.add_argument("root")
-    sp.add_argument("--area", required=True)
+    sp.add_argument("--area", action="append", default=None,
+                    help="subject area (repeatable); omit for every area in the model. "
+                         "Several or none print one combined result: per-area entries plus totals")
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
-    sp.set_defaults(func=cmd_seed_validate)
+    sp.set_defaults(func=cmd_seed_validate_areas)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)
@@ -2006,9 +2200,54 @@ def _utf8_stdio() -> None:
             stream.reconfigure(encoding="utf-8")
 
 
+def _enter_caller_cwd() -> None:
+    """The `sm` launcher runs us from `/` so nothing in the caller's folder can shadow this package,
+    and names that folder in AGAMI_CALLER_CWD. Moving back once the package is imported makes a
+    relative path argument resolve where the caller ran `sm` (#542)."""
+    cwd = os.environ.pop("AGAMI_CALLER_CWD", "")
+    if cwd:
+        try:
+            os.chdir(cwd)
+        except OSError:
+            pass  # the folder is gone: stay put, and a relative path's error names where it looked
+
+
+def _one_ops_file(sp: argparse.ArgumentParser, args: argparse.Namespace, extra: list[str]) -> list[str]:
+    """Take `curate`'s OPS_FILE from the leftovers and require exactly one ops file. argparse fills an
+    optional positional in the first run of positionals, so in `curate root --signer x ops.json` the
+    file is left over. Python 3.12 also leaves a `--` and what follows it: each of those is a
+    positional, even one that starts with `-`."""
+    cut = extra.index("--") if "--" in extra else len(extra)
+    before, after = extra[:cut], extra[cut + 1:]
+    if args.ops is None:
+        at = next((i for i, a in enumerate(before) if not a.startswith("-")), None)
+        if at is not None:
+            args.ops = before.pop(at)
+        elif after:
+            args.ops = after.pop(0)
+    extra = before + after
+    if args.ops is not None and args.ops_file is not None:
+        sp.error("argument --ops-file: not allowed with argument OPS_FILE")
+    if args.ops is None and args.ops_file is None:
+        sp.error("one of the arguments OPS_FILE --ops-file is required")
+    return extra
+
+
+def _parse_args(argv: Optional[list[str]]) -> argparse.Namespace:
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    after = getattr(args, "after_parse", None)
+    if after is not None:
+        extra = after(args, extra)
+    if extra:
+        parser.error("unrecognized arguments: " + " ".join(extra))
+    return args
+
+
 def main(argv=None) -> int:
     _utf8_stdio()
-    args = build_parser().parse_args(argv)
+    _enter_caller_cwd()
+    args = _parse_args(argv)
     try:
         return args.func(args)
     except FileNotFoundError as e:

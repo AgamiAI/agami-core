@@ -36,7 +36,15 @@ import yaml
 from . import validator as V
 from .loader import _read_yaml as _load
 from .loader import load_datasource
-from .models import CrossSubjectAreaRelationship, Datasource, Entity, Metric, Relationship
+from .models import (
+    CrossSubjectAreaRelationship,
+    Datasource,
+    Entity,
+    Metric,
+    Relationship,
+    example_metrics,
+    metric_tag_key,
+)
 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
@@ -1776,17 +1784,51 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
     return res
 
 
+_METRIC_TAGS = ("metric", "metrics")
+
+
+def _metric_tagged(ex: dict) -> dict:
+    """`ex` with its metric tag written the way a release that predates `metrics` reads it (#546):
+    one metric as `metric: a`, several as `metrics: [a, b]`, in the tag's own place. An example
+    already in that form is returned as is, so a re-save does not reorder it."""
+    names = example_metrics(ex)
+    tag = {"metric": names[0]} if len(names) == 1 else ({"metrics": names} if names else {})
+    if {k: ex[k] for k in _METRIC_TAGS if k in ex} == tag:
+        return ex
+    out: dict = {}
+    for k, v in ex.items():
+        if k in _METRIC_TAGS:
+            out.update(tag)
+        else:
+            out[k] = v
+    return out
+
+
+def _model_metric_keys(root: Path) -> Optional[set[str]]:
+    """Every metric name the model declares, folded as tags are; None when the model can't be read,
+    and then tags are not checked: examples are not model-validated, so they need no model."""
+    try:
+        org = load_datasource(root, include_rejected=True)
+    except Exception:  # noqa: BLE001 - any unreadable model only skips the tag check
+        return None
+    return {metric_tag_key(m.name) for sa in org.subject_areas for m in sa.metrics} | {
+        metric_tag_key(m.name) for m in org.cross_subject_area_metrics}
+
+
 def add_examples(root: str | Path, area: str, examples: list[dict],
                  *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
     """Append/replace scope-tagged NL→SQL examples in prompt_examples/<area>/examples.yaml.
     The packaged writer so skills never hand-edit that YAML or reverse-engineer its schema.
 
     Each example — required: `question`, `sql`. Optional scope tags (the ranking reads
-    these): `tables`, `columns`, `metric`, `default_filters`. Optional provenance:
-    `source` (seed | correction), `status` (confirmed | proposed), `created_at`.
+    these): `tables`, `columns`, `metrics` (a list; a single `metric` is still read),
+    `default_filters`. Optional provenance: `source` (seed | correction), `status`
+    (confirmed | proposed), `created_at`. A metric tag naming a metric the model does not
+    declare refuses the example.
 
     Dedups by `question`: a new example with an existing question replaces it (so a
-    correction supersedes the earlier answer) rather than duplicating."""
+    correction supersedes the earlier answer) rather than duplicating. Examples this call
+    does not name are written back as they were."""
     from .loader import list_prompt_examples
     root = Path(root)
     res = ApplyResult()
@@ -1794,23 +1836,35 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     # rather than duplicating.
     existing = list(list_prompt_examples(root, area, include_rejected=True))
     by_q = {e.get("question"): i for i, e in enumerate(existing) if e.get("question")}
+    known = None
     for ex in examples:
         q, sql = (ex or {}).get("question"), (ex or {}).get("sql")
         if not q or not sql:
             res.skipped.append({"item": q or "?", "reason": "question and sql are required"})
             continue
+        if example_metrics(ex):
+            known = _model_metric_keys(root) if known is None else known
+            unknown = [m for m in example_metrics(ex)
+                       if known is not None and metric_tag_key(m) not in known]
+            if unknown:
+                res.skipped.append({"item": q,
+                                    "reason": f"metric(s) not in the model: {', '.join(unknown)}"})
+                continue
         if q in by_q:
             old = existing[by_q[q]]
             # The same SQL is a re-save (a sign-off, a tag), not a correction: keep the fields it
             # didn't restate, or re-saving a confirmed example to sign it would strip its status.
             same_sql = " ".join(str(old.get("sql", "")).split()) == " ".join(str(sql).split())
-            # A rejection is not carried over: re-adding a rejected question un-rejects it.
-            kept = {k: v for k, v in old.items() if not (k == "status" and v == "rejected")}
-            existing[by_q[q]] = {**kept, **ex} if same_sql else ex
+            # A rejection is not carried over: re-adding a rejected question un-rejects it. A metric
+            # tag the re-save restates replaces the old one in either spelling.
+            restated = any(k in ex for k in _METRIC_TAGS)
+            kept = {k: v for k, v in old.items() if not (k == "status" and v == "rejected")
+                    and not (restated and k in _METRIC_TAGS)}
+            existing[by_q[q]] = _metric_tagged({**kept, **ex} if same_sql else ex)
             res.applied.append(f"example (replaced) {area}/{q[:50]}")
         else:
             by_q[q] = len(existing)
-            existing.append(ex)
+            existing.append(_metric_tagged(ex))
             res.applied.append(f"example {area}/{q[:50]}")
     if not res.applied:
         return res
