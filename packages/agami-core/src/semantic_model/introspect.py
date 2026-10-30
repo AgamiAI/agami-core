@@ -346,6 +346,7 @@ def introspect(
     probe_budget = _ProbeBudget()   # one cap across the refresh's recheck and the new joins
     skip_keys: set = set()
     fresh_keys: set[tuple] = set()   # (schema, name): a bare name can exist in two schemas
+    fresh_personal: dict[tuple, set[str]] = {}   # merged table -> columns this run found personal
     if refreshing:
         from .loader import load_datasource
         prev = load_datasource(out, include_rejected=True)
@@ -373,6 +374,12 @@ def introspect(
             if not keys_read:
                 report.notes.append(f"unique keys not re-read for {_qualified(old)}: kept the stored ones")
             m, change = _merge_table(old, t, keys_read=keys_read)
+            # The merge keeps the saved flags and identity; the placeholder scan needs this run's
+            # personal-data findings, and the sample filed under the merged table's (schema, name).
+            ok = (old.schema_name, old.name)
+            fresh_personal[ok] = {c.name.lower() for c in t.columns if _never_read(c)}
+            if (t.schema_name, t.name) != ok and (t.schema_name, t.name) in samples:
+                samples[ok] = samples.pop((t.schema_name, t.name))
             _drop_sample_findings(report, t.schema_name, t.name, {c.name for c in old.columns})
             if not keys_read:
                 unread.append(m)
@@ -471,7 +478,8 @@ def introspect(
     # Placeholder values (#445), on the small and dimension tables this run read: a dimension is the
     # one side of a join, so this waits for the joins.
     _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
-                       samples, reads, report, sg)
+                       samples, reads, report, sg, fresh_personal=fresh_personal,
+                       prior=set(existing) if refreshing else set())
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -2219,22 +2227,35 @@ _KEY_NAME_RE = re.compile(r"(^|_)(id|key|sk|fk|code)$", re.IGNORECASE)
 _YEAR_NAME_RE = re.compile(r"(^|_)(year|yr)$|^(fiscal_)?year_", re.IGNORECASE)
 
 
+def _whole_table_read(sample: list, est_rows: Optional[int]) -> bool:
+    """`_sample_covers_values`, except that no sample (skipped or failed) says nothing about the
+    table's size: only a known row count can then show it is small."""
+    if not sample:
+        return est_rows is not None and 0 <= est_rows <= _CHOICE_FULL_TABLE_MAX_ROWS
+    return _sample_covers_values(sample, est_rows)
+
+
 def _placeholder_size_ok(sample: list, est_rows: Optional[int]) -> bool:
     """Small, or under the large-table line so it may still be scanned once it proves a dimension."""
-    return _sample_covers_values(sample, est_rows) or (est_rows is not None and 0 <= est_rows < _LARGE_TABLE_ROWS)
+    return _whole_table_read(sample, est_rows) or (est_rows is not None and 0 <= est_rows < _LARGE_TABLE_ROWS)
+
+
+def _never_read(c: Column) -> bool:
+    """A personal column: its values would be written into the model and the report."""
+    return _personal_column(c) or bool(c.choice_field and _personal_list(c))
 
 
 def _placeholder_kinds(c: Column, sample: list, join_cols: set[str]) -> set[str]:
-    """What the placeholder scan checks `c` as (`date`, `year`, `key`, `code`); empty to skip it.
-    A personal column is never read: its values would be written into the model and the report."""
-    if c.review_state in ("rejected", "stale") or _personal_column(c) or (c.choice_field and _personal_list(c)):
+    """What the placeholder scan checks `c` as (`date`, `year`, `key`, `code`); empty to skip it."""
+    if c.review_state in ("rejected", "stale") or _never_read(c):
         return set()
     kinds: set[str] = set()
     if c.type in ("date", "timestamp") or c.date_format in ("yyyymmdd", "iso8601"):
         kinds.add("date")
-    elif c.type == "integer" and _YEAR_NAME_RE.search(c.name):
+    elif c.type in ("integer", "string") and _YEAR_NAME_RE.search(c.name):
         kinds.add("year")
-    if c.type not in ("integer", "string") or kinds:
+    # A date stored as a number or text can still be a key: a yyyymmdd `date_key` with a -99999 member.
+    if c.type not in ("integer", "string") or (kinds and not c.date_format):
         return kinds
     if c.primary_key or c.name.lower() in join_cols or _KEY_NAME_RE.search(c.name):
         kinds.add("key")
@@ -2249,6 +2270,7 @@ def _placeholder_kinds(c: Column, sample: list, join_cols: set[str]) -> set[str]
 def _scan_placeholders(
     dialect: D.Dialect, runner: Runner, tables: list[Table], rels: list[Relationship],
     samples: dict[tuple, tuple], reads: _ReadBudget, report: IntrospectReport, sg: Optional[str],
+    *, fresh_personal: Optional[dict[tuple, set[str]]] = None, prior: frozenset | set = frozenset(),
 ) -> None:
     """Find placeholder values on the small and dimension tables read this run, and record each one
     on its column, unreviewed, for a person to say what it means (#445).
@@ -2256,7 +2278,12 @@ def _scan_placeholders(
     One bounded read per key, date, year and code column, on the run's value-read budget, and the
     table's existing sample for "far from the rest". A dimension is the one side of a join, scanned
     only below the large-table line. A meaning a person gave, or a value they said is real data, is
-    kept as it is on a refresh; an unconfirmed value the scan no longer finds is dropped."""
+    kept as it is on a refresh; an unconfirmed value the scan no longer finds is dropped.
+
+    Two areas may each hold a copy of one table: a column is read once if any copy serves it, never
+    if any copy (or `fresh_personal`, this run's reading of a refreshed table) finds it personal, and
+    each copy takes the result unless it excludes that column. A change to a `prior` table's list is
+    reported in `report.changes`, so a refresh preview shows it."""
     if not samples:
         return
     dims: set[tuple] = set()
@@ -2269,28 +2296,40 @@ def _scan_placeholders(
         for fc, tc in _column_pairs(r, sg) or []:
             join_cols.setdefault(table_key(r.from_table, r.from_schema), set()).add(fc.lower())
             join_cols.setdefault(table_key(r.to_table, r.to_schema), set()).add(tc.lower())
+    live: list[Table] = []
+    for t in tables:
+        if t.review_state not in ("rejected", "stale") and not any(t is x for x in live):
+            live.append(t)
+    copies: dict[tuple, list[Table]] = {}
+    for t in live:
+        if (t.schema_name, t.name) in samples:
+            copies.setdefault((t.schema_name, t.name), []).append(t)
     found: dict[tuple, dict[str, list[P.Finding]]] = {}
     skipped = 0
-    for t in tables:
-        key = (t.schema_name, t.name)
-        if key in found or key not in samples or t.review_state in ("rejected", "stale"):
-            continue
+    for key, ts in copies.items():
         sample, est_rows = samples[key]
-        tk = table_key(t.name, t.schema_name)
-        if not (_sample_covers_values(sample, est_rows) or tk in dims or ("", tk[1]) in dims):
+        tk = table_key(key[1], key[0])
+        if not (_whole_table_read(sample, est_rows) or tk in dims or ("", tk[1]) in dims):
             continue
         per = found[key] = {}
         joins = join_cols.get(tk, set()) | join_cols.get(("", tk[1]), set())
-        for c in t.columns:
-            kinds = _placeholder_kinds(c, sample, joins)
+        personal = (fresh_personal or {}).get(key, set())
+        by_name: dict[str, list[Column]] = {}
+        for t in ts:
+            for c in t.columns:
+                by_name.setdefault(c.name.lower(), []).append(c)
+        for name, cs in by_name.items():
+            if name in personal or any(_never_read(c) for c in cs):
+                continue
+            kinds = set().union(*(_placeholder_kinds(c, sample, joins) for c in cs))
             if not kinds:
                 continue
+            c = next(c for c in cs if _placeholder_kinds(c, sample, joins))
             if reads.left <= 0:
                 skipped += 1
                 continue
             reads.left -= 1
-            rows = _try(runner, dialect.placeholder_scan_sql(t.schema_name, t.name, c.name, c.type,
-                                                             _PLACEHOLDER_TOP))
+            rows = _try(runner, dialect.placeholder_scan_sql(key[0], key[1], c.name, c.type, _PLACEHOLDER_TOP))
             if rows is None:
                 continue  # not read: what the column holds is unknown, so nothing is dropped either
             top = [(str(r.get("v")), int(float(r.get("n") or 0))) for r in rows if r.get("v") is not None]
@@ -2298,28 +2337,40 @@ def _scan_placeholders(
             lo, hi = first.get("lo"), first.get("hi")
             total = int(float(first.get("total") or 0)) if first else 0
             rest = [str(row.get(c.name)) for row in sample if row.get(c.name) not in (None, "")]
-            per[c.name.lower()] = P.find(kinds, top, None if lo in (None, "") else str(lo),
-                                         None if hi in (None, "") else str(hi), total, rest,
-                                         yyyymmdd=c.date_format == "yyyymmdd")
+            per[name] = P.find(kinds, top, None if lo in (None, "") else str(lo),
+                               None if hi in (None, "") else str(hi), total, rest,
+                               yyyymmdd=any(x.date_format == "yyyymmdd" for x in cs))
     if skipped:
         report.notes.append(f"{skipped} column(s) not checked for placeholder values: the run's "
                             f"{DISTINCT_READ_CAP} value reads were used up")
     listed: set[tuple] = set()
-    for t in tables:
+    for t in live:
         per = found.get((t.schema_name, t.name))
         if per is None:
             continue
         for i, c in enumerate(t.columns):
-            if c.name.lower() not in per:
+            if c.name.lower() not in per or c.review_state in ("rejected", "stale"):
                 continue
             merged = _merged_placeholders(c.placeholders, per[c.name.lower()])
             if merged != c.placeholders:
+                if (t.schema_name, t.name) in prior:
+                    _report_placeholder_change(report, t, c, merged)
                 t.columns[i] = c.model_copy(update={"placeholders": merged})
             for p in merged:
                 if p.review_state == "unreviewed" and (t.schema_name, t.name, c.name, p.value) not in listed:
                     listed.add((t.schema_name, t.name, c.name, p.value))
                     rows_note = f"; {p.rows:,} row{'' if p.rows == 1 else 's'}" if p.rows else ""
                     report.placeholders.append(f"{t.name}.{c.name} = '{p.value}' ({p.reason}{rows_note})")
+
+
+def _report_placeholder_change(report: IntrospectReport, t: Table, c: Column, merged: list[Placeholder]) -> None:
+    """Values added to or dropped from `c`'s list, under `placeholders` in the table's changes."""
+    old, new = [p.value for p in c.placeholders], [p.value for p in merged]
+    lines = report.changes.setdefault(_qualified(t), {}).setdefault("placeholders", [])
+    for text in ([f"{c.name} '{v}' found" for v in new if v not in old]
+                 + [f"{c.name} '{v}' no longer found" for v in old if v not in new]):
+        if text not in lines:   # a second area's copy of the same table
+            lines.append(text)
 
 
 def _merged_placeholders(old: list[Placeholder], findings: list[P.Finding]) -> list[Placeholder]:

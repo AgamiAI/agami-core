@@ -370,3 +370,108 @@ def test_a_refresh_drops_an_unanswered_value_no_longer_found(shop):
     _, rep = I.introspect("shop", "sqlite", runner=shop["run"], artifacts_dir=shop["art"], append=True)
     assert not any(x.startswith("shipments.status") for x in rep.placeholders)
     assert _col(load_datasource(shop["root"]), "shipments", "status").placeholders == []
+
+
+# --- review of f079a484: size guard, refresh identity and flags, copies, date keys, string years -------
+
+
+def _one_table_db(path: Path, ddl: str, rows: list[tuple]) -> Path:
+    con = sqlite3.connect(path)
+    con.execute(ddl)
+    con.executemany(f"INSERT INTO t VALUES ({','.join('?' * len(rows[0]))})", rows)
+    con.commit()
+    con.close()
+    return path
+
+
+def test_no_sample_is_not_a_small_table():
+    assert not I._placeholder_size_ok([], None)
+    assert not I._placeholder_size_ok([], 20_000_000)
+    assert I._placeholder_size_ok([], 10)
+
+
+def test_a_big_table_whose_sample_fails_is_not_scanned(shop, tmp_path, monkeypatch):
+    seen: list[str] = []
+    run = _runner(shop["db"], seen)
+
+    def failing(sql):
+        if sql.startswith('SELECT * FROM "main"."shipments"'):
+            raise RuntimeError("sample refused")
+        return run(sql)
+
+    # Row count unknown: no sample proves nothing, so the table is skipped.
+    monkeypatch.setattr(I, "_estimate_rows", lambda *a, **k: None)
+    _, rep = I.introspect("shop", "sqlite", runner=failing, artifacts_dir=tmp_path / "b", dry_run=True)
+    assert not any('"shipments"' in q for q in _scans(seen))
+    assert not any(x.startswith("shipments.") for x in rep.placeholders)
+
+
+def test_a_refresh_never_reads_a_column_this_run_finds_personal(tmp_path):
+    db = _one_table_db(tmp_path / "m.db", "CREATE TABLE t(id INTEGER PRIMARY KEY, born_on TEXT, tier TEXT)",
+                       [(i, f"2024-0{1 + i % 9}-1{i % 9}", ["gold", "silver"][i % 2]) for i in range(1, 101)])
+    run = _runner(db, [])
+    I.introspect("shop", "sqlite", runner=run, artifacts_dir=tmp_path)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE t SET born_on = CASE WHEN id % 5 = 0 THEN '1900-01-01' "
+                "ELSE '19' || (50 + id % 40) || '-0' || (1 + id % 9) || '-1' || (id % 9) END")
+    con.commit()
+    con.close()
+    seen: list[str] = []
+    _, rep = I.introspect("shop", "sqlite", runner=_runner(db, seen), artifacts_dir=tmp_path, append=True)
+    assert not any('"born_on"' in q for q in _scans(seen))
+    assert not any(x.startswith("t.born_on") for x in rep.placeholders)
+    assert _col(load_datasource(tmp_path / "shop"), "t", "born_on").placeholders == []
+
+
+def test_a_bare_table_refresh_scans_the_saved_schema_table(shop):
+    con = sqlite3.connect(shop["db"])
+    con.execute("DELETE FROM date_dim WHERE date_key = -99999")
+    con.commit()
+    con.close()
+    _, rep = I.introspect("shop", "sqlite", runner=shop["run"], artifacts_dir=shop["art"], append=True,
+                          tables=["date_dim"])
+    assert not any(x.startswith("date_dim.") for x in rep.placeholders)
+    assert _col(load_datasource(shop["root"]), "date_dim", "date_key").placeholders == []
+
+
+def test_a_refresh_reports_placeholder_changes(shop):
+    con = sqlite3.connect(shop["db"])
+    con.execute("UPDATE shipments SET status = 'shipped' WHERE status = '-'")
+    con.commit()
+    con.close()
+    _, rep = I.introspect("shop", "sqlite", runner=shop["run"], artifacts_dir=shop["art"], append=True,
+                          dry_run=True)
+    assert rep.changes["main.shipments"] == {"placeholders": ["status '-' no longer found"]}
+    assert "changed main.shipments: placeholders status '-' no longer found" in rep.render()
+
+
+def test_a_column_one_copy_excludes_is_still_scanned_for_the_copy_that_serves_it(shop):
+    def copy(review: str) -> m.Table:
+        return m.Table(name="shipments", schema="main", storage_connection="c", columns=[
+            m.Column(name="id", type="integer", primary_key=True),
+            m.Column(name="status", type="string", review_state=review)])
+
+    excluded, served = copy("rejected"), copy("approved")
+    sample = shop["run"]('SELECT * FROM "main"."shipments"')
+    seen: list[str] = []
+    rep = I.IntrospectReport(profile="shop", db_type="sqlite", out_dir="", dry_run=True)
+    I._scan_placeholders(D.get_dialect("sqlite"), _runner(shop["db"], seen), [excluded, served], [],
+                         {("main", "shipments"): (sample, 300)}, I._ReadBudget(10), rep, None)
+    assert sum('"status"' in q for q in _scans(seen)) == 1
+    assert [p.value for p in served.get_column("status").placeholders] == ["-"]
+    assert excluded.get_column("status").placeholders == []
+
+
+def test_a_yyyymmdd_key_with_its_unknown_member_outside_the_sample(tmp_path):
+    days = [int((date(2023, 1, 1) + timedelta(i)).strftime("%Y%m%d")) for i in range(600)]
+    db = _one_table_db(tmp_path / "d.db", "CREATE TABLE t(date_key INTEGER, label TEXT)",
+                       [(k, "day") for k in days] + [(-99999, "Unknown")])
+    _, rep = I.introspect("shop", "sqlite", runner=_runner(db, []), artifacts_dir=tmp_path, dry_run=True)
+    assert "t.date_key = '-99999' (a negative key among positive ones; 1 row)" in rep.placeholders
+
+
+def test_a_text_year_column_reports_its_unknown_year(tmp_path):
+    db = _one_table_db(tmp_path / "y.db", "CREATE TABLE t(id INTEGER PRIMARY KEY, fiscal_year TEXT)",
+                       [(i, ["2023", "2024"][i % 2]) for i in range(1, 60)] + [(60, "2099")])
+    _, rep = I.introspect("shop", "sqlite", runner=_runner(db, []), artifacts_dir=tmp_path, dry_run=True)
+    assert any(x.startswith("t.fiscal_year = '2099' (a year far outside the others") for x in rep.placeholders)
