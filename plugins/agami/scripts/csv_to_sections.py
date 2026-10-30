@@ -101,8 +101,7 @@ def _build_section(spec: dict, idx: int, anomalies: list) -> dict:
 
     # table_rows — every cell formatted EXACTLY via units (no LLM, no abbreviation).
     table_headers = [relabels.get(h, h) for h in headers]
-    table_rows = [[units.format_cell(c, _unit_for(unit_map, headers, i)) for i, c in enumerate(r)]
-                  for r in rows]
+    table_rows = units.format_rows(headers, rows, unit_map)
 
     # labels — the label column, formatted (handles date encodings / choice labels).
     label_unit = _unit_for(unit_map, headers, label_col)
