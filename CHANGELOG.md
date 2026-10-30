@@ -12,6 +12,14 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a
+  `VALUES` arm of a `UNION` as one more `SELECT`, so the receipt counted an extra arm and could
+  label a set operation's output columns against the wrong position. The `model` extra and the
+  semantic model's `requirements.txt` now pin `sqlglot>=20,<30.26` until the receipt reads the new
+  parse; an installed 30.26 is replaced by the latest earlier release on the next install.
+
 ## [0.9.21] — 2026-10-29
 
 ### Fixed
