@@ -7,6 +7,7 @@ dictionary-sourced description is stamped with the authoritative `metadata` prov
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -291,6 +292,25 @@ def test_cmd_enrich_metadata_applies_from_canned_db(tmp_path, monkeypatch):
     assert edge.from_subject_area == "itsm" and edge.to_subject_area == "sys"
     assert edge.review_state == "approved" and edge.confidence == "confirmed"
     assert edge.signed_off_role == "system"
+
+
+def test_enrich_metadata_reports_a_description_whose_provenance_it_replaced(tmp_path, monkeypatch, capsys):
+    _servicenow_model(tmp_path)
+    from semantic_model import curate
+    from semantic_model import introspect as INTRO
+
+    curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "incident", "column": "severity",
+                             "field": "description", "value": "How bad it is", "source": "ai"}])
+    monkeypatch.setattr(INTRO, "make_execute_sql_runner", lambda profile, python=None: (
+        lambda sql: SYS_DICTIONARY if "sys_dictionary" in sql.lower() else []))
+    from semantic_model import cli
+
+    ns = cli.build_parser().parse_args(["enrich-metadata", str(tmp_path), "--profile", "servicenow",
+                                        "--db-type", "redshift", "--skip-references"])
+    assert ns.func(ns) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert {"item": "table itsm/incident.severity", "from": "ai_unvalidated",
+            "to": "metadata"} in out["provenance_changed"], out
 
 
 def test_enrich_metadata_with_no_preset_is_nothing_to_do(tmp_path, monkeypatch, capsys):
