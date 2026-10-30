@@ -579,15 +579,19 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             if op.get("op") == "move" and not op.get("area"):
                 # Resolved now, so the log records the area the table left as well as the one it joined.
                 op = {**op, "area": _resolve_area(root, op)}
-            where, before, staled, resolved = _apply_one(root, op, signer, role, backups, res.notes)
+            keys, before, staled, resolved = _apply_one(root, op, signer, role, backups, res.notes)
             res.applied.append(_op_label(op))
-            # datasource.yaml holds several lists, so an index alone doesn't say which entry it is.
-            slot = (op.get("kind"), where)
-            # An approve after the edit, in the same batch, signs off the edited definition.
-            if staled:
-                stale[slot] = _op_label(op).split(" ", 1)[1]
-            elif op.get("op") != "edit":
-                stale.pop(slot, None)
+            # An entry tracked here can be renamed by an edit or carried elsewhere by a move.
+            for old, new, label in keys:
+                if old != new and old in stale:
+                    stale = {(new if k == old else k): (label or v if k == old else v) for k, v in stale.items()}
+            if op.get("op") != "move":
+                slot = keys[0][1]
+                # An approve after the edit, in the same batch, signs off the edited definition.
+                if staled:
+                    stale[slot] = _op_label(op).split(" ", 1)[1]
+                elif op.get("op") != "edit":
+                    stale.pop(slot, None)
             logged.append({**op, "before": before, **resolved, **({"made_stale": True} if staled else {})})
         except BatchError as e:
             res.errors.append(f"{_op_label(op)}: {e}")
@@ -672,10 +676,12 @@ def _resolve_area(root: Path, op: dict) -> str:
 
 def _apply_one(root: Path, op: dict, signer, role,
                backups: "Optional[dict[Path, Optional[str]]]" = None,
-               notes: Optional[list[str]] = None) -> tuple[Any, Any, bool, dict]:
-    """Apply one op; return where the entry it changed lives, the value it replaced (for the curation
-    log), whether the op sent an approved entry back to review, and the fields to add to its log entry
-    (the declared name a metric or entity op resolved to, when the op spelt it differently)."""
+               notes: Optional[list[str]] = None) -> tuple[list, Any, bool, dict]:
+    """Apply one op; return the keys of the entries it changed, each `(before, after, label)` (`_key`;
+    a move's label is where the entry now is), the value it replaced (for the curation log), whether
+    the op sent an approved entry back to review, and the fields to add to its log entry (the declared
+    name a metric or entity op resolved to, when the op spelt it differently; the area it resolved to,
+    when the op named none or another; the items a move carried)."""
     if backups is None:
         backups = {}
     action = op.get("op")
@@ -697,8 +703,8 @@ def _apply_one(root: Path, op: dict, signer, role,
     if action == "move":
         if kind != "table":
             raise ValueError("move applies to tables only (kind: table)")
-        moved = _move_table(root, op, area, backups, notes if notes is not None else [])
-        return (moved, None), None, False, {}
+        carried, keys = _move_table(root, op, area, backups, notes if notes is not None else [])
+        return keys, None, False, {"carried": carried}
 
     if kind == "table":
         path = _area_dir(root, area) / "tables" / f"{name}.yaml"
@@ -724,7 +730,7 @@ def _apply_one(root: Path, op: dict, signer, role,
             # The file's own `name`: it can carry the schema (`public.wide`) the op's name leaves out.
             _reconcile_ambiguity_groups(root, path, str(doc.get("name") or name), doc.get("schema"),
                                         old_groups, doc.get("column_groups") or {}, backups)
-        return (path, op.get("column")), before, False, {}
+        return [((kind, path, op.get("column")),) * 2 + (None,)], before, False, {}
 
     if kind in ("entity", "metric"):
         path, key, doc, item = _find_item(root, kind, name, area)
@@ -739,7 +745,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         # The log's history matches by declared name, as `_find_item` resolves (`revenue ($)` vs `revenue (%)`).
         declared = prior.get("name")
         resolved = {"declared_name": declared} if declared and declared != name else {}
-        return (path, _position(_entries(doc, key), item) if key else None), before, staled, resolved
+        place = _place(root, path)
+        keys = [(_key(kind, place, prior), _key(kind, place, item), None)]
+        return keys, before, staled, {**resolved, **_resolved_area(op, place)}
 
     if kind == "subject_area":
         # edit-only (e.g. set the area's `description`) — a subject area carries no trust block,
@@ -758,7 +766,7 @@ def _apply_one(root: Path, op: dict, signer, role,
         before = doc.get(fld)
         doc[fld] = val
         _dump(path, doc)
-        return (path, None), before, False, {}
+        return [((kind, path),) * 2 + (None,)], before, False, {}
 
     if kind == "relationship":
         path, key, doc, rels, hit = _find_join(root, op, area)
@@ -767,7 +775,9 @@ def _apply_one(root: Path, op: dict, signer, role,
         before = _set_trust(hit, op, new_state, signer, role)
         staled = _stale_on_edit(kind, prior, hit, op)
         _dump(path, doc if isinstance(doc, dict) else {key: rels})
-        return (path, _position(rels, hit)), before, staled, {}
+        place = _place(root, path)
+        keys = [(_key(kind, place, prior), _key(kind, place, hit), None)]
+        return keys, before, staled, _resolved_area(op, place)
 
     raise ValueError(f"unknown kind {kind!r}")
 
@@ -816,8 +826,27 @@ def _stale_on_edit(kind: str, prior: dict, doc: dict, op: dict) -> bool:
     return True
 
 
-def _position(entries: list, entry: dict) -> int:
-    return next(i for i, e in enumerate(entries) if e is entry)
+def _place(root: Path, path: Path) -> str:
+    """The subject area whose file `path` is, or `CROSS_AREA` for a datasource-level file."""
+    try:
+        return path.relative_to(root / "subject_areas").parts[0]
+    except ValueError:
+        return CROSS_AREA
+
+
+def _key(kind: str, place: str, doc: dict) -> tuple:
+    """Which metric, entity or join `doc` is, wherever its list puts it: an index shifts when a move
+    takes another entry out of the same list."""
+    if kind != "relationship":
+        return kind, place, doc.get("name")
+    return (kind, place, *(" ".join(str(doc.get(k) or "").split()).lower() if k not in
+                           ("from_table", "to_table") else doc.get(k) for k in _JOIN_IDENTITY))
+
+
+def _resolved_area(op: dict, place: str) -> dict:
+    """The area an op's entry was found in, for its log entry, when the op didn't name that one: the
+    history of an item then reads only its own area's edits."""
+    return {} if op.get("area") == place else {"resolved_area": place}
 
 
 def _area_names(root: Path) -> list[str]:
@@ -1067,13 +1096,15 @@ def _check_new_area(root: Path, area: str) -> None:
 
 
 def _move_table(root: Path, op: dict, src: str, backups: "dict[Path, Optional[str]]",
-                notes: list[str]) -> Path:
+                notes: list[str]) -> tuple[list[dict], list[tuple]]:
     """Move a table to another subject area, taking what is only about it along (#513).
 
     The table file and its subject_area.yaml entry move. Each join on it is placed again by the areas
     that now own its two ends: inside one area, or a cross-area join between two. A metric or entity
     that reads only this table moves with it; one that also reads another table stays and is listed
-    in `notes`. The caller validates the whole model and restores every file on failure."""
+    in `notes`. The caller validates the whole model and restores every file on failure. Returns the
+    metrics and entities carried (`{kind, name, from}`, for the log) and each carried entry's
+    `(old key, new key, label)`."""
     from .models import table_key
 
     name, dst = op["name"], op.get("to_area")
@@ -1134,9 +1165,13 @@ def _move_table(root: Path, op: dict, src: str, backups: "dict[Path, Optional[st
         _dump(dap, da)
 
     _write_joins(root, plan, backups, notes)
+    carried: list[dict] = []
     for kind in ("metric", "entity"):
-        _carry_items(root, kind, src, dst, me, per, owners, after, backups, notes)
-    return dst_tf
+        carried += _carry_items(root, kind, src, dst, me, per, owners, after, backups, notes)
+    keys = [(old, new, f"relationship {new[1]}/{new[2]}->{new[3]}") for old, new in plan["moved"]]
+    keys += [((c["kind"], c["from"], c["name"]), (c["kind"], dst, c["name"]), f"{c['kind']} {dst}/{c['name']}")
+             for c in carried]
+    return carried, keys
 
 
 def _join_ends(r: dict) -> tuple[tuple[str, str], tuple[str, str]]:
@@ -1152,7 +1187,7 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
     inside one area, or a cross-area join between two. Writes nothing; raises when a join on the
     table names an end that can't be resolved to one table."""
     xfile = root / "cross_subject_area_relationships.yaml"
-    plan: dict = {"rewrite": [], "into_area": {}, "into_cross": [], "xfile": xfile}
+    plan: dict = {"rewrite": [], "into_area": {}, "into_cross": [], "xfile": xfile, "moved": []}
 
     def label(r: dict) -> str:
         return f"{r.get('from_table')}->{r.get('to_table')}"
@@ -1189,6 +1224,8 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
                 keep.append(r)
                 continue
             out, fa, ta = hit
+            plan["moved"].append((_key("relationship", src, r),
+                                  _key("relationship", fa if fa == ta else CROSS_AREA, out)))
             if fa == ta:
                 plan["into_area"].setdefault(fa, []).append(out)
             else:
@@ -1211,6 +1248,8 @@ def _plan_joins(root: Path, src: str, me: tuple[str, str], per: dict, shown: dic
                 continue
             out, fa, ta = hit
             changed = True
+            plan["moved"].append((_key("relationship", CROSS_AREA, r),
+                                  _key("relationship", fa if fa == ta else CROSS_AREA, out)))
             if fa == ta:
                 plan["into_area"].setdefault(fa, []).append(
                     {k: v for k, v in out.items() if k not in ("from_subject_area", "to_subject_area")})
@@ -1321,14 +1360,16 @@ def _write_joins(root: Path, plan: dict, backups: "dict[Path, Optional[str]]", n
 
 
 def _carry_items(root: Path, kind: str, src: str, dst: str, me: tuple[str, str], per: dict,
-                 owners: dict, after: dict, backups: "dict[Path, Optional[str]]", notes: list[str]) -> None:
+                 owners: dict, after: dict, backups: "dict[Path, Optional[str]]",
+                 notes: list[str]) -> list[dict]:
     """Move the metrics (or entities) on the moved table whose every table is now in the new area.
     The old area's are moved or, when they also read a table outside it, reported and left. Another
     area's are moved only when that area owns none of their tables any more (their tables reached
-    the new area by separate moves); otherwise they are left as they are."""
+    the new area by separate moves); otherwise they are left as they are. Returns the ones moved."""
     from .models import table_key
 
     sub = _KINDS[kind][0]
+    carried: list[dict] = []
     for area in [src, *(a for a in _listed_areas(root) if a not in (src, dst))]:
         for f in sorted((_area_dir(root, area) / sub).glob("*.yaml")):
             doc = _load(f) or {}
@@ -1360,6 +1401,8 @@ def _carry_items(root: Path, kind: str, src: str, dst: str, me: tuple[str, str],
             f.unlink()
             notes.append(f"{kind} {label} moved with it" if area == src
                          else f"{kind} {label} moved from {area}: every table it reads is now in {dst}")
+            carried.append({"kind": kind, "name": label, "from": area})
+    return carried
 
 
 def _reconcile_expose_groups(root: Path, area: str, table: str, schema: Optional[str],
@@ -2109,23 +2152,34 @@ def changes_since_approval(root: str | Path, kind: str, area: Optional[str], obj
     curation log: each `{field, before, after, by, at, text}`. None when the log doesn't reach back to
     the edit that took the approval away (no log, a trimmed one, or a hand edit) (#537). When a line
     after that edit can't be read, the list ends with a `field: None` entry saying "some changes not
-    recorded", since that line may have been one."""
+    recorded", since that line may have been one. `area` is the item's subject area; None for a
+    datasource-level metric or entity."""
     lines = log if log is not None else _read_log_lines(Path(root))
     ident = _identity(kind, obj)
-    areas = {area} if area else set()
+    areas = _history_areas(kind, area, obj)
     found: list[dict] = []
     unreadable = False
     for entry in reversed(lines):
         if not isinstance(entry, dict):
             unreadable = True
             continue
-        if areas and _moved_with(kind, entry, ident, areas):
-            # Before the move the entry lived where its table did, or among the cross-area joins.
-            areas |= {entry.get("area"), CROSS_AREA} if kind == "relationship" else {entry.get("area")}
+        if areas and _is_move(entry):
+            if kind == "relationship":
+                if entry.get("name") in (ident.get("from_table"), ident.get("to_table")):
+                    # Before the move the join lived where its table did, or among the cross-area joins.
+                    areas |= {entry.get("area"), CROSS_AREA}
+            elif entry.get("to_area") in areas:
+                if not isinstance(entry.get("carried"), list):
+                    return None   # logged before a move recorded what it carried
+                came = [c.get("from") for c in entry["carried"] if isinstance(c, dict)
+                        and c.get("kind") == kind and c.get("name") == ident.get("name")]
+                if came:
+                    areas = {came[0]}
             continue
         if entry.get("kind") != kind:
             continue
-        if entry.get("area") and areas and entry["area"] not in areas:
+        where = entry.get("resolved_area") or entry.get("area")
+        if where and areas and where not in areas:
             continue
         # Walking back, an edit of a field that names the entry (a join's columns) named it by the old value.
         prior = dict(ident)
@@ -2164,14 +2218,24 @@ def _same_value(field: str, a: Any, b: Any) -> bool:
     return " ".join(str(a or "").split()).lower() == " ".join(str(b or "").split()).lower()
 
 
-def _moved_with(kind: str, entry: dict, ident: dict, areas: set) -> bool:
-    """Whether a logged table move may have carried the entry out of another area: a join on that
-    table, or a metric or entity in the area the table moved to."""
-    if entry.get("op") != "move" or entry.get("kind") != "table" or not entry.get("area"):
-        return False
-    if kind == "relationship":
-        return entry.get("name") in (ident.get("from_table"), ident.get("to_table"))
-    return entry.get("to_area") in areas
+def _is_move(entry: dict) -> bool:
+    return entry.get("op") == "move" and entry.get("kind") == "table" and bool(entry.get("area"))
+
+
+def _history_areas(kind: str, area: Optional[str], obj: Any) -> set:
+    """Where the log's edits of an item can have been made: its area; the datasource-level lists for
+    a cross-area metric or entity; the cross-area joins, or either end's area, for a cross-area join.
+    Empty (any area) for a join given no area."""
+    if kind != "relationship":
+        return {area or CROSS_AREA}
+    ends = {_identity_get(obj, "from_subject_area"), _identity_get(obj, "to_subject_area")} - {None}
+    if ends:
+        return ends | {CROSS_AREA}
+    return {area} if area else set()
+
+
+def _identity_get(obj: Any, key: str) -> Any:
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
 
 
 def since_approval(root: str | Path, kind: str, area: Optional[str], obj: Any,

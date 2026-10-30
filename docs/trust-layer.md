@@ -86,7 +86,9 @@ The Review tab, `sm review-queue` and `sm approve-queue` show what changed on a 
 its approval, read from `curation_log.jsonl` — e.g. *binding (sqlite) changed from SUM(amount) to
 SUM(amount) - SUM(discount)*, with who made each edit and when. When the log doesn't reach back to
 the edit that took the approval away, the entry still shows as stale, with *changes not
-recorded*.
+recorded*. Only that entry's own edits are shown: a cross-area metric's history never includes a
+same-named metric's edits in a subject area, and a table move brings an entry's earlier edits with
+it only when the move carried that entry (its log entry lists them under `carried`).
 
 A refresh (`introspect --append`) re-labels only the joins introspection approved itself, so it
 never touches a join a person edited: a stale join is not one of those, and it keeps its edited

@@ -370,6 +370,41 @@ def test_an_edit_of_one_datasource_list_does_not_hide_another_lists_stale_entry(
     assert [s.rsplit("/", 1)[-1] for s in res.stale] == ["billed customers"]
 
 
+def _billing_revenue(root: Path, **state) -> None:
+    d = root / "subject_areas" / "billing" / "metrics"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "revenue.yaml").write_text(yaml.safe_dump({
+        **_CROSS_METRIC, "name": "revenue", "bindings": {"PostgreSQL": "SUM(invoices.id)"},
+        "source_tables": ["invoices"], **SIGNED, **state}))
+
+
+def _shown_by_area(root: Path) -> dict:
+    return {it["area"]: [c["text"] for c in it["changes_since_approval"]["changes"]] or
+            it["changes_since_approval"]["summary"]
+            for it in curate.review_queue(L.load_datasource(root), root=root)["rule_1"]}
+
+
+def test_a_cross_area_metric_shows_only_its_own_changes(tmp_path):
+    _model(tmp_path, cross=[_JOIN],
+           ds_extra={"cross_subject_area_metrics": [{**_CROSS_METRIC, **SIGNED, "name": "revenue"}]})
+    _billing_revenue(tmp_path)
+    for area, unit in ((curate.CROSS_AREA, "USD"), ("billing", "percent")):
+        assert curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "area": area, "name": "revenue",
+                                        "field": "unit", "value": unit}]).stale
+    assert _shown_by_area(tmp_path) == {None: ["unit changed from (none) to USD"],
+                                        "billing": ["unit changed from (none) to percent"]}
+
+
+def test_an_edit_that_named_no_area_is_only_the_history_of_the_item_it_changed(tmp_path):
+    _model(tmp_path, cross=[_JOIN],
+           ds_extra={"cross_subject_area_metrics": [{**_CROSS_METRIC, **SIGNED, "name": "revenue"}]})
+    assert curate.apply(tmp_path, [{"op": "edit", "kind": "metric", "name": "revenue",
+                                    "field": "unit", "value": "USD"}]).stale
+    _billing_revenue(tmp_path, review_state="stale")
+    assert _shown_by_area(tmp_path) == {None: ["unit changed from (none) to USD"],
+                                        "billing": "changes not recorded"}
+
+
 def _two_joins(root: Path) -> None:
     """A second approved orders -> customers join, on vendor_id."""
     tables = root / "subject_areas" / "sales" / "tables" / "orders.yaml"

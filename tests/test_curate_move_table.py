@@ -531,3 +531,78 @@ def test_a_moved_stale_item_stays_stale_and_shows_what_changed(tmp_path, kind, n
         assert (it["review_state"], it.get("signed_off_by")) == ("stale", "you@example.com"), it
         changed = it["changes_since_approval"]
         assert changed["recorded"] and [c["field"] for c in changed["changes"]] == [edit["field"]], (to, it)
+
+
+_WHO = {"signer": "you@example.com", "role": "owner"}
+_UNITS = {"kind": "metric", "name": "units_sold"}
+_LINE_JOIN = {"kind": "relationship", "name": "order_items->orders", "from_column": "order_id"}
+
+
+def _approved_then_edited(root: Path, *then: dict):
+    """Approve units_sold and order_items->orders, then edit both, move order_items to catalog and
+    run `then`, all in one batch."""
+    at = {"at": "2026-01-01T00:00:00Z"}
+    assert curate.apply(root, [{**_UNITS, "op": "approve", "area": "sales", **at},
+                               {**_LINE_JOIN, "op": "approve", "area": "sales", **at}], **_WHO).validated
+    return curate.apply(root, [
+        {**_UNITS, "op": "edit", "area": "sales", "field": "unit", "value": "items"},
+        {**_LINE_JOIN, "op": "edit", "area": "sales", "field": "relationship", "value": "one_to_one"},
+        {"op": "move", "kind": "table", "name": "order_items", "to_area": "catalog"}, *then], **_WHO)
+
+
+def test_a_moved_stale_item_is_reported_where_it_now_is(tmp_path):
+    res = _approved_then_edited(_model(tmp_path))
+    assert res.validated, res.as_dict()
+    assert res.stale == ["metric catalog/units_sold", "relationship _cross/order_items->orders"]
+
+
+def test_approving_a_moved_item_in_the_same_batch_clears_its_stale_notice(tmp_path):
+    root = _model(tmp_path)
+    at = {"op": "approve", "area": "catalog", "at": "2026-01-02T00:00:00Z"}
+    res = _approved_then_edited(root, {**_UNITS, **at}, {**_LINE_JOIN, **at})
+    assert res.validated and res.stale == [], res.as_dict()
+    org = loader.load_datasource(root)
+    assert next(m for m in org.subject_area("catalog").metrics if m.name == "units_sold").review_state == "approved"
+    assert {(r.from_table, r.review_state) for r in org.cross_subject_area_relationships} == \
+        {("order_items", "approved")}
+
+
+def _revenue(root: Path, area: str, table: str) -> None:
+    _item(root, area, "metrics", {"name": "revenue", "calculation": f"{table} count",
+                                  "bindings": {"PostgreSQL": f"COUNT({table}.id)"}, "source_tables": [table],
+                                  "confidence": "proposed", "review_state": "approved",
+                                  "signed_off_by": "you@example.com", "signed_off_role": "owner",
+                                  "signed_off_at": "2026-01-01T00:00:00Z"})
+
+
+def _revenue_history(root: Path, area: str) -> dict:
+    (it,) = [it for it in curate.review_queue(loader.load_datasource(root), root=root)["rule_1"]
+             if (it["name"], it["area"]) == ("revenue", area)]
+    return it["changes_since_approval"]
+
+
+def test_a_move_does_not_give_a_destination_metric_another_areas_history(tmp_path):
+    root = _model(tmp_path)
+    _revenue(root, "catalog", "products")
+    _revenue(root, "sales", "orders")
+    for area, unit in (("catalog", "USD"), ("sales", "EUR")):
+        assert curate.apply(root, [{"op": "edit", "kind": "metric", "area": area, "name": "revenue",
+                                    "field": "unit", "value": unit}], **_WHO).stale
+    assert _move(root, "customers", "catalog").validated
+    since = _revenue_history(root, "catalog")
+    assert [c["text"] for c in since["changes"]] == ["unit changed from (none) to USD"] and since["complete"]
+    log = [json.loads(ln) for ln in (root / curate.CURATION_LOG).read_text().splitlines()]
+    assert log[-1]["carried"] == [{"kind": "metric", "name": "customer_count", "from": "sales"}]
+
+
+def test_a_move_logged_without_what_it_carried_says_changes_not_recorded(tmp_path):
+    root = _model(tmp_path)
+    _revenue(root, "catalog", "products")
+    assert curate.apply(root, [{"op": "edit", "kind": "metric", "area": "catalog", "name": "revenue",
+                                "field": "unit", "value": "USD"}], **_WHO).stale
+    assert _move(root, "customers", "catalog").validated
+    path = root / curate.CURATION_LOG
+    lines = [json.loads(ln) for ln in path.read_text().splitlines()]
+    del lines[-1]["carried"]
+    path.write_text("".join(json.dumps(e) + "\n" for e in lines))
+    assert _revenue_history(root, "catalog")["summary"] == "changes not recorded"

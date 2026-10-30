@@ -40,7 +40,13 @@ below corresponds to one such version.
   `on:` join keeps its confidence. A table move (#513) keeps a stale join, metric or entity stale
   with its old signer, and the review surfaces still show what changed; when a move finds two copies
   of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
-  and a move where it disagrees with a copy a person signed off is refused.
+  and a move where it disagrees with a copy a person signed off is refused. A move's log entry lists
+  the metrics and entities it carried (`carried`), and an item's changes follow it back only through
+  a move that carried it (a move logged without that list gives "changes not recorded"). An item's
+  changes come only from edits of that item: a cross-area metric or entity reads only edits of the
+  datasource-level lists, and an op that named no area (or another one) logs the area it resolved
+  to (`resolved_area`). `stale` names a moved item where it now is, and an approve after the move in
+  the same batch clears it.
 
 ## [0.9.21] — 2026-10-29
 
