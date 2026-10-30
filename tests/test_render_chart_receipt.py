@@ -91,6 +91,13 @@ JOIN_STATUS_BADGE = "const said = JOIN_BADGE[r.status] || ['stale', r.status || 
 JOIN_PREDICATE_LABEL = "text: 'joined on: '"
 JOIN_NO_PREDICATE = "text: 'this join wrote no condition of its own'"
 JOIN_DECLARED_GUARD = "if (r.status === 'declared') {"
+# The aggregates block, and the branch that keeps a value the duplication cannot move off the amber
+# badge (#450). The guard tests `=== false`, so a `null` or a receipt without the field stays amber.
+AGGREGATES_SECTION_CONSTRUCTION = "renderSection('aggregates', 'Aggregates', null, list => {"
+AGG_UNAFFECTED_GUARD = "(a.status === 'multiplied' && a.result_affected === false)"
+AGG_UNAFFECTED_LABEL = "'rows repeated by a join; value unaffected'"
+# `json.dumps` spacing, which the template's hand-written sample receipt does not use.
+NONCE_RESULT_UNAFFECTED = '"result_affected": false'
 
 
 def _section(items=None, undetermined=None) -> dict:
@@ -298,7 +305,7 @@ def test_the_receipt_derived_assertions_use_values_the_template_never_contains()
     template = TEMPLATE_PATH.read_text()
     for nonce in (AGGREGATES_MARKER, NONCE_JOIN, NONCE_FROM_TO, NONCE_FROM_TO_ENCODED,
                   NONCE_REVIEW_STATE, NONCE_AD_HOC_ORIGIN, NONCE_EMPTY_SECTION,
-                  NONCE_UNDECLARED_PREDICATE, NONCE_UNDECLARED_STATUS):
+                  NONCE_UNDECLARED_PREDICATE, NONCE_UNDECLARED_STATUS, NONCE_RESULT_UNAFFECTED):
         assert nonce not in template, f"{nonce!r} is template text, so it proves nothing"
 
 
@@ -310,7 +317,8 @@ def test_the_construction_sites_the_assertions_stand_on_are_each_unique():
     for site in (BANNER_CONSTRUCTION, BANNER_DERIVATION, BANNER_CTA, MARKER_CONSTRUCTION,
                  MARKER_LABEL, MARKER_READ, EMPTY_STATE_CONSTRUCTION,
                  JOINS_SECTION_CONSTRUCTION, JOIN_STATUS_BADGE, JOIN_PREDICATE_LABEL,
-                 JOIN_NO_PREDICATE, JOIN_DECLARED_GUARD):
+                 JOIN_NO_PREDICATE, JOIN_DECLARED_GUARD, AGGREGATES_SECTION_CONSTRUCTION,
+                 AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL):
         assert template.count(site) == 1, f"{site!r} appears {template.count(site)}x, not once"
 
 
@@ -607,3 +615,19 @@ def test_render_with_every_section_empty():
     assert NONCE_EMPTY_SECTION in html
     assert AGGREGATES_MARKER in html
     assert EMPTY_STATE_CONSTRUCTION in html
+
+
+def test_an_aggregate_the_duplication_cannot_move_is_not_drawn_amber():
+    """#450. A MAX over a fan is `status: multiplied`, correctly, and `result_affected: false`. The
+    panel draws it on the non-alarm badge, decided before the ordinary status lookup, so reverting the
+    branch to the plain lookup (amber for every `multiplied`) fails here."""
+    item = {"aggregate": "MAX(shipments.weight)", "scope": "main", "status": "multiplied",
+            "result_affected": False, "joins": [NONCE_FROM_TO], "findings": [], "reason": None}
+    html = render(title="Test", summary="", sections=[_chart_section()],
+                  receipt=_receipt(aggregates=_section([item])))
+
+    assert NONCE_RESULT_UNAFFECTED in html
+    start = html.index(AGGREGATES_SECTION_CONSTRUCTION)
+    block = html[start:html.index("renderSection(", start + 1)]
+    guard = block.index(AGG_UNAFFECTED_GUARD)
+    assert guard < block.index(AGG_UNAFFECTED_LABEL) < block.index("AGG_BADGE[a.status]")

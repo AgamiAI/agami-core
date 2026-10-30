@@ -46,11 +46,12 @@ exposure. So the analysis stays, and both the authoring and the refusing go.
 
 from __future__ import annotations
 
+import decimal
 import functools
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional
 
 # Absolute, not relative: `guardrail` is a flat top-level module that sits ALONGSIDE the
 # `semantic_model` package in both layouts — next to it in `packages/agami-core/src/`, and next to it
@@ -61,6 +62,7 @@ import guardrail
 try:
     import sqlglot
     from sqlglot import expressions as exp
+    from sqlglot.dialects.dialect import Dialect, NormalizationStrategy
     from sqlglot.errors import ErrorLevel, ParseError, TokenError
 
     _HAVE_SQLGLOT = True
@@ -74,10 +76,13 @@ from .models import (
     Entity,
     Metric,
     Relationship,
+    Table,
+    stored_identity,
 )
 from .models import (
     bare_name as _bare,
 )
+from .models import table_key as _table_key
 from .sql_dialect import DialectUnresolved, engines_disagree, resolve_datasource_dialect
 from .suggest import did_you_mean
 
@@ -131,6 +136,7 @@ class GuardContext:
     dialect: "str | None" = None
     unreadable: "UnreadableStatement | None" = None
     schema_index: "dict[str, dict[str | None, set[str]]] | None" = None
+    table_decls: "dict[tuple, list[Table]] | None" = None
 
 
 class UnreadableStatement(NamedTuple):
@@ -304,6 +310,7 @@ def build_guard_context(sql: str, org: Datasource) -> "GuardContext | None":
         dialect=dialect,
         unreadable=unreadable,
         schema_index=_schema_index(org),
+        table_decls=_table_decls(org),
     )
 
 
@@ -535,6 +542,147 @@ def statement_shape(ctx: "GuardContext | None") -> "str | None":
     return "aggregate" if ctx.tree.find(exp.Group) is not None else "listing"
 
 
+# A table this large is worth narrowing before it is scanned. The same line introspection draws for
+# `recommended_filters` and `get_datasource_schema` draws for `large_tables`, so the three agree on
+# which tables are large.
+SCAN_LARGE_ROWS = 1_000_000
+
+
+def scan_findings(tree: "exp.Expression | None", org: "Datasource | None") -> list[dict[str, Any]]:
+    """Where a large table is the side an outer join does not preserve, and the preserved side is
+    plain tables the model sizes below the line (#451): `small LEFT JOIN large` keeps every small
+    row, so the engine cannot narrow the large table by the join first, and on a distributed engine
+    it moves all of it.
+
+    One structural shape, deliberately. Whether a large table is otherwise "narrowed" depends on
+    every way SQL can filter (through a joined dimension, a USING join, a cast key, a date
+    expression), and a guess at that wrongly flags good queries. For the same reason nothing is
+    flagged when the preserved side is a subquery or CTE, or any of its tables has no known size.
+    Advisory, never a refusal. Each finding names the table as the statement wrote it, and carries
+    the `exp.Table` it was read through so the receipt puts it on that reference and no other."""
+    if tree is None or org is None or not _HAVE_SQLGLOT:
+        return []
+    size = _table_sizes(tree, org)
+    out: list[dict[str, Any]] = []
+    for node, preserved, _side in _outer_joins(tree):
+        t, rows = size(node)
+        sizes = [size(n)[1] for n in preserved]
+        if rows >= SCAN_LARGE_ROWS and all(r and r < SCAN_LARGE_ROWS for r in sizes):
+            out.append({"node": node, "table": _written(node), "rows": rows, "risk": "outer_join",
+                        "from": _written(preserved[0])})
+    return out
+
+
+def _table_sizes(tree: "exp.Expression", org: "Datasource",
+                 ) -> "Callable[[exp.Expression], tuple[Any, int]]":
+    """For `tree`: node -> (model table, estimated rows), or (None, 0) for a reference to a visible
+    CTE, a subquery, a table the model does not size, or a name it leaves ambiguous. Resolved by
+    schema and name the way the scope gates resolve it, so `staging.orders` never borrows
+    `sales.orders`'s size."""
+    ctes = _cte_references(tree)
+    sidx = _schema_index(org)
+    # The same physical table may be declared in several subject areas; the largest estimate wins,
+    # so declaration order cannot decide whether the warning shows.
+    by_qname: dict[tuple, Any] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, bare = stored_identity(t.name, t.schema_name)
+            key = (_tkey(schema) or None, _tkey(bare))
+            if _rows_of(t) >= _rows_of(by_qname.get(key)):
+                by_qname[key] = t
+
+    def size(node: "exp.Expression") -> "tuple[Any, int]":
+        if not isinstance(node, exp.Table) or id(node) in ctes:
+            return None, 0
+        hit = _resolve_table(sidx, node)
+        t = by_qname.get(hit) if isinstance(hit, tuple) else None
+        rows = t.performance_hints.estimated_row_count if t and t.performance_hints else None
+        return (t, rows) if rows else (None, 0)
+
+    return size
+
+
+def _written(node: "exp.Table") -> str:
+    """The table as the statement qualified it, without its alias: what a rewrite has to name."""
+    if _default_schema(node):
+        return f"{node.catalog}..{node.name}"
+    return ".".join(p for p in (node.catalog, node.db, node.name) if p)
+
+
+def _default_schema(node: "exp.Table") -> bool:
+    """`db..table`: the database's default schema, which sqlglot keeps as an empty string."""
+    return isinstance(node.args.get("db"), str)
+
+
+def _rows_of(t: Any) -> int:
+    return (t.performance_hints.estimated_row_count or 0) if t is not None and t.performance_hints else 0
+
+
+# A RIGHT JOIN drops every source before it, so the pairs grow with the square of the join count;
+# a statement of hundreds of joins fits under the SQL length cap. Both callers need only a few.
+_SCAN_MAX_PAIRS = 64
+
+
+def _outer_joins(tree: "exp.Expression") -> "Iterator[tuple[exp.Table, list[exp.Table], str]]":
+    """Each (unpreserved table, preserved tables, side) of the statement's LEFT/RIGHT outer joins
+    between exactly two plain tables, at most `_SCAN_MAX_PAIRS`, produced lazily. Semi and anti
+    joins carry a side too but are not outer joins."""
+    budget = _SCAN_MAX_PAIRS
+    ctes = _cte_references(tree)  # a CTE reference is an `exp.Table` too, but not a plain table
+    for sel in tree.find_all(exp.Select):
+        frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
+        seen: list["exp.Expression"] = [frm.this] if frm is not None else []
+        for join in sel.args.get("joins") or []:
+            side = (join.side or "").upper()
+            kind = (join.kind or "").upper()
+            if side in ("LEFT", "RIGHT") and kind in ("", "OUTER") and seen:
+                preserved, dropped = (seen, [join.this]) if side == "LEFT" else ([join.this], seen)
+                # Only the direct two-table shape: with more on the preserved side, which table the
+                # outer one joins to is in the ON clause, and advice naming the wrong one is invalid.
+                if len(preserved) == 1 and len(dropped) == 1 and all(
+                        isinstance(n, exp.Table) and id(n) not in ctes for n in preserved + dropped):
+                    snapshot = list(preserved)
+                    for n in dropped:
+                        if budget <= 0:
+                            return
+                        budget -= 1
+                        yield n, snapshot, side
+            seen.append(join.this)
+
+
+def scan_sentence(finding: dict[str, Any]) -> str:
+    """One outer-join finding in words a caller can act on, for the receipt."""
+    table, rows = _echo_name(finding["table"]), finding["rows"]
+    small = _echo_name(str(finding.get("from") or "the preserved table"))
+    return (f"`{table}` (about {rows:,} rows) is the outer side of a join from `{small}`: every "
+            f"`{small}` row is kept, so the engine cannot narrow `{table}` by the join first and "
+            f"can read or move all of it. Start FROM `{table}` and INNER JOIN `{small}`, keeping the "
+            f"outer join only if `{small}` rows with no match are needed.")
+
+
+def scan_risks(ctx: "GuardContext | None") -> list[str]:
+    """What a timeout refusal says about the statement's shape (#451): each outer join between plain
+    tables, in the caller's own names. Said whatever the tables' sizes, because a refusal may echo
+    only what the caller wrote (SECURITY.md, "What a refusal may name"): naming sizes or recommended
+    filters there would let a forced timeout read model facts, and wording that appeared only for a
+    large table would leak which ones are.
+
+    Plain strings for the reason `statement_shape` returns one: `execute_sql` ships in a stdlib-only
+    mirror that cannot import this module's parse, so the analysis runs here and travels as text."""
+    if ctx is None or ctx.tree is None or not _HAVE_SQLGLOT:
+        return []
+    out: dict[str, None] = {}  # ordered and de-duplicated: a UNION can repeat one shape
+    for node, preserved, side in _outer_joins(ctx.tree):
+        if len(out) >= 2:  # all `_narrow_it` shows
+            break
+        big, small = _echo_name(_written(node)), _echo_name(_written(preserved[0]))
+        out[f"The statement keeps every `{small}` row and pulls `{big}` in from the outer "
+            f"side of a {side} JOIN, which stops the engine narrowing `{big}` by the join "
+            f"first. If `{big}` is the larger table, start FROM it and INNER JOIN `{small}`, "
+            f"keeping the outer join only if `{small}` rows with no match are needed."] = None
+    return list(out)
+
+
 # Ambiguity threshold — "ask, don't guess" when top-two are within this delta.
 AMBIGUITY_DELTA = 0.15
 
@@ -677,7 +825,7 @@ def resolve_metrics(
             bindings = mm.bindings
             if _D.is_derived(mm) or _D.is_second_order(mm):
                 try:
-                    bindings = _D.expanded_bindings(mm, idx)
+                    bindings = _D.expanded_bindings(mm, idx, org)
                 except _D.DerivedError:
                     bindings = mm.bindings
             ranked.append(
@@ -690,6 +838,7 @@ def resolve_metrics(
                         "calculation": mm.calculation,
                         "bindings": bindings,
                         "confidence": mm.confidence,
+                        **({"caveats": list(mm.caveats)} if mm.caveats else {}),
                     },
                 )
             )
@@ -887,12 +1036,43 @@ class AggregateReport:
     # on the other two statuses. One word for four different causes sent a reader to the join when
     # the aggregate simply named no column.
     reason: Optional[str] = None
+    # Whether every read of the aggregate resolved to a table the analysis could see behind. Not
+    # emitted: `reason` already says why on an `undetermined` report. Kept because a multiplication
+    # outranks an unresolved read in `status`, so a `multiplied` report can still have reads the
+    # analysis did not see, and those decide `result_affected` below.
+    resolved: bool = True
+
+    @property
+    def result_affected(self) -> Optional[bool]:
+        """Whether the duplication `status` reports can have changed THIS value (#450).
+
+        `status` describes the rows and stays `multiplied` for a `MAX` over a fan, because the rows
+        really were duplicated and `not_multiplied` would be a false claim. What a reader needs to
+        act on is the other fact: a minimum, a maximum, a boolean fold or a DISTINCT aggregate
+        cannot move under duplication. False when every multiplying finding is `fan_out_invariant`
+        (or nothing multiplied), True when any fan or chasm trap is, None when undetermined.
+
+        Derived rather than stored, so a report downgraded to `undetermined` after it was built
+        cannot keep a stale answer. It covers this aggregate at its own scope only: a value read
+        from a subquery or CTE resolves to no table, so it is never `False`. That holds even when a
+        fan on a table it DID resolve makes `status` `multiplied`: the unresolved part may already
+        be inflated, so the answer is None.
+
+        The chasm check does not grade immunity, so a `MIN` or `MAX` under a chasm reads True. That
+        is the conservative side; finer grading is #200 / #204 / #339 / #429."""
+        if self.status == UNDETERMINED:
+            return None
+        risks = {f.risk for f in self.findings if f.risk in _MULTIPLYING_RISKS}
+        if not risks <= {"fan_out_invariant"}:
+            return True
+        return False if self.resolved else None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "aggregate": self.aggregate,
             "scope": self.scope,
             "status": self.status,
+            "result_affected": self.result_affected,
             "joins": self.joins,
             "findings": [f.as_dict() for f in self.findings],
             "reason": self.reason,
@@ -1119,12 +1299,32 @@ def projected_sensitive_columns(sql: str, org: Datasource,
     return _projected_sensitive(tree, org, ctx=ctx)
 
 
+def _sensitive_ci(by_table: dict[str, set[str]]) -> dict[str, dict[str, str]]:
+    """folded table -> folded column -> "table.column" as the model declares them.
+
+    Folded quoted or not, unlike `_ci_get`: a miss here makes the receipt say no sensitive column
+    came back when one did, while an extra match only over-warns (#456)."""
+    idx: dict[str, dict[str, str]] = {}
+    for table in sorted(by_table):
+        cols = idx.setdefault(_tkey(table), {})
+        for col in sorted(by_table[table]):
+            cols.setdefault(_tkey(col), f"{table}.{col}")
+    return idx
+
+
 def _projected_sensitive(tree, org: Datasource,
                          ctx: "GuardContext | None" = None) -> list[str]:
-    """The analysis half, on an already-parsed tree."""
+    """The analysis half, on an already-parsed tree.
+
+    Table and column names match whatever case the statement wrote them in (#456): `SELECT
+    ORDERS.SSN FROM ORDERS` projects the declared `orders.ssn` as surely as the lowercase spelling
+    does. A resolved column is named as the model declares it; one whose table can't be pinned keeps
+    the name the statement wrote."""
     by_table, allnames = ctx.sensitive_by_table if ctx is not None else _sensitive_by_table(org)
     if not allnames:
         return []
+    sensitive = _sensitive_ci(by_table)
+    folded_names = {_tkey(n) for n in allnames}
     # A set operation (UNION/INTERSECT/EXCEPT) parses to exp.SetOperation, not
     # exp.Select — gate on "contains a SELECT" and scan every OUTPUT-bearing arm, else
     # `… UNION SELECT ssn FROM customers` would project a sensitive column past this gate.
@@ -1138,22 +1338,34 @@ def _projected_sensitive(tree, org: Datasource,
         for proj in sel.expressions:
             # (a) a raw projection of a sensitive column, not protected by COUNT
             for col in proj.find_all(exp.Column):
-                if col.name not in allnames or _count_protects(col):
+                if _tkey(col.name) not in folded_names or _count_protects(col):
                     continue
-                tbl = _resolve_col_table(col, scope)
-                if tbl is None:
-                    offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
-                elif tbl in by_table and col.name in by_table[tbl]:
-                    offending.add(f"{tbl}.{col.name}")
+                if col.table:
+                    # The exact alias, else every alias the qualifier could name ignoring case.
+                    hits = [col.table] if col.table in scope else [
+                        k for k in scope if _tkey(k) == _tkey(col.table)]
+                    tables = {scope[k] for k in hits} or {col.table}
+                else:
+                    only = _resolve_col_table(col, scope)
+                    if only is None:
+                        offending.add(col.name)  # ambiguous + sensitive somewhere → conservative
+                        continue
+                    tables = {only}
+                for tbl in tables:
+                    hit = sensitive.get(_tkey(tbl), {}).get(_tkey(col.name))
+                    if hit:
+                        offending.add(hit)
                 # same-named column on a non-sensitive table → not offending
             # (b) `*` / `t.*` that would expand a directly-FROM'd table holding sensitive cols
             is_star = isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
             if is_star:
                 qualifier = proj.table if isinstance(proj, exp.Column) else None
-                tables = {scope.get(qualifier, qualifier)} if qualifier else direct
+                # An unquoted `O.*` may name `o` or `O`; every alias it could bind to counts.
+                hits = ([qualifier] if qualifier in scope else
+                        [k for k in scope if _tkey(k) == _tkey(qualifier)]) if qualifier else []
+                tables = ({scope[k] for k in hits} or {qualifier}) if qualifier else direct
                 for tbl in tables:
-                    for c in sorted(by_table.get(tbl, set())):
-                        offending.add(f"{tbl}.{c}")
+                    offending.update(sensitive.get(_tkey(tbl), {}).values())
 
     return sorted(offending)
 
@@ -1302,6 +1514,14 @@ def _same_identifier(a: tuple[bool, str], b: tuple[bool, str]) -> bool:
 def _cte_references(tree: "exp.Expression") -> set[int]:
     """The `exp.Table` nodes (by id) that name a CTE VISIBLE where they are written.
 
+    The ids of `_cte_bindings`, for the gates that only ask whether a reference is a CTE.
+    """
+    return set(_cte_bindings(tree))
+
+
+def _cte_bindings(tree: "exp.Expression") -> "dict[int, exp.CTE]":
+    """Each `exp.Table` node (by id) that names a CTE VISIBLE where it is written -> that CTE.
+
     The scope gates used to skip every table whose name ANY WITH bound, anywhere in the statement,
     which let a physical table through: an inner `WITH secret AS (…)` inside an EXISTS hid the outer
     `FROM secret`; a CTE body naming a sibling defined after it read the physical table; so did a
@@ -1318,8 +1538,8 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
     this walk does not understand is checked as a table. Iterative, because a caller controls the
     tree depth and a long `AND` chain already exceeds the recursion limit.
     """
-    bound: set[int] = set()
-    stack: list[tuple[object, tuple[tuple[bool, str], ...]]] = [(tree, ())]
+    bound: dict[int, exp.CTE] = {}
+    stack: list[tuple[object, tuple[tuple[tuple[bool, str], exp.CTE], ...]]] = [(tree, ())]
 
     def push_children(node: "exp.Expression", visible: tuple, skip: tuple[str, ...]) -> None:
         for key, value in node.args.items():
@@ -1333,8 +1553,11 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
         node, visible = stack.pop()
         if isinstance(node, exp.Table) and not node.db:
             key = _identifier_key(node.this)
-            if key is not None and any(_same_identifier(key, v) for v in visible):
-                bound.add(id(node))
+            # Innermost first: a nested WITH's name shadows an enclosing one's.
+            cte = next((c for v, c in reversed(visible) if key is not None
+                        and _same_identifier(key, v)), None)
+            if cte is not None:
+                bound[id(node)] = cte
         # sqlglot renamed the arg from `with` to `with_`; read both.
         with_ = node.args.get("with_") or node.args.get("with")
         inner = visible
@@ -1350,13 +1573,13 @@ def _cte_references(tree: "exp.Expression") -> set[int]:
                     # self-reference in B as the physical table, so everything left of it, and the
                     # union's own modifiers, is checked as the anchor.
                     push_children(cte, inner, ("this",))
-                    stack.append((body.expression, inner + (name,)))
+                    stack.append((body.expression, inner + ((name, cte),)))
                     stack.append((body.this, inner))
                     push_children(body, inner, ("this", "expression"))
                 else:
                     stack.append((cte, inner))
                 if name is not None:
-                    inner = inner + (name,)
+                    inner = inner + ((name, cte),)
         push_children(node, inner, ("with_", "with"))
     return bound
 
@@ -1371,29 +1594,98 @@ def _schema_index(org: Datasource) -> dict[str, dict[Optional[str], set[str]]]:
     idx: dict[str, dict[Optional[str], set[str]]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            by_schema = idx.setdefault(_tkey(t.name), {})
-            by_schema.setdefault(_tkey(t.schema_name) or None, set()).update(
+            # A schema embedded in the name (`public.orders`) is the table's schema, as everywhere
+            # else that reads a table's identity (#258); keyed whole, no reference could reach it.
+            schema, bare = stored_identity(t.name, t.schema_name)
+            by_schema = idx.setdefault(_tkey(bare), {})
+            by_schema.setdefault(_tkey(schema) or None, set()).update(
                 _tkey(c.name) for c in t.columns)
     return idx
 
 
+def _table_decls(org: Datasource) -> "dict[tuple, list[Table]]":
+    """`_schema_index`'s (schema, name) key -> the tables declared under it, with the spellings and
+    the folded index does not keep: what `_resolve_table` checks a reference's case against (#337)."""
+    decls: dict[tuple, list[Table]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, bare = stored_identity(t.name, t.schema_name)
+            decls.setdefault((_tkey(schema) or None, _tkey(bare)), []).append(t)
+    return decls
+
+
+# Engines where a quoted identifier is case-sensitive: Postgres (and Supabase, which parses as it),
+# Snowflake and Oracle. Elsewhere a quoted name matches without regard to case, as the engine
+# resolves it: Redshift folds quoted names by default, and DuckDB, SQL Server, SQLite, Databricks,
+# Trino and BigQuery datasets match them case-insensitively, so the folded comparison the index
+# already makes is the engine's own.
+_QUOTED_EXACT = frozenset({"postgres", "snowflake", "oracle"})
+
+# Engines where a table or database name is case-sensitive whether or not it is quoted. MySQL on
+# Linux, its default (`lower_case_table_names=0`), keeps the case a table was created with and
+# compares it exactly, so `shop.Orders` and `shop.orders` are two tables; backticks change nothing.
+# A server that folds (`lower_case_table_names` 1 or 2) would resolve another case too, and refusing
+# it there is the fail-closed cost: the declared spelling works on every setting.
+_EXACT_NAMES = frozenset({"mysql"})
+
+
+def _part_names(ident: "exp.Expression", declared: str, dialect: "str | None") -> bool:
+    """Whether a written identifier part names the declared one in the case the engine compares.
+
+    On `_EXACT_NAMES` engines the written name must be the declared one. On `_QUOTED_EXACT` engines
+    a quoted part must be the declared spelling exactly: `"orders"` and `"ORDERS"` are two tables on
+    Snowflake, and accepting either for one declaration would let the other through. An unquoted
+    part was already matched folded, and folding is right for it.
+    """
+    strict = dialect in _EXACT_NAMES or (dialect in _QUOTED_EXACT and ident.args.get("quoted"))
+    return not strict or ident.name == declared
+
+
+def _names_declared(tbl: "exp.Table", t: Table, dialect: "str | None") -> bool:
+    """Whether reference `tbl` names declared table `t` in the case the engine compares, beyond the
+    folded (schema, name) match the index already made (#337)."""
+    schema, bare = stored_identity(t.name, t.schema_name)
+    if not _part_names(tbl.this, bare, dialect):
+        return False
+    return tbl.args.get("db") is None or not schema or _part_names(tbl.args["db"], schema, dialect)
+
+
 def _resolve_table(sidx: dict[str, dict[Optional[str], set[str]]],
-                   tbl: "exp.Table") -> "tuple[Optional[str], str] | str | None":
-    """The declared (schema, name) a physical reference reads, `"ambiguous"`, or None if undeclared.
+                   tbl: "exp.Table", decls: "dict[tuple, list[Table]] | None" = None,
+                   dialect: "str | None" = None) -> "tuple[Optional[str], str] | str | None":
+    """The declared (schema, name) a physical reference reads, `"ambiguous"`, `"default_schema"`,
+    or None if undeclared.
 
     Qualified: only a table declared with that schema — not one declared with no schema, since the
     model never said which schema that one lives in. Unqualified: the name must be declared under
     exactly one schema; under two or more, which table the engine reads depends on a search path
-    the guard cannot see. Only `db` counts: the model records no catalog.
+    the guard cannot see.
+
+    With `decls`, a name must also match the declared table in the case the engine compares
+    (#337): `"Orders"` is not `orders` on Postgres, nor `Orders` on MySQL. A model's tables live in
+    the connection's own database, so a catalog part is the connection's to judge, which
+    `check_catalog_scope` does once credentials are known. A four-part name reads through a linked
+    server or another catalog's schema, and never names a declared table. `db..table` reads the
+    default schema of the connecting user, which the guard cannot see: `"default_schema"`.
     """
+    if isinstance(tbl.this, exp.Dot):
+        return None
+    if _default_schema(tbl):
+        return "default_schema"
     name = _tkey(tbl.name)
     by_schema = sidx.get(name, {})
     if tbl.db:
         schema = _tkey(tbl.db)
-        return (schema, name) if schema in by_schema else None
-    if len(by_schema) > 1:
+        found: "tuple[Optional[str], str] | str | None" = (
+            (schema, name) if schema in by_schema else None)
+    elif len(by_schema) > 1:
         return "ambiguous"
-    return (next(iter(by_schema)), name) if by_schema else None
+    else:
+        found = (next(iter(by_schema)), name) if by_schema else None
+    if decls is not None and isinstance(found, tuple):
+        if not any(_names_declared(tbl, t, dialect) for t in decls.get(found, [])):
+            return None
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -1462,21 +1754,27 @@ def check_table_scope(sql: str, org: Datasource,
 
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
             else _schema_index(org))
+    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
+             else _table_decls(org))
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     cte_refs = _cte_references(tree)
     offending: set[str] = set()
     ambiguous: dict[str, str] = {}  # folded name -> the caller's first spelling, for the echo
+    defaulted: set[str] = set()
     for tbl in tree.find_all(exp.Table):
         name = tbl.name
         if not name or id(tbl) in cte_refs:
             continue  # a CTE an enclosing WITH defines, not a physical table
-        resolved = _resolve_table(sidx, tbl)
+        resolved = _resolve_table(sidx, tbl, decls, dialect)
         if resolved is None:
             # The caller's own qualified spelling: echoing only `orders` for `staging.orders` would
             # read as nonsense beside a declared `sales_data.orders`.
-            offending.add(f"{tbl.db}.{name}" if tbl.db else name)
+            offending.add(_written(tbl))
         elif resolved == "ambiguous":
             ambiguous.setdefault(_tkey(name), name)
-    if not offending and not ambiguous:
+        elif resolved == "default_schema":
+            defaulted.add(_written(tbl))
+    if not offending and not ambiguous and not defaulted:
         return None
 
     # Echo-only by construction: static prose plus the table names the CALLER put in its own
@@ -1496,10 +1794,61 @@ def check_table_scope(sql: str, org: Datasource,
                        "schema, so which one is meant cannot be decided: "
                        + _echo_identifiers(sorted(ambiguous.values())) + ".")
         remediations.append("Qualify each of those tables with its schema (schema.table).")
+    if defaulted:
+        details.append("query leaves the schema empty (database..table), so which schema is read "
+                       "depends on the connecting user's default: "
+                       + _echo_identifiers(sorted(defaulted)) + ".")
+        remediations.append("Write the schema between the dots, or drop the database "
+                            "(schema.table).")
     return guardrail.refuse(
         guardrail.RULE_TABLE_SCOPE,
         detail=" ".join(details),
         remediation=" ".join(remediations),
+    )
+
+
+def check_catalog_scope(sql: str, org: Datasource,
+                        connection_catalog: "str | None") -> "guardrail.Refusal | None":
+    """Refuse a reference qualified with a catalog (database / project) other than the connection's
+    (#337). A model's tables live in the connection's own database, so no other catalog holds them.
+
+    The table-scope gate matches `catalog.schema.table` on its schema and name, and on Snowflake,
+    BigQuery, SQL Server, DuckDB, Databricks and Trino one connection reaches other catalogs: a
+    reference naming another one reads a different table that only shares the declared one's schema
+    and name. Credentials say which catalog the connection is in, and they are loaded after the
+    gates, so this runs once they are. Unknown (`connection_catalog` None) refuses: the reference
+    could be naming any catalog, and dropping the qualifier is always a working rewrite.
+
+    Echo-only, like the table-scope refusal: the connection's catalog is never named.
+    """
+    if not _HAVE_SQLGLOT or sql.count(".") < 2:
+        return None
+    dialect = _dialect_of(org)[0]
+    tree = _parse_sql(sql, dialect)
+    if tree is None:
+        return None
+    sidx, decls = _schema_index(org), _table_decls(org)
+    cte_refs = _cte_references(tree)
+    offending: set[str] = set()
+    for tbl in tree.find_all(exp.Table):
+        written = tbl.args.get("catalog")
+        if written is None or not tbl.name or id(tbl) in cte_refs:
+            continue
+        resolved = _resolve_table(sidx, tbl, decls, dialect)
+        if not isinstance(resolved, tuple):
+            continue  # undeclared or ambiguous: the table-scope gate's to refuse
+        if (connection_catalog is None or _tkey(written.name) != _tkey(connection_catalog)
+                or not _part_names(written, connection_catalog, dialect)):
+            offending.add(_written(tbl))
+    if not offending:
+        return None
+    return guardrail.refuse(
+        guardrail.RULE_TABLE_SCOPE,
+        detail="query references table(s) in a database other than the connection's: "
+               + _echo_identifiers(sorted(offending))
+               + " — a declared table is read in the connection's own database.",
+        remediation="Drop the database / project qualifier and write schema.table, or qualify the "
+                    "table with the database the connection is configured for.",
     )
 
 
@@ -1612,15 +1961,20 @@ def check_column_scope(sql: str, org: Datasource,
     parse, tracked in `tests/test_parse_fidelity_gaps.py` and owned by the fail-closed work.
 
     Strict where a column visibly binds to a declared physical table — qualified by
-    that table (or its alias), or the single in-scope declared table for a bare
-    column; fail-open where the column comes from a CTE/subquery output or a
-    select-list alias we can't attribute to a physical table. This mirrors the
-    table-scope and fan/chasm gates' degrade-to-allow posture, so legitimate complex
-    SQL never false-refuses, while the common hallucinated-column case (including
-    columns inside a CTE/subquery body, which bind directly to their physical table)
-    is still caught. Matching is case-insensitive (unquoted identifiers fold case),
-    consistent with `check_table_scope`. Runs AFTER the table-scope + star gates, so
-    every physical table in scope is known-declared and no `*` remains.
+    that table (or its alias), or unqualified in a scope that reads one. An unqualified
+    column passes when a table it reads declares it or a CTE / derived source there
+    names it in its projection; otherwise, if that scope reads a declared table, it is
+    refused, since the table's undeclared physical columns are what the engine would
+    bind (#339). A scope with no source supplying it defers to the enclosing query, as a
+    correlated reference does. A name a USING / NATURAL join merges is the physical side's,
+    and the join's compared names are checked against its own operands. Fail-open stays only
+    where no declared table is in reach: a column qualified by a CTE/derived alias (judged in
+    that source's body), or a select-list alias where the engine reads the alias (a whole
+    ORDER BY or GROUP BY item, or a window alias in QUALIFY; see `_reads_output_alias`).
+    NATURAL between two declared tables compares whatever columns they share physically,
+    which the model cannot see, so it stays allowed. Matching is case-insensitive (unquoted
+    identifiers fold case), consistent with `check_table_scope`. Runs AFTER the table-scope
+    + star gates, so every physical table in scope is known-declared and no `*` remains.
 
     Degrades to allow when sqlglot is unavailable, the SQL doesn't parse, it is not
     a SELECT, or the model declares no columns.
@@ -1635,20 +1989,22 @@ def check_column_scope(sql: str, org: Datasource,
     colidx = ctx.column_index if ctx is not None else _column_index(org)
     if not colidx:
         return None
-    if ctx is not None:
-        tree = ctx.tree
-    else:
-        tree = _parse_sql(sql, _dialect_of(org)[0])
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
+    tree = ctx.tree if ctx is not None else _parse_sql(sql, dialect)
     if tree is None or tree.find(exp.Select) is None:
         return None
 
+    # The table-scope resolver, so a reference that gate refuses never binds a column here either.
+    decls = (ctx.table_decls if ctx is not None and ctx.table_decls is not None
+             else _table_decls(org))
+    dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     # Keyed by (schema, name) rather than bare name: `_column_index` unions every same-named table's
     # columns, so a column only `staging.orders` declares passed on a read of `sales_data.orders`.
     sidx = (ctx.schema_index if ctx is not None and ctx.schema_index is not None
             else _schema_index(org))
     declared = {(schema, name): cols for name, by_schema in sidx.items()
                 for schema, cols in by_schema.items()}
-    cte_refs = _cte_references(tree)
+    cte_refs = _cte_bindings(tree)
 
     def _select_chain(node):
         """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
@@ -1666,13 +2022,13 @@ def check_column_scope(sql: str, org: Datasource,
     # would let an inner alias validate an outer column against the wrong table, or an
     # inner `AS x` mask an unrelated outer column `x`. For each select we track the
     # physical tables it reads directly (alias -> bare table), its output aliases, and
-    # whether it reads from a CTE ref / derived subquery (→ a bare column we can't
-    # match may be that source's output, so fail-open).
+    # the columns its CTE / derived / table-function sources name (#339).
     # An unresolvable physical table (undeclared or ambiguous — table scope refuses it) binds its
     # alias to False, so the qualifier is known to be a physical table rather than a CTE alias.
     alias_by_select: dict[int, dict[str, Any]] = {}  # id(select) -> {alias -> (schema, name) | False}
+    binding_of: dict[int, Any] = {}                  # id(physical Table node) -> its alias binding
     direct_phys: dict[int, set[tuple]] = {}          # id(select) -> {(schema, name) read directly}
-    has_derived: dict[int, bool] = {}                # id(select) -> reads a CTE ref / derived subquery directly
+    source_cols: dict[int, set[str]] = {}            # id(select) -> {column a non-physical source names}
     output_by_select: dict[int, set[str]] = {}       # id(select) -> {select-list output alias}
     for tbl in tree.find_all(exp.Table):
         name = (tbl.name or "").lower()
@@ -1680,37 +2036,115 @@ def check_column_scope(sql: str, org: Datasource,
             continue
         sel = _enclosing_select(tbl)
         if id(tbl) in cte_refs:
-            if sel is not None:
-                has_derived[id(sel)] = True  # `FROM <cte>` is a derived source for this select
             continue
         if sel is not None:
-            resolved = _resolve_table(sidx, tbl)
+            resolved = _resolve_table(sidx, tbl, decls, dialect)
             binding = resolved if isinstance(resolved, tuple) else False
+            if binding:
+                # Case alone can tell two declarations apart (`sales."Orders"` vs `sales.orders` on
+                # Postgres). The folded index unions their columns, so bind the reference to the
+                # columns of the declarations it actually names.
+                named = [t for t in decls.get(binding, []) if _names_declared(tbl, t, dialect)]
+                if named and len(named) < len(decls.get(binding, [])):
+                    exact = binding + (frozenset(id(t) for t in named),)
+                    declared[exact] = {_tkey(c.name) for t in named for c in t.columns}
+                    binding = exact
             aliases = alias_by_select.setdefault(id(sel), {})
             aliases[tbl.alias_or_name.lower()] = binding
             if tbl.db and not tbl.alias:
                 # `sales_data.orders.amount` beside `staging.orders` in one FROM: both register
                 # under `orders`, last wins, so also register the qualified spelling.
                 aliases[f"{tbl.db}.{name}".lower()] = binding
+            binding_of[id(tbl)] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
-    for sq in tree.find_all(exp.Subquery):
-        # a derived table in FROM/JOIN (NOT a WHERE/scalar subquery, which adds no columns to its select)
-        if isinstance(sq.parent, (exp.From, exp.Join)):
-            sel = _enclosing_select(sq)
-            if sel is not None:
-                has_derived[id(sel)] = True
-    for al in tree.find_all(exp.Alias):
-        if not al.alias:
-            continue
-        sel = _enclosing_select(al)
-        if sel is not None:
-            output_by_select.setdefault(id(sel), set()).add(al.alias.lower())
-
     offending: set[str] = set()
     # The declared tables each offending column was judged against — what the refusal may list. Only
     # tables the statement itself reads: never the rest of the model (see `_declared_listing`).
     judged: dict[str, set[tuple]] = {}
+    # Refused in a scope that also reads a CTE / derived source: the column may be one that source
+    # returns without a name the gate can read, which qualifying it says.
+    beside_source: set[str] = set()
+    # Refused where it names one of the select's own output aliases: the engine reads the input
+    # column of that name there, so the repair is the alias's expression, not the model.
+    alias_named: set[str] = set()
+    # A USING or NATURAL join compares names without a column reference, and merges them: the
+    # result is the physical side's value, or COALESCE of both, so a source naming it does not make
+    # it the source's. Each join is judged on its own operands, everything left of it and the item
+    # it joins, so a third table is not held to a key it never joins on.
+    merged_by_select: dict[int, set[str]] = {}
+
+    def declares(leaf: tuple, key: str) -> bool:
+        ph, names = leaf
+        return ((isinstance(ph, tuple) and ph in declared and key.lower() in declared[ph])
+                or (names is not None and key in names))
+
+    def tables_of(leaves: list) -> list[tuple]:
+        return [ph for ph, _ in leaves if isinstance(ph, tuple) and ph in declared]
+
+    def judge_joins(sel: "exp.Select", joins: list, groups: list) -> None:
+        # `groups` is the leaves of the first item then of one per join: join k joins groups[k + 1]
+        # to groups[:k + 1].
+        for k, j in enumerate(joins):
+            left = [leaf for g in groups[:k + 1] for leaf in g]
+            right = groups[k + 1]
+            for key in filter(None, (_column_key(u, dialect) for u in j.args.get("using") or [])):
+                merged_by_select.setdefault(id(sel), set()).add(key)
+                left_ok = any(declares(leaf, key) for leaf in left)
+                right_ok = any(declares(leaf, key) for leaf in right) or not tables_of(right)
+                if not (left_ok and right_ok):
+                    offending.add(key)
+                    judged.setdefault(key, set()).update(tables_of(left + right))
+            if str(j.args.get("method") or "").upper() == "NATURAL":
+                operands = left + right
+                compared = set().union(*(names for _, names in operands if names is not None))
+                merged_by_select.setdefault(id(sel), set()).update(compared)
+                tables = tables_of(operands)
+                for key in sorted(compared):
+                    if tables and not all(key.lower() in declared[t] for t in tables):
+                        offending.add(key)
+                        judged.setdefault(key, set()).update(tables)
+
+    def leaves_of(sel: "exp.Select", src: "exp.Expression") -> list[tuple]:
+        """One FROM / JOIN item as (declared table read or None, names supplied or None) leaves.
+
+        A parenthesised join is one item whose leaves are its own items, its joins judged as the
+        select's are. Its alias (`(...) AS w`) is registered so `w.col` is judged on those leaves.
+        """
+        wrappers, inner = _parens(src)
+        if not (wrappers and inner.args.get("joins")):
+            names = _source_column_names(src, cte_refs, dialect)
+            leaves = [(binding_of.get(id(inner)) if names is None else None, names)]
+            if names is None and id(inner) in binding_of:
+                for w in wrappers:  # `(customers) AS x`: x is that table
+                    if w.alias:
+                        alias_by_select.setdefault(id(sel), {})[w.alias.lower()] = binding_of[id(inner)]
+            return leaves
+        joins = inner.args["joins"]
+        groups = [leaves_of(sel, inner)] + [leaves_of(sel, j.this) for j in joins]
+        judge_joins(sel, joins, groups)
+        leaves = [leaf for g in groups for leaf in g]
+        # A column list renames the join's columns by position, physical ones included, so no
+        # name it gives is known to be a source's.
+        if any(isinstance(w.args.get("alias"), exp.TableAlias) and w.args["alias"].columns
+               for w in wrappers):
+            leaves = [(ph, None) for ph, _ in leaves]
+        for w in wrappers:
+            if w.alias:
+                alias_by_select.setdefault(id(sel), {})[w.alias.lower()] = _JoinAlias(leaves)
+        return leaves
+
+    for sel in tree.find_all(exp.Select):
+        groups = [leaves_of(sel, src) for src in _from_sources(sel)]
+        judge_joins(sel, sel.args.get("joins") or [], groups)
+        for _, names in (leaf for g in groups for leaf in g):
+            if names is not None:
+                source_cols.setdefault(id(sel), set()).update(names)
+        # Top-level aliases only: one inside a function argument (`XMLFOREST(id AS x)`) names
+        # nothing the select returns.
+        output_by_select[id(sel)] = {e.alias.lower() for e in sel.expressions
+                                     if isinstance(e, exp.Alias) and e.alias}
+
     for col in tree.find_all(exp.Column):
         name = col.name
         if not name:
@@ -1732,23 +2166,44 @@ def check_column_scope(sql: str, org: Datasource,
                     break
             if phys is None:
                 continue  # qualified by a CTE/derived alias — validated at its own source
+            if isinstance(phys, _JoinAlias):
+                ckey = _column_key(col.this, dialect)
+                if not (ckey and any(declares(leaf, ckey) for leaf in phys.leaves)):
+                    tables = tables_of(phys.leaves)
+                    if tables:  # the engine reads `col` from one of these tables
+                        offending.add(name)
+                        judged.setdefault(name, set()).update(tables)
+                continue
             if phys and lname not in declared[phys]:
                 # Bare `table.column`: the schema half is the model's to know, not the echo's.
                 offending.add(f"{phys[1]}.{name}")
                 judged.setdefault(f"{phys[1]}.{name}", set()).add(phys)
             continue
-        # unqualified: judge against the tables its own SELECT reads directly
-        if sel is not None and lname in output_by_select.get(id(sel), set()):
+        # Unqualified: bound where the engine binds it — the innermost scope with a source that
+        # supplies the name, then outward through correlation. It is refused at the first scope
+        # with a declared table that could supply it instead: that table's physical columns are
+        # not known, so an undeclared one of that name would be read (#339).
+        scopes = _column_scopes(col, dialect)
+        if (scopes and lname in output_by_select.get(id(scopes[0]), set())
+                and _reads_output_alias(col, scopes[0], dialect)):
             continue  # a select-list output alias of THIS select, not a base column
-        local = {t for t in direct_phys.get(id(sel), set()) if t in declared} if sel is not None else set()
-        if any(lname in declared[t] for t in local):
-            continue  # declared on a table this select reads (possibly ambiguous — don't false-reject)
-        if sel is not None and has_derived.get(id(sel), False):
-            continue  # fail-open: may be an output column of this select's CTE/derived source
-        if not local:
-            continue  # no declared physical table in this scope to judge against — fail-open
-        offending.add(name)
-        judged.setdefault(name, set()).update(local)
+        ckey = _column_key(col.this, dialect)
+        for s in scopes:
+            local = {t for t in direct_phys.get(id(s), set()) if t in declared}
+            # A merged name is the physical side's only where a table is in this scope; between
+            # CTEs and subqueries alone it is theirs.
+            supplied = (ckey in source_cols.get(id(s), set())
+                        and (not local or ckey not in merged_by_select.get(id(s), set())))
+            if any(lname in declared[t] for t in local) or supplied:
+                break  # declared, or named by a CTE / derived source (possibly ambiguous — the DB's call)
+            if local:
+                offending.add(name)
+                judged.setdefault(name, set()).update(local)
+                if id(s) in source_cols:
+                    beside_source.add(name)
+                if lname in output_by_select.get(id(scopes[0]), set()):
+                    alias_named.add(name)
+                break
 
     if not offending:
         return None
@@ -1768,6 +2223,11 @@ def check_column_scope(sql: str, org: Datasource,
         detail="query references column(s) not in the semantic model: " + _echo_identifiers(cols)
                + " — only columns declared on the model's tables may be queried.",
         remediation=_declared_listing(org, cols, judged)
+                    + ("A select-list alias is read as itself only as a whole ORDER BY or GROUP BY "
+                       "item; elsewhere write its expression out (HAVING SUM(amount) > 1000, not "
+                       "HAVING revenue > 1000). " if alias_named else "")
+                    + ("If a column comes from a CTE or subquery, give it a name there (AS ...) "
+                       "or qualify it with that source's alias. " if beside_source else "")
                     + "Add the column to the model (agami-connect / '/agami-model'), "
                     "or remove it from the query.",
     )
@@ -1804,15 +2264,16 @@ def _declared_listing(org: Datasource, offending: list[str],
     seen: dict[tuple, set[str]] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            key = (_tkey(t.schema_name) or None, _tkey(t.name))
-            if key not in keys:
-                continue
-            names.setdefault(key, t.name)
-            have, had = columns.setdefault(key, []), seen.setdefault(key, set())
-            for c in _visible_columns(t, _exposed_groups_for(sa, t.name)):
-                if _tkey(c.name) not in had:
-                    had.add(_tkey(c.name))
-                    have.append(c.name)
+            schema, bare = stored_identity(t.name, t.schema_name)
+            base = (_tkey(schema) or None, _tkey(bare))
+            # A key carrying table ids names only those declarations: case told them apart.
+            for key in (k for k in keys if k[:2] == base and (len(k) == 2 or id(t) in k[2])):
+                names.setdefault(key, t.name)
+                have, had = columns.setdefault(key, []), seen.setdefault(key, set())
+                for c in _visible_columns(t, _exposed_groups_for(sa, t)):
+                    if _tkey(c.name) not in had:
+                        had.add(_tkey(c.name))
+                        have.append(c.name)
     ordered = sorted(columns, key=lambda k: (names[k].lower(), k[0] or ""))
     listed = ordered[:_LIST_MAX_TABLES]
     bare_count: dict[str, int] = {}
@@ -1851,6 +2312,19 @@ def _cardinality_index(org: Datasource) -> list[Relationship]:
         rels.extend(sa.relationships)
     rels.extend(org.cross_subject_area_relationships)
     return rels
+
+
+def _folded_rel(rel: Relationship) -> Relationship:
+    """A COPY of `rel` with its two table names in `_tkey` spelling, for the detectors' comparisons.
+
+    Copied because the relationship belongs to the model, which every other analysis in the receipt
+    still reads as declared. An edge already in that spelling is returned as is, because this runs
+    per SELECT and per set-operation arm and the common, lowercase model would otherwise pay a copy
+    of every edge each time."""
+    folded_from, folded_to = _tkey(rel.from_table), _tkey(rel.to_table)
+    if folded_from == rel.from_table and folded_to == rel.to_table:
+        return rel
+    return rel.model_copy(update={"from_table": folded_from, "to_table": folded_to})
 
 
 def _one_side_facing_many(rels: list[Relationship], table: str, others: set[str]) -> list[Relationship]:
@@ -1917,7 +2391,9 @@ def pre_flight_check(sql: str, org: Datasource,
 def _aggregate_reports(tree, org: Datasource,
                        ctx: "GuardContext | None" = None,
                        *, visible: Optional[set[str]] = None,
-                       tidx: Optional[dict[str, tuple]] = None) -> list[AggregateReport]:
+                       tidx: Optional[dict[str, tuple]] = None,
+                       join_statuses: "tuple[list[tuple[str, str, str]], int] | None" = None,
+                       ) -> list[AggregateReport]:
     """The analysis half, on an already-parsed tree: one report per aggregate the statement outputs.
 
     This was `_collect_findings`, which returned the flat finding list this is now a projection of.
@@ -1961,7 +2437,115 @@ def _aggregate_reports(tree, org: Datasource,
                 sel, org, ctx=ctx,
                 scope="main" + suffixes.get(id(sel), ""), visible=visible, tidx=tidx,
             ))
-    return reports
+    if join_statuses is None and reports:
+        # The pre-flight path (`sm prepare`) holds no joins section, so it settles the joins here —
+        # the same ladder the receipt runs — rather than claim numbers clean it never weighed.
+        sites, written = _join_sites(tree, visible, _RECEIPT_MAX_REFS)
+        declared = ([(rel, _declared_pairs(rel, _dialect_of(org)[0])) for rel in _cardinality_index(org)]
+                    if sites else [])
+        weighed = _weighed_statuses(sites, [_join_site_status(js, declared) for js in sites], tidx, org)
+        join_statuses = ([(js.scope, status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                          for js, status in zip(sites, weighed)], written - len(sites))
+    return _downgrade_unweighed(reports, *join_statuses) if join_statuses else reports
+
+
+_UNWEIGHED_REASON = "a join's cardinality isn't established, so it may repeat rows: "
+# What an undeclared join reports to `_downgrade_unweighed` when the model's own keys settle it.
+_KEYED_ONE_TO_ONE = "keyed_one_to_one"
+
+
+def _names_in_several_schemas(org: Datasource) -> set[str]:
+    """Bare table names (folded) that the model defines in more than one schema."""
+    seen: dict[str, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            schema, name = _table_key(t.name, t.schema_name)
+            seen.setdefault(name, set()).add(schema)
+    return {name for name, schemas in seen.items() if len(schemas) > 1}
+
+
+def _weighed_statuses(sites: "list[_JoinSite]", results: "list[tuple[str, Optional[Relationship]]]",
+                      tidx: dict[str, tuple], org: Datasource) -> list[str]:
+    """Each join's status, an undeclared one reported `_KEYED_ONE_TO_ONE` when its columns are the
+    whole of a key on both sides and no other join that can feed the same numbers could fan. A fan
+    further along could repeat rows through the keyed join, and following it is #595's to do."""
+    several = _names_in_several_schemas(org) if sites else set()
+    keyed = [status == UNDECLARED and _keyed_one_to_one(js, tidx, several)
+             for js, (status, _match) in zip(sites, results)]
+    out = []
+    for i, (js, (status, _match)) in enumerate(zip(sites, results)):
+        others = [j for j, other in enumerate(sites) if j != i and (
+            other.scope == js.scope or other.scope.startswith("cte:") or js.scope.startswith("cte:"))]
+        if keyed[i] and all(keyed[j] or (results[j][0] == DECLARED and results[j][1] is not None
+                                         and results[j][1].relationship == "one_to_one")
+                            for j in others):
+            out.append(_KEYED_ONE_TO_ONE)
+        else:
+            out.append(status)
+    return out
+
+
+def _keyed_one_to_one(js: "_JoinSite", tidx: dict[str, tuple], several: set[str]) -> bool:
+    """Whether the join's columns are the whole of a key on both sides, so one row meets at most one."""
+    if not js.pairs or not isinstance(js.node.this, exp.Table):
+        return False
+    # The pairs carry base-table names, so every equality must be on this join's own right-hand
+    # alias: `JOIN b b2 ON a.code = b1.code` constrains nothing about b2.
+    right = js.node.this.alias_or_name
+    for conj in _and_conjuncts(js.node.args.get("on")):
+        if (isinstance(conj, exp.EQ) and isinstance(conj.this, exp.Column)
+                and isinstance(conj.expression, exp.Column) and conj.this.table and conj.expression.table
+                and [conj.this.table, conj.expression.table].count(right) != 1):
+            return False
+    cols: dict[str, list[str]] = {}
+    for pair in js.pairs:
+        # `a.x = a.y` compares a table with itself and constrains nothing between the two.
+        if len(pair) != 2 or len({key for key, _ in pair}) != 2:
+            return False
+        for table_key, column in pair:
+            cols.setdefault(table_key, []).append(column)
+    if len(cols) != 2 or set(cols) & several:
+        # The pairs carry bare names, and a name two schemas define could borrow the other's key.
+        return False
+    # A table read twice in this SELECT leaves the pairs unable to say which instance each one is.
+    reads = [_tkey(tbl.name) for tbl in _own_table_refs(_enclosing_select(js.node))]
+    if any(reads.count(table_key) > 1 for table_key in cols):
+        return False
+    for table_key, columns in cols.items():
+        hit = tidx.get(table_key)
+        if hit is None or not hit[0].unique_on(columns):
+            return False
+    return True
+
+
+def _downgrade_unweighed(reports: list[AggregateReport], joins: list[tuple[str, str, str]],
+                         dropped: int) -> list[AggregateReport]:
+    """`not_multiplied` is a positive claim that no join repeated the rows behind a number, and the
+    fan detector can only make it about joins whose cardinality it knows. A join no declaration
+    settled — `undetermined` or `undeclared` — or one past the cap, is a join it never weighed, so a
+    number it could reach says it could not tell, naming the joins: the rule `_multiplication_status`
+    states per aggregate.
+
+    Only joins that can feed the number count: its own query branch, or a CTE (which any branch may
+    read). A join in another UNION arm, or inside a `WHERE ... IN (subquery)`, can't repeat its rows.
+    The one exception is a join past the receipt's cap: it is never read — that is what the cap is
+    for, since a caller can write any number of joins — so its branch is unknown, and every number is
+    downgraded rather than one cleared that the uncounted join might feed."""
+    out = []
+    for r in reports:
+        if r.status != NOT_MULTIPLIED:
+            out.append(r)
+            continue
+        unweighed = [label for scope, status, label in joins
+                     if status in (UNDETERMINED, UNDECLARED)
+                     and (scope == r.scope or scope.startswith("cte:"))]
+        if not unweighed and not dropped:
+            out.append(r)
+            continue
+        why = _UNWEIGHED_REASON + (
+            ", ".join(unweighed) if unweighed else f"{dropped} join(s) past the receipt's cap")
+        out.append(replace(r, status=UNDETERMINED, reason=why))
+    return out
 
 
 # The risks that are statements about the ROWS an aggregate was computed from, and therefore the
@@ -2026,16 +2610,52 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
         # in the battery and across every arm of a set operation; appending a statement-derived
         # edge to it would leak this query's CTE into the next one's analysis.
         rels = rels + cte_rels
+    # Every table-name comparison below is a plain string comparison, and a statement and a model
+    # can spell one table two ways: `FROM ORDERS` against a model that says `orders`, or a model
+    # introspected from an engine that hands names back uppercase against a statement written in
+    # lowercase. Compared as written, the fan detector found no edge and the receipt reported a
+    # multiplied SUM as `not_multiplied` (#201). Folded ONCE, on both sides, with the same `_tkey`
+    # the scope gate and the table index use, so no fan/chasm comparison can disagree with another.
+    # The aggregation-class and semi-additivity checks keep the map AS WRITTEN. Their lookups match
+    # across case themselves (#453), exact name first, so a model declaring both `ORDERS` and
+    # `orders` still finds the one the statement named; a folded name would lose that.
+    written_scope = tables_in_scope
+    tables_in_scope = {alias: _tkey(t) for alias, t in tables_in_scope.items()}
+    rels = [_folded_rel(r) for r in rels]
     table_set = set(tables_in_scope.values())
+
+    def shown(table: str) -> str:
+        # Findings name a table as the model declares it, not in the folded spelling the
+        # comparisons above use (#453): `ORDERS`, not `orders`, on a model that says `ORDERS`. A name
+        # the model does not declare (a CTE, a derived table) is shown as it reached here.
+        hit = tidx.get(table)
+        return _echo_name(hit[0].name if hit else table)
+
     # Only the edges the statement's own joins could have traversed count below (ACE-133). The fan
     # and chasm detectors match a declared edge to a join by TABLE PAIR, and a model can declare two
     # edges between one pair: a subclass view joined to its base table on the key the model declares
     # one-to-one was reported as a fan trap because a sibling many-to-one between the same two
     # tables was also in the list, while the joins section of the same receipt, which reads the
     # written key, called the join one-to-one. The written key names the edge.
-    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0])
+    def columns_of(table: str) -> "set[str] | None":
+        hit = tidx.get(table)
+        return {c.name.lower() for c in hit[0].columns} if hit else None
+
+    declared_rels = rels
+    rels = _edges_as_written(rels, tree, tables_in_scope, _dialect_of(org)[0], columns_of)
+    # A join written on only part of a declared composite key repeats rows on BOTH sides, which the
+    # one-way fan rule below cannot say, so such an edge is taken out of it and reported on its own.
+    # Read against every declaration: which ones `_edges_as_written` kept depends on all the joins.
+    partial, unclear = _partial_key_joins(declared_rels, tree, tables_in_scope, _dialect_of(org)[0], columns_of)
+    if partial:
+        rels = [r for r in rels if id(r) not in partial]
 
     sites = _aggregate_sites(tree, tables_in_scope, scope, visible)
+    if unclear:
+        sites = [site._replace(resolved=False, unresolved_because=(
+            "a USING or NATURAL join may equate only part of a composite key, and which table one of "
+            "its columns comes from could not be told")) if site.resolved and site.sources & unclear else site
+            for site in sites]
     # The set the detectors read, derived from the sites rather than walked again — the two must
     # agree about which aggregates exist, and deriving is how that is guaranteed rather than hoped.
     agg_sources = {t for site in sites for t in site.sources}
@@ -2054,8 +2674,8 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 # a PAIR of tables into a report on each aggregate the cross-product inflates —
                 # the pair is not the unit a caller reads, the number is.
                 many_sources = {s for s in agg_sources if _many_side_facing_one(rels, s, shared)}
-                srcs = [_echo_name(s) for s in sorted(agg_sources)]
-                shared_echo = _echo_name(shared)
+                srcs = [shown(s) for s in sorted(agg_sources)]
+                shared_echo = shown(shared)
                 reason = (
                     f"chasm trap: independent measures from {srcs} both join shared "
                     f"dimension {shared_echo!r}; cross-product inflates both aggregates."
@@ -2084,7 +2704,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 _bare(r.from_table) if _bare(r.to_table) == measure_table else _bare(r.to_table)
                 for r in fan_rels
             }
-            measure = _echo_name(measure_table)
+            measure = shown(measure_table)
             for i, site in enumerate(sites):
                 if measure_table not in site.sources:
                     continue
@@ -2098,7 +2718,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                 inflating = [mt for mt in sorted(many_tables) if mt not in site.value_sources]
                 if not inflating:
                     continue
-                many = [_echo_name(mt) for mt in inflating]
+                many = [shown(mt) for mt in inflating]
                 # Two sentences about ONE fan, picked per aggregate. The edge is the same edge and
                 # the duplication is the same duplication; what differs is whether the number moved
                 # with it. The second states that and stops there — it names no fix, because under
@@ -2120,6 +2740,26 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
                     aggregate=site.aggregate,
                 ))
 
+        # PARTIAL KEY: either side's measure is repeated, since each row may match several.
+        for rel, written, needed in partial.values():
+            ends = {_bare(rel.from_table), _bare(rel.to_table)}
+            label = f"{shown(_bare(rel.from_table))} -> {shown(_bare(rel.to_table))}"
+            short = (f"joins {label} on {' AND '.join(written)} only; the declared join needs "
+                     f"{' AND '.join(needed)}, so each row can match several and rows repeat")
+            for i, site in enumerate(sites):
+                hit = sorted(site.sources & ends)
+                if not hit:
+                    continue
+                measure = shown(hit[0])
+                risk = "fan_out_invariant" if _is_fan_immune(site.node) else "fan_trap"
+                reason = (f"fan trap: aggregating {measure!r}, which {short}."
+                          if risk == "fan_trap" else
+                          f"fan out: {short}; this aggregate's value is unchanged by that duplication.")
+                attached[i].append(Finding(
+                    risk, reason=reason, triggering_joins=[f"{label} (partial key)"],
+                    aggregate=site.aggregate,
+                ))
+
     # The SEMANTIC checks the fan/chasm detector is blind to: aggregation-class violations and
     # semi-additive rollups over time. These need NO join, so cardinality analysis cannot see them.
     #
@@ -2132,7 +2772,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
     # Returned as (site index, finding) rather than as bare findings: these are the two checks that
     # already knew which aggregate they were about, and re-deriving that from the finding text
     # afterwards would be inventing an answer the check had in hand.
-    for i, finding in _check_aggregation_semantics(tree, sites, org, tables_in_scope, ctx=ctx):
+    for i, finding in _check_aggregation_semantics(tree, sites, org, written_scope, ctx=ctx):
         attached[i].append(finding)
 
     reports: list[AggregateReport] = []
@@ -2149,6 +2789,7 @@ def _preflight_select(tree: "exp.Select", org: Datasource,
             )),
             findings=findings,
             reason=site.unresolved_because if status == UNDETERMINED else None,
+            resolved=site.resolved,
         ))
     return reports
 
@@ -2364,7 +3005,7 @@ def _projection_sources(body: "exp.Expression") -> dict[str, str]:
 
 
 def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain: list[str],
-              grains: dict[str, set[str]], scope_map: dict[str, str],
+              tables: dict[str, Table], scope_map: dict[str, str],
               outputs: dict[str, str]) -> Optional[Relationship]:
     """The join edge between a grain-CHANGING CTE and the table it is joined to, or None.
 
@@ -2389,9 +3030,9 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
       (a comma join, or an edge written some way this does not read); more than one means a
       composite key, whose cardinality is not the single-column rule's to state.
     * the far side resolving to no table in scope.
-    * the far side's DECLARED GRAIN being empty. This guard sits BEFORE the call and that placement
-      is the point: `infer_cardinality` tests `bool(to_pk)`, so a table declared `grain: []` and a
-      table with no grain at all are indistinguishable to it and BOTH fall through to its
+    * the far side declaring NO KEY — an empty grain and no unique key. This guard sits BEFORE the
+      call and that placement is the point: a table declared `grain: []` and a table with no grain
+      at all are indistinguishable to `infer_cardinality`, and BOTH fall through to its
       `many_to_one` default. Calling it anyway would put a cardinality on the receipt that no one
       declared, which is worse than saying nothing.
 
@@ -2419,11 +3060,12 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         return None
     near, far = pairs[0]
     other = scope_map.get(far.table)
-    if not other or not grains.get(_tkey(other)):
+    far_table = tables.get(_tkey(other)) if other else None
+    if far_table is None or not (far_table.grain or far_table.unique_keys):
         return None
 
     # Every name that reaches `infer_cardinality` is folded, on BOTH sides of every comparison it
-    # makes. `grains` was folded by the caller, `grain` by `_group_by_grain`, and the join keys are
+    # makes. `Table.unique_on` folds the keys, `grain` by `_group_by_grain`, and the join keys are
     # folded here — the module's own convention, stated on `check_column_scope` as "matching is
     # case-insensitive", and the one this comparison was missing. The `Relationship` keeps the
     # WRITTEN spellings, because that is what the receipt echoes back to the caller.
@@ -2437,9 +3079,7 @@ def _cte_edge(conjuncts: list["exp.Expression"], alias: str, cte_key: str, grain
         from_table=cte_key, to_table=other,
         from_column=near.name, to_column=far.name,
         relationship=infer_cardinality(
-            _tkey(cte_key), _tkey(other), [near_key], [_tkey(far.name)],
-            {**grains, _tkey(cte_key): set(grain)},
-        ),
+            Table(name=cte_key, grain=list(grain)), far_table, [near_key], [_tkey(far.name)]),
     )
 
 
@@ -2494,13 +3134,11 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     matches nothing. So `WITH OI AS (…) … JOIN OI` derives an edge named `OI`, and the grain lookup
     that decides its cardinality folds on the way in.
     """
-    # Folded, because `Table.grain` comes from a catalog and the join keys come from the caller's
-    # SQL — Snowflake and Oracle hand back `ID` where the query writes `id`. Unfolded on either
-    # side, a declared `grain=["ID"]` matches no join key, `infer_cardinality` reads the CTE as
-    # non-unique and invents a fan the statement does not have. It also walks straight through the
-    # empty-grain guard above, since a case-mismatched grain is a non-empty one.
-    grains = {key: {_tkey(col) for col in table.grain or []}
-              for key, (table, _area) in tidx.items()}
+    # `infer_cardinality` compares keys case-folded (`Table.unique_on`), because `Table.grain` comes
+    # from a catalog and the join keys come from the caller's SQL — Snowflake and Oracle hand back
+    # `ID` where the query writes `id`. Unfolded, a declared `grain=["ID"]` matched no join key and
+    # the CTE was read as non-unique, inventing a fan the statement does not have.
+    tables = {key: table for key, (table, _area) in tidx.items()}
     conjuncts = [c for on in _all_join_predicates(sel) for c in _and_conjuncts(on)]
     resolved = dict(scope_map)
     # PASS ONE settles every grain-preserving rebinding, and nothing else. `_cte_edge` resolves the
@@ -2529,7 +3167,7 @@ def _resolve_cte_scope(sel: "exp.Select", bodies: dict[str, "exp.Expression"],
     for alias, written in pending:
         body = bodies[_tkey(written)]
         grain = _group_by_grain(body)
-        edge = _cte_edge(conjuncts, alias, written, grain, grains, settled,
+        edge = _cte_edge(conjuncts, alias, written, grain, tables, settled,
                          _projection_sources(body)) if grain else None
         if edge is None:
             resolved[alias] = ""
@@ -2576,17 +3214,62 @@ def _column_index(org: Datasource) -> dict[str, dict[str, Column]]:
     return idx
 
 
+def _ci_get(mapping: dict[str, Any], name: Optional[str], *, quoted: bool = False) -> Any:
+    """`mapping[name]`, matching the key the way SQL matches an identifier: exactly, else (for an
+    unquoted name) case-insensitively and only when that finds exactly one key. Two keys differing
+    only in case are ambiguous, and a guess would attach a finding to the wrong column; a quoted name
+    is case-sensitive, so it never falls back."""
+    if not name:
+        return None
+    if name in mapping:
+        return mapping[name]
+    if quoted:
+        return None
+    hits = [k for k in mapping if _tkey(k) == _tkey(name)]
+    return mapping[hits[0]] if len(hits) == 1 else None
+
+
+def _is_quoted(col: "exp.Column") -> bool:
+    ident = col.args.get("this")
+    return isinstance(ident, exp.Identifier) and bool(ident.args.get("quoted"))
+
+
+def _semi_metric(semi: dict[tuple[str, str], "Metric"], table: str, col: "exp.Column") -> Optional["Metric"]:
+    """The semi-additive metric summing `table.col`, matched like `_ci_get`: the declared pair
+    exactly, else (unquoted column) the one pair equal ignoring case. A quoted `"Balance"` beside a
+    declared `balance` is a different column and does not match (#453)."""
+    if (table, col.name) in semi:
+        return semi[(table, col.name)]
+    hits = [key for key in semi
+            if _tkey(key[0]) == _tkey(table)
+            and (key[1] == col.name if _is_quoted(col) else _tkey(key[1]) == _tkey(col.name))]
+    return semi[hits[0]] if len(hits) == 1 else None
+
+
 def _lookup_column(col: "exp.Column", scope: dict[str, str],
                    colidx: dict[str, dict[str, Column]]) -> Optional[Column]:
-    t = _resolve_col_table(col, scope)
-    if t and col.name in colidx.get(t, {}):
-        return colidx[t][col.name]
-    # bare column, ambiguous table: only safe if exactly one in-scope table defines it
-    if not t:
-        owners = [tt for tt, cols in colidx.items()
-                  if tt in set(scope.values()) and col.name in cols]
+    """The model's Column a statement column reads, for the aggregation-class and semi-additivity
+    checks. Table and column names match case-insensitively (#453): a model introspected from an
+    engine that stores names uppercase, read by a statement written in lowercase or the reverse, is
+    the same table and column, and an exact match made those checks go quiet."""
+    t = _resolve_ci(col, scope)
+    found = _ci_get(_ci_get(colidx, t) or {}, col.name, quoted=_is_quoted(col)) if t else None
+    if found is not None:
+        return found
+    # bare column, ambiguous table: only safe if exactly one in-scope table defines it. Exact table
+    # names first, so a model declaring two tables that differ only in case keeps the answer the
+    # exact match always gave; case-insensitively only when nothing matched exactly. A QUALIFIED
+    # column that `_resolve_ci` left unresolved (an ambiguous qualifier) is not a bare column, and
+    # attributing it to whichever table owns the name would be the guess it declined to make.
+    if not t and not col.table:
+        in_scope = set(scope.values())
+        owners = [cols for tt, cols in colidx.items() if tt in in_scope and col.name in cols]
+        if not owners:
+            folded = {_tkey(v) for v in in_scope}
+            owners = [cols for tt, cols in colidx.items()
+                      if _tkey(tt) in folded and _ci_get(cols, col.name, quoted=_is_quoted(col)) is not None]
         if len(owners) == 1:
-            return colidx[owners[0]][col.name]
+            return _ci_get(owners[0], col.name, quoted=_is_quoted(col))
     return None
 
 
@@ -2718,8 +3401,8 @@ def _check_aggregation_semantics(
             # match on (table, column) — resolve the summed column's table from the
             # query; skip when it can't be pinned down (don't mis-fire on a bare column
             # that happens to share a name with a semi-additive measure elsewhere).
-            ctable = _resolve_col_table(col, scope)
-            mm = semi.get((ctable, col.name)) if ctable else None
+            ctable = _resolve_ci(col, scope)
+            mm = _semi_metric(semi, ctable, col) if ctable else None
             if mm is not None:
                 cname = _echo_name(col.name)
                 found.append((i, Finding(
@@ -2741,8 +3424,12 @@ def _check_aggregation_semantics(
 
 
 def _model_table_index(org: Datasource) -> dict[str, tuple]:
-    """bare table name, CASE-FOLDED -> (Table, area_name). First occurrence wins (a cross-schema
-    name clash is rare and the relationships now carry schema to disambiguate).
+    """bare table name, CASE-FOLDED -> (Table, area_name). A schema written into the name
+    (`public.orders`) is not part of the key, as everywhere that reads a table's identity (#258).
+
+    First occurrence wins, so where two schemas declare one name the receipt and the mention scan
+    describe the first copy. The scope gates and `dataset_names` tell the copies apart; the receipt
+    and metric scoping doing the same is a follow-up.
 
     Folded because `check_table_scope` folds: it compares `{name.lower()}` against the statement's
     names, since Postgres and friends fold unquoted identifiers. When this index did not, the gate
@@ -2752,7 +3439,7 @@ def _model_table_index(org: Datasource) -> dict[str, tuple]:
     idx: dict[str, tuple] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
-            idx.setdefault(_tkey(t.name), (t, sa.name))
+            idx.setdefault(_tkey(stored_identity(t.name, t.schema_name)[1]), (t, sa.name))
     return idx
 
 
@@ -2888,7 +3575,12 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     detector. Neither names anything from the model, so a marker discloses nothing that the items
     beside it do not already.
     """
-    unsettled = sum(1 for r in reports if r.status == UNDETERMINED)
+    # Two different gaps behind `undetermined`: reads this layer could not resolve, and a join behind
+    # the number that no declaration settled (`_downgrade_unweighed`). Counted apart so neither
+    # clause misdescribes the other's aggregates.
+    unweighed = sum(1 for r in reports if r.status == UNDETERMINED
+                    and (r.reason or "").startswith(_UNWEIGHED_REASON))
+    unsettled = sum(1 for r in reports if r.status == UNDETERMINED) - unweighed
     # Which aggregates the walk did not reach, split by WHERE they sit, because the two are
     # different gaps to a reader: one is a clause of this statement we do not read, the other is a
     # query scope we do not enter.
@@ -2906,6 +3598,8 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
     return " ".join(clause for clause in (
         (f"{unsettled} of the listed aggregate(s) could not be resolved to the tables they read, "
          "so whether a join multiplies them is not established." if unsettled else ""),
+        (f"{unweighed} of the listed aggregate(s) sit behind a join whose cardinality isn't "
+         "established, so whether it multiplies them is not established." if unweighed else ""),
         ("An aggregate in HAVING or ORDER BY is not reported: only the SELECT list is read."
          if in_filter_or_sort else ""),
         ("An aggregate inside a CTE or a subquery is not reported: only the SELECT lists that "
@@ -2974,6 +3668,95 @@ def _joins_marker(items: list[dict[str, Any]], dropped: int) -> Optional[str]:
     ) if clause) or None
 
 
+def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Optional[Relationship]]":
+    """One written join's status against the model's declarations, and the relationship it matched.
+    The ladder the receipt's joins section reports, shared with the aggregate analysis so a number
+    behind a join this ladder could not settle is never called clean (`_downgrade_unweighed`)."""
+    match: Optional[Relationship] = None
+    if not js.right_declarable:
+        # An endpoint the STATEMENT bound — a CTE name, a derived table, a `VALUES` list, a CTE
+        # shadowing a declared table — cannot be what any declaration is about, so this is
+        # settled rather than open: there is nothing here for a better analysis to establish
+        # later. The RIGHT endpoint is asked first because it is the one always established —
+        # it comes off `join.this`, the join's own right input — so a structural impossibility
+        # there outranks everything below however little the ON said.
+        status = UNDECLARABLE
+    elif not js.pinned:
+        # The ON did not reduce to a pair of endpoints. Unlike the branch above this is a fact
+        # about the ANALYSIS, so it stays open and `_joins_marker` counts it: reporting it
+        # `undeclarable` would claim the model cannot declare a join it may well declare, and
+        # would let the marker reach null with something genuinely unestablished under it.
+        status = UNDETERMINED
+    elif not js.left_declarable:
+        # And only NOW is the left endpoint worth asking about, because only now is it one the
+        # analysis established. Until the ON pins, `left` holds the FROM fallback, which is a
+        # LABEL — the address a reader needs to find the join in their own SQL — and reading a
+        # settled status off it made the FROM decide the question: the same unreadable ON came
+        # back `undetermined` over `FROM orders` and `undeclarable` over `FROM (SELECT …) d`,
+        # the second under a null marker, and the FROM relation need not be party to the join at
+        # all.
+        status = UNDECLARABLE
+    elif js.predicate is None and js.node.args.get("kind") == "CROSS":
+        # It wrote no predicate, which is a fact about the statement and not a gap in the
+        # analysis: there is nothing here for a declaration to match.
+        #
+        # `kind` is the ONLY thing separating this settled status from the open one two branches
+        # down, where the comma join lands. The battery is what pins that distinction: the
+        # sqlglot pin is an open `>=`, and a future version that normalized `FROM a, b` to a
+        # `CROSS` kind would move every comma join from `undetermined` to a settled claim that
+        # the model does not declare it — silently, since both shapes already report a null
+        # predicate. `test_the_comma_join_is_undetermined_and_reports_no_predicate` fails first.
+        status = UNDECLARED
+    elif not js.pairs:
+        # Two shapes reach here and both leave the question open. The comma join
+        # (`FROM a, b WHERE a.id = b.id`) wrote its predicate into the WHERE, and attributing a
+        # WHERE conjunct to a join is an implication check ACE-099 ruled out. The other is an ON
+        # nothing in reduced to a pair of columns — a join on an expression, or on an
+        # unqualified column this layer will not guess the table of. Neither is evidence that
+        # the model does not declare the join, which is what `undeclared` would assert.
+        status = UNDETERMINED
+    else:
+        # The written pairs against the declared ones, DECLARED-AS-A-SUBSET: extra conjuncts an
+        # author added — the as-of and soft-delete shapes — do not weaken the match, which is the
+        # stance ACE-099 shipped for declared filters, so a reader comparing `tables` and `joins`
+        # sees one rule and not two. First match in `_cardinality_index`'s own list order, so the
+        # same statement names the same relationship on every run (REQ-022).
+        #
+        # The two sides are reduced ASYMMETRICALLY and that is the whole design. The WRITTEN side
+        # is lossy on purpose — a conjunct the SQL author added beyond the declared join is not a
+        # reason to withhold the match. The DECLARED side may not be: a declaration reduced to a
+        # subset of itself would match a statement that never wrote the rest of it. So
+        # `_declared_pairs` returns None rather than a partial reduction, which is what makes
+        # `pairs is not None` here a filter and not a formality.
+        written = js.pairs | js.fixed
+        match = next((rel for rel, pairs in declared_pairs
+                      if pairs is not None and pairs <= written), None)
+        same_tables = {_tkey(js.endpoints[0]), _tkey(js.endpoints[1])}
+        if match is not None:
+            status = DECLARED
+        elif any(_rel_tables(rel) == same_tables and (
+                    pairs is None
+                    # The declared columns were written but not its fixed-value condition, which
+                    # may sit in a WHERE this layer does not attribute to the join: not evidence
+                    # the model lacks the join, so it stays open rather than `undeclared`.
+                    or {p for p in pairs if not _is_fixed_value(p)} <= js.pairs)
+                 for rel, pairs in declared_pairs):
+            # Nothing matched, and a declaration between THESE TWO TABLES is one we could not
+            # read — an `on:` that will not parse, one carrying a bind marker, one that did not
+            # reduce whole. `undeclared` would tell the reader "the model does not declare this
+            # join" on the strength of our own failure to read the model, and send a model
+            # author off to add an edge they already have. It is our gap, so it stays open and
+            # the marker counts it.
+            #
+            # Scoped to declarations touching BOTH endpoints, because an unreadable edge
+            # elsewhere in the model says nothing about this join and would otherwise make every
+            # join in every statement unanswerable.
+            status = UNDETERMINED
+        else:
+            status = UNDECLARED
+    return status, match
+
+
 def assemble_receipt(
     org: Datasource,
     sql: str,
@@ -3040,6 +3823,14 @@ def assemble_receipt(
     # attributed to a table, and attributing one to a table nothing read is the same error.
     used = {bare for bare in scope.values() if _tkey(bare) not in cte_names}
     tidx = _model_table_index(org)
+    # One sentence per large table read from the outer side of a join, keyed by the table node, so
+    # a finding in one CTE body or UNION arm never lands on a same-named reference elsewhere (#451).
+    # Advisory, so an analysis that fails costs the hint, never the receipt.
+    try:
+        scan_by_node = {id(f["node"]): scan_sentence(f) for f in scan_findings(tree, org)
+                        if f.get("node") is not None}
+    except Exception:
+        scan_by_node = {}
     # The names the analysis can see BEHIND: a table the model declares, minus any name the
     # statement bound to a result of its own. Computed once and handed to both callers that need
     # it — `_model_table_index` walks the whole model and this path runs for every executed query.
@@ -3078,83 +3869,8 @@ def assemble_receipt(
     declared_pairs = ([(rel, _declared_pairs(rel, dialect)) for rel in _cardinality_index(org)]
                       if join_sites else [])
     join_items: list[dict[str, Any]] = []
-    for js in join_sites:
-        match: Optional[Relationship] = None
-        if not js.right_declarable:
-            # An endpoint the STATEMENT bound — a CTE name, a derived table, a `VALUES` list, a CTE
-            # shadowing a declared table — cannot be what any declaration is about, so this is
-            # settled rather than open: there is nothing here for a better analysis to establish
-            # later. The RIGHT endpoint is asked first because it is the one always established —
-            # it comes off `join.this`, the join's own right input — so a structural impossibility
-            # there outranks everything below however little the ON said.
-            status = UNDECLARABLE
-        elif not js.pinned:
-            # The ON did not reduce to a pair of endpoints. Unlike the branch above this is a fact
-            # about the ANALYSIS, so it stays open and `_joins_marker` counts it: reporting it
-            # `undeclarable` would claim the model cannot declare a join it may well declare, and
-            # would let the marker reach null with something genuinely unestablished under it.
-            status = UNDETERMINED
-        elif not js.left_declarable:
-            # And only NOW is the left endpoint worth asking about, because only now is it one the
-            # analysis established. Until the ON pins, `left` holds the FROM fallback, which is a
-            # LABEL — the address a reader needs to find the join in their own SQL — and reading a
-            # settled status off it made the FROM decide the question: the same unreadable ON came
-            # back `undetermined` over `FROM orders` and `undeclarable` over `FROM (SELECT …) d`,
-            # the second under a null marker, and the FROM relation need not be party to the join at
-            # all.
-            status = UNDECLARABLE
-        elif js.predicate is None and js.node.args.get("kind") == "CROSS":
-            # It wrote no predicate, which is a fact about the statement and not a gap in the
-            # analysis: there is nothing here for a declaration to match.
-            #
-            # `kind` is the ONLY thing separating this settled status from the open one two branches
-            # down, where the comma join lands. The battery is what pins that distinction: the
-            # sqlglot pin is an open `>=`, and a future version that normalized `FROM a, b` to a
-            # `CROSS` kind would move every comma join from `undetermined` to a settled claim that
-            # the model does not declare it — silently, since both shapes already report a null
-            # predicate. `test_the_comma_join_is_undetermined_and_reports_no_predicate` fails first.
-            status = UNDECLARED
-        elif not js.pairs:
-            # Two shapes reach here and both leave the question open. The comma join
-            # (`FROM a, b WHERE a.id = b.id`) wrote its predicate into the WHERE, and attributing a
-            # WHERE conjunct to a join is an implication check ACE-099 ruled out. The other is an ON
-            # nothing in reduced to a pair of columns — a join on an expression, or on an
-            # unqualified column this layer will not guess the table of. Neither is evidence that
-            # the model does not declare the join, which is what `undeclared` would assert.
-            status = UNDETERMINED
-        else:
-            # The written pairs against the declared ones, DECLARED-AS-A-SUBSET: extra conjuncts an
-            # author added — the as-of and soft-delete shapes — do not weaken the match, which is the
-            # stance ACE-099 shipped for declared filters, so a reader comparing `tables` and `joins`
-            # sees one rule and not two. First match in `_cardinality_index`'s own list order, so the
-            # same statement names the same relationship on every run (REQ-022).
-            #
-            # The two sides are reduced ASYMMETRICALLY and that is the whole design. The WRITTEN side
-            # is lossy on purpose — a conjunct the SQL author added beyond the declared join is not a
-            # reason to withhold the match. The DECLARED side may not be: a declaration reduced to a
-            # subset of itself would match a statement that never wrote the rest of it. So
-            # `_declared_pairs` returns None rather than a partial reduction, which is what makes
-            # `pairs is not None` here a filter and not a formality.
-            match = next((rel for rel, pairs in declared_pairs
-                          if pairs is not None and pairs <= js.pairs), None)
-            if match is not None:
-                status = DECLARED
-            elif any(pairs is None and _rel_tables(rel) == {_tkey(js.endpoints[0]),
-                                                           _tkey(js.endpoints[1])}
-                     for rel, pairs in declared_pairs):
-                # Nothing matched, and a declaration between THESE TWO TABLES is one we could not
-                # read — an `on:` that will not parse, one carrying a bind marker, one that did not
-                # reduce whole. `undeclared` would tell the reader "the model does not declare this
-                # join" on the strength of our own failure to read the model, and send a model
-                # author off to add an edge they already have. It is our gap, so it stays open and
-                # the marker counts it.
-                #
-                # Scoped to declarations touching BOTH endpoints, because an unreadable edge
-                # elsewhere in the model says nothing about this join and would otherwise make every
-                # join in every statement unanswerable.
-                status = UNDETERMINED
-            else:
-                status = UNDECLARED
+    join_results = [_join_site_status(js, declared_pairs) for js in join_sites]
+    for js, (status, match) in zip(join_sites, join_results):
         # Everything a DECLARATION contributes, and null on every other status: an item that matched
         # nothing must assert nothing about a relationship it did not match, which is the defect the
         # per-relationship build had — it printed a signed-off trail beside a join written on the
@@ -3294,7 +4010,8 @@ def assemble_receipt(
         out = []
         for b in used:
             info = _declared_table(b)
-            if info and any(c.name == cname for c in info[0].columns):
+            # Ignoring case, like the qualifier below (#456): `SELECT Ssn FROM orders` reads `ssn`.
+            if info and any(_tkey(c.name) == _tkey(cname) for c in info[0].columns):
                 out.append(b)
         return out
 
@@ -3308,8 +4025,18 @@ def assemble_receipt(
         # CTE subtraction anywhere in between — so the fix that reached `tables`, the relationship
         # walk and the unqualified branch below never reached a qualified column. The reference
         # itself is kept either way: a dropped reference is an unchecked one.
+        if col.table and (origin := _qualified_reference_origin(col)) is not None:
+            # Resolved in the column's own scope, through a derived table or CTE (#521).
+            ref_cols.add(origin)
+            continue
         if col.table:                                   # qualified -> resolve via alias scope
-            bare = scope.get(col.table, col.table)
+            # The alias matched ignoring case, like the sensitive check (#456); an exact match
+            # wins, and a qualifier that could be two aliases keeps the written name.
+            hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+            if col.table in scope:
+                bare = scope[col.table]
+            else:
+                bare = scope[hits[0]] if len(hits) == 1 else col.table
         else:                                           # unqualified -> attribute only if unambiguous
             cands = _tables_defining(col.name)
             bare = cands[0] if len(cands) == 1 else None
@@ -3364,6 +4091,8 @@ def assemble_receipt(
     # Which sensitive columns this statement projects RAW — the same analysis that used to refuse
     # it, on the tree already parsed above rather than a second parse of the same statement.
     projected_sensitive = set(_projected_sensitive(tree, org, ctx=None))
+    # Folded: `_projected_sensitive` uses the model's spelling, `column_refs` the statement's (#456).
+    projected_folded = {_tkey(name) for name in projected_sensitive}
     column_items: list[dict[str, Any]] = []
     for bare, cname in column_refs[:_RECEIPT_MAX_REFS]:
         info = _declared_table(bare)
@@ -3401,7 +4130,7 @@ def assemble_receipt(
         # by bare name, so both forms are checked. It means PROJECTED, not merely referenced: a
         # sensitive column used only in a WHERE is not flagged, because the value did not come
         # back and saying otherwise would cry wolf on the filters that are the normal safe use.
-        if f"{bare}.{cname}" in projected_sensitive or cname in projected_sensitive:
+        if _tkey(f"{bare}.{cname}") in projected_folded or _tkey(cname) in projected_folded:
             item["sensitive"] = True
         column_items.append(item)
     # The output columns lead. They are what the caller READ, so a surface rendering the first few
@@ -3417,6 +4146,7 @@ def assemble_receipt(
     # and re-derive it there. `_table_references` is the same list with the nodes dropped, and it is
     # not called here for that reason.
     sites = _reference_sites(tree)
+    node_of_ref = {id(site.ref): site.node for site in sites}
     dropped_refs = max(0, len(sites) - _RECEIPT_MAX_REFS)
     # How many of the LISTED references the accounting could not settle, for the marker below. A
     # reference counts here when it has declared filters and ANY one of them came back
@@ -3462,6 +4192,9 @@ def assemble_receipt(
             "declared": t is not None,
             "rows": (ph.estimated_row_count if ph else None),
             "rows_as_of": (ph.estimated_row_count_at if ph else None),
+            # Advisory: this table is large and the statement reads it from the outer side of a join
+            # (#451). Null otherwise, or when its size is unknown.
+            "scan_risk": scan_by_node.get(id(node_of_ref.get(id(r)))) if t else None,
             # Freshness describes a table the model declares. An undeclared reference (a CTE name,
             # say) has no model row for it to be about, so claiming it would be a lie by shape.
             "freshness": freshness if t else None,
@@ -3532,7 +4265,12 @@ def assemble_receipt(
     # shared one from — so without the second argument the analysis rebuilt it once per output arm.
     # `visible` is the one the joins section above already computed off this same `tidx` and these
     # same `cte_names`; recomputing it here would be the same set under a second spelling.
-    reports = _aggregate_reports(tree, org, ctx=None, visible=visible, tidx=tidx)
+    reports = _aggregate_reports(
+        tree, org, ctx=None, visible=visible, tidx=tidx,
+        join_statuses=([(it["scope"], status, it["from_to"])
+                        for status, it in zip(_weighed_statuses(join_sites, join_results, tidx, org), join_items)],
+                       dropped_joins),
+    )
     dropped_aggregates = max(0, len(reports) - _RECEIPT_MAX_REFS)
     aggregate_items: list[dict[str, Any]] = [
         r.as_dict() for r in reports[:_RECEIPT_MAX_REFS]
@@ -3708,6 +4446,196 @@ def _enclosing_select(node: "exp.Expression") -> "exp.Select | None":
     while p is not None and not isinstance(p, exp.Select):
         p = p.parent
     return p
+
+
+def _column_scopes(node: "exp.Expression", dialect: "str | None" = None) -> list["exp.Select"]:
+    """The SELECTs whose sources an unqualified column can bind to, innermost first.
+
+    `_enclosing_selects` minus each query that owns a CTE or FROM / JOIN derived table the column
+    sits in: that body cannot see its owner's sources (a LATERAL one can, which is why only a
+    subquery sitting directly in FROM / JOIN counts), but it still sees every query further out, so
+    `SELECT (WITH c AS (SELECT secret_col AS n) SELECT n FROM c) FROM orders` binds to `orders`.
+    DuckDB makes every FROM / JOIN subquery lateral without the keyword, so there its owner stays.
+    """
+    scopes: list["exp.Select"] = []
+    hidden: set[int] = set()
+    p = node.parent
+    while p is not None:
+        if isinstance(p, exp.Select) and id(p) not in hidden:
+            scopes.append(p)
+        if isinstance(p, exp.CTE) and p.parent is not None:
+            hidden.add(id(p.parent.parent))  # CTE -> With -> the query (or set operation) carrying it
+        elif (isinstance(p, exp.Subquery) and isinstance(p.parent, (exp.From, exp.Join))
+              and dialect != "duckdb" and not isinstance(_parens(p)[1], exp.Table)):
+            # A parenthesised join's ON is its owner's, not a body's: only a query hides the owner.
+            hidden.add(id(p.parent.parent))
+        p = p.parent
+    return scopes
+
+
+# Engines whose QUALIFY clause reads a select-list alias: the dedup idiom
+# `row_number() OVER (...) AS rn ... QUALIFY rn = 1`.
+_QUALIFY_ALIAS_DIALECTS = frozenset({"duckdb", "snowflake", "bigquery", "databricks"})
+
+
+def _reads_output_alias(col: "exp.Column", sel: "exp.Select", dialect: "str | None") -> bool:
+    """Whether an unqualified name in `sel` means one of `sel`'s own select-list aliases.
+
+    Only where every engine reads the alias over a same-named input column: a whole ORDER BY item,
+    or a whole GROUP BY item. Inside an expression there, in HAVING or FILTER, and everywhere else,
+    Postgres and MySQL read the input column first, so `SELECT 1 AS secret_col FROM orders ORDER BY
+    CASE WHEN secret_col = 'x' THEN 0 END` sorts on `orders.secret_col`. QUALIFY on the engines that
+    have it reads an alias of a window function, which is how a deduplication is written there.
+    """
+    p = col.parent
+    while isinstance(p, exp.Paren):  # `ORDER BY (doubled)` is still the whole item
+        p = p.parent
+    if isinstance(p, exp.Ordered) and isinstance(p.parent, exp.Order) and p.parent.parent is sel:
+        return True
+    if isinstance(p, exp.Group) and p.parent is sel:
+        return True
+    if dialect not in _QUALIFY_ALIAS_DIALECTS:
+        return False
+    while p is not None and p is not sel:
+        if isinstance(p, (exp.AggFunc, exp.Window, exp.Filter)):
+            return False
+        if isinstance(p, exp.Qualify) and p.parent is sel:
+            return any(isinstance(e, exp.Alias) and e.alias.lower() == col.name.lower()
+                       and e.find(exp.Window) is not None for e in sel.expressions)
+        p = p.parent
+    return False
+
+
+def _parens(src: "exp.Expression") -> tuple[list["exp.Subquery"], "exp.Expression"]:
+    """The parentheses around a table or a join, outermost first, and what they wrap.
+
+    sqlglot parses `(customers JOIN t ON ...)` as a Subquery over a Table carrying the joins.
+    """
+    wrappers: list["exp.Subquery"] = []
+    inner = src
+    while isinstance(inner, exp.Subquery) and isinstance(inner.this, (exp.Subquery, exp.Table)):
+        wrappers.append(inner)
+        inner = inner.this
+    return wrappers, inner
+
+
+@dataclass(frozen=True)
+class _JoinAlias:
+    """The alias of a parenthesised join: `w.col` reads whichever of these leaves has `col`."""
+    leaves: list
+
+
+def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
+    """The items a SELECT's FROM and JOINs read, in order."""
+    # sqlglot renamed the arg from `from` to `from_`; read both.
+    from_ = sel.args.get("from_") or sel.args.get("from")
+    items = [from_.this] if isinstance(from_, exp.From) else []
+    return items + [j.this for j in sel.args.get("joins") or []]
+
+
+@functools.lru_cache(maxsize=None)
+def _dialect_object(dialect: "str | None") -> "Dialect":
+    """One sqlglot Dialect per name: `get_or_raise` builds a new instance on every call."""
+    return Dialect.get_or_raise(dialect)
+
+
+def _column_key(ident: object, dialect: "str | None") -> Optional[str]:
+    """A column name as the engine resolves it, so two spellings compare equal exactly when the
+    engine reads them as one column; None for anything that is not a plain identifier.
+
+    sqlglot's per-dialect normalization: a quoted name keeps its case where the engine does
+    (Postgres, Snowflake, Oracle), so `"SECRET_COL"` is not `secret_col` there. MySQL's strategy is
+    case-sensitive because its TABLE names can be, but its column names never are, so they fold.
+    """
+    if not isinstance(ident, exp.Identifier) or not ident.name:
+        return None
+    d = _dialect_object(dialect)
+    if d.NORMALIZATION_STRATEGY is NormalizationStrategy.CASE_SENSITIVE:
+        return ident.name.lower()
+    return d.normalize_identifier(ident.copy()).name
+
+
+def _renamed(names: "list[Optional[str]]", renames: "list[Optional[str]]") -> "list[Optional[str]]":
+    """`names` with an alias column list applied: by position, keeping any unrenamed suffix. Names
+    past the outputs rename nothing: DuckDB ignores them, so they must not vouch for a column."""
+    return renames[:len(names)] + names[len(renames):]
+
+
+def _query_column_names(query: "exp.Expression", dialect: "str | None") -> "list[Optional[str]]":
+    """The output names of a query a CTE or derived table wraps, in order, as `_column_key`s.
+
+    The first arm of a set operation names its columns. An output with no readable name — an
+    unaliased expression, a star — is None: it holds its position for an alias list to rename, and
+    unrenamed it vouches for no column, the fail-closed direction.
+    """
+    while isinstance(query, (exp.Subquery, exp.SetOperation)):
+        query = query.this
+    if isinstance(query, exp.Values):
+        # A VALUES body (as MySQL parses one) names nothing but has a position per column.
+        first = query.expressions[0] if query.expressions else None
+        return [None] * (len(first.expressions) if isinstance(first, exp.Tuple) else 1)
+    names: list[Optional[str]] = []
+    for e in query.expressions if isinstance(query, exp.Select) else ():
+        if isinstance(e, exp.Alias):
+            names.append(_column_key(e.args.get("alias"), dialect))
+        elif isinstance(e, exp.Column) and not isinstance(e.this, exp.Star):
+            names.append(_column_key(e.this, dialect))
+        else:
+            names.append(None)
+    return names
+
+
+def _cte_output_names(cte: "exp.CTE", dialect: "str | None") -> "list[Optional[str]]":
+    """A CTE's output names in order: its body's, renamed by the CTE's own column list."""
+    a = cte.args.get("alias")
+    own = [_column_key(c, dialect) for c in a.columns] if isinstance(a, exp.TableAlias) else []
+    return _renamed(_query_column_names(cte.this, dialect), own)
+
+
+def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
+                         dialect: "str | None") -> Optional[set[str]]:
+    """The `_column_key`s one FROM / JOIN item supplies, or None for a physical table, whose
+    columns are the model's to say, not the statement's.
+
+    Alias column lists rename by position: a CTE's own list over its body, then the reference's
+    (`FROM c AS x(n)`) over that, so `x` supplies `n` and not the name it renamed.
+    """
+    def listed(node: "exp.Expression") -> "list[Optional[str]]":
+        a = node.args.get("alias")
+        return [_column_key(c, dialect) for c in a.columns] if isinstance(a, exp.TableAlias) else []
+
+    # Parentheses around a table: a physical one is a physical source; a CTE reference is that
+    # CTE, renamed by each wrapper's alias list from the innermost out (`(c) AS x(n)`).
+    wrappers, inner = _parens(src)
+    if wrappers and isinstance(inner, exp.Table):
+        cte = cte_refs.get(id(inner))
+        if cte is None:
+            return None  # `(customers) AS x` is a physical table in parentheses
+        ordered = _renamed(_cte_output_names(cte, dialect), listed(inner))
+        for w in reversed(wrappers):
+            ordered = _renamed(ordered, listed(w))
+        return {n for n in ordered if n}
+    alias = src.args.get("alias")
+    renames = listed(src)
+    names: Optional[list[Optional[str]]] = None
+    if isinstance(src, exp.Table):
+        cte = cte_refs.get(id(src))
+        if cte is None and src.name:
+            return None
+        if cte is not None:
+            names = _cte_output_names(cte, dialect)
+    elif isinstance(src, (exp.Subquery, exp.Lateral)) and isinstance(
+            src.this, (exp.Subquery, exp.Query)):
+        names = _query_column_names(src.this, dialect)
+    if names is not None:
+        return {n for n in _renamed(names, renames) if n}
+    # A table function, UNNEST or VALUES: only an alias column list says what it returns. Postgres
+    # alone names a one-column FUNCTION's output after the table alias; VALUES is `column1` there,
+    # and other engines name a function's columns their own way (`value`, `generate_series`).
+    if (not renames and isinstance(alias, exp.TableAlias) and dialect == "postgres"
+            and not isinstance(src, exp.Values)):
+        renames = [_column_key(alias.this, dialect)]
+    return {n for n in renames if n}
 
 
 def _enclosing_selects(node: "exp.Expression") -> list["exp.Select"]:
@@ -4129,11 +5057,173 @@ def _own_alias_map(sel: "exp.Select | None") -> dict[str, str]:
     `walk` yields the node it prunes at, hence the `isinstance` on the way out: the nested SELECT
     itself comes back, and it is not a table reference.
     """
+    return {(tbl.alias or tbl.name): tbl.name for tbl in _own_table_refs(sel)}
+
+
+def _own_table_refs(sel: "exp.Select | None") -> list["exp.Table"]:
+    """The table references THIS SELECT reads itself, in order, repeats kept (see `_own_alias_map`)."""
     if sel is None:
-        return {}
+        return []
     boundary = sel.walk(prune=lambda node: isinstance(node, exp.Select) and node is not sel)
-    return {(tbl.alias or tbl.name): tbl.name
-            for tbl in boundary if isinstance(tbl, exp.Table)}
+    return [tbl for tbl in boundary if isinstance(tbl, exp.Table)]
+
+
+def _own_sources(sel: "exp.Select") -> list["exp.Expression"]:
+    """The relations this SELECT's own FROM and JOINs introduce, in the order it wrote them."""
+    frm = sel.args.get("from_") or sel.args.get("from")
+    nodes = [frm.this] if isinstance(frm, exp.From) else []
+    nodes += [join.this for join in sel.args.get("joins") or []]
+    return [node for node in nodes if node is not None]
+
+
+def _pick_binding(sources: list["exp.Expression"], qualifier: str) -> "exp.Expression | None":
+    """The source a qualifier names: an exact alias first, else the ONE that matches ignoring case."""
+    exact = [s for s in sources if s.alias_or_name == qualifier]
+    if exact:
+        return exact[0]
+    folded = [s for s in sources if _tkey(s.alias_or_name) == _tkey(qualifier)]
+    return folded[0] if len(folded) == 1 else None
+
+
+# The last tree `_cte_reference_ids` walked and its answer: one statement's receipt asks it once
+# per column, and `_cte_references` walks the whole tree.
+# Rebound whole, never mutated: receipts are built in worker threads, and a reader holding one
+# tuple cannot see another thread's tree paired with it.
+_CTE_REFS_LAST: tuple = (None, frozenset())
+
+
+def _cte_reference_ids(root: "exp.Expression") -> "set[int] | frozenset[int]":
+    """`_cte_references(root)`, computed once per tree."""
+    global _CTE_REFS_LAST
+    cached_root, refs = _CTE_REFS_LAST
+    if cached_root is not root:
+        refs = _cte_references(root)
+        _CTE_REFS_LAST = (root, refs)
+    return refs
+
+
+def _cte_binding(table: "exp.Table") -> "exp.CTE | None":
+    """The CTE a table reference reads, or None when it reads a table.
+
+    Bound by `_cte_references`' rules, so a schema-qualified name, a later sibling and a
+    non-recursive self-reference read the table, as they do for the scope gate.
+    """
+    if table.db or id(table) not in _cte_reference_ids(table.root()):
+        return None
+    key = _identifier_key(table.this)
+    via: "exp.CTE | None" = None
+    node: "exp.Expression | None" = table.parent
+    while node is not None:
+        if isinstance(node, exp.CTE):
+            via = node
+        with_ = node.args.get("with_") or node.args.get("with")
+        if isinstance(with_, exp.With):
+            ctes = list(with_.expressions)
+            pos = next((i for i, c in enumerate(ctes) if c is via), None)
+            if pos is not None:
+                # A body sees the siblings before it, and itself only under RECURSIVE.
+                ctes = ctes[:pos + 1] if with_.args.get("recursive") else ctes[:pos]
+            for cte in reversed(ctes):
+                alias = cte.args.get("alias")
+                name = _identifier_key(alias.this) if isinstance(alias, exp.TableAlias) else None
+                if name is not None and key is not None and _same_identifier(key, name):
+                    return cte
+        node = node.parent
+    return None
+
+
+def _alias_columns(node: "exp.Expression") -> list[str]:
+    """The column list an alias gives its relation (`AS s(y, x)`), or [] when it gives none."""
+    alias = node.args.get("alias")
+    return [c.name for c in alias.columns] if isinstance(alias, exp.TableAlias) else []
+
+
+def _projection_for(body: "exp.Select", cname: str,
+                    listed: list[str]) -> "exp.Expression | None":
+    """The ONE projection of `body` that outputs `cname`, by position when a column list renames
+    the outputs, else by name. None when that is not certain."""
+    if not listed:
+        # A star may output the same name ahead of the explicit projection.
+        if any(p.is_star for p in body.expressions):
+            return None
+        matches = [p for p in body.expressions if _tkey(p.alias_or_name) == _tkey(cname)]
+        return matches[0] if len(matches) == 1 else None
+    names = [_tkey(n) for n in listed]
+    if (len(names) != len(body.expressions) or names.count(_tkey(cname)) != 1
+            or any(p.is_star for p in body.expressions)):
+        return None
+    return body.expressions[names.index(_tkey(cname))]
+
+
+def _origin_through(source: "exp.Expression", cname: str,
+                    depth: int) -> Optional[tuple[str, str]]:
+    """(table, column) behind `cname` read from `source`, or None when it is not a plain column.
+
+    A plain table is its own origin. A derived table or a CTE is followed only through a
+    projection that hands one input column back unchanged, bare or renamed: `x / y AS r` is a value
+    the statement computed and no single column is its origin. A UNION body, a star and an output
+    name projected twice stop here too.
+    """
+    if depth >= _MAX_CTE_CHAIN:
+        return None
+    if isinstance(source, exp.Table):
+        if _alias_columns(source):
+            return None
+        cte = _cte_binding(source)
+        if cte is None:
+            return source.name, cname
+        body, listed = cte.this, _alias_columns(cte)
+    elif isinstance(source, exp.Subquery):
+        body, listed = source.this, _alias_columns(source)
+    else:
+        return None
+    if not isinstance(body, exp.Select):
+        return None
+    match = _projection_for(body, cname, listed)
+    inner = match.this if isinstance(match, exp.Alias) else match
+    if not isinstance(inner, exp.Column) or not inner.name:
+        return None
+    return _column_origin(inner, depth + 1)
+
+
+def _column_origin(col: "exp.Column", depth: int = 0) -> Optional[tuple[str, str]]:
+    """(table, column) a column reads, resolved in the scope it was written in, or None."""
+    chain = _enclosing_selects(col)
+    if not chain:
+        return None
+    if not col.table:
+        # Unqualified: followed only when the innermost SELECT reads exactly one source.
+        sources = _own_sources(chain[0])
+        if len(sources) != 1:
+            return None
+        return _origin_through(sources[0], col.name, depth)
+    for sel in chain:
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            return _origin_through(source, col.name, depth)
+    return None
+
+
+def _qualified_reference_origin(col: "exp.Column") -> Optional[tuple[str, str]]:
+    """(table, column) for the receipt's label of a QUALIFIED column, or None when its qualifier
+    names nothing in the scopes enclosing it.
+
+    The receipt's whole-statement alias map holds only plain tables, last one wins, so `s.x` over a
+    derived table or a CTE `s` stayed `s.x`, and an alias reused in a nested query resolved to
+    whichever table the walk met last (#521). This resolves the qualifier from the column's own
+    SELECT outward, and follows a derived table or a CTE to its table through plain projections.
+    When the qualifier is bound but the value is computed, the label keeps the name the source
+    was given: the CTE's name for a CTE reference, the alias for a derived table.
+
+    The receipt's labels only: the scope gate, the fan/chasm analysis and the metric match keep
+    their own resolution, so what is refused and what a value is matched to do not change here.
+    """
+    for sel in _enclosing_selects(col):
+        source = _pick_binding(_own_sources(sel), col.table)
+        if source is not None:
+            written = source.name if isinstance(source, exp.Table) else col.table
+            return _column_origin(col) or (written, col.name)
+    return None
 
 
 def _computed_relations(sel: "exp.Select | None") -> frozenset[str]:
@@ -4210,6 +5300,9 @@ class _JoinSite(NamedTuple):
     # model does not declare this", because a predicate we could not read is not a predicate the
     # model failed to declare.
     pairs: frozenset[frozenset[tuple[str, str]]]
+    # This join's fixed-value conditions on its own right-hand alias (`_fixed_value_pairs`); the
+    # declared-join match reads `pairs | fixed`, everything else reads `pairs` alone.
+    fixed: frozenset[frozenset[tuple[str, str]]] = frozenset()
 
 
 def _predicate_pairs(pred: "exp.Expression",
@@ -4252,6 +5345,51 @@ def _predicate_pairs(pred: "exp.Expression",
             (_tkey(_bare(scope_map.get(rhs.table, rhs.table))), rhs.name.lower()),
         }))
     return frozenset(pairs)
+
+
+def _fixed_value_pairs(pred: "exp.Expression", scope_map: dict[str, str],
+                       aliases: "set[str] | None") -> frozenset[frozenset[tuple[str, str]]]:
+    """A predicate's fixed-value conditions (`dim.current_flag = 'Y'`), each as a pair whose two ends
+    are the same table: the column and the value. They belong to a declared join's identity, so a
+    declared `... AND current_flag = 'Y'` matches only a join that wrote it too.
+
+    `aliases` binds them to the join they belong to: a written ON counts a condition only on its own
+    right-hand alias, because a filter on another instance of the same table (`d.current_flag`
+    written in `d2`'s ON) says nothing about `d2`'s rows. None — the declared side — takes any
+    qualifier, since a declaration names its tables directly. Kept out of `_predicate_pairs`, whose
+    consumers read every pair as two joined columns."""
+    out: set[frozenset[tuple[str, str]]] = set()
+    for conj in _and_conjuncts(pred):
+        if not isinstance(conj, exp.EQ):
+            continue
+        col, val = conj.this, conj.expression
+        if isinstance(val, exp.Column) and not isinstance(col, exp.Column):
+            col, val = val, col
+        if not (isinstance(col, exp.Column) and col.table and _literal_key(val) is not None):
+            continue
+        if aliases is not None and col.table not in aliases:
+            continue
+        table = _tkey(_bare(scope_map.get(col.table, col.table)))
+        out.add(frozenset({(table, col.name.lower()), (table, _literal_key(val))}))
+    return frozenset(out)
+
+
+def _literal_key(node: "exp.Expression") -> "str | None":
+    """A literal's comparable spelling, or None for anything that isn't one. The `=` prefix can't
+    open a column name, so a value never collides with a column of the same table."""
+    if isinstance(node, exp.Literal):
+        return ("='" + node.this + "'") if node.is_string else ("=" + node.this)
+    if isinstance(node, exp.Boolean):
+        return "=" + str(node.this).lower()
+    return None
+
+
+def _is_fixed_value(pair: "frozenset[tuple[str, str]]") -> bool:
+    """Whether a reduced pair is a fixed-value condition — told by the value's `=` marker, not by its
+    tables collapsing to one, which a self-join's pair does too."""
+    return any(column.startswith("=") for _table, column in pair)
+
+
 
 
 def _declared_pairs(rel: Relationship,
@@ -4306,16 +5444,81 @@ def _reduced_on(text: str, dialect: "str | None") -> "frozenset[frozenset[tuple[
     if predicate is None:
         return None
     # And refused whenever the reduction lost anything, which is the general form of the bind-marker
-    # guard above rather than a second rule. `_predicate_pairs` keeps equalities between two
-    # qualified columns and drops the rest, so `orders.region_id = regions.id AND regions.name =
-    # 'EU'` reduces to the unrestricted half of itself — and that half matches a statement that
-    # wrote no restriction at all, under the whole declared predicate printed beside it. Every
-    # top-level conjunct has to survive or none of them counts. `IS NULL`, an inequality and a
-    # function call are the same case as the bind marker in three other spellings.
-    reduced = [_predicate_pairs(conj, {}) for conj in _and_conjuncts(predicate)]
+    # guard above rather than a second rule. A conjunct survives as a column-to-column equality or a
+    # fixed-value equality (`regions.name = 'EU'`, kept whole by `_fixed_value_pairs` so only a
+    # statement that wrote it matches); anything else would leave an unrestricted half that matches a
+    # statement which wrote no restriction at all. Every top-level conjunct has to survive or none of
+    # them counts. `IS NULL`, an inequality and a function call are the same case as the bind marker
+    # in three other spellings.
+    reduced = [_predicate_pairs(conj, {}) | _fixed_value_pairs(conj, {}, None)
+               for conj in _and_conjuncts(predicate)]
     if not reduced or not all(reduced):
         return None
-    return frozenset().union(*reduced)
+    pairs = frozenset().union(*reduced)
+    # At least one column pair: it is what pins the declaration to its two tables. A declaration of
+    # fixed values alone would match any join that writes the filter, between any tables at all.
+    if all(_is_fixed_value(pair) for pair in pairs):
+        return None
+    return pairs
+
+
+def model_dialect(org: "Datasource | None") -> "str | None":
+    """The sqlglot dialect `org`'s model text is read in, or None when its engine is unknown."""
+    return _dialect_of(org)[0]
+
+
+def join_key_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tuple[str, str]] | None":
+    """The (from column, to column) pairs a join is keyed on, in the order written.
+
+    The pair form is one pair. An `on:` join yields one pair per conjunct, read with the same parse
+    `_declared_pairs` uses, so a composite key written as `on:` is seen by every caller that used to
+    read `from_column`/`to_column` alone. None when the `on:` is anything but column equalities
+    between its own two tables (a CAST, a fixed value, a bind marker) or will not parse: such a
+    join has no column pairs to report. A self-join keeps each equality's written order."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return [(rel.from_column, rel.to_column)]
+    pairs = _on_key_pairs(rel.on or "", _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table)), dialect)
+    return list(pairs) if pairs is not None else None
+
+
+def join_column_pairs(rel: Relationship, dialect: "str | None" = None) -> "list[tuple[str, str]] | None":
+    """`join_key_pairs`, but a fixed-value condition such as `customers_curr.current_flag = 'Y'` is
+    passed over rather than making the answer None: the columns a join is keyed on, for callers that
+    only ask which columns it uses (hidden columns, reference grouping, retyped columns). The ones
+    that compare joins for identity keep the strict reading."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return [(rel.from_column, rel.to_column)]
+    pairs = _on_key_pairs(rel.on or "", _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table)), dialect,
+                          skip_fixed=True)
+    return list(pairs) if pairs is not None else None
+
+
+@functools.lru_cache(maxsize=1024)
+def _on_key_pairs(text: str, ft: str, tt: str, dialect: "str | None",
+                  skip_fixed: bool = False) -> "tuple[tuple[str, str], ...] | None":
+    """The `on:` half of `join_key_pairs`, remembered like `_reduced_on`: model text, one parse each."""
+    if not _HAVE_SQLGLOT or _BIND_MARKER.search(text):
+        return None
+    predicate = _parse_declared_predicate(text, dialect)
+    if predicate is None:
+        return None
+    out: list[tuple[str, str]] = []
+    for conj in _and_conjuncts(predicate):
+        lhs, rhs = (conj.this, conj.expression) if isinstance(conj, exp.EQ) else (None, None)
+        if skip_fixed and lhs is not None and (
+                (isinstance(lhs, exp.Column) and _literal_key(rhs) is not None)
+                or (isinstance(rhs, exp.Column) and _literal_key(lhs) is not None)):
+            continue
+        if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column)):
+            return None
+        sides = (_tkey(lhs.table), _tkey(rhs.table))
+        if sides == (ft, tt):
+            out.append((lhs.name, rhs.name))
+        elif sides == (tt, ft):
+            out.append((rhs.name, lhs.name))
+        else:
+            return None
+    return tuple(out) or None
 
 
 def _join_condition(join: "exp.Join") -> "str | None":
@@ -4457,6 +5660,8 @@ def _join_sites(node: "exp.Expression", visible: set[str],
             pinned=pinned,
             # Resolved through THIS join's own enclosing scope, which is the map already in hand.
             pairs=_predicate_pairs(on, scope_map) if on is not None else frozenset(),
+            fixed=(_fixed_value_pairs(on, scope_map, {join.this.alias_or_name})
+                   if on is not None else frozenset()),
         ))
     return sites, written
 
@@ -4500,7 +5705,7 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
     the aggregate's identity one line before the receipt wanted it: the section could name the
     measure TABLE and never the number. Same walk, same resolution, one more thing kept.
 
-    **`resolved` is what stops the report from over-claiming.** `_resolve_col_table` returns None
+    **`resolved` is what stops the report from over-claiming.** `_resolve_folded` returns None
     for an unqualified column with two or more tables in scope, and `COUNT(*)` has no column at all,
     so neither contributes a source table and no fan around either is visible to the detector. As a
     finding list that was silence. As a per-aggregate report it would be `not_multiplied`, a
@@ -4549,15 +5754,50 @@ def _aggregate_sites(tree: "exp.Select", scope_map: dict[str, str], scope: str,
         # a total the join really does inflate reported `not_multiplied`. The chasm blast radius was
         # wider still: `agg_sources` is the union over sites, so one wrapped aggregate emptied the
         # set for every OTHER aggregate in the statement, including ones the CASE never touched.
+        if _enclosing_select(agg) is not tree:
+            # Computed inside a nested SELECT: its columns bind in that scope, not in `scope_map`.
+            sites.append(_AggSite(
+                node=agg,
+                aggregate=_echo_expr(agg.sql()),
+                scope=scope,
+                sources=frozenset(),
+                value_sources=frozenset(),
+                resolved=False,
+                unresolved_because=("the aggregate is computed inside a nested SELECT, whose rows the "
+                                    "pre-flight does not analyse"),
+            ))
+            continue
         cols = list(agg.find_all(exp.Column))
-        resolved = [_resolve_col_table(col, scope_map) for col in cols]
-        why = _why_unresolved(cols, resolved, scope_map, visible)
+        holds_subquery = None
+        if agg.find(exp.Select) is not None:
+            # A subquery's columns are bound in its own scope; credited to this SELECT's aliases
+            # they could name a table the aggregate never reads. The outer columns still count, so
+            # a fan on them is reported, but the subquery's rows leave the rest unknown.
+            own = _enclosing_select(agg)
+            cols = [col for col in cols if _enclosing_select(col) is own]
+            holds_subquery = ("the aggregate holds a subquery whose rows the pre-flight does not "
+                              "analyse")
+        # `COUNT(*) FILTER (WHERE x > 0)` parses as `Filter(this=Count, expression=Where)`, so the
+        # predicate sits outside the aggregate node. It still decides which rows are folded, as the
+        # same test inside `COUNT(CASE WHEN x > 0 THEN 1 END)` does, so it is read too (#521). The
+        # value path below is left alone: the predicate is not part of the value.
+        nested = None
+        if isinstance(agg.parent, exp.Filter) and agg.parent.this is agg:
+            predicate = agg.parent.expression
+            # A subquery's columns belong to its own scope, not this SELECT's (D4).
+            if predicate.find(exp.Subquery, exp.Exists, exp.Select) is not None:
+                nested = ("the aggregate's FILTER clause holds a subquery, so the pre-flight cannot "
+                          "tell which of this query's rows it counts")
+            else:
+                cols += list(predicate.find_all(exp.Column))
+        resolved = [_resolve_folded(col, scope_map) for col in cols]
+        why = nested or holds_subquery or _why_unresolved(cols, resolved, scope_map, visible)
         sites.append(_AggSite(
             node=agg,
             aggregate=_echo_expr(agg.sql()),
             scope=scope,
             sources=frozenset(t for t in resolved if t),
-            value_sources=_value_sources(agg, scope_map),
+            value_sources=_value_sources(agg, scope_map, zero_arms_inert=isinstance(agg, exp.Sum)),
             resolved=why is None,
             unresolved_because=why,
         ))
@@ -4643,9 +5883,13 @@ if _HAVE_SQLGLOT:
         "Binary", "Unary", "Cast", "Distinct",
         "Sum", "Count", "Avg", "Min", "Max", "LogicalOr", "LogicalAnd",
     )
+    # The combining nodes whose value IS their operand's (#579). A value under one still reaches
+    # the SUM unchanged, so `SUM((CASE … ELSE 0 END))` keeps its zero arm inert, and a literal under
+    # one is still that literal, so an arm written `(0)` or `CAST(0 AS DECIMAL)` reads as zero.
+    _PASS_THROUGH_NODES = _exp_nodes("Paren", "Cast")
 else:  # pragma: no cover - nothing in this section runs without a parser
     _ALTERNATION_NODES = _TERNARY_NODES = _STRUCTURAL_NODES = _COMBINING_NODES = ()
-    _DECODE_NODES = ()
+    _DECODE_NODES = _PASS_THROUGH_NODES = ()
 
 
 # What `_value_operands` says about a node, and what `_value_sources` does with the operands beside
@@ -4673,7 +5917,9 @@ def _value_operands(node: "exp.Expression") -> tuple[str, list["exp.Expression"]
       aggregate skips rather than folds, so counting it would report a fan on
       `SUM(CASE WHEN orders.flag THEN order_items.quantity END)`, whose value is at item grain on
       every row that contributes one. An explicit `ELSE NULL` IS counted, contributes no table and
-      so clears no edge: the same shape read the other way, in the fail-closed direction.
+      so clears no edge: the same shape read the other way, in the fail-closed direction. Under a
+      `SUM`, with only alternations, parentheses and casts between, `_value_sources` drops it and an
+      `ELSE 0` the way the absent default is dropped (#579).
     - `exp.If` and `exp.Nvl2`. `IF` / `IIF` / `IFF` parse to `exp.If`, NOT to `exp.Case`, on every
       dialect this layer speaks, and `NVL2` to a node with the identical three arguments. Without a
       case of their own the combining branch would take the CONDITION's columns as value columns,
@@ -4728,6 +5974,22 @@ def _present(operands: list) -> list["exp.Expression"]:
     return [operand for operand in operands if isinstance(operand, exp.Expression)]
 
 
+def _is_zero_or_null(node: "exp.Expression") -> bool:
+    """Whether a node is the literal `0` or `NULL`, through parentheses and casts (#579)."""
+    while isinstance(node, _PASS_THROUGH_NODES):
+        node = node.this
+    if isinstance(node, exp.Null):
+        return True
+    if isinstance(node, exp.Literal) and not node.is_string:
+        # Decimal, not float: `float('1e-400')` rounds to 0.0, and a constant that small is still
+        # added once per joined row.
+        try:
+            return decimal.Decimal(node.this) == 0
+        except decimal.InvalidOperation:
+            return False
+    return False
+
+
 def _decode_arms(node: "exp.Expression") -> list["exp.Expression"]:
     """The result slots of a `DECODE`, plus its trailing default when it wrote one.
 
@@ -4751,7 +6013,8 @@ def _decode_arms(node: "exp.Expression") -> list["exp.Expression"]:
     return arms
 
 
-def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozenset[str]:
+def _value_sources(node: "exp.Expression", scope_map: dict[str, str], *,
+                   zero_arms_inert: bool = False) -> frozenset[str]:
     """The tables an expression's value is at the grain of on EVERY path through it.
 
     This is the one question the per-edge fan suppression asks, and both halves of it are load
@@ -4798,16 +6061,29 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
     its operands' answers out of `computed`. Keying by `id()` is safe because every operand
     `_value_operands` returns is a node the caller's tree already holds, so none of them can be
     collected and have its id reused while this runs.
+
+    **`zero_arms_inert` is for a `SUM` (#579).** An arm that is the literal `0` or `NULL` adds
+    nothing to a sum however often its row is repeated, so it is left out of the intersection the
+    way an absent `ELSE` already is. Without that, `SUM(CASE WHEN orders.status = 'shipped' THEN
+    COALESCE(order_items.quantity, 0) END)` intersected `order_items` with the `0`'s empty set and
+    reported a fan on a value that is at item grain on every row that adds anything. It holds only
+    while every node between the arm and the `SUM` is an alternation, a parenthesis or a cast: under
+    `COUNT` or `AVG` a `0` is still a counted row, and under arithmetic it is not the value (`COALESCE
+    (x, 0) + orders.total_amount` sums a one-side amount on the rows where `x` is NULL). An
+    alternation whose every arm is inert keeps an empty value path, so the fan is still reported.
     """
     if not isinstance(node, exp.Expression):
         return frozenset()
     computed: dict[int, frozenset[str]] = {}
+    # The nodes whose value reaches the SUM unchanged, keyed like `computed`. Only their alternation
+    # arms may drop out as inert.
+    summand: set[int] = {id(node)} if zero_arms_inert else set()
     stack: list[tuple["exp.Expression", bool]] = [(node, False)]
     while stack:
         current, folding = stack.pop()
         reading, operands = _value_operands(current)
         if reading == _VALUE_COLUMN:
-            table = _resolve_col_table(current, scope_map)
+            table = _resolve_folded(current, scope_map)
             computed[id(current)] = frozenset([table]) if table else frozenset()
             continue
         if reading == _VALUE_UNKNOWN or not operands:
@@ -4818,8 +6094,17 @@ def _value_sources(node: "exp.Expression", scope_map: dict[str, str]) -> frozens
         if not folding:
             stack.append((current, True))
             stack.extend((operand, False) for operand in operands)
+            passes_value = (reading == _VALUE_INTERSECT or current is node
+                            or isinstance(current, _PASS_THROUGH_NODES))
+            if id(current) in summand and passes_value:
+                summand.update(id(operand) for operand in operands)
             continue
+        if reading == _VALUE_INTERSECT and id(current) in summand:
+            operands = [operand for operand in operands if not _is_zero_or_null(operand)]
         parts = [computed.get(id(operand), frozenset()) for operand in operands]
+        if not parts:
+            computed[id(current)] = frozenset()
+            continue
         computed[id(current)] = (
             frozenset.intersection(*parts) if reading == _VALUE_INTERSECT
             else frozenset().union(*parts)
@@ -4850,6 +6135,39 @@ def _output_aggregates(node: "exp.Expression") -> list["exp.AggFunc"]:
 # and a fan trap does not refuse — it does not refuse now and there is no code left that could.
 # Do not re-add either as a general helper: the shape they compute is rewrite-eligibility, not a
 # fact about the statement.
+
+
+def _resolve_ci(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
+    """`_resolve_col_table`, with the qualifier matched to its alias or table the way SQL matches an
+    unquoted identifier: `SUM(O.rate) FROM orders o` reads `orders` (#453). The one resolver for the
+    fan/chasm analysis and the aggregation-class and semi-additivity checks, so those cannot
+    disagree about which table a column belongs to.
+
+    `_resolve_col_table` itself is left exact, for the callers that still want the written name.
+    The receipt's sensitive-projection fact does NOT use this: `_projected_sensitive` matches
+    qualifiers itself, more broadly (quoted names fold too), so a change here doesn't reach it."""
+    if col.table:
+        qualifier = col.args.get("table")
+        if isinstance(qualifier, exp.Identifier) and qualifier.args.get("quoted"):
+            # A quoted qualifier is case-sensitive: only its exact alias or table.
+            return scope.get(col.table, col.table)
+        # Unquoted: any alias or table equal ignoring case, but only ONE. `FROM orders AS o JOIN
+        # order_items AS "O"` puts both `o` and `O` in scope, and which one an unquoted `O` binds to
+        # depends on the engine's folding; the scope map no longer knows which alias was quoted, so
+        # two candidates leave the column unresolved, which the report calls undetermined rather
+        # than guessing a table and possibly calling an inflated number clean.
+        hits = [k for k in scope if _tkey(k) == _tkey(col.table)]
+        if len(hits) == 1:
+            return scope[hits[0]]
+        return None if hits else col.table
+    return _resolve_col_table(col, scope)
+
+
+def _resolve_folded(col: "exp.Column", scope_map: dict[str, str]) -> Optional[str]:
+    """`_resolve_ci` in the folded spelling the fan/chasm detectors compare (#201), so a qualifier that
+    matches nothing in the statement still meets the folded relationships."""
+    table = _resolve_ci(col, scope_map)
+    return _tkey(table) if table else table
 
 
 def _resolve_col_table(col: "exp.Column", scope: dict[str, str]) -> Optional[str]:
@@ -4883,7 +6201,10 @@ def _shared_dimension(
     over-reporting is a receipt that says more than it had to, the other polarity says something
     false (see `INFLATED_SHAPES`).
     """
-    for dim in table_set:
+    # SORTED, for the reason the fan loop sorts `agg_sources` (#202): when two dimensions both
+    # qualify, iterating a set picked one by hash order, so the same statement named a different
+    # shared dimension in two processes.
+    for dim in sorted(table_set):
         if dim in agg_sources:
             continue
         many_sources = sorted(s for s in agg_sources if _many_side_facing_one(rels, s, dim))
@@ -4931,30 +6252,153 @@ def _joined_table_pairs(tree: "exp.Select", scope_map: dict[str, str]) -> frozen
 
 
 def _written_join_pairs(
-    tree: "exp.Select", scope_map: dict[str, str]
+    tree: "exp.Select", scope_map: dict[str, str], columns: "Callable[[str], set[str] | None] | None" = None
 ) -> dict[frozenset[str], frozenset[frozenset[tuple[str, str]]]]:
     """THIS SELECT's own explicit joins as the column pairs each one wrote, keyed by the unordered
     pair of tables it connects: the same reading as `_joined_table_pairs`, keeping the columns. The
     same pinning rule too: only an ON that names its own join's two relations counts, and a pair an
     unqualified column kept this layer from resolving contributes nothing."""
     out: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
-    for join in tree.args.get("joins") or ():
-        on = join.args.get("on")
-        if on is None:
-            continue
-        right = scope_map.get(join.this.alias_or_name, _relation_name(join.this))
-        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
-        if right not in names or len(names - {right}) > 1:
-            continue
-        for pair in _predicate_pairs(on, scope_map):
-            tables = frozenset(table for table, _column in pair)
-            if len(tables) == 2:
-                out.setdefault(tables, set()).add(pair)
+    for tables, pairs, _kind in _each_written_join(tree, scope_map, columns):
+        out.setdefault(tables, set()).update(pairs)
     return {tables: frozenset(pairs) for tables, pairs in out.items()}
 
 
+def _each_written_join(
+    tree: "exp.Select", scope_map: dict[str, str], columns: "Callable[[str], set[str] | None] | None" = None,
+    unread: "list[tuple[str, frozenset[str], str]] | None" = None,
+) -> "list[tuple[frozenset[str], frozenset[frozenset[tuple[str, str]]], str]]":
+    """`_written_join_pairs` one join at a time: (tables, the pairs that join wrote, its kind such as
+    SEMI or ANTI, '' for a plain join). Kept apart so two joins to two aliases of a table, each on
+    half a key, aren't read as one join on all of it. A self-join (`nodes n JOIN nodes p`) is keyed
+    by its one table; `USING` and `NATURAL` columns count when the relations they come from are known
+    (`_using_pairs`), and each one that can't be placed goes into `unread` as (the joined table, the
+    tables it may come from, the join's kind)."""
+    out = []
+    frm = tree.args.get("from_") or tree.args.get("from")
+    prior = [frm.this.alias_or_name] if isinstance(frm, exp.From) and frm.this is not None else []
+    # A column a USING join merged, by name: the aliases it now stands for, or None when unknown.
+    merged: "dict[str, set[str] | None]" = {}
+    for join in tree.args.get("joins") or ():
+        alias = join.this.alias_or_name
+        right = scope_map.get(alias, _relation_name(join.this))
+        kind = str(join.args.get("kind") or "").upper()
+        on, using = join.args.get("on"), join.args.get("using")
+        sources, prior = list(prior), prior + [alias]
+        if on is None:
+            natural = str(join.args.get("method") or "").upper() == "NATURAL"
+            if using or natural:
+                names = ([col.name.lower() for col in using] if using
+                         else _natural_columns(alias, sources, scope_map, columns, merged))
+                lost: list = []
+                per = _using_pairs(names, alias, sources, scope_map, columns, merged, lost)
+                out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
+                if unread is not None:
+                    unread.extend((_tkey(_bare(right)), frozenset(cands), kind) for cands in lost)
+            continue
+        names = {scope_map.get(col.table, col.table) for col in on.find_all(exp.Column) if col.table}
+        if right not in names or len(names - {right}) > 1:
+            continue
+        # This join's fixed-value conditions on its own alias travel with its key, so a declared
+        # condition join compares whole here too (see `_fixed_value_pairs`).
+        fixed = _fixed_value_pairs(on, scope_map, {alias})
+        per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+        for pair in _predicate_pairs(on, scope_map):
+            tables = frozenset(table for table, _column in pair)
+            if len(tables) == 2:
+                per.setdefault(tables, set()).update({pair, *fixed})
+        for pair in _self_join_pairs(on, scope_map, alias):
+            per.setdefault(frozenset({next(iter(pair))[0]}), set()).update({pair, *fixed})
+        out.extend((tables, frozenset(pairs), kind) for tables, pairs in per.items())
+    return out
+
+
+def _self_join_pairs(on: "exp.Expression", scope_map: dict[str, str],
+                     alias: str) -> "set[frozenset[tuple[str, str]]]":
+    """The equalities of a join's ON between its own alias and ANOTHER alias of the same table:
+    `n.parent_id = p.id` in `nodes n JOIN nodes p`. `_predicate_pairs` can't tell these from a
+    condition within one row, since both ends resolve to `nodes`; the aliases can."""
+    out = set()
+    for conj in _and_conjuncts(on):
+        if not isinstance(conj, exp.EQ):
+            continue
+        lhs, rhs = conj.this, conj.expression
+        if not (isinstance(lhs, exp.Column) and isinstance(rhs, exp.Column) and lhs.table and rhs.table):
+            continue
+        if lhs.table == rhs.table or alias not in (lhs.table, rhs.table):
+            continue
+        lt, rt = (_tkey(_bare(scope_map.get(c.table, c.table))) for c in (lhs, rhs))
+        if lt == rt:
+            out.add(frozenset({(lt, lhs.name.lower()), (rt, rhs.name.lower())}))
+    return out
+
+
+def _using_pairs(
+    names: "list[str] | None", alias: str, sources: list[str], scope_map: dict[str, str],
+    columns: "Callable[[str], set[str] | None] | None", merged: "dict[str, set[str] | None]",
+    lost: list,
+) -> "dict[frozenset[str], set[frozenset[tuple[str, str]]]]":
+    """A `JOIN ... USING (a, b)` as the pairs it joins on, `names` None when the columns can't be told.
+
+    A column an earlier USING merged stands for every relation it merged (`a JOIN b USING (k) JOIN c
+    USING (k)` equates c.k with a.k and b.k); any other comes from the one relation before the join
+    whose modelled columns include it, or from the only relation there is. A column whose source
+    can't be told adds the tables it may come from to `lost` and no pair, and `merged` records it
+    as unknown for the joins after this one."""
+    right = _tkey(_bare(scope_map.get(alias, alias)))
+
+    def key(a: str) -> str:
+        return _tkey(_bare(scope_map.get(a, a)))
+
+    per: dict[frozenset[str], set[frozenset[tuple[str, str]]]] = {}
+    if names is None:
+        lost.append({key(s) for s in sources})
+        return per
+    for name in names:
+        group, groups, maybe = merged.get(name, set()), [], []
+        if name in merged and group is None:
+            maybe = list(sources)
+        elif len(sources) == 1:
+            groups = [set(sources)]
+        else:
+            for s in sources:
+                if s in group:
+                    continue
+                known = columns(key(s)) if columns is not None else None
+                if known is None:
+                    maybe.append(s)
+                elif name in known:
+                    groups.append({s})
+            if group:
+                groups.append(group)
+        if len(groups) != 1 or maybe:
+            lost.append({key(s) for s in [*maybe, *(a for g in groups for a in g)] or sources})
+            merged[name] = None
+            continue
+        for a in sorted(groups[0]):
+            per.setdefault(frozenset({key(a), right}), set()).add(frozenset({(key(a), name), (right, name)}))
+        merged[name] = groups[0] | {alias}
+    return per
+
+
+def _natural_columns(
+    alias: str, sources: list[str], scope_map: dict[str, str],
+    columns: "Callable[[str], set[str] | None] | None", merged: "dict[str, set[str] | None]",
+) -> "list[str] | None":
+    """The columns a NATURAL join equates: the joined relation's modelled columns that a relation
+    before it has too. None when any of those relations' columns aren't known."""
+    if columns is None:
+        return None
+    mine = columns(_tkey(_bare(scope_map.get(alias, alias))))
+    before = [columns(_tkey(_bare(scope_map.get(s, s)))) for s in sources]
+    if mine is None or any(k is None for k in before):
+        return None
+    return sorted(c for c in mine if c in merged or any(c in k for k in before))
+
+
 def _edges_as_written(
-    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None"
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None",
+    columns: "Callable[[str], set[str] | None] | None" = None,
 ) -> list[Relationship]:
     """The declared edges the fan and chasm detectors may lean on, given the joins the statement
     wrote.
@@ -4976,7 +6420,7 @@ def _edges_as_written(
     The declared side is reduced with `_declared_pairs`, whose None means "cannot be compared" and
     is treated here as "does not match", never as a wildcard.
     """
-    written = _written_join_pairs(tree, scope_map)
+    written = _written_join_pairs(tree, scope_map, columns)
     if not written:
         return rels
     by_pair: dict[frozenset[str], list[Relationship]] = {}
@@ -4997,6 +6441,62 @@ def _edges_as_written(
         if not matching or rel in matching:
             kept.append(rel)
     return kept
+
+
+def _partial_key_joins(
+    rels: list[Relationship], tree: "exp.Select", scope_map: dict[str, str], dialect: "str | None",
+    columns: "Callable[[str], set[str] | None] | None" = None,
+) -> "tuple[dict[int, tuple[Relationship, list[str], list[str]]], set[str]]":
+    """The declared composite-key joins this SELECT wrote only PART of, by id: each with the columns
+    it wrote and the ones the declaration needs, named from the join's FROM side (#510). Beside them,
+    the tables of a composite key a `USING`/`NATURAL` join may have written part of, when which
+    relation a column came from can't be told: their aggregates are undetermined, not clean.
+
+    `rels` is every declaration, and each written join is read on its own: one that matches some
+    declaration whole (a declared single-column join, or the whole key) repeats nothing that
+    declaration doesn't already say; one that writes some but not all of a key is partial."""
+    # A SEMI or ANTI join returns each row at most once, so it can't repeat one.
+    lost: list[tuple[str, frozenset[str], str]] = []
+    joins = [(tables, pairs) for tables, pairs, kind in _each_written_join(tree, scope_map, columns, lost)
+             if kind not in ("SEMI", "ANTI")]
+    if not joins and not lost:
+        return {}, set()
+    declared = [(rel, d) for rel in rels if (d := _declared_pairs(rel, dialect)) is not None]
+    composite = {_rel_tables(rel) for rel, d in declared if len(_endpoint_pairs(rel, d)) > 1}
+    unclear = {t for right, cands, kind in lost if kind not in ("SEMI", "ANTI")
+               for c in cands if frozenset({c, right}) in composite for t in (c, right)}
+    out: dict[int, tuple[Relationship, list[str], list[str]]] = {}
+    for tables, pairs in joins:
+        between = [(rel, d) for rel, d in declared if _rel_tables(rel) == tables]
+        if any(d <= pairs for _rel, d in between):
+            continue
+        for rel, d in between:
+            keys = _endpoint_pairs(rel, d)
+            used = keys & pairs
+            if rel.on and len(keys) > 1 and used and used != keys and id(rel) not in out:
+                out[id(rel)] = (rel, *_partial_names(rel, keys, used, dialect))
+    return out, unclear
+
+
+def _endpoint_pairs(rel: Relationship,
+                    declared: "frozenset[frozenset[tuple[str, str]]]") -> "set[frozenset[tuple[str, str]]]":
+    """The declared pairs that join a column of one end to a column of the other: not a fixed value,
+    and not a condition within one table (`customers.billing_region = customers.region`). A self-join
+    declaration can't tell the last apart, so all its column pairs count."""
+    ends = _rel_tables(rel)
+    return {p for p in declared
+            if not _is_fixed_value(p) and (len(ends) == 1 or {t for t, _c in p} == ends)}
+
+
+def _partial_names(rel: Relationship, keys: "set[frozenset[tuple[str, str]]]",
+                   used: "set[frozenset[tuple[str, str]]]", dialect: "str | None") -> tuple[list[str], list[str]]:
+    """The columns a partial join wrote and the ones its declaration needs, by FROM-side name."""
+    ft, tt = _tkey(_bare(rel.from_table)), _tkey(_bare(rel.to_table))
+    named = [(f, p) for f, t in join_key_pairs(rel, dialect) or []
+             if (p := frozenset({(ft, f.lower()), (tt, t.lower())})) in keys]
+    if len(named) != len(keys):   # an `on:` with a fixed value or a filter too: name each pair by its FROM-side column
+        named = [(next((c for t, c in sorted(p) if t == ft), sorted(p)[0][1]), p) for p in sorted(keys, key=sorted)]
+    return [_echo_name(f) for f, p in named if p in used], [_echo_name(f) for f, _ in named]
 
 
 # `apply_default_filters` was deleted here by ACE-042: declared filters are business logic, not a
@@ -5738,7 +7238,7 @@ def _metric_candidates(org: Datasource, storage_type: "str | None",
         bindings = mm.bindings or {}
         if _D.is_derived(mm) or _D.is_second_order(mm):
             try:
-                bindings = _D.expanded_bindings(mm, idx)
+                bindings = _D.expanded_bindings(mm, idx, org)
             except _D.DerivedError:
                 bindings = mm.bindings or {}
         text = (bindings or {}).get(storage_type)
@@ -6051,6 +7551,9 @@ __all__ = [
     "pre_flight_check",
     "assemble_receipt",
     "assemble_refusal_receipt",
+    "join_key_pairs",
+    "join_column_pairs",
+    "model_dialect",
     # Re-exported for the chokepoint, which reaches them through this module rather than
     # importing `sql_dialect` directly: `execute_sql` is vendored into the plugin while this
     # package resolves separately, so it reads what it needs off one module it already has.

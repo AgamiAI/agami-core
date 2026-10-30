@@ -256,11 +256,17 @@ def test_the_budget_has_exactly_one_configuration_surface():
     # once per call before any bound is derived, and `tools._pass_child_env` writes both numbers into
     # the child's `AGAMI_SQL_*` keys, so the fork carries it explicitly instead of losing it.
     # `tests/test_per_org_statement_limits.py` drives that across a real process boundary.
+    #
+    # `_guard_scan` (#451) is the ninth, and the same kind as `_guard_shape`: the safety pass's reading
+    # of the statement (its outer joins, in the caller's own table names and never the model's sizes)
+    # carried across to the refusal builder within one call, cleared at entry beside it, and read only to WORD a refusal already decided,
+    # never to compute a bound.
     context_vars -= {
         "_last_error_detail",
         "_guard_model",
         "_last_outcome",
         "_guard_shape",
+        "_guard_scan",
         "_pass_posture",
         "_last_executing_identity",
         "_last_warehouse_query_id",
@@ -1307,7 +1313,10 @@ def test_the_supervisor_bound_is_derived_from_the_statement_budget(warehouse, mo
     # the child reaches the budget this side resolved (an organisation's own limit, when it has one).
     # They may differ from `os.environ` only in SPELLING an unset or unusable value as the number it
     # resolves to — asserted by value, so a child handed any other budget still fails here.
-    assert differing <= {"AGAMI_GOVERNANCE_ENFORCED", "AGAMI_SQL_MAX_ROWS", "AGAMI_SQL_TIMEOUT_S"}, differing
+    # PYTHONUTF8 and PYTHONIOENCODING (#362) are not budget inputs either: they fix the encoding of
+    # the child's streams.
+    assert differing <= {"AGAMI_GOVERNANCE_ENFORCED", "AGAMI_SQL_MAX_ROWS", "AGAMI_SQL_TIMEOUT_S",
+                         "PYTHONUTF8", "PYTHONIOENCODING"}, differing
     assert child_env["AGAMI_SQL_TIMEOUT_S"] == "300"
     assert child_env["AGAMI_SQL_MAX_ROWS"] == str(execute_sql._row_cap_from_env())
 

@@ -47,6 +47,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from store import Store
 from tools import (
+    REPLY_SEPARATORS,
     SERVER_NAME,
     TOOLS,
     _current_org_ctx,
@@ -385,15 +386,15 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
     no `caller_identity` key returns unchanged too — but one that DOES carry that key is still
     reserialized with it stripped; see the overwrite-guarantee paragraph below.
 
-    Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` builds
-    its response this way, a JSON payload with a "## Domain context" / "## USER_MEMORY.md" markdown
-    suffix appended after it — by parsing only the leading JSON object and re-appending whatever
-    followed it, untouched.
+    Handles a JSON object followed by trailing non-JSON text — `tool_get_datasource_schema` built its
+    response this way until its domain context moved inside the JSON (#477), and a consumer's tool
+    may still — by parsing only the leading JSON object and re-appending whatever followed it,
+    untouched.
 
     **`tool_get_prompt_examples`'s local file-serving branch (no DB configured) is NOT handled, and
     this is not merely deferred scope — it is a mode where the gap cannot matter.** That branch
-    returns a whole area's curated library as one YAML/Markdown document with no leading JSON
-    object at all, so there is no prefix here to stamp. But "no `AGAMI_DB_URL`" is exactly the
+    now replies in the served JSON shape, but it is still never stamped, and the reason never
+    depended on the shape: "no `AGAMI_DB_URL`" is exactly the
     condition for the local single-player transport (`mcp_harness.py`), which has no authentication
     at all, by design — its own docs state the trust boundary is the OS user account, because there
     is nothing to authenticate to. `_actor_ctx` is only ever set inside this module's own
@@ -432,7 +433,7 @@ def _with_caller_identity(result_text: str, actor: str | None) -> str:
         body = {k: v for k, v in body.items() if k != "caller_identity"}
     else:
         body["caller_identity"] = actor
-    return json.dumps(body, indent=2) + suffix
+    return json.dumps(body, separators=REPLY_SEPARATORS) + suffix
 
 
 def build_server(

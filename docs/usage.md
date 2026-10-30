@@ -39,7 +39,7 @@ $ /agami-connect
   ✓ Validator passed (semantic-model schema + trust block)
   ✓ Wrote the model under ~/agami-artifacts/main/ (datasource.yaml + subject_areas/…)
   ✓ Snapshot pinned at .snapshots/45f0fefa2403/
-  ✓ git init + initial commit
+  ✓ Every later model edit is logged to curation_log.jsonl (`sm history` lists them)
 
 [Phase 4: Rule 1 sign-off — BEFORE seed generation]
   8 metric proposals need your sign-off — seeds will exercise these
@@ -304,19 +304,23 @@ kick the refresh yourself.
 **What happens to removed tables / columns** (the lossy case):
 - They drop out of the model on the next write. Hand-edits on them (descriptions,
   sign-offs) are lost.
-- `.git/` in `<artifacts_dir>/<profile>/` keeps the history — `git log` and
-  `git show <commit>:<path>` recover prior versions if needed.
+- `curation_log.jsonl` in `<artifacts_dir>/<profile>/` records every model edit with
+  its time, who made it, the value it replaced and the model version it produced —
+  `sm history <artifacts_dir>/<profile>` lists them, newest first. agami doesn't
+  create a git repository; if you `git init` the profile folder yourself, each edit
+  is also committed there, and `git log` / `git show <commit>:<path>` recover whole
+  prior files.
 - `.snapshots/` keeps prior model versions pinned, so old query receipts still
   resolve the entries they referenced.
 
 **Workflow**:
 ```
-git -C ~/agami-artifacts/<profile> log -5  # optional: see what's there
+sm history ~/agami-artifacts/<profile> --limit 5  # optional: the latest model edits
 /agami-connect reintrospect
 # Walk Phase 4 if a Rule 1 gate fires (new metrics need sign-off)
 # Walk Phase 5 examples-validation (can skip with `done`)
 # Walk Phase 7's Rule 2 polish panel if you want (or skip)
-git -C ~/agami-artifacts/<profile> diff HEAD~1  # diff of what the schema change cost / added
+git -C ~/agami-artifacts/<profile> diff HEAD~1  # only if you `git init`-ed the folder: what the schema change cost / added
 ```
 
 **Known gap**: no automated drift detection yet. You have to know the schema

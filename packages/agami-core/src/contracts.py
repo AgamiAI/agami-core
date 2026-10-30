@@ -125,8 +125,8 @@ class ListDatasourcesResult(_Contract):
 
 
 # ---------------------------------------------------------------------------
-# get_datasource_schema — the structured payload (the tool also appends Markdown
-# domain context as text; a serving backend can emit this structured part as JSON).
+# get_datasource_schema — the structured payload; its Markdown domain context is the
+# `domain_context` field (#477).
 # ---------------------------------------------------------------------------
 
 
@@ -157,10 +157,8 @@ class SubjectAreaSummary(_Contract):
 # tables differ only by their join columns, and this tier carries no columns, so as a list they
 # serialized identically and a wide model spent most of the block repeating itself.
 #
-# Names are BARE. `dataset_names` strips every qualifier and resolves first-match, so a
-# schema-qualified node would look precise and select a different table; where one name is
-# declared under two schemas both edges land on one node. #258 is the fix, and this should
-# publish the qualified name once the resolver preserves it.
+# A name is bare unless it is declared under more than one schema, then `schema.table`: each node
+# is the spelling `dataset_names` resolves back to that one table (#258).
 CrossAreaMap = dict[str, list[str]]
 
 
@@ -172,8 +170,10 @@ class DatasourceSchemaResult(_Contract):
     # Pass 1 (index): subject areas + cross-area relationships.
     subject_areas: list[SubjectAreaSummary] | None = None
     cross_area_relationships: CrossAreaMap | None = None
-    # The never-hide net: every metric the model declares, and the tables big enough to matter.
+    # The never-hide net: every described metric in scope, a count of the undescribed rest (#406),
+    # and the tables big enough to matter.
     metric_index: dict[str, Any] | None = None
+    metrics_without_description: int | None = None
     large_tables: dict[str, int] | None = None  # {table: estimated_row_count}
     note: str | None = None
     truncated: bool | None = None
@@ -194,16 +194,35 @@ class DatasourceSchemaResult(_Contract):
     # One `{"name", "did_you_mean" | "hint"}` per `metric_names` entry that selected nothing; absent
     # when every name resolved. Declared because the alternative was the silent drop it replaces.
     unknown_metric_names: list[dict[str, Any]] | None = None
+    # Declared ambiguities for the tables in scope (#473): each `{name, when, options, behaviour,
+    # applies_to}`. Absent when none apply. Declared so a typed client sees the guidance.
+    ambiguities: list[dict[str, Any]] | None = None
+    # Entries this reply reaches without opening what they're tied to (#477): each
+    # `{name, when, open}`, where `open` is `{datasource, ambiguity_names: [name]}`, the
+    # get_datasource_schema call that returns the full entry. Absent when there are none.
+    ambiguity_signposts: list[dict[str, Any]] | None = None
+    # Names in `ambiguity_names` that no declared ambiguity has. Absent when every name resolved.
+    unknown_ambiguity_names: list[str] | None = None
+    # How to act on `ambiguities`, sent with them so it survives a client trimming the server
+    # instructions.
+    ambiguities_note: str | None = None
     # Pass 2 (dataset_names): per-table context + relationships/metrics from get_table_context.
     # Kept loose — these come straight from the loader and carry many provenance fields.
     tables: dict[str, Any] | None = None
     relationships: list[dict[str, Any]] | None = None
+    # Joins from a requested table to one the caller didn't request (#477): one
+    # `{table, from, relationship, keys: ["from_col=table_col", ...], schema?, join_type?}` per
+    # pair of tables. Absent when there are none.
+    joins_to_other_tables: list[dict[str, Any]] | None = None
+    # The datasource.md narrative, derived model summary and USER_MEMORY.md preferences, as one
+    # Markdown string (#477). It used to follow the JSON object as text. Absent when there is none.
+    domain_context: str | None = None
     metrics: list[dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
-# get_prompt_examples — structured payload (the tool returns Markdown text when
-# examples exist; the no-examples case is this JSON).
+# get_prompt_examples — structured payload. Served and local both reply in JSON: the ranked
+# examples with `datasource`, `count` and `model_version`, or the no-examples note.
 # ---------------------------------------------------------------------------
 
 

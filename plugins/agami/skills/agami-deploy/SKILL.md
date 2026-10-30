@@ -37,7 +37,7 @@ in plan mode — it writes the bundle + your agami.env and may run Docker. Switc
 Automatically** mode (Shift+Tab) and re-invoke me."* **DO NOT** write a plan file or call `ExitPlanMode`.
 
 ## Phase 0: Preflight
-1. **Resolve the environment** — `python3 "$AGAMI_PLUGIN_ROOT/scripts/connect_resolve.py"` prints JSON;
+1. **Resolve the environment** — `bash "$AGAMI_PLUGIN_ROOT/scripts/py" connect_resolve.py` prints JSON;
    read `data.artifacts_dir` (the local model dir) and `data.interpreter.python3` (call it `$PY` — the
    interpreter that has the agami-core package; use it for `deploy_preflight`).
 2. **Model present** — `<artifacts_dir>/<active_profile>/datasource.yaml` must exist. If there's no model yet,
@@ -66,7 +66,7 @@ and use their answer as `--target`. It must **not** be inside the artifacts dir 
 it copies the model *out of* artifacts *into* the bundle). Then write it:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/prepare_deploy.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" prepare_deploy.py \
   --target <chosen-dir, default ~/agami-deploy> \
   --artifacts-dir "<data.artifacts_dir>" \
   --public-base-url "https://<host>" \

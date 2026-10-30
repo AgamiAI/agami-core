@@ -212,6 +212,8 @@ Run: chmod 600 <artifacts_dir>/local/credentials
 
 The agami-connect Phase 0a sets the right permissions automatically when it writes the file. If you create it by hand, run `chmod 600 <artifacts_dir>/local/credentials` afterwards.
 
+**On Windows** there is no `chmod 600`: NTFS has no Unix mode bits, so `chmod` does nothing and every file reads as `644`/`666`. The check is skipped there, and the file is protected by your Windows user profile's permissions instead — keep the artifacts folder under your own user folder.
+
 ## Profile selection
 
 The active profile is the one `init` recorded in `<artifacts_dir>/local/.config.active_profile` when you first set up. Override per shell session with:

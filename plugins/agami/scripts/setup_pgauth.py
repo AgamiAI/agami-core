@@ -86,7 +86,7 @@ def _load_section(profile: str) -> dict[str, str]:
     # execute_sql.py for the same fix and why it matters (configparser default
     # leaves "xy12345 # locator..." as the value).
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
-    cfg.read(CREDENTIALS_PATH)
+    cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
     if profile not in cfg:
         sys.stderr.write(
             f"Profile [{profile}] not found in <artifacts_dir>/local/credentials. "
@@ -119,7 +119,7 @@ def _resolve_default_profile() -> str:
         return env
     if CONFIG_PATH.exists():
         try:
-            cfg = json.loads(CONFIG_PATH.read_text())
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             active = cfg.get("active_profile")
             if isinstance(active, str) and active:
                 return active
@@ -239,7 +239,7 @@ def _atomic_write(path: Path, contents: str, mode: int) -> None:
     """Atomic write: temp file in same dir + rename, with chmod set before rename."""
     fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
     try:
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(contents)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
@@ -318,7 +318,7 @@ def main() -> int:
             sys.stderr.write("<artifacts_dir>/local/credentials is missing.\n")
             return 2
         cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
-        cfg.read(CREDENTIALS_PATH)
+        cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
         profiles = cfg.sections()
     else:
         profiles = [args.profile or _resolve_default_profile()]

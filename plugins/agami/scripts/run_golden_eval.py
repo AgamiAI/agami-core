@@ -225,6 +225,7 @@ def _tools_came_up(server: "McpServer") -> Optional[str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
             timeout=60,
             env={**os.environ, **(server.env or {})},
             check=False,
@@ -317,6 +318,7 @@ def _sm(*args: str, json_out: bool = True) -> Any:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if completed.returncode != 0:
@@ -425,7 +427,7 @@ def _relationships_text(bundles: list[dict]) -> str:
     the number. The generator cannot infer it from column names.
     """
     lines: list[str] = []
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
     for bundle in bundles:
         for rel in bundle.get("relationships") or []:
             left, right = rel.get("from_table"), rel.get("to_table")
@@ -438,10 +440,14 @@ def _relationships_text(bundles: list[dict]) -> str:
                 left = f"{rel['from_schema']}.{left}"
             if rel.get("to_schema"):
                 right = f"{rel['to_schema']}.{right}"
-            on = f"{left}.{rel.get('from_column')} = {right}.{rel.get('to_column')}"
-            if on in seen:
+            # A composite key is an `on:` join with no from/to column (#510).
+            on = rel.get("on") or f"{left}.{rel.get('from_column')} = {right}.{rel.get('to_column')}"
+            # Keyed on the qualified ends too: introspection writes a composite `on:` on bare table
+            # names, so the same key in two schemas is the same text.
+            key = (left, right, on)
+            if key in seen:
                 continue
-            seen.add(on)
+            seen.add(key)
             parts = [f"{left} -> {right}", f"on {on}"]
             for field in ("relationship", "join_type"):
                 value = rel.get(field)
@@ -569,16 +575,23 @@ def _fetch_context(root: Path, top_k: int, profile: str) -> dict:
 
 
 def _split_payload(payload: str) -> tuple[dict, str]:
-    """The tool's response in its two parts: the leading JSON document, and the prose after it.
+    """The tool's response in its two parts: the JSON document, and its prose (the domain context).
 
-    A response that does not open with a JSON object — an error sentence, say — has no document and
-    is all prose, which is the reading that keeps everything and drops nothing.
+    The prose is the document's `domain_context` field (#477), or, from an older server, the text
+    after the object. A response that does not open with a JSON object — an error sentence, say —
+    has no document and is all prose, which is the reading that keeps everything and drops nothing.
     """
     try:
         document, end = json.JSONDecoder().raw_decode(payload)
     except ValueError:
         return {}, payload
-    return (document if isinstance(document, dict) else {}), payload[end:]
+    if not isinstance(document, dict):
+        return {}, payload[end:]
+    # The prose now rides inside the JSON as `domain_context` (#477); an older server sent it after
+    # the object, so both are read and kept.
+    prose = document.pop("domain_context", None) or ""
+    tail = payload[end:]
+    return document, (prose + ("\n" + tail if tail.strip() else "")) if prose else tail
 
 
 def _fixed_context(schema: str, org_context: str) -> str:

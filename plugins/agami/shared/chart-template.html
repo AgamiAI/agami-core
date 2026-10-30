@@ -94,7 +94,7 @@
       // "multiplied" (and `joins` names the join that did it), "not_multiplied", or
       // "undetermined". `findings` is the other axis — aggregation class and semi-additivity,
       // which are about what the number MEANS rather than how many rows went into it.
-      "aggregates": {"items": [{"aggregate":"SUM(o.total)","scope":"main","status":"multiplied","reason":null,
+      "aggregates": {"items": [{"aggregate":"SUM(o.total)","scope":"main","status":"multiplied","result_affected":true,"reason":null,
                                 "joins":["orders (1) <- order_items (N)"],
                                 "findings":[{"risk":"fan_trap","reason":"...",
                                              "triggering_joins":["..."],
@@ -854,18 +854,30 @@
       return head.replace(/\B(?=(\d{2})+(?!\d))/g, ',') + ',' + tail;
     }
     function groupWestern(s) { return s.replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+    // `<CODE>[_<scale>][/<period>]`, e.g. USD_millions, USD/day, USD_millions/year
+    const SCALE_SUFFIX = { thousands:'K', millions:'M', billions:'B', lakhs:'L', crores:'Cr' };
+    const PERIODS = ['hour', 'day', 'week', 'month', 'quarter', 'year'];
+    function parseUnit(unit) {
+      const m = /^([A-Za-z]{3})(?:_([A-Za-z]+?)s?)?(?:\/([A-Za-z]+))?$/i.exec((unit || '').trim());
+      if (!m || !CURRENCY_SYMBOLS[m[1].toUpperCase()]) return null;
+      const scale = m[2] ? m[2].toLowerCase() + 's' : null;
+      const period = m[3] ? m[3].toLowerCase() : null;
+      if ((scale && !SCALE_SUFFIX[scale]) || (period && !PERIODS.includes(period))) return null;
+      return { code: m[1].toUpperCase(), scale, period };
+    }
     function fmtUnit(value, unit) {
       if (value === null || value === undefined || value === '') return '';
       const num = Number(value);
       if (!isFinite(num)) return String(value);
-      const code = (unit || '').trim().toUpperCase();
-      if (CURRENCY_SYMBOLS[code]) {
-        const decimals = ZERO_DECIMAL[code] ? 0 : 2;
-        const neg = num < 0, n = Math.abs(num);
-        const fixed = n.toFixed(decimals);
-        const [intPart, frac] = decimals ? fixed.split('.') : [fixed, ''];
-        const grouped = code === 'INR' ? groupIndian(intPart) : groupWestern(intPart);
-        return (neg ? '-' : '') + CURRENCY_SYMBOLS[code] + grouped + (frac ? '.' + frac : '');
+      const cu = parseUnit(unit);
+      if (cu) {
+        const n = Math.abs(num);
+        const fixed = cu.scale ? n.toFixed(6).replace(/\.?0+$/, '')
+                               : n.toFixed(ZERO_DECIMAL[cu.code] ? 0 : 2);
+        const [intPart, frac] = fixed.split('.');
+        const grouped = cu.code === 'INR' ? groupIndian(intPart) : groupWestern(intPart);
+        return (num < 0 ? '-' : '') + CURRENCY_SYMBOLS[cu.code] + grouped + (frac ? '.' + frac : '')
+          + (cu.scale ? SCALE_SUFFIX[cu.scale] : '') + (cu.period ? '/' + cu.period : '');
       }
       const low = (unit || '').trim().toLowerCase();
       if (low === 'percent' || low === '%' || low === 'pct') return num + '%';
@@ -1687,7 +1699,12 @@
           if (a.scope && a.scope !== 'main') {
             li.appendChild(document.createTextNode(' ' + a.scope));
           }
-          const said = AGG_BADGE[a.status] || ['stale', a.status || 'unknown'];
+          // A multiplication the value cannot feel (a MIN, MAX, boolean fold or DISTINCT aggregate)
+          // is not the amber state: the rows were repeated, but `result_affected` says this number
+          // is unchanged by it, and an amber badge beside a correct number is a false alarm (#450).
+          const said = (a.status === 'multiplied' && a.result_affected === false)
+            ? ['approved', 'rows repeated by a join; value unaffected']
+            : (AGG_BADGE[a.status] || ['stale', a.status || 'unknown']);
           li.appendChild(el('span', { class: 'conf-badge ' + said[0], text: said[1] }));
           if (a.joins && a.joins.length) {
             li.appendChild(el('div', { class: 'receipt-meta', text: a.joins.join(', ') }));

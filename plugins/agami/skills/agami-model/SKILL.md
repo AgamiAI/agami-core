@@ -13,7 +13,7 @@ This skill orchestrates:
 
 1. **Render** — invoke `render_model_explorer.py` to walk every YAML and write a self-contained HTML artifact at `<artifacts_dir>/local/model/<profile>/<ts>.html`. The Python script does the YAML reading — **no LLM tokens spent on the walk**. The dashboard has tabs: **Datasource · Review · Subject areas · Tables · Metrics · Entities · Joins · Examples · Queued**. The **Review** tab is the sign-off queue (the old `/agami-review`); pass `--initial-tab review` to open on it.
 2. **Open + wait** — auto-open the file, end the turn, wait for the user to come back with a "Generate feedback for Claude" block (exclude/include, approve/reject, edits, new metrics, org edit).
-3. **Apply** — for each batch, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state / stamps sign-off, runs the validator, reverts via git on failure, appends to `curation_log.jsonl`, and commits.
+3. **Apply** — for each batch, run `semantic_model.cli curate` with an ops JSON. The engine flips review_state / stamps sign-off, runs the validator, restores the files it changed on failure (from in-memory backups, no git needed), appends each change to `curation_log.jsonl` with its time and the value it replaced, and commits when the profile folder is its own git repository.
 4. **Re-render** — render to a new timestamped file and re-open. Wait for the next batch.
 
 Trust-spine semantics — three actions on the same `review_state` field:
@@ -35,7 +35,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
   - **A pasted feedback block names its own target.** When applying a block from the dashboard's "Generate feedback for Claude", its first line is `profile: <name>` — that dashboard was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one dashboard's approvals to whatever happens to be the active profile (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named profile, target it directly — don't fall back to `active_profile` or hunt with `find`.
 - **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
-- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `python3 -c 'import yaml'`. If not, surface the install hint and stop.
+- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
 
 **Scope / initial tab.** Look at `$ARGUMENTS`:
 - `review`, `preseed`, or `rule1` → the user wants the sign-off queue: render with `--initial-tab review` so the dashboard opens on the Review tab. (`preseed`/`rule1` come from `/agami-connect`'s Phase 4 gate — the Review tab already groups Rule 1 metrics under "Needs your eyes", so no separate scope filter is needed; the user signs those off there.)
@@ -59,7 +59,7 @@ ts=$(date -u +%Y%m%d-%H%M%S)
 # Per-profile subdir so multi-profile users can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
 out="<artifacts_dir>/local/model/$profile/$ts.html"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
   ${initial_tab:+--initial-tab "$initial_tab"} \
@@ -78,7 +78,8 @@ Tabs: Datasource · Review · Subject areas · Tables · Metrics · Entities ·
 Joins · Examples · Queued. Live search + status filters per tab.
 • Review tab — the sign-off queue: Approve / Reject the metrics (must be
   signed off before queries use them), entities, and inferred joins, with a
-  one-click "Approve all" for the confident ones.
+  one-click "Approve all" for the confident ones and a matching "Reject all"
+  (one reason, recorded on each rejected item in curation_log.jsonl).
 • Tables/Metrics/… — browse + edit; Exclude tables/columns you don't want
   queried (a column offers "exclude all N named <col>" to drop it everywhere);
   add metrics; edit datasource.md.
@@ -91,14 +92,10 @@ You can also type commands directly:
   done
 ```
 
-**Auto-open with the standard multi-command fallback chain:**
+**Auto-open it** (macOS, Linux and Windows alike; on failure it prints the path to open by hand):
 
 ```bash
-( command -v open    >/dev/null 2>&1 && open "$out" ) || \
-( command -v xdg-open >/dev/null 2>&1 && xdg-open "$out" ) || \
-( command -v start    >/dev/null 2>&1 && start "$out" ) || \
-( command -v cmd      >/dev/null 2>&1 && cmd /c start "" "$out" ) || \
-echo "agami: couldn't auto-open the explorer — open manually: $out"
+bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "$out"
 ```
 
 End the turn. Wait for the user.
@@ -110,17 +107,17 @@ End the turn. Wait for the user.
 The user pastes the dashboard's "Generate feedback" block. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
-parse_model_feedback.py --block-file <pasted>
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_model_feedback.py --block-file <pasted>
 ```
 
 It prints `{data, anomalies, needs_judgment}`:
 - `data.profile` — the dashboard's target model. **Use it, overriding the active-profile default** (a block was rendered for THAT model; never apply it to whatever's active).
-- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit verbatim). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
+- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
 - `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
 - `data.datasource_md` — the full datasource.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/datasource.md` (overwrite; human narrative only).
-- `data.signer` / `data.role` — the curator identity for `--signer`/`--role` on every approve. **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the Phase 0 ask.
+- `data.signer` / `data.role` — the curator identity for `--signer`/`--role` (recorded on every op; required on an approve). **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the Phase 0 ask.
 
 **If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a schema prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (re-copy that block from the dashboard). Don't apply a partial block.
 
@@ -138,19 +135,23 @@ It prints `{data, anomalies, needs_judgment}`:
   {"op": "exclude", "kind": "table", "area": "sales", "name": "CUSTOMERS", "column": "EMAIL"},
   {"op": "approve", "kind": "metric", "area": "sales", "name": "total_revenue", "at": "2026-06-10T17:51:41Z"},
   {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
-  {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"}
+  {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_discount", "reason": "not a real metric"},
+  {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"},
+  {"op": "move",    "kind": "table", "area": "sales", "name": "shipments", "to_area": "fulfilment"}
 ]
 ```
 
-(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, commits, logs to `curation_log.jsonl`, and reverts everything on validation failure**:
+A `move` (the explorer's **Move to area**) gives the table a new owning area, created if the model doesn't have it yet. Its joins follow it (a join that now spans two areas becomes a cross-area join, and the reverse), and the metrics and entities on it move too once every table they read is in the new area. Ones that also read a table outside it stay; the result's `notes` lists them (*"left in sales: metric units_per_order also reads orders"*). A join the new area already holds is kept once: a person's sign-off over the engine's approval, and that over an unreviewed copy; two copies a person signed off that disagree refuse the move until one is approved or rejected to match. Pass `notes` on to the user verbatim; a batch that was undone reports none.
+
+(Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, logs to `curation_log.jsonl`, commits (when the profile folder is its own git repository), and reverts everything on validation failure**:
 
 ```bash
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
-  --ops-file /tmp/agami-model-ops.json \
+  --ops-file "<artifacts_dir>/local/tmp/agami-model-ops.json" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
 
-`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0 (resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp). Stdout is JSON: `{applied, skipped, errors, validated, committed}`.
+`ROOT="<artifacts_dir>/<profile>"`. `--signer`/`--role` come from Phase 0. They are recorded in `curation_log.jsonl` on every op the batch applies (exclude, include, approve, reject and edit); an approve, or an edit of an approved join's tables, columns or cardinality, also stamps them on the item as its sign-off. Resolve them before applying if the batch has any `approve` op — the validator rejects an approved entry with no sign-off stamp. Stdout is JSON: `{applied, skipped, errors, validated, committed}`, plus `commit_note` when nothing was committed (see the edge-case table).
 
 **Success** (`validated: true`):
 - Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*
@@ -159,6 +160,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
 
 **Failure** (`validated: false`):
 - The engine already reverted via git. Surface: *"⚠ Validator rejected the batch — all changes reverted. No files were modified."* Show `errors` verbatim. Stop; don't re-render.
+- The same happens when an op with no `area` names a join, entity or metric that isn't in the model, or one that matches more than one entry (e.g. two joins between the same tables): the error names the op and the candidates. Re-send the op with `from_column` / `to_column` (or `area` for an entity or metric), never drop it. An op without `area` is searched for in every subject area and in the cross-area joins, entities and metrics (an entity or metric whose declared name equals the op's `name` exactly wins over others that only share its slug); an op that names an area and misses its target is listed in `skipped[]` as before.
 
 Excluded entries vanish from the runtime model (the loader drops `review_state: rejected`) but stay visible in the explorer (which loads with `include_rejected=True`) so the user can re-include them.
 
@@ -173,7 +175,7 @@ Every successful apply produces a new explorer file at a new timestamp.
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
 new_out="<artifacts_dir>/local/model/$profile/$new_ts.html"
-python3 "$AGAMI_PLUGIN_ROOT/scripts/render_model_explorer.py" \
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
   --profile "$profile" --artifacts-dir "$artifacts_dir" --out "$new_out"
 ```
 
@@ -214,8 +216,8 @@ Then end the turn. The skill is one-shot per invocation — re-enter via the sla
 | User types `include tables: schema.table` for a table that's already unreviewed | Same — idempotent flip; entry stays unreviewed; curator name recorded. |
 | User types `exclude columns: schema.table.col` and the column doesn't exist | The applier returns it in `skipped[]` with reason "field not found on dataset". Surface the skip; continue with the rest. |
 | User types `exclude tables: schema.table.col` (3 segments — looks like a column) | The grammar is positional; agami treats the `exclude tables:` prefix as authoritative. The applier will fail to find a table with that 3-segment name and return `skipped` with reason "table yaml not found". Surface clearly. |
-| Validator fails on a partially-applied batch | The applier reverts ALL YAML changes via `git checkout -- .` before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
-| User has the profile dir but no `.git/` (legacy from before Phase 3e) | The applier skips the git commit + revert steps silently. Curation log still gets appended. The user loses revert-on-validator-fail safety — surface a one-liner suggesting `git init` in the profile dir. |
+| Validator fails on a partially-applied batch | The applier restores every file it touched from its own backups (no git needed) before returning. `applied` counts are zeroed in the response (defense against partial-apply confusion). The user sees `validator_output` verbatim and can fix + retry. |
+| `committed: false` with a `commit_note` | Nothing went wrong — the change is written and validated; it just wasn't committed. Pass the note on in one line, in your own words: the model isn't in git (the change is still in `curation_log.jsonl` — `sm history <root>` lists what changed, newest first; `git init` in its folder keeps whole file versions too), or it's inside a larger repository (agami never commits there — tell them which folder changed so they commit it themselves). |
 | The model has 5000+ fields | The renderer handles it (JSON manifest is ~hundreds of KB at the high end). Client-side search is instant up to the millions of DOM nodes mark. If it gets sluggish, file an issue. |
 
 ---

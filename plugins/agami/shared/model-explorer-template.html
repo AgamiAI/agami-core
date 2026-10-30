@@ -39,7 +39,7 @@
     }
     A table:
       { "name", "qname", "description", "row_count", "review_state", "excluded",
-        "grain":[], "caveats":[], "default_filters":[], "area", "schema",
+        "grain":[], "unique_keys":[[]], "caveats":[], "default_filters":[], "area", "schema",
         "fields": [ { "name", "qname", "type", "description", "review_state",
                       "excluded", "sensitive", "unit", "caveats", "date_format", "timezone" } ] }
 -->
@@ -221,6 +221,11 @@
       color: var(--fg); border: 1px solid var(--border);
     }
     .table-actions button:hover, .card-actions button:hover { border-color: var(--accent); color: var(--accent); }
+    .table-actions select.move-select {
+      font: inherit; font-size: 12px; padding: 5px 8px; border-radius: 6px; cursor: pointer;
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border); max-width: 200px;
+    }
+    .table-actions select.move-select.queued { border-color: var(--accent); color: var(--accent); }
     .table-actions button.action-exclude.queued, .card-actions button.queued-exclude {
       background: var(--bad-fg); color: white; border-color: var(--bad-fg);
     }
@@ -382,6 +387,8 @@
     }
     .btn-sm.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     .btn-sm.primary:hover { background: var(--accent-hover); }
+    .btn-sm.bulk-reject { color: var(--bad-fg); border-color: var(--bad-border); }
+    .kind-subhead .btn-sm + .btn-sm { margin-left: 6px; }
     /* Prominent "Add metric" buttons (the open trigger + the form submit) — easy to spot.
        Selector outscopes the generic `.card-actions button` rule (else it gets overridden). */
     .card-actions button.add-metric-open, .card-actions button.add-metric-go,
@@ -458,7 +465,7 @@
     .q-kind.exclude { background: var(--bad-bg); color: var(--bad-fg); }
     .q-kind.include { background: var(--ok-bg); color: var(--ok-fg); }
     .q-kind.approve { background: var(--ok-fg); color: #fff; }
-    .q-kind.edit, .q-kind.add { background: var(--info-bg); color: var(--accent); border: 1px solid var(--info-border); }
+    .q-kind.edit, .q-kind.add, .q-kind.move { background: var(--info-bg); color: var(--accent); border: 1px solid var(--info-border); }
     .queue-item .q-label { flex: 1; word-break: break-word; font-family: ui-monospace, monospace; font-size: 12.5px; }
     .queue-item .q-undo {
       font: inherit; font-size: 11px; padding: 3px 10px; border-radius: 5px; cursor: pointer;
@@ -688,8 +695,10 @@
     // newMetrics[]   = {area, name, description, calculation, binding, unit, other_names[], source_tables[]}
     // newExamples[]  = {area, question, sql}   (human-added NL→SQL examples)
     // dsEdit        = new datasource.md text | null
+    // moves[qname]  = {op:'move', kind:'table', area, name, to_area, [schema]}  (table → another area)
     const pending = {};
     const ops = {};
+    const moves = {};
     const edits = {};
     const exampleEdits = {};
     const newMetrics = [];
@@ -949,6 +958,11 @@
       // metrics/entities/joins that aren't already approved/excluded, and aren't moot
       // (approving a join to a table you excluded is pointless — the runtime drops it).
       return effReviewState(item) !== 'approved' && !effExcluded(item) && !mootReason(item);
+    }
+    // What a bulk reject may turn down: not approved, not already rejected. A moot item still
+    // qualifies (its card offers Reject too) — only approving it is pointless.
+    function isRejectable(item) {
+      return effReviewState(item) !== 'approved' && !effExcluded(item);
     }
     // The sign-off queue: every metric / entity / join not yet approved or rejected.
     // The "untouched" review queue — items not yet approved/rejected AND not yet edited.
@@ -1346,6 +1360,7 @@
         type: 'button', class: (eff ? 'action-include' : 'action-exclude') + (queued ? ' queued' : ''),
         onclick: (ev) => { ev.stopPropagation(); toggleOp('table', table); },
       }, lab));
+      actions.appendChild(moveSelect(table));
       header.appendChild(actions);
 
       header.addEventListener('click', () => {
@@ -1363,9 +1378,10 @@
       if (dtext) { const at = aiDescTag(table.description_source); if (at) dsc.appendChild(at); }
       body.appendChild(dsc);
 
-      if ((table.grain || []).length || (table.caveats || []).length || (table.default_filters || []).length) {
+      if ((table.grain || []).length || (table.unique_keys || []).length || (table.caveats || []).length || (table.default_filters || []).length) {
         const chips = el('div', { class: 'table-chips' });
         (table.grain || []).forEach(g => chips.appendChild(el('span', { class: 'mini-chip', text: 'grain: ' + g })));
+        (table.unique_keys || []).forEach(k => chips.appendChild(el('span', { class: 'mini-chip', text: 'unique: ' + k.join(', ') })));
         (table.default_filters || []).forEach(d => chips.appendChild(el('span', { class: 'mini-chip', text: 'declared filter: ' + d })));
         body.appendChild(chips);
         if ((table.caveats || []).length) body.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + table.caveats.join(' · ') }));
@@ -1384,6 +1400,38 @@
       renderFieldsGrouped(body, table);
       card.appendChild(body);
       return card;
+    }
+
+    // "Move to area": queues a move op; the engine carries the table's joins, and the metrics and
+    // entities that read only this table, to the new area, and lists the ones it leaves behind.
+    const NEW_AREA = '__new__';
+    function moveSelect(table) {
+      const queued = moves[table.qname];
+      const sel = el('select', {
+        class: 'move-select' + (queued ? ' queued' : ''), 'aria-label': 'Move ' + table.name + ' to another subject area',
+        title: 'Move this table to another subject area. Its joins follow it; metrics and entities that read only this table move too.',
+        onclick: (ev) => ev.stopPropagation(),
+        onchange: (ev) => {
+          let to = ev.target.value;
+          if (to === NEW_AREA) {
+            to = (window.prompt('Name of the new subject area (lowercase letters, digits and _):') || '').trim().toLowerCase();
+            if (!/^[a-z0-9][a-z0-9_]*$/.test(to)) { renderAll(); return; }
+          }
+          if (!to || to === table.area) delete moves[table.qname];
+          else {
+            const op = { op: 'move', kind: 'table', area: table.area, name: table.name, to_area: to };
+            if (table.db_schema) op.schema = table.db_schema;
+            moves[table.qname] = op;
+          }
+          renderAll();
+        },
+      });
+      sel.appendChild(el('option', { value: '' }, queued ? 'Move to area: ' + queued.to_area + ' (queued)' : 'Move to area…'));
+      (manifest.subject_areas || []).map(a => a.name).filter(n => n !== table.area).forEach(n =>
+        sel.appendChild(el('option', { value: n }, n)));
+      sel.appendChild(el('option', { value: NEW_AREA }, 'New area…'));
+      if (queued) sel.appendChild(el('option', { value: table.area }, 'Keep in ' + table.area));
+      return sel;
     }
 
     function renderTablesTab(root) {
@@ -1435,11 +1483,21 @@
       if (e && e.fields && ('sensitive' in e.fields)) return !!e.fields.sensitive;
       return !!field.sensitive;
     }
-    function setSensitive(field, table, val) {
+    function queueSensitive(field, table, val) {
       const q = field.qname; const orig = !!field.sensitive;
       const cur = edits[q] || { kind: 'table', area: table.area, name: table.name, column: field.name, fields: {} };
       if (val === orig) delete cur.fields.sensitive; else cur.fields.sensitive = val;
       if (Object.keys(cur.fields).length) edits[q] = cur; else delete edits[q];
+    }
+    function setSensitive(field, table, val) {
+      queueSensitive(field, table, val);
+      renderAll();
+    }
+    // Bulk: queue the same flag on every row the list is showing (search narrows it), then render
+    // once. Still only queued edits — nothing applies until the footer submits, and each row's own
+    // toggle undoes it.
+    function setSensitiveMany(rows, val) {
+      rows.forEach(r => queueSensitive(r.f, r.ctx, val));
       renderAll();
     }
     function piiToggleBtn(field, table) {
@@ -1485,9 +1543,15 @@
       }));
       return { flagged, suspected };
     }
-    function piiSubhead(label, n, hint) {
+    function piiSubhead(label, n, hint, bulk) {
       const w = el('div', { style: 'margin:14px 0 4px;' });
-      w.appendChild(el('div', { class: 'kind-subhead', html: label + ' <span class="subtab-count">' + n + '</span>' }));
+      const head = el('div', { class: 'kind-subhead', style: 'display:flex;align-items:center;gap:10px;',
+        html: label + ' <span class="subtab-count">' + n + '</span>' });
+      if (bulk && n) {
+        head.appendChild(el('button', { type: 'button', class: 'btn-pii pii-bulk', style: 'margin-left:auto;',
+          title: bulk.title, onclick: (ev) => { ev.stopPropagation(); bulk.run(); } }, bulk.label));
+      }
+      w.appendChild(head);
       if (hint) w.appendChild(el('div', { class: 'field-hint', style: 'padding:2px 0 6px;', text: hint }));
       return w;
     }
@@ -1532,13 +1596,22 @@
       const sec = el('div', { class: 'schema-section' });
       if (piiSubTab !== 'suspected') {
         sec.appendChild(piiSubhead('Flagged as PII', fl.length,
-          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive.'));
+          'agami hides the raw values. Click 🔒 to clear any that aren’t actually sensitive — or search to narrow the list and clear them all at once.',
+          { label: 'Clear all ' + fl.length + ' shown',
+            title: 'Queue clearing the PII flag on every column listed here (search narrows it). Nothing applies until you submit.',
+            run: () => {
+              // Clearing a privacy flag lets raw values be returned, so the count is confirmed first.
+              if (window.confirm('Clear the PII flag on ' + fl.length + ' column(s)? Their raw values will be returned in answers once you submit.')) setSensitiveMany(fl, false);
+            } }));
         if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
         fl.forEach(r => sec.appendChild(piiRowCard(r)));
       }
       if (piiSubTab !== 'flagged') {
         sec.appendChild(piiSubhead('Suspected — confirm or leave', su.length,
-          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.'));
+          'These look like PII by name but weren’t auto-flagged (e.g. a name field in a non-PII table). Mark the real ones; leave the rest.',
+          { label: 'Mark all ' + su.length + ' shown',
+            title: 'Queue marking every column listed here as PII (search narrows it). Nothing applies until you submit.',
+            run: () => setSensitiveMany(su, true) }));
         if (!su.length) sec.appendChild(el('div', { class: 'empty-state', text: 'None suspected.' }));
         su.forEach(r => sec.appendChild(piiRowCard(r)));
       }
@@ -1680,13 +1753,16 @@
       if (m.unit) { body.appendChild(labelLine('Unit')); body.appendChild(descBlock(m.unit)); }
       if ((m.source_tables || []).length) { body.appendChild(labelLine('Source tables')); body.appendChild(descBlock(m.source_tables.join(', '))); }
       if ((m.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(m.other_names.join(', '))); }
+      if ((m.caveats || []).length) body.appendChild(el('div', { class: 'field-hint', text: '⚠ ' + m.caveats.join(' · ') }));
       body.appendChild(flatCardActions('metric', m));
       if (editOpen.has(m.qname)) body.appendChild(renderEditForm(m, 'metric', [
         { field: 'unit', label: 'Unit', current: m.unit, rows: 1,
           hint: 'What the result is measured in, so answers format nicely — a currency like USD/INR, or "percent" / "days". For a SUM/AVG, agami inherits the source column’s unit automatically; set it here only if it’s missing or wrong. Leave blank for a plain count.' },
         { field: 'description', label: 'Notes (optional)', current: m.description, rows: 2,
-          hint: 'Extra business context beyond the definition above — when to use it, caveats, how it differs from a similar metric. The definition itself goes in “What it measures”; leave this blank if there’s nothing to add.' },
+          hint: 'Extra business context beyond the definition above — when to use it, how it differs from a similar metric (things to watch out for go in Caveats). The definition itself goes in “What it measures”; leave this blank if there’s nothing to add.' },
         { field: 'other_names', label: 'Also called', type: 'list', current: m.other_names, rows: 2 },
+        { field: 'caveats', label: 'Caveats (things to watch out for)', type: 'list', current: m.caveats, rows: 2,
+          hint: 'What the formula does not cover — e.g. “gives no value when the start date is missing”.' },
       ]));
       card.appendChild(body);
       return card;
@@ -1791,9 +1867,10 @@
     // the first source table (legacy models carry no anchor).
     function metricGroupKey(m) { return (m.area || '?') + '.' + (m.primary_table || (m.source_tables || [])[0] || '?'); }
     function renderMetricsGrouped(root) {
+      // `_kind` as reviewAll stamps it, so a bulk op from this tab names its kind.
       const all = (manifest.metrics || []).filter(m =>
         (!searchQ || `${m.name} ${m.calculation} ${m.description} ${(m.other_names || []).join(' ')} ${m.area}`.toLowerCase().includes(searchQ))
-        && passesFilter(m, 'metric'));
+        && passesFilter(m, 'metric')).map(m => ({ ...m, _kind: 'metric' }));
       setSearchCounts(`${all.length} of ${(manifest.metrics || []).length} metric${(manifest.metrics || []).length === 1 ? '' : 's'} shown`);
       if (!all.length) {
         root.appendChild(el('div', { class: 'empty-state', text: (manifest.metrics || []).length ? 'No metrics match.' : 'No metrics defined yet.' }));
@@ -1803,10 +1880,13 @@
       all.forEach(m => { const k = metricGroupKey(m); if (!byKey[k]) { byKey[k] = []; order.push(k); } byKey[k].push(m); });
       const sec = el('div', { class: 'schema-section' });
       const allApprovable = all.filter(isApprovable);
-      if (allApprovable.length) {
+      const allRejectable = all.filter(isRejectable);
+      if (allApprovable.length || allRejectable.length) {
         const bar = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
-        bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+        if (allApprovable.length) bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
           onclick: () => bulkApprove(all) }, `✓ Approve all ${allApprovable.length} proposed`));
+        bar.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
+          onclick: () => bulkReject(all) }, `✕ Reject all ${allRejectable.length} proposed`));
         sec.appendChild(bar);
       }
       order.forEach(k => {
@@ -1906,8 +1986,11 @@
       h.appendChild(el('span', { class: 'kind-count', text: String(items.length) }));
       if (bulk) {
         const approvable = items.filter(isApprovable);
+        const rejectable = items.filter(isRejectable);
         if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm',
           style: 'margin-left:auto;', onclick: () => bulkApprove(items) }, `✓ Approve ${approvable.length}`));
+        if (rejectable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
+          style: approvable.length ? '' : 'margin-left:auto;', onclick: () => bulkReject(items) }, `✕ Reject ${rejectable.length}`));
       }
       return h;
     }
@@ -1932,6 +2015,31 @@
     }
     function bulkApprove(items) {
       items.forEach(it => { if (isApprovable(it)) ops[it.qname] = { op: 'approve', kind: it._kind, area: it.area, name: relName(it) }; });
+      renderAll();
+    }
+    const KIND_NOUN = { metric: ['metric', 'metrics'], entity: ['entity', 'entities'],
+                        relationship: ['join', 'joins'] };
+    function kindNoun(items, n) {
+      const kinds = [...new Set(items.map(it => it._kind))];
+      const pair = kinds.length === 1 && KIND_NOUN[kinds[0]] || ['item', 'items'];
+      return pair[n === 1 ? 0 : 1];
+    }
+    // Queues one reject per shown item, all carrying the one reason the person gives — the reason
+    // reaches curation_log.jsonl with each op. Nothing is applied until the block is submitted.
+    function bulkReject(items) {
+      const targets = items.filter(isRejectable);
+      if (!targets.length) return;
+      const noun = kindNoun(targets, targets.length);
+      if (!window.confirm(`Reject ${targets.length} ${noun}?`)) return;
+      let reason = '';
+      let ask = `Why are you rejecting these ${targets.length} ${noun}? The reason is recorded on each one.`;
+      while (!reason) {
+        const got = window.prompt(ask, '');
+        if (got === null) return;
+        reason = got.trim();
+        ask = `A reason is required to reject ${targets.length} ${noun}.`;
+      }
+      targets.forEach(it => { ops[it.qname] = { op: 'exclude', kind: it._kind, area: it.area, name: relName(it), reason }; });
       renderAll();
     }
     // Sign-off identity control (email + role). Recreated on re-render; value persists
@@ -2602,10 +2710,12 @@
 
       // approve/reject ops — split metrics / joins / entities
       const opv = Object.entries(ops);
-      const opRow = ([q, o]) => queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}`, () => delete ops[q]);
+      const opRow = ([q, o]) => queueRow(o.op, o.op, `${o.op} ${o.kind}: ${o.area}.${o.name}` + (o.reason ? ` — ${o.reason}` : ''), () => delete ops[q]);
       [['metric', 'Metrics'], ['relationship', 'Joins'], ['entity', 'Entities']].forEach(([kind, label]) =>
         qGroup(label, opv.filter(([, o]) => o.kind === kind).map(opRow)));
       qGroup('Other', opv.filter(([, o]) => !['metric', 'relationship', 'entity'].includes(o.kind)).map(opRow));
+      qGroup('Moves', Object.entries(moves).map(([q, o]) =>
+        queueRow('move', 'move', `move table ${o.area}.${o.name} → ${o.to_area}`, () => delete moves[q])));
 
       // edits — split table / column / metric / join / entity
       const ed = Object.entries(edits);
@@ -2759,7 +2869,8 @@
     function renderMeta() {
       const t = manifest.totals || {};
       const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-      const parts = [plural(t.schemas || 0, 'schema'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
+      // the manifest's `schemas` key holds subject areas, not database schemas
+      const parts = [plural(t.schemas || 0, 'subject area'), plural(t.tables || 0, 'table'), plural(t.fields || 0, 'field')];
       if (t.metrics) parts.push(plural(t.metrics, 'metric'));
       if (t.relationships) parts.push(plural(t.relationships, 'join'));
       if (t.entities) parts.push(plural(t.entities, 'entity').replace('entitys', 'entities'));
@@ -2770,7 +2881,7 @@
 
     // ---- Queued totals + footer ----
     function totalQueued() {
-      return Object.keys(pending).length + Object.keys(ops).length + Object.keys(edits).length
+      return Object.keys(pending).length + Object.keys(ops).length + Object.keys(moves).length + Object.keys(edits).length
            + Object.keys(exampleEdits).length + newMetrics.length + newExamples.length + (dsEdit !== null ? 1 : 0)
            + (termEdits !== null ? 1 : 0);
     }
@@ -2841,21 +2952,39 @@
       // Drop approve ops on entries that became moot (a table they depend on is now excluded) —
       // approving a join to an excluded table is pointless; the runtime drops it anyway.
       const _byq = {}; reviewAll().forEach(it => { _byq[it.qname] = it; });
+      // Two tables can be joined several ways (one per date or person role), so a join op names WHICH
+      // join by its columns or condition — the table pair alone would sign off whichever came first.
+      const _joinByq = {};
+      [...(manifest.relationships || []), ...(manifest.cross_relationships || [])]
+        .forEach(r => { _joinByq[r.qname] = r; });
+      const withJoinIdentity = (qname, o) => {
+        const r = o.kind === 'relationship' ? _joinByq[qname] : null;
+        if (!r) return o;
+        const id = {};
+        if (r.from_column) id.from_column = r.from_column;
+        if (r.to_column) id.to_column = r.to_column;
+        if (r.on) id.on = r.on;
+        if (r.from_schema) id.from_schema = r.from_schema;
+        if (r.to_schema) id.to_schema = r.to_schema;
+        return { ...o, ...id };
+      };
       const opList = [];
       Object.entries(ops).forEach(([qname, o]) => {
         if (o.op === 'approve') {
           const it = _byq[qname];
           if (it && mootReason(it)) return;  // skip moot approval
-          opList.push(_approveAt ? { ...o, at: _approveAt } : o);
-        } else opList.push(o);
+          opList.push(withJoinIdentity(qname, _approveAt ? { ...o, at: _approveAt } : o));
+        } else opList.push(withJoinIdentity(qname, o));
       });
-      Object.values(edits).forEach(e => {
+      Object.entries(edits).forEach(([qname, e]) => {
         Object.keys(e.fields).forEach(field => {
           const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
           if (e.column) op.column = e.column;
-          opList.push(op);
+          opList.push(withJoinIdentity(qname, op));
         });
       });
+      // After every op that names the table by its current area.
+      Object.values(moves).forEach(o => opList.push(o));
       if (opList.length) { lines.push('curate-ops:'); lines.push(JSON.stringify(opList)); }
 
       if (newMetrics.length) {
@@ -2903,6 +3032,7 @@
     document.getElementById('btn-reset').addEventListener('click', () => {
       Object.keys(pending).forEach(k => delete pending[k]);
       Object.keys(ops).forEach(k => delete ops[k]);
+      Object.keys(moves).forEach(k => delete moves[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
       newMetrics.length = 0; newExamples.length = 0; dsEdit = null; termEdits = null; addMetricOpen = false; addExampleOpen = false;

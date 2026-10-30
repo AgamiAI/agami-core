@@ -15,7 +15,9 @@ Input (stdin or --block-file):
     exclude tables:  <area>.<table>, <area>.<table>
     include tables:  <area>.<table>
     exclude columns: <area>.<table>.<column>, ...
-    curate-ops: [ {"op":"approve","kind":"metric","area":"...","name":"...","at":"..."}, ... ]
+    curate-ops: [ {"op":"approve","kind":"metric","area":"...","name":"...","at":"..."},
+                  {"op":"move","kind":"table","area":"<from>","name":"<table>","to_area":"<to>"}, ... ]
+                (a reject may carry a "reason"; it is kept and lands in curation_log.jsonl)
     new-metrics: [ {"area":"...","name":"...","calculation":"...", ...}, ... ]
     key-terminology: {"gold tier": "lifetime spend > $10k", ...}
     signed-off-by: jane@x.com (cfo)
@@ -27,7 +29,8 @@ or `done`). Output (the standard contract):
     {"ok": true,
      "data": {
        "profile": "<name>"|null,
-       "ops": [ ...curate ops: exclude/include translated + curate-ops merged verbatim... ],
+       "ops": [ ...curate ops: exclude/include translated + curate-ops merged verbatim,
+                with `move` ops last... ],
        "new_metrics_by_area": {"<area>": [ ...metric dicts... ]},
        "key_terminology": {..}|null,
        "signer": "jane@x.com"|null, "role": "cfo"|null
@@ -157,6 +160,13 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
             data["key_terminology"] = parsed
         elif jk == "datasource-md":
             data["datasource_md"] = parsed  # JSON-encoded string → the full datasource.md text
+
+    # A move changes the area every other op on that table names, so it runs after them.
+    moves = [o for o in ops if isinstance(o, dict) and o.get("op") == "move"]
+    for o in moves:
+        if not (o.get("name") and o.get("area") and o.get("to_area")):
+            anomalies.append({"kind": "move_missing_field", "detail": json.dumps(o)})
+    ops[:] = [o for o in ops if o not in moves] + moves
 
     if bad_targets:
         needs = {"kind": "malformed_targets", "targets": bad_targets,

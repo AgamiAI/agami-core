@@ -180,11 +180,17 @@ def _join_status(site, rels: list) -> "tuple[str, str | None]":
         return UNDETERMINED, ("the join wrote no condition this layer can read as column pairs "
                              "(USING, NATURAL, a comma join or an expression)")
     readable = [pairs for _rel, pairs in rels if pairs is not None]
-    if any(pairs <= site.pairs for pairs in readable):
+    written = site.pairs | site.fixed
+    if any(pairs <= written for pairs in readable):
         return DECLARED, None
     if any(pairs is None for _rel, pairs in rels):
         return UNDETERMINED, ("a declared relationship between these tables could not be read, so "
                              "whether the written key is the declared one is not decided")
+    if any({p for p in pairs if not RT._is_fixed_value(p)} <= site.pairs for pairs in readable):
+        # The declared columns were written but not its fixed-value condition, which may sit in a
+        # WHERE this layer does not attribute to the join — the receipt's reading, kept the same here.
+        return UNDETERMINED, ("the declared join's fixed-value condition (e.g. a current-row flag) is "
+                             "not in this join's ON, so whether it applies is not decided")
     if rels:
         return WRONG_KEY, None
     return UNDECLARED, None
@@ -216,7 +222,8 @@ def join_probes(org: Datasource, sql: str) -> dict[str, Any]:
         status, why_open = _join_status(site, rels)
         declared_pairs = sorted(
             _pair_list(pair)
-            for pair in {p for _rel, pairs in rels if pairs is not None for p in pairs}
+            for pair in {p for _rel, pairs in rels if pairs is not None for p in pairs
+                         if not RT._is_fixed_value(p)}
         )
         entry: dict[str, Any] = {
             "id": f"join-{n}",
@@ -277,17 +284,17 @@ def _declared_cardinality(rels: list, site: "RT._JoinSite") -> list[dict[str, An
             "from": RT._tkey(RT._bare(rel.from_table)),
             "to": RT._tkey(RT._bare(rel.to_table)),
             "one_side": _one_side(rel),
-            "matched": pairs is not None and bool(site.pairs) and pairs <= site.pairs,
+            "matched": pairs is not None and bool(site.pairs) and pairs <= site.pairs | site.fixed,
         })
     return out
 
 
 def _unique_by_model(table: Table, column: Column) -> bool:
-    """Whether the semantic model says one row per value of this column: a declared key, or the
-    whole of the table's grain. One rule, read by both emitters, so a column reached through a
-    declared join and an undeclared one gets the same answer."""
-    grain = [g.lower() for g in (getattr(table, "grain", None) or [])]
-    return bool(column.primary_key) or (bool(grain) and grain == [column.name.lower()])
+    """Whether the semantic model says one row per value of this column: a declared key, the
+    whole of the table's grain, or the whole of one of its unique keys. One rule, read by both
+    emitters, so a column reached through a declared join and an undeclared one gets the same
+    answer."""
+    return bool(column.primary_key) or table.unique_on([column.name])
 
 
 def _size_known(table: Table) -> bool:

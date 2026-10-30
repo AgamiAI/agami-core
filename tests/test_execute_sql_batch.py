@@ -172,3 +172,16 @@ def test_the_model_is_resolved_once_per_process_until_a_file_under_it_changes(lo
     execute_sql._MODEL_MEMO.clear()
     assert execute_sql._resolve_guard_model(PROFILE) is None and execute_sql._resolve_guard_model(PROFILE) is None
     assert execute_sql._MODEL_MEMO == {}
+
+
+def test_a_relative_out_resolves_from_the_current_directory_and_the_manifest_says_where(warehouse, monkeypatch, capsys):
+    # relative to where the command runs, not the plan's folder — and the manifest shows the real path
+    _Connects(monkeypatch)
+    (warehouse / "plans").mkdir()
+    plan = _plan(warehouse / "plans", [{"id": "count", "sql": "SELECT COUNT(*) AS n FROM orders",
+                                        "out": "results/count.csv"}])
+    monkeypatch.chdir(warehouse)
+    assert _main(monkeypatch, "--batch", str(plan)) == 0
+    manifest = json.loads(capsys.readouterr().out)
+    assert manifest["items"][0]["out"] == str((warehouse / "results" / "count.csv").resolve())
+    assert (warehouse / "results" / "count.csv").exists()

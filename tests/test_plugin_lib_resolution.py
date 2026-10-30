@@ -28,7 +28,15 @@ REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "plugins" / "agami" / "scripts"
 LIB = REPO / "plugins" / "agami" / "lib"
 SRC = REPO / "packages" / "agami-core" / "src"
-VENDORED = ["agami_paths.py", "execute_sql.py", "guardrail.py", "sql_guard.py", "semantic_model/__init__.py", "semantic_model/units.py"]
+# Source path -> path under lib/, as in dev.py::_VENDORED.
+VENDORED = {
+    "agami_paths.py": "agami_paths.py",
+    "execute_sql.py": "execute_sql.py",
+    "guardrail.py": "guardrail.py",
+    "sql_guard.py": "sql_guard.py",
+    "sql_dialect_rules.py": "sql_dialect_rules.py",
+    "semantic_model/units.py": "_semantic_model_units.py",
+}
 
 # `-S` disables site.py, so an installed (incl. editable) agami-core is not on the path — the same
 # "the package isn't available" state a marketplace user's plain python3 is in.
@@ -69,8 +77,8 @@ def test_scripts_import_in_marketplace_layout(marketplace_cache, mod):
 
 def test_vendored_lib_matches_source():
     """The bundled lib/ is a drift-checked mirror; if this fails, run `uv run dev.py sync-lib`."""
-    for rel in VENDORED:
-        assert (LIB / rel).read_bytes() == (SRC / rel).read_bytes(), f"{rel} drifted from the package source"
+    for src, rel in VENDORED.items():
+        assert (LIB / rel).read_bytes() == (SRC / src).read_bytes(), f"{rel} drifted from the package source"
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +136,7 @@ def _dataclass_decorators(tree: ast.AST):
                     yield deco
 
 
-@pytest.mark.parametrize("rel", VENDORED)
+@pytest.mark.parametrize("rel", VENDORED.values())
 def test_the_vendored_slice_stays_python_39_compatible(rel):
     """The vendored modules must still load on the oldest interpreter the plugin path can meet.
 

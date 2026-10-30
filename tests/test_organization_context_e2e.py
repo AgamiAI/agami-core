@@ -70,10 +70,8 @@ def _org_context(root: Path, profile: str, capsys) -> str:
 
 
 def _served_domain_context(profile: str) -> str:
-    # Disk-backed serve path (no AGAMI_DB_URL): domain-context text trails the JSON head.
-    out = tools.tool_get_datasource_schema({"datasource": profile})
-    head, end = json.JSONDecoder().raw_decode(out)
-    return out[end:]
+    # Disk-backed serve path (no AGAMI_DB_URL): the reply's `domain_context` field (#477).
+    return json.loads(tools.tool_get_datasource_schema({"datasource": profile})).get("domain_context", "")
 
 
 def test_local_surface_shows_company_block_once_and_this_sources_vocabulary(tmp_path, capsys, monkeypatch):
