@@ -14,6 +14,25 @@ below corresponds to one such version.
 
 ### Added
 
+- **An example can be tagged with several metrics, and is found under each (#546).** A prompt
+  example's tag held one metric name (`metric: revenue`), so an example computing two metrics could
+  be linked to only one of them. It is now a list, `metrics: [revenue, order count]`; a single
+  `metric:` and a `metrics:` given as one string still read. `sm add-example` and `sm seed-examples`
+  write one metric as `metric:`, as before, and several as `metrics:`; the examples a call doesn't
+  name are written back as they were, so existing files don't change. Each tagged metric must be one
+  the model declares, by name: an example naming another is refused and listed in `skipped` (in
+  `rejected` for `sm seed-examples`). `get_prompt_examples` takes `metric_names` and `sm examples`
+  takes `--metric` (repeatable): the examples tagged with more of those metrics rank first, then
+  by the question as before. Without them the ranking is unchanged. A metric two areas both declare
+  is named by the selector `get_datasource_schema` gives it (`revenue (finance)`); that selector
+  matches the `revenue` tag on that area's examples and on cross-area ones, not on the other
+  area's, on a local and a served deployment alike. Only the first 100 distinct names are used, so
+  an oversized `metric_names` can't tie up the server.
+
+  **Reading a model:** a release older than this one serves a `metrics:` list unchanged but cannot
+  rank by it, so upgrade the server before or with a model whose examples carry several metrics.
+  Examples with one metric are written as `metric:`, which every release reads.
+
 - **`seed-examples`, `seed-validate`, `remove-example` and the examples dashboard take several subject areas in one call (#544).**
   Each command took one `--area`, so writing or checking the examples of a database with 30–50
   areas took dozens of calls. Repeat `--area`, or leave it out for every area in the model, and the

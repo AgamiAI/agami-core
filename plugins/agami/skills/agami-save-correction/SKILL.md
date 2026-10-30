@@ -90,7 +90,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" add-example "$ROOT" --area <area> --file "<
 [{"question": "<original NL question from query_log.jsonl>", "sql": "<corrected SQL>",
   "tables": ["..."], "source": "correction", "status": "confirmed", "created_at": "<ISO8601 UTC>"}]
 ```
-Required: `question`, `sql`. Optional scope tags (improve ranking): `tables`, `columns`, `metric`.
+Required: `question`, `sql`. Optional scope tags (improve ranking): `tables`, `columns`, `metrics` (a list of every model metric the SQL computes, by its `name`; one that isn't in the model refuses the example, listed in `skipped`).
 
 This phase is **non-conditional** — every correction always lands in the examples library, even if Phase 5 (model update) declines or fails.
 

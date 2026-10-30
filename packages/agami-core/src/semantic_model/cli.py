@@ -214,7 +214,14 @@ def cmd_set_org(args) -> int:
 
 def cmd_examples(args) -> int:
     examples = L.list_prompt_examples(args.root, args.area)
-    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k)
+    org = None
+    if args.metric:
+        try:
+            org = L.load_datasource(args.root)
+        except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
+            org = None
+    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k, metrics=args.metric,
+                                     org=org, area=args.area)
     _print_json(
         {
             "high_confidence": RT.is_high_confidence(matches),
@@ -1206,6 +1213,8 @@ def cmd_seed_examples(args) -> int:
     runner = make_execute_sql_runner(args.profile)
     passing, rejected = curate.validate_seeds(cands, runner)
     res = curate.add_examples(args.root, args.area, passing) if passing else curate.ApplyResult()
+    # A seed the writer refused (an unknown metric tag) is rejected like one the database refused.
+    rejected += [{"question": s["item"], "error": s["reason"]} for s in res.skipped]
     _print_json({"added": res.applied, "written": res.validated,
                  "committed": res.committed, **_commit_note(res), "rejected": rejected})
     return 0
@@ -1866,6 +1875,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area", required=True)
     sp.add_argument("--query", required=True)
     sp.add_argument("--top-k", type=int, default=5)
+    sp.add_argument("--metric", action="append", default=None,
+                    help="a metric the question uses, by name or by the selector get_datasource_schema gave "
+                         "(repeatable): examples tagged with it rank first")
     sp.set_defaults(func=cmd_examples)
 
     sp = sub.add_parser("preflight", help="fan-trap / chasm-trap pre-flight check")
@@ -2026,7 +2038,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
     sp.add_argument("--file", required=True,
-                    help="JSON list of {question, sql, [tables, columns, metric, source, status, created_at]}")
+                    help="JSON list of {question, sql, [tables, columns, metrics, source, status, created_at]}")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_add_example)
@@ -2103,7 +2115,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="subject area (repeatable); omit for every area in the model. Several or "
                          "none print one combined result, and each seed then names its `area`")
     sp.add_argument("--profile", required=True, help="credentials profile (for the live-DB validation)")
-    sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metric]}")
+    sp.add_argument("--file", required=True, help="JSON list of candidate {question, sql, [tables, columns, metrics]}")
     sp.add_argument("--after-review", action="store_true",
                     help="bypass the preseed-review gate (Phase 4c only — the user has already "
                          "been in the explorer and chose to proceed with items still unreviewed)")

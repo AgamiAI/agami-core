@@ -17,10 +17,19 @@ import hashlib
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
-from semantic_model.models import Datasource, OrgRecord, stored_identity, table_key
+from semantic_model.models import (
+    Datasource,
+    MetricTag,
+    OrgRecord,
+    example_metric_hits,
+    metric_tag_key,
+    metric_tags,
+    stored_identity,
+    table_key,
+)
 from store import Store
 
 # The per-datasource model tables write_datasource clears before a re-seed (so a redeploy
@@ -460,6 +469,26 @@ def _tokens(s: str | None) -> set[str]:
     return set(_WORD_RE.findall((s or "").lower()))
 
 
+def metric_ranked(
+    rows: list[Any],
+    metrics: Any,
+    doc_of: Callable[[Any], dict[str, Any]],
+    area_of: Callable[[Any], str | None] = lambda r: None,
+) -> list[Any]:
+    """`rows` with the examples tagged with more of `metrics` first, in their order otherwise (#546).
+
+    A stable sort on the tag count alone, after the word-overlap one: an example tagged with two
+    metrics is found under either, and with no `metrics` asked for the order is untouched.
+    `metrics` are names or `MetricTag`s (`metric_tags`); `area_of` gives a row's subject area, which
+    a tag resolved from an area-qualified selector is matched in.
+    """
+    wanted = [m if isinstance(m, MetricTag) else MetricTag(metric_tag_key(m))
+              for m in metrics or [] if isinstance(m, MetricTag) or (isinstance(m, str) and m.strip())]
+    if not wanted:
+        return rows
+    return sorted(rows, key=lambda r: example_metric_hits(doc_of(r), wanted, area_of(r)), reverse=True)
+
+
 def example_id(ex: dict[str, Any]) -> str:
     """The example's identity, derived from its own content: `question` + `sql`, 12 hex characters —
     the construction `compute_model_hash` uses (`snapshot.py::_hash_and_manifest`).
@@ -537,29 +566,41 @@ def select_examples(
     top_k: int = 10,
     char_budget: int = _EXAMPLES_CHAR_BUDGET,
     org_id: str = DEFAULT_ORG,
+    metrics: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Scope to the org's datasource (+ area, plus the cross-area bucket), rank by word-overlap on
     the question, and cap to top-K within a char budget — so a large library never floods the
-    context. No embeddings (that tier is deploy-time + off by default)."""
+    context. No embeddings (that tier is deploy-time + off by default).
+
+    `metrics` ranks the examples tagged with more of them first (`metric_ranked`); a selector such
+    as `backlog (finance)` is resolved through the datasource's metrics (`metric_tags`)."""
     # Ordered so that examples tying on overlap are capped the same way on every read: the ranking
     # sort below is stable, so without it the rows past the cap followed the engine's row order (#203).
     # By id alone: ids are hex, so every engine's collation sorts them alike, and it is the order the
     # primary-key index already returned in practice, so the examples served do not change.
     if area:
         rows = store.query(
-            "SELECT id, question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
+            "SELECT id, area, question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
             "AND (area = ? OR area IS NULL) ORDER BY id",
             (org_id, datasource, area),
         )
     else:
         rows = store.query(
-            "SELECT id, question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
+            "SELECT id, area, question, doc FROM prompt_example WHERE org_id = ? AND datasource = ? "
             "ORDER BY id",
             (org_id, datasource),
         )
     q = _tokens(query)
     if q:
         rows = sorted(rows, key=lambda r: len(q & _tokens(r["question"])), reverse=True)
+    if metrics and not all(isinstance(m, MetricTag) for m in metrics):
+        # resolve `backlog (finance)` to that area's `backlog`, as get_datasource_schema names it
+        try:
+            org = load_datasource(store, datasource, org_id=org_id)
+        except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
+            org = None
+        metrics = metric_tags(metrics, org)
+    rows = metric_ranked(rows, metrics, lambda r: json.loads(r["doc"]), lambda r: r["area"])
     out: list[dict[str, Any]] = []
     used = 0
     for r in rows[:top_k]:
