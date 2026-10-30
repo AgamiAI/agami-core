@@ -3254,11 +3254,13 @@ def _example_metric_tags(profile: str, names: Any) -> Any:
     if not names:
         return names
     try:
-        from semantic_model.models import metric_tags
-
+        from semantic_model.models import bounded_metric_names, metric_tags
+    except Exception:  # noqa: BLE001 - no model package: nothing below can rank by tag either
+        return names
+    try:
         return metric_tags(names, get_cached_org(profile))
     except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
-        return names
+        return bounded_metric_names(names)
 
 
 def _model_area_order(root: Path) -> list[str]:
@@ -5735,7 +5737,8 @@ TOOLS: dict[str, dict[str, Any]] = {
                     "description": (
                         "Metric names the question uses, as get_datasource_schema gave them. "
                         "Examples tagged with more of them rank first; an example tagged with "
-                        "several metrics is found under any one of them."
+                        "several metrics is found under any one of them. Only the first 100 "
+                        "distinct names are used."
                     ),
                 },
                 "user_question": _USER_QUESTION_PROP,

@@ -26,7 +26,8 @@ below corresponds to one such version.
   by the question as before. Without them the ranking is unchanged. A metric two areas both declare
   is named by the selector `get_datasource_schema` gives it (`revenue (finance)`); that selector
   matches the `revenue` tag on that area's examples and on cross-area ones, not on the other
-  area's, on a local and a served deployment alike.
+  area's, on a local and a served deployment alike. Only the first 100 distinct names are used, so
+  an oversized `metric_names` can't tie up the server.
 
   **Reading a model:** a release older than this one serves a `metrics:` list unchanged but cannot
   rank by it, so upgrade the server before or with a model whose examples carry several metrics.

@@ -166,6 +166,27 @@ class MetricTag(NamedTuple):
     excluded: frozenset = frozenset()        # example areas it never matches
 
 
+# A question names a handful of metrics. A longer list is malformed or hostile, and every name is
+# matched against every example, so it is cut here rather than refused in the tool schema.
+MAX_METRIC_NAMES = 100
+
+
+def bounded_metric_names(names: Any) -> list[str]:
+    """The first `MAX_METRIC_NAMES` distinct non-blank names, as `metric_tag_key` tells them apart."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in names or []:
+        if not isinstance(n, str) or not n.strip():
+            continue
+        key = metric_tag_key(n)
+        if key not in seen:
+            seen.add(key)
+            out.append(n)
+            if len(out) == MAX_METRIC_NAMES:
+                break
+    return out
+
+
 def metric_tags(names: Any, org: Any = None) -> list[MetricTag]:
     """The metrics `names` asks for, each resolved through the model's selectors when `org` is given.
 
@@ -173,13 +194,14 @@ def metric_tags(names: Any, org: Any = None) -> list[MetricTag]:
     tag `backlog` on that area's examples and on cross-area ones, not on another area's that declares
     its own `backlog`. A name only one metric declares, or one the model doesn't know, matches its tag
     on any example, as before."""
-    wanted = [n for n in names or [] if isinstance(n, str) and n.strip()]
+    wanted = bounded_metric_names(names)
     selectors = metric_selectors(org) if org is not None and wanted else {}
     folded = {metric_tag_key(k): v for k, v in selectors.items()}
     owners: dict[str, list[Optional[str]]] = {}
     for m, area in selectors.values():
         owners.setdefault(metric_tag_key(m.name), []).append(area)
     out: list[MetricTag] = []
+    seen: set[MetricTag] = set()
     for n in wanted:
         hit = folded.get(metric_tag_key(n))
         if hit is None:
@@ -193,7 +215,8 @@ def metric_tags(names: Any, org: Any = None) -> list[MetricTag]:
                 tag = MetricTag(key, frozenset({area, None}))
             else:  # the cross-area one: wherever no area declares its own
                 tag = MetricTag(key, None, frozenset(a for a in owners[key] if a))
-        if tag not in out:
+        if tag not in seen:
+            seen.add(tag)
             out.append(tag)
     return out
 

@@ -316,3 +316,39 @@ def test_a_metric_one_area_declares_still_matches_any_areas_tag():
 
     assert metric_tags(["Order  Count", "unknown"]) == [MetricTag("order count"), MetricTag("unknown")]
     assert example_metric_hits({"metric": "order count"}, [MetricTag("order count")], "anywhere") == 1
+
+
+def _sample_org():
+    from semantic_model.loader import load_datasource
+
+    return load_datasource(SAMPLE)
+
+
+def test_a_long_metric_names_list_is_bounded_and_resolved_in_linear_time():
+    import time
+
+    from semantic_model.models import MAX_METRIC_NAMES, MetricTag, metric_tags
+
+    names = [f"m{i}" for i in range(40_000)] + ["M1 ", "m1"]   # repeats fold to one name
+    start = time.perf_counter()
+    tags = metric_tags(names, _sample_org())
+    assert time.perf_counter() - start < 1.0   # was ~10 s: a list membership test per name
+    assert len(tags) == MAX_METRIC_NAMES
+    assert tags[0] == MetricTag("m0") and tags[1] == MetricTag("m1")
+
+
+def test_repeated_names_count_once():
+    from semantic_model.models import metric_tags
+
+    assert len(metric_tags(["revenue", "Revenue", " revenue ", "order count"], _sample_org())) == 2
+
+
+def test_an_unreadable_model_still_bounds_the_names(monkeypatch):
+    from semantic_model.models import MAX_METRIC_NAMES
+
+    def broken(_profile):
+        raise RuntimeError("model can't be read")
+
+    monkeypatch.setattr(tools, "get_cached_org", broken)
+    out = tools._example_metric_tags("demo", [f"m{i}" for i in range(5_000)] + ["m0"])
+    assert len(out) == MAX_METRIC_NAMES and out[0] == "m0"
