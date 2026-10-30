@@ -68,9 +68,6 @@ _EXEMPT: dict[str, str] = {
         "already passes the ErrorLevel enum; it has no datasource engine to parse for because "
         "it validates the model itself"
     ),
-    "packages/agami-core/src/semantic_model/derived.py::_has_nested_aggregate": (
-        "inspects a model-authored metric fragment at validation time, not a caller's statement"
-    ),
 }
 
 

@@ -56,7 +56,99 @@ below corresponds to one such version.
   to (`resolved_area`). `stale` names a moved item where it now is, and an approve after the move in
   the same batch clears it.
 
+### Added
+
+- **An example can be tagged with several metrics, and is found under each (#546).** A prompt
+  example's tag held one metric name (`metric: revenue`), so an example computing two metrics could
+  be linked to only one of them. It is now a list, `metrics: [revenue, order count]`; a single
+  `metric:` and a `metrics:` given as one string still read. `sm add-example` and `sm seed-examples`
+  write one metric as `metric:`, as before, and several as `metrics:`; the examples a call doesn't
+  name are written back as they were, so existing files don't change. Each tagged metric must be one
+  the model declares, by name: an example naming another is refused and listed in `skipped` (in
+  `rejected` for `sm seed-examples`). `get_prompt_examples` takes `metric_names` and `sm examples`
+  takes `--metric` (repeatable): the examples tagged with more of those metrics rank first, then
+  by the question as before. Without them the ranking is unchanged. A metric two areas both declare
+  is named by the selector `get_datasource_schema` gives it (`revenue (finance)`); that selector
+  matches the `revenue` tag on that area's examples and on cross-area ones, not on the other
+  area's, on a local and a served deployment alike. Only the first 100 distinct names are used, so
+  an oversized `metric_names` can't tie up the server.
+
+  **Reading a model:** a release older than this one serves a `metrics:` list unchanged but cannot
+  rank by it, so upgrade the server before or with a model whose examples carry several metrics.
+  Examples with one metric are written as `metric:`, which every release reads.
+
+- **`seed-examples`, `seed-validate`, `remove-example` and the examples dashboard take several subject areas in one call (#544).**
+  Each command took one `--area`, so writing or checking the examples of a database with 30–50
+  areas took dozens of calls. Repeat `--area`, or leave it out for every area in the model, and the
+  command prints one result: the single-area fields, each area's own result labelled with its
+  `area`, and `totals`. One `--area` prints exactly what it printed before. `seed-examples` then
+  writes each seed to the area it names in an `area` field. `seed-validate` runs each area's seeds
+  through `execute_sql` scoped to that area, with the same per-statement limits. `remove-example`
+  takes a question as `<area>/<question>`, looked up in that area only, or matches it in whichever
+  area has it; a question that more than one area has is refused, with the areas, and nothing is
+  rejected. The dashboard renderer reads the combined `seed-validate` output, takes `--items-file`
+  more than once (a single area's file labelled `AREA=PATH`; an unlabelled one, or the same file
+  twice, is refused), and shows each card's area. An area the model doesn't have is refused with the list of valid ones, where one
+  `--area` used to run against an empty area (and `seed-examples` created its folder).
+
 ### Fixed
+
+- **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
+  query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
+  every query that used it, while the check for derived metrics refused a legal aggregate over a
+  subquery and missed a `SUM` inside a percentile's `WITHIN GROUP`. The rule is now judged per
+  SELECT: an aggregate directly inside another, or in its `WITHIN GROUP` or `FILTER` clause, is
+  refused, and so is a window function inside an aggregate (`AVG(SUM(amount) OVER ())`); an
+  aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate.
+  An aggregate in a scalar subquery that reads only the outer query's columns belongs to the outer
+  query, as on PostgreSQL and SQLite, so `AVG((SELECT SUM(orders.amount)))` is refused, while one
+  that sums the subquery's own rows is not. A column's table is matched by schema and name as the
+  engine compares them (on PostgreSQL, Snowflake and Oracle a quoted alias keeps its case, so
+  `FROM orders AS "ORDERS"` does not hide an outer `orders`), and a source can be an aliased
+  `VALUES` list or a parenthesized table or join. A window function inside another window
+  function's argument or `OVER` clause (`SUM((SUM(amount) OVER ())) OVER ()`) is refused too. On
+  SQL Server, which refuses any subquery inside an aggregate, `AVG((SELECT SUM(amount) FROM
+  orders))` is refused with the derived-table rewrite; on a derived metric that is a warning. The
+  one exception is Oracle, which runs two levels of aggregate in the argument of a SELECT with its
+  own GROUP BY: an Oracle binding `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is
+  accepted, while a bare `AVG(SUM(amount))`, a third level, or that binding on any other engine is
+  still refused. `sm add` (a subject area or `--area _cross`) and a `curate` edit of a metric's
+  `bindings` or `inner_grain` refuse such a binding with the reason, and write nothing for it. A metric already in a model gets a
+  `metric_binding_nested_aggregate` warning, never an error, so no model that validated before stops
+  validating; a derived metric nested in its argument is still the `derived_metric` error it was,
+  also when its base only nests in a `WITHIN GROUP`. An `sm add` batch reads the model once, not
+  once per derived metric. `resolve_metrics` names why a matched metric will not run, and a
+  database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
+  Snowflake, BigQuery, Databricks, SQL Server and MySQL) is answered with a sentence naming the
+  rewrite, with the same failure kind and exit code as before. `metric_null_filled` no longer warns
+  on an average of the values present, `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: a
+  numerator that only zero-fills columns inside a `SUM`, over a denominator that only counts the
+  present values of those same columns (a qualifier included, so `a.score` is not `b.score`, and on
+  PostgreSQL, Snowflake and Oracle a quoted `"Score"` is not `score`), counted with `COUNT(col)` or
+  a searched `CASE WHEN col IS NOT NULL`. Any other fallback, another aggregate or a term such as
+  `COUNT(*)` keeps the warning. The metric guidance shows that form for several columns, with the `*
+  1.0` that stops integer division. An `sm add` batch judges a derived metric with the batch's other
+  metrics known, whatever their order, and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in
+  the argument, not in a clause.
+
+- **`sm` resolves a relative path from the folder you run it in (#542).** The launcher runs the CLI
+  from `/` so nothing in your folder can shadow the installed package, and every relative path
+  argument resolved there too: `sm curate <root> --ops-file ops.json` looked for `/ops.json`, and a
+  relative model root or output path failed the same way. The CLI now moves back to the caller's
+  folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
+  (`sm curate <root> ops.json`, before or after the other options, or after `--`, which also lets
+  a file name start with `-`); `--ops-file` still works, and giving both is a usage error.
+
+- **The `measured_figure` check also finds ranges, counts in words and figures tied to now
+  (#541).** Model text such as "values range 49–142 here", "covers twelve of forty sites", "about
+  1,200 sites", "40 sites today", "1,204 orders carry no region" or "hundreds of rows have no region"
+  passed the check. It now finds numeric ranges stated as seen in the data, counts written in words
+  (up to the thousands, plus "a dozen" and "hundreds of"), hedged figures, figures with a unit or
+  next to "here", "today", "currently" or "as of", and counts inside a caveat sentence. Statements
+  about how a formula behaves ("returns 0 because no row meets the threshold"), its literals ("ELSE
+  0", "divide by 100"), scales ("ranges 0–100"), bounds ("more than 5 users", "top 10 customers"),
+  years used as dates ("since 2024"), versions and labels ("status 9 rows") are not flagged, and "2
+  rows per order" is no longer read as a count. It stays a warning.
 
 - **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a
   `VALUES` arm of a `UNION` as one more `SELECT`, so the receipt counted an extra arm and could

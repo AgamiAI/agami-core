@@ -77,6 +77,8 @@ from .models import (
     Metric,
     Relationship,
     Table,
+    example_metric_hits,
+    metric_tags,
     stored_identity,
 )
 from .models import (
@@ -726,19 +728,30 @@ class ExampleMatch:
 
 
 def get_prompt_examples(
-    query: str, examples: list[dict[str, Any]], *, top_k: int = 5
+    query: str, examples: list[dict[str, Any]], *, top_k: int = 5,
+    metrics: Optional[list[str]] = None, org: Any = None, area: Optional[str] = None,
 ) -> list[ExampleMatch]:
     """Rank scope-tagged examples by similarity to `query`. Highest first.
 
     Each example is a dict with at least a `question` (and typically `sql`,
-    `tables`, `columns`, `metric`, `default_filters` scope tags). A top match with
-    score >= HIGH_CONFIDENCE short-circuits the cold-start path (caller's job).
+    `tables`, `columns`, `metrics` (or an older single `metric`), `default_filters` scope tags).
+    A top match with score >= HIGH_CONFIDENCE short-circuits the cold-start path (caller's job).
+
+    `metrics` ranks the examples tagged with more of those metrics first, then by similarity; the
+    score itself is unchanged. Without it the order is the similarity order alone. With `org`, a
+    selector such as `backlog (finance)` matches that area's `backlog` tag (`metric_tags`); `area`
+    is the subject area of an example that doesn't name its own.
     """
     scored: list[ExampleMatch] = []
     for ex in examples:
         q = ex.get("question") or ex.get("nl") or ""
         scored.append(ExampleMatch(ex, _similarity(query, q)))
-    scored.sort(key=lambda m: m.score, reverse=True)
+    wanted = metric_tags([str(m) for m in metrics or []], org)
+    if wanted:
+        scored.sort(key=lambda m: (example_metric_hits(m.example, wanted, m.example.get("area") or area),
+                                   m.score), reverse=True)
+    else:
+        scored.sort(key=lambda m: m.score, reverse=True)
     return scored[:top_k]
 
 
@@ -821,27 +834,31 @@ def resolve_metrics(
         if score > 0:
             # A derived metric surfaces its COMPOSED SQL (base placeholders resolved) so
             # the generator gets ready-to-run SQL and the single-source-of-truth holds.
-            # Fall back to the raw binding if expansion fails (validator gates the model).
+            # Fall back to the raw binding if expansion fails (validator gates the model), and say
+            # why, as for a binding the database would refuse (#519).
             bindings = mm.bindings
+            problem = None
             if _D.is_derived(mm) or _D.is_second_order(mm):
                 try:
                     bindings = _D.expanded_bindings(mm, idx, org)
-                except _D.DerivedError:
+                except _D.DerivedError as e:
                     bindings = mm.bindings
-            ranked.append(
-                (
-                    score,
-                    {
-                        "metric": mm.name,
-                        "subject_area": area_name,
-                        "score": round(score, 3),
-                        "calculation": mm.calculation,
-                        "bindings": bindings,
-                        "confidence": mm.confidence,
-                        **({"caveats": list(mm.caveats)} if mm.caveats else {}),
-                    },
-                )
-            )
+                    problem = str(e)
+            else:
+                nested = _D.metric_binding_problems(mm, idx, org)
+                problem = _D.nested_aggregate_reason(mm.name, nested) if nested else None
+            hit = {
+                "metric": mm.name,
+                "subject_area": area_name,
+                "score": round(score, 3),
+                "calculation": mm.calculation,
+                "bindings": bindings,
+                "confidence": mm.confidence,
+                **({"caveats": list(mm.caveats)} if mm.caveats else {}),
+            }
+            if problem:
+                hit["binding_problem"] = problem
+            ranked.append((score, hit))
     ranked.sort(key=lambda t: t[0], reverse=True)
     return [d for _, d in ranked[:top_k]]
 

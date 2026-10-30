@@ -793,6 +793,141 @@ def test_sm_wrapper_resolves_and_runs(tmp_path):
     assert "OK" in proc.stdout or "error" not in proc.stdout.lower()
 
 
+def _sm(args, cwd):
+    """Run the real `sm` launcher from `cwd`, the way a skill's Bash call does."""
+    import os
+    proc = subprocess.run(["bash", str(SCRIPTS / "sm"), *args], cwd=cwd, capture_output=True,
+                          text=True, env={**os.environ, "AGAMI_PYTHON": sys.executable})
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def _describe_op(text):
+    return [{"op": "edit", "kind": "table", "area": "s", "name": "orders",
+             "field": "description", "value": text}]
+
+
+def _orders_description(root):
+    return yaml.safe_load((root / "subject_areas" / "s" / "tables" / "orders.yaml").read_text())["description"]
+
+
+@pytest.fixture
+def model_and_work(tmp_path):
+    """A model, and a separate folder the caller runs `sm` from (#542)."""
+    root, work = tmp_path / "model", tmp_path / "work"
+    root.mkdir()
+    work.mkdir()
+    _model(root)
+    return root, work
+
+
+def test_sm_curate_reads_a_relative_ops_file_from_the_callers_folder(model_and_work):
+    root, work = model_and_work
+    (work / "ops.json").write_text(json.dumps(_describe_op("from the caller's folder")))
+    rc, out, err = _sm(["curate", str(root), "--ops-file", "ops.json"], work)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "from the caller's folder"
+
+
+def test_sm_curate_still_reads_an_absolute_ops_file(model_and_work):
+    root, work = model_and_work
+    ops = work / "ops.json"
+    ops.write_text(json.dumps(_describe_op("absolute")))
+    rc, out, err = _sm(["curate", str(root), "--ops-file", str(ops)], root)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "absolute"
+
+
+def test_sm_curate_names_the_callers_folder_for_a_missing_ops_file(model_and_work):
+    root, work = model_and_work
+    rc, out, _ = _sm(["curate", str(root), "--ops-file", "nope.json"], work)
+    assert rc == 2
+    assert json.loads(out) == {"error": f"file not found: {(work / 'nope.json').resolve()}"}
+
+
+def test_sm_resolves_a_relative_model_root_from_the_callers_folder(model_and_work):
+    # the root is a path argument like any other: `sm validate model` from the folder above it
+    root, _ = model_and_work
+    rc, out, err = _sm(["validate", "model"], root.parent)
+    assert rc == 0, out + err
+
+
+def test_curate_takes_the_ops_file_as_a_second_positional(model_and_work):
+    root, work = model_and_work
+    (work / "ops.json").write_text(json.dumps(_describe_op("positional")))
+    rc, out, err = _sm(["curate", str(root), "ops.json"], work)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "positional"
+
+
+def test_curate_takes_the_positional_ops_file_after_an_option(model_and_work):
+    # argparse fills an optional positional with the first run of positionals; `ops.json` comes later
+    root, work = model_and_work
+    (work / "ops.json").write_text(json.dumps(_describe_op("after an option")))
+    rc, out, err = _sm(["curate", str(root), "--signer", "you@example.com", "ops.json", "--role", "analyst"], work)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "after an option"
+
+
+def test_curate_still_refuses_a_stray_extra_argument(model_and_work, capsys):
+    root, _ = model_and_work
+    with pytest.raises(SystemExit) as exit_:
+        cli.main(["curate", str(root), "--signer", "you@example.com", "a.json", "b.json"])
+    assert exit_.value.code == 2
+    assert "unrecognized arguments: b.json" in capsys.readouterr().err
+
+
+def test_curate_refuses_two_ops_files_and_none(model_and_work, capsys):
+    root, _ = model_and_work
+    for argv in (["curate", str(root), "a.json", "--ops-file", "b.json"], ["curate", str(root)],
+                 ["curate", str(root), "--signer", "you@example.com", "a.json", "--ops-file", "b.json"],
+                 ["curate", str(root), "--signer", "you@example.com"]):
+        with pytest.raises(SystemExit) as exit_:
+            cli.main(argv)
+        assert exit_.value.code == 2
+        assert "OPS_FILE" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name, head", [
+    ("ops.json", ["ROOT", "--signer", "you@example.com"]),
+    ("-ops.json", ["ROOT", "--signer", "you@example.com"]),
+    ("-ops.json", ["ROOT"]),
+    ("ops.json", ["--signer", "you@example.com", "ROOT"]),
+], ids=["option-first", "dash-named-option-first", "dash-named", "root-after-option"])
+def test_curate_takes_the_ops_file_after_the_end_of_options(model_and_work, monkeypatch, name, head):
+    root, work = model_and_work
+    (work / name).write_text(json.dumps(_describe_op(f"after -- as {name}")))
+    monkeypatch.chdir(work)
+    assert cli.main(["curate", *(str(root) if a == "ROOT" else a for a in head), "--", name]) == 0
+    assert _orders_description(root) == f"after -- as {name}"
+
+
+def test_sm_takes_the_ops_file_after_the_end_of_options(model_and_work):
+    root, work = model_and_work
+    (work / "-ops.json").write_text(json.dumps(_describe_op("through the launcher")))
+    rc, out, err = _sm(["curate", str(root), "--signer", "you@example.com", "--", "-ops.json"], work)
+    assert rc == 0, out + err
+    assert _orders_description(root) == "through the launcher"
+
+
+def test_curate_after_the_end_of_options_still_refuses_extras_both_and_neither(model_and_work, capsys):
+    root, _ = model_and_work
+    sign = ["--signer", "you@example.com"]
+    for argv, said in ((["curate", str(root), *sign, "--", "a.json", "b.json"], "unrecognized arguments: b.json"),
+                       (["curate", str(root), "--ops-file", "a.json", "--", "b.json"], "OPS_FILE"),
+                       (["curate", str(root), *sign, "--"], "OPS_FILE")):
+        with pytest.raises(SystemExit) as exit_:
+            cli.main(argv)
+        assert exit_.value.code == 2
+        assert said in capsys.readouterr().err
+
+
+def test_a_vanished_caller_folder_leaves_the_cwd_alone(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGAMI_CALLER_CWD", str(tmp_path / "gone"))
+    cli._enter_caller_cwd()
+    assert Path.cwd() == tmp_path and "AGAMI_CALLER_CWD" not in __import__("os").environ
+
+
 def test_validate_tolerates_excluded_table_but_flags_genuine_orphan(tmp_path):
     """Regression: excluding a table flips its tables/<T>.yaml to review_state:
     rejected but intentionally leaves the subject_area.yaml `tables:` ref in place.

@@ -188,9 +188,13 @@ fi
 
 ensure_pkg
 # Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
-# package via `python -m` putting cwd on sys.path[0]. The CLI's path args are absolute (the skill passes <artifacts_dir> absolute), so cwd is irrelevant to what
-# it does. PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the
-# portable guarantee.
+# package via `python -m` putting cwd on sys.path[0].
+# PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the portable
+# guarantee. The CLI moves back to the caller's folder once it is imported (AGAMI_CALLER_CWD), so a
+# relative path argument resolves where the caller ran `sm`, not against `/` (#542). Git Bash's /c/...
+# form is converted for a Windows Python.
 export PYTHONSAFEPATH=1
+AGAMI_CALLER_CWD="$(cygpath -m "$PWD" 2>/dev/null || printf '%s' "$PWD")"
+export AGAMI_CALLER_CWD
 cd /
 exec "$PY" -X utf8 -m semantic_model.cli "$@"

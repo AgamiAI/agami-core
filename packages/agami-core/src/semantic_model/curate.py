@@ -37,7 +37,15 @@ import yaml
 from . import validator as V
 from .loader import _read_yaml as _load
 from .loader import load_datasource
-from .models import CrossSubjectAreaRelationship, Datasource, Entity, Metric, Relationship
+from .models import (
+    CrossSubjectAreaRelationship,
+    Datasource,
+    Entity,
+    Metric,
+    Relationship,
+    example_metrics,
+    metric_tag_key,
+)
 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
@@ -737,6 +745,11 @@ def _apply_one(root: Path, op: dict, signer, role,
         _snapshot(backups, path)
         prior = copy.deepcopy(item)
         before = _set_trust(item, op, new_state, signer, role)
+        # removing inner_grain turns OUTERAGG({base}) into a plain nested aggregate
+        if kind == "metric" and action == "edit" and op.get("field") in ("bindings", "inner_grain"):
+            reason = _nested_aggregate_refusal(root, item)
+            if reason:
+                raise ValueError(reason)  # before the dump: nothing is written for this op
         if kind == "metric" and not item.get("caveats"):
             # clearing the caveats removes the key, so the file stays readable by an older release
             item.pop("caveats", None)
@@ -1656,6 +1669,74 @@ def _slug(name: str) -> str:
     return item_file_stem(name)
 
 
+def _model_context(root: Path) -> tuple[Any, dict]:
+    """The model on disk and its metric index, for judging a derived metric's bases; (None, {})
+    when it does not load."""
+    from . import derived as D
+
+    try:
+        org = load_datasource(root, include_rejected=True)
+        return org, D.metric_index(org)
+    except Exception:
+        return None, {}
+
+
+def _nested_aggregate_refusal(root: Path, metric: "Metric | dict", batch: Optional[dict] = None,
+                              context: Optional[tuple[Any, dict]] = None) -> Optional[str]:
+    """Why a new or edited metric binding is refused for nesting aggregates (#519), or None.
+
+    The validator only warns on this, so an existing model keeps validating; a binding being
+    written now is refused, since the database would refuse every query that uses it. `batch` holds
+    the other metrics being written with it, so a base listed later in the batch is known.
+    `context` is a `_model_context` already loaded, so a batch reads the model once."""
+    from . import derived as D
+
+    try:
+        met = metric if isinstance(metric, Metric) else Metric.model_validate(metric)
+    except Exception:
+        return None  # a structural problem is the validator's to report
+    org, idx = None, {}
+    if D.is_derived(met) or D.is_second_order(met):
+        org, idx = context if context is not None else _model_context(root)
+    problems = D.metric_binding_problems(met, {**idx, **(batch or {}), met.name: met}, org)
+    return D.nested_aggregate_reason(met.name, problems) if problems else None
+
+
+def _writable_items(root: Path, kind: str, items: list[dict], res: ApplyResult) -> list:
+    """The items of a `write_items` batch that may be written, structurally validated; each other
+    one is added to `res.skipped` with the reason, including a metric that nests aggregates."""
+    from . import derived as D
+
+    Model = _KINDS[kind][1]
+    parsed: list[tuple[dict, Any]] = []
+    for item in items:
+        # Strip grouping/locator metadata that callers (e.g. the model-dashboard
+        # "Add metric" form) attach but that isn't a model field. `area` is already
+        # passed as the `area` arg; `qname` is a UI locator. Without this, a dashboard
+        # new-metric fails with `extra_forbidden` on `area`.
+        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
+        try:
+            parsed.append((item, Model(**clean)))  # structural validation (required fields, enums, …)
+        except Exception as e:
+            parsed.append((item, e))
+    # every structurally valid metric of the batch, so a derived one is judged whatever the order
+    batch = {o.name: o for _, o in parsed if kind == "metric" and not isinstance(o, Exception)}
+    # loaded once for the batch: reloading per derived metric made a bulk add quadratic
+    context = (_model_context(root) if any(D.is_derived(o) or D.is_second_order(o)
+                                          for o in batch.values()) else None)
+    out = []
+    for item, obj in parsed:
+        if isinstance(obj, Exception):
+            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(obj)})
+            continue
+        reason = _nested_aggregate_refusal(root, obj, batch, context) if kind == "metric" else None
+        if reason:
+            res.skipped.append({"item": obj.name, "reason": reason})
+            continue
+        out.append(obj)
+    return out
+
+
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
                 *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
     """Create metric/entity YAML files from structured dicts — one validated,
@@ -1683,21 +1764,11 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
             f"{', '.join(listed) or 'none'}. Use one of those, or --area {CROSS_AREA} for a {kind} "
             "that spans subject areas.")
         return res
-    subdir, Model = _KINDS[kind]
+    subdir = _KINDS[kind][0]
     dest = _area_dir(root, area) / subdir
     backups: list[tuple[Path, Optional[str]]] = []  # (path, prior text or None if new)
 
-    for item in items:
-        # Strip grouping/locator metadata that callers (e.g. the model-dashboard
-        # "Add metric" form) attach but that isn't a model field. `area` is already
-        # passed as the `area` arg; `qname` is a UI locator. Without this, a dashboard
-        # new-metric fails with `extra_forbidden` on `area`.
-        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
-        try:
-            obj = Model(**clean)  # structural validation (required fields, enums, …)
-        except Exception as e:
-            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
-            continue
+    for obj in _writable_items(root, kind, items, res):
         path = dest / f"{_slug(obj.name)}.yaml"
         backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
         dest.mkdir(parents=True, exist_ok=True)
@@ -1734,7 +1805,6 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
     with datasource.yaml's own list, so an item of the same name is replaced where it already lives
     (removed from the other place if it is in both); a new one goes into the sidecar file."""
     res = ApplyResult()
-    sub, Model = _KINDS[kind]
     places = []   # [path, key, doc, items] per storage place, sidecar first
     for path, key in _cross_places(root, kind):
         doc = _load(path) if path.exists() else None
@@ -1746,13 +1816,7 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
     def has(place: list, slug: str) -> bool:
         return any(_slug(str((c or {}).get("name") or "")) == slug for c in place[3])
 
-    for item in items:
-        clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
-        try:
-            obj = Model(**clean)
-        except Exception as e:
-            res.skipped.append({"item": (item or {}).get("name", "?"), "reason": str(e)})
-            continue
+    for obj in _writable_items(root, kind, items, res):
         slug, dumped = _slug(obj.name), obj.model_dump(mode="json", exclude_none=True)
         home = inline if has(inline, slug) else side
         for i, place in enumerate(places):
@@ -1875,17 +1939,51 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
     return res
 
 
+_METRIC_TAGS = ("metric", "metrics")
+
+
+def _metric_tagged(ex: dict) -> dict:
+    """`ex` with its metric tag written the way a release that predates `metrics` reads it (#546):
+    one metric as `metric: a`, several as `metrics: [a, b]`, in the tag's own place. An example
+    already in that form is returned as is, so a re-save does not reorder it."""
+    names = example_metrics(ex)
+    tag = {"metric": names[0]} if len(names) == 1 else ({"metrics": names} if names else {})
+    if {k: ex[k] for k in _METRIC_TAGS if k in ex} == tag:
+        return ex
+    out: dict = {}
+    for k, v in ex.items():
+        if k in _METRIC_TAGS:
+            out.update(tag)
+        else:
+            out[k] = v
+    return out
+
+
+def _model_metric_keys(root: Path) -> Optional[set[str]]:
+    """Every metric name the model declares, folded as tags are; None when the model can't be read,
+    and then tags are not checked: examples are not model-validated, so they need no model."""
+    try:
+        org = load_datasource(root, include_rejected=True)
+    except Exception:  # noqa: BLE001 - any unreadable model only skips the tag check
+        return None
+    return {metric_tag_key(m.name) for sa in org.subject_areas for m in sa.metrics} | {
+        metric_tag_key(m.name) for m in org.cross_subject_area_metrics}
+
+
 def add_examples(root: str | Path, area: str, examples: list[dict],
                  *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
     """Append/replace scope-tagged NL→SQL examples in prompt_examples/<area>/examples.yaml.
     The packaged writer so skills never hand-edit that YAML or reverse-engineer its schema.
 
     Each example — required: `question`, `sql`. Optional scope tags (the ranking reads
-    these): `tables`, `columns`, `metric`, `default_filters`. Optional provenance:
-    `source` (seed | correction), `status` (confirmed | proposed), `created_at`.
+    these): `tables`, `columns`, `metrics` (a list; a single `metric` is still read),
+    `default_filters`. Optional provenance: `source` (seed | correction), `status`
+    (confirmed | proposed), `created_at`. A metric tag naming a metric the model does not
+    declare refuses the example.
 
     Dedups by `question`: a new example with an existing question replaces it (so a
-    correction supersedes the earlier answer) rather than duplicating."""
+    correction supersedes the earlier answer) rather than duplicating. Examples this call
+    does not name are written back as they were."""
     from .loader import list_prompt_examples
     root = Path(root)
     res = ApplyResult()
@@ -1893,23 +1991,35 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     # rather than duplicating.
     existing = list(list_prompt_examples(root, area, include_rejected=True))
     by_q = {e.get("question"): i for i, e in enumerate(existing) if e.get("question")}
+    known = None
     for ex in examples:
         q, sql = (ex or {}).get("question"), (ex or {}).get("sql")
         if not q or not sql:
             res.skipped.append({"item": q or "?", "reason": "question and sql are required"})
             continue
+        if example_metrics(ex):
+            known = _model_metric_keys(root) if known is None else known
+            unknown = [m for m in example_metrics(ex)
+                       if known is not None and metric_tag_key(m) not in known]
+            if unknown:
+                res.skipped.append({"item": q,
+                                    "reason": f"metric(s) not in the model: {', '.join(unknown)}"})
+                continue
         if q in by_q:
             old = existing[by_q[q]]
             # The same SQL is a re-save (a sign-off, a tag), not a correction: keep the fields it
             # didn't restate, or re-saving a confirmed example to sign it would strip its status.
             same_sql = " ".join(str(old.get("sql", "")).split()) == " ".join(str(sql).split())
-            # A rejection is not carried over: re-adding a rejected question un-rejects it.
-            kept = {k: v for k, v in old.items() if not (k == "status" and v == "rejected")}
-            existing[by_q[q]] = {**kept, **ex} if same_sql else ex
+            # A rejection is not carried over: re-adding a rejected question un-rejects it. A metric
+            # tag the re-save restates replaces the old one in either spelling.
+            restated = any(k in ex for k in _METRIC_TAGS)
+            kept = {k: v for k, v in old.items() if not (k == "status" and v == "rejected")
+                    and not (restated and k in _METRIC_TAGS)}
+            existing[by_q[q]] = _metric_tagged({**kept, **ex} if same_sql else ex)
             res.applied.append(f"example (replaced) {area}/{q[:50]}")
         else:
             by_q[q] = len(existing)
-            existing.append(ex)
+            existing.append(_metric_tagged(ex))
             res.applied.append(f"example {area}/{q[:50]}")
     if not res.applied:
         return res

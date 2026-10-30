@@ -61,6 +61,7 @@ class PromptExamplesRequest(_Contract):
     # Applied on the served path (defaults to 10, within a ~20k-char budget); the local file path
     # returns the curated YAML whole and ignores it. The comment here used to say the opposite.
     top_k: int | None = None
+    metric_names: list[str] | None = None  # ranks examples tagged with them first
 
 
 class ExecuteSqlRequest(_Contract):

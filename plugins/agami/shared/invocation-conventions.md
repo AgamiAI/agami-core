@@ -62,6 +62,9 @@ and JSON `null` / `true` / `false` are not valid Python — pasting a review-ite
 (which has `null` fields) into `python3 -c` is what produces
 `NameError: name 'null' is not defined`. The Write tool writes the bytes literally, so
 quotes and `null` survive. Keep ops minimal (the locator + action), not whole items.
+A relative path resolves from the folder `sm` is run in, like any other command's; the skills
+pass absolute `<artifacts_dir>/local/tmp/…` paths, which work from anywhere. `curate` also takes the
+ops file as a second plain argument: `sm curate "$ROOT" ops.json`.
 
 ## Commands that work on macOS, Linux and Windows
 
