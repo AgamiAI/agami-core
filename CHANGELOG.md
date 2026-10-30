@@ -12,8 +12,6 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
-## [0.9.21] — 2026-10-29
-
 ### Fixed
 
 - **The `measured_figure` check also finds ranges, counts in words and figures tied to now
@@ -26,6 +24,10 @@ below corresponds to one such version.
   0", "divide by 100"), scales ("ranges 0–100"), bounds ("more than 5 users", "top 10 customers"),
   years, versions and labels ("status 9 rows") are not flagged, and "2 rows per order" is no longer
   read as a count. It stays a warning.
+
+## [0.9.21] — 2026-10-29
+
+### Fixed
 
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
   The folder held a partial copy of the model package (`semantic_model/` with only `__init__.py` and
