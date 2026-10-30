@@ -98,6 +98,20 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
 
 
+_SQL_STRING_RE = re.compile(r"'(?:[^']|'')*'")
+
+
+def on_text_key(on: Optional[str]) -> str:
+    """An `on:` condition's text for comparing two joins: case and spacing folded outside string
+    literals only, since `b.flag = 'Y'` and `b.flag = 'y'` select different rows on most engines."""
+    text, out, at = on or "", [], 0
+    for m in _SQL_STRING_RE.finditer(text):
+        out += [re.sub(r"\s+", " ", text[at:m.start()].lower()), m.group(0)]
+        at = m.end()
+    out.append(re.sub(r"\s+", " ", text[at:].lower()))
+    return "".join(out).strip()
+
+
 def stored_identity(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     """``(schema, bare name)`` as written, '' for a schema the model does not give.
 

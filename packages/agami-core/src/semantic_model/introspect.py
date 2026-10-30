@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 # Introspection-run timestamp for system sign-offs on auto-approved structure.
 _NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -66,6 +66,7 @@ from .models import (
     StorageConnection,
     Table,
     bare_name,
+    on_text_key,
     table_key,
 )
 
@@ -603,8 +604,9 @@ def _same_tables(a: Relationship, b: Relationship) -> bool:
 def _pair_set(r: Relationship, dialect: Optional[str]) -> frozenset:
     pairs = _key_pairs(r, dialect)
     if pairs is None:
-        return frozenset({" ".join((r.on or "").lower().split())})
+        return frozenset({on_text_key(r.on)})
     return frozenset((f.lower(), t.lower()) for f, t in pairs)
+
 
 
 def _key_pairs(r: Relationship, dialect: Optional[str]) -> Optional[list[tuple[str, str]]]:
@@ -2100,32 +2102,43 @@ def _name_hint(col: str, target: Table) -> bool:
     return len(word) >= 3 and target.name.lower().startswith(word)
 
 
+_UNSERVED = ("rejected", "stale")   # review states the loader never serves
+
+
 def _candidate_pairs(rels: list[Relationship], tables: list[Table],
-                     dialect: Optional[str]) -> list[tuple[int, Table, Column, Table, str]]:
+                     dialect: Optional[str]) -> Iterator[tuple[int, Table, Column, Table, str]]:
     """Every (priority, table, column, target, key) the wider scan tests: a column no join reads from,
     against another table's one-column key, when the name matches the key's or the type does.
-    Name matches first, so the cap is spent on the likeliest pairs."""
-    covered = {(r.from_schema, bare_name(r.from_table).lower(), fc.lower())
+    Yielded lazily in priority order (name matches first, then by name), so stopping at the probe
+    cap also stops the enumeration."""
+    covered = {(table_key(r.from_table, r.from_schema), fc.lower())
                for r in rels for fc, _tc in _column_pairs(r, dialect) or []}
-    keys = [(u, k, next((c for c in u.columns if c.name == k), None))
-            for u in tables if u.review_state != "rejected" for k in _single_keys(u)]
+    served = sorted((t for t in tables if t.review_state not in _UNSERVED),
+                    key=lambda t: (t.schema_name or "", t.name))
+    keys = [(u, k, next((c for c in u.columns if c.name == k), None)) for u in served for k in _single_keys(u)]
     # A personal column is never probed at either end: the scan must not read personal data (#516).
-    keys = [(u, k, kc) for u, k, kc in keys if kc is not None and not _personal_column(kc)]
-    out = []
-    for t in tables:
-        if t.review_state == "rejected":
-            continue
-        for c in t.columns:
-            if (c.primary_key or c.review_state == "rejected" or c.type not in _KEY_TYPES
+    keys = sorted(((u, k, kc) for u, k, kc in keys
+                   if kc is not None and kc.review_state not in _UNSERVED and kc.type in _KEY_TYPES
+                   and not _personal_column(kc)),
+                  key=lambda x: (x[0].schema_name or "", x[0].name, x[1]))
+    columns = []
+    for t in served:
+        tk = table_key(t.name, t.schema_name)
+        lone_pk = sum(1 for c in t.columns if c.primary_key) == 1
+        for c in sorted(t.columns, key=lambda c: c.name):
+            if ((c.primary_key and lone_pk) or c.review_state in _UNSERVED or c.type not in _KEY_TYPES
                     or _personal_column(c)
-                    or {(t.schema_name, t.name.lower(), c.name.lower()),
-                        (None, t.name.lower(), c.name.lower())} & covered):
+                    or {(tk, c.name.lower()), (("", tk[1]), c.name.lower())} & covered):
                 continue
-            # A measure, a date or a coded list matches any key of its type by chance.
-            measure = (c.aggregation in ("additive", "averageable") or c.date_format or c.choice_field
+            # A measure or a date matches any key of its type by chance; so does a coded column (a
+            # value list) or a member of a composite key (`line_no`), which a name must back instead.
+            measure = (c.aggregation in ("additive", "averageable") or c.date_format
                        or _looks_time_named(c.name) or _NOT_A_REFERENCE_RE.search(c.name))
+            columns.append((t, c, measure, bool(c.choice_field or c.primary_key)))
+    for level in (0, 1, 2):
+        for t, c, measure, needs_name in columns:
             for u, k, kc in keys:
-                if u is t or kc.type not in _KEY_TYPES:
+                if u is t:
                     continue
                 if _name_related(c.name, u, k):
                     prio = 0
@@ -2133,10 +2146,8 @@ def _candidate_pairs(rels: list[Relationship], tables: list[Table],
                     prio = 1 if _name_hint(c.name, u) else 2
                 else:
                     continue
-                out.append((prio, t, c, u, k))
-    out.sort(key=lambda p: (p[0], p[1].schema_name or "", p[1].name, p[2].name, p[3].schema_name or "",
-                            p[3].name, p[4]))
-    return out
+                if prio == level and not (needs_name and prio == 2):
+                    yield prio, t, c, u, k
 
 
 def _qualified_column(t: Table, column: str) -> str:

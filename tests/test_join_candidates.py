@@ -257,3 +257,91 @@ def test_the_candidates_file_holds_counts_and_names_never_sampled_values(tmp_pat
     assert {c["id"] for c in doc["candidates"] + doc["low_overlap"]} == {"main.orders.cust_code->main.customers.code"}
     text = (out / ".introspect" / "join_candidates.json").read_text() + report.render()
     assert not any(v in text for v in ("CX-77", "QZ-0001"))
+
+
+def test_a_reference_with_a_value_list_read_from_the_data_is_still_a_candidate(tmp_path):
+    # 20 customers: `cust_ref` has few enough distinct values to get a value list, yet it is a reference.
+    schema = ("CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
+              "CREATE TABLE orders(id INTEGER PRIMARY KEY, cust_ref INTEGER, amount REAL);"
+              + "".join(f"INSERT INTO customers VALUES ({i}, 'n{i}');" for i in range(1, 21))
+              + "".join(f"INSERT INTO orders VALUES ({i}, {i % 20 + 1}, 1.0);" for i in range(1, 61)))
+    org, _, out = _build(tmp_path, schema)
+    orders = next(sa.defined_table("orders") for sa in org.subject_areas if sa.defined_table("orders"))
+    assert next(c for c in orders.columns if c.name == "cust_ref").choice_field
+    assert _CUST_REF in {c["id"] for c in _candidates(out)["candidates"]}
+
+
+def test_a_member_of_a_composite_key_is_scanned_when_its_name_backs_it(tmp_path):
+    schema = ("CREATE TABLE orders(id INTEGER PRIMARY KEY, placed TEXT);"
+              "CREATE TABLE order_lines(order_ref INTEGER, line_no INTEGER, qty INTEGER,"
+              " PRIMARY KEY(order_ref, line_no));"
+              "INSERT INTO orders VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+              "INSERT INTO order_lines VALUES (1, 1, 5), (1, 2, 5), (2, 1, 5), (3, 1, 5);")
+    _, _, out = _build(tmp_path, schema)
+    doc = _candidates(out)
+    assert "main.order_lines.order_ref->main.orders.id" in {c["id"] for c in doc["candidates"]}
+    # `line_no` falls inside any id range: a key member needs its name to back it, not its type alone
+    assert not any(".line_no->" in c["id"] for c in doc["candidates"] + doc["low_overlap"])
+
+
+def _t(name: str, cols: list, schema: str | None = None, **kw):
+    from semantic_model.models import Column, Table
+    return Table(name=name, schema_name=schema, columns=[Column(**c) for c in cols], **kw)
+
+
+_ID = {"name": "id", "type": "integer", "primary_key": True}
+
+
+def test_a_join_naming_its_schema_in_the_table_covers_only_that_schema():
+    from semantic_model.models import Relationship
+    tables = [_t("orders", [_ID, {"name": "cust_ref", "type": "integer"}], "crm", grain=["id"]),
+              _t("orders", [_ID, {"name": "cust_ref", "type": "integer"}], "billing", grain=["id"]),
+              _t("customers", [_ID], "crm", grain=["id"])]
+    rels = [Relationship(from_table="crm.orders", from_column="cust_ref", to_table="crm.customers",
+                         to_column="id", relationship="many_to_one")]
+    froms = {(t.schema_name, t.name, c.name) for _, t, c, _, _ in I._candidate_pairs(rels, tables, "sqlite")}
+    assert ("billing", "orders", "cust_ref") in froms and ("crm", "orders", "cust_ref") not in froms
+    # a join that states no schema still covers the column in every schema
+    bare = [Relationship(from_table="orders", from_column="cust_ref", to_table="customers", to_column="id",
+                         relationship="many_to_one")]
+    assert not any(c.name == "cust_ref" for _, _, c, _, _ in I._candidate_pairs(bare, tables, "sqlite"))
+
+
+@pytest.mark.parametrize("state", ["rejected", "stale"])
+def test_an_unserved_key_or_column_is_never_probed(state):
+    code = {"name": "code", "type": "string"}
+    tables = [_t("customers", [_ID, {**code, "review_state": state}], grain=["id"], unique_keys=[["code"]]),
+              _t("orders", [_ID, {"name": "cust_code", "type": "string"},
+                            {"name": "cust_id", "type": "integer", "review_state": state}], grain=["id"])]
+    pairs = [(t.name, c.name, u.name, k) for _, t, c, u, k in I._candidate_pairs([], tables, None)]
+    assert ("orders", "cust_code", "customers", "code") not in pairs
+    assert not any(c == "cust_id" for _, c, _, _ in pairs)
+    assert ("orders", "cust_code", "customers", "code") in [
+        (t.name, c.name, u.name, k) for _, t, c, u, k in I._candidate_pairs(
+            [], [_t("customers", [_ID, code], grain=["id"], unique_keys=[["code"]]), tables[1]], None)]
+
+
+def test_candidate_pairs_come_lazily_in_a_fixed_priority_order():
+    import inspect
+    import itertools
+    tables = [_t(f"t{i}", [_ID, {"name": f"t{(i + 1) % 6}_id", "type": "integer"},
+                           {"name": "ref", "type": "integer"}, {"name": "tag", "type": "string"}],
+                 grain=["id"], unique_keys=[["tag"]]) for i in range(6)]
+    gen = I._candidate_pairs([], tables, None)
+    assert inspect.isgenerator(gen)
+    pairs = list(gen)
+    key = lambda p: (p[0], p[1].schema_name or "", p[1].name, p[2].name, p[3].schema_name or "",  # noqa: E731
+                     p[3].name, p[4])
+    assert [key(p) for p in pairs] == sorted(key(p) for p in pairs)
+    assert pairs[0][0] == 0 and pairs[-1][0] == 2
+    first = [key(p) for p in itertools.islice(I._candidate_pairs([], tables, None), 5)]
+    assert first == [key(p) for p in pairs[:5]]
+
+
+def test_a_refresh_tells_filtered_joins_apart_by_their_literals():
+    from semantic_model.models import Relationship
+    on = "orders.cust_ref = customers.id AND customers.flag = '{}'"
+    rel = lambda text: Relationship(from_table="orders", to_table="customers", on=text,  # noqa: E731
+                                    relationship="many_to_one")
+    assert not I._same_join(rel(on.format("Y")), rel(on.format("y")))
+    assert I._same_join(rel(on.format("Y")), rel("  " + on.format("Y").upper().replace(" AND ", "  and ")))

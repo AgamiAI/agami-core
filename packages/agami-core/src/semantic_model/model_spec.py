@@ -37,7 +37,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from .models import CrossSubjectAreaRelationship, Metric, Relationship, SubjectArea, TableRef
+from .models import (
+    CrossSubjectAreaRelationship,
+    Metric,
+    Relationship,
+    SubjectArea,
+    TableRef,
+    on_text_key,
+)
 
 _AREA_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _CARDINALITIES = ("many_to_one", "one_to_many", "one_to_one")
@@ -128,7 +135,7 @@ def _check_spec(
             _low(j.get("to_table")),
             _low(j.get("from_column")),
             _low(j.get("to_column")),
-            " ".join(str(j.get("on") or "").split()).lower(),
+            on_text_key(str(j.get("on") or "")),
         )
         if ident in seen_joins:
             errs.append(

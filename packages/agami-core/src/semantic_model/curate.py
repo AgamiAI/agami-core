@@ -1165,23 +1165,61 @@ _ADD_JOIN_FIELDS = ("from_table", "from_column", "to_table", "to_column", "from_
                     "on", "join_type", "relationship", "description")
 
 
-def _table_columns(root: Path, area: str, ref: tuple[str, str]) -> dict[str, str]:
-    """The columns of the table `ref` in `area`'s tables/ folder, lowercased -> as written."""
+def _stored_table(root: Path, area: str, ref: tuple[str, str]) -> tuple[dict, dict[str, str]]:
+    """The table file of `ref` in `area`'s tables/ folder, and its columns lowercased -> as written."""
     from .models import table_key
 
     for tf in sorted((_area_dir(root, area) / "tables").glob("*.yaml")):
         doc = _load(tf) or {}
         if _same_table(ref, table_key(str(doc.get("name") or tf.stem), doc.get("schema"))):
-            return {str(c.get("name")).lower(): str(c.get("name"))
-                    for c in doc.get("columns") or [] if isinstance(c, dict) and c.get("name")}
-    return {}
+            doc.setdefault("name", tf.stem)
+            return doc, {str(c.get("name")).lower(): str(c.get("name"))
+                         for c in doc.get("columns") or [] if isinstance(c, dict) and c.get("name")}
+    return {}, {}
+
+
+def _model_dialect(root: Path) -> Optional[str]:
+    """The sqlglot grammar the model's SQL text is written in, or None when its engine isn't one known."""
+    from .sql_dialect import DialectUnresolved, sqlglot_dialect
+
+    doc = _load(root / "datasource.yaml") or {}
+    engines = set()
+    for sc in doc.get("storage_connections") or []:
+        if not isinstance(sc, dict):
+            continue
+        ref = sc.get("ref") or f"datasources/{sc.get('name')}/storage.yaml"
+        st = sc.get("storage_type") or ((_load(root / ref) or {}) if (root / ref).exists() else {}).get("storage_type")
+        if st:
+            engines.add(str(st))
+    try:
+        return sqlglot_dialect(engines.pop()) if len(engines) == 1 else None
+    except DialectUnresolved:
+        return None
+
+
+def _on_columns(on: str, dialect: Optional[str]) -> list[tuple[str, str]]:
+    """(table, column) for every column an `on:` condition names, filters and casts included. Raises
+    BatchError when it doesn't parse or a column isn't qualified with its table."""
+    from sqlglot import exp
+
+    from .runtime import _parse_declared_predicate
+
+    predicate = _parse_declared_predicate(on, dialect)
+    if predicate is None:
+        raise BatchError(f"the join condition {on!r} doesn't parse as SQL")
+    out = []
+    for c in predicate.find_all(exp.Column):
+        if not c.table:
+            raise BatchError(f"column {c.name!r} in the join condition needs its table: write <table>.{c.name}")
+        out.append((c.table, c.name))
+    return out
 
 
 def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Path:
     """Write the join an `add` op describes, unreviewed (#512). Its two tables' areas decide where:
     that area's relationships.yaml when they share one, else the cross-area joins. A table or column
     the model doesn't have fails the batch; the same join already in the model is skipped."""
-    from .models import table_key
+    from .models import stored_identity, table_key
 
     entry = {k: op[k] for k in _ADD_JOIN_FIELDS if op.get(k) not in (None, "")}
     entry.update(confidence="proposed", review_state="unreviewed")
@@ -1191,12 +1229,15 @@ def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Pat
         raise BatchError(f"not a valid join: {e}") from e
     owners = _owners(root)
     ends = {}
-    on_cols = {"from": [], "to": []}
+    on_cols: dict[str, list[str]] = {"from": [], "to": []}
     if entry.get("on"):
-        from .runtime import join_column_pairs
-        for f, t in join_column_pairs(Relationship(**entry)) or []:
-            on_cols["from"].append(f)
-            on_cols["to"].append(t)
+        sides = {"from": table_key(entry["from_table"], entry.get("from_schema"))[1],
+                 "to": table_key(entry["to_table"], entry.get("to_schema"))[1]}
+        for t, c in _on_columns(str(entry["on"]), _model_dialect(root)):
+            hit = [side for side, name in sides.items() if name == t.lower()]
+            if not hit:
+                raise BatchError(f"the join condition names {t}.{c}, but {t!r} is neither end of the join")
+            on_cols[hit[0]].append(c)
     for side in ("from", "to"):
         ref = table_key(entry[f"{side}_table"], entry.get(f"{side}_schema"))
         hits = sorted({k for k in owners if _same_table(ref, k)})
@@ -1205,15 +1246,20 @@ def _add_join(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> Pat
                 f"no table {entry[f'{side}_table']!r} in the model" if not hits else
                 f"table {entry[f'{side}_table']!r} is in {len(hits)} schemas; give {side}_schema")
         ends[side] = (hits[0], owners[hits[0]])
-        cols = _table_columns(root, owners[hits[0]], hits[0])
+        doc, cols = _stored_table(root, owners[hits[0]], hits[0])
         col = entry.get(f"{side}_column")
         for c in [col] if col else on_cols[side]:
             if c.lower() not in cols:
                 raise BatchError(f"table {entry[f'{side}_table']!r} has no column {c!r}")
         if col:
             entry[f"{side}_column"] = cols[col.lower()]
-        if hits[0][0] and not entry.get(f"{side}_schema"):
-            entry[f"{side}_schema"] = _area_tables(root)[1].get(hits[0], hits[0][0])
+        # The model's own spelling, since the loader matches a join's tables case-sensitively.
+        schema, name = stored_identity(str(doc["name"]), doc.get("schema"))
+        entry[f"{side}_table"] = name
+        if schema:
+            entry[f"{side}_schema"] = schema
+        else:
+            entry.pop(f"{side}_schema", None)
     for path, key in [*((_area_dir(root, a) / "relationships.yaml", "relationships") for a in _listed_areas(root)),
                       (root / "cross_subject_area_relationships.yaml", "edges"),
                       (root / "datasource.yaml", "cross_subject_area_relationships")]:
@@ -1244,14 +1290,13 @@ def _same_join_entry(a: dict, b: dict) -> bool:
     from types import SimpleNamespace
 
     from .introspect import _same_join
-    from .models import Relationship
+    from .models import Relationship, on_text_key
 
     # Every field, so whatever `_same_join` reads is there (a composite key's `on`, too).
     def ns(r: dict) -> Any:
         return SimpleNamespace(**{k: r.get(k) for k in Relationship.model_fields})
 
-    return (_same_join(ns(a), ns(b))
-            and " ".join(str(a.get("on") or "").split()).lower() == " ".join(str(b.get("on") or "").split()).lower())
+    return _same_join(ns(a), ns(b)) and on_text_key(str(a.get("on") or "")) == on_text_key(str(b.get("on") or ""))
 
 
 def _sign_off_rank(r: dict) -> int:

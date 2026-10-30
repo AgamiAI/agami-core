@@ -135,6 +135,49 @@ def test_a_misspelled_table_or_column_undoes_the_batch(model, bad):
     assert not (model / "curation_log.jsonl").exists()
 
 
+@pytest.mark.parametrize("on", [
+    "orders.cust_no = customers.cust_no AND customers.missing_flag = 'Y'",
+    "CAST(orders.cust_noo AS INTEGER) = customers.cust_no",
+    "orders.cust_no > customers.nope",
+    "orders.cust_no = customers.cust_no AND products.id = 1",
+    "orders.cust_no = customers.cust_no AND region = 1",
+    "orders.cust_no = = customers.cust_no",
+])
+def test_every_column_of_a_join_condition_is_checked(model, on):
+    before = _snapshot(model)
+    res = curate.apply(model, [_add(from_table="orders", to_table="customers", on=on)])
+    assert res.errors and not res.applied and not res.validated
+    assert _snapshot(model) == before
+
+
+def test_a_join_condition_with_a_filter_and_a_cast_is_added_when_its_columns_exist(model):
+    on = "CAST(orders.cust_no AS INTEGER) = customers.cust_no AND Customers.Region = 1"
+    res = curate.apply(model, [_add(from_table="orders", to_table="customers", on=on)])
+    assert res.validated and res.applied, res.as_dict()
+
+
+def test_filtered_joins_differing_only_in_a_literal_case_are_two_joins(model):
+    on = "orders.cust_no = customers.cust_no AND customers.region = '{}'"
+    res = curate.apply(model, [_add(from_table="orders", to_table="customers", on=on.format("Y")),
+                               _add(from_table="orders", to_table="customers", on=on.format("y")),
+                               _add(from_table="orders", to_table="customers", on=on.format("Y").upper())])
+    assert len(res.applied) == 2 and len(res.skipped) == 1, res.as_dict()
+    assert sorted(r["on"][-3:] for r in _rels(model) if r.get("on")) == ["'Y'", "'y'"]
+
+
+def test_an_added_join_keeps_the_models_spelling_of_its_tables(model):
+    res = curate.apply(model, [_add(from_table="ORDERS", from_column="cust_ref", to_table="Customers",
+                                    to_column="ID", from_schema="PUBLIC")])
+    assert res.validated and res.applied
+    [r] = [r for r in _rels(model) if r.get("from_column") == "cust_ref"]
+    assert (r["from_table"], r["from_schema"], r["to_table"], r["to_column"]) == ("orders", "public",
+                                                                                   "customers", "id")
+    org = loader.load_datasource(model)
+    assert ("orders", "cust_ref") in {(r.from_table, r.from_column) for sa in org.subject_areas
+                                      for r in sa.relationships}
+    assert any(it.get("from_column") == "cust_ref" for it in curate.review_queue(org)["rule_2"])
+
+
 def test_a_join_between_two_areas_goes_to_the_cross_area_joins(model):
     res = curate.apply(model, [_add(from_table="orders", from_column="product_id", to_table="products",
                                     to_column="id")])
