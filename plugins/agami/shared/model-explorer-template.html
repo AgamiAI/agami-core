@@ -35,6 +35,8 @@
       "relationships":[ { "qname", "from_table", "from_column", "to_table", "to_column", "on",
                           "from_schema", "to_schema", "cross_schema",
                           "cardinality", "description", "review_state", "excluded", "area" } ],
+      (a stale metric / entity / join also carries "changes_since_approval":
+         { "recorded", "changes": [ { "field", "before", "after", "by", "at", "text" } ], "summary" })
       "examples":     [ { "n", "qname", "question", "sql", "tables", "source", "status", "area" } ]
     }
     A table:
@@ -1726,11 +1728,24 @@
       return header;
     }
 
+    // A stale item was approved, then edited: show what changed since that approval (#537).
+    function sinceApprovalBlock(item, body) {
+      const since = item.changes_since_approval;
+      if (item.review_state !== 'stale' || !since) return;
+      const who = item.signed_off_by ? ' (approved by ' + item.signed_off_by + ')' : '';
+      body.appendChild(labelLine('Changed since it was approved' + who));
+      const lines = since.recorded && (since.changes || []).length
+        ? since.changes.map(c => c.text + (c.by ? ' — ' + c.by : '') + (c.at ? ', ' + c.at : ''))
+        : [since.summary || 'changes not recorded'];
+      lines.forEach(t => body.appendChild(descBlock(t)));
+    }
+
     function renderMetricCard(m) {
       const eff = effExcluded(m);
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(m.qname) ? ' queued-' + queuedAction(m.qname) : '') });
       card.appendChild(flatCardHeader(m.name, m, eff));
       const body = el('div', { class: 'table-body' });
+      sinceApprovalBlock(m, body);
       body.appendChild(labelLine('What it measures (click to edit)'));
       body.appendChild(hintLine('The plain-language definition — this is what agami matches a question against. The SQL below is how it’s computed.'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
@@ -1773,6 +1788,7 @@
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(e.qname) ? ' queued-' + queuedAction(e.qname) : '') });
       card.appendChild(flatCardHeader(e.name + (e.plural ? ' / ' + e.plural : ''), e, eff));
       const body = el('div', { class: 'table-body' });
+      sinceApprovalBlock(e, body);
       if ((e.maps_to || []).length) { body.appendChild(labelLine('Maps to')); body.appendChild(descBlock(e.maps_to.join(', '))); }
       if ((e.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(e.other_names.join(', '))); }
       if (e.value_pattern) { body.appendChild(labelLine('Value pattern (regex)')); body.appendChild(preBlock(e.value_pattern)); }
@@ -1801,6 +1817,7 @@
                                  : `${fq}${r.from_table} → ${tq}${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
       card.appendChild(flatCardHeader(join, r, eff));
       const body = el('div', { class: 'table-body' });
+      sinceApprovalBlock(r, body);
       if (r.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(r.cardinality)); }
       body.appendChild(labelLine('Description (click to edit)'));
       body.appendChild(inlineBlock({ qname: r.qname, area: r.area, name: relName(r), kind: 'relationship',
@@ -2957,8 +2974,11 @@
       const _joinByq = {};
       [...(manifest.relationships || []), ...(manifest.cross_relationships || [])]
         .forEach(r => { _joinByq[r.qname] = r; });
+      // A join's identity as the queued edits leave it: each op names the join as it stands when that
+      // op runs, so the second column edit and the approval follow the first edit's new column.
+      const _joinNow = {};
       const withJoinIdentity = (qname, o) => {
-        const r = o.kind === 'relationship' ? _joinByq[qname] : null;
+        const r = o.kind === 'relationship' ? (_joinNow[qname] || _joinByq[qname]) : null;
         if (!r) return o;
         const id = {};
         if (r.from_column) id.from_column = r.from_column;
@@ -2969,11 +2989,12 @@
         return { ...o, ...id };
       };
       const opList = [];
+      const approvals = [];
       Object.entries(ops).forEach(([qname, o]) => {
         if (o.op === 'approve') {
           const it = _byq[qname];
           if (it && mootReason(it)) return;  // skip moot approval
-          opList.push(withJoinIdentity(qname, _approveAt ? { ...o, at: _approveAt } : o));
+          approvals.push([qname, _approveAt ? { ...o, at: _approveAt } : o]);
         } else opList.push(withJoinIdentity(qname, o));
       });
       Object.entries(edits).forEach(([qname, e]) => {
@@ -2981,8 +3002,15 @@
           const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
           if (e.column) op.column = e.column;
           opList.push(withJoinIdentity(qname, op));
+          if (e.kind === 'relationship' && _joinByq[qname]
+              && ['from_column', 'to_column', 'on', 'from_schema', 'to_schema'].includes(field)) {
+            _joinNow[qname] = { ...(_joinNow[qname] || _joinByq[qname]), [field]: e.fields[field] };
+          }
         });
       });
+      // Approvals go after the edits: approving an item you also edited signs off the edited version,
+      // where an edit applied after the approval would send it straight back to review.
+      approvals.forEach(([qname, o]) => opList.push(withJoinIdentity(qname, o)));
       // After every op that names the table by its current area.
       Object.values(moves).forEach(o => opList.push(o));
       if (opList.length) { lines.push('curate-ops:'); lines.push(JSON.stringify(opList)); }

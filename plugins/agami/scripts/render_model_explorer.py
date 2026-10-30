@@ -84,6 +84,19 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
     derived_context_md = _OD.derived_context(org, with_curated_glossary=False)
     key_terminology = dict(getattr(org, "key_terminology", {}) or {})
 
+    from semantic_model import curate as _C
+    log: list = []
+    log_read = False
+
+    def since_approval(kind: str, area: Any, obj: Any) -> dict:
+        """What changed on a stale item since its approval, for the Review tab (#537)."""
+        nonlocal log, log_read
+        if obj.review_state != "stale":
+            return {}
+        if not log_read:
+            log, log_read = _C.read_log(profile_dir), True
+        return {"changes_since_approval": _C.since_approval(profile_dir, kind, area, obj, log=log)}
+
     for sa in org.subject_areas:
         out_tables: list[dict] = []
         for t in sa.tables_defined:
@@ -141,7 +154,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "description": e.description, "review_state": e.review_state,
                 "confidence": e.confidence, "excluded": e.review_state == "rejected",
                 "signed_off_by": e.signed_off_by, "signed_off_role": e.signed_off_role,
-                "rule": 2, "area": sa.name,
+                "rule": 2, "area": sa.name, **since_approval("entity", sa.name, e),
             })
 
         for mm in sa.metrics:
@@ -155,7 +168,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "review_state": mm.review_state, "confidence": mm.confidence,
                 "excluded": mm.review_state == "rejected",
                 "signed_off_by": mm.signed_off_by, "signed_off_role": mm.signed_off_role,
-                "rule": 1, "area": sa.name,
+                "rule": 1, "area": sa.name, **since_approval("metric", sa.name, mm),
             })
 
         for r in sa.relationships:
@@ -169,7 +182,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
                 "review_state": r.review_state, "confidence": r.confidence,
                 "excluded": r.review_state == "rejected",
                 "signed_off_by": r.signed_off_by, "signed_off_role": r.signed_off_role,
-                "rule": 2, "area": sa.name,
+                "rule": 2, "area": sa.name, **since_approval("relationship", sa.name, r),
             })
 
         for i, ex in enumerate(_L.list_prompt_examples(profile_dir, sa.name)):
@@ -215,7 +228,7 @@ def build_manifest(profile_dir: Path, profile: str) -> dict:
             # rendered as a reviewable join (Joins tab + Review queue), like intra-area joins;
             # `area` (the from-side) is what a curate op targets — the org-level fallback in
             # curate resolves it to cross_subject_area_relationships.
-            "rule": 2, "cross_area": True, "area": fa,
+            "rule": 2, "cross_area": True, "area": fa, **since_approval("relationship", fa, r),
         })
 
     return {

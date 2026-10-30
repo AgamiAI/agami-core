@@ -297,6 +297,8 @@ kick the refresh yourself.
 **What happens to drift** (column type change, FK target shift):
 - The entry's `agami.review_state` flips to `stale`. Prior `signed_off_*` is
   preserved for audit.
+- The same `stale` state marks an approved metric, entity or join a person edited since its
+  approval (see [trust-layer.md](trust-layer.md#editing-an-approved-entry-sends-it-back-to-review)).
 - At runtime, `agami-query` still answers but **warns** when a query touches a
   `stale` entry (schema drift) — surfaces as: *"This used X, marked stale (schema
   drift). Run /agami-connect to re-introspect, then /agami-model to reconcile."*

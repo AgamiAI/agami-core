@@ -98,7 +98,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --area A --tables t1 t2   #
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" examples "$ROOT" --area A --query "…"     # examples-first ranking
 ```
 
-The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-model to reconcile."*
+The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once. A stale metric, entity or join was approved and then edited, so it is not signed off: *"This uses `<entity>`, which changed since it was approved and needs re-approving in /agami-model."* A stale table or column is schema drift: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-model to reconcile."*
 
 ### 1c — what the model gives you
 

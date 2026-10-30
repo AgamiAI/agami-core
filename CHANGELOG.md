@@ -12,6 +12,50 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
+  `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
+  tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
+  approved` with the old signer and time, so a receipt reported a definition nobody approved as
+  signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
+  reports it as not signed off until someone re-approves it, which records the new signer and time.
+  Only `description`, `other_names`, a metric's `business_question`, a metric's or entity's `caveats`, an entity's
+  `plural`, and a join's `for_questions_about` keep the approval; every other field,
+  including any added later, counts as a change, and an edit that sets a field to the value it
+  already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
+  was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an
+  approve with no signer can't reuse them. An edit can no longer set a sign-off field
+  (`review_state`, `signed_off_by`, `signed_off_at`, `signed_off_role`, `confidence`,
+  `migrated_from`) on any entry, so a stale item can't be re-approved under its old stamp: the op is
+  skipped and points to approve / reject / include. In one batch an approve after the edit signs off the
+  edited version (the explorer now sends approvals after edits) and an edit after the approve leaves
+  the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
+  tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
+  read from `curation_log.jsonl` (e.g. "binding (sqlite) changed from SUM(amount) to SUM(amount) -
+  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it ("some changes not
+  recorded" after the changes it could read, when a line since the edit can't be read). This
+  supersedes #559's re-stamp of a person's structural join edit as their approval (#511): the edited
+  join goes stale instead, and a refresh still leaves it alone, since it re-labels only the joins
+  introspection approved itself, and never merges an edited split join into a database's composite
+  foreign key (`composite foreign key not applied: … edited since its approval`); a refresh that
+  lowers a stale join's confidence because a column's type changed keeps it `stale`, and a stale
+  `on:` join keeps its confidence. A table move (#513) keeps a stale join, metric or entity stale
+  with its old signer, and the review surfaces still show what changed; when a move finds two copies
+  of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
+  and a move where it disagrees with a copy a person signed off is refused. A move's log entry lists
+  the metrics and entities it carried (`carried`), and an item's changes follow it back only through
+  a move that carried it (a move logged without that list gives "changes not recorded"). The log entry
+  also lists each join the move placed again (`joins`: where it was and is, its identity before and
+  after with its schemas, and, when it met a copy already there, that the copies were `merged` and
+  which was `kept`); a join's changes follow back only the copy kept, say the copies were merged and
+  the other copy's changes are not recorded, and ignore a move of a same-named table in another
+  schema. An item's
+  changes come only from edits of that item: a cross-area metric or entity reads only edits of the
+  datasource-level lists, and an op that named no area (or another one) logs the area it resolved
+  to (`resolved_area`). `stale` names a moved item where it now is, and an approve after the move in
+  the same batch clears it.
+
 ### Added
 
 - **An example can be tagged with several metrics, and is found under each (#546).** A prompt

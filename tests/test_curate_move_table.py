@@ -477,3 +477,231 @@ def test_a_join_that_turns_cross_area_is_not_added_twice(tmp_path):
     cross = loader.load_datasource(root).cross_subject_area_relationships
     assert [(r.from_subject_area, r.to_subject_area) for r in cross
             if (r.from_table, r.to_table) == ("order_items", "orders")] == [("catalog", "sales")]
+
+
+# A join a person edited after its approval is `stale` and keeps the approval's signer (#537).
+_STALE_ENGINE = {**_ENGINE, "review_state": "stale", "relationship": "one_to_one"}
+
+
+def test_a_stale_copy_outranks_an_engine_approved_one(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_STALE_ENGINE)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_ENGINE)
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    rels = loader.load_datasource(root).subject_area("catalog").relationships
+    same = [r for r in rels if (r.from_table, r.to_table) == ("order_items", "products")]
+    assert [(r.review_state, r.relationship) for r in same] == [("stale", "one_to_one")]
+    assert ("join order_items->products was already in area 'catalog'; kept one copy: "
+            "the moved copy, edited by a person since its approval") in res.notes
+
+
+def test_a_move_is_refused_when_a_stale_copy_and_a_signed_copy_disagree(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update({**_SIGNED, "review_state": "stale",
+                                                      "relationship": "one_to_one"})
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_SIGNED)
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    res = _move(root, "order_items", "catalog")
+    assert not res.applied and "signed off differently" in res.skipped[0]["reason"], res.as_dict()
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("kind,name,edit,rule", [
+    ("relationship", "order_items->orders", {"from_column": "order_id", "field": "relationship",
+                                             "value": "one_to_one"}, "rule_2"),
+    ("metric", "units_sold", {"field": "bindings", "value": {"PostgreSQL": "SUM(order_items.qty) * 2"}},
+     "rule_1"),
+])
+def test_a_moved_stale_item_stays_stale_and_shows_what_changed(tmp_path, kind, name, edit, rule):
+    root = _model(tmp_path)
+    who = {"signer": "you@example.com", "role": "owner"}
+    op = {"kind": kind, "area": "sales", "name": name}
+    which = {k: v for k, v in edit.items() if k == "from_column"}
+    assert curate.apply(root, [{**op, **which, "op": "approve", "at": "2026-01-01T00:00:00Z"}], **who).validated
+    assert curate.apply(root, [{**op, "op": "edit", **edit}], **who).stale
+    for to in ("catalog", "sales"):
+        assert _move(root, "order_items", to).validated
+        (it,) = [it for it in curate.review_queue(loader.load_datasource(root), root=root)[rule]
+                 if it["name"] == name]
+        assert (it["review_state"], it.get("signed_off_by")) == ("stale", "you@example.com"), it
+        changed = it["changes_since_approval"]
+        assert changed["recorded"] and [c["field"] for c in changed["changes"]] == [edit["field"]], (to, it)
+
+
+_WHO = {"signer": "you@example.com", "role": "owner"}
+_UNITS = {"kind": "metric", "name": "units_sold"}
+_LINE_JOIN = {"kind": "relationship", "name": "order_items->orders", "from_column": "order_id"}
+
+
+def _approved_then_edited(root: Path, *then: dict):
+    """Approve units_sold and order_items->orders, then edit both, move order_items to catalog and
+    run `then`, all in one batch."""
+    at = {"at": "2026-01-01T00:00:00Z"}
+    assert curate.apply(root, [{**_UNITS, "op": "approve", "area": "sales", **at},
+                               {**_LINE_JOIN, "op": "approve", "area": "sales", **at}], **_WHO).validated
+    return curate.apply(root, [
+        {**_UNITS, "op": "edit", "area": "sales", "field": "unit", "value": "items"},
+        {**_LINE_JOIN, "op": "edit", "area": "sales", "field": "relationship", "value": "one_to_one"},
+        {"op": "move", "kind": "table", "name": "order_items", "to_area": "catalog"}, *then], **_WHO)
+
+
+def test_a_moved_stale_item_is_reported_where_it_now_is(tmp_path):
+    res = _approved_then_edited(_model(tmp_path))
+    assert res.validated, res.as_dict()
+    assert res.stale == ["metric catalog/units_sold", "relationship _cross/order_items->orders"]
+
+
+def test_approving_a_moved_item_in_the_same_batch_clears_its_stale_notice(tmp_path):
+    root = _model(tmp_path)
+    at = {"op": "approve", "area": "catalog", "at": "2026-01-02T00:00:00Z"}
+    res = _approved_then_edited(root, {**_UNITS, **at}, {**_LINE_JOIN, **at})
+    assert res.validated and res.stale == [], res.as_dict()
+    org = loader.load_datasource(root)
+    assert next(m for m in org.subject_area("catalog").metrics if m.name == "units_sold").review_state == "approved"
+    assert {(r.from_table, r.review_state) for r in org.cross_subject_area_relationships} == \
+        {("order_items", "approved")}
+
+
+def _revenue(root: Path, area: str, table: str) -> None:
+    _item(root, area, "metrics", {"name": "revenue", "calculation": f"{table} count",
+                                  "bindings": {"PostgreSQL": f"COUNT({table}.id)"}, "source_tables": [table],
+                                  "confidence": "proposed", "review_state": "approved",
+                                  "signed_off_by": "you@example.com", "signed_off_role": "owner",
+                                  "signed_off_at": "2026-01-01T00:00:00Z"})
+
+
+def _revenue_history(root: Path, area: str) -> dict:
+    (it,) = [it for it in curate.review_queue(loader.load_datasource(root), root=root)["rule_1"]
+             if (it["name"], it["area"]) == ("revenue", area)]
+    return it["changes_since_approval"]
+
+
+def test_a_move_does_not_give_a_destination_metric_another_areas_history(tmp_path):
+    root = _model(tmp_path)
+    _revenue(root, "catalog", "products")
+    _revenue(root, "sales", "orders")
+    for area, unit in (("catalog", "USD"), ("sales", "EUR")):
+        assert curate.apply(root, [{"op": "edit", "kind": "metric", "area": area, "name": "revenue",
+                                    "field": "unit", "value": unit}], **_WHO).stale
+    assert _move(root, "customers", "catalog").validated
+    since = _revenue_history(root, "catalog")
+    assert [c["text"] for c in since["changes"]] == ["unit changed from (none) to USD"] and since["complete"]
+    log = [json.loads(ln) for ln in (root / curate.CURATION_LOG).read_text().splitlines()]
+    assert log[-1]["carried"] == [{"kind": "metric", "name": "customer_count", "from": "sales"}]
+
+
+def test_a_move_logged_without_what_it_carried_says_changes_not_recorded(tmp_path):
+    root = _model(tmp_path)
+    _revenue(root, "catalog", "products")
+    assert curate.apply(root, [{"op": "edit", "kind": "metric", "area": "catalog", "name": "revenue",
+                                "field": "unit", "value": "USD"}], **_WHO).stale
+    assert _move(root, "customers", "catalog").validated
+    path = root / curate.CURATION_LOG
+    lines = [json.loads(ln) for ln in path.read_text().splitlines()]
+    del lines[-1]["carried"]
+    path.write_text("".join(json.dumps(e) + "\n" for e in lines))
+    assert _revenue_history(root, "catalog")["summary"] == "changes not recorded"
+
+
+def _join_history(root: Path, frm: str, to: str, area) -> dict:
+    (it,) = [it for it in curate.review_queue(loader.load_datasource(root), root=root)["rule_2"]
+             if it["kind"] == "relationship" and (it["name"], it["area"]) == (f"{frm}->{to}", area)]
+    return it["changes_since_approval"]
+
+
+_EXECUTABLE = {"op": "edit", "kind": "relationship", "name": "order_items->products", "field": "executable"}
+
+
+def _edit_in_place(root: Path, value: str) -> None:
+    """Edit catalog's copy of order_items->products; the cross-area copy is set aside meanwhile, as
+    an op naming catalog would match both."""
+    path = root / "datasource.yaml"
+    ds = yaml.safe_load(path.read_text())
+    path.write_text(yaml.safe_dump({**ds, "cross_subject_area_relationships": []}))
+    assert curate.apply(root, [{**_EXECUTABLE, "area": "catalog", "value": value}], **_WHO).stale
+    path.write_text(yaml.safe_dump(ds))
+
+
+def test_a_merged_join_shows_only_the_kept_copys_changes(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_SIGNED)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_SIGNED)
+    # The copy in place is edited first; the moved copy's edit is newer.
+    _edit_in_place(root, "informational")
+    assert curate.apply(root, [{**_EXECUTABLE, "area": curate.CROSS_AREA, "value": "split"}], **_WHO).stale
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    assert any("kept one copy: the copy in place" in n for n in res.notes), res.notes
+    since = _join_history(root, "order_items", "products", "catalog")
+    assert [c["text"] for c in since["changes"]] == [
+        "executable changed from (none) to informational", curate.MERGED_COPY]
+    assert not since["complete"]
+    moved = json.loads((root / curate.CURATION_LOG).read_text().splitlines()[-1])
+    (landed,) = [j for j in moved["joins"] if j["after"]["to_table"] == "products"]
+    assert (landed["from"], landed["to"], landed["merged"], landed["kept"]) == \
+        ("catalog", "catalog", True, "in_place")
+
+
+def test_a_kept_moved_copy_shows_only_its_own_changes(tmp_path):
+    root = _model(tmp_path)
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["cross_subject_area_relationships"][0].update(_SIGNED)
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    _catalog_holds(root, **_ENGINE)
+    assert curate.apply(root, [{**_EXECUTABLE, "area": curate.CROSS_AREA, "value": "split"}], **_WHO).stale
+    # A later edit of the engine's copy in place, which the move discards.
+    _edit_in_place(root, "informational")
+    cat = yaml.safe_load((root / "subject_areas" / "catalog" / "relationships.yaml").read_text())
+    cat["relationships"][0].update(_ENGINE)   # back to the engine's approval, so the moved copy wins
+    (root / "subject_areas" / "catalog" / "relationships.yaml").write_text(yaml.safe_dump(cat))
+    res = _move(root, "order_items", "catalog")
+    assert res.validated, res.as_dict()
+    assert any("kept one copy: the moved copy" in n for n in res.notes), res.notes
+    since = _join_history(root, "order_items", "products", "catalog")
+    assert [c["text"] for c in since["changes"]] == [
+        "executable changed from (none) to split", curate.MERGED_COPY]
+
+
+def test_moving_a_same_named_table_in_another_schema_does_not_mix_join_histories(tmp_path):
+    root = _model(tmp_path)
+    _area(root, "archive", ["orders", "customers"], schema="archive")
+    _table(root, "archive", "orders", ["customer_id"], schema="archive")
+    _table(root, "archive", "customers", [], schema="archive")
+    (root / "subject_areas" / "archive" / "relationships.yaml").write_text(yaml.safe_dump({
+        "relationships": [_join("orders", "customer_id", "customers", **_SIGNED)]}))
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append("subject_areas/archive")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    rels = root / "subject_areas" / "sales" / "relationships.yaml"
+    doc = yaml.safe_load(rels.read_text())
+    doc["relationships"][0].update(_SIGNED)
+    rels.write_text(yaml.safe_dump(doc))
+    join = {"op": "edit", "kind": "relationship", "name": "orders->customers", "field": "executable"}
+    assert curate.apply(root, [{**join, "area": "sales", "value": "informational"}], **_WHO).stale
+    assert curate.apply(root, [{**join, "area": "archive", "value": "split"}], **_WHO).stale
+    res = _move(root, "orders", "catalog", area="archive", schema="archive")
+    assert res.validated, res.as_dict()
+    since = _join_history(root, "orders", "customers", "sales")
+    assert [c["text"] for c in since["changes"]] == ["executable changed from (none) to informational"]
+    assert since["complete"]
+
+
+def test_a_move_logged_without_its_joins_says_changes_not_recorded(tmp_path):
+    root = _model(tmp_path)
+    assert curate.apply(root, [{**_LINE_JOIN, "op": "approve", "area": "sales", "at": "2026-01-01T00:00:00Z"}],
+                        **_WHO).validated
+    assert curate.apply(root, [{**_LINE_JOIN, "op": "edit", "area": "sales", "field": "relationship",
+                                "value": "one_to_one"}], **_WHO).stale
+    assert _move(root, "order_items", "catalog").validated
+    path = root / curate.CURATION_LOG
+    lines = [json.loads(ln) for ln in path.read_text().splitlines()]
+    del lines[-1]["joins"]
+    path.write_text("".join(json.dumps(e) + "\n" for e in lines))
+    assert _join_history(root, "order_items", "orders", "catalog")["summary"] == "changes not recorded"

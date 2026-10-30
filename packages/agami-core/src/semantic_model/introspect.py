@@ -435,10 +435,14 @@ def introspect(
             hit = next((h for fc, tc in _column_pairs(r, sg) or []
                         for h in (_retyped_end(retyped, r.from_schema, r.from_table, fc),
                                   _retyped_end(retyped, r.to_schema, r.to_table, tc)) if h), None)
-            # The validator type-checks only the column-pair form; an `on:` join someone wrote or
-            # signed is theirs, so only one introspection itself signed goes back to review.
-            if hit and r.confidence == "confirmed" and (not r.on or r.signed_off_role == "system"):
-                r.confidence, r.review_state = "proposed", "unreviewed"
+            # The validator type-checks only the column-pair form; an `on:` join someone wrote,
+            # signed or edited (stale) is theirs, so only one introspection itself signed goes back.
+            if hit and r.confidence == "confirmed" and (
+                    not r.on or (r.signed_off_role == "system" and r.review_state != "stale")):
+                r.confidence = "proposed"
+                # A stale join is already back in review, and `stale` is what says a person changed it.
+                if r.review_state != "stale":
+                    r.review_state = "unreviewed"
                 report.changes.setdefault(hit, {}).setdefault("joins to review", []).append(_join_label(r, sg))
 
     # 3. relationships (catalog FKs, else probe by name+type+overlap). Use the FULL built set's
@@ -632,8 +636,7 @@ def _merge_split_joins(
         key = " AND ".join(f for f, _ in pairs)
         people = [p for p in covered if not _engine_approved(p)]
         if people:
-            why = ", ".join(sorted({f"signed off by {p.signed_off_by}" if p.signed_off_by
-                                    else "not approved by introspection" for p in people}))
+            why = ", ".join(sorted({_not_merged_reason(p) for p in people}))
             report.changes.setdefault(where, {}).setdefault(_UNMERGED_JOINS, []).append(
                 f"{c.from_table} → {c.to_table} ({key}): not changed: {why}")
             continue
@@ -643,6 +646,13 @@ def _merge_split_joins(
         dropped.update(id(p) for p in covered)
         kept.append(c)
     return dropped, kept
+
+
+def _not_merged_reason(p: Relationship) -> str:
+    # A stale join still carries the signer of the approval it lost, so say it was edited instead.
+    if p.review_state == "stale":
+        return "edited since its approval"
+    return f"signed off by {p.signed_off_by}" if p.signed_off_by else "not approved by introspection"
 
 
 def _without_joins(org: Datasource, dropped: set[int]) -> Datasource:
