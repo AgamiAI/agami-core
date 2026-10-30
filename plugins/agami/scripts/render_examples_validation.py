@@ -24,6 +24,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -112,21 +113,72 @@ def render(
     return out
 
 
+def _read_items(path: str) -> tuple[object, list]:
+    """A file's parsed JSON and its items: a bare array (one area's `sm seed-validate`) or the
+    combined `{areas, items, totals}` object it prints for several areas."""
+    with open(os.path.expanduser(path), encoding="utf-8") as f:
+        doc = json.load(f)
+    items = doc.get("items") if isinstance(doc, dict) else doc
+    if not isinstance(items, list):
+        raise ValueError(f"{path}: must hold a JSON array of items or an object with an "
+                         f"'items' array, got {type(doc).__name__}")
+    return doc, items
+
+
+def _split_label(arg: str) -> tuple[str | None, str]:
+    """`AREA=PATH` labels a single-area file with its area; a plain path (or one that exists with
+    an `=` in its name) has no label."""
+    head, sep, rest = arg.partition("=")
+    if sep and rest and re.fullmatch(r"[\w.-]+", head) and not os.path.exists(os.path.expanduser(arg)):
+        return head, rest
+    return None, arg
+
+
+def _read_files(args: list[str]) -> list[tuple[str, object, list]]:
+    """Each `--items-file` as (path, parsed JSON, items), with a file's label copied into its
+    items. Refuses a file given twice, and, with several files, an item no area is known for."""
+    files, seen = [], {}
+    for arg in args:
+        area, path = _split_label(arg)
+        real = os.path.realpath(os.path.expanduser(path))
+        if real in seen:
+            # Its examples would get two numbers, and write-back keeps only the last.
+            raise ValueError(f"{path}: given twice (also as {seen[real]})")
+        seen[real] = path
+        doc, items = _read_items(path)
+        if area:
+            for it in items:
+                if isinstance(it, dict):
+                    it.setdefault("area", area)
+        files.append((path, doc, items))
+    if len(files) > 1:
+        unlabelled = [p for p, _, items in files
+                      if any(isinstance(it, dict) and not it.get("area") for it in items)]
+        if unlabelled:
+            # Two areas can share a question; without the area `reject N` can't say which.
+            raise ValueError(f"{', '.join(unlabelled)}: items carry no area; label a single area's "
+                             "file as AREA=PATH, or run `sm seed-validate` once for all the areas")
+    return files
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--title", required=True,
                    help="Dashboard title (e.g., 'Seed examples · default')")
     p.add_argument("--profile", required=True, help="Active profile name")
-    p.add_argument("--items-file", required=True,
-                   help="Path to a JSON file containing the items[] array")
+    p.add_argument("--items-file", required=True, action="append",
+                   help="JSON items from `sm seed-validate`: one area's array or the combined "
+                        "object for several areas (repeatable; files render in the order given). "
+                        "With several files, label a single area's array as AREA=PATH")
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
-    with open(os.path.expanduser(args.items_file), encoding="utf-8") as f:
-        items = json.load(f)
-    if not isinstance(items, list):
-        sys.stderr.write(f"--items-file must contain a JSON array, got {type(items).__name__}\n")
+    try:
+        files = _read_files(args.items_file)
+    except ValueError as e:
+        sys.stderr.write(f"--items-file {e}\n")
         return 1
+    items = [it for _, _, file_items in files for it in file_items]
 
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,15 +191,17 @@ def main() -> int:
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
     # failed write never leaves the items file truncated; non-fatal (the HTML already embeds the
-    # normalized numbering), so a write failure warns rather than aborting the render.
-    items_path = os.path.expanduser(args.items_file)
-    try:
-        tmp_path = items_path + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(items, f)
-        os.replace(tmp_path, items_path)
-    except OSError as e:
-        sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
+    # normalized numbering), so a write failure warns rather than aborting the render. Each file
+    # keeps its own shape; several files share the one numbering.
+    for path, doc, _ in files:
+        items_path = os.path.expanduser(path)
+        try:
+            tmp_path = items_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(doc, f)
+            os.replace(tmp_path, items_path)
+        except OSError as e:
+            sys.stderr.write(f"warning: could not normalize {items_path}: {e}\n")
     print(f"Wrote {out_path} ({len(items)} example{'s' if len(items) != 1 else ''})")
     return 0
 

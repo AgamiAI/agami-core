@@ -144,6 +144,7 @@
     .example-question {
       font-size: 15px; font-weight: 600; flex: 1; min-width: 200px;
     }
+    .example-area { font-size: 12px; color: var(--muted); }
     .badge {
       display: inline-block; font-size: 10px; font-weight: 600;
       letter-spacing: 0.04em; text-transform: uppercase;
@@ -560,6 +561,7 @@
       const header = el('div', { class: 'example-header' });
       header.appendChild(el('span', { class: 'example-num', text: '#' + item.n }));
       header.appendChild(el('span', { class: 'example-question', text: item.question || '<no question>' }));
+      if (item.area) header.appendChild(el('span', { class: 'example-area', text: item.area }));
       const stateBadge = item.error ? 'error' : (item.state || 'unreviewed');
       header.appendChild(el('span', { class: 'badge ' + stateBadge, text: stateBadge }));
 
