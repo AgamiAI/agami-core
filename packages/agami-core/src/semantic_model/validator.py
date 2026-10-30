@@ -1224,33 +1224,231 @@ def _check_metric_descriptions(org: Datasource, res: ValidationResult) -> None:
         )
 
 
-# Phrasings that state a count measured on the data rather than a rule about it (#479). Each needs a
-# population word or a ratio, so a threshold (`score > 0.8`), a weight (`x 1.5`) or a unit factor
-# (`/ 100`) never matches. `<n> of <m>` wants a denominator of 10 or more: "2 of 3 criteria" is a
-# definition, while "57 of 231 operations" is a measurement.
-_NUM = r"\d[\d,]*(?:\.\d+)?"
+# Phrasings that state a count measured on the data rather than a rule about it (#479, #541). Each
+# needs a population word, a ratio, a hedge or a "here/currently" cue, so a threshold (`score > 0.8`),
+# a weight (`x 1.5`), a unit factor (`/ 100`) or a formula's literal (`ELSE 0`) never matches.
+# `<n> of <m>` wants a denominator of 10 or more, or a cue such as "only" or "here": "2 of 3 criteria"
+# is a definition, while "57 of 231 operations" is a measurement.
+_DIGITS = r"\d[\d,]*(?:\.\d+)?"
+_W_SMALL = r"two|three|four|five|six|seven|eight|nine"
+_W_UNDER_100 = (
+    rf"(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[-\s](?:one|{_W_SMALL}))?"
+    rf"|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|{_W_SMALL})"
+)
+# A bare "one" is left out: it is mostly "one row per order" or "one of", not a count. As the rest of
+# a compound ("one hundred and one") it is part of the figure.
+_WORDS = (
+    rf"(?:(?:a|one|{_W_UNDER_100})\s+(?:hundred|thousand)(?:\s+(?:and\s+)?(?:{_W_UNDER_100}|one))?"
+    rf"|a\s+dozen|{_W_UNDER_100})"
+)
+_N_BARE = rf"(?:{_DIGITS}|{_WORDS}\b)"
+# Not inside a word, a date, a version or a quoted sample value ("2016-2020", "v2.3", "'1500 rows'").
+_N = rf"(?<![\w.'\"/:–—-]){_N_BARE}"
+_CUR = r"(?:[$€£]\s*)?"
+_UNIT = r"(?:%|\s*percent\b|\s*(?:k|m|bn|million|billion|thousand|gb|mb|tb|kb)\b)"
+_STOP = (
+    r"(?:when|if|else|then|where|and|or|but|because|so|for|to|of|by|the|a|an|per|each|every|in|on|"
+    r"at|as|is|are|was|were|be|means?|from|before|after|until|since|ago|than|with|without|it|its|"
+    r"this|that|which|returns?)"
+)
+# Schema and format nouns ("2 decimal places", "3 columns") and time windows ("30 days") belong to
+# a definition, not a volume.
+_NOT_VOLUME = (
+    r"(?:decimals?|digits?|places?|characters?|chars?|columns?|fields?|tables?|keys?|levels?|times?|"
+    r"statuses|states|types|categories|codes|options|seconds?|minutes?|hours?|days?|weeks?|months?|"
+    r"quarters?|years?)"
+)
+_WORD = rf"(?!{_STOP}\b)[a-z][\w-]*"
+_VOLUME_WORD = rf"(?!(?:{_STOP}|{_NOT_VOLUME})\b)[a-z][\w-]*"
+_CUE_AFTER = (
+    r"(?:here|today|currently|now(?!\s*\()|presently|at\s+present|at\s+the\s+moment|so\s+far"
+    r"|in\s+(?:the|this)\s+(?:data|dataset|snapshot|sample)|as\s+of)\b"
+)
+_CUE_BEFORE = (
+    r"\b(?:currently|presently|at\s+present|so\s+far|today|now|as\s+of\s+(?:today|now|[^,.;]{1,25},))"
+)
+_RANGE = (
+    rf"(?P<btw>between\s+)?{_CUR}(?P<lo>{_N}){_UNIT}?(?P<sep>\s*[–—-]\s*|\s+(?:to|and)\s+){_CUR}"
+    rf"(?P<hi>{_N_BARE})(?![\w-]|\.\d){_UNIT}?"
+)
+_MAGNITUDES = r"dozens|hundreds|thousands|millions|billions"
+_STATE = (
+    r"(?:lacks?|(?:have|has|had|carr(?:y|ies)|are|is|were|was)\s+(?:still\s+)?(?:no|null|missing|"
+    r"empty|blank|negative|zero|duplicated?|duplicates|orphaned|unmatched|unknown|invalid))\b"
+)
+# (kind, pattern). The kind says which extra test `_counts` applies.
 _MEASURED_FIGURE_RES = (
-    re.compile(rf"\b{_NUM}\s+(?:out\s+)?of\s+(?:the\s+)?(?:about\s+|~)?(?P<of>{_NUM})\b", re.I),
-    re.compile(rf"\bcover(?:s|ing)?\s+(?:only|about|~)\s*{_NUM}", re.I),
-    # Not after `-` or a quote: "2016-2020 rows" is a year range and "'1500 records'" a sample value.
-    re.compile(rf"(?<![-'\"])\b{_NUM}\s+(?:rows|records)\b", re.I),
-    re.compile(rf"\b(?:null|missing|empty|blank)\s+(?:on|in|for)\s+(?:about\s+|~)?{_NUM}", re.I),
-    re.compile(
-        rf"\b{_NUM}\s*%\s+(?:of\s+(?:the\s+|all\s+)?(?:rows|records|values|entries)"
-        r"|(?:are\s+|is\s+)?(?:null|empty|blank|missing))\b",
-        re.I,
+    ("share", re.compile(rf"(?P<n>{_N})\s+(?:out\s+)?of\s+(?:the\s+)?(?:about\s+|~)?(?P<of>{_N})", re.I)),
+    ("count", re.compile(rf"\bcover(?:s|ing)?\s+(?:only|about|roughly|just|~)\s*(?P<n>{_N})", re.I)),
+    # "2 rows per order" is a grain, not a count.
+    ("rows", re.compile(rf"(?P<n>{_N})\s+(?:rows|records)\b(?!\s+(?:per|for\s+each|each)\b)", re.I)),
+    (
+        "count",
+        re.compile(rf"\b(?:null|missing|empty|blank)\s+(?:on|in|for)\s+(?:about\s+|~)?(?P<n>{_N})", re.I),
+    ),
+    (
+        "count",
+        re.compile(
+            rf"(?P<n>{_N})\s*(?:%|\s+percent)\s+(?:of\s+(?:the\s+|all\s+)?(?:rows|records|values|entries)"
+            r"|(?:are\s+|is\s+)?(?:null|empty|blank|missing))\b",
+            re.I,
+        ),
+    ),
+    # A count inside a caveat sentence: "1,204 orders carry no region", "40% of sites have no owner".
+    (
+        "state",
+        re.compile(
+            rf"(?P<n>{_N})(?P<u>\s*%|\s+percent)?\s+(?:of\s+(?:the\s+|all\s+|them\s+)?)?"
+            rf"(?P<rest>(?:{_WORD}\s+){{0,2}}){_STATE}",
+            re.I,
+        ),
+    ),
+    # "hundreds of rows", "thousands of orders" — but "thousands of dollars" is a unit.
+    (
+        "count",
+        re.compile(
+            rf"\b(?P<n>{_MAGNITUDES})\s+of\s+"
+            # "hundreds of thousands of dollars": the next magnitude word is where the unit starts.
+            rf"(?!(?:dollars|euros|pounds|cents|usd|eur|gbp|units|{_MAGNITUDES})\b){_VOLUME_WORD}",
+            re.I,
+        ),
+    ),
+    # A hedge only measures: a definition says "over 100", never "about 100".
+    (
+        "count",
+        re.compile(
+            rf"(?:\b(?:about|approximately|approx\.|roughly|around|nearly|almost)\s+|~\s*){_CUR}"
+            rf"(?P<n>{_N})(?:{_UNIT}|\s+{_VOLUME_WORD})",
+            re.I,
+        ),
+    ),
+    # Values seen in the data: "values range 49–142", "varies between 3 and 80".
+    (
+        "range",
+        re.compile(
+            r"(?<!\bthe\s)(?<!\ba\s)(?<!\bvalid\s)\b(?:rang(?:e|es|ed|ing)|var(?:y|ies|ied|ying)|spans?"
+            rf"|spanning|observed|seen)\s+(?:values?\s+)?(?:from\s+)?{_RANGE}",
+            re.I,
+        ),
+    ),
+    # A figure tied to now: "49–142 here", "40 sites today", "12% currently", "currently 40 sites".
+    (
+        "now",
+        re.compile(
+            rf"(?:{_RANGE}|{_CUR}(?P<n>{_N})(?P<u>{_UNIT})?(?P<rest>(?:\s+{_VOLUME_WORD}){{0,3}}))"
+            rf"\s*,?\s+{_CUE_AFTER}",
+            re.I,
+        ),
+    ),
+    (
+        "now",
+        re.compile(
+            rf"{_CUE_BEFORE}\s*,?\s+(?:there\s+(?:are|is)\s+|(?:has|have|holds?|contains?|covers?)\s+)?"
+            rf"(?:only\s+|just\s+|about\s+|roughly\s+|around\s+|~\s*)?(?:{_RANGE}|{_CUR}(?P<n>{_N})"
+            rf"(?P<u>{_UNIT})?(?P<rest>(?:\s+{_VOLUME_WORD})?))",
+            re.I,
+        ),
     ),
 )
+# The words before a figure that make it a bound, an operand or a label: "more than 5 users", "top
+# 10 customers", "divided by 100", "a threshold of 50", "status 9 rows", "week 53".
+_PREV = re.compile(
+    r"(?:\b(?:with|without|than|over|under|above|below|exceeding|least|most|top|bottom|first|last|"
+    r"next|limit|every|each|per|within|to|by|at|after|before|since|until|times|plus|minus|returns?|"
+    r"equals?)|\b(?:value|code|default|threshold|minimum|maximum|min|max|cap|window|weight|factor|"
+    r"rate|score|level)\s+of|\b(?:category|type|code|tier|step|version|stage|grade|class|group|level|"
+    r"status|id|number|week|day|month|quarter|year|period|fy|q)|[<>=*/+#])\s*$",
+    re.I,
+)
+# "populated with 1,204 rows" and "returns 829 rows" are counts; "with 0 rows" or "returns 1 row" is
+# still how the formula behaves.
+_WITH_RETURNS = re.compile(r"\b(?:with|returns?)\s*$", re.I)
+# A year is a date only where the words say so: "fiscal year 2024", "since 2024", "Q1 2024". "There
+# are 2024 rows" is a count.
+_YEAR_CONTEXT = re.compile(
+    r"(?:\b(?:as\s+of|in|during|from|through|thru|since|until|till|before|after|by|fiscal|fy|year|"
+    r"calendar|end\s+of|early|late|mid|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|"
+    r"july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|[qh][1-4])(?:\s+the)?|-)\s*$",
+    re.I,
+)
+_SMALL_SHARE_CUE = re.compile(r"\b(?:only|just|here|today|currently|presently|so\s+far|as\s+of)\b", re.I)
+# "scores range 0–100" is the scale a value is defined on; "ranges 3 to 5 days" and "varies by tier"
+# state a rule.
+_SCALE_LOW, _SCALE_HIGH = (0, 1), (1, 5, 7, 10, 100)
+_NOT_VOLUME_AFTER = re.compile(rf"\s+{_NOT_VOLUME}\b", re.I)
+_RULE_CUE = re.compile(r"\b(?:depending|depends|based\s+on|according\s+to|by\s+(?:tier|plan|type|level))\b", re.I)
+_WORD_VALUES = {
+    w: i
+    for i, w in enumerate(
+        "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
+        "fifteen sixteen seventeen eighteen nineteen".split()
+    )
+} | {w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)}
+
+
+def _figure_value(token: str) -> float:
+    """The value of a figure written in digits ("1,204") or words ("forty-two", "a dozen")."""
+    token = token.lower().replace(",", "")
+    if token[0].isdigit():
+        return float(token)
+    total = current = 0
+    for word in re.split(r"[-\s]+", token):
+        if word == "hundred":
+            current = max(current, 1) * 100
+        elif word == "thousand":
+            total, current = total + max(current, 1) * 1000, 0
+        elif word == "dozen":
+            current = max(current, 1) * 12
+        else:
+            current += _WORD_VALUES.get(word, 0)
+    return float(total + current)
+
+
+def _sentence(text: str, start: int, end: int) -> str:
+    lo = max(text.rfind(c, 0, start) for c in ".;!?\n") + 1
+    ends = [i for i in (text.find(c, end) for c in ".;!?\n") if i != -1]
+    return text[lo : min(ends, default=len(text))]
+
+
+def _range_counts(kind: str, m: re.Match, text: str) -> bool:
+    if "and" in m.group("sep") and not m.group("btw"):
+        return False  # "columns 3 and 5" is a list, not a range
+    lo, hi = _figure_value(m.group("lo")), _figure_value(m.group("hi"))
+    if lo in _SCALE_LOW and hi in _SCALE_HIGH:
+        return False
+    if _NOT_VOLUME_AFTER.match(text, m.end()):
+        return False
+    return not _RULE_CUE.search(_sentence(text, m.start(), m.end()))
+
+
+def _counts(kind: str, m: re.Match, text: str) -> bool:
+    """Whether a match states a figure measured on the data, rather than a bound, a literal of the
+    formula, a year or a fixed scale."""
+    groups = m.groupdict()
+    if groups.get("lo"):
+        return _range_counts(kind, m, text)
+    n = groups["n"]
+    before = text[max(0, m.start("n") - 30) : m.start("n")]
+    if _PREV.search(before):
+        if not (kind == "rows" and _WITH_RETURNS.search(before) and _figure_value(n) >= 2):
+            return False
+    if re.fullmatch(r"(?:19|20)\d\d", n) and _YEAR_CONTEXT.search(before):
+        return False
+    if kind == "now" and not (groups["u"] or groups["rest"].strip()):
+        return False  # "a value of 1 here" names a code, not how many
+    if kind == "state" and not groups["u"] and (_figure_value(n) < 2 or not groups["rest"]):
+        return False  # "0 items have no revenue" is the formula's literal, "type 7 have no" a label
+    if kind == "share" and _figure_value(groups["of"]) < 10:
+        return bool(_SMALL_SHARE_CUE.search(_sentence(text, m.start(), m.end())))
+    return True
 
 
 def _measured_figure(text: str) -> Optional[str]:
     """The first phrase in `text` that states a figure measured on the data, or None."""
-    for pattern in _MEASURED_FIGURE_RES:
+    for kind, pattern in _MEASURED_FIGURE_RES:
         for m in pattern.finditer(text):
-            of = m.groupdict().get("of")
-            if of is not None and float(of.replace(",", "")) < 10:
-                continue
-            return m.group(0)
+            if _counts(kind, m, text):
+                return m.group(0)
     return None
 
 
