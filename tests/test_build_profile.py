@@ -455,3 +455,95 @@ def test_the_catalog_name_rule_agrees_with_the_table_name_rule(dialect):
             by_table_rule = (spelling.lower() == stored.lower()
                              and runtime._part_names(ident, stored, dialect))
             assert (runtime._engine_name(ident, dialect) == want) is by_table_rule, (spelling, quoted)
+
+
+# ------------------------------------------------- aliases that differ only in case
+
+
+@pytest.mark.parametrize("sql", [
+    # Postgres keeps a quoted alias's case: `c` is orders and `"C"` the catalog view, either order.
+    'SELECT c.secret FROM orders c CROSS JOIN information_schema.columns AS "C"',
+    'SELECT c.secret FROM information_schema.columns AS "C" CROSS JOIN orders c',
+    # An unaliased catalog view registers under its own name too.
+    "SELECT columns.secret FROM orders columns CROSS JOIN information_schema.columns",
+    # Fail closed: which source the alias names is not known, so even a declared column is refused.
+    'SELECT c.id FROM orders c CROSS JOIN information_schema.columns AS "C"',
+])
+def test_an_alias_shared_apart_from_case_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_COLUMN_SCOPE
+    assert "differ only in case" in refused.refusal.remediation
+
+
+def test_distinct_aliases_beside_a_catalog_view_still_run_under_build_profile(model):
+    sql = "SELECT o.id, c.column_name FROM orders o CROSS JOIN information_schema.columns AS c"
+    ran, executor = _run(sql, build_profile=True)
+    assert ran.status == "ok", ran.refusal
+    assert executor.seen == [sql]
+
+
+def _org(engine: str):
+    """orders(id, tags) and customers(id, secret), with orders' `secret` left out of the model."""
+    from semantic_model import models as m
+
+    def table(name: str, *cols: str):
+        return m.Table(name=name, schema="sales", storage_connection="c", grain=["id"], description=name,
+                       columns=[m.Column(name=c, type="array" if c == "tags" else "string") for c in cols])
+
+    return m.Datasource(datasource="acme",
+                        storage_connections=[m.StorageConnection(name="c", storage_type=engine)],
+                        subject_areas=[m.SubjectArea(name="sales", tables_defined=[
+                            table("orders", "id", "tags"), table("customers", "id", "secret")])])
+
+
+def test_an_alias_two_model_tables_share_apart_from_case_is_judged_against_both():
+    from semantic_model import runtime
+
+    org = _org("PostgreSQL")
+    # `c` is orders, which leaves `secret` out; customers declaring it must not let it through.
+    for sql in ('SELECT c.secret FROM orders c JOIN customers "C" ON c.id = "C".id',
+                'SELECT c.secret FROM customers "C" JOIN orders c ON c.id = "C".id'):
+        res = runtime.check_column_scope(sql, org)
+        assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE, sql
+    # Declared on both, so whichever the alias names, it is declared.
+    assert runtime.check_column_scope('SELECT c.id FROM orders c JOIN customers "C" ON c.id = "C".id', org) is None
+
+
+# ------------------------------------------------- BigQuery UNNEST value and offset aliases
+
+
+def _gates(sql: str, org, **kw):
+    from semantic_model import runtime
+
+    for gate in (runtime.check_scopable, runtime.check_table_scope):
+        res = gate(sql, org, **kw)
+        if res is not None:
+            return res
+    return runtime.check_column_scope(sql, org)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT tag FROM sales.orders o, UNNEST(o.tags) AS tag",
+    "SELECT tag, i FROM sales.orders o, UNNEST(o.tags) AS tag WITH OFFSET AS i ORDER BY i",
+    "SELECT o.id, tag FROM sales.orders o CROSS JOIN UNNEST(o.tags) AS tag WITH OFFSET AS i WHERE i = 0",
+])
+def test_a_bigquery_unnest_value_and_offset_alias_run_under_build_profile(sql):
+    org = _org("BigQuery")
+    assert _gates(sql, org, build_profile=True) is None
+    res = _gates(sql, org)
+    assert res is not None and res.rule == guardrail.RULE_UNSCOPABLE
+
+
+@pytest.mark.parametrize(("sql", "rule"), [
+    # A name no source of that SELECT binds still has to be qualified.
+    ("SELECT o.id FROM sales.orders o, UNNEST(o.tags) AS tag WHERE secret IS NULL", guardrail.RULE_UNSCOPABLE),
+    ("SELECT secret FROM sales.orders o, UNNEST(o.tags) AS tag", guardrail.RULE_UNSCOPABLE),
+    # Bound in the outer SELECT only, so the inner `tag` is not the unnest's.
+    ("SELECT o.id FROM sales.orders o, UNNEST(o.tags) AS tag "
+     "WHERE EXISTS (SELECT 1 FROM sales.customers c WHERE tag = c.id)", guardrail.RULE_UNSCOPABLE),
+    ("SELECT tag FROM sales.orders o, UNNEST(o.secret) AS tag", guardrail.RULE_COLUMN_SCOPE),
+])
+def test_a_bigquery_unnest_does_not_open_anything_else_under_build_profile(sql, rule):
+    res = _gates(sql, _org("BigQuery"), build_profile=True)
+    assert res is not None and res.rule == rule

@@ -264,8 +264,10 @@ def test_the_budget_has_exactly_one_configuration_surface():
     #
     # `_last_error_cli_detail` (#523) is the tenth, an OUTPUT carrier like `_last_error_detail`: the
     # database's redacted first line for the local command line, cleared at entry, never read to
-    # compute a bound.
+    # compute a bound. `_cli_detail_wanted` beside it only says whether to compute that line: set once
+    # by `main` from where it runs (the forked child sets its own), and never read to compute a bound.
     context_vars -= {
+        "_cli_detail_wanted",
         "_last_error_cli_detail",
         "_last_error_detail",
         "_guard_model",

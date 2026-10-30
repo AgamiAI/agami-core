@@ -516,6 +516,19 @@ def _ordered_by_own_alias(col: "exp.Column", dialect: "str | None") -> bool:
         for e in sel.expressions)
 
 
+def _bound_by_expansion(col: "exp.Column", dialect: "str | None") -> bool:
+    """A bare name one of its own SELECT's table functions returns by name: an alias column list, or
+    BigQuery's `UNNEST(o.tags) AS tag` value and `WITH OFFSET AS i` position, which cannot be
+    qualified. The engine binds it there, never to an outer model table."""
+    sel = _enclosing_select(col)
+    key = _column_key(col.this, dialect)
+    if sel is None or not key:
+        return False
+    return any(key in (_source_column_names(src, {}, dialect) or set())
+               for src in _from_sources(sel)
+               if isinstance(src, (exp.Unnest, exp.Lateral)) or (isinstance(src, exp.Table) and not src.name))
+
+
 def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
                                       ctx: "GuardContext | None") -> "guardrail.Refusal | None":
     """Under the build profile, a statement that reads a model table and also a catalog view or a
@@ -533,7 +546,8 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
     if not declared or not (catalog or expands):
         return None
     bare = sorted({c.name for c in tree.find_all(exp.Column)
-                   if c.name and not c.table and not _ordered_by_own_alias(c, dialect)})
+                   if c.name and not c.table and not _ordered_by_own_alias(c, dialect)
+                   and not _bound_by_expansion(c, dialect)})
     if not bare:
         return None
     return guardrail.refuse(
@@ -2160,6 +2174,15 @@ def check_column_scope(sql: str, org: Datasource,
                 for schema, cols in by_schema.items()}
     cte_refs = _cte_bindings(tree)
 
+    def bind_alias(sel_id: int, key: str, binding: Any) -> None:
+        # Aliases are looked up folded, but `c` and `"C"` are two sources where a quoted alias keeps
+        # its case. Whichever was registered last would win, so keep both and judge against each.
+        aliases = alias_by_select.setdefault(sel_id, {})
+        prior = aliases.get(key, binding)
+        known = list(prior.bindings) if isinstance(prior, _CollidedAlias) else [prior]
+        aliases[key] = binding if prior == binding else (
+            prior if binding in known else _CollidedAlias(tuple(known + [binding])))
+
     def _select_chain(node):
         """Enclosing selects innermost -> outermost (alias visibility + correlation)."""
         chain, p = [], node
@@ -2203,12 +2226,11 @@ def check_column_scope(sql: str, org: Datasource,
                     exact = binding + (frozenset(id(t) for t in named),)
                     declared[exact] = {_tkey(c.name) for t in named for c in t.columns}
                     binding = exact
-            aliases = alias_by_select.setdefault(id(sel), {})
-            aliases[tbl.alias_or_name.lower()] = binding
+            bind_alias(id(sel), tbl.alias_or_name.lower(), binding)
             if tbl.db and not tbl.alias:
                 # `sales_data.orders.amount` beside `staging.orders` in one FROM: both register
-                # under `orders`, last wins, so also register the qualified spelling.
-                aliases[f"{tbl.db}.{name}".lower()] = binding
+                # under `orders`, which collides, so also register the qualified spelling.
+                bind_alias(id(sel), f"{tbl.db}.{name}".lower(), binding)
             binding_of[id(tbl)] = binding
             if binding:
                 direct_phys.setdefault(id(sel), set()).add(binding)
@@ -2222,6 +2244,8 @@ def check_column_scope(sql: str, org: Datasource,
     # Refused where it names one of the select's own output aliases: the engine reads the input
     # column of that name there, so the repair is the alias's expression, not the model.
     alias_named: set[str] = set()
+    # Refused through an alias two sources share apart from case: the repair is a distinct alias.
+    collided: set[str] = set()
     # A USING or NATURAL join compares names without a column reference, and merges them: the
     # result is the physical side's value, or COALESCE of both, so a source naming it does not make
     # it the source's. Each join is judged on its own operands, everything left of it and the item
@@ -2272,7 +2296,7 @@ def check_column_scope(sql: str, org: Datasource,
             if names is None and id(inner) in binding_of:
                 for w in wrappers:  # `(customers) AS x`: x is that table
                     if w.alias:
-                        alias_by_select.setdefault(id(sel), {})[w.alias.lower()] = binding_of[id(inner)]
+                        bind_alias(id(sel), w.alias.lower(), binding_of[id(inner)])
             return leaves
         joins = inner.args["joins"]
         groups = [leaves_of(sel, inner)] + [leaves_of(sel, j.this) for j in joins]
@@ -2285,7 +2309,7 @@ def check_column_scope(sql: str, org: Datasource,
             leaves = [(ph, None) for ph, _ in leaves]
         for w in wrappers:
             if w.alias:
-                alias_by_select.setdefault(id(sel), {})[w.alias.lower()] = _JoinAlias(leaves)
+                bind_alias(id(sel), w.alias.lower(), _JoinAlias(leaves))
         return leaves
 
     for sel in tree.find_all(exp.Select):
@@ -2320,6 +2344,26 @@ def check_column_scope(sql: str, org: Datasource,
                     break
             if phys is None:
                 continue  # qualified by a CTE/derived alias — validated at its own source
+            if isinstance(phys, _CollidedAlias):
+                # Fail closed: allowed only when every source the alias may name declares it. A
+                # catalog view or an unresolved table declares nothing.
+                ckey = _column_key(col.this, dialect)
+                tables, everywhere = [], True
+                for b in phys.bindings:
+                    if isinstance(b, _JoinAlias):
+                        tables += tables_of(b.leaves)
+                        everywhere &= bool(ckey) and any(declares(leaf, ckey) for leaf in b.leaves)
+                    elif isinstance(b, tuple):
+                        tables.append(b)
+                        everywhere &= lname in declared[b]
+                    else:
+                        everywhere = False
+                if tables and not everywhere:
+                    shown = f"{col.table}.{name}"
+                    offending.add(shown)
+                    collided.add(shown)
+                    judged.setdefault(shown, set()).update(tables)
+                continue
             if isinstance(phys, _JoinAlias):
                 ckey = _column_key(col.this, dialect)
                 if not (ckey and any(declares(leaf, ckey) for leaf in phys.leaves)):
@@ -2376,7 +2420,10 @@ def check_column_scope(sql: str, org: Datasource,
         guardrail.RULE_COLUMN_SCOPE,
         detail="query references column(s) not in the semantic model: " + _echo_identifiers(cols)
                + " — only columns declared on the model's tables may be queried.",
-        remediation=_declared_listing(org, cols, judged)
+        remediation=_declared_listing(org, [c for c in cols if c not in collided], judged)
+                    + ("Two sources in one SELECT have aliases that differ only in case, so it is not "
+                       "known which one a column qualified by that alias reads; give each source its "
+                       "own alias. " if collided else "")
                     + ("A select-list alias is read as itself only as a whole ORDER BY or GROUP BY "
                        "item; elsewhere write its expression out (HAVING SUM(amount) > 1000, not "
                        "HAVING revenue > 1000). " if alias_named else "")
@@ -4679,6 +4726,12 @@ class _JoinAlias:
     leaves: list
 
 
+@dataclass(frozen=True)
+class _CollidedAlias:
+    """Sources of one SELECT whose aliases fold to the same name (`c` and `"C"`), each one's binding."""
+    bindings: tuple
+
+
 def _from_sources(sel: "exp.Select") -> list["exp.Expression"]:
     """The items a SELECT's FROM and JOINs read, in order."""
     # sqlglot renamed the arg from `from` to `from_`; read both.
@@ -4789,6 +4842,9 @@ def _source_column_names(src: "exp.Expression", cte_refs: "dict[int, exp.CTE]",
     if (not renames and isinstance(alias, exp.TableAlias) and dialect == "postgres"
             and not isinstance(src, exp.Values)):
         renames = [_column_key(alias.this, dialect)]
+    # BigQuery's `UNNEST(x) AS v WITH OFFSET AS i` also returns the position, under the offset alias.
+    if isinstance(src, exp.Unnest) and isinstance(src.args.get("offset"), exp.Identifier):
+        renames = [*renames, _column_key(src.args["offset"], dialect)]
     return {n for n in renames if n}
 
 

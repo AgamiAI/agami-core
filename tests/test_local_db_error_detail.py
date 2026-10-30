@@ -59,6 +59,14 @@ def warehouse(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture
+def cli_detail():
+    """What `main` sets on a local command line, so an in-process call computes the detail."""
+    token = execute_sql._cli_detail_wanted.set(True)
+    yield
+    execute_sql._cli_detail_wanted.reset(token)
+
+
 def _cli(sql: str, **extra_env: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-m", "execute_sql", "--profile", PROFILE, "--sql", sql],
@@ -120,7 +128,7 @@ def test_the_mcp_tool_s_failure_payload_is_unchanged(warehouse, sql, kind, messa
     assert "Database error" not in rendered and "misuse" not in rendered and "no such column" not in rendered
 
 
-def test_the_detail_never_rides_on_the_envelope(warehouse):
+def test_the_detail_never_rides_on_the_envelope(warehouse, cli_detail):
     env = execute_sql.execute_guarded(NESTED_AGGREGATE, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
     assert env.failure.message == execute_sql.UNEXPECTED_FAILURE_MESSAGE
     assert "misuse" in execute_sql._last_error_cli_detail.get()
@@ -155,7 +163,7 @@ def test_the_first_line_is_redacted(text, creds, expected):
     assert execute_sql._db_error_first_line(text, None, creds) == expected
 
 
-def test_the_sqlstate_is_shown_when_the_driver_gives_one(warehouse):
+def test_the_sqlstate_is_shown_when_the_driver_gives_one(warehouse, cli_detail):
     class _PgError(Exception):
         pgcode = "42703"
 
@@ -246,3 +254,60 @@ def test_a_password_equal_to_a_common_word_does_not_stop_the_login_being_redacte
     line = execute_sql._db_error_first_line(f'password authentication failed for user "{_SHORT_LOGIN}"', None,
                                             {_PW_KEY: "user", "user": _SHORT_LOGIN})
     assert f'"{_SHORT_LOGIN}"' not in line and "<redacted>" in line
+
+
+@pytest.mark.parametrize("path", ["in_process", "direct"])
+def test_no_served_caller_spends_time_on_the_command_line_detail(warehouse, monkeypatch, path):
+    calls = []
+    monkeypatch.setattr(execute_sql, "_db_error_first_line", lambda *a: calls.append(a) or "x")
+    if path == "direct":
+        env = execute_sql.execute_guarded(NESTED_AGGREGATE, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
+        assert env.status == "failed"
+    else:
+        tools.set_injected_executor(execute_sql.BUILTIN_EXECUTOR)
+        try:
+            assert json.loads(tools.tool_execute_sql({"sql": NESTED_AGGREGATE, "datasource": PROFILE}))["status"] == "failed"
+        finally:
+            tools.set_injected_executor(None)
+    assert calls == [] and execute_sql._last_error_cli_detail.get() is None
+
+
+# A long first line with no spaces is where the patterns rescan most.
+_LONG = 64 * 1024
+
+
+@pytest.mark.parametrize("text", [
+    "x" * _LONG,
+    "demo@" + "x" * _LONG,
+    "a-" * (_LONG // 2) + "://",
+    f"auth failed: {_PW_KEY}={_FAKE_SECRET} " + "y" * _LONG,
+    "z" * 10 + f"{_PW_KEY}=" + "w" * _LONG,
+])
+def test_a_long_first_line_is_redacted_quickly_and_whole(text):
+    import time
+
+    started = time.perf_counter()
+    line = execute_sql._db_error_first_line(text, None, {_PW_KEY: _FAKE_SECRET})
+    assert time.perf_counter() - started < 1.0
+    assert line and len(line) <= 300 and _FAKE_SECRET not in line and "demo@" not in line
+
+
+def _cut_inside(word_start: int, tail: str) -> str:
+    """A long URL, which redaction shortens to one word so what follows it is shown, then `tail`,
+    placed so the window ends `word_start` characters into it."""
+    url = "s://" + "h" * (execute_sql._DETAIL_WINDOW - word_start - 5)
+    text = f"{url} {tail}"
+    assert text.index(tail) + word_start == execute_sql._DETAIL_WINDOW
+    return text
+
+
+def test_a_login_cut_by_the_window_is_never_half_shown():
+    line = execute_sql._db_error_first_line(_cut_inside(4, "demo@db.example.com is unreachable"), None, {})
+    assert "demo" not in line and "<redacted>" in line
+
+
+def test_a_profile_value_cut_between_its_words_is_never_half_shown():
+    value = f"{_FAKE_SECRET} {_FAKE_ACCOUNT}"
+    text = _cut_inside(len(_FAKE_SECRET) + 4, f"{value} rejected")
+    line = execute_sql._db_error_first_line(text, None, {_PW_KEY: value})
+    assert _FAKE_SECRET not in line and "<redacted>" in line

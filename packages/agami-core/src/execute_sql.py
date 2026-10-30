@@ -1536,6 +1536,9 @@ _last_error_detail: ContextVar[str | None] = ContextVar("_last_error_detail", de
 # under the fixed sentence; nothing puts it on an Envelope, so the MCP tool and the hosted server
 # never see it. Cleared on entry like the carrier above.
 _last_error_cli_detail: ContextVar[str | None] = ContextVar("_last_error_cli_detail", default=None)
+# Set by `main` on a local command line, the one place the detail is shown, so no served caller spends
+# time redacting a line nobody reads.
+_cli_detail_wanted: ContextVar[bool] = ContextVar("_cli_detail_wanted", default=False)
 
 # Set by the MCP tool on the executor it forks: that child's stderr is relayed to the caller, so it
 # must write exactly what it wrote before #523 and refuse `--build-profile`.
@@ -1555,6 +1558,9 @@ _KEY_VALUE_RE = re.compile(rf"\b(?:{_SECRET_KEY_WORDS}|host|hostaddr|user|userna
 # A quoted login or host, as `Login failed for user 'sa'` or `role "demo"`, redacted whatever its length.
 _QUOTED_LOGIN_RE = re.compile(rf"\b(?:server at|host|user|username|role|login)\s+({_SQ_VALUE}|{_DQ_VALUE})",
                               re.IGNORECASE)
+# How much of the first line is redacted. The patterns below can rescan a long run with no spaces, so
+# they never see more than this; it still leaves the 300 characters shown after redaction shortens it.
+_DETAIL_WINDOW = 1200
 # A shorter profile value is matched only through the two patterns above: on its own it is too likely
 # to be an ordinary word in the message.
 _MIN_PROFILE_VALUE_LEN = 3
@@ -1605,11 +1611,35 @@ def _credential_spans(line: str, creds: dict[str, Any] | None) -> list[tuple[int
         start, end = m.span(1)
         closed = end - start >= 2 and line[end - 1] == line[start]
         spans.append((start + 1, end - 1 if closed else end))
-    for k, v in (creds or {}).items():
-        if _is_secret_cred_key(k) and v and len(str(v)) >= _MIN_PROFILE_VALUE_LEN:
-            for spelling in _escaped_spellings(str(v)):
-                spans += [m.span() for m in re.finditer(rf"(?<!\w){re.escape(spelling)}(?!\w)", line)]
+    for spelling in _secret_profile_spellings(creds):
+        spans += [m.span() for m in re.finditer(rf"(?<!\w){re.escape(spelling)}(?!\w)", line)]
     return spans
+
+
+def _secret_profile_spellings(creds: dict[str, Any] | None) -> set[str]:
+    return {spelling for k, v in (creds or {}).items()
+            if _is_secret_cred_key(k) and v and len(str(v)) >= _MIN_PROFILE_VALUE_LEN
+            for spelling in _escaped_spellings(str(v))}
+
+
+def _detail_window(line: str, creds: dict[str, Any] | None) -> str:
+    """The start of a long line, cut where no credential can be left half shown.
+
+    The cut drops the word it lands in, since each pattern matches within one word, and then the
+    start of a profile value with a space in it, which the whole-value match would no longer find."""
+    if len(line) <= _DETAIL_WINDOW:
+        return line
+    end = _DETAIL_WINDOW
+    while end and not line[end].isspace():
+        end -= 1
+    cut = line[:end]
+    for spelling in _secret_profile_spellings(creds):
+        for k in range(min(len(spelling) - 1, len(cut)), 0, -1):
+            before = cut[-k - 1] if k < len(cut) else ""
+            if cut.endswith(spelling[:k]) and not (before.isalnum() or before == "_"):
+                cut = cut[:-k]
+                break
+    return cut or _REDACTED
 
 
 def _redact_spans(line: str, spans: list[tuple[int, int]]) -> str:
@@ -1634,6 +1664,7 @@ def _db_error_first_line(text: str | None, sqlstate: str | None,
                  if ln.strip() and not ln.strip().lower().startswith(_DETAIL_SKIP_PREFIXES)), "")
     if not line:
         return None
+    line = _detail_window(line, creds)
     line = _redact_spans(line, _credential_spans(line, creds))
     for pattern, replacement in _REDACT_PATTERNS:
         line = pattern.sub(replacement, line)
@@ -3500,7 +3531,7 @@ def execute_guarded(
         # ContextVar is read by `tools._record_execution` when the recorder shares this process, and
         # `_RAW_LOG` is the server-side trail everywhere else. Neither is the caller's channel.
         _last_error_detail.set(exc.msg)
-        if exc.code != FAILURE_KIND_TO_EXIT["sign_in_required"]:
+        if exc.code != FAILURE_KIND_TO_EXIT["sign_in_required"] and _cli_detail_wanted.get():
             # A sign-in failure's text is the executor's own, not the database's.
             _last_error_cli_detail.set(_db_error_first_line(exc.msg, sqlstate_of(exc), creds))
         _RAW_LOG.error("database error (audit detail): %s", exc.msg)
@@ -3593,6 +3624,7 @@ def main() -> int:
     _LOG.addHandler(logging.NullHandler())
     _LOG.propagate = False
 
+    _cli_detail_wanted.set(not (_hosted() or _served_child()))
     if args.build_profile and (_hosted() or _served_child()):
         return _err("--build-profile is for building a model on your own machine; it is refused on a "
                     "hosted server and from the MCP tool.")

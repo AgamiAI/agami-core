@@ -24,9 +24,12 @@ below corresponds to one such version.
   query text (MySQL's `COLUMN_STATISTICS` and `PROCESSLIST`, BigQuery's `JOBS`) stay refused. A
   column the model leaves out is still refused, `SELECT *` is still refused, a `USING` or `NATURAL`
   join is refused under the flag (write an explicit `ON`), and the 50,000-character cap is
-  unchanged. Agami's own catalog query that calls `pg_get_constraintdef` runs under it too, matched by its exact shape, so a statement an
+  unchanged. Beside a model table every column is qualified, except a name the table function returns,
+  such as BigQuery's `UNNEST(o.tags) AS tag` value or `WITH OFFSET AS i` position. A column
+  qualified by an alias two sources share apart from case (`c` and `"C"`) is refused unless every
+  one of them declares it, with or without the flag. Agami's own catalog query that calls `pg_get_constraintdef` runs under it too, matched by its exact shape, so a statement an
   agent writes cannot use that function. The flag is refused on a hosted server and the MCP tool
-  cannot set it, so what the tool accepts and refuses is unchanged.
+  cannot set it, so apart from that alias rule what the tool accepts and refuses is unchanged.
 
 - **`execute_sql` shows the database's error on your own machine, and `--batch` always writes its
   manifest (#523).** A failing statement told a builder only a fixed sentence, often "an unexpected
@@ -34,7 +37,8 @@ below corresponds to one such version.
   `Database error: <the database's first line>` (and the SQLSTATE where the driver gives one), with
   credentials (any `password`, `secret`, `token` or key field, escaped or quoted, and the login named in
   `for user 'sa'` however short), hosts and IPv4/IPv6 addresses redacted and HINT, DETAIL and
-  CONTEXT lines dropped. Exit codes are unchanged. A hosted server and the MCP tool still return the fixed sentence alone. In
+  CONTEXT lines dropped; only the line's first 1,200 characters are read, so a very long line
+  costs no more. Exit codes are unchanged. A hosted server and the MCP tool still return the fixed sentence alone. In
   `--batch`, a malformed item is recorded as failed and the rest still run, an item whose output
   cannot be written stays in the manifest with its error, its CSV is emptied so no earlier rows are
   left behind, run files and the manifest are written whole or not at all, and the manifest is
