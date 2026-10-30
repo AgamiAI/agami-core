@@ -27,6 +27,10 @@ below corresponds to one such version.
   label columns as `labels`, and `sm format-table --labels` takes them. Big integers are no longer
   rounded through a float. Reports built by `csv_to_sections.py` follow the same rules.
 
+## [0.9.21] — 2026-10-29
+
+### Fixed
+
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
   The folder held a partial copy of the model package (`semantic_model/` with only `__init__.py` and
   `units.py`). With `lib/` as the working folder, or first on the import path, Python loaded that
