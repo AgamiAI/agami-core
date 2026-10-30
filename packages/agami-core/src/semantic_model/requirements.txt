@@ -8,4 +8,4 @@
 #
 pydantic>=2,<3
 PyYAML>=6
-sqlglot>=20            # SQL parsing for value_transform / on: / pre-flight fan-trap checks
+sqlglot>=20,<30.26     # SQL parsing for value_transform / on: / pre-flight fan-trap checks
