@@ -43,6 +43,10 @@ below corresponds to one such version.
   metrics known, whatever their order, and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in
   the argument, not in a clause.
 
+## [0.9.21] — 2026-10-29
+
+### Fixed
+
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
   The folder held a partial copy of the model package (`semantic_model/` with only `__init__.py` and
   `units.py`). With `lib/` as the working folder, or first on the import path, Python loaded that
