@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# py — run a plugin script with the Python agami uses, the same on macOS, Linux and Windows.
+#
+# The skills call this instead of `python3`: on Windows `python3` is often the Microsoft Store stub
+# (it opens the Store and runs nothing) or absent. Resolution is `sm`'s, from _python.sh. UTF-8 mode
+# (-X utf8) so a non-ASCII path, password or result reads and prints the same everywhere.
+#
+# Usage:  bash "$AGAMI_PLUGIN_ROOT/scripts/py" connect_resolve.py --db-type postgres
+#         bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import yaml'
+# A bare `<name>.py` is the plugin's own script of that name; any other argument passes through.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+. "$SCRIPT_DIR/_python.sh"
+agami_scratch_dir >/dev/null   # the skills write scratch files there; make sure it exists
+
+PY="$(resolve_python)"
+if [ -z "$PY" ]; then
+  echo "agami: no Python interpreter found (tried \$AGAMI_PYTHON, <artifacts_dir>/local/.config, PATH)." >&2
+  exit 3
+fi
+# Warn (stderr only, never fatal) when this Python's installed agami-core is older than the plugin: it
+# wins over the bundled lib/, and a plugin update doesn't upgrade it. `sm install` is the fix it names.
+"$PY" "$SCRIPT_DIR/_plugin_version.py" --check </dev/null >/dev/null || true
+export AGAMI_LIBRARY_VERSION_CHECKED=1
+case "${1:-}" in
+  */*|-*|"") ;;                                         # a path, an option, or nothing: as given
+  *.py) [ -f "$SCRIPT_DIR/$1" ] && set -- "$SCRIPT_DIR/$1" "${@:2}" ;;
+esac
+exec "$PY" -X utf8 "$@"

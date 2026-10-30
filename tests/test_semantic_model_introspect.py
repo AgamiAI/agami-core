@@ -70,6 +70,44 @@ def test_catalog_mode_builds_valid_model(tmp_path):
     rel = org.subject_areas[0].relationships[0]
     assert (rel.from_table, rel.to_table, rel.relationship) == ("orders", "customers", "many_to_one")
     assert rel.confidence == "confirmed"  # postgres FKs are enforced
+    assert not any("no declared foreign keys" in n for n in rep.notes)
+
+
+def test_no_catalog_fks_says_joins_are_inferred(tmp_path):
+    # An empty FK result falls back to guessing joins; the report must say so rather than stay silent.
+    runner = make_catalog_runner(tables=["customers", "orders"], columns={
+        "customers": [col("id", "integer", nullable=False)],
+        "orders": [col("id", "integer", nullable=False), col("customer_id", "integer")],
+    })
+    _, rep = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True)
+    assert rep.mode_per_capability["relationships"] == "probe"
+    assert any("no declared foreign keys were visible" in n for n in rep.notes)
+
+
+def test_declared_fks_to_tables_outside_the_model_are_skipped(tmp_path):
+    # The catalog lists every FK in the schema, so one to a pruned table or to a schema that was not
+    # introspected must not become a join to a table the model does not have.
+    runner = make_catalog_runner(
+        tables=["customers", "orders", "regions"],
+        columns={
+            "customers": [col("id", "integer", nullable=False), col("region_id", "integer")],
+            "orders": [col("id", "integer", nullable=False), col("customer_id", "integer")],
+            "regions": [col("id", "integer", nullable=False)],
+        },
+        fks=[
+            {"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id",
+             "from_schema": "public", "to_schema": "public"},
+            {"from_table": "customers", "from_column": "region_id", "to_table": "regions", "to_column": "id",
+             "from_schema": "public", "to_schema": "public"},
+            {"from_table": "orders", "from_column": "customer_id", "to_table": "customers", "to_column": "id",
+             "from_schema": "public", "to_schema": "archive"},
+        ],
+    )
+    org, rep = I.introspect("shop", "postgres", runner=runner, artifacts_dir=tmp_path, dry_run=True,
+                            tables=["public.customers", "public.orders"])
+    rels = [r for a in org.subject_areas for r in a.relationships] + list(org.cross_subject_area_relationships)
+    assert [(r.from_table, r.to_table) for r in rels] == [("orders", "customers")]
+    assert any("skipped 2 declared foreign key(s) to tables outside the model" in n for n in rep.notes)
 
 
 def test_exclude_columns_marks_them_rejected(tmp_path):
@@ -264,13 +302,115 @@ def test_legacy_model_backed_up_on_reonboard(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_cluster_by_family_merges_plural_and_prefix():
-    mapping = build.cluster_by_family(["events", "event_types", "event_registrations",
-                                       "members", "membership_plans", "member_visits", "sales", "sale_items"])
-    # event* collapse together; member*/membership* collapse; sale*/sale_items collapse
-    assert mapping["events"] == mapping["event_types"] == mapping["event_registrations"]
-    assert mapping["members"] == mapping["membership_plans"] == mapping["member_visits"]
-    assert mapping["sales"] == mapping["sale_items"]
+def test_cluster_by_family_groups_by_the_whole_first_word():
+    mapping = build.cluster_by_family(["events", "event_types", "pro_x", "products", "projects",
+                                       "promotions", "member_visits", "member_plans"])
+    # one name starting with another's word is not a family (#513): pro_x isn't products
+    assert len({mapping[n] for n in ("pro_x", "products", "projects", "promotions")}) == 4
+    assert mapping["events"] != mapping["event_types"]
+    assert mapping["member_visits"] == mapping["member_plans"] == "member"
+
+
+def test_area_names_keep_the_plural():
+    # stripping a trailing "s" made supplie, facilitie, statu, analysi, new (#513)
+    names = ["supplies", "facilities", "status", "analysis", "news", "series"]
+    assert build.cluster_by_family(names) == {n: n for n in names}
+
+
+def _t(name: str, description: str = "") -> m.Table:
+    return m.Table(name=name, description=description,
+                   columns=[m.Column(name="id", type="integer", primary_key=True)])
+
+
+def _j(frm: str, to: str) -> m.Relationship:
+    return m.Relationship(from_table=frm, from_column=f"{to}_id", to_table=to, to_column="id",
+                          relationship="many_to_one")
+
+
+def _proposed(tables, rels):
+    areas, _ = build.propose_subject_areas(tables, rels, "c", "demo")
+    return {t.name: sa.name for sa in areas for t in sa.tables_defined}
+
+
+def test_grouping_follows_joins_not_name_prefixes():
+    # pro_tasks joins projects' world, products joins orders': a shared prefix doesn't decide it,
+    # and joined tables with different names land together
+    names = ["orders", "order_lines", "products", "customers", "invoices",
+             "projects", "pro_tasks", "timesheets", "staff",
+             *(f"misc{i}_log" for i in range(20))]
+    rels = [_j("order_lines", "orders"), _j("order_lines", "products"), _j("orders", "customers"),
+            _j("invoices", "orders"), _j("pro_tasks", "projects"), _j("timesheets", "pro_tasks"),
+            _j("timesheets", "staff")]
+    area = _proposed([_t(n) for n in names], rels)
+    assert area["orders"] == area["order_lines"] == area["products"] == area["customers"] == area["invoices"]
+    assert area["projects"] == area["pro_tasks"] == area["timesheets"] == area["staff"]
+    assert area["products"] != area["pro_tasks"]
+    assert area["orders"] == "orders"   # named by its most-joined table, in the plural
+    assert area["misc0_log"] == "misc0"   # no joins: grouped by its whole first word
+
+
+def test_one_join_between_two_clusters_does_not_merge_them():
+    # connected components would make this one area: every table reaches every other
+    shop = ["orders", "order_items", "products", "payments", "returns", "promotions"]
+    people = ["staff", "departments", "projects", "pro_tasks", "timesheets", "payroll_runs"]
+    rels = [_j("order_items", "orders"), _j("order_items", "products"), _j("payments", "orders"),
+            _j("returns", "order_items"), _j("promotions", "products"),
+            _j("staff", "departments"), _j("pro_tasks", "projects"), _j("pro_tasks", "staff"),
+            _j("timesheets", "pro_tasks"), _j("timesheets", "staff"), _j("payroll_runs", "staff"),
+            _j("returns", "staff")]   # the one bridge
+    filler = [_t(f"x{i}_log") for i in range(15)]
+    area = _proposed([_t(n) for n in shop + people] + filler, rels)
+    assert len({area[t] for t in shop}) == 1 and len({area[t] for t in people}) == 1
+    assert area["orders"] != area["staff"]
+    assert (area["orders"], area["staff"]) == ("orders", "staff")
+
+
+def test_a_table_with_no_joins_goes_with_tables_sharing_its_first_word():
+    names = ["orders", "order_lines", "order_notes", "suppliers", "supplier_ratings", "status",
+             *(f"t{i}" for i in range(20))]
+    rels = [_j("order_lines", "orders"), *(_j(f"t{i}", "suppliers") for i in range(3))]
+    area = _proposed([_t(n) for n in names], rels)
+    assert area["order_notes"] == area["order_lines"]       # joinless, same whole first word
+    assert area["supplier_ratings"] != area["suppliers"]    # "supplier" is not "suppliers"
+    assert area["status"] == "status" and "suppliers" in set(area.values())
+
+
+def test_an_oversized_join_cluster_is_split_below_the_area_limit():
+    hub = [_t("customers")]
+    leaves = [_t(f"leaf{i}_events") for i in range(40)]
+    pairs = [_t(f"orders{i}") for i in range(5)]
+    rels = [*(_j(t.name, "customers") for t in leaves), *(_j(t.name, "customers") for t in pairs),
+            *(_j(t.name, "customers") for t in pairs)]   # two joins each: the strongest links
+    areas, _ = build.propose_subject_areas(hub + leaves + pairs, rels, "c", "demo")
+    assert all(len(sa.tables) <= build.SINGLE_AREA_MAX for sa in areas)
+    owner = {t.name: sa.name for sa in areas for t in sa.tables_defined}
+    assert all(owner[f"orders{i}"] == owner["customers"] for i in range(5))
+    assert len(areas) == 2   # the leaves cut off by the limit are pooled, not one area each
+    org = m.Datasource(datasource="demo", storage_connections=[m.StorageConnection(
+        name="c", storage_type="PostgreSQL")], subject_areas=areas,
+        cross_subject_area_relationships=build.extract_cross_area_relationships(areas, rels))
+    assert V.validate(org).ok
+
+
+def test_two_hubs_beside_full_clusters_do_not_raise():
+    # Both hubs end up alone with every neighbour group full; the first is pooled (its group
+    # removed) before the second looks at it as a neighbour.
+    clusters = [[f"c{k}_t{i}" for i in range(build.SINGLE_AREA_MAX)] for k in range(3)]
+    rels = [_j("hub_a", "hub_b")]
+    for names in clusters:
+        rels += [_j(a, b) for i, a in enumerate(names) for b in names[i + 1:]]
+        rels += [_j(n, h) for n in names for h in ("hub_a", "hub_b")]
+    tables = [_t("hub_a"), _t("hub_b"), *(_t(n) for names in clusters for n in names)]
+    groups = build.group_by_joins(tables, rels)
+    assert sum(len(g) for g in groups) == len(tables)
+    assert all(len(g) <= build.SINGLE_AREA_MAX for g in groups)
+
+
+def test_shared_words_break_ties_between_equally_joined_links():
+    tables = [_t("a_hub", "warehouse stock"), _t("b_x", "warehouse bins"), _t("c_y", "invoice lines")]
+    rels = [_j("b_x", "a_hub"), _j("c_y", "a_hub")]
+    groups = build.group_by_joins(tables, rels, max_size=2)
+    assert sorted(sorted(t.name for t in g) for g in groups) == [["a_hub", "b_x"], ["c_y"]]
 
 
 def test_deep_table_column_groups_no_orphans():
@@ -371,7 +511,7 @@ def _large_runner(sql):
     if "information_schema.tables" in s and "table_type" in s:
         return [{"schema_name": "public", "table_name": "events", "table_type": "BASE TABLE"},
                 {"schema_name": "public", "table_name": "wide_mart", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'events'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "created_at", "data_type": "timestamp", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
@@ -426,7 +566,7 @@ def _no_pk_runner(table, est_rows, *, seen):
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             return [{"schema_name": "public", "table_name": table, "table_type": "BASE TABLE"}]
-        if "information_schema.columns" in s:
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             return cols
         if "PRIMARY KEY" in s:
             return []  # no catalog PK → without the guard this would fall into the scan probe
@@ -501,6 +641,33 @@ def test_detect_money_column_handles_word_boundaries():
         assert not build.detect_money_column(c), f"{c} should NOT be money"
 
 
+@pytest.mark.parametrize("name", ["duration_minutes", "total_minutes", "total_hours",
+                                  "credit_hours", "points_balance", "total_weight",
+                                  "totalMinutes", "reading_units", "balance_pts",
+                                  "total_seconds", "duration_secs"])
+def test_non_money_unit_words_are_not_money(name):
+    assert not build.detect_money_column(name)
+
+
+@pytest.mark.parametrize("name", ["gross_usd", "value_usd", "balance_usd", "fx_dollar",
+                                  "amount_total", "total_amount", "revenueUSDMillions",
+                                  "revenue_per_day", "cost_per_kg", "fare_try",
+                                  "second_payment_amount", "second_installment_fee",
+                                  "hour_cost", "cost_per_hour"])
+def test_currency_named_and_money_named_columns_are_money(name):
+    assert build.detect_money_column(name)
+
+
+@pytest.mark.parametrize("name,unit", [
+    ("revenue_usd_millions", "USD_millions"), ("revenueUSDMillions", "USD_millions"),
+    ("gross_usd", "USD"), ("fx_dollar", "USD"), ("cost_usd_per_day", "USD/day"),
+    ("monthly_fee_inr_thousands", "INR_thousands/month"), ("total_amount", None),
+    ("try_count", None),   # a leading ISO-looking word is not a currency
+])
+def test_suggest_unit_reads_currency_scale_and_period_from_the_name(name, unit):
+    assert build.suggest_unit(name) == unit
+
+
 # ---------------------------------------------------------------------------
 # Cross-schema relationships (Case 1): schema is stamped on every edge, declared
 # cross-schema FKs are surfaced for review (not auto-approved), and the inferred
@@ -517,7 +684,7 @@ def _xschema_fk_runner(sql):
         if "'sales'" in s:
             return [{"schema_name": "sales", "table_name": "invoices", "table_type": "BASE TABLE"}]
         return [{"schema_name": "billing", "table_name": "customers", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'invoices'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -563,7 +730,7 @@ def _collision_probe_runner(sql):
             return [{"schema_name": "s1", "table_name": "orders", "table_type": "BASE TABLE"},
                     {"schema_name": "s1", "table_name": "customers", "table_type": "BASE TABLE"}]
         return [{"schema_name": "s2", "table_name": "customers", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'orders'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -617,7 +784,7 @@ def _collision_schemas_runner(sql):
                     {"schema_name": "billing", "table_name": "invoices", "table_type": "BASE TABLE"}]
         return [{"schema_name": "crm", "table_name": "products", "table_type": "BASE TABLE"},
                 {"schema_name": "crm", "table_name": "accounts", "table_type": "BASE TABLE"}]
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'invoices'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "product_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -665,12 +832,12 @@ def _redshift_fk_runner(overlap_matches: bool):
     which is what the value-overlap probe decides."""
     def run(sql):
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        if "FROM pg_namespace" in s:  # Redshift's schema list (#558)
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             return [{"schema_name": "public", "table_name": "orders", "table_type": "BASE TABLE"},
                     {"schema_name": "public", "table_name": "customers", "table_type": "BASE TABLE"}]
-        if "information_schema.columns" in s:
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             if "'orders'" in s:
                 return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                         {"column_name": "customer_id", "data_type": "integer", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""}]
@@ -728,13 +895,13 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
 
     def runner(sql):
         s = " ".join(sql.split())
-        if "information_schema.schemata" in s:
+        if "FROM pg_namespace" in s:  # Redshift's schema list (#558)
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
             rows = [{"schema_name": "public", "table_name": "parent", "table_type": "BASE TABLE"}]
             rows += [{"schema_name": "public", "table_name": f"child{i}", "table_type": "BASE TABLE"} for i in range(N)]
             return rows
-        if "information_schema.columns" in s:
+        if "information_schema.columns" in s or "FROM svv_columns" in s:
             if "'parent'" in s:
                 return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""}]
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
@@ -789,7 +956,7 @@ def test_introspect_fails_fast_on_bogus_allowlist(tmp_path):
 
 def _append_runner(sql):
     s = " ".join(sql.split())
-    if "information_schema.columns" in s:
+    if "information_schema.columns" in s or "FROM svv_columns" in s:
         if "'orders'" in s:
             return [{"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
                     {"column_name": "total", "data_type": "numeric", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": "2"}]
@@ -840,3 +1007,282 @@ def test_introspect_append_relisting_table_no_duplicate(tmp_path):
     org = L.load_datasource(tmp_path / "shop")
     names = [t.name for sa in org.subject_areas for t in sa.tables_defined]
     assert sorted(names) == ["customers", "order_items", "orders"]   # each table exactly once
+
+
+def test_a_failed_column_read_is_retried_once():
+    # A dropped connection on one catalog read must not cost the table its columns.
+    from semantic_model import dialects as D
+
+    calls = {"n": 0}
+
+    def flaky(sql: str):
+        if "svv_columns" in sql:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("connection reset")
+            return [{"column_name": "id", "data_type": "integer", "numeric_scale": None}]
+        raise AssertionError("fell through to the probe")
+
+    cols, mode = I._columns(D.get_dialect("redshift"), flaky, "s", "t")
+    assert mode == "catalog" and [c.name for c in cols] == ["id"] and calls["n"] == 2
+
+
+def test_an_empty_column_read_is_not_retried():
+    # [] means the catalog answered and listed nothing; only a FAILED read (None) is retried.
+    from semantic_model import dialects as D
+
+    seen: list[str] = []
+
+    def empty(sql: str):
+        seen.append(sql)
+        return []
+
+    I._columns(D.get_dialect("redshift"), empty, "s", "t")
+    assert sum("svv_columns" in s for s in seen) == 1
+
+
+def test_one_value_seen_in_a_sample_is_not_a_value_list():
+    # a sample of the first rows can show a single value of a column that holds several
+    assert I._maybe_choice(["N"] * 50) is None
+    assert I._maybe_choice(["N"] * 30 + ["Y"] * 20) == {"N": "", "Y": ""}
+
+
+def test_warehouse_keys_are_not_money():
+    from semantic_model import build as B_
+
+    for key in (
+        "invoice_key",
+        "payment_key",
+        "payment_method_type_key",
+        "invoice_sk",
+        "credit_fk",
+        "deposit_account_key",
+        "invoice_nbr",
+    ):
+        assert not B_.detect_money_column(key), key
+    assert B_.detect_money_column("invoice_amount") and B_.detect_money_column("credit_amt")
+
+
+def _status_col():
+    return m.Column(name="status", type="string", description="")
+
+
+def _rows(n):
+    return [{"status": "Open" if i % 3 else "Closed"} for i in range(n)]
+
+
+@pytest.mark.parametrize(
+    "sample_rows, est_rows, expect_list",
+    [
+        (120, None, True),  # the sample is the whole table
+        (I.SAMPLE_ROWS, 5_000, True),  # a small table, per the catalog
+        (I.SAMPLE_ROWS, None, False),  # a view or no estimate: it could be any size
+        (I.SAMPLE_ROWS, 15_000_000, False),  # a big table: DISTINCT would scan it
+    ],
+)
+def test_a_value_list_is_read_with_distinct_on_a_small_table_only(
+    sample_rows, est_rows, expect_list
+):
+    # The list is the column's DISTINCT values (#517), so 'Returned', which the sampled rows never
+    # show, is in it; before, the list was the sample's values and missed it.
+    from semantic_model import dialects as D
+
+    def run(sql):
+        if sql.startswith("SELECT DISTINCT"):
+            return [{"v": v} for v in ("Open", "Closed", "Returned")]
+        return _rows(sample_rows)
+
+    col = _status_col()
+    I._enrich_from_sample(D.get_dialect("postgres"), run, "s", "t", [col], est_rows=est_rows)
+    assert (col.choice_field == {"Closed": "", "Open": "", "Returned": ""}) is expect_list
+
+
+def test_an_unknown_row_estimate_is_not_a_small_table():
+    # a view or a never-analyzed table reports -1 rows; a full sample of it covers nothing
+    full = [{}] * I.SAMPLE_ROWS
+    assert not I._sample_covers_values(full, -1)
+    assert I._sample_covers_values(full, I.SAMPLE_ROWS)
+
+
+# ---------------------------------------------------------------------------
+# Row counts for views and never-analysed tables (#451): the catalog keeps no usable estimate, so
+# introspection counts instead, and a large view gets `large_tables` + `recommended_filters`.
+# ---------------------------------------------------------------------------
+
+
+def _estimate_runner(table, *, estimate, count, seen):
+    """One table with a date column. `estimate` is what the catalog stat returns (None = no row, as
+    `svv_table_info` gives for a view); `count` is the COUNT(*) answer (None = the count fails)."""
+    cols = [
+        {"column_name": "id", "data_type": "integer", "is_nullable": "NO", "ordinal_position": "1", "numeric_scale": ""},
+        {"column_name": "submitted_on", "data_type": "date", "is_nullable": "YES", "ordinal_position": "2", "numeric_scale": ""},
+    ]
+
+    def run(sql):
+        s = " ".join(sql.split())
+        seen.append(s)
+        if "information_schema.schemata" in s or "pg_namespace" in s and "nspname AS schema_name" in s:
+            return [{"schema_name": "public"}]
+        if ("information_schema.tables" in s or "svv_tables" in s) and "table_type" in s:
+            return [{"schema_name": "public", "table_name": table, "table_type": "VIEW"}]
+        if "information_schema.columns" in s or "svv_columns" in s:
+            return cols
+        if "PRIMARY KEY" in s:
+            return [{"column_name": "id"}]
+        if "FOREIGN KEY" in s:
+            return []
+        if "reltuples" in s or "svv_table_info" in s:
+            return [] if estimate is None else [{"estimated_rows": str(estimate)}]
+        if "COUNT(*) AS estimated_rows" in s:
+            if count is None:
+                raise RuntimeError("statement timed out")
+            return [{"estimated_rows": str(count)}]
+        return []
+
+    return run
+
+
+@pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
+def test_a_table_the_catalog_cannot_size_is_counted(tmp_path, dialect, estimate):
+    seen: list[str] = []
+    run = _estimate_runner("orders_v", estimate=estimate, count=7_000_000, seen=seen)
+    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    view = org.subject_areas[0].defined_table("orders_v")
+    assert view.performance_hints.estimated_row_count == 7_000_000
+    # Large, so it carries the filter the scan-risk check names.
+    assert view.performance_hints.recommended_filters == ["submitted_on"]
+    assert any("COUNT(*) AS estimated_rows" in s for s in seen)
+
+
+def test_a_table_with_a_catalog_estimate_is_not_counted(tmp_path):
+    seen: list[str] = []
+    run = _estimate_runner("orders", estimate=5_000_000, count=1, seen=seen)
+    org, _ = I.introspect("fin", "postgres", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    assert org.subject_areas[0].defined_table("orders").performance_hints.estimated_row_count == 5_000_000
+    assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
+
+
+@pytest.mark.parametrize("dialect, estimate", [("redshift", None), ("postgres", -1), ("postgres", 0)])
+def test_a_count_that_fails_leaves_the_size_unknown(tmp_path, dialect, estimate):
+    seen: list[str] = []
+    run = _estimate_runner("orders_v", estimate=estimate, count=None, seen=seen)
+    org, _ = I.introspect("fin", dialect, runner=run, artifacts_dir=tmp_path, dry_run=True)
+    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
+    # Unknown, not -1: a never-analysed Postgres table no longer stores the catalog's -1.
+    assert hints is None or hints.estimated_row_count is None
+    assert any("COUNT(*) AS estimated_rows" in s for s in seen)  # the fallback was tried
+
+
+def test_a_spent_count_budget_leaves_the_rest_unknown(tmp_path, monkeypatch):
+    """Counts run serially, so one run-level budget bounds them all; past it a table stays unsized
+    and the report says how many were skipped."""
+    monkeypatch.setattr(I, "_COUNT_BUDGET_S", 0.0)
+    seen: list[str] = []
+    run = _estimate_runner("orders_v", estimate=None, count=7_000_000, seen=seen)
+    org, report = I.introspect("fin", "redshift", runner=run, artifacts_dir=tmp_path, dry_run=True)
+    hints = org.subject_areas[0].defined_table("orders_v").performance_hints
+    assert hints is None or hints.estimated_row_count is None
+    assert not any("COUNT(*) AS estimated_rows" in s for s in seen)
+    assert any("1 table(s) left unsized" in n for n in report.notes)
+
+
+def test_a_count_spends_the_budget():
+    from semantic_model import dialects as D
+
+    budget = I._CountBudget(seconds_left=5.0)
+    assert I._estimate_rows(D.get_dialect("redshift"), lambda sql: [], "s", "v", budget) is None
+    assert budget.seconds_left < 5.0 and budget.skipped == 0
+
+
+@pytest.mark.parametrize("rows", [0, 42])
+def test_an_engine_whose_estimate_is_the_count_runs_it_once(rows):
+    """SQLite has no catalog statistics, so its estimate query IS the exact count: a 0 (or any)
+    answer must not run the same full scan a second time."""
+    from semantic_model import dialects as D
+
+    seen: list[str] = []
+
+    def run(sql):
+        seen.append(sql)
+        return [{"estimated_rows": str(rows)}]
+
+    assert I._estimate_rows(D.get_dialect("sqlite"), run, None, "t") == rows
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("dialect", ["mysql", "bigquery"])
+def test_engines_without_a_native_bound_are_not_counted(dialect):
+    """Until #459 gives introspection reads BigQuery's byte cap and MySQL's server-side time limit,
+    those engines never get the exact-count fallback: a view stays unsized, as before."""
+    from semantic_model import dialects as D
+
+    assert D.get_dialect(dialect).sql_row_count("s", "t") is None
+
+
+# ---------------------------------------------------------------------------
+# ISO dates kept as text under a name that says nothing about dates (#518)
+# ---------------------------------------------------------------------------
+
+
+def _iso_rows(n=25, **extra):
+    return [{"id": i, "period": f"2024-01-{i % 28 + 1:02d}", **{k: v(i) for k, v in extra.items()}}
+            for i in range(n)]
+
+
+def test_sniff_iso_text_needs_enough_values_that_all_are_real_dates():
+    dates = [f"2024-02-{d:02d}" for d in range(1, 26)]
+    assert I._sniff_iso_text(dates) == ("iso8601", None)
+    assert I._sniff_iso_text([f"{d} 10:00:00+05:30" for d in dates]) == ("iso8601", "offset-aware")
+    assert I._sniff_iso_text([f"{d}T10:00:00.123Z" for d in dates]) == ("iso8601", "offset-aware")
+    assert I._sniff_iso_text(dates[:19]) == (None, None)  # too few to claim without a date name
+    assert I._sniff_iso_text(dates + ["2024-13-45"]) == (None, None)  # the shape, not a date
+    assert I._sniff_iso_text(dates + ["2024-01-01 25:00"]) == (None, None)
+    assert I._sniff_iso_text(dates + ["2024-01-01 shipped late"]) == (None, None)
+    assert I._sniff_iso_text([f"2024.1.{d}" for d in range(1, 26)]) == (None, None)  # versions
+    assert I._sniff_iso_text(dates + [None, ""]) == ("iso8601", None)  # nulls don't count against
+
+
+def test_strict_iso_range_checks_the_utc_offset():
+    assert I._is_strict_iso("2024-01-01 10:00:00+05:30")
+    assert I._is_strict_iso("2024-01-01T10:00:00-2359")
+    assert not I._is_strict_iso("2024-01-01 10:00:00+25:00")  # no such offset hour
+    assert not I._is_strict_iso("2024-01-01 10:00:00+05:99")  # no such offset minute
+    dates = [f"2024-01-{d:02d}" for d in range(1, 26)]
+    assert I._sniff_iso_text(dates + ["2024-01-01 10:00+25:00"]) == (None, None)
+
+
+def test_enrich_from_sample_dates_an_iso_text_column_with_a_plain_name():
+    from semantic_model import dialects as D
+
+    sample = _iso_rows(release=lambda i: f"2024.1.{i}", note=lambda i: f"2024-01-01 note {i}")
+    cols = [m.Column(name="id", type="integer", primary_key=True),
+            m.Column(name="period", type="string"), m.Column(name="release", type="string"),
+            m.Column(name="note", type="string")]
+    I._enrich_from_sample(D.get_dialect("sqlite"), lambda sql: sample, None, "t", cols)
+    by = {c.name: c for c in cols}
+    assert by["period"].date_format == "iso8601"
+    assert by["period"].choice_field is None  # a column of dates is not a list of codes
+    assert by["release"].date_format is None and by["note"].date_format is None
+
+
+def test_enrich_from_sample_samples_a_table_whose_only_text_column_is_a_key():
+    from semantic_model import dialects as D
+
+    # No date-named or code-like column here, which used to skip the sample altogether.
+    sample = [{"period_id": f"2024-03-{d:02d}"} for d in range(1, 26)]
+    calls = []
+    cols = [m.Column(name="period_id", type="string")]
+    I._enrich_from_sample(D.get_dialect("sqlite"), lambda sql: calls.append(sql) or sample,
+                          None, "t", cols)
+    assert len(calls) == 1 and cols[0].date_format == "iso8601"
+
+
+def test_grouping_does_not_depend_on_the_order_tables_arrive_in():
+    # A batched build lists the last batch's tables first; a tie must not fall differently for it.
+    tables = [_t("p_hub"), _t("q_x"), _t("r_y")]
+    rels = [_j("q_x", "p_hub"), _j("r_y", "p_hub")]
+
+    def names(ts):
+        return sorted(sorted(t.name for t in g) for g in build.group_by_joins(ts, rels, max_size=2))
+
+    assert names(tables) == names(list(reversed(tables)))

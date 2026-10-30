@@ -163,22 +163,22 @@ def test_e2e_wide_model_all_lookups_via_index_and_linear_in_table_count(monkeypa
     monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(art))
 
     scan_calls = {"n": 0}
-    real_find_table = L._find_table
+    real_find_tables = L._find_tables
 
-    def counting_find_table(org, name, area=None, *, index=None):
+    def counting_find_tables(org, name, area=None, *, index=None):
         if index is None:
             scan_calls["n"] += 1  # a fall-through to the old linear scan
-        return real_find_table(org, name, area, index=index)
+        return real_find_tables(org, name, area, index=index)
 
     find_calls = {"n": 0}
-    real_index_find = L.TableIndex.find
+    real_index_find = L.TableIndex.find_all
 
     def counting_index_find(self, name, area=None):
         find_calls["n"] += 1
         return real_index_find(self, name, area)
 
-    monkeypatch.setattr(L, "_find_table", counting_find_table)
-    monkeypatch.setattr(L.TableIndex, "find", counting_index_find)
+    monkeypatch.setattr(L, "_find_tables", counting_find_tables)
+    monkeypatch.setattr(L.TableIndex, "find_all", counting_index_find)
 
     tools.tool_get_datasource_schema({"datasource": "acme", "mode": "full"})
 

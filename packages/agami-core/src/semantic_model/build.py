@@ -9,11 +9,12 @@ the assembly logic is independently testable and reusable.
 
 from __future__ import annotations
 
+import itertools
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Collection, Optional
 
 import yaml
 
@@ -29,30 +30,15 @@ from .models import (
     bare_name,
 )
 
-# Strongly-PII column-name patterns — sensitive regardless of table.
-STRONG_PII_RE = re.compile(
-    r"(dob|birth|phone|mobile|email|address|aadhaar|aadhar|\bpan\b|\bssn\b|passport|"
-    r"pincode|\bzip\b|account_?no|card_?no|salary|income)",
-    re.IGNORECASE,
+# Name and value rules for personal data live in `pii`; re-exported here for callers.
+from .pii import (
+    STRONG_PII_RE,
+    WEAK_PII_RE,
+    detect_sensitive,
+    suspected_pii,
+    suspected_reason,
 )
-# Weakly-PII patterns — only sensitive inside a PII-ish table (a "name" column on
-# a product table is not PII; on a person table it is).
-WEAK_PII_RE = re.compile(r"(\bname\b|first_?name|last_?name|full_?name|surname)", re.IGNORECASE)
-# Broader "might be PII" tokens for the SUSPECTED tier — a review aid only, never auto-flags.
-# General privacy concepts (not a customer's schema): identity, contact, location, demographics.
-_EXTRA_PII_RE = re.compile(
-    r"(gender|\bsex\b|ip_?address|\bip\b|latitude|longitude|\bgeo\b|national_?id|tax_?id|"
-    r"licen[cs]e|user_?name|nationality|ethnicit|religion|marital|emergency_?contact|"
-    r"next_?of_kin|date_?of_?birth|maiden)", re.IGNORECASE)
 
-
-def suspected_pii(column_name: str) -> bool:
-    """A BROADER 'might be PII' heuristic than `detect_sensitive` — surfaces columns the strict
-    flag may have MISSED (e.g. `first_name` in a non-PII-named table like `sys_user`, which the
-    table-gated weak rule skips), so a reviewer can confirm. A review aid; never auto-marks
-    sensitive. General privacy vocabulary, not vendor-specific."""
-    return bool(STRONG_PII_RE.search(column_name) or WEAK_PII_RE.search(column_name)
-                or _EXTRA_PII_RE.search(column_name))
 # Back-compat alias (some callers import SENSITIVE_RE).
 SENSITIVE_RE = STRONG_PII_RE
 
@@ -61,28 +47,103 @@ SINGLE_AREA_MAX = 24
 
 
 # Numeric columns whose NAME indicates a monetary value, so curation can offer a currency
-# `unit` without callers hand-rolling (and mis-rolling) a regex. Tokens match on word
-# boundaries (`_` or string edges), so a bare `count` never matches inside `discount`:
-# `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate` are not.
-_MONEY_RE = re.compile(
-    r"(^|_)(amount|amt|price|cost|fee|revenue|sales|salary|wage|income|payment|"
-    r"charge|balance|deposit|withdrawal|refund|discount|subtotal|total|spend|spent|"
-    r"budget|invoice|mrr|arr|gmv|ltv|aov|paid|due|owed|credit|debit)s?(_|$)",
-    re.IGNORECASE,
-)
-# Tokens that flip a money-ish name back to NON-money (it's a rate / count / id / score / …).
-_MONEY_NEGATIVE_RE = re.compile(
-    r"(^|_)(rate|pct|percent|percentage|ratio|count|cnt|qty|quantity|num|number|id|"
-    r"flag|year|age|day|month|score|rank|code|status)s?(_|$)",
-    re.IGNORECASE,
-)
+# `unit` without callers hand-rolling (and mis-rolling) a regex. Names are split into whole
+# words on `_`, other punctuation and camelCase, so a bare `count` never matches inside
+# `discount`: `discount_amount` / `member_discount` ARE money; `order_count` / `discount_rate`
+# are not.
+_MONEY_WORDS = frozenset({
+    "amount", "amt", "price", "cost", "fee", "revenue", "sales", "salary", "wage", "income",
+    "payment", "charge", "balance", "deposit", "withdrawal", "refund", "discount", "subtotal",
+    "total", "spend", "spent", "budget", "invoice", "mrr", "arr", "gmv", "ltv", "aov", "paid",
+    "due", "owed", "credit", "debit",
+})
+# Words that name a currency outright. ISO codes beyond these count only after the first word
+# (`gross_usd`, `fare_try`), since a few double as English words (`try_count`, `php_version`).
+_CURRENCY_WORDS = {"usd": "USD", "dollar": "USD", "eur": "EUR", "euro": "EUR", "gbp": "GBP",
+                   "inr": "INR", "rupee": "INR", "jpy": "JPY", "yen": "JPY"}
+# Words that flip a money-ish name back to NON-money: a rate / count / id / key / score, or a
+# non-money unit (minutes, hours, weight, points). Keys matter in warehouses: `invoice_key` and
+# `payment_key` name join keys, not money. `total_minutes` and `points_balance` are not money.
+_NOT_MONEY_WORDS = frozenset({
+    "rate", "pct", "percent", "percentage", "ratio", "count", "cnt", "qty", "quantity", "num",
+    "number", "nbr", "id", "key", "sk", "fk", "flag", "year", "age", "day", "month", "score",
+    "rank", "code", "status", "duration", "weight", "kg", "lb", "gram", "point", "pts", "units",
+})
+# Time words exclude only in the plural: `total_seconds` is a duration, `second_payment_amount`
+# is the second payment.
+_NOT_MONEY_PLURALS = frozenset({"seconds", "secs", "minutes", "mins", "hours", "hrs"})
+_SCALE_WORDS = {"thousand": "thousands", "million": "millions", "billion": "billions",
+                "lakh": "lakhs", "crore": "crores"}
+_PERIOD_WORDS = frozenset({"hour", "day", "week", "month", "quarter", "year"})
+_PERIOD_ADJECTIVES = {"hourly": "hour", "daily": "day", "weekly": "week", "monthly": "month",
+                      "quarterly": "quarter", "yearly": "year", "annual": "year"}
+
+
+def name_words(column_name: str) -> list[str]:
+    """`revenueUSDMillions` / `revenue_usd_millions` -> ["revenue", "usd", "millions"]."""
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", column_name)
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", s)
+    return [w for w in re.split(r"[^A-Za-z0-9]+", s.lower()) if w]
+
+
+def _in(word: str, vocab) -> Optional[str]:
+    """The vocabulary entry `word` is, allowing a plural `s` (`amounts`, `minutes`)."""
+    if word in vocab:
+        return word
+    if word.endswith("s") and word[:-1] in vocab:
+        return word[:-1]
+    return None
+
+
+def _per_period(words: list[str]) -> tuple[list[str], Optional[str]]:
+    """Drop a `per <x>` pair (`revenue_per_day`, `cost_per_kg`) — it says what the money is
+    per, not that it isn't money — and return the period when `<x>` is one."""
+    out, period, i = [], None, 0
+    while i < len(words):
+        if words[i] == "per" and i + 1 < len(words):
+            period = period or _in(words[i + 1], _PERIOD_WORDS)
+            i += 2
+            continue
+        out.append(words[i])
+        i += 1
+    return out, period
+
+
+def name_currency(column_name: str) -> Optional[str]:
+    """The ISO code a column's name states (`gross_usd`, `fx_dollar`, `amountEUR`), or None."""
+    from .units import CURRENCY_SYMBOLS
+
+    for i, w in enumerate(name_words(column_name)):
+        hit = _in(w, _CURRENCY_WORDS)
+        if hit:
+            return _CURRENCY_WORDS[hit]
+        if i and w.upper() in CURRENCY_SYMBOLS:
+            return w.upper()
+    return None
 
 
 def detect_money_column(column_name: str) -> bool:
-    """A column whose name looks monetary (amount/price/revenue/discount/…) and is NOT a
-    rate/count/id/score — so `discount_amount` is money while `discount_rate` and
-    `order_count` are not. Name-only; the caller restricts this to numeric columns."""
-    return bool(_MONEY_RE.search(column_name)) and not _MONEY_NEGATIVE_RE.search(column_name)
+    """A column whose name looks monetary (amount/price/revenue/discount/… or a currency such as
+    `_usd`) and carries no rate/count/id/score or non-money unit word — so `discount_amount` and
+    `balance_usd` are money while `discount_rate`, `order_count`, `total_minutes`, `credit_hours`
+    and `points_balance` are not. Name-only; the caller restricts this to numeric columns."""
+    words, _ = _per_period(name_words(column_name))
+    if any(_in(w, _NOT_MONEY_WORDS) or w in _NOT_MONEY_PLURALS for w in words):
+        return False
+    return name_currency(column_name) is not None or any(_in(w, _MONEY_WORDS) for w in words)
+
+
+def suggest_unit(column_name: str) -> Optional[str]:
+    """The unit a money column's name spells out, in the units.py grammar:
+    `revenue_usd_millions` -> `USD_millions`, `cost_usd_per_day` -> `USD/day`. None when the
+    name states no currency (the caller then asks which currency it is)."""
+    code = name_currency(column_name)
+    if not code or not detect_money_column(column_name):
+        return None
+    words, period = _per_period(name_words(column_name))
+    period = period or next((_PERIOD_ADJECTIVES[w] for w in words if w in _PERIOD_ADJECTIVES), None)
+    scale = next((_SCALE_WORDS[_in(w, _SCALE_WORDS)] for w in words if _in(w, _SCALE_WORDS)), None)
+    return code + (f"_{scale}" if scale else "") + (f"/{period}" if period else "")
 
 
 # --- aggregation class (the Phase-1 column-intrinsic measure semantics) ------
@@ -112,9 +173,12 @@ _AVERAGEABLE_RE = re.compile(
 # on the metric as `non_additive_dimensions` (Phase 2 / #3), not here.
 _ADDITIVE_RE = re.compile(
     r"(^|_)(amount|amt|total|subtotal|sum|qty|quantity|count|cnt|revenue|sales|cost|"
-    r"spend|spent|value|volume|units|gmv|charge|fee|tax|discount|paid|due|gross|net|"
+    r"spend|spent|value|volume|gmv|charge|fee|tax|discount|paid|due|gross|net|"
     r"profit|income|expense|balance|deposit|withdrawal|refund|credit|debit|payment|"
-    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)",
+    r"inventory|stock|headcount|distance|weight|duration|bytes|size)s?(_|$)"
+    # a bare `units` is often a per-entity reading (`reading_units`); only a flow settles it
+    r"|(^|_)units_(sold|shipped|ordered|delivered|received|returned|purchased|produced)(_|$)"
+    r"|(^|_)(sold|shipped|ordered|delivered|received|returned|purchased|produced)_units(_|$)",
     re.IGNORECASE,
 )
 
@@ -129,9 +193,12 @@ def classify_aggregation(column_name: str, column_type: str, is_key: bool = Fals
         return "dimension"
     if column_type not in _NUMERIC_TYPES:
         return "dimension"
-    if _DIMENSION_RE.search(column_name):
+    # money detection reads camelCase / kebab words, so these checks must too, or `unitPrice`
+    # would skip the averageable test and be called additive
+    spelled = (column_name, "_".join(name_words(column_name)))
+    if any(_DIMENSION_RE.search(n) for n in spelled):
         return "dimension"
-    if _AVERAGEABLE_RE.search(column_name):
+    if any(_AVERAGEABLE_RE.search(n) for n in spelled):
         return "averageable"
     if detect_money_column(column_name) or _ADDITIVE_RE.search(column_name):
         return "additive"
@@ -173,17 +240,6 @@ def canonical_description(column_name: str, values: list) -> Optional[str]:
     if _LOCALE_NAME_RE.search(column_name) and most(_LOCALE_VAL_RE):
         return "Language / locale code (e.g. en, en_US, pt-BR)."
     return None
-
-
-def detect_sensitive(table_name: str, column_name: str) -> bool:
-    """Strongly-PII column names (email/phone/dob/ssn/address/…) are sensitive
-    regardless of table. Weakly-PII names (name/first_name/…) are sensitive only
-    inside a PII-ish table, to avoid flagging e.g. a product `name`."""
-    if STRONG_PII_RE.search(column_name):
-        return True
-    table_pii = table_name.upper() == "PII" or bool(STRONG_PII_RE.search(table_name)) \
-        or bool(WEAK_PII_RE.search(table_name))
-    return bool(WEAK_PII_RE.search(column_name)) and table_pii
 
 
 # Role groups — assigned from STRUCTURAL column signals (PK, foreign_key, choice_field,
@@ -289,69 +345,187 @@ def maybe_column_groups(
 
 
 def infer_cardinality(
-    from_table: str,
-    to_table: str,
+    from_table: Optional[Table],
+    to_table: Optional[Table],
     from_cols: list[str],
     to_cols: list[str],
-    grain_by_table: dict[str, set[str]],
 ) -> str:
-    """Infer join cardinality from declared/inferred grain.
+    """Infer join cardinality from each side's keys: its grain (primary key) and unique keys.
 
-    to-side == to PK & from-side == from PK -> one_to_one
-    to-side == to PK (unique), from not      -> many_to_one
-    from-side == from PK, to not             -> one_to_many
-    else                                     -> many_to_one (default; review)
+    A side is "one" when the join's columns are exactly one of its keys; a multi-column key counts
+    only when the join uses all of it. A nullable unique column still counts: NULL never joins.
+    Tables, not names, so two same-named tables in two schemas don't lend each other a key.
+
+    both sides keyed  -> one_to_one
+    to side keyed     -> many_to_one
+    from side keyed   -> one_to_many
+    neither           -> many_to_one (default; review)
     """
-    from_pk = grain_by_table.get(from_table, set())
-    to_pk = grain_by_table.get(to_table, set())
-    from_is_pk = bool(from_pk) and set(from_cols) == from_pk
-    to_is_pk = bool(to_pk) and set(to_cols) == to_pk
-    if from_is_pk and to_is_pk:
+    from_one = from_table is not None and from_table.unique_on(from_cols)
+    to_one = to_table is not None and to_table.unique_on(to_cols)
+    if from_one and to_one:
         return "one_to_one"
-    if to_is_pk and not from_is_pk:
-        return "many_to_one"
-    if from_is_pk and not to_is_pk:
+    if from_one:
         return "one_to_many"
     return "many_to_one"
 
 
 # ---------------------------------------------------------------------------
-# Subject-area proposal (prefix-family clustering; one table per area)
+# Subject-area proposal (join-graph grouping; one owner per table)
 # ---------------------------------------------------------------------------
 
 
-def _singularize(token: str) -> str:
-    if len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
-        return token[:-1]
-    return token
+def _first_token(name: str) -> str:
+    # Kept as written: stripping a trailing "s" made "supplie", "statu" and "analysi" (#513).
+    return re.split(r"[_\s]", bare_name(name))[0].lower() or "misc"
 
 
 def cluster_by_family(names: list[str]) -> dict[str, str]:
-    """Map each table name -> an area key, grouping by first-token (singularized)
-    then merging prefix-families (one key being a prefix of another)."""
-    raw_key: dict[str, str] = {}
-    for name in names:
-        bare = bare_name(name)
-        token = _singularize(re.split(r"[_\s]", bare)[0].lower())
-        raw_key[name] = token or "misc"
+    """Map each table name -> its first name word. Only a whole word groups tables: `pro_x` is not
+    put with `products` and `promotions` because one name starts with the other's word."""
+    return {name: _first_token(name) for name in names}
 
-    canonical: dict[str, str] = {}
-    for k in sorted(set(raw_key.values()), key=len):
-        target = k
-        for root in canonical.values():
-            if k.startswith(root) or root.startswith(k):
-                target = min(root, k, key=len)
-                break
-        canonical[k] = target
 
-    def resolve(k: str) -> str:
-        seen: set[str] = set()
-        while canonical.get(k, k) != k and k not in seen:
-            seen.add(k)
-            k = canonical[k]
-        return k
+_STOP_WORDS = frozenset({"and", "the", "for", "with", "from", "per", "each", "one", "row", "rows",
+                         "table", "this", "that", "are", "has", "its", "data"})
 
-    return {name: resolve(raw_key[name]) for name in names}
+
+def _words(t: Table) -> set[str]:
+    text = f"{bare_name(t.name)} {t.description or ''}".lower()
+    return {w for w in re.split(r"[^a-z0-9]+", text) if len(w) > 2 and w not in _STOP_WORDS}
+
+
+# Below 1, modularity favours fewer, larger groups: at 1 it cuts a five-table chain in two.
+_RESOLUTION = 0.5
+
+
+def group_by_joins(tables: list[Table], rels: list[Relationship],
+                   max_size: int = SINGLE_AREA_MAX) -> list[list[Table]]:
+    """Group tables by the joins between them, with no target number of groups.
+
+    Groups start as single tables and the two joined groups that most raise the graph's modularity
+    are merged, until no merge raises it. That keeps a connected database apart at its weakest links:
+    a hub that half the tables join (customers, staff) doesn't pull them all into one group, as plain
+    connected components would. A merge past `max_size` is never made. Ties go to the pair sharing
+    more words in their names and descriptions. A joined table left alone goes to the neighbouring
+    group it joins most that has room, else into a pool of such tables. A table with no joins goes with the group holding the
+    most tables that share its whole first name word, else in a group of its own."""
+    # Ties fall to table order, so sort: a batched build lists its tables in batch order.
+    tables = sorted(tables, key=lambda t: (t.schema_name or "", t.name))
+    n = len(tables)
+    index = {(t.schema_name, t.name): i for i, t in enumerate(tables)}
+    by_bare: dict[str, list[int]] = defaultdict(list)
+    for i, t in enumerate(tables):
+        by_bare[t.name].append(i)
+
+    def at(table: str, schema: Optional[str]) -> Optional[int]:
+        bare = bare_name(table)
+        if schema is not None and (schema, bare) in index:
+            return index[(schema, bare)]
+        hits = by_bare.get(bare, [])
+        return hits[0] if len(hits) == 1 else None
+
+    weight: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    for r in rels:
+        a, b = at(r.from_table, r.from_schema), at(r.to_table, r.to_schema)
+        if a is not None and b is not None and a != b:
+            weight[a][b] += 1
+            weight[b][a] += 1
+    joined = sorted(weight)
+    total = sum(sum(w.values()) for w in weight.values())   # 2m
+    words = [_words(t) for t in tables]
+    tokens = [_first_token(t.name) for t in tables]
+
+    groups: dict[int, list[int]] = {i: [i] for i in joined}
+    degree = {i: sum(weight[i].values()) for i in joined}
+    links = {i: dict(weight[i]) for i in joined}            # group -> {group: join weight}
+
+    def shared(g: int, h: int) -> int:
+        return len(set().union(*(words[i] for i in groups[g])) & set().union(*(words[i] for i in groups[h])))
+
+    while True:
+        best, best_key = None, None
+        for g in groups:
+            for h, w in links[g].items():
+                if h <= g or len(groups[g]) + len(groups[h]) > max_size:
+                    continue
+                gain = w / total - _RESOLUTION * degree[g] * degree[h] / (total * total)
+                if gain <= 1e-12:
+                    continue
+                key = (round(gain, 12), shared(g, h), -min(g, h))
+                if best_key is None or key > best_key:
+                    best, best_key = (g, h), key
+        if best is None:
+            break
+        g, h = best
+        groups[g] += groups.pop(h)
+        degree[g] += degree.pop(h)
+        for k, w in links.pop(h).items():
+            if k == g:
+                continue
+            links[g][k] = links[g].get(k, 0) + w
+            links[k][g] = links[k].get(g, 0) + w
+            links[k].pop(h, None)
+        links[g].pop(h, None)
+
+    # A joined table still alone was refused by the size limit or by every neighbour: put it with the
+    # neighbouring group it joins most that has room, else pool those of one cluster by name word.
+    comp = {i: i for i in joined}
+
+    def croot(i: int) -> int:
+        while comp[i] != i:
+            comp[i] = comp[comp[i]]
+            i = comp[i]
+        return i
+
+    for a in joined:
+        for b in weight[a]:
+            comp[croot(a)] = croot(b)
+    owner = {i: g for g, members in groups.items() for i in members}
+    pooled: dict[int, list[int]] = defaultdict(list)
+    for i in [g for g, members in groups.items() if len(members) == 1]:
+        near = [(w, len(words[i] & set().union(*(words[m] for m in groups[owner[k]]))), -owner[k], owner[k])
+                for k, w in weight[i].items()
+                if owner[k] in groups and 1 < len(groups[owner[k]]) < max_size]  # a pooled one's is gone
+        del groups[i]
+        if near:
+            g = max(near)[3]
+            groups[g].append(i)
+            owner[i] = g
+        else:
+            pooled[croot(i)].append(i)
+    for members in pooled.values():
+        members.sort(key=lambda i: (tokens[i], tables[i].name))
+        for k in range(0, len(members), max_size):
+            groups[members[k]] = members[k:k + max_size]
+
+    for i in sorted(set(range(n)) - set(joined), key=lambda i: tables[i].name):
+        same = [r for r, members in groups.items()
+                if len(members) < max_size and any(tokens[m] == tokens[i] for m in members)]
+        if same:
+            best_group = max(same, key=lambda r: (sum(tokens[m] == tokens[i] for m in groups[r]), r >= 0, -r))
+            groups[best_group].append(i)
+        else:
+            groups[-1 - i] = [i]
+    return [[tables[i] for i in sorted(members)] for members in sorted(groups.values(), key=min)]
+
+
+def _group_name(members: list[Table], rels: list[Relationship]) -> str:
+    """The first name word most of the group's tables share; on a tie, a one-word table's name (the
+    entity itself, `orders` over `order_items`), then that of its most-joined table."""
+    names = {t.name for t in members}
+    degree: dict[str, int] = defaultdict(int)
+    for r in rels:
+        f, t = bare_name(r.from_table), bare_name(r.to_table)
+        if f in names and t in names and f != t:
+            degree[f] += 1
+            degree[t] += 1
+    count: dict[str, int] = defaultdict(int)
+    for t in members:
+        count[_first_token(t.name)] += 1
+    hub = max(members, key=lambda t: (count[_first_token(t.name)], _first_token(t.name) == t.name.lower(),
+                                      degree[t.name], [-ord(c) for c in t.name]))
+    return _first_token(hub.name)
 
 
 def make_table_ref(conn: str, table: Table) -> TableRef:
@@ -364,9 +538,14 @@ def make_table_ref(conn: str, table: Table) -> TableRef:
     )
 
 
+_WINDOWS_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+
+
 def _area_key(schema: str) -> str:
-    """A filesystem-safe area name from a schema name."""
-    return re.sub(r"[^a-z0-9_]+", "_", schema.lower()).strip("_") or "misc"
+    """A filesystem-safe area name from a schema name. Windows reserves its device names at every
+    path level, so a schema called `con` or `aux` gets a suffix rather than a directory nobody can open."""
+    key = re.sub(r"[^a-z0-9_]+", "_", schema.lower()).strip("_") or "misc"
+    return f"{key}_" if key in _WINDOWS_RESERVED else key
 
 
 def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
@@ -375,15 +554,26 @@ def _rel_in_area(r: Relationship, keys: set, bare: set) -> bool:
     don't both match an area just because the bare name `products` is present. Schemaless
     relationships (SQLite / legacy) fall back to bare-name membership."""
     def here(table: str, schema) -> bool:
-        return (schema, table) in keys if schema is not None else table in bare
-    return (here(bare_name(r.from_table), r.from_schema)
-            and here(bare_name(r.to_table), r.to_schema))
+        name = bare_name(table)
+        if schema is None and "." in table:   # a schema written in the name (`crm.shipments`) is stated too
+            return (table.split(".")[-2], name) in keys or (None, name) in keys
+        return (schema, name) in keys if schema is not None else name in bare
+    return here(r.from_table, r.from_schema) and here(r.to_table, r.to_schema)
+
+
+def _as_area_rel(r: Relationship) -> Relationship:
+    """A join as an area holds it. A batched build re-proposes areas over joins that include the last
+    batch's cross-area ones, and one whose ends now share an area must lose its area endpoints, which
+    an area's relationships.yaml can't carry."""
+    if not isinstance(r, CrossSubjectAreaRelationship):
+        return r
+    return Relationship(**r.model_dump(exclude_none=True, by_alias=True, exclude={"from_subject_area", "to_subject_area"}))
 
 
 def make_area(name: str, tables: list[Table], rels: list[Relationship], conn: str) -> SubjectArea:
     table_names = {t.name for t in tables}
     keys = {(t.schema_name, t.name) for t in tables}
-    area_rels = [r for r in rels if _rel_in_area(r, keys, table_names)]
+    area_rels = [_as_area_rel(r) for r in rels if _rel_in_area(r, keys, table_names)]
     return SubjectArea(
         name=name,
         description=f"Auto-proposed subject area covering: {', '.join(sorted(table_names))}.",
@@ -402,7 +592,7 @@ def propose_subject_areas(
     natural domains, and (critically) this keeps same-named tables in different schemas
     (e.g. `billing.products` vs `crm.products`) in separate area dirs so neither is lost to
     a bare-name write collision. A single-schema DB keeps the old behavior: one area when
-    small, else prefix-family clustering.
+    small, else grouped by its joins (`group_by_joins`).
     """
     notes: list[str] = []
     schemas = sorted({t.schema_name for t in tables if t.schema_name})
@@ -419,14 +609,18 @@ def propose_subject_areas(
     if len(tables) <= SINGLE_AREA_MAX:
         notes.append(f"{len(tables)} tables -> single subject area {profile.lower()!r}")
         return [make_area(profile.lower(), tables, rels, conn)], notes
-    mapping = cluster_by_family([t.name for t in tables])
-    by_area = defaultdict(list)
-    for t in tables:
-        by_area[mapping[t.name]].append(t)
+    by_area = {}
+    for members in group_by_joins(tables, rels):
+        name = base = _area_key(_group_name(members, rels))
+        k = 2
+        while name in by_area:
+            name, k = f"{base}_{k}", k + 1
+        by_area[name] = members
     areas = [make_area(a, members, rels, conn) for a, members in sorted(by_area.items())]
     notes.append(
-        f"{len(tables)} tables -> {len(areas)} areas by prefix-family (one owner each); "
-        "cross-area joins become cross_subject_area_relationships. PROPOSAL — review."
+        f"{len(tables)} tables -> {len(areas)} areas by their joins (grouped where tables join each other "
+        "most; one with no joins goes with tables sharing its first name word); cross-area joins become "
+        "cross_subject_area_relationships. PROPOSAL — review."
     )
     return areas, notes
 
@@ -485,11 +679,76 @@ def _model_dump(model) -> dict:
                             exclude={"for_questions_about"})
 
 
+def unloadable(org: Datasource) -> list[str]:
+    """What `write_tree` would write that the loader can't read back: each object, as written, re-read
+    as the type the loader builds from its file. The validator checks the objects in memory, where an
+    area join can still be a cross-area one whose extra keys only fail once read from disk."""
+    from .models import Entity, Metric, StorageConnection
+
+    def bad(kind: type, obj: Any, where: str) -> list[str]:
+        try:
+            kind(**_model_dump(obj))
+            return []
+        except Exception as e:
+            return [f"{where}: {e}"]
+
+    out = [e for sc in org.storage_connections for e in bad(StorageConnection, sc, f"storage {sc.name}")]
+    out += [e for r in org.cross_subject_area_relationships
+            for e in bad(CrossSubjectAreaRelationship, r, f"cross-area join {r.from_table}->{r.to_table}")]
+    for sa in org.subject_areas:
+        out += [e for tr in sa.tables for e in bad(TableRef, tr, f"{sa.name} reference to {tr.table}")]
+        out += [e for t in sa.tables_defined for e in bad(Table, t, f"{sa.name}/tables/{t.name}")]
+        out += [e for x in sa.entities for e in bad(Entity, x, f"{sa.name}/entities/{x.name}")]
+        out += [e for m in sa.metrics for e in bad(Metric, m, f"{sa.name}/metrics/{m.name}")]
+        out += [e for r in sa.relationships
+                for e in bad(Relationship, r, f"{sa.name} join {r.from_table}->{r.to_table}")]
+    return out
+
+
 @dataclass
 class WriteReport:
     out_dir: str
     dry_run: bool
     files_written: list[str] = field(default_factory=list)
+    # Files whose content was already on disk and were left as they are (#472).
+    files_unchanged: list[str] = field(default_factory=list)
+
+
+def _meaningful(value: Any) -> Any:
+    """`value` with the null and empty-list entries of every mapping dropped, for comparing two dumps.
+
+    The serializer writes an empty default (`indexes: []`) that an older writer left out, and the two
+    mean the same thing to the loader. An empty MAPPING is kept: `choice_field: {}` is a declared enum
+    with no labels yet, which is not the same as no `choice_field`. Only mapping entries are dropped:
+    an empty item in a LIST is a value someone wrote. The cost: a file that still carries an empty key the current serializer
+    omits (`ambiguities: []`) is no longer scrubbed by a refresh, since its data is unchanged.
+    """
+    if isinstance(value, dict):
+        return {
+            k: _meaningful(v) for k, v in value.items() if v is not None and v != []
+        }
+    if isinstance(value, list):
+        return [_meaningful(v) for v in value]
+    return value
+
+
+def _same_content(path: Path, content: str) -> bool:
+    """Whether the file at `path` already says what `content` says, compared as parsed YAML (#472).
+
+    A refresh of one table re-dumped every file in the model, and a file whose values had not changed
+    still came out with its keys reordered, an empty default added or its lines re-wrapped, so a
+    one-table refresh was a whole-model diff and the real change was lost in it. Equal data means the
+    file is left alone, which also keeps its line endings and formatting. A file that does not parse is
+    never equal: rewriting it is the fix.
+    """
+    if not path.is_file():
+        return False
+    try:
+        old = yaml.safe_load(path.read_text(encoding="utf-8"))
+        new = yaml.safe_load(content)
+    except (yaml.YAMLError, OSError, UnicodeDecodeError):
+        return False
+    return _meaningful(old) == _meaningful(new)
 
 
 def ensure_org_id(out: Path, existing: Optional[str] = None, *, dry_run: bool = False) -> str:
@@ -518,23 +777,52 @@ def ensure_org_id(out: Path, existing: Optional[str] = None, *, dry_run: bool = 
     return org_record.ensure_org_record(out.parent).org_id
 
 
-def _previous_description(out: Path) -> str:
-    """The `description` already in `out/datasource.yaml`, or "" when there is none (#327).
+def _previous_doc(out: Path) -> dict:
+    """The `datasource.yaml` already in `out`, or {} when there is none (#327).
 
     Read the same way `ensure_org_id` reads the previous file's id, and for the same reason: a
-    re-introspect rebuilds the model from the database, which knows nothing a human wrote. An
-    unreadable file keeps today's behaviour (no description) rather than failing the write."""
+    re-introspect or a spec re-apply rebuilds the model from what it knows, and the database knows
+    nothing a human wrote. An unreadable file keeps today's behaviour rather than failing the write."""
     import yaml
 
     path = out / "datasource.yaml"
     if not path.exists():
-        return ""
+        return {}
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:  # noqa: BLE001 - a malformed previous file must not block writing a new one
-        return ""
-    value = doc.get("description") if isinstance(doc, dict) else None
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def _previous_description(out: Path) -> str:
+    value = _previous_doc(out).get("description")
     return value.strip() if isinstance(value, str) else ""
+
+
+# Datasource-level enrichment a rewrite must not drop: the glossary (`sm set-terminology`), the
+# declared ambiguities (#473), and the cross-area entities and metrics kept in this file. Carried over as written, because the loader
+# merges the latter with their own sidecar files and re-serializing the merged list would duplicate them.
+_CARRIED_DATASOURCE_KEYS = ("key_terminology", "ambiguities", "cross_subject_area_entities",
+                            "cross_subject_area_metrics")
+
+
+def _carried_datasource_fields(org: Datasource, out: Path) -> dict:
+    prev = _previous_doc(out)
+    carried = {k: prev[k] for k in _CARRIED_DATASOURCE_KEYS if prev.get(k)}
+    if org.key_terminology:
+        carried["key_terminology"] = dict(org.key_terminology)
+    if org.ambiguities:
+        carried["ambiguities"] = [a.model_dump(exclude_defaults=True) for a in org.ambiguities]
+    return carried
+
+
+def item_file_stem(name: str) -> str:
+    """The file name (without .yaml) an entity or metric is stored under. One rule for every writer:
+    `write_tree` used the display name (`Net Sales.yaml`) while `sm add` and `curate`
+    used this slug, so rewriting a tree after `sm add` duplicated every item and broke lookup by name."""
+    s = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    return s or "unnamed"
 
 
 def write_tree(
@@ -545,11 +833,15 @@ def write_tree(
     dry_run: bool = False,
 ) -> WriteReport:
     """Write the canonical on-disk tree (datasource.yaml + datasources + subject_areas +
-    optional prompt_examples). Returns the list of files (would-be on dry_run)."""
+    optional prompt_examples). Returns the list of files (would-be on dry_run). A file whose content
+    is already on disk is left untouched and listed under `files_unchanged` (#472)."""
     examples_by_area = examples_by_area or {}
     rep = WriteReport(out_dir=str(out), dry_run=dry_run)
 
     def write(rel: str, content: str) -> None:
+        if _same_content(out / rel, content):
+            rep.files_unchanged.append(rel)
+            return
         rep.files_written.append(rel)
         if dry_run:
             return
@@ -579,6 +871,7 @@ def write_tree(
         "cross_subject_area_relationships": [
             _model_dump(r) for r in org.cross_subject_area_relationships
         ],
+        **_carried_datasource_fields(org, out),
     }))
     for sc in org.storage_connections:
         write(f"datasources/{sc.name}/storage.yaml", _dump(_model_dump(sc)))
@@ -593,9 +886,9 @@ def write_tree(
         for t in sa.tables_defined:
             write(f"{base}/tables/{t.name}.yaml", _dump(_model_dump(t)))
         for e in sa.entities:
-            write(f"{base}/entities/{e.name}.yaml", _dump(_model_dump(e)))
+            write(f"{base}/entities/{item_file_stem(e.name)}.yaml", _dump(_model_dump(e)))
         for mm in sa.metrics:
-            write(f"{base}/metrics/{mm.name}.yaml", _dump(_model_dump(mm)))
+            write(f"{base}/metrics/{item_file_stem(mm.name)}.yaml", _dump(_model_dump(mm)))
         if sa.relationships:
             write(f"{base}/relationships.yaml",
                   _dump({"relationships": [_model_dump(r) for r in sa.relationships]}))
@@ -620,56 +913,113 @@ _END_NAME_RE = re.compile(
     r"(^|_)(closed|resolved|ended|end|finished|completed|fulfilled|approved|delivered)(_|$)", re.I)
 _FLAG_NAME_RE = re.compile(r"^(is_|has_).+|.+_flag$", re.I)
 _TS_TYPES = {"timestamp", "date"}
+# Audit columns record when a row was written or changed, not when the thing it describes began or
+# ended, so a duration pairs one only when no other column can stand in for it (#514).
+_AUDIT_NAME_RE = re.compile(
+    r"^(sys_.+|.+_by|.*modified.*|(created|updated|inserted|last_updated)(_(at|on|date|time|ts))?"
+    r"|date_(created|updated))$", re.I)
+_PLANNED_NAME_RE = re.compile(r"(^|_)(planned|scheduled|expected|estimated|target)(_|$)", re.I)
+_ACTUAL_NAME_RE = re.compile(r"(^|_)actual(_|$)", re.I)
+# Below this many rows a rate or an average is too thin to define a metric on (#514).
+TINY_TABLE_ROWS = 50
 
 
-# A "trivial" measure is a single bare aggregate over ONE column (or COUNT(*)) — there's no
-# interpretive choice in it, so it's as trustworthy as the column's aggregation class (which is
-# already confirmed structure). These auto-approve with a system sign-off, like an enforced FK
-# join, instead of cluttering the review queue. Anything with a CASE (a flag RATE) or a
-# multi-column / function expression (a DURATION's start/end pairing) is NOT trivial — that
-# involves a heuristic the engine could get wrong, so it stays proposed for a human glance.
-_TRIVIAL_BINDING_RE = re.compile(
-    r"^\s*(COUNT\(\s*\*\s*\)|(?:SUM|AVG)\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\))\s*$", re.IGNORECASE)
+def _flag(code: str, why: str) -> dict:
+    return {"flag": code, "why": why}
 
 
-def _is_trivial_measure(binding_sql: str) -> bool:
-    """True for COUNT(*) / SUM(col) / AVG(col) — a single bare aggregate, no CASE/arithmetic/
-    function. These carry no judgment beyond the column's (already-confirmed) aggregation class."""
-    return bool(_TRIVIAL_BINDING_RE.match(binding_sql or ""))
+def _duration_family(name: str) -> str:
+    """planned / actual / "" — a duration pairs a start and an end of the SAME family, never a
+    planned start with an actual end."""
+    if _PLANNED_NAME_RE.search(name):
+        return "planned"
+    if _ACTUAL_NAME_RE.search(name):
+        return "actual"
+    return ""
 
 
-def _with_caveats(prose: str, caveats: list[str]) -> str:
-    """The caveat is the reason the metric was proposed, so it has to arrive with it.
+def _prefer_non_audit(cols: list[Column]) -> tuple[list[Column], bool]:
+    """The non-audit columns, or the audit ones (and True) when they are all there is."""
+    plain = [c for c in cols if not _AUDIT_NAME_RE.match(c.name)]
+    return (plain, False) if plain else (cols, bool(cols))
 
-    `Metric` has no caveats field, and of its two prose fields `calculation` is the one that is
-    always populated and is what a question is matched against — so the caveat goes there. A metric
-    proposed *because* a caveat exists, that then ships without it, is the empty metric #404
-    removes wearing a better justification. Appended, not substituted, so the intent reads first.
 
-    `description` is left empty, as it already was for every generated metric. That has a cost
-    worth naming: `tools`' `metric_index` falls back to the metric's own NAME when `description` is
-    empty, so on the `mode="index"` tier a caveat-justified metric still shows name-as-description
-    and the caveat appears only once the table is in scope. Filling it is a separate change with
-    its own shape (#406) rather than a second prose field written from the first.
-    """
-    return prose if not caveats else prose + ". " + " ".join(
-        c if c.rstrip().endswith((".", "!", "?")) else c.rstrip() + "." for c in caveats)
+# How many other pairings an ambiguous_pairing flag names; a wide table can have dozens.
+_LISTED_PAIRS = 3
+
+
+def _others(pairs: list[tuple[Column, Column]], this: tuple[Column, Column]) -> str:
+    rest = (f"{a.name}→{b.name}" for a, b in pairs if (a, b) != this)
+    shown = list(itertools.islice(rest, _LISTED_PAIRS))
+    more = len(pairs) - 1 - len(shown)
+    return ", ".join(shown) + (f" … and {more} more" if more else "")
+
+
+def _duration_pairs(ts_cols: list[Column]) -> list[tuple[Column, Column, str, list[dict]]]:
+    """(start, end, family, flags) for every start/end pairing worth offering."""
+    out = []
+    for fam in ("", "actual", "planned"):
+        mine = [c for c in ts_cols if _duration_family(c.name) == fam]
+        starts, s_audit = _prefer_non_audit([c for c in mine if _START_NAME_RE.search(c.name)])
+        ends, e_audit = _prefer_non_audit([c for c in mine if _END_NAME_RE.search(c.name)])
+        pairs = [(s, e) for s in starts for e in ends if s is not e]
+        for s, e in pairs:
+            flags = []
+            if len(pairs) > 1:
+                flags.append(_flag("ambiguous_pairing", f"{len(pairs)} start/end pairings fit; "
+                                   f"also offered: {_others(pairs, (s, e))}"))
+            if s_audit or e_audit:
+                which = ", ".join(c.name for c, a in ((s, s_audit), (e, e_audit)) if a)
+                flags.append(_flag("audit_column", f"{which} looks like an audit column (when the "
+                                   "row was written), the only candidate for this pairing"))
+            out.append((s, e, fam, flags))
+    return out
+
+
+def flag_columns(table: Table) -> list[Column]:
+    """The columns a share-of-true rate could be proposed on: boolean, or an integer named like a
+    flag (`is_*`/`has_*`/`*_flag`), not a key, and described (an `ai_unknown` one is skipped)."""
+    return [c for c in table.columns
+            if not c.primary_key and c.description_source != "ai_unknown"
+            and (c.type == "boolean" or (c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))))]
+
+
+def flag_rate_name(table: str, column: str) -> str:
+    return f"{table}_{column}_rate"
 
 
 def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
-                    now: Optional[str] = None) -> list[dict]:
+                    flag_rates: bool | Collection[str] = False) -> list[dict]:
     """Per-table reusable measures inferred STRUCTURALLY — all general, no vendor patterns:
-      • count of rows, when `COUNT(*)` may not be counting things or a caveat rides on it;
-      • SUM of `additive` columns, AVG of `averageable` columns (gated on aggregation class —
-        never SUM an id, never AVG a status code — and on carrying a unit or a caveat, #404);
-      • a RATE for each boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
-        pattern — fraction true);
-      • an AVG DURATION when a clear start+end timestamp pair exists (the `avg_resolution_time`
-        pattern — `AVG(end − start)` via the dialect's day-difference form).
+      • a RATE for a boolean / `is_*`/`has_*`/`*_flag` column (the `made_sla` / `reopen`
+        pattern — fraction true among the rows where the flag is set) — only when asked:
+        `flag_rates=True` for every flag column, or a collection of column names
+        (case-insensitive) for those. Proposed for every flag column they were most of the
+        suggested metrics on a large onboarding while the business defined one (#530);
+      • an AVG DURATION for each start+end timestamp pair (the `avg_resolution_time` pattern —
+        `AVG(end − start)` via the dialect's day-difference form for the columns' types), leaving
+        out rows where the end is before the start. A start pairs only with an end of the same
+        planned/actual family, and an audit column only when nothing else fits.
     Returns proposed/unreviewed Metric dicts for curate.write_items; the user signs them off in
-    bulk in the explorer. Capped at max_per_table. A mechanically trivial binding auto-approves
-    with a system sign-off UNLESS its prose carries a caveat — that caveat is unverified words, and
-    words are the part a person has to confirm.
+    bulk in the explorer. Capped at max_per_table. Each one pairs columns or picks a condition —
+    a choice the engine could get wrong — so none of them is auto-approved.
+
+    Each dict also carries `_proposal`, which is not a Metric field and is popped before writing:
+    `flags` (why a person should look before it is kept — an ambiguous or audit pairing, a table
+    under TINY_TABLE_ROWS rows), `columns` (what the binding reads) and `row_expr` (the per-row
+    value the binding averages, which a test run checks for a constant result).
+
+    A plain COUNT(*) / SUM(col) / AVG(col) is never proposed. `runtime._check_aggregation_semantics`
+    enforces a column's `aggregation` class on every statement with or without a named metric, and
+    everything such a metric could carry beyond its name already reaches the agent on the table it
+    opens: the column's `unit` (which the formatter also carries through SUM/AVG), the table's and
+    column's `caveats`, and the table's `grain`. So `{t}_total_{c}` adds a name and nothing else;
+    proposed per table and per column it was most of a wide model's catalogue (137 of 175, #404),
+    every entry listed by its own name (#406). A curator can still add any plain metric by hand.
+
+    The generator writes `calculation` only. `description` — the one-line label the metric index
+    shows and search matches — says what the metric is FOR, which is judgement it cannot derive; the
+    agami-connect skill writes it (#406).
 
     Columns agami couldn't read (`description_source == "ai_unknown"`) are SKIPPED — we don't
     propose a metric on a column we can't explain (its prose would just restate opaque SQL).
@@ -678,121 +1028,59 @@ def suggest_metrics(table: Table, dialect, *, max_per_table: int = 10,
     t = table.name
     st = dialect.name
     out: list[dict] = []
-    # A plain aggregate over a column whose `aggregation` class already licenses it is not a
-    # metric — `runtime._check_aggregation_semantics` enforces that class on every statement,
-    # with or without a named metric, so `{t}_total_{c}` adds a name and nothing else. Proposed
-    # per table and per column it produced most of a wide model's catalogue: 137 of 175 served
-    # metrics whose whole binding was a bare COUNT(*)/SUM(col)/AVG(col) (#404).
-    #
-    # A plain aggregate is proposed only when the PROPOSAL carries something the class does not —
-    # and only something the generator actually writes onto the metric: a unit (the `unit` field),
-    # a caveat (appended to the `calculation` prose), or a grain that makes `COUNT(*)` count
-    # something other than things. A table `default_filters` deliberately does NOT license one:
-    # execute_sql does not apply default filters, and a bare `COUNT(*)` binding does not embed
-    # them, so a filtered table's plain count says exactly as little as any other. A curator can
-    # still add any plain metric by hand; this is only what the generator proposes unprompted.
-    #
-    # One primary key means one row per thing, so COUNT(*) counts things. A composite or absent
-    # grain means it may not, and THAT is worth naming. The two clauses agree on an INTROSPECTED
-    # model — `introspect` derives `primary_key` from `grain`, so they can differ only in order —
-    # and the grain clause is there for the curated case, where a column can be marked a key
-    # without being part of the declared grain.
-    pk_cols = [c.name for c in table.columns if c.primary_key]
-    counts_things = len(pk_cols) == 1 and list(table.grain or []) == pk_cols
-    t_caveats = list(table.caveats or [])
-    # Names whose prose carries a caveat, so the sign-off pass below can tell them from the
-    # genuinely judgment-free ones. Tracked by name rather than a key on the dict, which would
-    # have to be stripped again before `curate.write_items` validates it as a Metric.
-    caveated: set[str] = set()
-    if t_caveats or not counts_things:
-        out.append({"name": f"{t}_count",
-                    "calculation": _with_caveats(f"Number of {t} records", t_caveats),
-                    "bindings": {st: "COUNT(*)"}, "source_tables": [t]})
-        if t_caveats:
-            caveated.add(f"{t}_count")
-    ts_cols: list[str] = []
-    for c in table.columns:
-        if c.primary_key:
+    flags_here = flag_columns(table)
+    wanted = (None if flag_rates is True
+              else {n.lower() for n in flag_rates} if flag_rates else set())
+    for c in flags_here:
+        if wanted is not None and c.name.lower() not in wanted:
             continue
-        if c.description_source == "ai_unknown":  # opaque column → don't propose a metric on it
-            continue
-        is_bool = c.type == "boolean"
-        is_int_flag = c.type == "integer" and bool(_FLAG_NAME_RE.match(c.name))
-        if is_bool or is_int_flag:
-            cond = c.name if is_bool else f"{c.name} <> 0"
-            out.append({"name": f"{t}_{c.name}_rate",
-                        "calculation": f"Fraction of {t} where {c.name} is true",
-                        "bindings": {st: f"AVG(CASE WHEN {cond} THEN 1.0 ELSE 0.0 END)"},
-                        "source_tables": [t]})
-            continue
-        # A plain SUM/AVG is proposed only when something beyond the aggregation class rides on
-        # the metric itself: a unit the formatter needs, or a caveat the aggregate must respect.
-        # Without one of those the class already says everything the metric would.
-        c_caveats = list(c.caveats or [])
-        worth_naming = bool(c_caveats) or bool(c.unit)
-        if c.aggregation == "additive" and worth_naming:
-            m = {"name": f"{t}_total_{c.name}",
-                 "calculation": _with_caveats(f"Total {c.name} across {t}", c_caveats),
-                 "bindings": {st: f"SUM({c.name})"}, "source_tables": [t]}
-            if c.unit:  # SUM(col) carries the column's unit — USD column → USD total
-                m["unit"] = c.unit
-            out.append(m)
-            if c_caveats:
-                caveated.add(m["name"])
-        elif c.aggregation == "averageable" and worth_naming:
-            m = {"name": f"{t}_avg_{c.name}",
-                 "calculation": _with_caveats(f"Average {c.name} in {t}", c_caveats),
-                 "bindings": {st: f"AVG({c.name})"}, "source_tables": [t]}
-            if c.unit:  # AVG(col) is in the same unit as the column
-                m["unit"] = c.unit
-            out.append(m)
-            if c_caveats:
-                caveated.add(m["name"])
-        if c.type in _TS_TYPES:
-            ts_cols.append(c.name)
-    starts = [c for c in ts_cols if _START_NAME_RE.search(c)]
-    ends = [c for c in ts_cols if _END_NAME_RE.search(c)]
-    if starts and ends and starts[0] != ends[0]:
-        s, e = starts[0], ends[0]
-        out.append({"name": f"{t}_avg_duration_days",
-                    "calculation": f"Average days from {s} to {e} in {t}",
-                    "bindings": {st: f"AVG({dialect.duration_days_expr(s, e)})"},
-                    "source_tables": [t], "unit": "days"})
-    # Clamped, not floored at 1: a row count is no longer unconditional so `0` can honestly mean
-    # none, but a negative cap must not fall through to Python's negative slice, where `-1` would
-    # quietly return every proposal except the last.
+        row = dialect.flag_rate_expr(dialect.ident(c.name), boolean=c.type == "boolean")
+        out.append({"name": flag_rate_name(t, c.name),
+                    "calculation": f"Fraction of {t} where {c.name} is true, among the rows "
+                                   f"where {c.name} is set (rows where it is NULL are left out)",
+                    "bindings": {st: f"AVG({row})"},
+                    "source_tables": [t],
+                    "_proposal": {"flags": [], "columns": [c.name], "row_expr": row}})
+    ts_cols = [c for c in table.columns
+               if not c.primary_key and c.description_source != "ai_unknown"
+               and c.type in _TS_TYPES]
+    pairs = _duration_pairs(ts_cols)
+    for s, e, fam, flags in pairs:
+        days = dialect.duration_days_expr(dialect.ident(s.name), dialect.ident(e.name),
+                                          start_type=s.type, end_type=e.type)
+        guard = dialect.duration_guard(dialect.ident(s.name), dialect.ident(e.name),
+                                       start_type=s.type, end_type=e.type)
+        row = f"CASE WHEN {guard} THEN {days} END"
+        same_family = [p for p in pairs if p[2] == fam]
+        name = (f"{t}_avg_days_{s.name}_to_{e.name}" if len(same_family) > 1
+                else f"{t}_avg_{fam + '_' if fam else ''}duration_days")
+        out.append({"name": name,
+                    "calculation": f"Average days from {s.name} to {e.name} in {t}; rows where "
+                                   f"{e.name} is before {s.name} are left out",
+                    "bindings": {st: f"AVG({row})"},
+                    "source_tables": [t], "unit": "days",
+                    "_proposal": {"flags": flags, "columns": [s.name, e.name], "row_expr": row}})
+    # Clamped, not floored at 1: `0` honestly means none, but a negative cap must not fall through
+    # to Python's negative slice, where `-1` would quietly return every proposal except the last.
     out = out[: max(0, max_per_table)]
+    rows = table.performance_hints.estimated_row_count if table.performance_hints else None
     for m in out:
-        binding = next(iter(m.get("bindings", {}).values()), "")
-        # A caveat-carrying metric is NOT judgment-free, however trivial its binding. Before #404
-        # a plain aggregate was proposed for every eligible column and auto-approving it claimed
-        # only that `SUM(col)` is `SUM(col)`; now such a metric survives precisely because someone
-        # attached a caveat to the column or table, that caveat is the metric's whole justification,
-        # and it is carried as prose the engine did not verify. So it goes to the review queue for
-        # the same reason a rate or a duration does — the part a person has to confirm is words,
-        # not arithmetic.
-        if _is_trivial_measure(binding) and m["name"] not in caveated:
-            # mechanically sound (COUNT(*) / SUM(col) / AVG(col)) — auto-approve with a system
-            # sign-off so it skips the review queue, exactly like an enforced FK join.
-            m["confidence"] = "confirmed"
-            m["review_state"] = "approved"
-            m["signed_off_by"] = "agami_suggest"
-            m["signed_off_role"] = "system"
-            if now:
-                m["signed_off_at"] = now
-        else:
-            # a flag RATE or a DURATION pair — heuristic choice the engine could get wrong.
-            m["confidence"] = "proposed"
-            m["review_state"] = "unreviewed"
+        m["confidence"] = "proposed"
+        m["review_state"] = "unreviewed"
         m["primary_table"] = t  # every suggested metric is single-table — anchor it there
+        if rows is not None and 0 <= rows < TINY_TABLE_ROWS:
+            m["_proposal"]["flags"].append(_flag(
+                "low_confidence", f"{t} has about {rows} rows (under {TINY_TABLE_ROWS})"))
     return out
 
 
 __all__ = [
-    "SENSITIVE_RE", "detect_sensitive", "detect_money_column",
+    "SENSITIVE_RE", "STRONG_PII_RE", "WEAK_PII_RE", "detect_sensitive", "detect_money_column",
+    "suggest_unit", "name_currency", "name_words",
     "derive_column_groups", "column_group_descriptions", "maybe_column_groups",
-    "infer_cardinality", "cluster_by_family", "make_area", "make_table_ref",
+    "infer_cardinality", "cluster_by_family", "group_by_joins", "make_area", "make_table_ref",
     "propose_subject_areas", "extract_cross_area_relationships",
-    "suggest_metrics", "suspected_pii", "canonical_description",
+    "suggest_metrics", "flag_columns", "flag_rate_name", "suspected_pii", "suspected_reason",
+    "canonical_description",
     "write_tree", "WriteReport",
 ]

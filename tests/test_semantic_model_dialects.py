@@ -65,6 +65,22 @@ def test_quoting_per_family():
     assert D.get_dialect("sqlserver").quote_ident("x") == "[x]"
 
 
+@pytest.mark.parametrize("key", ["mysql", "snowflake", "bigquery", "databricks"])
+def test_a_trailing_backslash_cannot_end_the_literal_where_it_escapes(key):
+    """These engines read `\\` as an escape inside a string literal, so `'acme\\'` would leave the
+    literal open (#439)."""
+    d = D.get_dialect(key)
+    assert d.quote_lit("acme\\") == "'acme\\\\'"
+    assert d.quote_lit("it's\\") == "'it''s\\\\'"
+    assert d.quote_lit("orders\\") in d.sql_columns("SALES_DATA", "orders\\")
+
+
+@pytest.mark.parametrize("key", ["postgres", "sqlite", "sqlserver", "duckdb", "trino", "oracle"])
+def test_a_backslash_stays_literal_where_it_does_not_escape(key):
+    """Doubling it here would change the name being looked up."""
+    assert D.get_dialect(key).quote_lit("acme\\") == "'acme\\'"
+
+
 # --- row-limit syntax ---
 
 
@@ -99,6 +115,74 @@ def test_bigquery_regioned_information_schema():
 def test_mysql_fk_uses_referenced_columns():
     d = D.get_dialect("mysql")
     assert "referenced_table_name" in d.sql_foreign_keys("s")
+
+
+@pytest.mark.parametrize("key", ["postgres", "supabase"])
+def test_postgres_keys_read_pg_constraint_not_information_schema(key):
+    # information_schema hides constraints from a SELECT-only role; pg_constraint does not.
+    d = D.get_dialect(key)
+    pk, fk = d.sql_primary_keys("s", "t"), d.sql_foreign_keys("s")
+    for sql in (pk, fk):
+        assert "pg_constraint" in sql and "information_schema" not in sql.lower()
+    assert "contype = 'p'" in pk and "column_name" in pk and "ORDER BY k.ord" in pk
+    assert "contype = 'f'" in fk
+    for alias in ("from_table", "from_column", "from_schema", "to_table", "to_column", "to_schema"):
+        assert f"AS {alias}" in fk
+    assert "nspname = 's'" in pk and "relname = 't'" in pk and "nspname = 's'" in fk
+
+
+def test_redshift_keeps_information_schema_keys():
+    # No LATERAL or unnest ... WITH ORDINALITY on Redshift, so it must not inherit the pg_constraint form.
+    d = D.get_dialect("redshift")
+    assert "information_schema.table_constraints" in d.sql_primary_keys("s", "t")
+    assert "information_schema.table_constraints" in d.sql_foreign_keys("s")
+    assert "pg_constraint" not in d.sql_primary_keys("s", "t") + d.sql_foreign_keys("s")
+
+
+def test_redshift_reads_columns_from_svv_columns():
+    # A late-binding view's columns are absent from information_schema.columns, so a schema of such
+    # views introspected as columnless tables. svv_columns lists them, under the same field names.
+    d = D.get_dialect("redshift")
+    one, bulk = d.sql_columns("s", "t"), d.sql_columns_bulk(["s"])
+    for sql in (one, bulk):
+        assert "FROM svv_columns" in sql and "information_schema.columns" not in sql
+    assert "table_schema = 's'" in one and "table_name = 't'" in one
+    assert "table_schema IN ('s')" in bulk
+    assert d.sql_columns_bulk([]) is None
+    # PostgreSQL itself keeps the standard catalog.
+    assert "information_schema.columns" in D.get_dialect("postgres").sql_columns("s", "t")
+
+
+def test_redshift_lists_schemas_the_user_may_use_not_only_owns():
+    # information_schema.schemata lists only owned schemas on Redshift, so a read-only role listed
+    # none and discovery found no tables (#558).
+    d = D.get_dialect("redshift")
+    sql = d.sql_schemas()
+    assert "FROM pg_namespace" in sql and "information_schema.schemata" not in sql
+    assert "has_schema_privilege(nspname, 'USAGE')" in sql
+    assert "'information_schema', 'pg_catalog'" in sql and "LEFT(nspname, 3) <> 'pg_'" in sql
+    assert "AS schema_name" in sql
+    # PostgreSQL itself keeps the standard view, which lists schemas the user has any privilege on.
+    assert "information_schema.schemata" in D.get_dialect("postgres").sql_schemas()
+
+
+def test_redshift_discovery_finds_tables_for_a_role_that_owns_no_schema():
+    from semantic_model import introspect as I
+
+    d = D.get_dialect("redshift")
+
+    def runner(sql: str) -> list[dict]:
+        if "information_schema.schemata" in sql:
+            return []  # what a role that owns nothing sees on Redshift
+        if "FROM pg_namespace" in sql:
+            return [{"schema_name": "sales"}]
+        if "information_schema.tables" in sql and "'sales'" in sql:
+            return [{"schema_name": "sales", "table_name": "orders_v", "table_type": "VIEW"}]
+        return []
+
+    report = I.IntrospectReport(profile="p", db_type="redshift", out_dir="o", dry_run=True)
+    assert I._discover_tables(d, runner, None, report) == [("sales", "orders_v")]
+    assert report.mode_per_capability["tables"] == "catalog"
 
 
 def test_unenforced_fk_dialects_flagged():

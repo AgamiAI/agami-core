@@ -72,6 +72,12 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
     org_id = org_id if org_id is not None else _default_org()
     # --- read + parse everything first (where malformed input fails, before any write) ---
     org = loader.load_datasource(profile_dir)
+    unknown = loader.unknown_datasource_keys(profile_dir)
+    if unknown:
+        # A warning, not a failure (#575): those fields are not deployed, which is exactly what has to
+        # be said here, since the stored model is what every caller is served.
+        print(f"model_deploy: datasource {datasource!r}: {loader.unknown_keys_message(unknown)}",
+              file=sys.stderr)
     if not (org.description or "").strip():
         # A warning, not a failure (#327): the model is still correct without one. But the description is
         # the one line `list_datasources` gives an agent to route a question by, and on an organization
@@ -94,7 +100,7 @@ def deploy_one(store: Store, datasource: str, profile_dir: Path, org_id: str | N
             continue
         examples.extend({**ex, "area": ex.get("area") or sa.name} for ex in area_examples if isinstance(ex, dict))
     datasource_md = profile_dir / "datasource.md"
-    datasource_text = datasource_md.read_text() if datasource_md.exists() else None
+    datasource_text = datasource_md.read_text(encoding="utf-8") if datasource_md.exists() else None
     # The hash of the tree being deployed, not the newest snapshot's name: a model edited without a new
     # snapshot would otherwise deploy under the previous version, and one never snapshotted under the
     # constant "deployed", so a client pinning the version could never see it change (#364).
@@ -119,7 +125,7 @@ def _deploy_user_memory(store: Store, artifacts_dir: Path, org_id: str | None = 
     f = artifacts_dir / "USER_MEMORY.md"
     if f.exists():
         org_id = org_id if org_id is not None else _default_org()
-        model_store.write_memory(store, "", user=f.read_text(), org_id=org_id)  # global user row
+        model_store.write_memory(store, "", user=f.read_text(encoding="utf-8"), org_id=org_id)  # global user row
         store.commit()
 
 
@@ -142,7 +148,7 @@ def _deploy_org_record(store: Store, artifacts_dir: Path, org_id: str | None = N
         # (datasource='' sentinel, like USER_MEMORY.md) so the served two-level context can read it.
         narrative = OR.narrative_path(artifacts_dir)
         if narrative.exists():
-            model_store.write_memory(store, "", datasource_doc=narrative.read_text(), org_id=org_id)
+            model_store.write_memory(store, "", datasource_doc=narrative.read_text(encoding="utf-8"), org_id=org_id)
 
 
 def deploy_models(store: Store, artifacts_dir: Path, org_id: str | None = None) -> list[str]:

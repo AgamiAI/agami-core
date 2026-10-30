@@ -4,7 +4,7 @@
       "content": [
         {
           "type": "text",
-          "text": "{\n  \"status\": \"ok\",\n  \"columns\": [\n    \"id\"\n  ],\n  \"rows\": [\n    [\n      \"1\"\n    ],\n    [\n      \"2\"\n    ]\n  ],\n  \"row_count\": 2,\n  \"units\": {},\n  \"markdown\": \"| id |\\n| --- |\\n| 1 |\\n| 2 |\",\n  \"sql\": \"SELECT id FROM orders\",\n  \"execution_ms\": \"<volatile>\",\n  \"receipt\": {\n    \"model_version\": null,\n    \"columns\": {\n      \"items\": [\n        {\n          \"kind\": \"output\",\n          \"column\": \"id\",\n          \"aggregate\": false,\n          \"scope\": \"main\",\n          \"status\": \"unmatched\",\n          \"name\": null,\n          \"area\": null,\n          \"definition_prose\": null,\n          \"expression\": null,\n          \"confidence\": null,\n          \"origin\": null,\n          \"review_state\": null,\n          \"signed_off_by\": null,\n          \"signed_off_role\": null,\n          \"signed_off_at\": null,\n          \"source_tables\": null\n        },\n        {\n          \"kind\": \"reference\",\n          \"column\": \"public.orders.id\"\n        }\n      ],\n      \"undetermined\": null\n    },\n    \"tables\": {\n      \"items\": [\n        {\n          \"ref\": \"orders\",\n          \"alias\": null,\n          \"qname\": \"public.orders\",\n          \"declared\": true,\n          \"rows\": null,\n          \"rows_as_of\": null,\n          \"freshness\": null,\n          \"scope\": \"main\",\n          \"filters\": []\n        }\n      ],\n      \"undetermined\": null\n    },\n    \"joins\": {\n      \"items\": [],\n      \"undetermined\": null\n    },\n    \"aggregates\": {\n      \"items\": [],\n      \"undetermined\": null\n    },\n    \"assumptions\": {\n      \"items\": [],\n      \"undetermined\": null\n    }\n  },\n  \"audit_id\": \"<volatile>\",\n  \"caller_identity\": \"jordan@example.com\"\n}"
+          "text": "{\"status\":\"ok\",\"columns\":[\"id\"],\"rows\":[[\"1\"],[\"2\"]],\"row_count\":2,\"units\":{},\"markdown\":\"| id |\\n| --- |\\n| 1 |\\n| 2 |\",\"sql\":\"SELECT id FROM orders\",\"execution_ms\":\"<volatile>\",\"receipt\":{\"model_version\":null,\"columns\":{\"items\":[{\"kind\":\"output\",\"column\":\"id\",\"aggregate\":false,\"scope\":\"main\",\"status\":\"unmatched\",\"name\":null,\"area\":null,\"definition_prose\":null,\"expression\":null,\"confidence\":null,\"origin\":null,\"review_state\":null,\"signed_off_by\":null,\"signed_off_role\":null,\"signed_off_at\":null,\"source_tables\":null},{\"kind\":\"reference\",\"column\":\"public.orders.id\"}],\"undetermined\":null},\"tables\":{\"items\":[{\"ref\":\"orders\",\"alias\":null,\"qname\":\"public.orders\",\"declared\":true,\"rows\":null,\"rows_as_of\":null,\"scan_risk\":null,\"freshness\":null,\"scope\":\"main\",\"filters\":[]}],\"undetermined\":null},\"joins\":{\"items\":[],\"undetermined\":null},\"aggregates\":{\"items\":[],\"undetermined\":null},\"assumptions\":{\"items\":[],\"undetermined\":null}},\"audit_id\":\"<volatile>\",\"caller_identity\":\"jordan@example.com\"}"
         }
       ],
       "isError": false
@@ -32,7 +32,14 @@
       "basis": null,
       "conversation_id": "<volatile>",
       "client_model": null,
-      "datasource_source": "explicit"
+      "datasource_source": "explicit",
+      "example_id": null,
+      "example_use": null,
+      "arguments": null,
+      "missed": null,
+      "miss_count": null,
+      "result_chars": "<volatile>",
+      "result_tokens_est": "<volatile>"
     }
   },
   "refused": {
@@ -40,7 +47,7 @@
       "content": [
         {
           "type": "text",
-          "text": "{\n  \"status\": \"refused\",\n  \"refusal\": {\n    \"reason\": \"unsafe\",\n    \"rule\": \"read_only\",\n    \"detail\": \"only SELECT / WITH...SELECT is allowed (statement starts with DELETE)\",\n    \"remediation\": \"Rewrite as a read-only SELECT or WITH\\u2026SELECT.\"\n  },\n  \"sql\": \"DELETE FROM orders\",\n  \"receipt\": {\n    \"model_version\": null,\n    \"columns\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"tables\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"joins\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"aggregates\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    },\n    \"assumptions\": {\n      \"items\": [],\n      \"undetermined\": \"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"\n    }\n  },\n  \"audit_id\": \"<volatile>\",\n  \"caller_identity\": \"jordan@example.com\"\n}"
+          "text": "{\"status\":\"refused\",\"refusal\":{\"reason\":\"unsafe\",\"rule\":\"read_only\",\"detail\":\"only SELECT / WITH...SELECT is allowed (statement starts with DELETE)\",\"remediation\":\"Rewrite as a read-only SELECT or WITH\\u2026SELECT.\"},\"sql\":\"DELETE FROM orders\",\"receipt\":{\"model_version\":null,\"columns\":{\"items\":[],\"undetermined\":\"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"},\"tables\":{\"items\":[],\"undetermined\":\"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"},\"joins\":{\"items\":[],\"undetermined\":\"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"},\"aggregates\":{\"items\":[],\"undetermined\":\"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"},\"assumptions\":{\"items\":[],\"undetermined\":\"The statement was refused before any semantic model was consulted, so nothing in it was checked against one.\"}},\"audit_id\":\"<volatile>\",\"caller_identity\":\"jordan@example.com\"}"
         }
       ],
       "isError": false
@@ -68,7 +75,14 @@
       "basis": null,
       "conversation_id": "<volatile>",
       "client_model": null,
-      "datasource_source": "explicit"
+      "datasource_source": "explicit",
+      "example_id": null,
+      "example_use": null,
+      "arguments": null,
+      "missed": null,
+      "miss_count": null,
+      "result_chars": "<volatile>",
+      "result_tokens_est": "<volatile>"
     }
   },
   "failed": {
@@ -76,7 +90,7 @@
       "content": [
         {
           "type": "text",
-          "text": "{\n  \"status\": \"failed\",\n  \"failure\": {\n    \"kind\": \"table_not_found\",\n    \"message\": \"The statement referenced a table this database does not have. If the model was built against an older schema, re-introspect the datasource.\"\n  },\n  \"sql\": \"SELECT id FROM returns\",\n  \"execution_ms\": \"<volatile>\",\n  \"receipt\": {\n    \"model_version\": null,\n    \"columns\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    },\n    \"tables\": {\n      \"items\": [\n        {\n          \"ref\": \"returns\",\n          \"declared\": true\n        }\n      ],\n      \"undetermined\": \"A refused statement is told which of the names it wrote the model declares, and nothing further about any of them: no resolved name, no row estimate, no freshness.\"\n    },\n    \"joins\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    },\n    \"aggregates\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    },\n    \"assumptions\": {\n      \"items\": [],\n      \"undetermined\": \"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"\n    }\n  },\n  \"audit_id\": \"<volatile>\",\n  \"caller_identity\": \"jordan@example.com\"\n}"
+          "text": "{\"status\":\"failed\",\"failure\":{\"kind\":\"table_not_found\",\"message\":\"The statement referenced a table this database does not have. If the model was built against an older schema, re-introspect the datasource.\"},\"sql\":\"SELECT id FROM returns\",\"execution_ms\":\"<volatile>\",\"receipt\":{\"model_version\":null,\"columns\":{\"items\":[],\"undetermined\":\"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"},\"tables\":{\"items\":[{\"ref\":\"returns\",\"declared\":true}],\"undetermined\":\"A refused statement is told which of the names it wrote the model declares, and nothing further about any of them: no resolved name, no row estimate, no freshness.\"},\"joins\":{\"items\":[],\"undetermined\":\"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"},\"aggregates\":{\"items\":[],\"undetermined\":\"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"},\"assumptions\":{\"items\":[],\"undetermined\":\"Withheld because the statement was refused. Reporting these would name parts of the model the statement never referenced, which would turn a refusal into a listing of the model.\"}},\"audit_id\":\"<volatile>\",\"caller_identity\":\"jordan@example.com\"}"
         }
       ],
       "isError": false
@@ -104,7 +118,14 @@
       "basis": null,
       "conversation_id": "<volatile>",
       "client_model": null,
-      "datasource_source": "explicit"
+      "datasource_source": "explicit",
+      "example_id": null,
+      "example_use": null,
+      "arguments": null,
+      "missed": null,
+      "miss_count": null,
+      "result_chars": "<volatile>",
+      "result_tokens_est": "<volatile>"
     }
   }
 }

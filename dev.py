@@ -48,10 +48,19 @@ _ROOT = Path(__file__).resolve().parent
 # package; `sync-lib` regenerates the copy and `check` fails on drift.
 _LIB_SRC = _ROOT / "packages" / "agami-core" / "src"
 _LIB_DST = _ROOT / "plugins" / "agami" / "lib"
-# The module-load import closure of the 4 scripts (all stdlib-only). tests/test_plugin_lib_resolution.py
-# fails if a script gains a module-level import that's missing here; a new *lazy* import from the package
-# would also need adding to this list.
-_VENDORED = ["agami_paths.py", "execute_sql.py", "guardrail.py", "sql_guard.py", "semantic_model/__init__.py", "semantic_model/units.py"]
+# The module-load import closure of the 4 scripts (all stdlib-only), as source path -> path under lib/.
+# tests/test_plugin_lib_resolution.py fails if a script gains a module-level import that's missing here; a
+# new *lazy* import from the package would also need adding. `units.py` lands under a private top-level
+# name: a partial `lib/semantic_model/` package would shadow the installed one whenever lib/ is first on
+# sys.path (#539).
+_VENDORED = {
+    "agami_paths.py": "agami_paths.py",
+    "execute_sql.py": "execute_sql.py",
+    "guardrail.py": "guardrail.py",
+    "sql_guard.py": "sql_guard.py",
+    "sql_dialect_rules.py": "sql_dialect_rules.py",
+    "semantic_model/units.py": "_semantic_model_units.py",
+}
 
 
 def run(cmd: list[str], *, allow_fail: bool = False) -> int:
@@ -84,10 +93,10 @@ def secrets() -> int:
 
 def sync_lib() -> int:
     """Regenerate plugins/agami/lib/ from packages/agami-core/src (the vendored closure the scripts import)."""
-    for rel in _VENDORED:
+    for src, rel in _VENDORED.items():
         dst = _LIB_DST / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(_LIB_SRC / rel, dst)
+        shutil.copyfile(_LIB_SRC / src, dst)
         print(f"  synced {dst.relative_to(_ROOT)}")
     return 0
 
@@ -96,8 +105,8 @@ def _lib_drift() -> int:
     """Fail if plugins/agami/lib/ has drifted from packages/agami-core/src (someone edited the source)."""
     drifted = [
         rel
-        for rel in _VENDORED
-        if not (_LIB_DST / rel).exists() or not filecmp.cmp(_LIB_SRC / rel, _LIB_DST / rel, shallow=False)
+        for src, rel in _VENDORED.items()
+        if not (_LIB_DST / rel).exists() or not filecmp.cmp(_LIB_SRC / src, _LIB_DST / rel, shallow=False)
     ]
     if drifted:
         print(f"\n$ lib drift check\n  ✗ plugins/agami/lib is stale: {', '.join(drifted)}"

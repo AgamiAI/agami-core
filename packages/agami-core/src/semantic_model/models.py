@@ -35,19 +35,34 @@ validator gives via `additionalProperties: false`.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+import re
+from typing import Any, Iterable, Literal, Optional
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    constr,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
+# Words that carry no meaning in a one-line label, so a description made of the name plus these
+# says nothing the name did not (`Metric.described`).
+_LABEL_FILLER = frozenset({"the", "a", "an", "of"})
+
+
+def _label_words(text: str) -> frozenset[str]:
+    # A naive plural fold, so "orders" and "order" are one word; applied to both sides alike, so a
+    # word it mangles ("class" → "clas") still matches itself.
+    words = re.findall(r"[^\W_]+", text.lower())
+    return frozenset(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words) - _LABEL_FILLER
+
 
 
 def bare_name(qualified: str) -> str:
@@ -81,6 +96,24 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     bare = bare_name(name or "")
     embedded = parts[-2] if len(parts) > 1 else None
     return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
+
+
+def stored_identity(name: str, schema: Optional[str] = None) -> tuple[str, str]:
+    """``(schema, bare name)`` as written, '' for a schema the model does not give.
+
+    What `model_table` is keyed by (#258). Not folded, unlike `table_key`: the store keeps the
+    model's own spelling, and two definitions that differ only by case are the validator's to catch.
+    The schema may be embedded in the name, read the same way `table_key` reads it, but only when
+    the `schema` field does not give it: introspection stores the two apart, so with a schema set a
+    dot in the name is part of the name (Postgres `public."orders.v2"`), unless the name merely
+    repeats that schema (`public.orders` with `schema: public`).
+    """
+    name = name or ""
+    if schema not in (None, ""):
+        prefix = f"{schema}."
+        return schema, name[len(prefix):] if name.lower().startswith(prefix.lower()) else name
+    parts = name.split(".")
+    return (parts[-2] if len(parts) > 1 else ""), parts[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -260,8 +293,9 @@ class Column(_Base):
     description_source: Optional[DescriptionSource] = None
     primary_key: bool = False
     foreign_key: Optional[ForeignKey] = None
-    # enum semantics: maps stored value -> human meaning
-    choice_field: Optional[dict[str, str]] = None
+    # enum semantics: maps stored value -> human meaning. The stored value is kept exactly, never
+    # trimmed (#517): a query must match 'Open ' to find those rows.
+    choice_field: Optional[dict[constr(strip_whitespace=False), str]] = None
     # How this column may be aggregated as a measure (additive / averageable / dimension).
     # Set by an introspection heuristic, refined by the curator. Consumed by the query-time
     # enforcement layer (e.g. refuse SUM of an `averageable` price, or AVG of a `dimension`
@@ -270,7 +304,8 @@ class Column(_Base):
     sensitive: bool = False
     # declarative cleaning/transform SQL (regexp_replace, TO_TIMESTAMP, …)
     value_transform: Optional[str] = None
-    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…)
+    # Display unit for the column's values. A currency ISO code (INR/USD/EUR/…),
+    # optionally scaled and/or a rate (USD_millions, USD/day — grammar in units.py),
     # drives a deterministic symbol + grouping in the formatter/chart renderer;
     # other units (cents, percent, days, ms) surface as a label. This is the
     # structured home for the onboarding "what currency are these in?" answer —
@@ -338,6 +373,9 @@ class Table(_Base):
 
     # composite-key-aware primary key; the source of truth for grain.
     grain: list[str] = Field(default_factory=list)
+    # Every other unique key the database declares, one list of columns per key. Read by join
+    # cardinality: a join on the whole of one is one row per value, like a join on the grain.
+    unique_keys: list[list[str]] = Field(default_factory=list)
     description: str = ""  # ONE line — what is this table
     # provenance of `description` — drives "earn trust through use" (advisory, not a gate)
     description_source: Optional[DescriptionSource] = None
@@ -394,6 +432,25 @@ class Table(_Base):
             raise ValueError(f"table {self.name!r}: sql must be empty when source_type='table'")
         return self
 
+    @model_validator(mode="after")
+    def _unique_keys_resolve(self) -> "Table":
+        names = self.column_names()
+        for key in self.unique_keys:
+            if not key or len(set(key)) != len(key):
+                raise ValueError(f"table {self.name!r}: unique_keys entry {key} must name distinct columns")
+            missing = [c for c in key if c not in names]
+            if missing:
+                raise ValueError(f"table {self.name!r}: unique_keys names unknown column(s) {missing}")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_unique_keys(self, handler: Any) -> Any:
+        # Left out when empty so a table without one dumps as before; an older release forbids the key.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("unique_keys"):
+            data.pop("unique_keys", None)
+        return data
+
     @field_validator("caveats")
     @classmethod
     def _caveats_nonempty(cls, v: list[str]) -> list[str]:
@@ -403,6 +460,15 @@ class Table(_Base):
         return v
 
     # --- convenience accessors used by loader/validator ---
+
+    def unique_on(self, columns: Iterable[str]) -> bool:
+        """Whether `columns` are exactly the grain or exactly one unique key: one row per value.
+        Case-insensitive, since a catalog and a statement can spell one column two ways."""
+        cols = {c.lower() for c in columns}
+        if not cols:
+            return False
+        keys = [self.grain, *self.unique_keys]
+        return any(key and {k.lower() for k in key} == cols for key in keys)
 
     def column_names(self) -> set[str]:
         return {c.name for c in self.columns}
@@ -471,9 +537,11 @@ class Entity(_Base):
     caveats: list[str] = Field(default_factory=list)
     # rare override: force a clarifying question even when resolution is confident
     clarification_strictness: Optional[Literal["normal", "high"]] = None
-    # curation/trust — LLM-proposed entities default approved; reject to drop.
+    # curation/trust — entities are proposed by enrichment, so one waits in the review queue until
+    # a person approves it (which stamps the signer); an omitted review_state must not read as
+    # signed off (#508). Entities usable while unreviewed (Rule 2); reject to drop.
     confidence: Confidence = "confirmed"
-    review_state: ReviewState = "approved"
+    review_state: ReviewState = "unreviewed"
     signed_off_by: Optional[str] = None
     signed_off_at: Optional[str] = None
     signed_off_role: Optional[str] = None
@@ -515,8 +583,8 @@ class Metric(_Base):
     calculation: str
     # per-storage_type SQL bindings, e.g. {"PostgreSQL": "COUNT(DISTINCT ...)"}
     bindings: dict[str, str] = Field(default_factory=dict)
-    # display unit of the metric's output (e.g. a currency ISO code) so the
-    # formatter renders results deterministically (₹1,23,456 not 123456)
+    # display unit of the metric's output (e.g. a currency ISO code, or USD_millions /
+    # USD/day — grammar in units.py) so the formatter renders results deterministically
     unit: Optional[str] = None
     source_tables: list[str] = Field(default_factory=list)
     base_metrics: list[str] = Field(default_factory=list)
@@ -544,6 +612,9 @@ class Metric(_Base):
     # Empty for first-order / case-(a) metrics.
     inner_grain: list[str] = Field(default_factory=list)
     business_question: Optional[str] = None
+    # what the formula does not cover ("gives no value when the start date is missing"), kept out
+    # of description/calculation so it is served as a warning rather than read as the definition
+    caveats: list[str] = Field(default_factory=list)
     confidence: Confidence = "proposed"
     source: Optional[str] = None
     review_state: ReviewState = "unreviewed"
@@ -559,6 +630,23 @@ class Metric(_Base):
             raise ValueError("metric calculation (prose intent) must be non-empty")
         return v
 
+    @field_validator("caveats")
+    @classmethod
+    def _caveats_nonempty(cls, v: list[str]) -> list[str]:
+        for c in v:
+            if not c or not c.strip():
+                raise ValueError("caveats entries must be non-empty strings")
+        return v
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_caveats(self, handler: Any) -> Any:
+        # A metric without caveats dumps as before the field existed, so the file still loads on an
+        # older agami-core, which forbids unknown keys.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("caveats"):
+            data.pop("caveats", None)
+        return data
+
     @model_validator(mode="after")
     def _semi_additive_coherent(self) -> "Metric":
         # "how to collapse over a non-additive dimension" is meaningless without naming
@@ -569,6 +657,21 @@ class Metric(_Base):
                 "dimension(s) the metric can't be summed over (e.g. [\"time\"])"
             )
         return self
+
+    @property
+    def described(self) -> bool:
+        """True when `description` says something the metric's name does not (#406).
+
+        `description` is the one-line label `metric_index` shows and the metric search matches, so
+        an empty one — or the name in words, "Incident count" for `incident_count` — tells the agent
+        nothing the key did not. Such a metric is left out of `metric_index` and flagged by the
+        validator; its table's schema reply still returns it in full.
+
+        Words are Unicode letters and digits (`[^\\W_]`, which still splits on `_`): an ASCII-only
+        pattern read a description written wholly in another script as empty. It has to add a word
+        the name does not have — filler and plural endings aside — so "The revenue", "Count of
+        incidents" for `incident_count`, and "Revenue" for `gross_revenue` all restate the name."""
+        return bool(_label_words(self.description) - _label_words(self.name))
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +1023,71 @@ class SubjectArea(_Base):
 # ---------------------------------------------------------------------------
 
 
+class AmbiguityOption(_Base):
+    """One meaning of an ambiguous question: what to call it, and how to write the SQL for it."""
+
+    label: str
+    how: str
+    default: bool = False
+
+    @field_validator("label", "how")
+    @classmethod
+    def _not_blank(cls, v: str) -> str:
+        # The agent writes the SQL from `how`; an option without it leaves the meaning to a guess.
+        if not v.strip():
+            raise ValueError("must not be blank")
+        return v
+
+
+class Ambiguity(_Base):
+    """A kind of question the model owner knows can mean more than one thing (#473).
+
+    Guidance for the agent, not enforcement: `ask` means ask the user which option they mean before
+    running SQL; `answer_and_offer` means answer with the default option, say which one was used,
+    and offer the others. Either applies only when the question doesn't already settle the choice.
+    `applies_to` names the tables it concerns, so a scoped schema reply carries only the entries
+    for what's in scope; empty means the whole datasource.
+
+    It can be tied more finely (#477): `columns` (`table.column`), `column_groups` (`table.group`)
+    or `metrics` (metric names). Then the full entry arrives only with a reply that opens one of
+    them, and every other reply that reaches it carries a signpost saying what to open. They are
+    separate fields because `applies_to` already accepts `schema.table`."""
+
+    name: str
+    when: str
+    options: list[AmbiguityOption]
+    behaviour: Literal["ask", "answer_and_offer"] = "ask"
+    applies_to: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
+    column_groups: list[str] = Field(default_factory=list)
+    metrics: list[str] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_anchors(self, handler):
+        # A model without the finer anchors still dumps as 0.9.16 wrote it, so it loads on a server
+        # that doesn't know them (rollback safety, as for `Datasource.ambiguities`).
+        d = handler(self)
+        for k in ("columns", "column_groups", "metrics"):
+            if isinstance(d, dict) and not d.get(k):
+                d.pop(k, None)
+        return d
+
+    def anchored(self) -> bool:
+        """Tied to something narrower than the whole datasource."""
+        return bool(self.applies_to or self.columns or self.column_groups or self.metrics)
+
+    @model_validator(mode="after")
+    def _options(self) -> "Ambiguity":
+        if len(self.options) < 2:
+            raise ValueError(f"ambiguity {self.name!r} needs at least two options")
+        defaults = sum(1 for o in self.options if o.default)
+        if defaults > 1:
+            raise ValueError(f"ambiguity {self.name!r} marks {defaults} options as default; at most one")
+        if self.behaviour == "answer_and_offer" and not defaults:
+            raise ValueError(f"ambiguity {self.name!r} is answer_and_offer but has no default option")
+        return self
+
+
 class Datasource(_Base):
     # Locally-minted, globally-unique deployment identity (F14 / ACE-056): a uuid4 hex minted ONCE at
     # agami-connect and persisted in datasource.yaml, then immutable. Optional/None so pre-F14 datasource.yaml files
@@ -944,6 +1112,18 @@ class Datasource(_Base):
     # The structured home means it survives a datasource.md regeneration (a prose section
     # the LLM has to remember to write does not).
     key_terminology: dict[str, str] = Field(default_factory=dict)
+    # Questions the owner knows are ambiguous, and what the agent should do about each (#473).
+    ambiguities: list[Ambiguity] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_ambiguities(self, handler: Any) -> Any:
+        # Left out of every dump when empty, so a model with none declared serializes exactly as it
+        # did before this field existed. An older agami-core forbids unknown keys, and a stored model
+        # carrying `ambiguities: []` would stop it loading after a rollback.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("ambiguities"):
+            data.pop("ambiguities", None)
+        return data
 
     @field_validator("fiscal_year_start_month")
     @classmethod

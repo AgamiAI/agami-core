@@ -894,6 +894,7 @@ def _sm_json(*args: str, timeout_s: float) -> Any:
             ["bash", str(_SM), *args],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
             timeout=timeout_s,
         )

@@ -8,7 +8,7 @@ These are non-negotiable. Skills that read this document must follow them under 
 
 1. **Connect ONLY to the host/port/database/user/password in `<artifacts_dir>/local/credentials`** — the sole credential source; there is no env-var bypass. Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
 2. **Never ask the user for connection details in chat.** Credentials live in `<artifacts_dir>/local/credentials` only. If the file is missing, invoke agami-connect Phase 0a (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
-3. **Never scan or guess.** Tool detection is `which <tool>` and `python3 -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
+3. **Never scan or guess.** Tool detection is `which <tool>` and `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
    - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
@@ -46,13 +46,13 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 **`python -m execute_sql` CLI surface** — exhaustive, read before invoking:
 
 ```
-python3 execute_sql.py [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE | --batch PLAN) [--manifest PATH] [--area AREA]
+"$PY" -m execute_sql [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE | --batch PLAN) [--manifest PATH] [--area AREA]
 ```
 
-- **`--batch PLAN`** runs a JSON list of `{id, sql | sql_file, out, area?}` in one process: the semantic model is resolved once and the connection is kept open across the items (Postgres, Redshift, Supabase and SQLite; the other engines still connect per item), while every item goes through the same guard on its own. Each item's CSV goes to `out` (empty when refused or failed), its outcome to `<out>.run.json` in `run.json`'s shape (`status`, `exit`, `kind`, `rule`, `detail`), and the manifest (`<plan>.manifest.json`, or `--manifest`) lists them all; stdout carries the manifest. Exit `0` when every item ran, else the first non-ok item's single-statement exit code. Reconcile's statement check uses it for a row's probes.
+- **`--batch PLAN`** runs a JSON list of `{id, sql | sql_file, out, area?}` in one process: the semantic model is resolved once and the connection is kept open across the items (Postgres, Redshift, Supabase and SQLite; the other engines still connect per item), while every item goes through the same guard on its own. Each item's CSV goes to `out` (empty when refused or failed; a relative `out` or `sql_file` resolves from the **current directory**, not the plan's folder, and the manifest records each `out` as an absolute path), its outcome to `<out>.run.json` in `run.json`'s shape (`status`, `exit`, `kind`, `rule`, `detail`), and the manifest (`<plan>.manifest.json`, or `--manifest`) lists them all; stdout carries the manifest. Exit `0` when every item ran, else the first non-ok item's single-statement exit code. Reconcile's statement check uses it for a row's probes.
 
 - **Output is RFC-4180 CSV on stdout, always.** No `--format` flag exists; don't pass one.
-- **Either** `--sql 'SELECT 1'` (string) **or** `--sql-file /tmp/q.sql` (path). Positional SQL is rejected.
+- **Either** `--sql 'SELECT 1'` (string) **or** `--sql-file "<artifacts_dir>/local/tmp/q.sql"` (path). Positional SQL is rejected.
 - `--profile` overrides `AGAMI_PROFILE`. If neither is set, defaults to `active_profile` from `<artifacts_dir>/local/.config`.
 - Exit codes: `0` (success), `1` (refused by a guard, one JSON object on stderr), `2` (config/usage), `3` (driver missing), `4` (connect or credentials), `5` (a syntax error the database named), `6` (a failure nothing classified), `7` (column not found), `8` (table not found), `9` (permission), `10` (network). The table in `execute_sql.py`'s docstring is the contract.
 
@@ -199,21 +199,20 @@ Used when neither the native CLI nor DuckDB is available, but Python with the ri
 **Always invoke it with `$PY` — the interpreter recorded in `<artifacts_dir>/local/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
 
 ```bash
-PY="$(python3 -c 'import json,pathlib; print(json.loads(pathlib.Path("<artifacts_dir>/local/.config").expanduser().read_text()).get("tool_paths",{}).get("python3") or "")' 2>/dev/null)"
-PY="${PY:-$(command -v python3 || command -v python)}"
+PY="$(bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import sys; print(sys.executable)' | tr -d '\r')"   # Windows Python ends lines \r\n
 ```
 
-(Same interpreter the `sm` wrapper and the introspection engine resolve to. Keeping them identical means the driver is present wherever a DB connection is opened.)
+(`py` resolves it the way the `sm` wrapper does — `$AGAMI_PYTHON`, then `.config`'s `tool_paths.python3`, then `python3`/`python` on PATH, never the Windows Store stub — with no Python needed to find it. Same interpreter the introspection engine uses. Keeping them identical means the driver is present wherever a DB connection is opened.)
 
 ```bash
-"$PY" -m execute_sql --profile <profile> --sql-file /tmp/agami-query.sql
+"$PY" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
 ```
 
 `execute_sql.py` reads `<artifacts_dir>/local/credentials` itself, opens a connection via `psycopg2` / `pymysql` / `sqlite3` based on the profile's `type` field, runs the SQL, emits RFC 4180 CSV on stdout. Exit codes communicate the failure category (config, driver missing, connect error, execution error). See [`plugins/agami/scripts/README.md`](../scripts/README.md) for full usage.
 
 Skills should always use `--sql-file` for non-trivial SQL. The `--sql` flag is fine for short statements; `--sql-file` avoids any shell-quoting issues for SQL containing single quotes, backticks, `$`, or backslashes.
 
-The "Python Driver Fallback" section further down shows the inline `python3 -c '...'` form that does the same thing without the helper — useful only if `execute_sql.py` isn't bundled (e.g., a legacy install). Prefer `execute_sql.py`.
+Never inline the connection as `python3 -c '...'` instead: that form is forbidden (see "Credentials file" below), and `execute_sql.py` ships in every install.
 
 ---
 
@@ -242,7 +241,7 @@ Supported end-to-end: Postgres + Redshift + MySQL + Snowflake + SQLite + **BigQu
 # Ensure the auth file exists for the active profile (idempotent, fast).
 # Generates <artifacts_dir>/local/.pgpass from credentials. Bash command line contains
 # NO password.
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_pgauth.py --profile "$PROFILE"
 
 # Execute a query and return CSV. PGPASSFILE points at the auth file;
 # psql reads the password silently. The bash command itself is password-free.
@@ -288,7 +287,7 @@ Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI 
 
 ```bash
 # Ensure the snowsql config exists (idempotent).
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_pgauth.py --profile "$PROFILE"
 
 # Run a query — snowsql reads the password from the config silently.
 snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "$PROFILE" \
@@ -303,7 +302,7 @@ Install snowsql: see <https://docs.snowflake.com/en/user-guide/snowsql-install-c
 
 ```bash
 pip install snowflake-connector-python
-"$PY" -m execute_sql --profile "$PROFILE" --sql-file /tmp/agami-q.sql
+"$PY" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
 ```
 
 `execute_sql.py` handles Snowflake natively when `type=snowflake`. Connection params: `account`, `user`, `password` (or `authenticator` for SSO), `warehouse`, `database`, `schema`, `role`. All optional except `account` and `user`; either `password` or `authenticator` is required.
@@ -330,7 +329,7 @@ pip install google-cloud-bigquery
 
 # Run a query — execute_sql.py loads the service-account JSON itself and
 # never puts credentials on the Bash command line.
-"$PY" -m execute_sql --profile "$PROFILE" --sql-file /tmp/agami-q.sql
+"$PY" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
 ```
 
 `execute_sql.py` handles BigQuery natively when `type=bigquery`. Connection params (read from the credentials profile):
@@ -368,7 +367,7 @@ These are sufficient for SELECT-only workloads, which is all agami issues.
 # Ensure the auth file exists for the active profile (idempotent, fast).
 # Generates <artifacts_dir>/local/.mysql.cnf with [client_<profile>] sections. Bash
 # command line contains NO password.
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_pgauth.py" --profile "$PROFILE"
+bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_pgauth.py --profile "$PROFILE"
 
 # Execute a query — mysql reads creds from the auth file via --defaults-file
 # + --defaults-group-suffix=_<profile>. Visible bash command is password-free.
@@ -402,7 +401,7 @@ When CLI tools are not available, use the bundled runtime helper:
 "$PY" -m execute_sql --sql "SELECT COUNT(*) FROM orders"
 
 # Multi-line / quote-heavy SQL via --sql-file (preferred)
-"$PY" -m execute_sql --sql-file /tmp/agami-query.sql
+"$PY" -m execute_sql --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
 ```
 
 `execute_sql.py` reads `<artifacts_dir>/local/credentials` itself (with chmod check) and connects via `psycopg2` / `pymysql` / `sqlite3`. The visible Bash command contains no credentials. SQL is passed via `--sql-file` (preferred for non-trivial queries) so single quotes, backticks, `$`, and `\` in the SQL don't get mangled by the shell.
@@ -420,13 +419,20 @@ Credentials live in `<artifacts_dir>/local/credentials` (an INI-style file, `chm
 ### Reading the file
 
 ```bash
-# Refuse to read if too permissive
-perms=$(stat -c '%a' <artifacts_dir>/local/credentials 2>/dev/null || stat -f '%A' <artifacts_dir>/local/credentials)
-case "$perms" in
-  600|400) ;;
+# Refuse to read if too permissive. POSIX only, as execute_sql's own check is: Windows (Git Bash)
+# reports every file as 644/666 and chmod can't change that — the file is protected by your user
+# profile's permissions instead — so the check would refuse every Windows install.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) ;;
   *)
-    echo "<artifacts_dir>/local/credentials must be chmod 600 (currently $perms). Run: chmod 600 <artifacts_dir>/local/credentials" >&2
-    exit 1
+    perms=$(stat -c '%a' <artifacts_dir>/local/credentials 2>/dev/null || stat -f '%A' <artifacts_dir>/local/credentials)
+    case "$perms" in
+      600|400) ;;
+      *)
+        echo "<artifacts_dir>/local/credentials must be chmod 600 (currently $perms). Run: chmod 600 <artifacts_dir>/local/credentials" >&2
+        exit 1
+        ;;
+    esac
     ;;
 esac
 

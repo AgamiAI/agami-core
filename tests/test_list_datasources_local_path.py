@@ -91,3 +91,15 @@ def test_the_store_step_sits_below_every_step_that_was_already_there(tmp_path, m
     monkeypatch.setenv("AGAMI_PROFILE", "from_env")
     assert tools.resolve_profile() == "from_env"
     assert tools.resolve_profile("explicit") == "explicit"
+
+
+def test_a_local_model_declaring_redshift_is_not_read_as_its_postgres_dsn(local, tmp_path):
+    """The credentials only speak for a profile with no model to declare an engine (#420)."""
+    (tmp_path / "modelled" / "datasource.yaml").write_text(
+        "datasource: modelled\nversion: 1\nstorage_connections:\n"
+        "- name: c\n  storage_type: Redshift\n"
+    )
+    by_name = {d["datasource"]: d for d in json.loads(
+        tools.tool_list_datasources({}))["datasources"]}
+    assert by_name["modelled"]["database_type"] == "redshift"
+    assert by_name["bare"]["database_type"] == "mysql"

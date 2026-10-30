@@ -136,7 +136,18 @@ CALLS = {
 }
 
 # Row columns whose value differs on every run.
-_VOLATILE_COLUMNS = {"id", "ts", "execution_ms", "audit_id", "correlation_id", "conversation_id"}
+# `result_chars` and `result_tokens_est` measure the envelope, whose length moves with the number of
+# digits in `execution_ms`.
+_VOLATILE_COLUMNS = {
+    "id",
+    "ts",
+    "execution_ms",
+    "audit_id",
+    "correlation_id",
+    "conversation_id",
+    "result_chars",
+    "result_tokens_est",
+}
 # Envelope keys whose value differs on every run, matched on the serialized text so the bytes
 # between them are still compared.
 _VOLATILE_KEYS = ("audit_id", "execution_ms", "elapsed_ms", "executed_at", "ts")
@@ -205,7 +216,7 @@ def served(tmp_path, monkeypatch):
 
 def _scrub_text(text: str) -> str:
     for key in _VOLATILE_KEYS:
-        text = re.sub(rf'("{key}": )("[^"]*"|-?\d+(\.\d+)?)', rf'\1"{_VOLATILE}"', text)
+        text = re.sub(rf'("{key}": ?)("[^"]*"|-?\d+(\.\d+)?)', rf'\1"{_VOLATILE}"', text)
     return text
 
 

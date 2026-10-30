@@ -51,8 +51,9 @@ def test_every_tool_has_handler_and_input_schema():
 
 
 def test_db_type_label_covers_advertised_databases():
-    # The `database_type` shown by list_datasources maps a DSN scheme → label for every DB agami
-    # advertises; an unknown scheme passes through verbatim (execution is execute_sql's job).
+    # The local listing's fallback when no model declares a single engine (#420) maps a DSN scheme
+    # → label for every DB agami advertises; an unknown scheme passes through verbatim (execution
+    # is execute_sql's job).
     cases = {
         "postgresql://h/db": "postgres",
         "mysql://h/db": "mysql",
@@ -63,6 +64,8 @@ def test_db_type_label_covers_advertised_databases():
         "trino://h": "trino",
         "duckdb:///tmp/f.db": "duckdb",
         "exotic://h": "exotic",  # unknown → passthrough
+        "u:secret@host/db": "",  # no scheme: never echo the string, which carries the password
+        "u:p@ss://x@host/db": "",  # `://` inside the password is not a scheme either
     }
     for url, expected in cases.items():
         assert tools._db_type_for("p", {"p": {"url": url}}) == expected, url

@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from .models import bare_name, table_key
+
 # {metric name} — names may contain spaces/underscores/digits (agami metric names do).
 PLACEHOLDER_RE = re.compile(r"\{\s*([^{}]+?)\s*\}")
 
@@ -132,7 +134,333 @@ def _slug(name: str) -> str:
     return s or "inner_value"
 
 
-def synthesize_second_order(metric, storage_type: str, idx: dict) -> str:
+# Words most engines reserve, so a table or column named after one must be quoted.
+_RESERVED_WORDS = frozenset({
+    "all", "and", "any", "as", "asc", "between", "by", "case", "cast", "check", "column",
+    "constraint", "create", "cross", "current_date", "current_time", "current_timestamp",
+    "current_user", "default", "delete", "desc", "distinct", "drop", "else", "end", "except",
+    "exists", "false", "fetch", "for", "foreign", "from", "full", "grant", "group", "having", "in",
+    "inner", "insert", "intersect", "into", "is", "join", "left", "like", "limit", "natural",
+    "not", "null", "offset", "on", "or", "order", "outer", "primary", "references", "right",
+    "select", "session_user", "table", "then", "to", "true", "union", "unique", "update", "user",
+    "using", "values", "when", "where", "window", "with",
+})
+# Reserved on one engine beyond the list above. SQLite's are the keywords it refuses as a bare
+# table or column name (measured on 3.45). Not listed for an engine that folds unquoted names to
+# upper case: quoting a lower-case name there would change which object it names.
+_ENGINE_RESERVED_WORDS = {
+    "SQLite": frozenset({
+        "add", "alter", "autoincrement", "collate", "commit", "deferrable", "escape", "index",
+        "isnull", "nothing", "notnull", "raise", "returning", "set", "transaction",
+    }),
+    "MySQL": frozenset({
+        "analyze", "both", "call", "cascade", "change", "char", "character", "condition",
+        "cume_dist", "database", "databases", "decimal", "dense_rank", "describe", "div", "double",
+        "dual", "empty", "explain", "first_value", "float", "fulltext", "function", "generated",
+        "groups", "if", "index", "int", "integer", "interval", "iterate", "key", "keys", "lag",
+        "last_value", "lateral", "lead", "leading", "leave", "linear", "load", "lock", "long",
+        "loop", "match", "maxvalue", "mod", "nth_value", "ntile", "numeric", "of", "option",
+        "over", "percent_rank", "procedure", "range", "rank", "read", "real", "recursive",
+        "release", "rename", "repeat", "replace", "require", "restrict", "return", "row",
+        "row_number", "rows", "schema", "schemas", "separator", "set", "show", "signal",
+        "spatial", "sql", "stored", "system", "trailing", "trigger", "unlock", "unsigned",
+        "usage", "use", "varchar", "virtual", "while", "write", "zerofill",
+    }),
+    "SQLServer": frozenset({
+        "backup", "browse", "close", "file", "identity", "index", "key", "open", "percent",
+        "pivot", "plan", "proc", "procedure", "rule", "schema", "set", "top", "tran", "unpivot",
+    }),
+    "PostgreSQL": frozenset({
+        "analyse", "analyze", "array", "asymmetric", "authorization", "both", "collate",
+        "collation", "concurrently", "current_catalog", "current_role", "current_schema",
+        "deferrable", "do", "freeze", "ilike", "initially", "isnull", "lateral", "leading",
+        "localtime", "localtimestamp", "notnull", "only", "overlaps", "placing", "returning",
+        "similar", "some", "symmetric", "tablesample", "trailing", "variadic", "verbose",
+    }),
+}
+_PLAIN_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_DOTTED_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
+
+def _ident(name: str, storage_type: str) -> str:
+    """`name` quoted for `storage_type` only when the engine needs it: special characters, a
+    reserved word, or a case the engine would fold away. A plain lower-case name stays bare, so
+    synthesized SQL that worked before is unchanged (and an upper-folding engine still matches it
+    case-insensitively, as it always has)."""
+    from .dialects import get_dialect
+
+    try:
+        dialect = get_dialect(storage_type)
+    except ValueError:
+        return name
+    if not _PLAIN_IDENT_RE.match(name):
+        return dialect.quote_ident(name)
+    if _is_reserved(name.lower(), storage_type):
+        # On an upper-folding engine a lower-case name means the stored upper-case one, and a
+        # quoted lower-case name would name a different object.
+        if name == name.lower() and _engine_folds("a", storage_type):
+            return dialect.quote_ident(name.upper())
+        return dialect.quote_ident(name)
+    if name != name.lower() and _engine_folds(name, storage_type):
+        return dialect.quote_ident(name)
+    return name
+
+
+def _is_reserved(word: str, storage_type: str) -> bool:
+    """A word the engine reserves: the shared list, then (on an engine that does not fold
+    unquoted names to upper case) its own list and the installed sqlglot's list for it."""
+    if word in _RESERVED_WORDS:
+        return True
+    if _engine_folds("a", storage_type):
+        return False
+    return word in _ENGINE_RESERVED_WORDS.get(storage_type, ()) or word in _sqlglot_reserved(storage_type)
+
+
+def _sqlglot_reserved(storage_type: str) -> frozenset:
+    """The installed sqlglot's reserved words for the engine; older releases list few or none."""
+    try:
+        from sqlglot.dialects.dialect import Dialect
+
+        from .sql_dialect import sqlglot_dialect
+
+        dialect = Dialect.get_or_raise(sqlglot_dialect(storage_type))
+        generator = getattr(dialect, "generator_class", None) or dialect.Generator
+        return frozenset(w.lower() for w in getattr(generator, "RESERVED_KEYWORDS", ()) or ())
+    except Exception:
+        return frozenset()
+
+
+def _engine_folds(name: str, storage_type: str) -> bool:
+    """True when the engine would change `name`'s case if it were left unquoted."""
+    try:
+        from sqlglot.dialects.dialect import Dialect
+
+        from .sql_dialect import sqlglot_dialect
+
+        return Dialect.get_or_raise(sqlglot_dialect(storage_type)).case_sensitive(name)
+    except Exception:
+        return False
+
+
+def _table_ref(name: str, storage_type: str) -> str:
+    """A possibly schema-qualified table name with each part quoted as it needs."""
+    return ".".join(_ident(part, storage_type) for part in name.split("."))
+
+
+def _same_table(a: str, a_schema: Optional[str], b: str, b_schema: Optional[str]) -> bool:
+    """Two references name one table: same bare name, and the same schema when both state one."""
+    sa, na = table_key(a, a_schema)
+    sb, nb = table_key(b, b_schema)
+    return na == nb and (not sa or not sb or sa == sb)
+
+
+def _owning_area(metric, org):
+    for sa in org.subject_areas:
+        if any(mm is metric for mm in sa.metrics):
+            return sa
+    return None
+
+
+def _join_edge(metric_name: str, anchor: str, other: str, base, org):
+    """The single declared, usable edge directly between `anchor` and `other`."""
+    area = _owning_area(base, org)
+    edges = list(area.relationships if area else []) + list(org.cross_subject_area_relationships)
+    found = []
+    for rel in edges:
+        if rel.review_state == "rejected" or rel.executable != "same_engine":
+            continue
+        fwd = (_same_table(rel.from_table, rel.from_schema, anchor, None)
+               and _same_table(rel.to_table, rel.to_schema, other, None))
+        rev = (_same_table(rel.from_table, rel.from_schema, other, None)
+               and _same_table(rel.to_table, rel.to_schema, anchor, None))
+        if fwd or rev:
+            found.append((rel, fwd))
+    if not found:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: no declared relationship joins {anchor!r} "
+            f"directly to {other!r}; declare one (multi-hop joins aren't synthesized)"
+        )
+    if len(found) > 1:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: {len(found)} declared relationships join "
+            f"{anchor!r} and {other!r}; the join is ambiguous"
+        )
+    rel, anchor_is_from = found[0]
+    # Read from the anchor's side: a join that gives each anchor row several matches multiplies
+    # the base aggregate's rows, so the inner value would be wrong.
+    fans_out = rel.relationship == ("one_to_many" if anchor_is_from else "many_to_one")
+    if fans_out:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: joining {other!r} to {anchor!r} fans out "
+            f"(several {other!r} rows per {anchor!r} row), which would inflate the base "
+            "aggregate; set the base metric's primary_table to the finer-grained table"
+        )
+    return rel
+
+
+def _join_sql(rel, other: str, storage_type: str) -> str:
+    if rel.on:
+        cond = rel.on
+    else:
+        left = f"{_ident(bare_name(rel.from_table), storage_type)}.{_ident(rel.from_column, storage_type)}"
+        right = f"{_ident(bare_name(rel.to_table), storage_type)}.{_ident(rel.to_column, storage_type)}"
+        cond = f"{left} = {right}"
+    return f" INNER JOIN {_table_ref(other, storage_type)} ON {cond}"
+
+
+def _table_def(name: str, org, base=None):
+    """The table's definition, from the base metric's own area first: an area can keep its own
+    curated copy of a table another area also defines."""
+    home = _owning_area(base, org) if base is not None else None
+    areas = ([home] if home else []) + [sa for sa in org.subject_areas if sa is not home]
+    for sa in areas:
+        for t in sa.tables_defined:
+            if _same_table(t.name, t.schema_name, name, None):
+                return t
+    return None
+
+
+def _declares(table, col: str) -> bool:
+    return table is not None and any(c.name.lower() == col.lower() for c in table.columns)
+
+
+def _dotted_grain(col: str, froms: list[str], org, base) -> list[tuple[str, str]]:
+    """Every (source table, declared column) a `table.column` grain entry can be read as; a
+    table or column name may itself contain a dot or a space, so each split is tried."""
+    found = []
+    for i, ch in enumerate(col):
+        if ch != ".":
+            continue
+        prefix, suffix = col[:i].strip(), col[i + 1:].strip()
+        for t in froms:
+            if (prefix and suffix and _same_table(t, None, prefix, None)
+                    and _declares(_table_def(t, org, base), suffix)):
+                found.append((t, suffix))
+    return found
+
+
+def _qualified_grain(metric_name: str, col: str, froms: list[str], org, storage_type: str,
+                     base=None) -> str:
+    """An `inner_grain` column qualified by its source table: `table.column` as written, else
+    the one source table that declares the bare column."""
+    dotted = _dotted_grain(col, froms, org, base) if "." in col else []
+    if len(dotted) > 1:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain {col!r} is ambiguous; it can be "
+            f"read as {[f'{t}.{c}' for t, c in dotted]}"
+        )
+    if dotted:
+        table, column = dotted[0]
+        return f"{_ident(bare_name(table), storage_type)}.{_ident(column, storage_type)}"
+    owners = [t for t in froms if _declares(_table_def(t, org, base), col)]
+    if not owners and _DOTTED_IDENT_RE.match(col):
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain {col!r} does not name a column "
+            f"declared by one of the base metric's tables {froms}"
+        )
+    if not owners and not _PLAIN_IDENT_RE.match(col):
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain {col!r} must name a column "
+            "when the base metric spans several tables"
+        )
+    if not owners:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain column {col!r} is not declared "
+            f"on any of the base metric's tables {froms}"
+        )
+    if len(owners) > 1:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: inner_grain column {col!r} is ambiguous; "
+            f"it is declared on {owners}. Write it as table.column"
+        )
+    return f"{_ident(bare_name(owners[0]), storage_type)}.{_ident(col, storage_type)}"
+
+
+def _grain_sql(col: str, storage_type: str, table=None) -> str:
+    """A single-table grain entry: a column name (or a column `table` declares) is quoted as it
+    needs, anything else verbatim."""
+    if _PLAIN_IDENT_RE.match(col) or _DOTTED_IDENT_RE.match(col):
+        return _table_ref(col, storage_type)
+    if _declares(table, col):
+        return _ident(col, storage_type)
+    return col
+
+
+def _anchor(metric_name: str, base, froms: list[str], org, storage_type: str,
+            inner_sql: str) -> str:
+    """The source table the base metric measures: its `primary_table`, else the one table that
+    declares every column its aggregates read. Never guessed: joining from the wrong table
+    would repeat the measured rows."""
+    if base.primary_table:
+        match = [t for t in froms if _same_table(t, None, base.primary_table, None)]
+        if not match:
+            raise DerivedError(
+                f"second-order metric {metric_name!r}: the base metric's primary_table "
+                f"{base.primary_table!r} is not one of its source tables {froms}"
+            )
+        return match[0]
+    owners = _measured_tables(inner_sql, base, froms, org, storage_type)
+    if len(owners) != 1:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: can't tell which of {froms} the base metric "
+            f"{base.name!r} measures; set primary_table to say which table the metric measures"
+        )
+    return owners.pop()
+
+
+def _measured_tables(inner_sql: str, base, froms: list[str], org, storage_type: str) -> set:
+    """The source tables owning the columns inside the base binding's aggregates; empty when a
+    column can't be pinned to exactly one table (or none is read, as in COUNT(*))."""
+    try:
+        import sqlglot
+        from sqlglot import expressions as exp
+        from sqlglot.errors import ErrorLevel
+
+        from .sql_dialect import sqlglot_dialect
+
+        tree = sqlglot.parse_one(inner_sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=ErrorLevel.RAISE)
+    except Exception:
+        return set()
+    owners: set = set()
+    for agg in tree.find_all(exp.AggFunc):
+        for col in agg.find_all(exp.Column):
+            if col.table:
+                tables = [t for t in froms if _same_table(t, None, col.table, None)]
+            else:
+                tables = [t for t in froms if _declares(_table_def(t, org, base), col.name)]
+            if len(tables) != 1:
+                return set()
+            owners.add(tables[0])
+    return owners
+
+
+def _from_clause(metric_name: str, base, froms: list[str], org, storage_type: str,
+                 inner_sql: str) -> str:
+    """FROM the anchor table, INNER JOINed directly to each other source table."""
+    if org is None:
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: its base spans {froms}, and joining them "
+            "needs the model's relationships"
+        )
+    bare = [table_key(t, None)[1] for t in froms]
+    clash = sorted({t for t, b in zip(froms, bare) if bare.count(b) > 1})
+    if clash:
+        # The join and the grain qualify columns by bare table name, which would be ambiguous.
+        raise DerivedError(
+            f"second-order metric {metric_name!r}: its base reads tables with the same name "
+            f"from different schemas ({clash}); synthesis can't tell them apart"
+        )
+    anchor = _anchor(metric_name, base, froms, org, storage_type, inner_sql)
+    sql = _table_ref(anchor, storage_type)
+    for other in froms:
+        if other == anchor:
+            continue
+        sql += _join_sql(_join_edge(metric_name, anchor, other, base, org), other, storage_type)
+    return sql
+
+
+def synthesize_second_order(metric, storage_type: str, idx: dict, org=None) -> str:
     """Deterministically build the CTE for a second-order statistic — compute the base
     aggregate at `inner_grain`, then apply the outer aggregate across it. Emitted as a
     scalar subquery so it slots in wherever a metric expression goes:
@@ -141,9 +469,14 @@ def synthesize_second_order(metric, storage_type: str, idx: dict) -> str:
            SELECT order_date, SUM(amount) AS daily_revenue
            FROM orders GROUP BY order_date) _inner)
 
+    A base over several tables is joined from its anchor (`primary_table`, else the one table
+    whose columns its aggregates read) to each other table by the one relationship declared directly between them,
+    which needs `org`. Identifiers are quoted only where the engine needs it.
+
     Raises DerivedError if the shape isn't `OUTERAGG({base})`, the base is unknown / not a
-    plain aggregate, `inner_grain` is empty, or the base spans more than one source table
-    (multi-table inner joins aren't synthesized yet)."""
+    plain aggregate, `inner_grain` is empty, it has no source table, or a multi-table join
+    can't be built safely (an unclear anchor, no direct edge, several edges, a fan-out, an
+    unresolvable grain)."""
     binding = (getattr(metric, "bindings", None) or {}).get(storage_type)
     if binding is None:
         raise DerivedError(f"metric {metric.name!r} has no {storage_type} binding")
@@ -167,35 +500,43 @@ def synthesize_second_order(metric, storage_type: str, idx: dict) -> str:
             f"second-order metric {metric.name!r}: base {base_name!r} is itself a "
             "second-order statistic — only one level of nesting is synthesized"
         )
-    froms = list(base.source_tables) or list(metric.source_tables)
-    if len(froms) != 1:
+    froms = list(dict.fromkeys(base.source_tables or metric.source_tables))
+    if not froms:
         raise DerivedError(
-            f"second-order metric {metric.name!r}: synthesis needs exactly one source table "
-            f"(got {froms or 'none'}); multi-table inner joins aren't synthesized yet"
+            f"second-order metric {metric.name!r}: synthesis needs the base metric's source table"
         )
-    table = froms[0]
-    grain = ", ".join(metric.inner_grain)
-    alias = _slug(base_name)
+    if len(froms) == 1:
+        from_sql = _table_ref(froms[0], storage_type)
+        table = _table_def(froms[0], org, base) if org is not None else None
+        grain = ", ".join(_grain_sql(g, storage_type, table) for g in metric.inner_grain)
+    else:
+        from_sql = _from_clause(metric.name, base, froms, org, storage_type, inner_sql)
+        grain = ", ".join(
+            _qualified_grain(metric.name, g, froms, org, storage_type, base)
+            for g in metric.inner_grain
+        )
+    alias = _ident(_slug(base_name), storage_type)
     return (
         f"(SELECT {outer_func}({alias}) FROM ("
         f"SELECT {grain}, {inner_sql} AS {alias} "
-        f"FROM {table} GROUP BY {grain}) _inner)"
+        f"FROM {from_sql} GROUP BY {grain}) _inner)"
     )
 
 
-def resolve_metric_sql(metric, storage_type: str, idx: dict) -> str:
+def resolve_metric_sql(metric, storage_type: str, idx: dict, org=None) -> str:
     """The one entry point: standalone SQL for a metric's binding in `storage_type`.
     Second-order (case b) → synthesized CTE; otherwise placeholder expansion (case a /
-    first-order). Raises DerivedError on any composition problem."""
+    first-order). `org` supplies the relationships a multi-table second-order base joins on.
+    Raises DerivedError on any composition problem."""
     if is_second_order(metric):
-        return synthesize_second_order(metric, storage_type, idx)
+        return synthesize_second_order(metric, storage_type, idx, org)
     return expand_binding(metric, storage_type, idx)
 
 
-def expanded_bindings(metric, idx: dict) -> dict:
+def expanded_bindings(metric, idx: dict, org=None) -> dict:
     """All of a metric's bindings resolved to standalone SQL (placeholder expansion for
     first-order, CTE synthesis for second-order). Raises DerivedError on failure."""
     out: dict = {}
     for stype in (getattr(metric, "bindings", None) or {}):
-        out[stype] = resolve_metric_sql(metric, stype, idx)
+        out[stype] = resolve_metric_sql(metric, stype, idx, org)
     return out

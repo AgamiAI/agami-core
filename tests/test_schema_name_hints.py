@@ -40,7 +40,7 @@ def _write_model(root: Path) -> None:
         return {
             "name": name,
             "calculation": f"the {name}",
-            "description": f"the {name}",
+            "description": f"How {name} is defined here",
             "bindings": {"PostgreSQL": f"SUM({name})"},
             "source_tables": source_tables,
             "confidence": "proposed",
@@ -275,7 +275,7 @@ def _add_metric(root: Path, area: str, name: str, source_tables: list[str]) -> N
             {
                 "name": name,
                 "calculation": f"the {name}",
-                "description": f"the {name}",
+                "description": f"How {name} is defined here",
                 "bindings": {"PostgreSQL": f"SUM({name})"},
                 "source_tables": source_tables,
                 "confidence": "proposed",
@@ -343,10 +343,10 @@ def _qualify_orders(art: Path) -> None:
     tfile.write_text(yaml.safe_dump(doc))
 
 
-def test_a_table_named_with_its_schema_is_not_refused_and_is_given_a_way_in(tmp_path, monkeypatch):
-    """A table whose own `name` carries its schema is indexed in full while `dataset_names` arrives
-    bare (#258), so neither spelling reaches it. Refusing it suggested back the very name sent; a
-    bare "not found" left an agent that had copied the name exactly with no next move."""
+def test_a_table_named_with_its_schema_is_reached_by_either_spelling(tmp_path, monkeypatch):
+    """A table whose own `name` carries its schema is the table `orders` and `public.orders` both
+    name (#258). It used to be indexed in full while `dataset_names` arrived bare, so neither
+    spelling reached it and the reply could only point at its area."""
     art = tmp_path / "art"
     _write_model(art / "acme")
     _qualify_orders(art)
@@ -355,11 +355,8 @@ def test_a_table_named_with_its_schema_is_not_refused_and_is_given_a_way_in(tmp_
     for sent in ("orders", "public.orders"):
         head = _call("acme", dataset_names=[sent])
         assert "error" not in head, "not refused"
-        entry = head["tables"]["orders"]
-        assert "did_you_mean" not in entry
-        assert f"area={SALES!r}" in entry["hint"]
-    # And the way in works: the area lists it.
-    assert "public.orders" in _call("acme", area=SALES)["tables"]
+        entry = head["tables"]["public.orders"]
+        assert "error" not in entry and entry["columns"], sent
 
 
 def test_a_broken_model_keeps_the_loaders_error(tmp_path, monkeypatch):

@@ -39,7 +39,7 @@ def _set_env(env_path: Path, key: str, value: str) -> None:
     """Set `KEY=VALUE` in `agami.env` — **replacing** an existing (even present-but-empty) line in place, else
     appending. Replace-not-append avoids a confusing duplicate key when e.g. `AGAMI_SIGNING_SECRET=` is blank.
     chmod 600 because the file holds the signing secret + DB creds."""
-    lines = env_path.read_text().splitlines()
+    lines = env_path.read_text(encoding="utf-8").splitlines()
     new = f"{key}={value}"
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -48,7 +48,7 @@ def _set_env(env_path: Path, key: str, value: str) -> None:
             break
     else:
         lines.append(new)
-    env_path.write_text("\n".join(lines) + "\n")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     env_path.chmod(0o600)
 
 
@@ -60,7 +60,7 @@ def prepare_env(env_path: Path) -> list[str]:
             f"{env_path} not found — run /agami-deploy to write it "
             "(or, from a repo clone, copy agami.env.example to agami.env and fill it in)"
         ]
-    env = _parse_env(env_path.read_text())
+    env = _parse_env(env_path.read_text(encoding="utf-8"))
 
     errors = [f"{k} is required" for k in _REQUIRED if not env.get(k)]
 

@@ -71,6 +71,7 @@ import csv
 import json
 import logging
 import os
+import re
 import stat
 import sys
 import threading
@@ -83,6 +84,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import agami_paths
+import sql_dialect_rules
 from guardrail import (
     PRE_MODEL_RULES,
     RECEIPT_BEFORE_MODEL,
@@ -123,10 +125,10 @@ _LOG = logging.getLogger(__name__)
 # A logger of its OWN for raw driver text, and the reason is a leak rather than tidiness (ACE-039).
 # This module never calls `basicConfig`, so in a forked child a record on `_LOG` falls through to
 # `logging.lastResort` and is written to STDERR — and `tools._child_failure_message` relays the
-# child's whole stderr into `failure.message` for any classified exit code. Logging the raw text on
-# `_LOG` would therefore hand it straight back to the caller on the DEFAULT surface, undoing the
-# sanitization in the same breath. (The catch-all beneath the classifier escapes this only because
-# its `exc_info=True` trips the traceback guard, at the cost of degrading its message.)
+# child's whole stderr into `failure.message` for an authored exit code (2, 3). Logging the raw text on
+# `_LOG` would therefore hand it straight back to the caller on the DEFAULT surface whenever a config
+# error follows, undoing the sanitization in the same breath. Every other code is rebuilt by the
+# parent from the code (`other` too, since #583), so the stream does not reach the caller there.
 #
 # `main` silences this logger at CLI entry, so the forked child emits nothing here and the column
 # stays NULL. In-process and hosted, it propagates to the server's root logger as intended.
@@ -157,7 +159,7 @@ def _resolve_default_profile() -> str:
     if CONFIG_PATH.exists():
         try:
             import json as _json
-            cfg = _json.loads(CONFIG_PATH.read_text())
+            cfg = _json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             active = cfg.get("active_profile")
             if isinstance(active, str) and active:
                 return active
@@ -231,10 +233,14 @@ class ExecutorError(Exception):
     the in-process caller gets a catchable error instead of a process exit. Replaces the old
     ``return _err(...)`` returns inside the per-engine run functions."""
 
-    def __init__(self, msg: str, *, code: int) -> None:
+    def __init__(self, msg: str, *, code: int, sqlstate: str | None = None) -> None:
         super().__init__(msg)
         self.msg = msg
         self.code = code
+        # The SQLSTATE the server sent, when the raise site knows it (#561). Optional because the
+        # built-in engines raise inside the `except` that caught the driver's exception, so the code
+        # is read from that instead; an injected executor that raises elsewhere passes it here.
+        self.sqlstate = sqlstate if _is_sqlstate(sqlstate) else None
 
 
 # The CLI exit-code contract in code, in both directions — the module docstring's table, executable.
@@ -337,6 +343,138 @@ _ERROR_MESSAGES: dict[str, str] = {
         "Sign in again (reconnect the connector), then start a new conversation."
     ),
 }
+
+
+# --- SQLSTATE (#561) -----------------------------------------------------------------------------
+#
+# An execution error no classifier arm reads used to reach the caller as `other` with the generic
+# sentence, so a client could not tell a statement it should rewrite from a broken server, and
+# guessed. The database's text still never travels (ACE-039): it can carry a value from a row, which
+# would reach the caller around the sensitive-column masking. The SQLSTATE can travel. It is five
+# characters from a fixed alphabet, carries no value, and its first two characters (the class) mean
+# the same on every engine that reports one, so one table keyed by class covers them all, vendor
+# codes included, without a rule per database. An engine that reports none is unchanged, and a class
+# the table does not name is returned as the bare code with the generic sentence.
+_SQLSTATE_RE = re.compile(r"[0-9A-Z]{5}")
+
+_SQLSTATE_CLASS_KIND: dict[str, FailureKind] = {
+    "42": "syntax",
+    "0A": "syntax",
+    "22": "syntax",
+    "08": "network",
+    "28": "auth",
+}
+_TOO_HEAVY = (
+    "The statement needed more than the database allows (SQLSTATE {code}). Simplify it or narrow "
+    "what it reads."
+)
+# Sentences that carry the code, so the caller can look it up. Classes whose kind already has a
+# fixed sentence in `_ERROR_MESSAGES` (network, auth) use that one unchanged.
+_SQLSTATE_MESSAGES: dict[str, str] = {
+    "42": (
+        "The database rejected the statement itself (SQLSTATE {code}): a name, function or rule in "
+        "it does not hold on this database. Rewrite the statement; running it unchanged fails again."
+    ),
+    "0A": (
+        "The database does not support something this statement uses (SQLSTATE {code}). Rewrite it "
+        "without that construct."
+    ),
+    "22": (
+        "A value did not fit an operation in the statement (SQLSTATE {code}), such as a division by "
+        "zero or a cast that fails. Rewrite the statement to guard against it."
+    ),
+    "53": _TOO_HEAVY,
+    "54": _TOO_HEAVY,
+    "40": (
+        "The database stopped the statement because of a conflict with other work (SQLSTATE {code}). "
+        "Running it again may succeed."
+    ),
+}
+_SQLSTATE_UNCLASSIFIED = (
+    "The statement could not be run because of an unexpected error on the server (SQLSTATE {code}). "
+    "The details are in the server log."
+)
+
+# Every sentence above with its code slot as a pattern. The forked transport relays a `syntax` or
+# `other` failure's line only when it matches one whole, because only our template and a valid code
+# can.
+SQLSTATE_MESSAGE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(re.escape(template).replace(re.escape("{code}"), "[0-9A-Z]{5}"))
+    for template in (*set(_SQLSTATE_MESSAGES.values()), _SQLSTATE_UNCLASSIFIED)
+)
+
+
+def _is_sqlstate(value: object) -> bool:
+    return isinstance(value, str) and _SQLSTATE_RE.fullmatch(value) is not None
+
+
+def _code_on(exc: BaseException) -> str | None:
+    """The code one exception carries itself, as a plain `str`, or None. Never raises: a driver
+    attribute that throws must not turn a failure envelope into an exception."""
+    try:
+        for name in ("sqlstate", "sql_state", "pgcode"):
+            value = getattr(exc, name, None)
+            if _is_sqlstate(value):
+                return str.__str__(value)
+        for arg in getattr(exc, "args", ()):
+            if isinstance(arg, dict):
+                value = arg.get("C", arg.get(b"C"))
+                if isinstance(value, bytes):
+                    value = value.decode("ascii", "replace")
+                if _is_sqlstate(value):
+                    return str.__str__(value)
+    except Exception:  # noqa: BLE001 - a driver's property is not ours to trust
+        return None
+    return None
+
+
+def sqlstate_of(exc: BaseException | None) -> str | None:
+    """The SQLSTATE a driver exception carries, or None.
+
+    Read from the attribute each driver keeps it on, never parsed out of the message, so nothing a
+    statement can contain is mistaken for the server's code: `sqlstate` (psycopg 3, Snowflake,
+    PyMySQL, MySQL Connector, and `ExecutorError` itself), `sql_state` (the Databricks connector's
+    newer backend), `pgcode` (psycopg2), and the `C` field of the dict `redshift_connector` raises
+    with. Trino and the Databricks default backend expose none, and stay unclassified. Public so an
+    injected executor can fill `ExecutorError(sqlstate=…)` from the exception it caught.
+
+    Follows `__cause__` / `__context__`, because the built-in engines raise `ExecutorError` inside the
+    `except` that caught the driver's exception. A few links reach the driver's exception from any
+    raise site here; the bound is what keeps a hand-built cycle in the chain from spinning.
+    """
+    for _ in range(4):
+        if exc is None:
+            return None
+        code = _code_on(exc)
+        if code is not None:
+            return code
+        exc = exc.__cause__ or exc.__context__
+    return None
+
+
+def _sqlstate_failure(sqlstate: str) -> tuple[FailureKind, str]:
+    """The kind and value-free sentence for an execution error the text classifier could not read."""
+    if sqlstate == "42501":
+        # insufficient_privilege: class 42, but the fix is a GRANT, not a rewrite.
+        return "permission", _ERROR_MESSAGES["permission"]
+    klass = sqlstate[:2]
+    kind = _SQLSTATE_CLASS_KIND.get(klass, "other")
+    template = _SQLSTATE_MESSAGES.get(klass)
+    if template is not None:
+        return kind, template.format(code=sqlstate)
+    if kind in _ERROR_MESSAGES:
+        return kind, _ERROR_MESSAGES[kind]
+    return "other", _SQLSTATE_UNCLASSIFIED.format(code=sqlstate)
+
+
+
+# The kinds a dialect rule may never replace (#566): failures whose fix is not a rewrite. Everything
+# else the classifier reads from an execution error is open to a rule matched on the primary message,
+# since the classifier reads the WHOLE text and an echoed statement can push a function error into
+# `table_not_found` or `column_not_found`.
+_NOT_A_REWRITE_KINDS = frozenset(
+    {"permission", "auth", "sign_in_required", "network", "dsn", "driver_missing"}
+)
 
 
 def _classify_db_error(text: str, code: int) -> FailureKind:
@@ -563,7 +701,7 @@ def _load_credentials(profile: str, org_id: str = "local") -> dict[str, str]:
     # value), which then gets fed to Snowflake/Postgres/MySQL as a junk
     # hostname/account and the connection hangs or fails confusingly.
     cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
-    cfg.read(CREDENTIALS_PATH)
+    cfg.read(CREDENTIALS_PATH, encoding="utf-8-sig")
     if profile not in cfg:
         # **Name the other profiles only on the single-user path.** This message is returned by the
         # tool, so it reaches the model and from there whoever asked the question. On a deployment
@@ -1508,6 +1646,11 @@ _guard_model: ContextVar[Any | None] = ContextVar("_guard_model", default=None)
 # absent or no model has been built yet. All of them get the shape-neutral remediation, which is why
 # that third text is not a defensive branch — it is the answer for every deployment without a model.
 _guard_shape: ContextVar[str | None] = ContextVar("_guard_shape", default=None)
+# What a timeout refusal can say about WHY the statement was slow (#451): one sentence per outer join
+# between plain tables, in the caller's own names and never the model's facts. Computed
+# where `_guard_shape` is, for the same reason (this module cannot import sqlglot), and empty when the
+# model pass did not run or the statement has no such join.
+_guard_scan: ContextVar[tuple[str, ...]] = ContextVar("_guard_scan", default=())
 
 # The ACE-101 posture, resolved ONCE per call and then fixed for the rest of it.
 #
@@ -1788,6 +1931,13 @@ _EXECUTOR_SATURATED = "the executor already has its limit of abandoned calls out
 _NARROW_IT = ("Narrow the time range, reduce the grouping, or add a selective filter, "
               "then run it again.")
 
+
+def _narrow_it() -> str:
+    """The time-bound remediation: the outer-join shape the statement uses, in its own table names,
+    when it has one (#451), then the generic advice. At most two shapes, so the refusal stays one
+    short paragraph."""
+    return " ".join([*_guard_scan.get()[:2], _NARROW_IT])
+
 # The transfer bound's remediation, keyed by the shape `_guard_shape` carries. Three entries rather
 # than one, because the right fix genuinely differs and the wrong one is not merely unhelpful:
 #
@@ -1874,10 +2024,10 @@ def _resource_limit_refusal(exc: _ResourceLimit | None) -> Refusal:
             f"The executor did not return within the {timeout_s + _OUTER_BOUND_SKEW_S}s limit "
             "and the query was abandoned."
         )
-        remediation = _NARROW_IT
+        remediation = _narrow_it()
     else:
         detail = f"The statement ran longer than the {timeout_s}s limit and was cancelled."
-        remediation = _NARROW_IT
+        remediation = _narrow_it()
     return refuse(RULE_RESOURCE_LIMIT, detail=detail, remediation=remediation)
 
 
@@ -1955,6 +2105,23 @@ def _collect_cursor(cur: Any) -> ExecResult:
     columns = [d[0] for d in cur.description]
     truncated = len(fetched) > cap
     return ExecResult(columns=columns, rows=[tuple(r) for r in fetched[:cap]], truncated=truncated)
+
+
+def _utf8_stdout() -> None:
+    """Make stdout the wire `_emit_result_csv` assumes: UTF-8 bytes, rows exactly as csv wrote them;
+    and stderr UTF-8 too, because every caller decodes both streams as UTF-8 and a database's error
+    text, written to stderr, can carry any character.
+
+    On Windows a piped stdout encodes in the ANSI code page, so a value outside it raises, and it
+    turns every "\n" into "\r\n" — including the one inside csv's own "\r\n" terminator, so each
+    row arrives as "\r\r\n" and a universal-newline reader sees a blank row after every real one.
+    The terminator stays: it is the cross-platform wire format, pinned byte for byte by
+    `test_ah012_executor_seam`. Only the stream changes. A replaced stream (a test's capture) may
+    have no `reconfigure`, and needs none."""
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", newline="")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
 
 
 def _emit_result_csv(result: ExecResult) -> None:
@@ -2119,6 +2286,49 @@ def _engine_mismatch(profile: str, creds: dict) -> "Refusal | None":
     )
 
 
+def _connection_catalog(creds: dict) -> str | None:
+    """The catalog (database / project) the credentials connect to, as a table reference's first
+    part names it; None where the engine has none or the credentials leave it to a default."""
+    db_type = str(creds.get("type", "")).lower()
+    if db_type == "snowflake":
+        # The connector resolves the name as an identifier: upper-cased unless it is quoted, so
+        # `analytics` connects to ANALYTICS and a quoted `"ANALYTICS"` must name that.
+        db = str(creds.get("database") or "")
+        if len(db) > 1 and db.startswith('"') and db.endswith('"'):
+            return db[1:-1] or None
+        return db.upper() or None
+    if db_type in ("postgres", "supabase", "redshift", "sqlserver", "mssql"):
+        return creds.get("database") or None
+    if db_type == "bigquery":
+        return creds.get("project") or None
+    if db_type in ("trino", "presto"):
+        return creds.get("catalog") or None
+    # Databricks: `_run_databricks` passes no catalog, so the session runs in the workspace's default
+    # one whatever the credentials say. Unknown, then, and a catalog prefix is refused.
+    if db_type == "duckdb":
+        # DuckDB names an attached database after its file, and the in-memory one `memory`.
+        path = creds.get("path") or creds.get("database") or ":memory:"
+        return "memory" if path == ":memory:" else Path(path).stem
+    return None
+
+
+def _foreign_catalog(sql: str, creds: dict) -> "Refusal | None":
+    """Refuse a reference to a declared table under a catalog the connection is not in (#337).
+
+    After the credentials, because they are what say which catalog that is. `getattr` for the same
+    reason as `_engine_mismatch`: an older installed runtime skips the check rather than raising.
+    """
+    # The model the gates just resolved and published, never a second load per query. None where
+    # no model is declared, and then there is no declared table for a catalog to misname.
+    org = _guard_model.get()
+    if org is None:
+        return None
+    from semantic_model import runtime as RT  # importable: the gates that published `org` ran on it
+
+    check = getattr(RT, "check_catalog_scope", None)
+    return None if check is None else check(sql, org, _connection_catalog(creds))
+
+
 def _disk_model_root(profile: str) -> Path | None:
     """The on-disk model root for `profile`, or None when no model is declared there.
 
@@ -2132,7 +2342,10 @@ def _disk_model_root(profile: str) -> Path | None:
     supported path would not have enforced (a false positive that breaks a working install) or stay
     silent where it would have (the hole ACE-071 closes).
     """
-    root = Path(os.environ.get("AGAMI_ARTIFACTS_DIR") or (Path.home() / "agami-artifacts")) / profile
+    # The same folder credentials and `sm` use — env var, then the saved pointer, then the default.
+    # Reading only the env var and the default missed a folder chosen through the pointer, so the
+    # model pass found no model there and stayed off while the model itself was in use (#428).
+    root = agami_paths.artifacts_dir() / profile
     return root if (root / "datasource.yaml").exists() else None
 
 
@@ -2499,6 +2712,13 @@ def _model_safety(sql: str, profile: str, area: str | None) -> tuple[str, Refusa
     # one. Set here and not at the chokepoint because the chokepoint cannot import sqlglot — see
     # `_guard_shape`. Stays None when `ctx` is None (no sqlglot) or the statement did not parse.
     _guard_shape.set(RT.statement_shape(ctx))
+    # `getattr`, like `_engine_mismatch`'s reads: the installed runtime can be older than this file.
+    # Advisory text for a later timeout, so a failure here costs the hint, never the query.
+    scan_risks = getattr(RT, "scan_risks", None)
+    try:
+        _guard_scan.set(tuple(scan_risks(ctx)) if scan_risks is not None else ())
+    except Exception:
+        _guard_scan.set(())
 
     # Readability gate — refuse a statement the guard cannot read in this datasource's own grammar,
     # BEFORE any gate below is asked to judge it. Each gate below degrades to allow when it has no
@@ -2665,7 +2885,7 @@ def _receipt_for(sql: str, profile: str, *, bounded: bool) -> Receipt:
     actually executed.
 
     Degrades rather than crashes, three ways, because every one of them is a real deployment. The
-    vendored plugin mirror ships ``semantic_model/__init__.py`` and ``units.py`` and no runtime at
+    vendored plugin mirror ships ``units.py`` (as ``_semantic_model_units.py``) and no runtime at
     all, so the guarded import is the same one ``_model_safety`` makes for the same reason; a local
     install legitimately has no model yet; and an assembler that raises must cost the caller its
     receipt, never its answer.
@@ -2970,6 +3190,7 @@ def execute_guarded(
     # And the same again for the shape. A stale value here is worse than none: it would word this
     # call's refusal for a statement somebody else sent, and the two wordings give opposite advice.
     _guard_shape.set(None)
+    _guard_scan.set(())
     # And the ACE-101 posture, resolved once here rather than cleared. Same reason as the four above,
     # one step stronger: those must not carry a STALE value into this call, and this one must not
     # CHANGE during it. The gate below and the receipt built after it have to be two statements about
@@ -2989,6 +3210,9 @@ def execute_guarded(
     # that keeps it that way — a future rewrite would have to reintroduce the divergence past a name
     # that says what it is for.
     received_sql = sql
+    # The engine as the credentials name it, for answering a database error with the dialect rule
+    # that explains it (#566). Unknown until the credentials load, which is after the gates.
+    engine: str | None = None
     try:
         # FIRST, above the read-only gate, because principle 7 records "every call ... whether it
         # executed or was refused" — so gating only execution would leave the refusals unrecorded
@@ -3034,6 +3258,7 @@ def execute_guarded(
                 return _envelope("refused", refusal=verdict,
                                  receipt=_refusal_receipt(verdict, received_sql, profile))
         creds = _load_credentials(profile, org_id or "local")
+        engine = str(creds.get("type") or "") or None
         if not no_safety and not _model_pass_disabled():
             # The guard picked its grammar from the model's declared engine; the executor picks its
             # driver from these credentials. Two independent pieces of operator configuration with
@@ -3049,7 +3274,10 @@ def execute_guarded(
             # `engine_mismatch` reports OUR configuration drift, a model declaring an engine its own
             # credentials do not speak, and it refuses every statement on that datasource until an
             # operator fixes it. That is 4c, not 4a: nothing here is about what the statement can do.
-            mismatch = _engine_mismatch(profile, creds)
+            # `_foreign_catalog` rides here for the opposite reason: it IS about what the statement
+            # reads (a table in another database, 4b), but only the credentials say which database
+            # is the connection's own, so it can run no earlier than this.
+            mismatch = _engine_mismatch(profile, creds) or _foreign_catalog(sql, creds)
             if mismatch is not None:
                 return _envelope("refused", refusal=mismatch,
                                  receipt=_refusal_receipt(mismatch, received_sql, profile))
@@ -3129,9 +3357,29 @@ def execute_guarded(
         # `_RAW_LOG` is the server-side trail everywhere else. Neither is the caller's channel.
         _last_error_detail.set(exc.msg)
         _RAW_LOG.error("database error (audit detail): %s", exc.msg)
-        return _envelope("failed", failure=Failure(
-            kind=kind, message=_ERROR_MESSAGES.get(kind, UNEXPECTED_FAILURE_MESSAGE),
-        ), receipt=_receipt_for(received_sql, profile, bounded=True))
+        message = _ERROR_MESSAGES.get(kind, UNEXPECTED_FAILURE_MESSAGE)
+        # A construct this engine rejects, named by its own dialect rule (#566). The rule is our
+        # text, chosen FROM the driver's, so the ACE-039 line holds. It is the statement's fault and
+        # a rewrite fixes it, which is what `syntax` says; read by the generic classifier,
+        # "function string_agg(...) does not exist" came out as a missing column or as unclassified.
+        # Only an execution error (code 5) of a kind that could be one, so a permission, sign-in or
+        # connection failure is never reported as "rewrite your SQL".
+        fix = (
+            sql_dialect_rules.dialect_fix_for(engine, exc.msg)
+            if exc.code == 5 and kind not in _NOT_A_REWRITE_KINDS else None
+        )
+        if fix is not None:
+            kind, message = "syntax", fix
+        elif kind == "other" and exc.code == 5:
+            # Nothing above could read it (#561). The server's SQLSTATE still says whose fault it
+            # was, without a word of its text: from the raise site, or from the driver's exception
+            # the built-in engines raised this inside. Only an execution error, as for the rule
+            # above: a connect failure or a deployment's own `other` is not the statement's fault.
+            sqlstate = sqlstate_of(exc)
+            if sqlstate is not None:
+                kind, message = _sqlstate_failure(sqlstate)
+        return _envelope("failed", failure=Failure(kind=kind, message=message),
+                         receipt=_receipt_for(received_sql, profile, bounded=True))
     except Exception:
         # Unanticipated, so unreadable: nobody has vetted what this exception's text contains, and
         # `configparser.MissingSectionHeaderError` alone carries the absolute path of the
@@ -3148,6 +3396,7 @@ def main() -> int:
     # One-shot migration of a legacy <artifacts_dir>/local into <artifacts_dir>/local/, then re-resolve
     # the paths (the migration can set the artifacts-dir pointer to a custom location).
     global CREDENTIALS_PATH, CONFIG_PATH
+    _utf8_stdout()
     agami_paths.bootstrap()
     CREDENTIALS_PATH = agami_paths.credentials_path()
     CONFIG_PATH = agami_paths.config_path()
@@ -3200,7 +3449,7 @@ def main() -> int:
                           manifest_path=Path(os.path.expanduser(args.manifest)) if args.manifest else None)
 
     if args.sql_file:
-        sql = Path(os.path.expanduser(args.sql_file)).read_text()
+        sql = Path(os.path.expanduser(args.sql_file)).read_text(encoding="utf-8")
     else:
         sql = args.sql
 
@@ -3274,13 +3523,15 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
     try:
         for n, item in enumerate(plan, 1):
             ident = str(item.get("id") or n)
-            out = Path(os.path.expanduser(str(item["out"])))
+            # Relative paths resolve from the current directory, not the plan's folder; the manifest
+            # records the absolute path so a caller sees where each result actually landed.
+            out = Path(os.path.expanduser(str(item["out"]))).resolve()
             out.parent.mkdir(parents=True, exist_ok=True)
             try:
                 sql = item["sql"] if item.get("sql") else Path(os.path.expanduser(item["sql_file"])).read_text(encoding="utf-8")
             except OSError as exc:
                 run = {"status": "failed", "exit": 2, "kind": "dsn", "rule": None, "detail": f"the statement file could not be read: {exc.strerror or exc}"}
-                out.write_text("")
+                out.write_text("", encoding="utf-8")
             else:
                 env = execute_guarded(sql, profile, item.get("area") or default_area, executor=BUILTIN_EXECUTOR,
                                       no_safety=no_safety)
@@ -3293,11 +3544,11 @@ def _batch_main(plan_path: Path, profile: str, *, default_area: str | None, no_s
                                 writer.writerow(row)
                     run = {"status": "ok", "exit": 0, "kind": None, "rule": None, "detail": None, "rows": len(env.data.rows)}
                 elif env.status == "refused":
-                    out.write_text("")
+                    out.write_text("", encoding="utf-8")
                     run = {"status": "refused", "exit": 1, "kind": None, "rule": getattr(env.refusal, "rule", None),
                            "detail": getattr(env.refusal, "reason", None)}
                 else:
-                    out.write_text("")
+                    out.write_text("", encoding="utf-8")
                     run = {"status": "failed", "exit": FAILURE_KIND_TO_EXIT.get(env.failure.kind, _DEFAULT_FAILURE_EXIT),
                            "kind": env.failure.kind, "rule": None, "detail": env.failure.message}
             _batch_run_json_path(out).write_text(json.dumps(run), encoding="utf-8")
