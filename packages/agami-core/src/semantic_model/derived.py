@@ -69,6 +69,12 @@ def expand_binding(metric, storage_type: str, idx: dict) -> str:
     # Judged once, on the whole expansion: a base's own nesting must not hide the one its
     # enclosing metric adds (AVG over a percentile of a SUM).
     problems = binding_problems(expanded, storage_type)
+    if problems and all(p.subquery for p in problems):
+        raise NestedAggregateError(
+            f"metric {metric.name!r} expands to SQL {storage_type} refuses "
+            f"({'; '.join(map(str, problems))}). {_SUBQUERY_FIX}",
+            problems,
+        )
     if problems:
         raise NestedAggregateError(
             f"metric {metric.name!r} composes an aggregate of an aggregate "
@@ -107,17 +113,25 @@ def _expand(metric, storage_type: str, idx: dict, stack: list) -> str:
 
 
 class BindingProblem(NamedTuple):
-    """One aggregate, or window function, written inside another aggregate of the same SELECT."""
+    """One aggregate, or window function, written inside another aggregate or window function of the
+    same SELECT; or, on an engine that refuses it, a subquery inside an aggregate."""
 
     outer: str    # the enclosing aggregate's name, e.g. "AVG"
     inner: str    # the nested aggregate's name, e.g. "SUM"
-    clause: str   # where it sits: "argument", "within_group" or "filter"
+    clause: str   # where it sits: "argument", "within_group", "filter" or "over"
     window: bool = False  # the nested call is a window function, `SUM(x) OVER ()`
+    outer_window: bool = False  # the enclosing call is a window function too
+    subquery: bool = False  # the nested thing is a subquery, refused only on some engines
 
     def __str__(self) -> str:
         where = {"within_group": " WITHIN GROUP (ORDER BY ...)",
                  "filter": " FILTER (WHERE ...)"}.get(self.clause, "")
+        if self.subquery:
+            return f"a subquery is inside {self.outer}(...){where}"
         inner = f"the window function {self.inner}(...) OVER (...)" if self.window else f"{self.inner}(...)"
+        if self.outer_window:
+            where = "the OVER (...) clause of " if self.clause == "over" else ""
+            return f"{inner} is nested inside {where}the window function {self.outer}(...) OVER (...)"
         return f"{inner} is nested inside {self.outer}(...){where}"
 
 
@@ -152,26 +166,75 @@ def _selects_above(node) -> list:
     return [a for a in _ancestors_until(node, None) if isinstance(a, exp.Select)]
 
 
-def _column_level(col):
+def _ident_key(ident, fold: Optional[str]) -> Optional[str]:
+    """An identifier as the engine compares it: a quoted name keeps its case where the engine folds
+    unquoted ones (`fold`, as `validator._identifier_fold`), so `"ORDERS"` is not `orders` there."""
+    from sqlglot import expressions as exp
+
+    if not isinstance(ident, exp.Identifier) or not ident.name:
+        return None
+    if fold and ident.args.get("quoted"):
+        return ident.name
+    return ident.name.upper() if fold == "upper" else ident.name.lower()
+
+
+def _from_sources(sel) -> list:
+    """The sources in a SELECT's FROM and JOINs, a parenthesized `(orders JOIN customers ...)`
+    opened up into its tables, since its names stay visible to the SELECT."""
+    from sqlglot import expressions as exp
+
+    out = []
+    pending = [sel.args.get("from_") or sel.args.get("from")] + list(sel.args.get("joins") or [])
+    pending = [s.this for s in pending if s is not None]
+    while pending:
+        src = pending.pop(0)
+        if (isinstance(src, exp.Subquery) and not src.alias
+                and isinstance(src.this, (exp.Table, exp.Subquery))):
+            pending.insert(0, src.this)
+            continue
+        out.append(src)
+        if isinstance(src, exp.Table):
+            pending[:0] = [j.this for j in src.args.get("joins") or []]
+    return out
+
+
+def _names_source(col, src, fold: Optional[str]) -> bool:
+    """Whether column `col`'s qualifier names source `src`. An alias hides the table's own name. A
+    qualifier part the other side leaves out is taken to match (`public.orders.amount` over
+    `FROM orders`), so a subquery that may read its own rows is never judged correlated."""
+    from sqlglot import expressions as exp
+
+    alias = src.args.get("alias")
+    if alias is not None and alias.this is not None:
+        return (col.args.get("db") is None
+                and _ident_key(col.args.get("table"), fold) == _ident_key(alias.this, fold))
+    if not isinstance(src, exp.Table):
+        return False
+    for part in ("table", "db", "catalog"):
+        mine = col.args.get(part)
+        theirs = src.args.get("this" if part == "table" else part)
+        if part != "table" and (mine is None or theirs is None):
+            continue
+        if _ident_key(mine, fold) is None or _ident_key(mine, fold) != _ident_key(theirs, fold):
+            return False
+    return True
+
+
+def _column_level(col, fold: Optional[str]):
     """The SELECT whose FROM a column reference resolves to, or None for the query a bare binding
     is placed in. Without a schema an unqualified column is taken to be the innermost FROM's, so a
     subquery that may read its own rows is never judged correlated."""
-    from sqlglot import expressions as exp
-
-    qualifier = col.table.lower() if col.table else None
     for sel in _selects_above(col):
-        sources = [sel.args.get("from_") or sel.args.get("from")] + list(sel.args.get("joins") or [])
-        sources = [s.this for s in sources if s is not None]
-        if qualifier is None:
+        sources = _from_sources(sel)
+        if not col.table:
             if sources:
                 return sel
-        elif any(isinstance(s, (exp.Table, exp.Subquery)) and s.alias_or_name.lower() == qualifier
-                 for s in sources):
+        elif any(_names_source(col, s, fold) for s in sources):
             return sel
     return None
 
 
-def _owning_select(agg):
+def _owning_select(agg, fold: Optional[str]):
     """The SELECT an aggregate is evaluated over. Like PostgreSQL and SQLite, an aggregate in a
     subquery whose arguments read only outer columns belongs to the nearest of those outer levels:
     `AVG((SELECT SUM(orders.amount)))` nests SUM in AVG."""
@@ -184,7 +247,7 @@ def _owning_select(agg):
             if not any(isinstance(a, exp.Query) for a in _ancestors_until(c, unit))]
     if not cols:
         return own
-    found = [_column_level(c) for c in cols]
+    found = [_column_level(c, fold) for c in cols]
     if any(f is own for f in found):
         return own
     return next((sel for sel in levels if any(f is sel for f in found)), None)
@@ -198,15 +261,15 @@ def _ancestors_until(node, stop):
         node = node.parent
 
 
-def _correlated_in(query, agg):
+def _correlated_in(query, agg, fold: Optional[str]):
     """The aggregates inside the subquery `query` that are evaluated over `agg`'s own SELECT."""
-    owner = _owning_select(agg)
+    owner = _owning_select(agg, fold)
     for node in query.walk():
-        if _is_aggregate(node) and _owning_select(node) is owner:
+        if _is_aggregate(node) and _owning_select(node, fold) is owner:
             yield node
 
 
-def _nested_in(unit, agg):
+def _nested_in(unit, agg, fold: Optional[str]):
     """The aggregates and window functions directly inside `unit` in the same SELECT. A subquery is
     a scope of its own: an aggregate over a derived table or a scalar subquery is legal SQL, and
     only an aggregate in it that reads nothing but `agg`'s columns is nested (`_owning_select`).
@@ -216,7 +279,7 @@ def _nested_in(unit, agg):
 
     for child in unit.iter_expressions():
         if isinstance(child, exp.Query):
-            yield from _correlated_in(child, agg)
+            yield from _correlated_in(child, agg, fold)
             continue
         call = child
         # a nested aggregate's own WITHIN GROUP / FILTER belongs to it, not to `agg`
@@ -225,7 +288,7 @@ def _nested_in(unit, agg):
         if isinstance(child, exp.Window) or (call is not agg and _is_aggregate(call)):
             yield child if isinstance(child, exp.Window) else call
             continue
-        yield from _nested_in(child, agg)
+        yield from _nested_in(child, agg, fold)
 
 
 def _call_name(node) -> str:
@@ -247,7 +310,7 @@ def _grouped_select(node) -> bool:
     return isinstance(scope, exp.Select) and scope.args.get("group") is not None
 
 
-def _oracle_allows(agg, inner, clause: str, storage_type: str) -> bool:
+def _oracle_allows(agg, inner, clause: str, storage_type: str, fold: Optional[str]) -> bool:
     """Oracle accepts two levels of aggregate in the argument of a grouped SELECT,
     `SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id`. A bare binding has no GROUP BY of
     its own and still nests, and a third level is refused there too."""
@@ -255,7 +318,8 @@ def _oracle_allows(agg, inner, clause: str, storage_type: str) -> bool:
 
     if storage_type != "Oracle" or clause != "argument" or not _is_aggregate(inner):
         return False
-    if not _grouped_select(agg) or next(_nested_in(_aggregate_unit(inner), inner), None) is not None:
+    if (not _grouped_select(agg)
+            or next(_nested_in(_aggregate_unit(inner), inner, fold), None) is not None):
         return False
     outer = _aggregate_unit(agg).parent
     while outer is not None and not isinstance(outer, exp.Query):
@@ -292,10 +356,12 @@ def binding_problems(sql: str, storage_type: str) -> list[BindingProblem]:
 
     An aggregate directly inside another aggregate of the same SELECT is refused (`AVG(SUM(a))`),
     and so is one in the aggregate's WITHIN GROUP or FILTER clause
-    (`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(a))`) and a window function inside an
-    aggregate (`AVG(SUM(a) OVER ())`). The one exception is Oracle, which runs two levels of
+    (`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(a))`), and a window function inside an
+    aggregate (`AVG(SUM(a) OVER ())`) or inside another window function
+    (`SUM(SUM(a) OVER ()) OVER ()`). The one exception is Oracle, which runs two levels of
     aggregate in the argument when that SELECT has a GROUP BY. An aggregate over a derived table or a
-    scalar subquery is legal and is not a problem. Parsed in the binding's own engine; a binding
+    scalar subquery is legal and is not a problem, except on SQL Server, which refuses any subquery
+    inside an aggregate. Parsed in the binding's own engine; a binding
     that does not parse (a `{placeholder}`, an engine with no grammar) yields nothing, so this never
     blocks on what it cannot read."""
     try:
@@ -311,16 +377,60 @@ def binding_problems(sql: str, storage_type: str) -> list[BindingProblem]:
         return []
     if tree is None:
         return []
+    from .validator import _identifier_fold
+
+    fold = _identifier_fold(storage_type)
     problems: list[BindingProblem] = []
     for agg in [n for n in tree.walk() if _is_aggregate(n)]:
         unit = _aggregate_unit(agg)
-        for inner in _nested_in(unit, agg):
+        for inner in _nested_in(unit, agg, fold):
             clause = _clause_of(inner, agg)
-            if _oracle_allows(agg, inner, clause, storage_type):
+            if _oracle_allows(agg, inner, clause, storage_type, fold):
                 continue
             problems.append(BindingProblem(agg.sql_name(), _call_name(inner), clause,
                                            isinstance(inner, exp.Window)))
+        if storage_type in _NO_SUBQUERY_IN_AGGREGATE:
+            sub = next((q for q in unit.find_all(exp.Query) if q is not unit), None)
+            if sub is not None:
+                problems.append(BindingProblem(agg.sql_name(), "subquery", _clause_of(sub, agg),
+                                               subquery=True))
+    for win in tree.find_all(exp.Window):
+        problems.extend(_window_in_window(win))
     return problems
+
+
+# Engines that refuse a subquery anywhere in an aggregate's argument, correlated or not: SQL Server
+# (error 130, "Cannot perform an aggregate function on an expression containing an aggregate or a
+# subquery").
+_NO_SUBQUERY_IN_AGGREGATE = frozenset({"SQLServer"})
+
+_SUBQUERY_FIX = ("Aggregate over a derived table instead: "
+                 "(SELECT AVG(t.v) FROM (SELECT ... AS v FROM ...) AS t).")
+
+
+def _window_in_window(win) -> list[BindingProblem]:
+    """A window function inside another's argument or OVER clause in the same SELECT, which no
+    engine runs: `SUM(SUM(x) OVER ()) OVER ()`. An aggregate there is legal, `SUM(SUM(x)) OVER ()`,
+    and so is anything in a subquery."""
+    from sqlglot import expressions as exp
+
+    out = []
+    for part, clause in ((win.this, "argument"), (win.args.get("partition_by"), "over"),
+                         (win.args.get("order"), "over")):
+        for node in part if isinstance(part, list) else [part]:
+            if node is None:
+                continue
+            for inner in node.find_all(exp.Window):
+                if inner is win or any(isinstance(a, exp.Query)
+                                       for a in _ancestors_until(inner, win)):
+                    continue
+                # a window or aggregate in between reports this one itself
+                if any(isinstance(a, exp.Window) or _is_aggregate(a)
+                       for a in _ancestors_until(inner, win)):
+                    continue
+                out.append(BindingProblem(_call_name(win), _call_name(inner), clause,
+                                          window=True, outer_window=True))
+    return out
 
 
 class NestedAggregateError(DerivedError):
@@ -360,6 +470,9 @@ def metric_binding_problems(metric, idx: dict, org=None) -> dict[str, list[Bindi
 def nested_aggregate_reason(metric_name: str, problems: dict[str, list[BindingProblem]]) -> str:
     """One sentence naming each nested aggregate and the forms that do run."""
     found = "; ".join(f"{stype}: {p}" for stype, ps in problems.items() for p in ps)
+    if all(p.subquery for ps in problems.values() for p in ps):
+        return (f"metric {metric_name!r} puts a subquery inside an aggregate ({found}), which the "
+                f"database refuses. {_SUBQUERY_FIX}")
     return (
         f"metric {metric_name!r} nests an aggregate inside another ({found}), which the database "
         "refuses. Write a plain aggregate (AVG(col) already ignores missing values), aggregate "

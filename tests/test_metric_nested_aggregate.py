@@ -91,6 +91,20 @@ CASES = [
     pytest.param("AVG((SELECT SUM(orders.amount) FROM orders o2))", True, id="sum-only-correlates"),
     pytest.param("AVG((SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer_id = "
                  "orders.customer_id))", False, id="subquery-sums-its-own-rows"),
+    # PostgreSQL keeps a quoted alias's case and compares the schema too (#597 review)
+    pytest.param('AVG((SELECT SUM(orders.amount) FROM orders AS "ORDERS"))', True,
+                 id="quoted-alias-hides-nothing"),
+    pytest.param("AVG((SELECT SUM(public.orders.amount) FROM archive.orders))", True,
+                 id="other-schema-same-name"),
+    pytest.param("AVG((SELECT SUM(public.orders.amount) FROM public.orders))", False,
+                 id="same-schema-same-name"),
+    pytest.param("AVG((SELECT SUM(v.column1) FROM (VALUES (1), (2)) AS v))", False,
+                 id="aliased-values"),
+    pytest.param("AVG((SELECT SUM(orders.amount) FROM (orders)))", False,
+                 id="parenthesized-table"),
+    pytest.param("SUM((SUM(amount) OVER ())) OVER ()", True, id="window-over-window"),
+    pytest.param("SUM(amount) OVER (ORDER BY SUM(amount) OVER ())", True,
+                 id="window-in-over-clause"),
 ]
 
 # A scalar subquery's aggregate that reads only the outer query's columns is that query's, so it
@@ -104,6 +118,11 @@ CORRELATED = [
     "AVG((SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer_id = orders.customer_id))",
     "AVG((SELECT SUM(orders.amount + o2.amount) FROM orders o2))",
     "AVG((SELECT COUNT(*)))",
+    "AVG((SELECT SUM(v.column1) FROM (VALUES (1), (2)) AS v))",
+    "AVG((SELECT SUM(orders.amount) FROM (orders)))",
+    "AVG((SELECT SUM(o2.amount) FROM (orders AS o2 JOIN orders o3 ON o2.customer_id = o3.customer_id)))",
+    "AVG((SELECT SUM(orders.amount) FROM (orders AS o2 JOIN orders o3 ON o2.customer_id = o3.customer_id)))",
+    'AVG((SELECT SUM(orders.amount) FROM orders AS "ORDERS"))',
 ]
 
 
@@ -197,18 +216,20 @@ def test_second_order_synthesis_is_still_accepted_and_unchanged(tmp_path):
         "FROM orders GROUP BY order_date) _inner)")
 
 
-def _derived_org(binding: str, base: str = "SUM(amount)") -> m.Datasource:
-    rev = m.Metric(name="revenue", calculation="x", bindings={"PostgreSQL": base},
+def _derived_org(binding: str, base: str = "SUM(amount)",
+                 storage_type: str = "PostgreSQL") -> m.Datasource:
+    rev = m.Metric(name="revenue", calculation="x", bindings={storage_type: base},
                    source_tables=["orders"])
-    der = m.Metric(name="d", calculation="x", bindings={"PostgreSQL": binding},
+    der = m.Metric(name="d", calculation="x", bindings={storage_type: binding},
                    base_metrics=["revenue"], source_tables=["orders"])
     return m.Datasource(datasource="acme", subject_areas=[
         m.SubjectArea(name=AREA, metrics=[rev, der])])
 
 
-def _derived_findings(binding: str, base: str = "SUM(amount)") -> list[tuple[str, str]]:
+def _derived_findings(binding: str, base: str = "SUM(amount)",
+                      storage_type: str = "PostgreSQL") -> list[tuple[str, str]]:
     res = V.ValidationResult()
-    V._check_derived_metrics(_derived_org(binding, base), res)
+    V._check_derived_metrics(_derived_org(binding, base, storage_type), res)
     return [(f.severity, f.code) for f in res.findings]
 
 
@@ -293,7 +314,11 @@ def test_the_window_verdicts_match_what_sqlite_runs():
     db = sqlite3.connect(":memory:")
     db.executescript("CREATE TABLE orders (amount INT); INSERT INTO orders VALUES (1), (2);")
     for binding in ("AVG(SUM(amount) OVER ())", "SUM(SUM(amount)) OVER ()",
-                    "RANK() OVER (ORDER BY SUM(amount))"):
+                    "RANK() OVER (ORDER BY SUM(amount))", "SUM((SUM(amount) OVER ())) OVER ()",
+                    "SUM(amount) OVER (ORDER BY SUM(amount) OVER ())",
+                    "SUM(amount) OVER (PARTITION BY SUM(amount) OVER ())",
+                    "SUM(AVG(SUM(amount) OVER ())) OVER ()",
+                    "SUM((SELECT MAX(x) OVER () FROM (SELECT 1 AS x))) OVER ()"):
         try:
             db.execute(f"SELECT {binding} FROM orders").fetchall()
             runs = True
@@ -417,3 +442,57 @@ def test_curate_refuses_dropping_the_inner_grain_that_makes_a_binding_legal(tmp_
     assert not res.applied
     assert "SUM(...) is nested inside AVG(...)" in res.skipped[0]["reason"]
     assert path.read_text() == before
+
+
+def test_quoted_names_keep_their_case_where_the_engine_folds():
+    # Snowflake folds unquoted names to upper case, so `"ORDERS"` names `orders` and `"orders"` not
+    assert D.binding_problems('AVG((SELECT SUM("ORDERS".amount) FROM orders))', "Snowflake") == []
+    assert D.binding_problems('AVG((SELECT SUM("orders".amount) FROM orders))', "Snowflake")
+    # SQLite compares names case-insensitively, quoted or not
+    assert D.binding_problems('AVG((SELECT SUM(orders.amount) FROM orders AS "ORDERS"))',
+                              "SQLite") == []
+
+
+SQLSERVER_SUBQUERY = "AVG((SELECT SUM(amount) FROM orders))"
+
+
+def test_sql_server_refuses_a_subquery_inside_an_aggregate(tmp_path):
+    assert [str(p) for p in D.binding_problems(SQLSERVER_SUBQUERY, "SQLServer")] == [
+        "a subquery is inside AVG(...)"]
+    assert D.binding_problems("SUM(CASE WHEN EXISTS (SELECT 1) THEN amount END)", "SQLServer")
+    assert D.binding_problems(SQLSERVER_SUBQUERY, "PostgreSQL") == []
+    assert D.binding_problems("(SELECT AVG(t) FROM (SELECT SUM(amount) AS t FROM orders) s)",
+                              "SQLServer") == []
+
+    _write_model(tmp_path / "add", storage_type="SQLServer")
+    res = curate.write_items(tmp_path / "add", AREA, "metric",
+                             [_metric("m1", SQLSERVER_SUBQUERY, "SQLServer")])
+    assert "derived table" in res.skipped[0]["reason"]
+
+    _write_model(tmp_path / "existing", (_metric("m1", SQLSERVER_SUBQUERY, "SQLServer"),),
+                 "SQLServer")
+    org = loader.load_datasource(tmp_path / "existing", include_rejected=True)
+    vres = V.validate(org)
+    assert vres.ok and any(f.code == CODE for f in vres.findings)
+    assert "binding_problem" in RT.resolve_metrics("m1", org)[0]
+
+
+def test_sql_server_refuses_a_derived_subquery_inside_an_aggregate():
+    binding = "AVG((SELECT {revenue} FROM orders))"
+    # a warning, as the subquery check is new: a model holding it keeps validating
+    assert _derived_findings(binding, storage_type="SQLServer") == [("warning", CODE)]
+    assert _derived_findings(binding) == []
+    hit = RT.resolve_metrics("d", _derived_org(binding, storage_type="SQLServer"))[0]
+    assert "a subquery is inside AVG(...)" in hit["binding_problem"]
+    assert "derived table" in hit["binding_problem"]
+
+
+def test_a_derived_window_over_a_window_base_is_refused():
+    assert _derived_findings("SUM({revenue}) OVER ()", base="SUM(amount) OVER ()") == [
+        ("error", "derived_metric")]
+    hit = RT.resolve_metrics("d", _derived_org("SUM({revenue}) OVER ()",
+                                               base="SUM(amount) OVER ()"))[0]
+    assert ("the window function SUM(...) OVER (...) is nested inside the window function "
+            "SUM(...) OVER (...)") in hit["binding_problem"]
+    # a window over a plain aggregate base stays legal
+    assert _derived_findings("SUM({revenue}) OVER ()") == []

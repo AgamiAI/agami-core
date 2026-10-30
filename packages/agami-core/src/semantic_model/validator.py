@@ -1320,9 +1320,10 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
             try:
                 D.resolve_metric_sql(met, stype, idx, org)
             except D.NestedAggregateError as e:
-                # Nesting in a WITHIN GROUP / FILTER clause is refused since #519. A model that
-                # validated before must keep validating, so that alone is a warning.
-                if all(p.clause != "argument" for p in e.problems):
+                # Nesting in a WITHIN GROUP / FILTER / OVER clause, and SQL Server's subquery in
+                # an aggregate, are refused since #519. A model that validated before must keep
+                # validating, so those alone are a warning.
+                if all(p.clause != "argument" or p.subquery for p in e.problems):
                     res.warn("metric_binding_nested_aggregate", str(e))
                 else:
                     res.error("derived_metric", str(e))

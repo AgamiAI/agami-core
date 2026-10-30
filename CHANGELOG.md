@@ -23,7 +23,13 @@ below corresponds to one such version.
   aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate.
   An aggregate in a scalar subquery that reads only the outer query's columns belongs to the outer
   query, as on PostgreSQL and SQLite, so `AVG((SELECT SUM(orders.amount)))` is refused, while one
-  that sums the subquery's own rows is not. The
+  that sums the subquery's own rows is not. A column's table is matched by schema and name as the
+  engine compares them (on PostgreSQL, Snowflake and Oracle a quoted alias keeps its case, so
+  `FROM orders AS "ORDERS"` does not hide an outer `orders`), and a source can be an aliased
+  `VALUES` list or a parenthesized table or join. A window function inside another window
+  function's argument or `OVER` clause (`SUM((SUM(amount) OVER ())) OVER ()`) is refused too. On
+  SQL Server, which refuses any subquery inside an aggregate, `AVG((SELECT SUM(amount) FROM
+  orders))` is refused with the derived-table rewrite; on a derived metric that is a warning. The
   one exception is Oracle, which runs two levels of aggregate in the argument of a SELECT with its
   own GROUP BY: an Oracle binding `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is
   accepted, while a bare `AVG(SUM(amount))`, a third level, or that binding on any other engine is
