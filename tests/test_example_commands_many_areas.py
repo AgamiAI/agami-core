@@ -221,7 +221,7 @@ def test_dashboard_renders_several_areas(tmp_path, fake_db):
     single.write_text(one)
     html = tmp_path / "out.html"
     argv = ["render", "--title", "t", "--profile", "p", "--items-file", str(combined),
-            "--items-file", str(single), "--out", str(html)]
+            "--items-file", f"sales={single}", "--out", str(html)]
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(sys, "argv", argv)
         assert R.main() == 0
@@ -230,7 +230,7 @@ def test_dashboard_renders_several_areas(tmp_path, fake_db):
     # one numbering across both files, written back in each file's own shape
     d = json.loads(combined.read_text())
     assert [it["n"] for it in d["items"]] == [1, 2, 3, 4] and d["totals"]["examples"] == 4
-    assert [it["n"] for it in json.loads(single.read_text())] == [5, 6]
+    assert [(it["n"], it["area"]) for it in json.loads(single.read_text())] == [(5, "sales"), (6, "sales")]
 
 
 def test_seed_examples_across_areas_stops_at_the_model_wide_gate(tmp_path, monkeypatch):
@@ -271,3 +271,81 @@ def test_dashboard_refuses_an_items_file_without_items(tmp_path, capsys):
         assert R.main() == 1
     assert "'items' array" in capsys.readouterr().err
     assert not (tmp_path / "out.html").exists()
+
+
+def _render(R, files: list[str], out: Path) -> int:
+    argv = ["render", "--title", "t", "--profile", "p", "--out", str(out)]
+    for f in files:
+        argv += ["--items-file", f]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(sys, "argv", argv)
+        return R.main()
+
+
+def test_dashboard_refuses_unlabelled_single_area_files_together(tmp_path, fake_db, capsys):
+    import render_examples_validation as R
+
+    _model(tmp_path)
+    _examples(tmp_path)
+    files = []
+    for area in AREAS:
+        _, out = _run(["seed-validate", str(tmp_path), "--profile", "p", "--area", area])
+        (tmp_path / f"{area}.json").write_text(out)
+        files.append(str(tmp_path / f"{area}.json"))
+    assert _render(R, files, tmp_path / "out.html") == 1
+    assert "items carry no area" in capsys.readouterr().err
+    assert not (tmp_path / "out.html").exists()
+    # labelled, both areas' "how many rows?" stay apart
+    assert _render(R, [f"sales={files[0]}", f"ops={files[1]}"], tmp_path / "out.html") == 0
+    assert [(it["area"], it["question"]) for it in json.loads(Path(files[1]).read_text())] == [
+        ("ops", "how many rows?"), ("ops", "broken seed")]
+
+
+def test_dashboard_refuses_the_same_file_twice(tmp_path, fake_db, capsys, monkeypatch):
+    import render_examples_validation as R
+
+    _model(tmp_path)
+    _examples(tmp_path)
+    _, out = _run(["seed-validate", str(tmp_path), "--profile", "p"])
+    items = tmp_path / "items.json"
+    items.write_text(out)
+    before = items.read_text()
+    (tmp_path / "alias.json").symlink_to(items)
+    monkeypatch.chdir(tmp_path)
+    for second in ("items.json", str(tmp_path / "alias.json"), f"{tmp_path}/./items.json"):
+        assert _render(R, [str(items), second], tmp_path / "out.html") == 1
+        assert "given twice" in capsys.readouterr().err
+    assert not (tmp_path / "out.html").exists()
+    assert items.read_text() == before
+
+
+def test_remove_example_keeps_an_area_prefix_in_its_area(tmp_path):
+    _model(tmp_path)
+    _examples(tmp_path)
+    curate.add_examples(tmp_path, "ops", [{"question": "sales/net revenue?",
+                                           "sql": "SELECT COUNT(*) AS n FROM shipments"}])
+    rc, out = _run(["remove-example", str(tmp_path), "--question", "sales/net revenue?"])
+    d = json.loads(out)
+    assert rc == 1 and d["rejected"] == []
+    assert [a["area"] for a in d["areas"]] == ["sales"]
+    assert "sales/net revenue?" in [e["question"] for e in list_prompt_examples(tmp_path, "ops")]
+
+
+@pytest.mark.parametrize("cmd", [["seed-validate", "--profile", "p"],
+                                 ["remove-example", "--question", "total billed?"]])
+def test_one_area_still_runs_when_another_area_file_is_missing(tmp_path, fake_db, cmd):
+    _model(tmp_path)
+    _examples(tmp_path)
+    (tmp_path / "subject_areas" / "ops" / "subject_area.yaml").unlink()
+    rc, out = _run([cmd[0], str(tmp_path), *cmd[1:], "--area", "sales"])
+    assert rc == 0, out
+    with pytest.raises(FileNotFoundError):
+        _run([cmd[0], str(tmp_path), *cmd[1:]])
+
+
+def test_no_datasource_yaml_still_stops_one_area(tmp_path, fake_db):
+    _model(tmp_path)
+    _examples(tmp_path)
+    (tmp_path / "datasource.yaml").unlink()
+    rc, out = _run(["seed-validate", str(tmp_path), "--profile", "p", "--area", "sales"])
+    assert rc == 3 and json.loads(out)["error"] == "no_model"

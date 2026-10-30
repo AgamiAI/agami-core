@@ -21,10 +21,11 @@ below corresponds to one such version.
   `area`, and `totals`. One `--area` prints exactly what it printed before. `seed-examples` then
   writes each seed to the area it names in an `area` field. `seed-validate` runs each area's seeds
   through `execute_sql` scoped to that area, with the same per-statement limits. `remove-example`
-  takes a question as `<area>/<question>` or matches it in whichever area has it; a question that
-  more than one area has is refused, with the areas, and nothing is rejected. The dashboard renderer
-  reads the combined `seed-validate` output, takes `--items-file` more than once, and shows each
-  card's area. An area the model doesn't have is refused with the list of valid ones, where one
+  takes a question as `<area>/<question>`, looked up in that area only, or matches it in whichever
+  area has it; a question that more than one area has is refused, with the areas, and nothing is
+  rejected. The dashboard renderer reads the combined `seed-validate` output, takes `--items-file`
+  more than once (a single area's file labelled `AREA=PATH`; an unlabelled one, or the same file
+  twice, is refused), and shows each card's area. An area the model doesn't have is refused with the list of valid ones, where one
   `--area` used to run against an empty area (and `seed-examples` created its folder).
 
 ## [0.9.21] — 2026-10-29

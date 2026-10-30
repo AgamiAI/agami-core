@@ -1295,11 +1295,10 @@ def _resolve_areas(args) -> Optional[list[str]]:
     named = list(dict.fromkeys(args.area or []))
     try:
         valid = [sa.name for sa in L.load_datasource(args.root, include_rejected=True).subject_areas]
-    except FileNotFoundError:
-        raise
     except Exception:
-        # A model that won't load can't list its areas; one named area still runs as before.
-        if len(named) == 1:
+        # A model that won't load (a broken or missing area file) can't list its areas; one named
+        # area still runs as before. No datasource.yaml at all means there is no model.
+        if len(named) == 1 and (Path(args.root) / "datasource.yaml").exists():
             return named
         raise
     unknown = [a for a in named if a not in valid]
@@ -1401,10 +1400,11 @@ def _commit_notes(per_area: list[dict]) -> dict:
 
 def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str], str]:
     """The areas `question` names an example in, and the question text to reject there.
-    `<area>/<question>` (the label `rejected` prints) names the area outright."""
+    `<area>/<question>` (the label `rejected` prints) names the area outright, even when that area
+    has no such question: another area's example is never the one meant."""
     q = question.strip()
     head, _, rest = q.partition("/")
-    if rest.strip() and rest.strip() in known.get(head, ()):
+    if rest.strip() and head in known:
         return [head], rest.strip()
     return [a for a, questions in known.items() if q in questions], q
 

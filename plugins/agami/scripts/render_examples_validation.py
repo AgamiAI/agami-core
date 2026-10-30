@@ -24,6 +24,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -124,6 +125,42 @@ def _read_items(path: str) -> tuple[object, list]:
     return doc, items
 
 
+def _split_label(arg: str) -> tuple[str | None, str]:
+    """`AREA=PATH` labels a single-area file with its area; a plain path (or one that exists with
+    an `=` in its name) has no label."""
+    head, sep, rest = arg.partition("=")
+    if sep and rest and re.fullmatch(r"[\w.-]+", head) and not os.path.exists(os.path.expanduser(arg)):
+        return head, rest
+    return None, arg
+
+
+def _read_files(args: list[str]) -> list[tuple[str, object, list]]:
+    """Each `--items-file` as (path, parsed JSON, items), with a file's label copied into its
+    items. Refuses a file given twice, and, with several files, an item no area is known for."""
+    files, seen = [], {}
+    for arg in args:
+        area, path = _split_label(arg)
+        real = os.path.realpath(os.path.expanduser(path))
+        if real in seen:
+            # Its examples would get two numbers, and write-back keeps only the last.
+            raise ValueError(f"{path}: given twice (also as {seen[real]})")
+        seen[real] = path
+        doc, items = _read_items(path)
+        if area:
+            for it in items:
+                if isinstance(it, dict):
+                    it.setdefault("area", area)
+        files.append((path, doc, items))
+    if len(files) > 1:
+        unlabelled = [p for p, _, items in files
+                      if any(isinstance(it, dict) and not it.get("area") for it in items)]
+        if unlabelled:
+            # Two areas can share a question; without the area `reject N` can't say which.
+            raise ValueError(f"{', '.join(unlabelled)}: items carry no area; label a single area's "
+                             "file as AREA=PATH, or run `sm seed-validate` once for all the areas")
+    return files
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--title", required=True,
@@ -131,12 +168,13 @@ def main() -> int:
     p.add_argument("--profile", required=True, help="Active profile name")
     p.add_argument("--items-file", required=True, action="append",
                    help="JSON items from `sm seed-validate`: one area's array or the combined "
-                        "object for several areas (repeatable; files render in the order given)")
+                        "object for several areas (repeatable; files render in the order given). "
+                        "With several files, label a single area's array as AREA=PATH")
     p.add_argument("--out", required=True)
     args = p.parse_args()
 
     try:
-        files = [(path, *_read_items(path)) for path in args.items_file]
+        files = _read_files(args.items_file)
     except ValueError as e:
         sys.stderr.write(f"--items-file {e}\n")
         return 1
