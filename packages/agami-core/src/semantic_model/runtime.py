@@ -78,7 +78,7 @@ from .models import (
     Relationship,
     Table,
     example_metric_hits,
-    metric_tag_key,
+    metric_tags,
     stored_identity,
 )
 from .models import (
@@ -729,7 +729,7 @@ class ExampleMatch:
 
 def get_prompt_examples(
     query: str, examples: list[dict[str, Any]], *, top_k: int = 5,
-    metrics: Optional[list[str]] = None,
+    metrics: Optional[list[str]] = None, org: Any = None, area: Optional[str] = None,
 ) -> list[ExampleMatch]:
     """Rank scope-tagged examples by similarity to `query`. Highest first.
 
@@ -738,15 +738,18 @@ def get_prompt_examples(
     A top match with score >= HIGH_CONFIDENCE short-circuits the cold-start path (caller's job).
 
     `metrics` ranks the examples tagged with more of those metrics first, then by similarity; the
-    score itself is unchanged. Without it the order is the similarity order alone.
+    score itself is unchanged. Without it the order is the similarity order alone. With `org`, a
+    selector such as `backlog (finance)` matches that area's `backlog` tag (`metric_tags`); `area`
+    is the subject area of an example that doesn't name its own.
     """
     scored: list[ExampleMatch] = []
     for ex in examples:
         q = ex.get("question") or ex.get("nl") or ""
         scored.append(ExampleMatch(ex, _similarity(query, q)))
-    wanted = {metric_tag_key(m) for m in metrics or [] if str(m).strip()}
+    wanted = metric_tags([str(m) for m in metrics or []], org)
     if wanted:
-        scored.sort(key=lambda m: (example_metric_hits(m.example, wanted), m.score), reverse=True)
+        scored.sort(key=lambda m: (example_metric_hits(m.example, wanted, m.example.get("area") or area),
+                                   m.score), reverse=True)
     else:
         scored.sort(key=lambda m: m.score, reverse=True)
     return scored[:top_k]

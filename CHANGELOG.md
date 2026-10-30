@@ -23,7 +23,10 @@ below corresponds to one such version.
   the model declares, by name: an example naming another is refused and listed in `skipped` (in
   `rejected` for `sm seed-examples`). `get_prompt_examples` takes `metric_names` and `sm examples`
   takes `--metric` (repeatable): the examples tagged with more of those metrics rank first, then
-  by the question as before. Without them the ranking is unchanged.
+  by the question as before. Without them the ranking is unchanged. A metric two areas both declare
+  is named by the selector `get_datasource_schema` gives it (`revenue (finance)`); that selector
+  matches the `revenue` tag on that area's examples and on cross-area ones, not on the other
+  area's, on a local and a served deployment alike.
 
   **Reading a model:** a release older than this one serves a `metrics:` list unchanged but cannot
   rank by it, so upgrade the server before or with a model whose examples carry several metrics.

@@ -36,7 +36,7 @@ validator gives via `additionalProperties: false`.
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, Iterable, Literal, NamedTuple, Optional
 
 from pydantic import (
     BaseModel,
@@ -137,9 +137,77 @@ def example_metrics(ex: dict[str, Any]) -> list[str]:
     return list(out.values())
 
 
-def example_metric_hits(ex: dict[str, Any], wanted: set[str]) -> int:
-    """How many of the `wanted` metric keys (`metric_tag_key`) the example is tagged with."""
-    return len(wanted & {metric_tag_key(n) for n in example_metrics(ex)})
+def metric_selectors(org: Any) -> dict[str, tuple[Any, Optional[str]]]:
+    """Map a unique key -> (metric, area) for every metric (subject-area + cross-area). The key is
+    the metric name, disambiguated by area on a collision so two areas sharing a metric name are
+    BOTH kept (the never-hide contract: every metric is listed in metric_index or counted beside
+    it). It is the selector `get_datasource_schema` names a metric by."""
+    out: dict[str, tuple[Any, Optional[str]]] = {}
+
+    def _add(m: Any, area: Optional[str]) -> None:
+        key = m.name
+        if key in out:  # name collision across areas — disambiguate, keep both
+            key = f"{m.name} ({area})" if area else f"{m.name} (cross-area)"
+        out[key] = (m, area)
+
+    for sa in org.subject_areas:
+        for m in sa.metrics:
+            _add(m, sa.name)
+    for m in getattr(org, "cross_subject_area_metrics", []):
+        _add(m, None)
+    return out
+
+
+class MetricTag(NamedTuple):
+    """A requested metric as an example's tag is matched against it (#546)."""
+
+    key: str                                 # the declared name, as `metric_tag_key` folds it
+    areas: Optional[frozenset] = None        # example areas it matches (None in it: cross-area); None: any
+    excluded: frozenset = frozenset()        # example areas it never matches
+
+
+def metric_tags(names: Any, org: Any = None) -> list[MetricTag]:
+    """The metrics `names` asks for, each resolved through the model's selectors when `org` is given.
+
+    A selector such as `backlog (finance)` is the declared `backlog` of that area, so it matches the
+    tag `backlog` on that area's examples and on cross-area ones, not on another area's that declares
+    its own `backlog`. A name only one metric declares, or one the model doesn't know, matches its tag
+    on any example, as before."""
+    wanted = [n for n in names or [] if isinstance(n, str) and n.strip()]
+    selectors = metric_selectors(org) if org is not None and wanted else {}
+    folded = {metric_tag_key(k): v for k, v in selectors.items()}
+    owners: dict[str, list[Optional[str]]] = {}
+    for m, area in selectors.values():
+        owners.setdefault(metric_tag_key(m.name), []).append(area)
+    out: list[MetricTag] = []
+    for n in wanted:
+        hit = folded.get(metric_tag_key(n))
+        if hit is None:
+            tag = MetricTag(metric_tag_key(n))
+        else:
+            m, area = hit
+            key = metric_tag_key(m.name)
+            if len(owners[key]) < 2:
+                tag = MetricTag(key)
+            elif area is not None:
+                tag = MetricTag(key, frozenset({area, None}))
+            else:  # the cross-area one: wherever no area declares its own
+                tag = MetricTag(key, None, frozenset(a for a in owners[key] if a))
+        if tag not in out:
+            out.append(tag)
+    return out
+
+
+def example_metric_hits(ex: dict[str, Any], wanted: Iterable[Any], area: Optional[str] = None) -> int:
+    """How many of the `wanted` metrics (`MetricTag`s, or bare names) the example is tagged with.
+    `area` is the example's subject area, None for a cross-area example."""
+    tags = {metric_tag_key(n) for n in example_metrics(ex)}
+    hits = 0
+    for w in wanted:
+        t = w if isinstance(w, MetricTag) else MetricTag(metric_tag_key(w))
+        if t.key in tags and (t.areas is None or area in t.areas) and area not in t.excluded:
+            hits += 1
+    return hits
 
 
 # ---------------------------------------------------------------------------

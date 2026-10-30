@@ -210,3 +210,109 @@ def test_without_a_readable_model_tags_are_not_checked(tmp_path):
                                                      "metric": "anything"}]
     curate.add_examples(tmp_path, "s", [{"question": "q2", "sql": "SELECT 2", "metric": None}])
     assert list_prompt_examples(tmp_path, "s")[1] == {"question": "q2", "sql": "SELECT 2"}
+
+
+# Two areas declaring `revenue`: get_datasource_schema names the second `revenue (finance)`, and a
+# tag carries the declared name, so the selector must resolve before tags are compared.
+FINANCE = "finance"
+STORE_REVENUE = {"question": "Takings this week", "area": AREA, "sql": "SELECT SUM(total_amount) FROM orders",
+                 "tables": ["orders"], "metric": "revenue"}
+FINANCE_REVENUE = {"question": "Booked takings this week", "area": FINANCE,
+                   "sql": "SELECT SUM(total_amount) FROM orders WHERE status = 'paid'",
+                   "tables": ["orders"], "metric": "revenue"}
+
+
+@pytest.fixture()
+def two_areas(root: Path) -> Path:
+    src, dst = root / "subject_areas" / AREA, root / "subject_areas" / FINANCE
+    (dst / "metrics").mkdir(parents=True)
+    shutil.copytree(src / "tables", dst / "tables")
+    sa = yaml.safe_load((src / "subject_area.yaml").read_text())
+    (dst / "subject_area.yaml").write_text(yaml.safe_dump({"name": FINANCE, "tables": sa["tables"]}))
+    rev = yaml.safe_load((src / "metrics" / "revenue.yaml").read_text())
+    (dst / "metrics" / "revenue.yaml").write_text(yaml.safe_dump(rev))
+    ds = yaml.safe_load((root / "datasource.yaml").read_text())
+    ds["subject_areas"].append(f"subject_areas/{FINANCE}")
+    (root / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    for area, ex in ((AREA, STORE_REVENUE), (FINANCE, FINANCE_REVENUE)):
+        (root / "prompt_examples" / area).mkdir(parents=True, exist_ok=True)
+        (root / "prompt_examples" / area / "examples.yaml").write_text(
+            yaml.safe_dump([{k: v for k, v in ex.items() if k != "area"}]))
+    return root
+
+
+def _schema_selector(org) -> str:
+    from semantic_model.models import metric_selectors
+
+    (key,) = [k for k, (m, a) in metric_selectors(org).items() if m.name == "revenue" and a == FINANCE]
+    assert key == "revenue (finance)"
+    return key
+
+
+@pytest.mark.parametrize("selector, first", [
+    ("revenue (finance)", FINANCE_REVENUE), ("revenue", STORE_REVENUE)])
+def test_runtime_resolves_an_area_qualified_selector(two_areas, selector, first):
+    from semantic_model.loader import load_datasource
+
+    org = load_datasource(two_areas)
+    _schema_selector(org)
+    lib = [FINANCE_REVENUE, STORE_REVENUE] if first is STORE_REVENUE else [STORE_REVENUE, FINANCE_REVENUE]
+    top = RT.get_prompt_examples("unrelated", lib, top_k=1, metrics=[selector], org=org)
+    assert top[0].example is first
+
+
+def test_sm_examples_resolves_an_area_qualified_selector(two_areas):
+    closer = {"question": "Booked takings this week by channel", "sql": "SELECT channel FROM orders"}
+    (two_areas / "prompt_examples" / FINANCE / "examples.yaml").write_text(yaml.safe_dump(
+        [closer, {k: v for k, v in FINANCE_REVENUE.items() if k != "area"}]))
+    rc, out = _run(["examples", str(two_areas), "--area", FINANCE, "--query",
+                    "booked takings this week by channel", "--metric", "revenue (finance)",
+                    "--top-k", "1"])
+    assert rc == 0 and out["matches"][0]["example"]["question"] == FINANCE_REVENUE["question"]
+
+
+def test_local_get_prompt_examples_resolves_an_area_qualified_selector(two_areas, monkeypatch):
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(two_areas.parent))
+    monkeypatch.setenv("AGAMI_PROFILE", "demo")
+    schema = json.loads(tools.tool_get_datasource_schema({"datasource": "demo", "query": "revenue"}))
+    assert "revenue (finance)" in json.dumps(schema)
+    for selector, first in (("revenue (finance)", FINANCE_REVENUE), ("revenue", STORE_REVENUE)):
+        out = json.loads(tools.tool_get_prompt_examples(
+            {"datasource": "demo", "query": "takings this week", "top_k": 1, "metric_names": [selector]}))
+        assert out["examples"][0]["question"] == first["question"], selector
+
+
+def test_served_store_resolves_an_area_qualified_selector(two_areas, tmp_path, monkeypatch):
+    from semantic_model.loader import load_datasource
+
+    url = "sqlite://" + str(tmp_path / "agami.db")
+    s = Store.connect(url)
+    s.run_migrations()
+    model_store.write_datasource(s, "main", load_datasource(two_areas))
+    model_store.write_examples(s, "main", [STORE_REVENUE, FINANCE_REVENUE])
+    try:
+        for selector, first in (("revenue (finance)", FINANCE_REVENUE), ("revenue", STORE_REVENUE)):
+            top = model_store.select_examples(s, "main", query="takings this week", top_k=1,
+                                              metrics=[selector])
+            assert top[0]["question"] == first["question"], selector
+        # cross-area examples match the area's selector too
+        model_store.write_examples(s, "main", [{**FINANCE_REVENUE, "area": None}, STORE_REVENUE])
+        top = model_store.select_examples(s, "main", query="takings this week", top_k=1,
+                                          metrics=["revenue (finance)"])
+        assert top[0]["question"] == FINANCE_REVENUE["question"]
+    finally:
+        s.close()
+    monkeypatch.setenv("AGAMI_DB_URL", url)
+    out = json.loads(tools.tool_get_prompt_examples(
+        {"datasource": "main", "query": "takings this week", "top_k": 1,
+         "metric_names": ["revenue (finance)"]}))
+    assert out["examples"][0]["question"] == FINANCE_REVENUE["question"]
+
+
+def test_a_metric_one_area_declares_still_matches_any_areas_tag():
+    from semantic_model.models import MetricTag, example_metric_hits, metric_tags
+
+    assert metric_tags(["Order  Count", "unknown"]) == [MetricTag("order count"), MetricTag("unknown")]
+    assert example_metric_hits({"metric": "order count"}, [MetricTag("order count")], "anywhere") == 1

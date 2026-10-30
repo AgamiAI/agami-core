@@ -210,7 +210,14 @@ def cmd_set_org(args) -> int:
 
 def cmd_examples(args) -> int:
     examples = L.list_prompt_examples(args.root, args.area)
-    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k, metrics=args.metric)
+    org = None
+    if args.metric:
+        try:
+            org = L.load_datasource(args.root)
+        except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
+            org = None
+    matches = RT.get_prompt_examples(args.query, examples, top_k=args.top_k, metrics=args.metric,
+                                     org=org, area=args.area)
     _print_json(
         {
             "high_confidence": RT.is_high_confidence(matches),
@@ -1695,7 +1702,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--query", required=True)
     sp.add_argument("--top-k", type=int, default=5)
     sp.add_argument("--metric", action="append", default=None,
-                    help="a metric the question uses (repeatable): examples tagged with it rank first")
+                    help="a metric the question uses, by name or by the selector get_datasource_schema gave "
+                         "(repeatable): examples tagged with it rank first")
     sp.set_defaults(func=cmd_examples)
 
     sp = sub.add_parser("preflight", help="fan-trap / chasm-trap pre-flight check")

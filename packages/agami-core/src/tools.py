@@ -1481,24 +1481,11 @@ def _content_tokens(s: str | None) -> set[str]:
 
 
 def _all_metrics(org) -> dict[str, tuple[Any, str | None]]:
-    """Map a unique key -> (metric, area) for every metric (subject-area + cross-area). The key is
-    the metric name, disambiguated by area on a collision so two areas sharing a metric name are
-    BOTH kept (the never-hide contract: every metric is listed in metric_index or counted beside
-    it)."""
-    out: dict[str, tuple[Any, str | None]] = {}
+    """Map a unique key -> (metric, area) for every metric: `models.metric_selectors`, the one
+    naming rule an example's metric tags are also resolved by."""
+    from semantic_model.models import metric_selectors
 
-    def _add(m, area: str | None) -> None:
-        key = m.name
-        if key in out:  # name collision across areas — disambiguate, keep both
-            key = f"{m.name} ({area})" if area else f"{m.name} (cross-area)"
-        out[key] = (m, area)
-
-    for sa in org.subject_areas:
-        for m in sa.metrics:
-            _add(m, sa.name)
-    for m in getattr(org, "cross_subject_area_metrics", []):
-        _add(m, None)
-    return out
+    return metric_selectors(org)
 
 
 def _match_metrics(query: str | None, metrics: dict[str, tuple[Any, str | None]]) -> list[str]:
@@ -3247,7 +3234,7 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
     top_k = args.get("top_k")
     examples = _rank_local_examples(
         docs, query=args.get("query"), top_k=10 if top_k is None else int(top_k),
-        metrics=args.get("metric_names"),
+        metrics=_example_metric_tags(profile, args.get("metric_names")),
     )
     return json.dumps(
         {
@@ -3259,6 +3246,19 @@ def tool_get_prompt_examples(args: dict[str, Any]) -> str:
         separators=REPLY_SEPARATORS,
         default=str,
     )
+
+
+def _example_metric_tags(profile: str, names: Any) -> Any:
+    """`metric_names` resolved through the model's selectors (`models.metric_tags`); the names as
+    sent when the model can't be read, so a missing model still ranks by tag."""
+    if not names:
+        return names
+    try:
+        from semantic_model.models import metric_tags
+
+        return metric_tags(names, get_cached_org(profile))
+    except Exception:  # noqa: BLE001 - an unreadable model only costs the selector resolution
+        return names
 
 
 def _model_area_order(root: Path) -> list[str]:
@@ -3319,7 +3319,7 @@ def _rank_local_examples(
         rows = sorted(
             rows, key=lambda d: len(wanted & _tokens(str(d.get("question") or ""))), reverse=True
         )
-    rows = metric_ranked(rows, metrics, lambda d: d)
+    rows = metric_ranked(rows, metrics, lambda d: d, lambda d: d.get("area"))
     out: list[dict[str, Any]] = []
     used = 0
     for doc in rows[: max(top_k, 0)]:
