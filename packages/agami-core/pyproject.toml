@@ -49,7 +49,7 @@ server = [
   "httpx>=0.27",        # OIDC discovery + token exchange (the server's one outbound egress)
   "certifi>=2026.10.19", # the CA bundle httpx verifies against; 2026.10.19 distrusts the eMudhra (emSign)
                          #   intermediates whose weak keys let anyone forge a certificate for any host
-  "cryptography>=43",   # RS256 backend for PyJWT id-token verification
+  "cryptography>=43",   # RS256 backend for PyJWT id-token verification; HKDF for the request-state key
 ]
 
 [tool.setuptools]
