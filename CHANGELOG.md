@@ -19,7 +19,8 @@ below corresponds to one such version.
   `9999-12-31` valid-to on the current version of a row, `'-'` filler text. Answers counted them as
   real, so a "by fiscal year" breakdown grew a year-2099 bar and a "latest date" came back as
   2099-12-31. Introspection now reads one bounded query per key, date, year and code column of each
-  small table, and of each dimension (the one side of a join) under a million rows, on the existing
+  small table, and of each dimension (the one side of a join, or the referenced side of a one-to-one
+  join) under a million rows, on the existing
   value-read budget, and flags a date before 1901 or more than 50 years ahead, a negative key among
   positive ones, a `999999`-style value and filler text on a large share of rows. A big fact table
   is not read, nor is a table whose sample could not be read and whose row count is unknown, nor

@@ -2289,7 +2289,8 @@ def _scan_placeholders(
     dims: set[tuple] = set()
     join_cols: dict[tuple, set[str]] = {}
     for r in rels:
-        if r.relationship == "many_to_one":
+        # one_to_one: the referenced side is the dimension; a unique FK must not hide it
+        if r.relationship in ("many_to_one", "one_to_one"):
             dims.add(table_key(r.to_table, r.to_schema))
         elif r.relationship == "one_to_many":
             dims.add(table_key(r.from_table, r.from_schema))
@@ -2313,13 +2314,16 @@ def _scan_placeholders(
             continue
         per = found[key] = {}
         joins = join_cols.get(tk, set()) | join_cols.get(("", tk[1]), set())
-        personal = (fresh_personal or {}).get(key, set())
+        # Exact names: Postgres can hold `status` and "STATUS" side by side. Personal data is still
+        # matched case-folded, so a flag on any spelling of a name keeps every spelling unread.
         by_name: dict[str, list[Column]] = {}
         for t in ts:
             for c in t.columns:
-                by_name.setdefault(c.name.lower(), []).append(c)
+                by_name.setdefault(c.name, []).append(c)
+        personal = {n.lower() for n in (fresh_personal or {}).get(key, set())}
+        personal |= {n.lower() for n, cs in by_name.items() if any(_never_read(c) for c in cs)}
         for name, cs in by_name.items():
-            if name in personal or any(_never_read(c) for c in cs):
+            if name.lower() in personal:
                 continue
             kinds = set().union(*(_placeholder_kinds(c, sample, joins) for c in cs))
             if not kinds:
@@ -2349,9 +2353,9 @@ def _scan_placeholders(
         if per is None:
             continue
         for i, c in enumerate(t.columns):
-            if c.name.lower() not in per or c.review_state in ("rejected", "stale"):
+            if c.name not in per or c.review_state in ("rejected", "stale"):
                 continue
-            merged = _merged_placeholders(c.placeholders, per[c.name.lower()])
+            merged = _merged_placeholders(c.placeholders, per[c.name])
             if merged != c.placeholders:
                 if (t.schema_name, t.name) in prior:
                     _report_placeholder_change(report, t, c, merged)

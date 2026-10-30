@@ -2135,9 +2135,10 @@
     function placeholderFindings() {
       const out = [];
       (manifest.schemas || []).forEach(s => (s.tables || []).forEach(t => {
-        if (t.excluded) return;
+        // stale: the database dropped it on a refresh, so nothing can be served from it
+        if (t.excluded || t.review_state === 'stale') return;
         (t.fields || []).forEach(f => {
-          if (f.excluded) return;
+          if (f.excluded || f.review_state === 'stale') return;
           (f.placeholders || []).forEach(p => {
             if (p.review_state !== 'unreviewed') return;
             out.push({ qname: s.name + '.' + t.name + '.' + f.name + '#placeholder:' + p.value,

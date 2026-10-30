@@ -43,6 +43,9 @@ FILLER_TOKENS = frozenset({
 })
 # A filler token is only worth asking about when it covers this share of the column's rows.
 FILLER_MIN_SHARE = 0.05
+# A single filler row counts only on a table at least this big: in a 2-4 row lookup, one 'None' or
+# 'X' is as likely a real member (a tier, a size) as a stand-in.
+FILLER_MIN_ROWS_FOR_ONE = 5
 # Dates: anything before this year, or more than this many years ahead, is not a real event date.
 _FIRST_REAL_YEAR = 1901
 _YEARS_AHEAD = 50
@@ -123,6 +126,7 @@ def find(
                 add(hi, "a 999999-style value far above the rest")
     if total > 0:
         for v, n in top:
-            if v.strip().casefold() in FILLER_TOKENS and n >= 2 and n / total >= FILLER_MIN_SHARE:
+            if (v.strip().casefold() in FILLER_TOKENS and n / total >= FILLER_MIN_SHARE
+                    and (n >= 2 or total >= FILLER_MIN_ROWS_FOR_ONE)):
                 add(v, f"filler text on {round(100 * n / total)}% of rows")
     return list(out.values())[:_MAX_PER_COLUMN]

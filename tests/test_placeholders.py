@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -189,6 +190,7 @@ def test_the_scan_shares_the_value_read_budget(shop, tmp_path, monkeypatch):
     ({"key"}, [], "1", "999999", 50, ["10", "40"], "999999"),
     ({"code"}, [("N/A", 30), ("open", 70)], "N/A", "open", 100, [], "N/A"),
     ({"code"}, [("", 20), ("open", 80)], "", "open", 100, [], ""),
+    ({"code"}, [("open", 5), ("-", 1)], "-", "open", 6, [], "-"),       # one filler row, 17% of six
 ])
 def test_shapes_are_flagged(kinds, top, lo, hi, total, rest, expect):
     assert expect in [f.value for f in P.find(kinds, top, lo, hi, total, rest, today=date(2026, 1, 1))]
@@ -200,6 +202,7 @@ def test_shapes_are_flagged(kinds, top, lo, hi, total, rest, expect):
     ({"key"}, [], "1", "99999", 50, ["10", "99998"]),                               # a real id run
     ({"code"}, [("N/A", 1), ("open", 99)], "N/A", "open", 100, []),                  # a small share
     ({"key"}, [], "-5", "-1", 10, []),                                               # all negative
+    ({"code"}, [("x", 1), ("xl", 1)], "x", "xl", 2, []),                             # one row of a tiny lookup
 ])
 def test_ordinary_values_are_not_flagged(kinds, top, lo, hi, total, rest):
     assert P.find(kinds, top, lo, hi, total, rest, today=date(2026, 1, 1)) == []
@@ -475,3 +478,90 @@ def test_a_text_year_column_reports_its_unknown_year(tmp_path):
                        [(i, ["2023", "2024"][i % 2]) for i in range(1, 60)] + [(60, "2099")])
     _, rep = I.introspect("shop", "sqlite", runner=_runner(db, []), artifacts_dir=tmp_path, dry_run=True)
     assert any(x.startswith("t.fiscal_year = '2099' (a year far outside the others") for x in rep.placeholders)
+
+
+# --- review of 07db7281: one-to-one dimensions, case-distinct names, one filler row, stale columns ----
+
+
+def test_a_dimension_behind_a_unique_foreign_key_is_still_scanned(tmp_path):
+    db = tmp_path / "o2o.db"
+    con = sqlite3.connect(db)
+    con.executescript("CREATE TABLE stores(store_key INTEGER PRIMARY KEY, region TEXT);"
+                      "CREATE TABLE store_profiles(id INTEGER PRIMARY KEY,"
+                      " store_key INTEGER UNIQUE REFERENCES stores(store_key), size TEXT);")
+    con.executemany("INSERT INTO stores VALUES (?,?)", [(-1, "Unknown")] + [(i, f"r{i % 5}") for i in range(1, 12001)])
+    con.executemany("INSERT INTO store_profiles VALUES (?,?,?)", [(i, i, "m") for i in range(1, 12001)])
+    con.commit()
+    con.close()
+    org, rep = I.introspect("shop", "sqlite", runner=_runner(db, []), artifacts_dir=tmp_path, dry_run=True)
+    rels = [r for sa in org.subject_areas for r in sa.relationships]
+    assert [r.relationship for r in rels] == ["one_to_one"]
+    assert "stores.store_key = '-1' (a negative key among positive ones; 1 row)" in rep.placeholders
+
+
+def test_columns_whose_names_differ_only_by_case_keep_their_own_findings():
+    t = m.Table(name="orders", schema="public", storage_connection="c", columns=[
+        m.Column(name="id", type="integer", primary_key=True),
+        m.Column(name="status", type="string"), m.Column(name="STATUS", type="string")])
+    sample = [I._Row({"id": str(i), "status": "ab"[i % 2], "STATUS": "pq"[i % 2]}) for i in range(60)]
+    answers = {'"status"': [("-", 10), ("open", 50)], '"STATUS"': [("N/A", 10), ("p", 50)]}
+    seen: list[str] = []
+
+    def run(sql):
+        seen.append(sql)
+        top = next((a for q, a in answers.items() if f"WHERE {q} IS NOT NULL" in sql), [("1", 1)])
+        return [I._Row({"v": v, "n": str(n), "lo": min(x for x, _ in top), "hi": max(x for x, _ in top),
+                        "total": "60"}) for v, n in top]
+
+    rep = I.IntrospectReport(profile="shop", db_type="postgres", out_dir="", dry_run=True)
+    I._scan_placeholders(D.get_dialect("postgres"), run, [t], [], {("public", "orders"): (sample, 60)},
+                         I._ReadBudget(10), rep, None)
+    assert sum("STATUS" in q.upper() for q in seen) == 2
+    assert [p.value for p in t.get_column("status").placeholders] == ["-"]
+    assert [p.value for p in t.get_column("STATUS").placeholders] == ["N/A"]
+
+
+def test_a_single_filler_row_on_a_small_code_column_is_found(tmp_path):
+    db = _one_table_db(tmp_path / "f.db", "CREATE TABLE t(id INTEGER PRIMARY KEY, state TEXT)",
+                       [(i, "open") for i in range(1, 6)] + [(6, "-")])
+    _, rep = I.introspect("shop", "sqlite", runner=_runner(db, []), artifacts_dir=tmp_path, dry_run=True)
+    assert "t.state = '-' (filler text on 17% of rows; 1 row)" in rep.placeholders
+
+
+def test_a_dropped_column_or_table_leaves_the_review_pile(shop, tmp_path, monkeypatch):
+    con = sqlite3.connect(shop["db"])
+    con.execute("ALTER TABLE shipments DROP COLUMN status")
+    con.execute("DROP TABLE customer_history")
+    con.commit()
+    con.close()
+    I.introspect("shop", "sqlite", runner=shop["run"], artifacts_dir=shop["art"], append=True)
+    org = load_datasource(shop["root"], include_rejected=True)
+    status = _col(org, "shipments", "status")
+    assert status.review_state == "stale" and [p.value for p in status.placeholders] == ["-"]
+    history = next(t for sa in org.subject_areas for t in sa.tables_defined if t.name == "customer_history")
+    assert history.review_state == "stale"
+    assert {(it["name"], it["column"]) for it in curate.review_queue(org)["placeholders"]} == {
+        ("date_dim", "date_key"), ("date_dim", "calendar_date"), ("date_dim", "fiscal_year")}
+
+    import render_model_explorer as R
+
+    import test_model_explorer_bulk_reject as page
+
+    if page.NODE is not None:   # the page's own pile, run under Node
+        html = R.render(title="t", profile="shop", manifest=R.build_manifest(shop["root"], "shop"))
+        script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+        js = "console.log(JSON.stringify(placeholderFindings().map(p => p.table + '.' + p.col)));"
+        proc = subprocess.run([page.NODE, "-"], input=page.DOM + script + "\n" + js, capture_output=True,
+                              text=True, timeout=60)
+        assert proc.returncode == 0, proc.stderr
+        assert sorted(json.loads(proc.stdout.strip().splitlines()[-1])) == [
+            "date_dim.calendar_date", "date_dim.date_key", "date_dim.fiscal_year"]
+
+    # with those answered, nothing is left to review: the page opens on Tables, not Review
+    _answer(shop["root"], [("reject", "date_dim", c, v, None) for c, v in
+                           (("date_key", "-99999"), ("calendar_date", "2099-12-31"), ("fiscal_year", "2099"))])
+    out = tmp_path / "page"
+    monkeypatch.setattr(sys, "argv", ["r", "--profile", "shop", "--artifacts-dir", str(shop["art"]),
+                                      "--out", str(out / "x.html"), "--manifest-out", str(out / "m.json")])
+    assert R.main() == 0
+    assert json.loads((out / "m.json").read_text())["initial_tab"] == "tables"

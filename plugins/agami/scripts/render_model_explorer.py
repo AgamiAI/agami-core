@@ -325,8 +325,10 @@ def main() -> int:
             for t in sc.get("tables", []):
                 pending += sum(1 for f in t.get("fields", [])
                                if f.get("description_source") == "ai_unknown" and not f.get("excluded"))
-                pending += sum(1 for f in t.get("fields", []) if not f.get("excluded")
-                               for p in f.get("placeholders", []) if p.get("review_state") == "unreviewed")
+                if not t.get("excluded") and t.get("review_state") != "stale":
+                    pending += sum(1 for f in t.get("fields", [])
+                                   if not f.get("excluded") and f.get("review_state") != "stale"
+                                   for p in f.get("placeholders", []) if p.get("review_state") == "unreviewed")
         initial = "review" if pending > 0 else "tables"
     manifest["initial_tab"] = initial
     if not manifest["schemas"]:
