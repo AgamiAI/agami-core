@@ -45,6 +45,23 @@ def test_large_library_is_ranked_and_capped(tmp_path, monkeypatch):
     assert all("revenue" in e["question"] for e in out["examples"][:5])
 
 
+def test_ties_at_the_cap_are_served_the_same_whatever_the_insert_order(tmp_path, monkeypatch):
+    """Every example ties on overlap, so only the read order decides which ten are served (#203)."""
+    examples = [
+        {"area": "sales", "question": f"revenue by region {i:02d}", "sql": "SELECT 1"}
+        for i in range(30)
+    ]
+    served = []
+    for name, seed in (("forward", examples), ("reversed", examples[::-1])):
+        (tmp_path / name).mkdir()
+        url = _seed(tmp_path / name, seed)
+        monkeypatch.setenv("AGAMI_DB_URL", url)
+        out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "query": "revenue"}))
+        served.append([e["id"] for e in out["examples"]])
+    assert served[0] == served[1]
+    assert served[0] == sorted(model_store.example_id(ex) for ex in examples)[:10]
+
+
 def test_char_budget_bounds_the_result(tmp_path, monkeypatch):
     # one giant example + many small: the budget stops accumulation (but always returns >=1).
     big = {"area": "s", "question": "x " * 50, "sql": "Q" * 30_000}
@@ -82,9 +99,9 @@ def test_area_narrows_to_that_area_plus_the_cross_area_bucket(tmp_path, monkeypa
 
     out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "area": "sales"}))
     got = {e["question"] for e in out["examples"]}
-    assert "how many orders by region" in got          # the named area
-    assert "how many rows overall" in got              # the cross-area bucket, not lost
-    assert "how many assets by install status" not in got   # another area, dropped
+    assert "how many orders by region" in got  # the named area
+    assert "how many rows overall" in got  # the cross-area bucket, not lost
+    assert "how many assets by install status" not in got  # another area, dropped
 
 
 def test_the_area_parameter_is_advertised_so_a_client_can_send_it(tmp_path):
@@ -121,6 +138,11 @@ def test_every_served_example_carries_its_id(tmp_path, monkeypatch):
 # --- the local (file) path, which had no test at all -----------------------------------------
 
 
+def _areas(out: str) -> set[str]:
+    """The areas the returned examples come from (the local path replies in the served shape)."""
+    return {e["area"] for e in json.loads(out)["examples"]}
+
+
 @pytest.fixture()
 def local_library(tmp_path, monkeypatch):
     """A local install with a two-area curated library on disk."""
@@ -137,7 +159,7 @@ def local_library(tmp_path, monkeypatch):
 
 def test_the_local_path_returns_every_area_when_none_is_named(local_library):
     out = tools.tool_get_prompt_examples({"datasource": local_library})
-    assert "subject area: sales" in out and "subject area: assets" in out
+    assert _areas(out) == {"sales", "assets"}
 
 
 def test_the_local_path_honours_area_too(local_library):
@@ -145,14 +167,14 @@ def test_the_local_path_honours_area_too(local_library):
     have been the same defect this batch is about, one layer down: a parameter a client can send
     that silently does nothing on half the deployments."""
     out = tools.tool_get_prompt_examples({"datasource": local_library, "area": "sales"})
-    assert "subject area: sales" in out
-    assert "subject area: assets" not in out
+    assert _areas(out) == {"sales"}
     assert "how many assets" not in out
 
 
 def test_an_area_with_no_examples_on_disk_gives_the_empty_note(local_library):
-    out = json.loads(tools.tool_get_prompt_examples(
-        {"datasource": local_library, "area": "nonexistent"}))
+    out = json.loads(
+        tools.tool_get_prompt_examples({"datasource": local_library, "area": "nonexistent"})
+    )
     assert out["examples"] == []
     assert "prompt_examples" in out["note"]
 
@@ -160,14 +182,14 @@ def test_an_area_with_no_examples_on_disk_gives_the_empty_note(local_library):
 @pytest.mark.parametrize("empty", [None, "", []])
 def test_an_empty_area_is_no_scope(local_library, empty):
     out = tools.tool_get_prompt_examples({"datasource": local_library, "area": empty})
-    assert "subject area: sales" in out and "subject area: assets" in out
+    assert _areas(out) == {"sales", "assets"}
 
 
 def test_an_area_sent_as_a_list_of_one_still_narrows(local_library):
     """`["sales"]` was read as no scope: every area's examples, to a caller that believed it had
     narrowed to one."""
     out = tools.tool_get_prompt_examples({"datasource": local_library, "area": ["sales"]})
-    assert "subject area: sales" in out and "subject area: assets" not in out
+    assert _areas(out) == {"sales"}
 
 
 @pytest.mark.parametrize("bad", [True, 1, 0, {}, 3.5, ["sales", "assets"]])
@@ -185,7 +207,7 @@ def test_a_whitespace_only_area_is_no_scope_not_an_empty_scope(local_library):
     """`"  "` is not the name of an area. Stripping to empty must read as "no scope given",
     not as "an area named nothing", which would match no directory and return the empty note."""
     out = tools.tool_get_prompt_examples({"datasource": local_library, "area": "   "})
-    assert "subject area: sales" in out and "subject area: assets" in out
+    assert _areas(out) == {"sales", "assets"}
 
 
 def test_an_example_is_read_as_utf8_whatever_the_platform_default(
@@ -204,7 +226,7 @@ def test_an_example_is_read_as_utf8_whatever_the_platform_default(
 
     out = tools.tool_get_prompt_examples({"datasource": local_library, "area": "sales"})
 
-    assert "revenue — by month" in out
+    assert [e["question"] for e in json.loads(out)["examples"]] == ["revenue — by month"]
 
 
 def test_one_undecodable_area_does_not_take_down_the_others(local_library, tmp_path):
@@ -215,8 +237,7 @@ def test_one_undecodable_area_does_not_take_down_the_others(local_library, tmp_p
 
     out = tools.tool_get_prompt_examples({"datasource": local_library})
 
-    assert "subject area: sales" in out
-    assert "subject area: assets" not in out
+    assert _areas(out) == {"sales"}
 
 
 # --- an area the model does not have -------------------------------------------------------------
@@ -326,31 +347,42 @@ def test_an_omitted_area_ranks_across_every_area_on_a_served_deployment(
     from semantic_model import loader
 
     org = loader.load_datasource(tmp_path / "main")
-    url = _seed(tmp_path, [
-        {"area": "sales", "question": "orders by region", "sql": "SELECT 1"},
-        {"area": "assets", "question": "assets by status", "sql": "SELECT 2"},
-        {"area": None, "question": "rows overall", "sql": "SELECT 3"},
-    ])
+    url = _seed(
+        tmp_path,
+        [
+            {"area": "sales", "question": "orders by region", "sql": "SELECT 1"},
+            {"area": "assets", "question": "assets by status", "sql": "SELECT 2"},
+            {"area": None, "question": "rows overall", "sql": "SELECT 3"},
+        ],
+    )
     monkeypatch.setenv("AGAMI_DB_URL", url)
     monkeypatch.setattr(tools, "get_cached_org", lambda _p: org)
 
-    out = json.loads(tools.tool_get_prompt_examples({"datasource": "main", "query": "by", **omitted}))
+    out = json.loads(
+        tools.tool_get_prompt_examples({"datasource": "main", "query": "by", **omitted})
+    )
     assert {e["question"] for e in out["examples"]} == {
-        "orders by region", "assets by status", "rows overall"}
+        "orders by region",
+        "assets by status",
+        "rows overall",
+    }
 
 
 def test_a_padded_area_narrows_like_the_clean_one_on_a_served_deployment(
     tmp_path, monkeypatch, local_model
 ):
-    """" sales " passed the stripped check and then reached `area = ?` unstripped, matching no area:
+    """ " sales " passed the stripped check and then reached `area = ?` unstripped, matching no area:
     only the cross-area examples came back, the "real but empty" answer the check exists to stop."""
     from semantic_model import loader
 
     org = loader.load_datasource(tmp_path / "main")
-    url = _seed(tmp_path, [
-        {"area": "sales", "question": "orders by region", "sql": "SELECT 1"},
-        {"area": None, "question": "rows overall", "sql": "SELECT 3"},
-    ])
+    url = _seed(
+        tmp_path,
+        [
+            {"area": "sales", "question": "orders by region", "sql": "SELECT 1"},
+            {"area": None, "question": "rows overall", "sql": "SELECT 3"},
+        ],
+    )
     monkeypatch.setenv("AGAMI_DB_URL", url)
     monkeypatch.setattr(tools, "get_cached_org", lambda _p: org)
 
@@ -366,15 +398,142 @@ def test_the_examples_tool_ignores_arguments_it_does_not_take(local_model):
     """The shape check is shared, but a tool is only held to its own parameters: `mode` means
     nothing to this one and must not be refused as "Unknown `mode`"."""
     out = tools.tool_get_prompt_examples({"datasource": local_model, "mode": "compact"})
-    assert "subject area: sales" in out
+    assert _areas(out) == {"sales"}
 
 
 def test_a_broken_model_does_not_fail_an_examples_call(local_model, monkeypatch):
     """The area check is advice. This tool never loaded the model before it, so a model that fails
     to load for any reason leaves the examples served as they were."""
+
     def _broken(_p):
         raise ValueError("model failed validation")
 
     monkeypatch.setattr(tools, "get_cached_org", _broken)
     out = tools.tool_get_prompt_examples({"datasource": local_model, "area": "sales"})
-    assert "subject area: sales" in out
+    assert _areas(out) == {"sales"}
+
+
+def test_the_local_path_ranks_and_caps_like_the_served_one(local_library, tmp_path):
+    """A large local library used to be sent whole on every call whatever the question. It is now
+    ranked by the question and capped, in the served path's shape, each example with its id."""
+    path = tmp_path / "main" / "prompt_examples" / "sales" / "examples.yaml"
+    path.write_text(
+        "".join(f"- question: filler question number {i}\n  sql: SELECT {i}\n" for i in range(40))
+        + "- question: revenue by region last quarter\n  sql: SELECT 99\n"
+    )
+
+    out = json.loads(
+        tools.tool_get_prompt_examples(
+            {"datasource": local_library, "query": "revenue by region", "top_k": 3}
+        )
+    )
+
+    assert out["count"] == 3 == len(out["examples"])
+    assert out["examples"][0]["question"] == "revenue by region last quarter"
+    assert all(len(e["id"]) == 12 for e in out["examples"])
+
+
+def test_a_rejected_example_is_not_served_locally(local_library, tmp_path):
+    path = tmp_path / "main" / "prompt_examples" / "sales" / "examples.yaml"
+    path.write_text(
+        "- question: how many orders\n  sql: SELECT 1\n"
+        "- question: a rejected one\n  sql: SELECT 2\n  status: rejected\n"
+    )
+    out = tools.tool_get_prompt_examples({"datasource": local_library, "area": "sales"})
+    assert [e["question"] for e in json.loads(out)["examples"]] == ["how many orders"]
+
+
+def test_the_local_reply_carries_the_served_fields_and_honours_top_k_zero(local_library):
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert out["datasource"] == local_library and "model_version" in out
+    assert out["count"] == len(out["examples"]) == 2
+    none = json.loads(tools.tool_get_prompt_examples({"datasource": local_library, "top_k": 0}))
+    assert none["examples"] == []
+
+
+def test_an_authored_id_is_kept_and_duplicates_are_served_once(local_library, tmp_path):
+    path = tmp_path / "main" / "prompt_examples" / "sales" / "examples.yaml"
+    path.write_text(
+        "- id: my-example\n  question: how many orders\n  sql: SELECT 1\n"
+        "- question: how many orders\n  sql: SELECT 2\n"
+        "- question: how many orders\n  sql: SELECT 2\n"
+    )
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library, "area": "sales"}))
+    ids = [e["id"] for e in out["examples"]]
+    assert "my-example" in ids and len(ids) == len(set(ids)) == 2
+
+
+def test_a_numeric_question_does_not_fail_the_call(local_library, tmp_path):
+    path = tmp_path / "main" / "prompt_examples" / "sales" / "examples.yaml"
+    path.write_text(
+        "- question: 2024\n  sql: SELECT 1\n- question: orders in 2024\n  sql: SELECT 2\n"
+    )
+    out = json.loads(
+        tools.tool_get_prompt_examples({"datasource": local_library, "query": "orders 2024"})
+    )
+    assert out["examples"][0]["question"] == "orders in 2024"
+
+
+def test_no_library_needs_no_model_dependencies(local_library, tmp_path, monkeypatch):
+    import builtins
+    import shutil
+
+    shutil.rmtree(tmp_path / "main" / "prompt_examples")
+    real = builtins.__import__
+
+    def _no_yaml(name, *a, **k):
+        # Neither the YAML loader nor the Pydantic-backed store: a bare install has neither.
+        if name.startswith(("semantic_model.loader", "model_store", "semantic_model.models")):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_yaml)
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert out["examples"] == [] and "note" in out
+
+
+def test_a_library_without_the_model_dependencies_says_what_to_install(local_library, monkeypatch):
+    import builtins
+
+    real = builtins.__import__
+
+    def _no_yaml(name, *a, **k):
+        if name.startswith("semantic_model.loader"):
+            raise ImportError(name)
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_yaml)
+    out = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert out["error"]["kind"] == "driver_missing"
+
+
+def test_an_id_two_areas_share_keeps_the_model_orders_copy_whatever_the_scope(
+    local_library, tmp_path
+):
+    # The model lists `sales` before `assets`; a deploy keeps the first copy of a shared id in that
+    # order, before any area scope applies. A scoped local call must not serve the other copy.
+    import yaml
+
+    root = tmp_path / "main"
+    (root / "datasource.yaml").write_text(
+        yaml.safe_dump({"subject_areas": ["subject_areas/sales", "subject_areas/assets"]})
+    )
+    for area, sql in (("sales", "SELECT 1"), ("assets", "SELECT 2")):
+        (root / "prompt_examples" / area / "examples.yaml").write_text(
+            f"- id: shared\n  question: q\n  sql: {sql}\n"
+        )
+    whole = json.loads(tools.tool_get_prompt_examples({"datasource": local_library}))
+    assert [(e["id"], e["sql"]) for e in whole["examples"]] == [("shared", "SELECT 1")]
+    scoped = json.loads(
+        tools.tool_get_prompt_examples({"datasource": local_library, "area": "assets"})
+    )
+    assert scoped["examples"] == []
+
+
+@pytest.mark.parametrize("bad", [[2024], [{"path": None}], "not a list", None])
+def test_a_malformed_area_list_only_costs_the_ordering(local_library, tmp_path, bad):
+    import yaml
+
+    (tmp_path / "main" / "datasource.yaml").write_text(yaml.safe_dump({"subject_areas": bad}))
+    out = tools.tool_get_prompt_examples({"datasource": local_library})
+    assert _areas(out) == {"sales", "assets"}

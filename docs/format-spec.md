@@ -84,6 +84,8 @@ Datasource (datasource.yaml)
 
 The Pydantic models in [`packages/agami-core/src/semantic_model/models.py`](../packages/agami-core/src/semantic_model/models.py) **are** the spec (they `forbid` unknown keys). Provider-portable declarative fields — `value_transform`, `caveats`, `value_pattern`, join `cardinality` — are applied generically by the MCP/runtime, so behavior is identical across LLMs. Three are declarative only, in two different senses. **Reported but not enforced:** `default_filters` is not AND-ed into a statement; the receipt reports, per table reference, which of a table's declared filters the statement applied, omitted, or left undetermined. `sensitive` does not gate anything: it marks a column the author wants handled carefully, the receipt reports when an answer projected one, and the authoring guidance asks the assistant to prefer aggregates — but nothing refuses. A column whose values must not be returned is left out of the model, which puts it out of scope, or is blocked by the connecting role's grants. **Neither enforced nor reported:** `default_time_window` is carried through the model, the loader, the store and the admin UI, and no code path reads it — nothing injects it into SQL, nothing checks it, and unlike the two above it does not appear in the receipt. It is accepted and displayed; an author should not expect it to change an answer. (This paragraph listed it among the fields applied generically, which it never was.)
 
+A column's or metric's `unit` is free text with one grammar the formatter reads: `<ISO currency code>[_<scale>][/<period>]`. The scale says the stored values are in `thousands`, `millions`, `billions`, `lakhs` or `crores` (singular accepted), so `USD_millions` shows 12.5 as `$12.5M`; the period makes it a rate (`hour`, `day`, `week`, `month`, `quarter`, `year`), so `USD/day` shows 120 as `$120.00/day`; the two combine (`USD_millions/year`). Any other text (`kg`, `days`, an unknown code) is shown after the number as a plain label, which is also how releases before this grammar read every one of these strings.
+
 Every write is gated by the validator at [`packages/agami-core/src/semantic_model/validator.py`](../packages/agami-core/src/semantic_model/validator.py) (driven via `python3 -m semantic_model.cli validate <root>`). **No model that fails validation is ever persisted.**
 
 ### Worked example — a minimal model on disk
@@ -118,10 +120,12 @@ name: orders
 schema: public
 storage_connection: shop_postgres
 grain: [id]
+unique_keys: [[order_number]]   # optional: each other unique key, as its columns; read for join cardinality
 description: One row per order.
 default_filters: ["{alias}.deleted_at IS NULL"]
 columns:
   - { name: id, type: integer, primary_key: true }
+  - { name: order_number, type: string }
   - { name: customer_id, type: integer, foreign_key: { table: customers, column: id } }
   - { name: status, type: string, choice_field: { pending: Pending, shipped: Shipped } }
   - { name: amount, type: decimal, caveats: ["Amount in USD; excludes refunds."] }
@@ -139,6 +143,12 @@ relationships:
     signed_off_by: agami_introspect
     signed_off_role: system
     signed_off_at: "2026-06-09T00:00:00Z"
+  # A foreign key over several columns is ONE join, written as `on:` with every column pair.
+  # Joining on only some of them repeats rows, and the receipt flags that as a fan trap.
+  - from_table: shipments
+    to_table: order_lines
+    on: "shipments.order_id = order_lines.order_id AND shipments.line_no = order_lines.line_no"
+    relationship: many_to_one
 ```
 ```yaml
 # subject_areas/sales/metrics/total_revenue.yaml
@@ -159,8 +169,9 @@ The validator combines Pydantic structural validation (required fields, enums, r
 2. **FK type-compatibility** — a simple-FK join with mismatched column types caps `confidence` at `proposed` and suggests a `CAST` in `on:` (BigQuery `INT64 = STRING` class of bug).
 3. **Subject-area sizing** — warn at 25 tables, error at 30.
 4. **Deep-table column_groups** — tables ≥ 30 columns must declare `column_groups`; no column may be orphaned; `expose_column_groups` must reference declared groups; every `TableRef.table` resolves to a `tables_defined` entry (org-wide, for multi-membership).
-5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot; **caveats** non-empty; **choice_field** keys match the column type.
-6. **Cross-area entity name-collision** → warning + a suggested cross-cutting unification.
+5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot, in the datasource's dialect (or the generic grammar) (an `on:` naming a column its table doesn't define is a warning); **caveats** non-empty; **choice_field** keys match the column type.
+6. **Cross-area entity name-collision** → warning + a suggested cross-cutting unification. Two areas mapping the same table don't collide.
+7. **Entity mappings** — a mapping to a column the area's own table lacks is an error; a mapping to a table no area defines, or to a missing column on another area's table (cross-area entities included), is a warning.
 
 The verdict is **binding**: `cli validate` exits 0 → ok, 1 → errors. `cli curate` and the introspection engine refuse / revert on a non-zero verdict.
 

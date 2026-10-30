@@ -65,6 +65,22 @@ def test_quoting_per_family():
     assert D.get_dialect("sqlserver").quote_ident("x") == "[x]"
 
 
+@pytest.mark.parametrize("key", ["mysql", "snowflake", "bigquery", "databricks"])
+def test_a_trailing_backslash_cannot_end_the_literal_where_it_escapes(key):
+    """These engines read `\\` as an escape inside a string literal, so `'acme\\'` would leave the
+    literal open (#439)."""
+    d = D.get_dialect(key)
+    assert d.quote_lit("acme\\") == "'acme\\\\'"
+    assert d.quote_lit("it's\\") == "'it''s\\\\'"
+    assert d.quote_lit("orders\\") in d.sql_columns("SALES_DATA", "orders\\")
+
+
+@pytest.mark.parametrize("key", ["postgres", "sqlite", "sqlserver", "duckdb", "trino", "oracle"])
+def test_a_backslash_stays_literal_where_it_does_not_escape(key):
+    """Doubling it here would change the name being looked up."""
+    assert D.get_dialect(key).quote_lit("acme\\") == "'acme\\'"
+
+
 # --- row-limit syntax ---
 
 
@@ -135,6 +151,38 @@ def test_redshift_reads_columns_from_svv_columns():
     assert d.sql_columns_bulk([]) is None
     # PostgreSQL itself keeps the standard catalog.
     assert "information_schema.columns" in D.get_dialect("postgres").sql_columns("s", "t")
+
+
+def test_redshift_lists_schemas_the_user_may_use_not_only_owns():
+    # information_schema.schemata lists only owned schemas on Redshift, so a read-only role listed
+    # none and discovery found no tables (#558).
+    d = D.get_dialect("redshift")
+    sql = d.sql_schemas()
+    assert "FROM pg_namespace" in sql and "information_schema.schemata" not in sql
+    assert "has_schema_privilege(nspname, 'USAGE')" in sql
+    assert "'information_schema', 'pg_catalog'" in sql and "LEFT(nspname, 3) <> 'pg_'" in sql
+    assert "AS schema_name" in sql
+    # PostgreSQL itself keeps the standard view, which lists schemas the user has any privilege on.
+    assert "information_schema.schemata" in D.get_dialect("postgres").sql_schemas()
+
+
+def test_redshift_discovery_finds_tables_for_a_role_that_owns_no_schema():
+    from semantic_model import introspect as I
+
+    d = D.get_dialect("redshift")
+
+    def runner(sql: str) -> list[dict]:
+        if "information_schema.schemata" in sql:
+            return []  # what a role that owns nothing sees on Redshift
+        if "FROM pg_namespace" in sql:
+            return [{"schema_name": "sales"}]
+        if "information_schema.tables" in sql and "'sales'" in sql:
+            return [{"schema_name": "sales", "table_name": "orders_v", "table_type": "VIEW"}]
+        return []
+
+    report = I.IntrospectReport(profile="p", db_type="redshift", out_dir="o", dry_run=True)
+    assert I._discover_tables(d, runner, None, report) == [("sales", "orders_v")]
+    assert report.mode_per_capability["tables"] == "catalog"
 
 
 def test_unenforced_fk_dialects_flagged():

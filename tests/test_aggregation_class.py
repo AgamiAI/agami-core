@@ -53,6 +53,20 @@ from catalog_helpers import make_catalog_runner
     ("total_cost", "decimal", False, "additive"),
     ("account_balance", "decimal", False, "additive"),   # stock: summable across accounts
     ("inventory_on_hand", "integer", False, "additive"),
+    ("units_sold", "integer", False, "additive"),
+    ("shipped_units", "integer", False, "additive"),
+    ("qty_sold", "integer", False, "additive"),
+    # a per-entity reading: the name doesn't settle that SUM means anything (#515)
+    ("reading_units", "float", False, "unknown"),
+    ("sensor_units", "float", False, "unknown"),
+    # camelCase / kebab spellings of a price or rate stay averageable, never additive
+    ("unitPrice", "decimal", False, "averageable"),
+    ("UnitPrice", "decimal", False, "averageable"),
+    ("costPerUnit", "decimal", False, "averageable"),
+    ("cost-per-hour", "decimal", False, "averageable"),
+    ("cost_per_hour", "decimal", False, "averageable"),
+    ("discountRate", "decimal", False, "averageable"),
+    ("customerId", "integer", False, "dimension"),
     # unrecognized numeric → unknown (safe; never enforced)
     ("xyz", "decimal", False, "unknown"),
     ("v_1", "float", False, "unknown"),
@@ -167,13 +181,18 @@ def test_suggest_metrics_rate_and_duration_patterns():
                     m.Column(name="is_active", type="integer"),       # int flag → rate
                     m.Column(name="opened_at", type="timestamp"),
                     m.Column(name="resolved_at", type="timestamp")])
-    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("redshift"))}
+    # flag_rates=True: a rate is proposed only when asked for (#530); this test checks its shape.
+    mets = {x["name"]: x for x in build.suggest_metrics(t, D.get_dialect("redshift"),
+                                                        flag_rates=True)}
+    # NULL-safe: a NULL flag is left out rather than counted as false (#514).
     assert mets["incident_made_sla_rate"]["bindings"]["Redshift"] == \
-        "AVG(CASE WHEN made_sla THEN 1.0 ELSE 0.0 END)"
+        "AVG(CASE WHEN made_sla THEN 1.0 WHEN NOT made_sla THEN 0.0 END)"
     assert mets["incident_is_active_rate"]["bindings"]["Redshift"] == \
-        "AVG(CASE WHEN is_active <> 0 THEN 1.0 ELSE 0.0 END)"
+        "AVG(CASE WHEN is_active <> 0 THEN 1.0 WHEN is_active = 0 THEN 0.0 END)"
     dur = mets["incident_avg_duration_days"]   # start+end timestamp pair → dialect DATEDIFF
-    assert dur["bindings"]["Redshift"] == "AVG(DATEDIFF('day', opened_at, resolved_at))"
+    days = "DATEDIFF('day', opened_at, resolved_at)"
+    # DATEDIFF counts day boundaries, so the guard compares the values themselves
+    assert dur["bindings"]["Redshift"] == f"AVG(CASE WHEN resolved_at >= opened_at THEN {days} END)"
     assert dur["unit"] == "days"
     # A flag RATE picks a condition and a DURATION pairs two columns: a choice the engine could
     # get wrong, so every proposal waits for a person, and none carries a system sign-off.
@@ -197,14 +216,16 @@ def test_suggest_metrics_skips_opaque_columns_until_described():
     ]
     t = m.Table(name="alm_asset", schema="public", storage_connection="c", grain=["id"],
                 description="a", columns=cols)
-    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    names = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"),
+                                                      flag_rates=True)}
     assert "alm_asset_active_to_rate" not in names   # opaque column → no metric proposed
     assert "alm_asset_is_leased_rate" in names       # described column → proposed
 
     # once the column is described, the SAME call now proposes its metric (the re-pass).
     cols[1].description_source = "ai"
     cols[1].description = "whether the asset is still within its active period"
-    names2 = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"))}
+    names2 = {x["name"] for x in build.suggest_metrics(t, D.get_dialect("postgresql"),
+                                                       flag_rates=True)}
     assert "alm_asset_active_to_rate" in names2
 
 
@@ -238,6 +259,6 @@ def test_the_cap_is_clamped_at_zero_not_floored_at_one(cap, expected):
                     m.Column(name="is_rush", type="boolean"),
                     m.Column(name="is_gift", type="boolean")])
     assert len(build.suggest_metrics(
-        t, D.get_dialect("postgresql"), max_per_table=cap)) == expected
+        t, D.get_dialect("postgresql"), max_per_table=cap, flag_rates=True)) == expected
 
 

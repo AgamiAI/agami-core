@@ -38,6 +38,8 @@ list[str] contract while adding structured findings for the review dashboard.
 from __future__ import annotations
 
 import hashlib
+import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -59,7 +61,9 @@ from .models import (
     Relationship,
     SubjectArea,
     Table,
+    TableRef,
     bare_name,
+    stored_identity,
     table_key,
 )
 
@@ -119,10 +123,11 @@ class ValidationResult:
 
 
 # An incremental-validation cache (ACE-046): per-area findings keyed by everything a per-area rule
-# reads — the area's own content AND the org-wide table registry. An enrichment run passes one of
-# these across edits so only the edited area's rules re-run; a normal `validate(org)` (cache=None)
-# is unchanged. Because the key pins every input, a cache hit is byte-identical to recomputing.
-# Key = (area name, area content sha, org-table-registry sha) → that area's findings.
+# reads — the area's own content, the org-wide table registry and the engine's dialect. An
+# enrichment run passes one of these across edits so only the edited area's rules re-run; a normal
+# `validate(org)` (cache=None) is unchanged. Because the key pins every input, a cache hit is
+# byte-identical to recomputing.
+# Key = (area name, area content sha, "<org-table-registry sha>:<dialect>") → that area's findings.
 ValidationCache = dict[tuple[str, str, str], "list[Finding]"]
 
 # Hard ceiling so a long-lived process (e.g. the HTTP server) that validates many distinct models
@@ -174,16 +179,17 @@ def _validate_area(
     # (entity mappings + each relationship's FK-type check), instead of rebuilding it per
     # relationship — that per-rel rebuild was the O(R×T) cost this pass eliminates (ACE-046).
     defined = _all_tables(sa)
+    dialect = _model_dialect(org)
     _check_subject_area_sizing(sa, ares)
     _check_table_refs_resolve(sa, ares, org_tables)
     _check_expose_column_groups(sa, ares, org_tables)
     _check_deep_table_column_groups(sa, ares)
     _check_default_filters_columns(sa, ares)
-    _check_value_transforms(sa, ares)
+    _check_value_transforms(sa, ares, dialect)
     _check_choice_fields(sa, ares)
     _check_entity_mappings(sa, ares, defined)
     for rel in sa.relationships:
-        _check_relationship(rel, sa, org, ares, cross=False, defined=defined)
+        _check_relationship(rel, sa, org, ares, cross=False, defined=defined, dialect=dialect)
         _check_relationship_served(rel, sa, ares, defined)
     return ares.findings
 
@@ -220,6 +226,78 @@ def _check_relationship_served(
         )
 
 
+def _check_ambiguities(org: Datasource, org_tables: dict, res: ValidationResult) -> None:
+    """Declared ambiguities (#473): unique names, and every `applies_to` names a model table. A
+    misspelled table would silently scope the entry out of every reply that should carry it."""
+    seen: set[str] = set()
+    # Bare, case-folded names: `applies_to` may write a table with or without its schema.
+    known = {t.split(".")[-1].lower() for t in org_tables}
+    for a in org.ambiguities:
+        if a.name in seen:
+            res.error("ambiguity_duplicate_name", f"ambiguity {a.name!r} is declared more than once")
+        seen.add(a.name)
+        for t in a.applies_to:
+            if t.split(".")[-1].lower() not in known:
+                res.error("ambiguity_unknown_table",
+                          f"ambiguity {a.name!r} applies_to {t!r}, which the model doesn't define")
+        _check_ambiguity_anchors(org, a, res)
+
+
+def _check_ambiguity_anchors(org: Datasource, a, res: ValidationResult) -> None:
+    """The finer anchors (#477) name a real `table.column`, `table.group` or metric. A misspelled
+    one would leave the entry signposted at a thing that never opens."""
+    from .models import table_key
+
+    # Every definition by identity, so `sales.orders` and `archive.orders` are told apart.
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+
+    def resolve(table: str) -> list:
+        schema, bare = table_key(table)
+        if schema:
+            exact = [(k, t) for k, t in defs if k == (schema, bare)]
+            # A stored table without a schema also matches, as the loader reads it.
+            return exact or [(k, t) for k, t in defs if k == ("", bare)]
+        return [(k, t) for k, t in defs if k[1] == bare]
+
+    def copies_of(ref: str, kind: str) -> tuple[list, str]:
+        """Every served copy of the table `ref` names (one table may be defined in several areas),
+        or [] after reporting why it can't be resolved."""
+        if "." not in ref:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} {kind} {ref!r} must be written table.{kind[:-1]}")
+            return [], ""
+        table, part = ref.rsplit(".", 1)
+        found = resolve(table)
+        if not found:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} {kind} {ref!r} names a table the model doesn't define")
+            return [], part
+        if len({k for k, _ in found}) > 1:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} {kind} {ref!r} matches tables in several schemas; "
+                      "write it schema.table.<name>")
+            return [], part
+        return [t for _, t in found], part
+
+    for ref in a.columns:
+        copies, col = copies_of(ref, "columns")
+        if copies and col.lower() not in {c.name.lower() for t in copies for c in t.columns}:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} columns {ref!r}: the table has no such column")
+    for ref in a.column_groups:
+        copies, group = copies_of(ref, "column_groups")
+        # Folded, as the loader and the reply resolve a group anchor.
+        if copies and group.lower() not in {g.lower() for t in copies for g in (t.column_groups or {})}:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} column_groups {ref!r}: the table has no such group")
+    metric_names = {m.name for sa in org.subject_areas for m in sa.metrics}
+    metric_names |= {m.name for m in org.cross_subject_area_metrics}
+    for name in a.metrics:
+        if name not in metric_names:
+            res.error("ambiguity_unknown_anchor",
+                      f"ambiguity {a.name!r} metrics {name!r}, which the model doesn't define")
+
+
 def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> ValidationResult:
     """Run every cross-cutting rule. Returns a ValidationResult (never raises on
     a model-level problem — those surface as the model failing to parse upstream).
@@ -237,7 +315,8 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     # defined in another area (multi-membership without duplication — the design
     # doc's "defined once, TableRef'd from each subject area" pattern).
     org_tables = _org_tables(org)
-    reg_sig = _org_tables_sig(org_tables) if cache is not None else ""
+    # The dialect the area's SQL fragments parse in is an input too, so a storage-type edit misses.
+    reg_sig = f"{_org_tables_sig(org_tables)}:{_model_dialect(org)}" if cache is not None else ""
     for sa in org.subject_areas:
         if cache is not None:
             key = (sa.name, _sig(sa), reg_sig)
@@ -257,12 +336,18 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     for rel in org.cross_subject_area_relationships:
         _check_cross_relationship(rel, org, res)
 
+    _check_entity_mappings_elsewhere(org, res)
     _check_cross_area_entity_collisions(org, res)
+    _check_ambiguities(org, org_tables, res)
     _check_table_name_across_schemas(org, res)
     _check_metric_backend_neutrality(org, res)
+    _check_metric_current_date(org, res)
     _check_metric_descriptions(org, res)
+    _check_measured_figures(org, res)
     _check_derived_metrics(org, res)
+    _check_metric_null_fill(org, res)
     _check_metric_binding_columns(org, res)
+    _check_metric_avg_of_ratio(org, res)
 
     return res
 
@@ -576,7 +661,24 @@ def _check_metric_combine(metric: CrossDatasourceMetric, res: ValidationResult) 
 
 
 def _all_tables(sa: SubjectArea) -> dict[str, Table]:
-    return {t.name: t for t in sa.tables_defined}
+    """An area's tables by name, and also by `schema.name` where a schema is known, so two
+    schemas' copies of one name in an area are both present (#258); see `_endpoint`."""
+    out: dict[str, Table] = {}
+    for t in sa.tables_defined:
+        out.setdefault(t.name, t)
+        schema, bare = stored_identity(t.name, t.schema_name)
+        if schema:
+            out[f"{schema.lower()}.{bare}"] = t
+    return out
+
+
+def _endpoint(defined: dict[str, Table], table: str, schema: Optional[str]) -> Optional[Table]:
+    """The table a relationship endpoint names: by its schema where it gives one, else by name."""
+    if schema:
+        found = defined.get(f"{schema.lower()}.{bare_name(table)}")
+        if found is not None:
+            return found
+    return defined.get(table)
 
 
 def _check_storage_connection_refs(org: Datasource, res: ValidationResult) -> None:
@@ -611,19 +713,42 @@ def _check_subject_area_sizing(sa: SubjectArea, res: ValidationResult) -> None:
 
 
 def _org_tables(org: Datasource) -> dict[str, Table]:
-    """Every canonical Table across the org, keyed by name (org-wide resolution)."""
+    """Every canonical Table across the org, keyed by name (org-wide resolution), and also by
+    `schema.name` where a schema is known, so a TableRef naming its schema finds that table rather
+    than whichever same-named one was defined last (#258)."""
     out: dict[str, Table] = {}
     for sa in org.subject_areas:
         for t in sa.tables_defined:
             out[t.name] = t
+            schema, bare = stored_identity(t.name, t.schema_name)
+            if schema:
+                out[f"{schema.lower()}.{bare}"] = t
     return out
+
+
+def _ref_table(org_tables: dict[str, Table], ref: TableRef) -> Optional[Table]:
+    """The canonical Table a TableRef points at: by its schema when it gives one, else by name.
+
+    A ref naming a schema the table is not in points at nothing, rather than at the same-named
+    table of another schema: serving resolves it by schema too, so passing it here would let the
+    model validate and the table then go missing from that area."""
+    if ref.schema_name:
+        found = org_tables.get(f"{ref.schema_name.lower()}.{bare_name(ref.table)}")
+        if found is not None:
+            return found
+    found = org_tables.get(ref.table)
+    if found is not None and ref.schema_name:
+        schema = stored_identity(found.name, found.schema_name)[0]
+        if schema and schema.lower() != ref.schema_name.lower():
+            return None
+    return found
 
 
 def _check_table_refs_resolve(
     sa: SubjectArea, res: ValidationResult, org_tables: dict[str, Table]
 ) -> None:
     for ref in sa.tables:
-        if ref.table not in org_tables:
+        if _ref_table(org_tables, ref) is None:
             res.error(
                 "orphan_table_ref",
                 f"subject area {sa.name!r}: TableRef {ref.table!r} has no matching canonical "
@@ -638,7 +763,7 @@ def _check_expose_column_groups(
     for ref in sa.tables:
         if not ref.expose_column_groups:
             continue
-        table = org_tables.get(ref.table)
+        table = _ref_table(org_tables, ref)
         if table is None:
             continue  # already reported by orphan check
         for grp in ref.expose_column_groups:
@@ -711,11 +836,11 @@ def _check_default_filters_columns(sa: SubjectArea, res: ValidationResult) -> No
                     )
 
 
-def _check_value_transforms(sa: SubjectArea, res: ValidationResult) -> None:
+def _check_value_transforms(sa: SubjectArea, res: ValidationResult, dialect: Optional[str]) -> None:
     for table in sa.tables_defined:
         for col in table.columns:
             if col.value_transform:
-                err = _sqlparse_error(col.value_transform)
+                err = _sqlparse_error(col.value_transform, dialect=dialect)
                 if err:
                     res.error(
                         "value_transform_unparseable",
@@ -759,6 +884,35 @@ def _check_entity_mappings(
                 )
 
 
+def _check_entity_mappings_elsewhere(org: Datasource, res: ValidationResult) -> None:
+    """Check the mappings the per-area rule can't see: an area entity's mapping to a table the area
+    doesn't define, and every org-level cross-area entity mapping. Resolved against the whole model.
+    Warnings, not errors, so a model that validated before still writes; org-level because the
+    per-area cache key doesn't cover other areas' columns."""
+    mappings = [(f"subject area {sa.name!r} entity {ent.name!r}", f"{sa.name}.entities[{ent.name}]", mp)
+                for sa in org.subject_areas for ent in sa.entities for mp in ent.maps_to
+                if mp.table not in {t.name for t in sa.tables_defined}]
+    mappings += [(f"cross-area entity {ent.name!r}", f"cross_subject_area_entities[{ent.name}]", mp)
+                 for ent in org.cross_subject_area_entities for mp in ent.maps_to]
+    defs = _table_defs(org)
+    for who, locator, mp in mappings:
+        hits = _tables_named(defs, mp.table)
+        if not hits:
+            res.warn(
+                "entity_mapping_unknown_table",
+                f"{who}: maps_to references {mp.table}.{mp.column} but no "
+                "subject area defines that table",
+                locator=locator,
+            )
+        elif not any(mp.column.lower() in {c.lower() for c in t.column_names()} for t in hits):
+            res.warn(
+                "entity_mapping_column_not_found",
+                f"{who}: maps_to references {mp.table}.{mp.column} but that "
+                "table has no such column",
+                locator=locator,
+            )
+
+
 def _check_relationship(
     rel: Relationship,
     sa: SubjectArea,
@@ -767,6 +921,8 @@ def _check_relationship(
     *,
     cross: bool,
     defined: dict[str, Table],
+    defined_to: Optional[dict[str, Table]] = None,
+    dialect: Optional[str] = None,
 ) -> None:
     # cardinality required (structural gate, check #17) — models enforces non-null,
     # re-assert the value domain here for a clear validator-level error too.
@@ -793,17 +949,42 @@ def _check_relationship(
 
     # on: must parse if present
     if rel.on:
-        err = _sqlparse_error(rel.on, as_condition=True)
+        err = _sqlparse_error(rel.on, as_condition=True, dialect=dialect or _model_dialect(org))
         if err:
             res.error(
                 "relationship_on_unparseable",
                 f"relationship {rel.from_table}->{rel.to_table}: on: does not parse "
                 f"({err}): {rel.on!r}",
             )
+        else:
+            _check_on_columns(rel, org, res, defined, defined if defined_to is None else defined_to)
         return  # user took explicit ownership; skip simple-form type check
 
     # FK type-compatibility on the simple form (Gap 3)
     _check_fk_type_compat(rel, res, defined)
+
+
+def _check_on_columns(
+    rel: Relationship, org: Datasource, res: ValidationResult, defined: dict[str, Table],
+    defined_to: dict[str, Table],
+) -> None:
+    """Warn when an `on:` join of column equalities names a column its table doesn't have. A
+    warning, not an error: hand-written `on:` joins validated before this check existed. Each end is
+    looked up among its own area's tables (`defined_to` for the TO end of a cross-area join)."""
+    from .runtime import join_key_pairs, model_dialect
+
+    pairs = join_key_pairs(rel, model_dialect(org)) or []
+    for table, cols, tables in ((rel.from_table, [f for f, _ in pairs], defined),
+                                (rel.to_table, [t for _, t in pairs], defined_to)):
+        t = tables.get(table) or tables.get(bare_name(table))
+        names = {c.name.lower() for c in t.columns} if t is not None else set()
+        missing = [c for c in cols if t is not None and c.lower() not in names]
+        if missing:
+            res.warn(
+                "relationship_on_unknown_column",
+                f"relationship {rel.from_table}->{rel.to_table}: on: names {', '.join(missing)}, "
+                f"which {table} doesn't define",
+            )
 
 
 def _check_cross_relationship(
@@ -828,7 +1009,8 @@ def _check_cross_relationship(
     # against the FROM area's tables, exactly as before — the cross edge's to_table lives in another
     # area, so it stays unresolved here (unchanged behaviour).
     sa_for_rel = sa_from or SubjectArea(name="<unknown>")
-    _check_relationship(rel, sa_for_rel, org, res, cross=True, defined=_all_tables(sa_for_rel))
+    _check_relationship(rel, sa_for_rel, org, res, cross=True, defined=_all_tables(sa_for_rel),
+                        defined_to=_all_tables(sa_to) if sa_to else {})
 
     # executable must match the endpoints' storage connections
     conn_from = _table_connection(sa_from, rel.from_table) if sa_from else None
@@ -851,24 +1033,39 @@ def _check_cross_relationship(
 
 
 def _check_table_name_across_schemas(org: Datasource, res: ValidationResult) -> None:
-    """Warn when one table name is declared under two or more schemas.
+    """Warn when one table name is declared under two or more schemas, and refuse one subject area
+    defining the same table twice.
 
-    A warning, not an error: the scope gates tell such tables apart by schema (#332), so querying
-    them is safe. But model lookups and schema serving still key tables by bare name and will
-    resolve that name to one of them, and an unqualified reference is refused as ambiguous.
+    Across schemas is a warning, not an error: the model stores, serves and scope-checks a table by
+    its schema and name (#258, #332), so querying them is safe. What remains is that an unqualified
+    reference is ambiguous: the scope gate refuses it and `dataset_names` asks for the schema.
+
+    Twice in one area is an error. The serving store keys a table by area, schema and name,
+    so a second definition would fail the deploy; and `public.orders` beside `orders` with
+    `schema: public` are one table spelled two ways, which nothing downstream can tell apart.
     """
     schemas: dict[str, set[str]] = {}
     for sa in org.subject_areas:
+        seen: set[tuple[str, str]] = set()
         for t in sa.tables_defined:
-            schemas.setdefault(t.name.lower(), set()).add((t.schema_name or "").lower())
+            schema, bare = stored_identity(t.name, t.schema_name)
+            schemas.setdefault(bare.lower(), set()).add(schema.lower())
+            key = (schema.lower(), bare.lower())
+            if key in seen:
+                res.error(
+                    "duplicate_table_identity",
+                    f"subject area {sa.name!r} defines table "
+                    f"{'.'.join(p for p in (schema, bare) if p)!r} more than once",
+                    locator=f"{sa.name}.tables_defined[{t.name}]",
+                )
+            seen.add(key)
     for name, found in sorted(schemas.items()):
         if len(found) < 2:
             continue
         res.warn(
             "table_name_in_multiple_schemas",
-            f"table {name} is declared under {len(found)} schemas; model lookups and schema "
-            "serving treat it by bare name, and queries must use the qualified form "
-            "(schema.table)",
+            f"table {name} is declared under {len(found)} schemas; an unqualified reference to it "
+            "is ambiguous, so queries and dataset_names must use the qualified form (schema.table)",
         )
 
 
@@ -907,11 +1104,12 @@ def _check_cross_area_entity_collisions(org: Datasource, res: ValidationResult) 
                 seen_pairs.add(pair_key)
                 tgt_a = _entity_targets(org, area_a, ent_a)
                 tgt_b = _entity_targets(org, area_b, ent_b)
-                if tgt_a and tgt_b and tgt_a != tgt_b:
+                if tgt_a and tgt_b and set(tgt_a) != set(tgt_b):
                     res.warn(
                         "cross_area_entity_collision",
                         f"entity {ent_a.name!r} is declared independently in areas "
-                        f"{area_a!r} (-> {sorted(tgt_a)}) and {area_b!r} (-> {sorted(tgt_b)}). "
+                        f"{area_a!r} (-> {', '.join(sorted(tgt_a.values()))}) and "
+                        f"{area_b!r} (-> {', '.join(sorted(tgt_b.values()))}). "
                         "Consider declaring it ONCE in a cross-cutting subject area with "
                         "maps_to across both, so the runtime never has to ask which was meant.",
                         suggestion=(
@@ -919,6 +1117,75 @@ def _check_cross_area_entity_collisions(org: Datasource, res: ValidationResult) 
                             f"    maps_to: [<{area_a} mapping>, <{area_b} mapping>]"
                         ),
                     )
+
+
+# A metric whose own text measures to today (#482). "current" alone is left out on purpose: a
+# "current balance" is the latest snapshot, not a date calculation.
+# Bare "now" is left out too: model text says "the metric now uses …" far more often than it means
+# the present; "until now", "up to now" and "to now" do mean it.
+_MEANS_TODAY_RE = re.compile(
+    r"\b(?:today|today's|current (?:date|day|time)|run date|as of now|right now|(?:up )?(?:un)?til now"
+    r"|up to now|to now)\b", re.I)
+_DATE_LITERAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _today_problem(sql: str, storage_type: str) -> Optional[str]:
+    """Why a binding does not measure to today, or None when it does (or does not parse).
+
+    Every engine's today (CURRENT_DATE, NOW(), GETDATE(), SYSDATE, CURDATE(), today()) parses to
+    sqlglot's CurrentDate / CurrentTimestamp family; SQLite spells it as the string 'now'."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return None
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return None
+    strings = [lit.this for lit in tree.find_all(exp.Literal) if lit.is_string]
+    today = (exp.CurrentDate, exp.CurrentTimestamp, exp.CurrentDatetime, exp.CurrentTime)
+    # 'now' means the present only as a date function's argument or a cast (SQLite's
+    # julianday('now'), Postgres's 'now'::timestamp); as a compared value it is just a label
+    now_in_date_call = any(
+        lit.is_string and lit.this.lower() == "now"
+        and isinstance(lit.parent, exp.Func) and not isinstance(lit.parent, exp.Predicate)
+        for lit in tree.find_all(exp.Literal))
+    if next(tree.find_all(*today), None) is not None or now_in_date_call:
+        return None  # measures to today; a date literal beside it is a filter, e.g. a placeholder
+    dated = next((v for v in strings if _DATE_LITERAL_RE.match(v)), None)
+    if dated:
+        return f"uses the fixed date {dated!r} instead"
+    for sub in tree.find_all(exp.Subquery):
+        if next(sub.find_all(exp.Max), None) is not None:
+            return "measures to the latest date in the data instead (a MAX in a subquery)"
+    return "has no current date in it (CURRENT_DATE or the engine's equivalent)"
+
+
+def _check_metric_current_date(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric's text measures to today but its binding does not use the current date
+    (#482). A binding that stops at a fixed date or at the latest date in the data gives a stable
+    figure, but when the data is not loaded up to today it silently changes the answer and which
+    rows qualify (overdue, at risk). How stale the data is belongs on the answer's receipt, not
+    in the formula."""
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if not _MEANS_TODAY_RE.search(f"{met.calculation} {met.description}"):
+            continue
+        for stype, sql in (met.bindings or {}).items():
+            why = _today_problem(sql, stype)
+            if why:
+                res.warn(
+                    "metric_today_not_current_date",
+                    f"metric {met.name!r} ({stype}) says it measures to today, but its binding "
+                    f"{why}. Use CURRENT_DATE (or the engine's equivalent) and say in the "
+                    "calculation that the result depends on the run date; how far the data lags "
+                    "today belongs on the answer's receipt, not in the formula.",
+                )
+                break
 
 
 def _check_metric_backend_neutrality(org: Datasource, res: ValidationResult) -> None:
@@ -957,6 +1224,80 @@ def _check_metric_descriptions(org: Datasource, res: ValidationResult) -> None:
         )
 
 
+# Phrasings that state a count measured on the data rather than a rule about it (#479). Each needs a
+# population word or a ratio, so a threshold (`score > 0.8`), a weight (`x 1.5`) or a unit factor
+# (`/ 100`) never matches. `<n> of <m>` wants a denominator of 10 or more: "2 of 3 criteria" is a
+# definition, while "57 of 231 operations" is a measurement.
+_NUM = r"\d[\d,]*(?:\.\d+)?"
+_MEASURED_FIGURE_RES = (
+    re.compile(rf"\b{_NUM}\s+(?:out\s+)?of\s+(?:the\s+)?(?:about\s+|~)?(?P<of>{_NUM})\b", re.I),
+    re.compile(rf"\bcover(?:s|ing)?\s+(?:only|about|~)\s*{_NUM}", re.I),
+    # Not after `-` or a quote: "2016-2020 rows" is a year range and "'1500 records'" a sample value.
+    re.compile(rf"(?<![-'\"])\b{_NUM}\s+(?:rows|records)\b", re.I),
+    re.compile(rf"\b(?:null|missing|empty|blank)\s+(?:on|in|for)\s+(?:about\s+|~)?{_NUM}", re.I),
+    re.compile(
+        rf"\b{_NUM}\s*%\s+(?:of\s+(?:the\s+|all\s+)?(?:rows|records|values|entries)"
+        r"|(?:are\s+|is\s+)?(?:null|empty|blank|missing))\b",
+        re.I,
+    ),
+)
+
+
+def _measured_figure(text: str) -> Optional[str]:
+    """The first phrase in `text` that states a figure measured on the data, or None."""
+    for pattern in _MEASURED_FIGURE_RES:
+        for m in pattern.finditer(text):
+            of = m.groupdict().get("of")
+            if of is not None and float(of.replace(",", "")) < 10:
+                continue
+            return m.group(0)
+    return None
+
+
+def _model_texts(org: Datasource) -> Iterator[tuple[str, str]]:
+    """(where, text) for every model text enrichment writes as a lasting statement about the data."""
+    metrics = list(org.cross_subject_area_metrics)
+    entities = list(org.cross_subject_area_entities)
+    for sa in org.subject_areas:
+        metrics.extend(sa.metrics)
+        entities.extend(sa.entities)
+    for met in metrics:
+        yield f"metric {met.name!r}", met.calculation
+        yield f"metric {met.name!r}", met.description
+        for caveat in met.caveats:
+            yield f"metric {met.name!r} caveat", caveat
+    for ent in entities:
+        for caveat in ent.caveats:
+            yield f"entity {ent.name!r} caveat", caveat
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for caveat in t.caveats:
+                yield f"table {t.name!r} caveat", caveat
+            for col in t.columns:
+                for caveat in col.caveats:
+                    yield f"column '{t.name}.{col.name}' caveat", caveat
+
+
+def _check_measured_figures(org: Datasource, res: ValidationResult) -> None:
+    """A count measured at build time ("covers 57 of 231 rows") is wrong after the next load, but
+    reads as part of the definition, and sessions repeat it in answers (#479). One warning for the
+    whole model, as for undescribed metrics: an older model can carry many."""
+    hits = []
+    for where, text in _model_texts(org):
+        phrase = _measured_figure(text or "")
+        if phrase:
+            hits.append(f"{where} ({phrase!r})")
+    if hits:
+        shown = ", ".join(hits[:5])
+        more = f" and {len(hits) - 5} more" if len(hits) > 5 else ""
+        res.warn(
+            "measured_figure",
+            f"{len(hits)} model text(s) state a figure measured on the data, which is wrong after "
+            f"the next load: {shown}{more}. State the lasting fact instead (\"NULL means the value "
+            "was not recorded\"), not its current count.",
+        )
+
+
 def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
     """Scorecard #1: a derived metric (one composing others via {base} placeholders)
     must resolve — no cycles, no unknown bases, no illegal second-order nesting. A
@@ -972,11 +1313,11 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
         if not (D.is_derived(met) or D.is_second_order(met)):
             continue
         # resolve_metric_sql dispatches: second-order → CTE synthesis, else placeholder
-        # expansion. Either failure mode (cycle, unknown base, bad shape, multi-table inner
-        # synth, missing inner_grain) is deploy-blocking.
+        # expansion. Either failure mode (cycle, unknown base, bad shape, an unjoinable multi-table
+        # base, missing inner_grain) is deploy-blocking.
         for stype in (met.bindings or {}):
             try:
-                D.resolve_metric_sql(met, stype, idx)
+                D.resolve_metric_sql(met, stype, idx, org)
             except D.DerivedError as e:
                 res.error("derived_metric", str(e))
         # grain sanity (first-order case-a only): a base sharing no source_table may be a
@@ -997,6 +1338,138 @@ def _check_derived_metrics(org: Datasource, res: ValidationResult) -> None:
                     )
 
 
+# Words that tell the reader a missing value really means zero, so filling it with a constant is
+# faithful to the data (#478): "NULL means none", "missing is treated as 0", "empty counts as zero".
+_NULL_MEANS_ZERO_RE = re.compile(
+    r"\b(?:null|nulls|missing|empty|blank|absent|no value)\b[^.;]{0,30}?"
+    r"\b(?:means?|is|are|=|treated as|counts? as|stands? for)\b[^.;]{0,15}?"
+    r"\b(?:0|zero|none|nothing)\b",
+    re.I,
+)
+# A metric's own text can carry the reason instead, when it names where the rule comes from: "the
+# KB formula counts a missing percentage as 0", "the business definition treats a missing gap as
+# zero". A bare "(null as 0)" names no source and does not count — that is how an invented fill
+# reads.
+_METRIC_DEFINES_ZERO_RE = re.compile(
+    r"\b(?:definition|defined|formula|kb|business rule|metrics? (?:file|document)|spec)\b[^.;]{0,80}?"
+    r"\b(?:counts?|treats?|takes?|fills?|sets?|reads?)\b[^.;]{0,60}?"
+    r"\b(?:missing|null|nulls|empty|blank|absent)\b[^.;]{0,40}?\bas (?:0|zero)\b",
+    re.I,
+)
+
+
+# A statement that denies the zero ("NULL is not zero", "the definition never treats it as 0") must
+# not read as permission to fill.
+_NEGATION_RE = re.compile(r"\b(?:not|never|no longer|isn't|aren't|doesn't|don't|cannot|can't)\b", re.I)
+
+
+def _says_missing_is_zero(text: str, pattern: "re.Pattern[str]") -> bool:
+    """True when `text` affirmatively says a missing value is (or is counted as) zero.
+
+    The negation is looked for in the whole clause up to the match, not only inside it: in "the
+    KB never treats a missing staff count as 0" the pattern can start at "missing", past the
+    "never"."""
+    text = text or ""
+    for m in pattern.finditer(text):
+        start = max(text.rfind(".", 0, m.start()), text.rfind(";", 0, m.start())) + 1
+        if not _NEGATION_RE.search(text[start:m.end()]):
+            return True
+    return False
+
+
+def _source_column_texts(org: Datasource, refs: list[str]) -> list[tuple[str, dict[str, str]]]:
+    """(bare table name, {column -> description + caveats}) for every table a metric's
+    `source_tables` names, resolved by schema-aware identity: `s.operations` finds the
+    `operations` table of schema `s`, a bare `operations` finds every table of that name, and
+    two same-named tables in different schemas stay apart instead of merging their texts."""
+    from .models import table_key
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+    found: dict[tuple[str, str], dict[str, list[str]]] = {}
+    for ref in refs:
+        schema, bare = table_key(ref)
+        hits = ([t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+                if schema else [t for k, t in defs if k[1] == bare])
+        for t in hits:
+            cols = found.setdefault(table_key(t.name, t.schema_name), {})
+            for c in t.columns:  # a table defined in several areas: every copy's text counts
+                cols.setdefault(c.name.lower(), []).append(" ".join([c.description or "", *c.caveats]))
+    return [(key[1], {c: " ".join(v) for c, v in cols.items()}) for key, cols in found.items()]
+
+
+def _null_filled_columns(sql: str, storage_type: str) -> list:
+    """The column nodes a binding wraps in COALESCE / IFNULL / NVL / ISNULL with a numeric
+    constant, e.g. `COALESCE(staff_count, 0)`.
+
+    A fill whose first argument holds an aggregate (`COALESCE(SUM(x), 0)`, a total over no rows)
+    is left alone: that is the empty-set case, not an invented value for a row. Parsed in the
+    binding's own engine dialect; a binding that does not parse is no evidence."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return []
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return []
+    found = []
+    for fill in tree.find_all(exp.Coalesce):  # IFNULL, NVL and ISNULL parse to the same node
+        constant = any(
+            isinstance(e, exp.Literal) and e.is_number
+            or isinstance(e, exp.Neg) and isinstance(e.this, exp.Literal) and e.this.is_number
+            for e in fill.expressions
+        )
+        if not constant or next(fill.this.find_all(exp.AggFunc), None) is not None:
+            continue
+        found.extend(fill.this.find_all(exp.Column))
+    return found
+
+
+def _check_metric_null_fill(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric's binding fills a missing column value with a constant although nothing
+    says that missing means zero (#478). `COALESCE(staff_count, 0)` on a column described as
+    "NULL means the count was not recorded" invents a value: the row gets a misleading result
+    instead of none, averages and rates are pulled toward zero, and sessions copy the binding
+    verbatim. Two things silence it: the column's description or caveats saying a missing value
+    means zero ("NULL means none"), or the metric's own calculation saying the definition it follows
+    counts a missing value as 0 and naming that definition ("the KB formula counts a missing
+    percentage as 0")."""
+    from . import derived as D
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue
+        own = " ".join([met.calculation, met.description, *met.caveats])
+        if (_says_missing_is_zero(own, _METRIC_DEFINES_ZERO_RE)
+                or _says_missing_is_zero(own, _NULL_MEANS_ZERO_RE)):
+            continue  # the metric says why it fills, and where that rule comes from
+        scoped = _source_column_texts(org, met.source_tables)
+        filled: set[str] = set()
+        for stype, sql in (met.bindings or {}).items():
+            for col in _null_filled_columns(sql, stype):
+                # a qualifier naming a source table picks that table; otherwise (no qualifier, or
+                # an alias) the column may come from any of them
+                named = [cols for bare, cols in scoped if col.table and bare == col.table.lower()]
+                tables = named or [cols for _, cols in scoped]
+                said = [cols[col.name.lower()] for cols in tables if col.name.lower() in cols]
+                if said and not any(_says_missing_is_zero(text, _NULL_MEANS_ZERO_RE) for text in said):
+                    filled.add(col.name)
+        if filled:
+            res.warn(
+                "metric_null_filled",
+                f"metric {met.name!r} fills a missing value of {sorted(filled)} with a constant, "
+                "but nothing says a missing value there means zero. That invents a value: the row "
+                "gets a result it should not have and averages are pulled toward the constant. Let "
+                "NULL propagate so the result stays empty. If missing really does mean zero, say so "
+                "in the column's description (\"NULL means none\"), or, when a definition you follow "
+                "says to count it as 0, say that in the metric's calculation and name the "
+                "definition (\"the KB formula counts a missing value as 0\").",
+            )
+
+
 def _binding_column_refs(sql: str) -> set[str]:
     """Best-effort set of bare column names referenced in a binding expression (lower-cased).
     sqlglot-based; returns empty on parse failure or no sqlglot (never block on unparseable)."""
@@ -1014,6 +1487,54 @@ def _binding_column_refs(sql: str) -> set[str]:
     return {c.name.lower() for c in tree.find_all(exp.Column) if c.name}
 
 
+def _binding_base_column_refs(sql: str, storage_type: str) -> set[str]:
+    """Like `_binding_column_refs`, but leaves out names that are aliases rather than table columns:
+    a column a derived table or CTE projects (`s.r`, or a bare `r` read from it) and a select-list
+    alias used in the same SELECT's HAVING / ORDER BY. Validator-only: the loader keeps the broader
+    set, so a metric reading a hidden column through an alias is still hidden at runtime."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return set()
+    from sqlglot.optimizer.scope import Scope, traverse_scope
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+        scopes = traverse_scope(tree)
+    except Exception:
+        return _binding_column_refs(sql)
+    if not scopes:  # a bare expression such as `SUM(amount)`: no aliases to resolve
+        return _binding_column_refs(sql)
+
+    def derived_of(scope: Scope) -> list[Scope]:
+        # only the sources the SELECT reads: an unused CTE projecting `cst` must not hide a typo
+        return [src for _, src in scope.selected_sources.values() if isinstance(src, Scope)]
+
+    def projects(src: Scope, name: str) -> bool:
+        """Whether `src` makes `name` an alias. Through a star, only if a derived source of its own
+        does; a star over a base table passes the table's columns through, so those stay checked."""
+        selects = {n.lower() for n in getattr(src.expression, "named_selects", [])}
+        if name in selects:
+            return True
+        return "*" in selects and any(projects(inner, name) for inner in derived_of(src))
+
+    out: set[str] = set()
+    for scope in scopes:
+        derived = derived_of(scope)
+        for col in scope.columns:
+            name = col.name.lower()
+            if not name:
+                continue
+            if col.table:
+                _, src = scope.selected_sources.get(col.table, (None, None))
+                if isinstance(src, Scope) and projects(src, name):
+                    continue
+            elif any(projects(s, name) for s in derived):
+                continue
+            out.add(name)
+    return out
+
+
 def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> None:
     """WARN when a metric's binding references a column that exists on NONE of its source_tables —
     catches a typo'd or renamed column (e.g. `SUM(cst)`) before it fails at query time, which is
@@ -1023,23 +1544,20 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
     derived metrics and unparseable bindings) and a denormalized / not-yet-listed source table
     could produce a false positive — so it surfaces the suspicion without blocking the write."""
     from . import derived as D
-    cols_by_table: dict[str, set[str]] = {}
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            cols_by_table.setdefault(t.name.lower(), set()).update(c.name.lower() for c in t.columns)
+    defs = _table_defs(org)
     all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
     for sa in org.subject_areas:
         all_metrics.extend(sa.metrics)
     for met in all_metrics:
         if D.is_derived(met) or not met.source_tables:
             continue  # derived: columns live in the base; no source_tables: a different check
-        allowed: set[str] = set()
-        for tn in met.source_tables:
-            allowed |= cols_by_table.get(tn.lower(), set())
+        # By schema-aware identity, so `s.orders` resolves and `archive.orders` lends no columns.
+        allowed = {c.name.lower() for tn in met.source_tables for t in _tables_named(defs, tn)
+                   for c in t.columns}
         if not allowed:
             continue  # source tables aren't in the model (its own check) — don't double-flag
         for stype, sql in (met.bindings or {}).items():
-            missing = sorted(r for r in _binding_column_refs(sql) if r not in allowed)
+            missing = sorted(r for r in _binding_base_column_refs(sql, stype) if r not in allowed)
             if missing:
                 res.warn(
                     "metric_binding_unknown_column",
@@ -1047,6 +1565,138 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
                     f"found on its source table(s) {met.source_tables} — check for a typo or a "
                     "missing source_table",
                 )
+
+
+# A metric's calculation can declare that it really is an average of per-row values (an average
+# per-student score, say), which silences `metric_avg_of_ratio` for it (#480).
+_PER_ROW_AVERAGE_RE = re.compile(
+    r"\b(?:per[- ]row|each row's|row[- ]level)\b.{0,40}\baverage|\baverage\b.{0,40}\b(?:per[- ]row|each row's|row[- ]level)\b",
+    re.I | re.S,
+)
+
+
+def _source_column_classes(org: Datasource, refs: list[str]) -> dict[str, dict[str, str]]:
+    """bare table name -> {column name -> aggregation class} for the tables a metric's
+    `source_tables` names, resolved by schema-aware identity: `s.store_sales` finds schema `s`'s
+    table (or a schema-less definition), a bare name every table of that name. Where the copies
+    of a table in several subject areas, or two same-named tables, disagree on a column's class,
+    the column is `ambiguous`, so the evidence never depends on the order the areas load in."""
+    from .models import table_key
+    defs = [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+    seen: dict[str, dict[str, set]] = {}
+    for ref in refs:
+        schema, bare = table_key(ref)
+        hits = ([t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+                if schema else [t for k, t in defs if k[1] == bare])
+        for t in hits:
+            cols = seen.setdefault(bare, {})
+            for c in t.columns:
+                cols.setdefault(c.name.lower(), set()).add(c.aggregation)
+    return {bare: {c: (next(iter(v)) if len(v) == 1 else "ambiguous") for c, v in cols.items()}
+            for bare, cols in seen.items()}
+
+
+def _in_condition(div, avg) -> bool:
+    """True when the division sits in a condition inside the AVG — a comparison (`>`, `IN`,
+    `BETWEEN`, …), which is how a CASE/IF test or a filter uses it — rather than in the value
+    being averaged. `AVG(CASE WHEN a / b > 0.5 THEN 1.0 ELSE 0.0 END)` is the share of rows above
+    a threshold, not an average ratio."""
+    from sqlglot import expressions as exp
+    node = div.parent
+    while node is not None and node is not avg:
+        if isinstance(node, exp.Predicate):
+            return True
+        node = node.parent
+    return False
+
+
+def _ratio_side_is_additive(side, classes: dict[str, str], by_table: dict[str, dict[str, str]]) -> bool:
+    """True when one side of a ratio is built only from `additive` columns (at least one) and no
+    aggregate. A side holding an aggregate is a ratio of totals already, and a column whose class
+    is unknown, averageable or ambiguous never counts as additive, so the check stays quiet."""
+    from sqlglot import expressions as exp
+    if next(side.find_all(exp.AggFunc), None) is not None:
+        return False
+    cols = list(side.find_all(exp.Column))
+    if not cols:
+        return False
+    for c in cols:
+        if c.table and c.table.lower() in by_table:
+            cls = by_table[c.table.lower()].get(c.name.lower())
+        else:
+            cls = classes.get(c.name.lower())
+        if cls != "additive":
+            return False
+    return True
+
+
+def _avg_of_ratio(sql: str, storage_type: str, classes: dict[str, str],
+                  by_table: dict[str, dict[str, str]]) -> bool:
+    """True when the binding averages a per-row ratio of two additive amounts: `AVG(a / b)`.
+
+    Parsed in the binding's own engine dialect, so `a::numeric` and engine quoting read as they
+    run; a binding that does not parse, or an engine with no dialect mapping, is no evidence."""
+    if not _HAVE_SQLGLOT:  # pragma: no cover - sqlglot is in requirements
+        return False
+    from sqlglot import expressions as exp
+
+    from .sql_dialect import sqlglot_dialect
+    try:
+        tree = sqlglot.parse_one(sql, dialect=sqlglot_dialect(storage_type),
+                                 error_level=_ErrorLevel.RAISE)
+    except Exception:
+        return False
+    for avg in tree.find_all(exp.Avg):
+        for div in avg.this.find_all(exp.Div):
+            # only a ratio computed row by row inside this AVG — not one inside a nested query or
+            # another aggregate, which is computed per group first and is a ratio of totals
+            node, nested = div.parent, False
+            while node is not None and node is not avg:
+                if isinstance(node, (exp.Select, exp.Subquery, exp.AggFunc)):
+                    nested = True
+                    break
+                node = node.parent
+            if nested or _in_condition(div, avg):
+                continue
+            if (_ratio_side_is_additive(div.this, classes, by_table)
+                    and _ratio_side_is_additive(div.expression, classes, by_table)):
+                return True
+    return False
+
+
+def _check_metric_avg_of_ratio(org: Datasource, res: ValidationResult) -> None:
+    """WARN when a metric averages a per-row ratio of two additive amounts (#480). For a group,
+    `AVG(online_sales / total_sales)` weighs a store with 100 sales the same as one with 1,000 and
+    disagrees with the totals beside it; the group's share is `SUM(a) / SUM(b)`.
+
+    A warning, not a gate: an average of per-row values is sometimes what a metric means, and a
+    calculation that says so ("the average of each row's ratio") silences it."""
+    from . import derived as D
+    all_metrics = list(getattr(org, "cross_subject_area_metrics", []) or [])
+    for sa in org.subject_areas:
+        all_metrics.extend(sa.metrics)
+    for met in all_metrics:
+        if D.is_derived(met) or not met.source_tables:
+            continue
+        if _PER_ROW_AVERAGE_RE.search(f"{met.calculation} {met.description}"):
+            continue
+        scoped = _source_column_classes(org, met.source_tables)
+        classes: dict[str, str] = {}
+        for table_cols in scoped.values():
+            for name, cls in table_cols.items():
+                # a name on two source tables with different classes is ambiguous: not additive
+                classes[name] = cls if classes.get(name, cls) == cls else "ambiguous"
+        for stype, sql in (met.bindings or {}).items():
+            if _avg_of_ratio(sql, stype, classes, scoped):
+                res.warn(
+                    "metric_avg_of_ratio",
+                    f"metric {met.name!r} ({stype}) averages a per-row ratio of two additive "
+                    "amounts, which weighs every row the same whatever its size. For a group's "
+                    "share use SUM(numerator) / NULLIF(SUM(denominator), 0) over the rows where "
+                    "both are known; if an average of per-row values is meant, say so in the "
+                    "calculation (\"the average of each row's ratio\").",
+                )
+                break
 
 
 # ---------------------------------------------------------------------------
@@ -1057,8 +1707,8 @@ def _check_metric_binding_columns(org: Datasource, res: ValidationResult) -> Non
 def _check_fk_type_compat(
     rel: Relationship, res: ValidationResult, defined: dict[str, Table]
 ) -> None:
-    from_t = defined.get(rel.from_table)
-    to_t = defined.get(rel.to_table)
+    from_t = _endpoint(defined, rel.from_table, rel.from_schema)
+    to_t = _endpoint(defined, rel.to_table, rel.to_schema)
     if not (from_t and to_t and rel.from_column and rel.to_column):
         return
     from_c = from_t.get_column(rel.from_column)
@@ -1097,8 +1747,8 @@ def recommended_confidence_cap(rel: Relationship, sa: SubjectArea) -> Optional[s
     if rel.on:
         return None
     defined = _all_tables(sa)
-    from_t = defined.get(rel.from_table)
-    to_t = defined.get(rel.to_table)
+    from_t = _endpoint(defined, rel.from_table, rel.from_schema)
+    to_t = _endpoint(defined, rel.to_table, rel.to_schema)
     if not (from_t and to_t and rel.from_column and rel.to_column):
         return None
     from_c = from_t.get_column(rel.from_column)
@@ -1119,18 +1769,56 @@ def _types_compatible(a: str, b: str) -> bool:
     return frozenset({a, b}) in _COERCIBLE_PAIRS
 
 
-def _entity_targets(org: Datasource, area_name: str, ent: Entity) -> set[str]:
-    """Resolve an entity's maps_to into a set of 'connection.schema.table' strings."""
+def _table_defs(org: Datasource) -> list[tuple[tuple[str, str], Table]]:
+    return [(table_key(t.name, t.schema_name), t) for sa in org.subject_areas for t in sa.tables_defined]
+
+
+def _tables_named(defs: list[tuple[tuple[str, str], Table]], ref: str) -> list[Table]:
+    """Every defined Table `ref` names, by schema-aware identity: `s.orders` finds schema `s`'s
+    `orders` (or a schema-less one), a bare `orders` finds every table of that name."""
+    schema, bare = table_key(ref)
+    if schema:
+        return [t for k, t in defs if k == (schema, bare)] or [t for k, t in defs if k == ("", bare)]
+    return [t for k, t in defs if k[1] == bare]
+
+
+def _entity_targets(org: Datasource, area_name: str, ent: Entity) -> dict[tuple, str]:
+    """Resolve an entity's maps_to into {identity: display}. A table is found in the area itself,
+    else through the area's TableRefs or anywhere in the model, so two areas mapping one table
+    compare equal. Display is `schema.table`, naming the connection only when there are several."""
     sa = org.subject_area(area_name)
-    out: set[str] = set()
+    out: dict[tuple, str] = {}
     if sa is None:
         return out
+    several = len(org.storage_connections) > 1
     defined = _all_tables(sa)
     for mp in ent.maps_to:
         t = defined.get(mp.table)
-        conn = t.storage_connection if t else "?"
-        schema = (t.schema_name if t else None) or "?"
-        out.add(f"{conn}.{schema}.{mp.table}")
+        ref_conn = ""
+        if t is None:
+            schema, bare = table_key(mp.table)
+            # the area's own TableRef settles which schema a bare name means, and which connection
+            listed = [r for r in sa.tables if (k := table_key(r.table, r.schema_name))[1] == bare
+                      and (not schema or k[0] in (schema, ""))]
+            if len(listed) == 1:
+                schema = table_key(listed[0].table, listed[0].schema_name)[0] or schema
+                ref_conn = listed[0].storage_connection
+            hits = _tables_named(_table_defs(org), f"{schema}.{bare}" if schema else bare)
+            if ref_conn:
+                hits = [h for h in hits if h.storage_connection in (ref_conn, None)]
+            if len({(h.storage_connection, table_key(h.name, h.schema_name)) for h in hits}) == 1:
+                t = hits[0]
+        if t is None:
+            schema, bare = table_key(mp.table)
+            conn, shown = ref_conn, mp.table
+        else:
+            schema, bare = table_key(t.name, t.schema_name)
+            ref = next((r for r in sa.tables if table_key(r.table, r.schema_name) == (schema, bare)), None)
+            conn = t.storage_connection or ref_conn or (ref.storage_connection if ref else "")
+            shown = f"{t.schema_name}.{t.name}" if t.schema_name and "." not in t.name else t.name
+        if several and conn:
+            shown = f"{shown} on {conn}"
+        out[(conn if several else "", schema, bare)] = shown
     return out
 
 
@@ -1174,16 +1862,37 @@ def _columns_referenced(expr: str, table_name: str) -> set[str]:
     return cols
 
 
-def _sqlparse_error(expr: str, *, as_condition: bool = False) -> Optional[str]:
-    """Return None if `expr` parses as SQL, else a short error string."""
+def _model_dialect(org: Datasource) -> Optional[str]:
+    """The sqlglot dialect of the datasource's engine, or None when it can't be resolved."""
+    from .sql_dialect import DialectUnresolved, resolve_datasource_dialect
+    try:
+        return resolve_datasource_dialect(org)
+    except DialectUnresolved:
+        return None
+
+
+def _sqlparse_error(
+    expr: str, *, as_condition: bool = False, dialect: Optional[str] = None
+) -> Optional[str]:
+    """Return None if `expr` parses as SQL, else a short error string.
+
+    A fragment is accepted when it parses in the engine's dialect (Postgres `~`, T-SQL brackets)
+    or in the generic grammar, which is what every model was checked against before (#518), so
+    no fragment that used to pass starts failing."""
     if not _HAVE_SQLGLOT:
         return None  # can't check; treat as ok (sqlglot optional, like legacy)
     candidate = f"SELECT 1 WHERE {expr}" if as_condition else f"SELECT {expr}"
-    try:
-        parsed = sqlglot.parse_one(candidate, error_level=_ErrorLevel.RAISE)
-        return None if parsed is not None else "empty parse"
-    except Exception as e:  # sqlglot.errors.ParseError and friends
-        return str(e).splitlines()[0][:160]
+    first_err = None
+    for read in ([dialect] if dialect else []) + [None]:
+        try:
+            parsed = sqlglot.parse_one(candidate, read=read, error_level=_ErrorLevel.RAISE)
+        except Exception as e:  # sqlglot.errors.ParseError and friends
+            first_err = first_err or str(e).splitlines()[0][:160]
+            continue
+        if parsed is not None:
+            return None
+        first_err = first_err or "empty parse"
+    return first_err
 
 
 def _value_matches_type(value: str, ctype: str) -> bool:
