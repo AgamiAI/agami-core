@@ -6560,6 +6560,53 @@ def _unanimous_tokens(org: Datasource) -> dict[str, str]:
             if len(toks) == 1 and next(iter(toks))}
 
 
+def _display_lookup(org: Datasource, tree: "exp.Expression", select: "exp.Select"
+                    ) -> "Callable[[exp.Column], Optional[Column]]":
+    """The model Column a statement column reads, for its display unit or label. A table is known by
+    its (schema, name), as the scope gates know it (#507), so `sales.orders.amount` never takes
+    `archive.orders.amount`'s unit. A qualifier naming two tables, or a bare column two in-scope
+    tables declare, reads nothing."""
+    sidx, decls, dialect = _schema_index(org), _table_decls(org), _dialect_of(org)[0]
+    cte_refs = _cte_bindings(tree)
+    cols_of: dict[frozenset, dict[str, Column]] = {}
+    scope: dict[str, set] = {}
+    for tbl in select.find_all(exp.Table):
+        if not tbl.name:
+            continue
+        resolved = None if id(tbl) in cte_refs else _resolve_table(sidx, tbl, decls, dialect)
+        binding = None
+        if isinstance(resolved, tuple):
+            named = [t for t in decls.get(resolved, []) if _names_declared(tbl, t, dialect)]
+            binding = frozenset(id(t) for t in named)
+            cols_of[binding] = {c.name: c for t in named for c in t.columns}
+        scope.setdefault(_tkey(tbl.alias_or_name), set()).add(binding)
+        if tbl.db and not tbl.alias:
+            scope.setdefault(_tkey(f"{tbl.db}.{tbl.name}"), set()).add(binding)
+
+    def lookup(col: "exp.Column") -> Optional[Column]:
+        quoted = _is_quoted(col)
+        if col.table:
+            bindings = scope.get(_tkey(f"{col.db}.{col.table}" if col.db else col.table), set())
+            binding = next(iter(bindings)) if len(bindings) == 1 else None
+            return _ci_get(cols_of[binding], col.name, quoted=quoted) if binding else None
+        owners = {b for bs in scope.values() for b in bs
+                  if b and _ci_get(cols_of[b], col.name, quoted=quoted) is not None}
+        return _ci_get(cols_of[owners.pop()], col.name, quoted=quoted) if len(owners) == 1 else None
+
+    return lookup
+
+
+def _star_projection(proj: "exp.Expression") -> bool:
+    """`*` or `t.*`: a projection that expands to columns of its own, so result positions no longer
+    line up with the select list. A star inside `COUNT(*)` expands nothing."""
+    return isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
+
+
+# Functions that return one of their arguments unchanged, so the result is in that argument's unit
+# or date encoding. A literal argument (`GREATEST(created_ts, 1704067200)`) is written in it too.
+_VALUE_SELECTING = _exp_nodes("Greatest", "Least", "Coalesce", "Min", "Max") if _HAVE_SQLGLOT else ()
+
+
 def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
     """Map each SELECT output column -> display unit, **tracing the SQL** (not matching
     names): an aggregate/expression over a column inherits that column's unit, so
@@ -6569,8 +6616,11 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
       - otherwise inherit the unit of the column(s) referenced, IF they share exactly
         one unit (so SUM/AVG/MIN/MAX/`col*1.1` of a currency column stay that currency);
       - a column is the one its table declares: a bare `days_open` has no unit even when
-        another table's `days_open` is money (#547);
-      - a CASE takes its unit from the values it returns, never from its conditions;
+        another table's `days_open` is money (#547), and `sales.orders` is never `archive.orders`;
+      - a CASE or IF takes its unit from the values it returns, never from its conditions, and
+        a 0 or NULL branch takes nothing away; a window or FILTER takes it from its value;
+      - GREATEST/LEAST/COALESCE/MIN/MAX/NULLIF return an argument, so they keep its unit or
+        date encoding;
       - COUNT(...), ratios (any division) and the difference of two dates get NO unit (a
         count / rate isn't money, and a duration isn't a date). Returns {} if the model
         carries no units or sqlglot can't parse.
@@ -6595,12 +6645,11 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
     if select is None:
         return {}
 
-    colidx = _column_index(org)
-    scope = _alias_map(select)
+    lookup = _display_lookup(org, tree, select)
     by_name = _unanimous_tokens(org)
 
     def _col_token(col: "exp.Column") -> Optional[str]:
-        found = _lookup_column(col, scope, colidx)
+        found = lookup(col)
         if found is not None:
             return _column_token(found)
         return by_name.get((col.name or "").lower())
@@ -6609,11 +6658,10 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
     # `SELECT *` expands to an unknown number of columns, so projection index no longer
     # lines up with result-column index — disable the positional fallback in that case
     # (the star's columns keep their real names, so name-matching still covers them).
-    has_star = any(isinstance(p, exp.Star) or p.find(exp.Star) is not None for p in projs)
+    has_star = any(_star_projection(p) for p in projs)
 
     # Unit-preserving scalar ops: an aggregate/round of a currency is still that currency.
-    _preserving = (exp.Sum, exp.Avg, exp.Min, exp.Max, exp.Round, exp.Coalesce,
-                   exp.Abs, exp.Ceil, exp.Floor)
+    _preserving = (exp.Sum, exp.Avg, exp.Round, exp.Abs, exp.Ceil, exp.Floor, exp.Nullif)
 
     def _same(found: list[Optional[str]]) -> Optional[str]:
         return found[0] if found and len(set(found)) == 1 else None
@@ -6625,7 +6673,8 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
         verification surface)."""
         if e is None:
             return None
-        if isinstance(e, (exp.Alias, exp.Paren, exp.Cast)):
+        # a window or FILTER is its value: PARTITION BY, ORDER BY and the predicate add no unit
+        if isinstance(e, (exp.Alias, exp.Paren, exp.Cast, exp.Window, exp.Filter)):
             return _unit_of(e.this)
         if isinstance(e, exp.Column):
             return _col_token(e)
@@ -6633,12 +6682,17 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
             return None                                   # a count is dimensionless
         if isinstance(e, _preserving):
             return _unit_of(e.this)
-        if isinstance(e, exp.Case):
-            values = [i.args.get("true") for i in e.args.get("ifs") or []]
-            if e.args.get("default") is not None:
-                values.append(e.args["default"])
-            # a NULL branch carries no unit and takes none away
-            return _same([_unit_of(v) for v in values if not isinstance(v, exp.Null)])
+        if isinstance(e, _VALUE_SELECTING):
+            args = [e.this, *(e.args.get("expressions") or [])]
+            return _same([_unit_of(a) for a in args if not isinstance(a, (exp.Literal, exp.Null))])
+        if isinstance(e, (exp.Case, exp.If)):
+            if isinstance(e, exp.If):
+                values = [e.args.get("true"), e.args.get("false")]
+            else:
+                values = [i.args.get("true") for i in e.args.get("ifs") or []]
+                values.append(e.args.get("default"))
+            # a 0 or NULL branch carries no unit and takes none away
+            return _same([_unit_of(v) for v in values if v is not None and not _is_zero_or_null(v)])
         if isinstance(e, exp.Div):
             num, den = _unit_of(e.this), _unit_of(e.expression)
             return num if (num and not den) else None      # currency/count → currency; X/X → none
@@ -6709,11 +6763,11 @@ def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
     select = tree.find(exp.Select) if tree is not None else None
     if select is None:
         return set()
-    colidx = _column_index(org)
-    scope = _alias_map(select)
+    lookup = _display_lookup(org, tree, select)
     projs = list(select.expressions)
-    has_star = any(isinstance(p, exp.Star) or p.find(exp.Star) is not None for p in projs)
-    passing = (exp.Alias, exp.Paren, exp.Cast, exp.Min, exp.Max, exp.Coalesce, exp.AnyValue)
+    has_star = any(_star_projection(p) for p in projs)
+    passing = (exp.Alias, exp.Paren, exp.Cast, exp.Min, exp.Max, exp.Coalesce, exp.AnyValue,
+               exp.Greatest, exp.Least, exp.Nullif, exp.Window, exp.Filter)
 
     out: set[str] = set()
     for i, proj in enumerate(projs):
@@ -6721,7 +6775,7 @@ def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
         while isinstance(e, passing) and not _is_year_part(e):
             e = e.this
         if isinstance(e, exp.Column):
-            found = _lookup_column(e, scope, colidx)
+            found = lookup(e)
             is_label = found is not None and _is_label_column(found)
         else:
             is_label = _is_year_part(e)

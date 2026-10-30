@@ -22,10 +22,13 @@ below corresponds to one such version.
   year taken out of a date, is shown as written; without the model, a column named like a year or
   a postal code is shown as written only when every value has that shape. A column now gets a unit
   only when that column has one: a CASE takes it from the values it returns, not from a money
-  column in its condition, a bare column is read from its own table, and the difference of two
-  dates is not a date, so a duration in days no longer shows as dollars. `sm prepare` returns these
-  label columns as `labels`, and `sm format-table --labels` takes them. Big integers are no longer
-  rounded through a float. Reports built by `csv_to_sections.py` follow the same rules.
+  column in its condition, a bare column is read from its own table (and schema), and the
+  difference of two dates is not a date, so a duration in days no longer shows as dollars. A `0`
+  or `NULL` branch, a window's `PARTITION BY` and a `FILTER`'s condition take no unit away, and
+  `GREATEST`, `LEAST`, `COALESCE` and `NULLIF` keep the unit or date encoding of what they
+  return. `sm prepare` returns these label columns as `labels`, and `sm format-table --labels`
+  takes them. Big integers are no longer rounded through a float. Reports built by
+  `csv_to_sections.py` follow the same rules.
 
 ## [0.9.21] — 2026-10-29
 

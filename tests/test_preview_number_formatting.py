@@ -190,3 +190,97 @@ def test_prepare_returns_labels_that_format_table_takes(tmp_path):
     rc, out = _cli(["format-table", "--csv-file", str(csv_file), "--units", json.dumps(prep["units"]),
                     "--labels", json.dumps(prep["labels"])])
     assert rc == 0 and out.splitlines()[2] == "| 2011 | $1,234.50 |"
+
+
+def _two_schema_model(root: Path) -> None:
+    """`orders` in two schemas: `sales.orders.amount` is money, `archive.orders.amount` is a code."""
+    (root / "datasources" / "c").mkdir(parents=True)
+    (root / "subject_areas" / "s" / "tables").mkdir(parents=True)
+    (root / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "demo", "version": 1,
+        "storage_connections": [{"name": "c", "ref": "datasources/c/storage.yaml"}],
+        "subject_areas": ["subject_areas/s"]}))
+    (root / "datasources" / "c" / "storage.yaml").write_text(
+        yaml.safe_dump({"name": "c", "storage_type": "DuckDB"}))
+    tables = {"sales": [{"name": "id", "type": "integer", "primary_key": True},
+                        {"name": "amount", "type": "decimal", "unit": "USD"}],
+              "archive": [{"name": "id", "type": "integer", "primary_key": True},
+                          {"name": "amount", "type": "string"}]}
+    (root / "subject_areas" / "s" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "s", "tables": [{"storage_connection": "c", "schema": schema, "table": "orders"}
+                                for schema in tables]}))
+    for schema, cols in tables.items():
+        (root / "subject_areas" / "s" / "tables" / f"{schema}_orders.yaml").write_text(yaml.safe_dump({
+            "name": "orders", "schema": schema, "storage_connection": "c", "grain": ["id"],
+            "description": f"{schema} orders", "columns": cols}))
+
+
+def test_a_column_is_read_from_its_own_schema(tmp_path):
+    _two_schema_model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, "SELECT SUM(amount) AS total FROM sales.orders") == {
+        "total": "USD", "#0": "USD"}
+    assert RT.resolve_result_units(org, "SELECT amount FROM archive.orders") == {}
+    assert RT.resolve_result_labels(org, "SELECT amount FROM archive.orders") == {"amount", "#0"}
+    assert RT.resolve_result_labels(org, "SELECT amount FROM sales.orders") == set()
+    both = ("SELECT sales.orders.amount AS s_amt, archive.orders.amount AS a_amt "
+            "FROM sales.orders JOIN archive.orders ON sales.orders.id = archive.orders.id")
+    assert RT.resolve_result_units(org, both) == {"s_amt": "USD", "#0": "USD"}
+    assert RT.resolve_result_labels(org, both) == {"a_amt", "#1"}
+    aliased = "SELECT s.amount AS s_amt, a.amount AS a_amt FROM sales.orders s JOIN archive.orders a ON s.id = a.id"
+    assert RT.resolve_result_units(org, aliased) == {"s_amt": "USD", "#0": "USD"}
+    assert RT.resolve_result_labels(org, aliased) == {"a_amt", "#1"}
+
+
+@pytest.mark.parametrize("expr", [
+    "SUM(CASE WHEN postcode = '1' THEN revenue ELSE 0 END)",
+    "SUM(CASE WHEN postcode = '1' THEN revenue ELSE NULL END)",
+    "SUM(CASE WHEN postcode = '1' THEN 0 ELSE revenue END)",
+    "SUM(IF(postcode = '1', revenue, 0))",
+    "SUM(IIF(postcode = '1', revenue, NULL))",
+    "SUM(revenue) OVER (PARTITION BY postcode)",
+    "SUM(revenue) OVER (PARTITION BY postcode ORDER BY days_open)",
+    "SUM(revenue) FILTER (WHERE postcode = '1')",
+    "GREATEST(revenue, 0)",
+    "COALESCE(SUM(revenue), 0)",
+])
+def test_money_keeps_its_unit_through_a_condition_or_window(tmp_path, expr):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, f"SELECT {expr} AS v FROM stores") == {"v": "USD", "#0": "USD"}
+
+
+@pytest.mark.parametrize("expr", [
+    "CASE WHEN postcode = '1' THEN revenue ELSE days_open END",
+    "IF(revenue > 0, days_open, 0)",
+    "SUM(days_open) OVER (PARTITION BY revenue)",
+    "COALESCE(revenue, days_open)",
+])
+def test_a_condition_or_partition_never_lends_its_unit(tmp_path, expr):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, f"SELECT {expr} AS v FROM stores") == {}
+
+
+@pytest.mark.parametrize("expr", [
+    "GREATEST(created_ts, 1704067200)", "LEAST(created_ts, 1704067200)", "MAX(created_ts, 0)",
+    "COALESCE(created_ts, 0)", "NULLIF(created_ts, 0)", "MIN(created_ts)", "MAX(created_ts)",
+])
+def test_a_function_that_picks_a_value_keeps_its_date_encoding(tmp_path, expr):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, f"SELECT {expr} AS v FROM orders") == {"v": "epoch_s", "#0": "epoch_s"}
+    # one that makes a new value from it is no longer that date
+    assert RT.resolve_result_units(
+        org, "SELECT strftime('%Y', created_ts, 'unixepoch') AS v FROM orders") == {}
+
+
+def test_count_star_keeps_the_positional_label(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    sql = "SELECT strftime('%Y', opened_on), COUNT(*) FROM stores GROUP BY 1"
+    assert "#0" in RT.resolve_result_labels(org, sql)
+    assert RT.resolve_result_units(org, "SELECT SUM(revenue), COUNT(*) FROM stores") == {"#0": "USD"}
+    # a real star still turns positions off
+    assert RT.resolve_result_labels(org, "SELECT s.*, postcode FROM stores s") == {"postcode"}
+    assert RT.resolve_result_labels(org, "SELECT *, postcode FROM stores") == {"postcode"}
