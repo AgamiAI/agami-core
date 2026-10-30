@@ -42,6 +42,8 @@ below corresponds to one such version.
   plan that is not a list. agami-connect's sampling step no longer says
   `SELECT * … LIMIT 5`, which was refused: it names the columns and runs with `--build-profile`.
 
+## [0.9.21] — 2026-10-29
+
 ### Fixed
 
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
