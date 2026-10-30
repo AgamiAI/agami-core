@@ -12,6 +12,29 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **A join can be added through `sm curate` and the model explorer, and introspection reports the
+  joins it tested but didn't write (#512).** The curate op `{"op":"add","kind":"relationship",
+  "from_table","from_column","to_table","to_column","relationship"}` (or an `on` condition instead of
+  the columns, for a key over several columns or a filtered join; `from_schema`, `to_schema`,
+  `join_type` and `description` optional) writes the join `unreviewed`, in its tables' area or in
+  the cross-area joins when they are in two areas. It is validated, logged in the curation history
+  and listed in the review queue; an add never approves. The same join already in the model is
+  skipped with a reason, and a table or column the model doesn't have fails the batch and undoes it.
+  The explorer's Joins tab has a **+ Add a join** form that queues the op. Introspection now tests
+  each column no join covers against the other tables' one-column keys when the name or the type
+  matches (`orders.cust_ref` against `customers.id`), also beside declared foreign keys, and lists
+  what it found in the report with each match rate, and in `.introspect/join_candidates.json` as a
+  ready `add` op; `sm curate <model> --ops-file <that file> --candidate <id>` adds one. These
+  candidates are never written to the model, so a refresh writes the same model as before. Each test
+  is a read-only query over at most 1,000 sampled values, at most 300 per run, skipping tables over
+  3,000,000 rows; the report says when the cap stopped the scan. A column flagged sensitive, or whose
+  sampled values look personal, is never tested at either end, and the report and the file carry only
+  names and counts, never a sampled value.
+
+## [0.9.21] — 2026-10-29
+
 ### Fixed
 
 - **`sm validate` and the query runner work when started from inside the plugin's `lib/` folder (#539).**
@@ -163,25 +186,6 @@ below corresponds to one such version.
   refused where they ran before.
 
 ### Added
-
-- **A join can be added through `sm curate` and the model explorer, and introspection reports the
-  joins it tested but didn't write (#512).** The curate op `{"op":"add","kind":"relationship",
-  "from_table","from_column","to_table","to_column","relationship"}` (or an `on` condition instead of
-  the columns, for a key over several columns or a filtered join; `from_schema`, `to_schema`,
-  `join_type` and `description` optional) writes the join `unreviewed`, in its tables' area or in
-  the cross-area joins when they are in two areas. It is validated, logged in the curation history
-  and listed in the review queue; an add never approves. The same join already in the model is
-  skipped with a reason, and a table or column the model doesn't have fails the batch and undoes it.
-  The explorer's Joins tab has a **+ Add a join** form that queues the op. Introspection now tests
-  each column no join covers against the other tables' one-column keys when the name or the type
-  matches (`orders.cust_ref` against `customers.id`), also beside declared foreign keys, and lists
-  what it found in the report with each match rate, and in `.introspect/join_candidates.json` as a
-  ready `add` op; `sm curate <model> --ops-file <that file> --candidate <id>` adds one. These
-  candidates are never written to the model, so a refresh writes the same model as before. Each test
-  is a read-only query over at most 1,000 sampled values, at most 300 per run, skipping tables over
-  3,000,000 rows; the report says when the cap stopped the scan. A column flagged sensitive, or whose
-  sampled values look personal, is never tested at either end, and the report and the file carry only
-  names and counts, never a sampled value.
 
 - **A table can move to another subject area, keeping its joins, metrics and entities (#513).**
   The curate op `{"op":"move","kind":"table","name":"<table>","area":"<from>","to_area":"<to>"}`
