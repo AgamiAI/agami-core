@@ -69,3 +69,134 @@ def test_1_6_lists_the_first_noise_names_before_the_card():
     s = _section_16()
     assert "first 5" in s and "and N more" in s
     assert "schema_count" in s
+
+
+# --- Phase 0 and 0a: start and connect as cards, with the one-time password page ------------------
+
+HELPER = SKILL.parent.parent.parent / "scripts" / "connect_helper.py"
+
+
+def _between(start: str, end: str) -> str:
+    text = SKILL.read_text(encoding="utf-8")
+    i = text.index(start)
+    return text[i : text.index(end, i + len(start))]
+
+
+def _helper_constant(name: str) -> object:
+    """A module-level constant of connect_helper.py, read from its source so the test needs no keyring."""
+    import ast
+
+    tree = ast.parse(HELPER.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} not found in connect_helper.py")
+
+
+def _hard_rules() -> str:
+    return _between("### HARD RULES", "### Preflight steps")
+
+
+def _password_page() -> str:
+    return _between("### 0a.4k ", "\n### ")
+
+
+def test_start_card_offers_first_run_and_returning_options():
+    s = _between("## Phase 0: Preflight", "## Phase 0a:")
+    assert "AskUserQuestion" in s
+    for label in ("Connect a database", "Try the sample data"):
+        assert label in s
+    for label in (
+        "Ask a question (Recommended)",
+        "Review the model",
+        "Connect another database",
+    ):
+        assert label in s
+
+
+def test_hard_rules_forbid_secrets_in_chat_but_allow_the_field_cards():
+    rules = _hard_rules()
+    assert "Never ask for a password in chat" in rules
+    for secret in ("password", "token", "key", "DSN"):
+        assert secret in rules
+    # Host, port, database and user are asked on cards now; the rule says so and why.
+    assert "cards" in rules and "host" in rules
+
+
+def test_database_type_card_has_no_recommended_option():
+    s = _between("### 0a.2 ", "### 0a.3 ")
+    assert "AskUserQuestion" in s
+    assert "(Recommended)" not in s.replace("no `(Recommended)`", "")
+
+
+def test_connection_fields_are_one_card_with_defaults_and_no_password():
+    s = _between("### 0a.4c ", "### 0a.4k ")
+    assert "AskUserQuestion" in s
+    assert "5432" in s and "3306" in s
+    assert "Other" in s
+    assert "password" in s.lower()  # says the password is not on this card
+
+
+def test_password_page_runs_the_helper_in_the_background():
+    s = _password_page()
+    assert "connect_helper.py" in s
+    assert "--spec" in s
+    assert "run_in_background" in s
+    assert "expires_in" in s
+    assert "local/tmp/" in s  # the spec file goes in the scratch folder, never /tmp
+
+
+def test_password_page_says_how_long_the_link_lasts():
+    assert _helper_constant("EXPIRES_IN") == 300
+    assert "expires after 5 minutes" in _password_page()
+
+
+def test_password_page_posts_the_link_with_the_spec_sentence():
+    assert "Enter the password on this page; it goes to your keychain, not the chat" in _password_page()
+
+
+def test_password_page_maps_every_status_and_reason():
+    s = _password_page()
+    for status in ("connected", "connect_failed", "refused", "expired", "missing_driver"):
+        assert f"`{status}`" in s, status
+    reasons = _helper_constant("REASONS")
+    assert reasons  # the helper's own list, so a new reason fails here until the skill handles it
+    for reason in reasons:
+        assert f"`{reason}`" in s, reason
+
+
+def test_password_page_offers_secure_storage_and_driver_install_cards():
+    s = _password_page()
+    assert "Set up secure storage" in s
+    assert "Use a file instead (manual)" in s
+    assert 'scripts/sm" install' in s
+    assert "Install <package>" in s and "Not now" in s
+    assert 'scripts/py" -m pip install --user' in s
+    assert "Try again" in s
+
+
+def test_password_page_has_an_sso_path_with_no_link():
+    s = _password_page()
+    assert '"auth": "sso"' in s
+    assert "no link" in s.lower()
+
+
+def test_password_page_never_puts_the_password_in_chat_or_the_spec():
+    s = _password_page()
+    assert "never" in s.lower() and "password" in s.lower()
+    assert '"password"' not in s  # the spec JSON carries no password field
+
+
+def test_mac_and_windows_path_never_asks_to_say_introspect():
+    for start, end in (("### 0a.4c ", "### 0a.4k "), ("### 0a.4k ", "\n### ")):
+        assert not re.search(r"say\W+introspect my database", _between(start, end), re.I)
+
+
+def test_linux_path_keeps_the_file_and_asks_with_a_card():
+    s = _between("### 0a.4 ", "## Phase 0s:")
+    assert "promote_credentials.py" in s
+    assert "credentials.example" in s
+    assert "I've filled it in" in s
+    assert "Show me the file again" in s
+    assert not re.search(r"say\W+.?introspect my database", s, re.I)
+    assert "END THE TURN" not in s

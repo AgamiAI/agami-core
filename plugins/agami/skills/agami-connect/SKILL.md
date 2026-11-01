@@ -71,17 +71,35 @@ If plan mode is not active, skip silently.
 Non-negotiable. They override every other instruction here when they conflict.
 
 1. **Connect ONLY to the host/port/database/user/password in `<artifacts_dir>/local/credentials`.** That file is the sole credential source — there is no env-var bypass. Never connect to anything else. Never probe `localhost` unless the credentials say so. Never substitute defaults for missing fields.
-2. **Never ask the user for connection values (host / port / user / password / token / DSN) in chat.** Not even temporarily. The single authorized credential path is **Phase 0a**, which writes a `credentials.example` template the user fills in and saves. Phase 0a never reads secrets inline — it writes a template, surfaces a hand-off, and ends the turn.
+2. **Never ask for a password in chat.** Nor any other secret: a password, an access token, a key (or a key file's contents), or a DSN that contains a password. Not even temporarily, and never echo one back. The non-secret fields (host, port, database, user, account, warehouse, a file path) ARE asked in chat, on the connection cards in 0a.4c: they are not secret, they already appear in the credentials file in plain text, and a card is faster than editing a file. The secret goes only through a path that keeps it out of the chat, the transcript, and your context: on macOS and Windows the one-time local page of **0a.4k** (it goes straight to the OS credential store), on Linux (and for a Databricks token anywhere) the `credentials.example` file of **0a.4** that the person fills in themselves. If the person types a secret into the chat anyway, don't use or repeat it: say it should not be shared in chat, suggest they change it, and carry on with the page or the file.
 3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import <module>'`.
-4. **If credentials are missing for the active profile, run Phase 0a.** After the user fills in the template they re-invoke (or just ask a data question — `agami-query` auto-invokes us).
+4. **If credentials are missing for the active profile, run Phase 0a.** It ends connected (the password page, 0a.4k) or with a card that waits for the filled-in file (0a.9). A person who closes the chat instead can come back later with any data question — `agami-query` auto-invokes us and 0a.10 picks the file up.
 5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `python -m execute_sql` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
 
 If you reach for a command that doesn't fit, stop and re-read this section.
 
 ### Preflight steps
 
-0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (This is why the option in 0a.2 isn't enough on its own: a returning user with an onboarded profile never reaches 0a.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
-1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → continue (Phase 1 / existing-model check); **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → run Phase 0a and stop. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`; `library_older_than_plugin` → offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, or the `AGAMI_PYTHON` fix it names; `agami_python_cannot_be_brought_current` → the `$AGAMI_PYTHON` the user set has no pip and an old or missing agami-core, so say so). `interpreter.chosen_because` says why that Python was picked, and a candidate passed over carries a `reason`; never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (A returning person also gets "Try the sample data" on the start card in step 1a; this short-circuit covers the request that already says so.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
+1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → the start card for a returning person (step 1a), then continue (Phase 1 / existing-model check) when the request was to reload or re-introspect; **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → the first-run start card (step 1a), then Phase 0a. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`; `library_older_than_plugin` → offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, or the `AGAMI_PYTHON` fix it names; `agami_python_cannot_be_brought_current` → the `$AGAMI_PYTHON` the user set has no pip and an old or missing agami-core, so say so). `interpreter.chosen_because` says why that Python was picked, and a candidate passed over carries a `reason`; never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+1a. **The start card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). One AskUserQuestion, one question, header `Start`. Skip it when the request already names the action: `$ARGUMENTS` is `reintrospect` or `profile NAME`, the person asked to reload or re-introspect, to add a new database (go to Phase 0a), or `agami-query` invoked this skill because a model is missing (go to Phase 0a).
+   - **First run** (`data.next` is `bootstrap`, nothing connected yet). Question: *"How do you want to start?"* No option is marked Recommended: whether there is a database to connect is a fact about the person's setup.
+
+     | label | description | then |
+     |---|---|---|
+     | `Connect a database` | Your own database; the password never goes through the chat | Phase 0a |
+     | `Try the sample data` | A small demo store, no connection needed | Phase 0s |
+
+   - **Returning** (`data.next` is `ready`: a database is already connected). Question: *"What would you like to do?"*
+
+     | label | description | then |
+     |---|---|---|
+     | `Ask a question (Recommended)` | Ask `<active database>` something | Hand to [agami-query](../agami-query/SKILL.md). A question typed in "Other" goes straight there. Picked with no text: offer a card of up to 4 questions taken from that database's seed examples (`prompt_examples/`), with "Other" for their own. |
+     | `Review the model` | Sign off metrics, edit descriptions, exclude tables | Hand to [agami-model](../agami-model/SKILL.md). |
+     | `Connect another database` | Add a second database alongside this one | Phase 0a (the new database gets its own name in 0a.3). |
+     | `Try the sample data` | A small demo store, no connection needed | Phase 0s |
+
+   Say "database", never "profile", in the card and around it.
 2. **Update-check (best-effort).** Run the probe from [`shared/version-check.md`](../../shared/version-check.md); surface a one-liner if a newer version exists. Never block on network failure.
 3. If `$ARGUMENTS` is `reintrospect`: re-introspect from scratch, but **preserve hand-edits** (descriptions, entities, metrics, caveats, trust sign-offs). The engine writes the structural skeleton; merge it over the existing enrichment rather than discarding it (see Phase 2's reintrospect note).
 
@@ -89,7 +107,12 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 ## Phase 0a: First-time credential bootstrap
 
-**Runs only when preflight step 1 returns `next: bootstrap` (no credentials for the profile).** If `<artifacts_dir>/local/credentials` already has the `[<profile>]` section, **skip Phase 0a entirely.**
+**Runs when preflight step 1 returns `next: bootstrap` (no credentials for the profile) and the person picked "Connect a database", or when they picked "Connect another database".** If `<artifacts_dir>/local/credentials` already has the `[<profile>]` section for the database being connected, **skip Phase 0a entirely.**
+
+**Two paths, chosen by the operating system** (`uname -s`: `Darwin` is macOS; `MINGW*` / `MSYS*` / `CYGWIN*`, or `$OS` = `Windows_NT`, is Windows):
+
+- **macOS and Windows: the password page.** 0a.1 → 0a.2 → 0a.3 → **0a.4c** (connection fields card) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
+- **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
 ```bash
@@ -103,44 +126,115 @@ grep -qxF 'local/' "<artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n'
 
 ### 0a.2 — Ask the database type
 
-**AskUserQuestion** (no `(Recommended)` — fact-of-environment). The **first** option is always the no-database sample path; cap the rest at 4 visible + Other.
+**AskUserQuestion**, one question, header `Database`, no `(Recommended)` — fact-of-environment. The sample data is on the start card (1a), not here.
 
 **Name the Other-only engines in the QUESTION PROMPT** so they're visibly supported — the auto-provided "Other" field can't carry its own description/examples, so the examples must live in the prompt. End the prompt with a line like:
-> *Something else — BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, or SQLite? Choose **Other** and type it (a name or a full DSN).*
+> *Something else — BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, or SQLite? Choose **Other** and type it (a name or a file path).*
 
 | label | description |
 |---|---|
-| `Try a sample database — no connection needed` | Don't have a database handy (or not ready to connect one)? agami ships a small **Acme Store** SQLite dataset (commerce + subscriptions) with a ready-made model — query it in under a minute, nothing leaves your machine. |
 | `PostgreSQL` | Postgres + compatible: Supabase, Neon, RDS, Aurora, Cloud SQL, Timescale, and **Amazon Redshift** (port 5439, SSL by default). |
 | `MySQL` | MySQL, MariaDB, RDS MySQL, PlanetScale. |
 | `Snowflake` | Snowflake. Account identifier instead of host. |
-| `Other (Other field)` | **BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite**, or paste any DSN. |
+| `Other (Other field)` | **BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, SQLite**. |
 
-Bind `$DB_TYPE` ∈ `sample | postgres | mysql | snowflake | bigquery | sqlserver | oracle | databricks | trino | duckdb | sqlite | dsn`.
+Bind `$DB_TYPE` ∈ `postgres | mysql | snowflake | bigquery | sqlserver | oracle | databricks | trino | duckdb | sqlite | dsn`.
 
 **Routing:**
-- **`Try a sample database`** (or the user says *"I don't have a database"* / *"try the sample"* / runs `agami-connect sample`) → bind `$DB_TYPE = sample`, set `$PROFILE_NAME = agami-example`, and **jump straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)** — skip the rest of 0a (no credential template, no hand-off turn; the connection is known).
+- **"sample" typed in Other** (or *"I don't have a database"*) → Phase 0s, as on the start card.
 - `PostgreSQL` → `postgres`; if the user later enters port `5439` or a `*.redshift.*.amazonaws.com` host, transparently re-bind to `redshift`. A `*.pooler.supabase.com` host stays `postgres` (Supabase is hosted Postgres).
 - `MySQL`/`Snowflake` → pass-through. `BigQuery` lives under **Other** now (or the user types it) → `bigquery`.
-- `Other` → parse the free-form input: a DSN scheme → derive `db_type`; `.db`/`.sqlite`/`.duckdb` suffix or absolute file path → SQLite or DuckDB; a named DB (`bigquery`, `sqlserver`/`mssql`, `oracle`, `databricks`, `trino`/`presto`, `duckdb`) → that dialect. Only refuse with "not supported yet" for engines outside the supported set above (e.g. MongoDB, Cassandra, ClickHouse).
+- `Other` → parse the free-form input: a DSN scheme → derive `db_type` (if it carries a password, follow HARD RULE 2: don't use or repeat it, ask the fields on 0a.4c instead); `.db`/`.sqlite`/`.duckdb` suffix or absolute file path → SQLite or DuckDB; a named DB (`bigquery`, `sqlserver`/`mssql`, `oracle`, `databricks`, `trino`/`presto`, `duckdb`) → that dialect. Only refuse with "not supported yet" for engines outside the supported set above (e.g. MongoDB, Cassandra, ClickHouse).
 
-### 0a.3 — Name the database profile (the user's choice)
+### 0a.3 — Name the database (the person's choice)
 
 Ask the user to **name** this connection — don't pick for them. The name is how they'll switch databases later (`AGAMI_PROFILE=<name>`) and it names the model folder (`<artifacts_dir>/<name>/`), so a name that means something to them — their database, product, team, or environment — beats a generic default.
 
-**AskUserQuestion**, with the **Other** free-text as the encouraged path (that's where they type their own name):
+**AskUserQuestion**, header `Name`, with the **Other** free-text as the encouraged path (that's where they type their own name):
 > What should I call this database? Pick a name you'll recognize when you connect more than one — e.g. your database or product name, or an environment.
 
-Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `<artifacts_dir>/local/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later.)
+Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `<artifacts_dir>/local/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later. On the password-page path the helper checks again, and also refuses a name the OS store already holds a password under.) Say "database", not "profile", to the person.
+
+### 0a.4c — The connection fields as one card (macOS and Windows)
+
+**Only on the password-page path** (see the top of Phase 0a). Linux, and Databricks on any system, use the file in 0a.4 instead.
+
+One AskUserQuestion, header per question, **one question per non-secret field** (at most 4). **The password is never on this card**: it goes on the page in 0a.4k. Every question takes the real value in "Other"; the options are the obvious defaults and common values, so the person presses one when it fits and types otherwise. No option is marked Recommended (these are facts about their setup). Put a line in the first question's prompt: *"Type yours in Other when the options don't fit, for example `your-cluster.example.com`."*
+
+| `$DB_TYPE` | questions (header: options) | spec `fields` keys | `auth` |
+|---|---|---|---|
+| postgres / redshift | `Host`: `localhost` (this computer), `127.0.0.1` · `Port`: `5432` (PostgreSQL default), `5439` (Amazon Redshift), `6543` (Supabase pooler) · `Database`: `postgres` (the default database), `analytics` · `User`: `readonly` (a read-only user, the safest), `postgres` | `host`, `port`, `database`, `user` | `password` |
+| mysql | `Host`: as above · `Port`: `3306` (MySQL default), `3307` · `Database`: `analytics`, `app` · `User`: `readonly`, `root` | same | `password` |
+| sqlserver | `Host`: as above · `Port`: `1433` (default), `1434` · `Database`: `master`, `analytics` · `User`: `readonly`, `sa` | same | `password` |
+| oracle | `Host`: as above · `Port`: `1521` (default), `1522` · `Service`: `ORCLPDB1`, `XEPDB1` · `User`: `readonly`, `system` | `host`, `port`, `service_name`, `user` | `password` |
+| snowflake | `Account`: `acme-xy12345` (org-account form), `xy12345.us-east-1` (locator form) · `User`: `readonly`, `analyst` · `Warehouse`: `COMPUTE_WH` (Snowflake's default), `ANALYTICS_WH` · `Sign-in`: `Password` (typed on a one-time page), `Browser sign-in (SSO)` (your company's sign-in, no password) | `account`, `user`, `warehouse` (+ `authenticator = externalbrowser` for SSO) | `password`, or `sso` for browser sign-in |
+| trino | `Host`: as above · `Port`: `8080` (HTTP default), `443` (HTTPS) · `User`: `readonly`, `admin` · `Catalog`: `hive`, `iceberg`; then a second card, `Password`: `No password`, `Password (HTTPS)` | `host`, `port`, `user`, `catalog` | `sso` for no password, else `password` |
+| bigquery | `Project`: `acme-analytics`, `acme-prod` · `Sign-in`: `Google sign-in on this computer` (gcloud application-default login), `A service-account key file` (its path in Other; the path, never the file's contents) | `project` (+ `service_account_path`) | `sso` |
+| sqlite / duckdb | `File`: the absolute path in Other; options `~/data/app.db`, `~/data/app.duckdb` (examples) | `path` | `sso` |
+
+Snowflake's database, schema and role, and Postgres' `sslmode`, are optional: ask them on a second card only when the person mentions them or the connection fails without them.
+
+Read the answers into the spec's `fields`, as strings. Expand `~` to an absolute path. **When an answer can't be used, say why in one line and ask that question again** (an empty answer; a port that isn't a number; an example value such as `acme-xy12345` or one containing `example` that is plainly not theirs; a value with `%`, or starting with `#` or `;`, which the credentials file can't hold). A host that is a full URL with a password in it: don't use or repeat it (HARD RULE 2), and ask for the host alone.
+
+Then run 0a.5 → 0a.8 (interpreter, agami-core, the artifacts folder, `.config`), and go to 0a.4k.
+
+### 0a.4k — the password page (macOS and Windows)
+
+The password goes from the person's browser straight into the OS credential store (Keychain on macOS, Credential Manager on Windows). It is never in the chat, on a command line, in a file, or in your context: you never see it, so never ask for it, and if it is typed into the chat anyway, follow HARD RULE 2.
+
+**1. Write the spec** with the Write tool to `<artifacts_dir>/local/tmp/agami-connect-spec.json` (non-secret fields only; there is no password key):
+
+```json
+{"profile": "<$PROFILE_NAME>", "db_type": "<$DB_TYPE>",
+ "fields": {"host": "<host>", "port": "<port>", "database": "<database>", "user": "<user>"}}
+```
+
+For a connection with no secret to type (Snowflake browser sign-in, BigQuery, Trino with no password, SQLite, DuckDB) add `"auth": "sso"`. **The `sso` path has no link and no page:** the helper writes the section, tests the connection, and prints only its final line, so skip step 3 and read that line in step 4.
+
+**2. Start the helper in the background.** Call Bash with `run_in_background: true`:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_helper.py --spec "<artifacts_dir>/local/tmp/agami-connect-spec.json"
+```
+
+Stdout is JSON lines and nothing else. The first line, once it is listening, is `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}`. **Read the background command's output** (the Bash result names the task and its output file; read that file) until the first line is there; it takes about a second. Don't run the helper in the foreground: it would hold the turn until the page is submitted, and the link would never reach the person. Where background commands aren't available, use the file path (0a.4) instead.
+
+**3. Post the link** as a clickable markdown link, with this sentence and how long it lasts:
+
+> [Enter your password](http://127.0.0.1:<port>/<token>/). Enter the password on this page; it goes to your keychain, not the chat. The link expires after 5 minutes.
+
+(On Windows say "Windows Credential Manager" in place of "your keychain".) Then say you are waiting for the page, and end your message there: no card, nothing to paste. The helper exits when the page is submitted or the 5 minutes pass, and that exit brings you back. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task (the helper then takes back whatever it stored) and show the database-type card again.
+
+**4. Read the final line** of the output when the helper exits, and act on it. Exit code is 0 for every outcome; `status` (and a refusal's `reason`) says what happened, and `detail` is the one line to show the person. Each outcome gets one sentence plus the next card:
+
+| final line | say | next |
+|---|---|---|
+| `connected` | *"Connected to `<name>`. The password is in your keychain."* (or the Windows store) | Run `setup_pgauth.py --all` (as in 0a.10) and continue to Phase 1. |
+| `connect_failed` | `detail` (why it failed). Nothing was kept: the helper removed the section and the stored password. | Card `Next step`: `Try again` (the same fields, a new link; the person may have mistyped the password) / `Change the connection details` (0a.4c again) / `Use a file instead (manual)` (0a.4). |
+| `expired` | *"The link expired before the page was submitted; nothing was saved."* | Card `Next step`: `New link` (step 2 again, same spec) / `Use a file instead (manual)`. |
+| `missing_driver` | `detail`, which names `package`. | Card `Driver`: `Install <package>` (with the real package names) / `Not now`. On the press, install into the interpreter `scripts/py` uses: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -m pip install --user <package>` (unquoted: `package` can hold two names, `duckdb pytz`), then step 2 again. If pip fails, show its last line and offer `Try again` / `Not now`. `Not now`: stop with *"Connect again when you're ready to install it."* |
+| `refused`, `no_store` | `detail` (agami's keyring library isn't set up for the OS store yet). | Card `Secure store`: `Set up secure storage` / `Use a file instead (manual)`. The first runs `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install` (it adds `keyring` on macOS and Windows), then step 2 again. |
+| `refused`, `stale_install` | `detail` (the agami-core this Python has is too old for the store). | Card `Update`: `Update agami` (runs `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, then step 2 again) / `Use a file instead (manual)`. |
+| `refused`, `name_taken` or `saved_password_exists` | `detail` (the name is in use here, or the OS store already holds a password under it). | The name card (0a.3) again, then a new spec and step 2. |
+| `refused`, `bad_name` | `detail`. | The name card (0a.3) again. |
+| `refused`, `bad_field` | `detail` (a field the credentials file can't hold). | The connection fields card (0a.4c) again. |
+| `refused`, `bad_spec` | Nothing to the person: the spec file you wrote is unreadable. | Rewrite it (step 1) and run step 2 again, once. A second `bad_spec`: say connecting failed and offer `Use a file instead (manual)`. |
+| `refused`, `unreadable_credentials` | `detail` (the credentials file under `<artifacts_dir>/local/` can't be parsed). | Card `Next step`: `I've fixed it` (step 2 again) / `Stop`. Never open or print the file: it can hold passwords. |
+| `refused`, `unsupported_os` | `detail`. | The file path: 0a.4, then 0a.9. |
+| `refused`, `store_error` or `write_failed` | `detail` (the store or the credentials file refused the write; nothing was kept). | Card `Next step`: `Try again` (step 2) / `Use a file instead (manual)`. |
+
+`Use a file instead (manual)` always means 0a.4 → 0a.9 → 0a.10, the same as Linux. A line that is not one of these, or no final line at all: show the last line of output and offer `Try again` / `Use a file instead (manual)`. Delete the spec file once the helper has exited.
 
 ### 0a.4 — Write `<artifacts_dir>/local/credentials.example`
+
+**The file path:** Linux and any system without a secure store, Databricks on every system, and whoever picks `Use a file instead (manual)` in 0a.4k. The person types the password into the file themselves, so it never passes through the chat.
 
 Use the **Write tool**. Shared header first, then the `$DB_TYPE` body with `[$PROFILE_NAME]` as the section.
 
 **Header:**
 ```ini
 # <artifacts_dir>/local/credentials.example
-# Fill in your values below, then come back and say "introspect my database".
+# Fill in your values below and save, then press "I've filled it in" in the chat.
 # agami moves this file to <artifacts_dir>/local/credentials and chmod-600s it for you — no
 # manual save or chmod needed. (Don't rename it yourself.)
 # agami only runs read-only SELECT queries, so a read-only database user is all it needs
@@ -283,18 +377,18 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
 Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
-### 0a.9 — Hand-off + END THE TURN
+### 0a.9 — Hand-off, then a card that waits for the file
+
+Show the summary, then the card. Don't ask the person to type a phrase.
 ```
 ✓ <artifacts_dir>/local/ ready (chmod 700)
 ✓ Credentials template → <artifacts_dir>/local/credentials.example
 ✓ Tool detected: <tool> (<tier>)
 ✓ Artifacts dir: <resolved path>
 
-Next:
-1. Open <artifacts_dir>/local/credentials.example and fill in your real connection details
-   (keep the filename as-is — don't rename it).
-2. Come back and say "introspect my database" — I'll secure the file and run the
-   full introspect → enrich → seed flow.
+Open <artifacts_dir>/local/credentials.example, fill in your connection details and save it
+(keep the filename as-is — don't rename it). I'll secure the file and run the full
+introspect → enrich → seed flow.
 
 Tip: agami only runs read-only queries, so a read-only database user is all it needs
 (and safest). Want the exact GRANT SQL for your database? Just ask.
@@ -302,7 +396,14 @@ Tip: agami only runs read-only queries, so a read-only database user is all it n
 Heads-up: a cold cloud warehouse (Snowflake especially) makes introspect the slow
 step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 ```
-**End the turn.** Do NOT continue to Phase 1.
+Then **AskUserQuestion**, one question, header `Credentials`: *"Tell me when the file is filled in and saved."*
+
+| label | description | then |
+|---|---|---|
+| `I've filled it in` | Secure the file and connect | 0a.10 |
+| `Show me the file again` | Where the file is and what to fill in | Print the path and the field names of the `[$PROFILE_NAME]` section from the template you wrote (from your own copy, never by reading the file: once filled in it holds the password), then the same card again. |
+
+The card is the wait: don't continue to Phase 1 until `I've filled it in` is pressed (or, in a later session, until the person comes back with any data question and preflight returns `promote`).
 
 Show the read-only **Tip** line only for dialects with a user/role concept (`postgres`,
 `redshift`, `mysql`, `snowflake`, `sqlserver`, `oracle`, `databricks`, `trino`); **omit** it for
@@ -312,7 +413,7 @@ block, and fill in whatever `<…>` placeholders it uses (e.g. `<db>` / `<schema
 `<catalog>` / `<project>` / `<dataset>`) from the values they entered.
 
 ### 0a.10 — On re-entry: promote the filled-in template, then continue
-The user filled in `<artifacts_dir>/local/credentials.example` and came back (or asked a data question / said "introspect my database"). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
+The person pressed `I've filled it in` on the 0a.9 card (or came back later with a data question, and preflight returned `promote`). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py
@@ -321,8 +422,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" promote_credentials.py
 Read the first token of stdout and act:
 - `SECURED <profile>` → credentials created from the template (chmod 600, `.example` consumed). Continue.
 - `APPENDED <profile>` → the new profile was appended to an existing credentials file (other profiles untouched, chmod 600). Continue.
-- `COLLISION <profile>` → a profile by that name **already exists**; nothing was changed. Tell the user *"You already have a profile named `<profile>` — pick a different name for this database,"* go back to **0a.3** to rename (then re-write the template in 0a.4 under the new name), and **stop**. Never overwrite or duplicate an existing profile.
-- `PLACEHOLDERS_REMAIN <fields>` → the template still holds template values; tell the user which fields to fill and **stop** (never introspect against a template).
+- `COLLISION <profile>` → a profile by that name **already exists**; nothing was changed. Tell the user *"You already have a profile named `<profile>` — pick a different name for this database,"* go back to **0a.3** to rename, re-write the template in 0a.4 under the new name, and show the 0a.9 card again. Never overwrite or duplicate an existing profile.
+- `PLACEHOLDERS_REMAIN <fields>` → the template still holds template values; tell the person which fields to fill and show the 0a.9 card again (never introspect against a template).
 - `NOTHING` → no `credentials.example` to promote (already promoted, or never written) — fall back to the preflight decision.
 
 (`${CLAUDE_PLUGIN_ROOT}` is the plugin root, filled in with its absolute path when this skill loads; `promote_credentials.py` is stdlib-only and needs no special interpreter.)
@@ -333,7 +434,7 @@ Read the first token of stdout and act:
 
 ## Phase 0s: Sample-database bootstrap (no connection)
 
-**Runs only when the user chose `Try a sample database` in 0a.2** (or said "I don't have a database" / "try the sample" / ran `agami-connect sample`). This **replaces Phases 0a, 1, and 2** with a short deterministic wire-up — no credential template, no hand-off turn, no live introspection on the fast path. The committed sample dataset + its prebuilt model live at **`${CLAUDE_PLUGIN_ROOT}/samples/store/`** (`seed.sql`, `build_sample.py`, `model/`). Profile is always **`agami-example`**.
+**Runs only when the person chose `Try the sample data` on the start card (Phase 0, step 1a)** (or said "I don't have a database" / "try the sample" / ran `agami-connect sample`). This **replaces Phases 0a, 1, and 2** with a short deterministic wire-up — no credential template, no hand-off turn, no live introspection on the fast path. The committed sample dataset + its prebuilt model live at **`${CLAUDE_PLUGIN_ROOT}/samples/store/`** (`seed.sql`, `build_sample.py`, `model/`). Profile is always **`agami-example`**.
 
 If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is already set up → skip to the demo query (step 7), or treat `reintrospect` as the 6B rebuild.
 
