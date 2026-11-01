@@ -113,7 +113,7 @@ test('Connect opens the Connect screen', async ($, on) => {
 
   await ui.press({ key: 'connect' })
 
-  expect(await ui.find({ type: 'Text', text: /not built yet/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  expect(await ui.find({ type: 'Input', key: 'profile' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: 'Connect a database' })).toBeUndefined()
   await ui.unmount()
 })

@@ -9,6 +9,10 @@ export type AgamiConnectState = {
   dbType?: string
   url?: string
   detail?: string
+  /** The non-secret connection fields typed so far, by the credentials file's key. Never a password. */
+  fields?: Record<string, string>
+  /** `sso` for a browser sign-in (Snowflake): the helper serves no page and stores no secret. */
+  auth?: 'password' | 'sso'
 }
 
 export type AgamiOs = 'mac' | 'windows' | 'other'
@@ -19,6 +23,8 @@ export type AgamiEnv = {
   active: string | null
   python: { ok: boolean; fix?: string }
   os: AgamiOs
+  /** Where agami keeps its files; null when the check could not run. */
+  artifactsDir: string | null
 }
 
 declare module 'claude-code' {

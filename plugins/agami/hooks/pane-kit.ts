@@ -28,11 +28,19 @@ export type Resolve = {
   stderr?: string
   /** What `uname` answers when the script could not run; absent, `uname` is missing (Windows). */
   uname?: string
+  /** What another plugin script prints, by its name (`promote_credentials.py`); a function reads it afresh per run. */
+  scripts?: Record<string, string | (() => string)>
 }
 
 const QUIET = { stderr: '', isStdoutTruncated: false, isStderrTruncated: false } as const
 
-export const READY = { profile: null, profiles: [], platform: 'Darwin', interpreter: { chosen_because: 'ok' } }
+export const READY = {
+  profile: null,
+  profiles: [],
+  platform: 'Darwin',
+  artifacts_dir: '/art',
+  interpreter: { chosen_because: 'ok' },
+}
 
 /** Runs `/agami` with `connect_resolve.py` answering as named, so the pane has read its environment. */
 export async function openPane($: Engine, on: Hooks, resolve: Resolve = { data: READY }): Promise<string[][]> {
@@ -46,6 +54,12 @@ export async function openPane($: Engine, on: Hooks, resolve: Resolve = { data: 
       if (resolve.uname === undefined) throw new Error('uname: not found')
 
       return { value: { ...QUIET, exitCode: 0, stdout: `${resolve.uname}\n` } }
+    }
+    if (e.argv[0] !== 'bash' || e.argv[2] !== 'connect_resolve.py') {
+      const answer = resolve.scripts?.[e.argv[2] ?? '']
+      const stdout = typeof answer === 'function' ? answer() : (answer ?? '')
+
+      return { value: { ...QUIET, exitCode: 0, stdout } }
     }
 
     return {

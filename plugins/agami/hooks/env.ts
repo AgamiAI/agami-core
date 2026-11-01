@@ -9,6 +9,7 @@ type Resolved = {
     profile?: string | null
     profiles?: string[]
     platform?: string
+    artifacts_dir?: string
     interpreter?: { agami_core?: string | null; chosen_because?: string }
   }
   anomalies?: { kind?: string; detail?: string }[]
@@ -54,7 +55,7 @@ export async function readEnv($: Engine): Promise<AgamiEnv> {
   try {
     const run = await $.process.run(['bash', script, 'connect_resolve.py'], { timeoutMs: 60_000 })
     if (run.exitCode !== 0) {
-      return { profiles: [], active: null, python: { ok: false, fix: INSTALL_PYTHON }, os: await osFromUname($) }
+      return { profiles: [], active: null, python: { ok: false, fix: INSTALL_PYTHON }, os: await osFromUname($), artifactsDir: null }
     }
     const out = JSON.parse(run.stdout) as Resolved
 
@@ -63,8 +64,9 @@ export async function readEnv($: Engine): Promise<AgamiEnv> {
       active: out.data?.profile ?? null,
       python: pythonOf(out),
       os: osOf(out.data?.platform),
+      artifactsDir: out.data?.artifacts_dir ?? null,
     }
   } catch {
-    return { profiles: [], active: null, python: { ok: false, fix: INSTALL_PYTHON }, os: await osFromUname($) }
+    return { profiles: [], active: null, python: { ok: false, fix: INSTALL_PYTHON }, os: await osFromUname($), artifactsDir: null }
   }
 }
