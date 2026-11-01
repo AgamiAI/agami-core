@@ -501,17 +501,17 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    **6A** → **step 7** (describe + stop). **6B** → the model overview above, then step 7's description + starter questions. Both end with a validated `<artifacts_dir>/agami-example/` model.
 7. **Wrap up — describe the dataset, offer questions, then STOP. Do NOT auto-run a query.** This is the entire closing for the sample path: **skip the rest of Phases 3–8** (no introspect summary, no "re-introspect `<profile>`" / "when you want the real thing" framing — that pushes the user off the sample they just picked and can surface another profile's name). The user asked to *query* the sample, not watch a scripted demo — so hand them the keys, don't drive. **(6B adds the model overview in the chat, see 6B. Neither path opens a page.)**
    - **Short description (2–3 lines, plain):** what the dataset is, drawn from `<artifacts_dir>/agami-example/datasource.md` — Acme Store, a retailer with one-time **commerce** (customers, products by category, orders, line items, payments, refunds) and recurring **subscriptions** (plans, subscriptions, invoices). ~500 customers, ~4,000 orders over ~2 years. State it; don't sell it.
-   - **A numbered list of ~6 starter questions — and DO NOT answer any of them.** The user picks. **Include at least two genuinely complex multi-table joins** so they see agami handle real joins, not just single-table counts (a flat list of trivial questions undersells it). A good set:
-     ```
-     1. What's our revenue by product category?                          (line items → products → categories)
-     2. Which product categories drive the most revenue in each sales channel?  (line items → products → categories + orders)
-     3. Who are the top 5 customers by total spend?                      (customers → orders)
-     4. Show the monthly revenue trend over the last 12 months.
-     5. How many customers have both an order and a subscription?        (commerce ↔ subscriptions)
-     6. How many active subscriptions do we have, and what's MRR?
-     ```
-     (Questions 1 and 2 are the multi-table joins. All six are backed by EXPLAIN-validated seed examples in the shipped model, so they answer reliably.)
-   - Then **stop and wait.** Nothing about agami-serve / agami-model / corrections yet — let them experience one real query in Claude Code first. When the user picks a number or asks anything, hand to [agami-query](../agami-query/SKILL.md) — it answers AND runs its own first-query flow (the one-time GitHub-star ask + `/agami-serve` pointer, gated by `local/.optins`). **Do NOT pre-narrate fan/chasm traps or "what agami caught."** If their question hits a trap (questions 1–3 can), agami-query surfaces it in the answer's receipt — let it happen on a real question instead of scripting it.
+   - **A card of starter questions — and DO NOT answer any until one is picked.** AskUserQuestion, one question, header `Ask`, *"What would you like to ask? Pick one or type your own in Other."*, no `(Recommended)`. Four options, **at least two of them multi-table joins** so the person sees agami handle real joins, not just single-table counts, each with the tables it joins as its description:
+
+     | label | description |
+     |---|---|
+     | `Revenue by product category` | Line items joined to products and categories |
+     | `Top categories per channel` | Which categories drive the most revenue in each sales channel |
+     | `Top 5 customers by spend` | Orders joined to customers |
+     | `Active subscriptions and MRR` | Subscriptions joined to plans |
+
+     (The first two are the multi-table joins. All four are backed by EXPLAIN-validated seed examples in the shipped model, so they answer reliably. "Other" takes any question, a monthly trend or "customers with both an order and a subscription" among them.) Where AskUserQuestion is unavailable, list the same four as a numbered list ([question-cards rule 7](../../shared/question-cards.md#7-where-askuserquestion-is-unavailable)).
+   - Then **stop and wait.** Nothing about agami-serve / agami-model / corrections yet — let them experience one real query in Claude Code first. When the user picks a question or asks anything, hand to [agami-query](../agami-query/SKILL.md) — it answers AND runs its own first-query flow (the one-time GitHub-star ask + `/agami-serve` pointer, gated by `local/.optins`). **Do NOT pre-narrate fan/chasm traps or "what agami caught."** If their question hits a trap (questions 1–3 can), agami-query surfaces it in the answer's receipt — let it happen on a real question instead of scripting it.
 8. **The "where to go deeper" footer (corrections / `/agami-model` / `/agami-serve`) fires from agami-query, not here.** When the user asks their first sample question, agami-query owns the turn — so its Phase 4f surfaces a one-time orientation footer for the `agami-example` profile (see [agami-query SKILL.md → Phase 4f](../agami-query/SKILL.md)). Don't try to print it from Phase 0s — a footer placed here never executes once agami-query has taken over. Phase 0s ends at step 7 (describe + questions + stop).
 
 ---

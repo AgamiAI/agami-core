@@ -561,3 +561,14 @@ def test_the_numbered_list_fallback_is_stated():
 def test_8_5_link_candidates_card_stays_within_four_options():
     s = _between("## Phase 8.5:", "## Error handling")
     assert "at most 4" in s
+
+
+def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
+    # A live run of the sample path ended in a numbered list to type a number back to.
+    text = SKILL.read_text(encoding="utf-8")
+    start = text.index("7. **Wrap up")
+    wrap_up = text[start : text.index("8. **The \"where to go deeper\"", start)]
+    assert "header `Ask`" in wrap_up
+    assert "A numbered list of ~6 starter questions" not in wrap_up
+    options = [line for line in wrap_up.splitlines() if line.strip().startswith("| `")]
+    assert 2 <= len(options) <= 4

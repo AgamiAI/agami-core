@@ -516,3 +516,32 @@ def test_a_declared_list_of_digit_phones_is_dropped_without_a_sample(tmp_path, k
     assert t.get_column("status").choice_field == {"open": "", "closed": ""}
     written = "".join(p.read_text() for p in (tmp_path / "shop").rglob("*") if p.is_file())
     assert written.count("5550100") == len(phones)  # only customerId's list
+
+
+# A live run listed products.name, plans.name and categories.name as possible personal data.
+from semantic_model.pii import suspected_pii, suspected_reason  # noqa: E402
+
+
+@pytest.mark.parametrize("table", ["products", "categories", "plans", "product_tags", "Campaigns"])
+def test_a_bare_name_on_a_table_of_things_is_not_suspected(table):
+    assert not suspected_pii("name", table)
+    assert suspected_reason("name", [], table) is None
+
+
+@pytest.mark.parametrize(
+    ("column", "table"),
+    [
+        ("name", "customers"),  # a person table: still listed
+        ("name", "leads"),  # neither a person word nor a thing: still listed for review
+        ("name", "customer_products"),  # a person word wins over a thing word
+        ("full_name", "products"),  # a person's name on any table
+        ("owner_name", "projects"),
+        ("email", "products"),
+    ],
+)
+def test_names_that_may_be_a_person_stay_suspected(column, table):
+    assert suspected_pii(column, table)
+
+
+def test_without_a_table_the_rule_is_unchanged():
+    assert suspected_pii("name")

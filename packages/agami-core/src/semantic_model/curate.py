@@ -344,7 +344,7 @@ def suspected_sensitive_columns(org: Datasource) -> dict:
             for c in t.columns:
                 if c.sensitive or getattr(c, "review_state", "approved") == "rejected":
                     continue
-                reason = B.suspected_reason(c.name, c.caveats)
+                reason = B.suspected_reason(c.name, c.caveats, t.name)
                 if reason:
                     cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
                                  "reason": reason})
