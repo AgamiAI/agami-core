@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import agami_paths
+import credential_store
 import sql_dialect_rules
 from guardrail import (
     PRE_MODEL_RULES,
@@ -690,6 +691,16 @@ def _env_datasource_dsn(profile: str, org_id: str = "local") -> str | None:
     return None
 
 
+def _resolve_references(creds: dict[str, str], profile: str) -> dict[str, str]:
+    """Swap any `keyring:` reference in the file's values for the secret it points at.
+
+    File path only: an env DSN is the container channel and carries its secret directly."""
+    try:
+        return {k: credential_store.resolve(v, profile=profile) if isinstance(v, str) else v for k, v in creds.items()}
+    except credential_store.CredentialStoreError as e:
+        raise ExecutorError(str(e), code=2) from e
+
+
 def _load_credentials(profile: str, org_id: str = "local") -> dict[str, str]:
     """Resolve credentials for `(org_id, profile)`, env-first then the file.
 
@@ -779,9 +790,9 @@ def _load_credentials(profile: str, org_id: str = "local") -> dict[str, str]:
             if k == "url":
                 continue
             merged[k] = v
-        return merged
+        return _resolve_references(merged, profile)
 
-    return section
+    return _resolve_references(section, profile)
 
 
 # Schemes we accept. Strip "+driver" suffixes (e.g. postgresql+asyncpg, postgres+psycopg2).
