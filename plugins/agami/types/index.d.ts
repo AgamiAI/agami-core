@@ -15,6 +15,12 @@ export type AgamiConnectState = {
   auth?: 'password' | 'sso'
 }
 
+/** The sample path on the home screen: whether its prompt's turn is still running, and what to say if it ended without a model. */
+export type AgamiSampleState = { waiting: boolean; note: string | null }
+
+/** The sample path on the home screen: whether its prompt's turn is still running, and what to say if it ended without a model. */
+export type AgamiSampleState = { waiting: boolean; note: string | null }
+
 export type AgamiOs = 'mac' | 'windows' | 'other'
 
 /** What the pane learns once per open from `connect_resolve.py`; the home screen draws from it. */
@@ -32,6 +38,8 @@ declare module 'claude-code' {
     'agami-core': {
       screen: AgamiScreen
       connect: Shaped<AgamiConnectState>
+      sample: Shaped<AgamiSampleState>
+      sample: Shaped<AgamiSampleState>
       // null until the check on open lands.
       env: Shaped<AgamiEnv | null>
     }

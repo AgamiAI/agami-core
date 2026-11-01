@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CoreEngineInterface, RenderElement, RenderInput } from 'claude-code'
 
-import type { AgamiEnv, AgamiScreen } from '../../types'
+import type { AgamiEnv, AgamiSampleState, AgamiScreen } from '../../types'
 import { ACCENT, BRAND, logoSvg, logoSvgAnimated } from '../brand'
 
 // Declared in each file that reads or writes them: the engine lists the values a module touches by
@@ -10,6 +10,9 @@ const screenState = atom({ plugin: 'agami-core', key: 'screen' } as const, 'home
 const envState = atom({ plugin: 'agami-core', key: 'env' } as const, null as AgamiEnv | null, {
   shape: 'env-2',
 })
+
+const IDLE: AgamiSampleState = { waiting: false, note: null }
+const sampleState = atom({ plugin: 'agami-core', key: 'sample' } as const, IDLE, { shape: 'sample-1' })
 
 type Engine = Pick<CoreEngineInterface, 'ui' | 'state' | 'prompt' | 'env'>
 
@@ -51,18 +54,43 @@ const FIRST_RUN = new Set(['connect', 'sample'])
 export async function runAction($: Pick<Engine, 'prompt' | 'state'>, key: string): Promise<void> {
   const action = actions.find(a => a.key === key)
   if (!action) return
+  await update($, sampleState, () => IDLE)
   if (action.prompt === undefined) {
     await update($, screenState, () => 'connect')
 
     return
   }
-  await $.prompt.submit({ text: action.prompt })
+  // Marked before the send so a turn that ends at once is still seen; undone if the prompt never starts one.
+  if (key === 'sample') await update($, sampleState, () => ({ waiting: true, note: null }))
+  const sent = await $.prompt.submit({ text: action.prompt })
+  if (key === 'sample' && sent.drop !== undefined) await update($, sampleState, () => IDLE)
+}
+
+/** Puts the sample path back to idle: a fresh open of the pane waits for nothing and shows no note. */
+export async function resetSample($: Pick<Engine, 'state'>): Promise<void> {
+  await update($, sampleState, () => IDLE)
+}
+
+const SAMPLE_NOTE = "The sample setup didn't finish. Check the chat to see where it stopped."
+
+/**
+ * Called when any turn ends. If it is the sample's turn, the pane moves to First answer once the
+ * sample model's `datasource.yaml` exists; otherwise it stays home and says setup did not finish.
+ */
+export async function onTurnComplete($: Pick<Engine, 'state'> & Pick<CoreEngineInterface, 'fs'>): Promise<void> {
+  const sample = await read($, sampleState)
+  if (!sample.waiting) return
+  const env = await read($, envState)
+  const ready = env?.artifactsDir != null && (await $.fs.exists(`${env.artifactsDir}/agami-example/datasource.yaml`))
+  await update($, sampleState, () => ({ waiting: false, note: ready ? null : SAMPLE_NOTE }))
+  if (ready) await update($, screenState, () => 'first-answer')
 }
 
 export async function home($: Engine, e: RenderInput): Promise<RenderElement> {
   const ui = $.ui.resolve(e)
   const { Box, Text, Button } = ui
   const env = await read($, envState)
+  const { note } = await read($, sampleState)
 
   if (!env) {
     return (
@@ -126,6 +154,11 @@ export async function home($: Engine, e: RenderInput): Promise<RenderElement> {
       {!env.python.ok ? (
         <Box flexDirection="column" marginTop={1}>
           <Text>{env.python.fix ?? 'agami cannot find a usable Python.'}</Text>
+        </Box>
+      ) : null}
+      {note !== null ? (
+        <Box marginTop={1}>
+          <Text>{note}</Text>
         </Box>
       ) : null}
       <Box flexDirection="column" marginTop={1}>

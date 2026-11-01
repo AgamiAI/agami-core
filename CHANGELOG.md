@@ -20,6 +20,12 @@ below corresponds to one such version.
   local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1` and stores it there, so
   it never reaches the chat, a command line or a plain-text file. `setup_pgauth.py` never writes
   such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
+- **An `/agami` pane: connect a database, or try the sample, from one screen.** `/agami` opens a
+  pane (a Claude Code mod, so it needs a build with mod support; other builds load the plugin
+  as before) with a home screen listing everything agami does. Connect asks for the host and user
+  there and sends the password through the one-time local page, never the pane or the chat.
+  Try the sample data runs the sample setup, and once the sample model exists the pane offers
+  the six starter questions as buttons, each asked in the chat as your own message.
 
 ### Changed
 

@@ -4,7 +4,8 @@ import type { Register } from 'claude-code'
 import type { AgamiEnv, AgamiScreen } from '../types'
 import { readEnv } from './env'
 import { connect, resetConnect, startConnectRunner } from './screens/connect'
-import { home } from './screens/home'
+import { firstAnswer } from './screens/first-answer'
+import { home, onTurnComplete, resetSample } from './screens/home'
 
 // The pane's id and title are `agami`, the same word as the command that opens it: one name for the
 // person to learn. The command's name is written out where it is registered and matched, because
@@ -35,6 +36,7 @@ export const register: Register = on => {
     // Each open starts at home and checks the setup afresh, once. A render has a 10 s budget, so the
     // check runs here, not in the render: the pane draws "Checking your setup…" until it lands.
     await resetConnect($)
+    await resetSample($)
     await update($, screenState, () => 'home')
     await update($, envState, () => null)
     const env = await readEnv($)
@@ -48,14 +50,25 @@ export const register: Register = on => {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE) {
       await resetConnect($)
+      await resetSample($)
       await update($, screenState, () => 'home')
     }
 
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // The sample's prompt runs a whole skill; its turn ending is the cue to look for the model it built.
+  // A subagent's turn ends too, and is not the sample's. A failed check must not hold up the turn.
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) await onTurnComplete($)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    if ((await read($, screenState)) === 'connect') return connect($, e)
+    const screen = await read($, screenState)
+    if (screen === 'connect') return connect($, e)
+    if (screen === 'first-answer') return firstAnswer($, e)
 
     return home($, e)
   })
