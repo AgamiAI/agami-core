@@ -15,11 +15,11 @@ export type AgamiConnectState = {
   auth?: 'password' | 'sso'
 }
 
-/** The sample path on the home screen: whether its prompt's turn is still running, and what to say if it ended without a model. */
-export type AgamiSampleState = { waiting: boolean; note: string | null }
-
-/** The sample path on the home screen: whether its prompt's turn is still running, and what to say if it ended without a model. */
-export type AgamiSampleState = { waiting: boolean; note: string | null }
+/**
+ * The sample path on the home screen: whether its prompt's turn is still running (and which turn, once
+ * it has started), and what to say if it ended without a model.
+ */
+export type AgamiSampleState = { waiting: boolean; turnId: string | null; note: string | null }
 
 export type AgamiOs = 'mac' | 'windows' | 'other'
 
@@ -38,7 +38,6 @@ declare module 'claude-code' {
     'agami-core': {
       screen: AgamiScreen
       connect: Shaped<AgamiConnectState>
-      sample: Shaped<AgamiSampleState>
       sample: Shaped<AgamiSampleState>
       // null until the check on open lands.
       env: Shaped<AgamiEnv | null>

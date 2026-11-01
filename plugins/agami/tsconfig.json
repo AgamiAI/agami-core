@@ -1,5 +1,7 @@
 {
   // The engine writes this base config, with the Claude Code API's declarations beside it, each time it
   // loads the mod (see `uv run dev.py mod`); it is git-ignored, so load the mod once before `tsc -p`.
-  "extends": "./.claude-plugin/types/tsconfig.json"
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  // The base config skips checking .d.ts files, which would let a broken ./types/index.d.ts through.
+  "compilerOptions": { "skipLibCheck": false }
 }

@@ -28,6 +28,7 @@ async function openHome($: Engine, on: Hooks, exists: boolean): Promise<World> {
 
     return { text: e.text }
   })
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
   on('fs.exists', (_, e) => {
     world.checked.push(e.path)
@@ -39,8 +40,10 @@ async function openHome($: Engine, on: Hooks, exists: boolean): Promise<World> {
   return world
 }
 
-const finishTurn = ($: Engine) =>
-  $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+const startTurn = ($: Engine, text: string, turnId = 't1') => $.turn.start({ text, turnId })
+
+const finishTurn = ($: Engine, turnId = 't1') =>
+  $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId, reason: 'answer' })
 
 test('First answer lists exactly the six sample questions, verbatim', () => {
   expect([...QUESTIONS]).toEqual(SIX)
@@ -53,6 +56,7 @@ test('pressing question 1 submits it as the user, and all six do', async ($, on)
     world.sent.length = 0
     const ui = await $.ui.mount({ ...PANE, surface })
     await ui.press({ key: 'sample' })
+    await startTurn($, SAMPLE)
     await finishTurn($)
 
     expect((await ui.findAll({ type: 'Button' })).map(b => b.text)).toEqual([...SIX, 'Back to home'])
@@ -72,6 +76,7 @@ test('home switches to First answer only when the sample turn ends with datasour
   await ui.press({ key: 'sample' })
   expect(world.sent[0]).toEqual({ text: SAMPLE, asUser: undefined })
   expect(await ui.find({ type: 'Button', key: 'q1' })).toBeUndefined()
+  await startTurn($, SAMPLE)
   await finishTurn($)
 
   expect(world.checked).toEqual([MARKER])
@@ -84,6 +89,7 @@ test('without the file, the pane stays home with a one-line note', async ($, on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   await ui.press({ key: 'sample' })
+  await startTurn($, SAMPLE)
   await finishTurn($)
 
   expect(await ui.find({ type: 'Button', key: 'q1' })).toBeUndefined()
@@ -109,10 +115,32 @@ test('Back to home returns to the home screen', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
 
   await ui.press({ key: 'sample' })
+  await startTurn($, SAMPLE)
   await finishTurn($)
   await ui.press({ key: 'home' })
 
   expect(await ui.find({ type: 'Button', key: 'sample' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'q1' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('an unrelated turn ending after the press changes nothing; the sample\'s own end does', async ($, on) => {
+  const world = await openHome($, on, true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // The sample prompt waits behind a turn already running.
+  await startTurn($, 'something else', 'earlier')
+  await ui.press({ key: 'sample' })
+  await finishTurn($, 'earlier')
+
+  expect(world.checked).toEqual([])
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'q1' })).toBeUndefined()
+
+  await startTurn($, `The agami plugin sent a message: ${SAMPLE}`, 'mine')
+  await finishTurn($, 'mine')
+
+  expect(world.checked).toEqual([MARKER])
+  expect(await ui.find({ type: 'Button', key: 'q1' })).toBeDefined()
   await ui.unmount()
 })

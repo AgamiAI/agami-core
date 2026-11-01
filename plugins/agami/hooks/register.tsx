@@ -5,7 +5,7 @@ import type { AgamiEnv, AgamiScreen } from '../types'
 import { readEnv } from './env'
 import { connect, resetConnect, startConnectRunner } from './screens/connect'
 import { firstAnswer } from './screens/first-answer'
-import { home, onTurnComplete, resetSample } from './screens/home'
+import { home, onTurnComplete, onTurnStart, resetSample } from './screens/home'
 
 // The pane's id and title are `agami`, the same word as the command that opens it: one name for the
 // person to learn. The command's name is written out where it is registered and matched, because
@@ -57,10 +57,17 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // The sample's turn is found by its prompt text when it starts, so its end is told from any other's.
+  on('turn.start', async ($, e, next) => {
+    if (e.agentId === undefined) await onTurnStart($, e.turnId, e.text)
+
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // The sample's prompt runs a whole skill; its turn ending is the cue to look for the model it built.
   // A subagent's turn ends too, and is not the sample's. A failed check must not hold up the turn.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) await onTurnComplete($)
+    if (e.agentId === undefined) await onTurnComplete($, e.turnId)
 
     return next(e)
   }).catch(($, e, next) => next(e))

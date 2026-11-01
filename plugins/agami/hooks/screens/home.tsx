@@ -11,8 +11,8 @@ const envState = atom({ plugin: 'agami-core', key: 'env' } as const, null as Aga
   shape: 'env-2',
 })
 
-const IDLE: AgamiSampleState = { waiting: false, note: null }
-const sampleState = atom({ plugin: 'agami-core', key: 'sample' } as const, IDLE, { shape: 'sample-1' })
+const IDLE: AgamiSampleState = { waiting: false, turnId: null, note: null }
+const sampleState = atom({ plugin: 'agami-core', key: 'sample' } as const, IDLE, { shape: 'sample-2' })
 
 type Engine = Pick<CoreEngineInterface, 'ui' | 'state' | 'prompt' | 'env'>
 
@@ -61,7 +61,7 @@ export async function runAction($: Pick<Engine, 'prompt' | 'state'>, key: string
     return
   }
   // Marked before the send so a turn that ends at once is still seen; undone if the prompt never starts one.
-  if (key === 'sample') await update($, sampleState, () => ({ waiting: true, note: null }))
+  if (key === 'sample') await update($, sampleState, () => ({ waiting: true, turnId: null, note: null }))
   const sent = await $.prompt.submit({ text: action.prompt })
   if (key === 'sample' && sent.drop !== undefined) await update($, sampleState, () => IDLE)
 }
@@ -71,18 +71,31 @@ export async function resetSample($: Pick<Engine, 'state'>): Promise<void> {
   await update($, sampleState, () => IDLE)
 }
 
+const SAMPLE_PROMPT = actions.find(a => a.key === 'sample')?.prompt ?? ''
+
+/**
+ * Called when a main-loop turn starts. While the sample waits, the turn whose text holds the sample's
+ * prompt is the sample's: its id is kept so only its own end is acted on. `includes`, because the
+ * text may arrive framed.
+ */
+export async function onTurnStart($: Pick<Engine, 'state'>, turnId: string, text: string): Promise<void> {
+  const sample = await read($, sampleState)
+  if (!sample.waiting || sample.turnId !== null || !text.includes(SAMPLE_PROMPT)) return
+  await update($, sampleState, st => ({ ...st, turnId }))
+}
+
 const SAMPLE_NOTE = "The sample setup didn't finish. Check the chat to see where it stopped."
 
 /**
  * Called when any turn ends. If it is the sample's turn, the pane moves to First answer once the
  * sample model's `datasource.yaml` exists; otherwise it stays home and says setup did not finish.
  */
-export async function onTurnComplete($: Pick<Engine, 'state'> & Pick<CoreEngineInterface, 'fs'>): Promise<void> {
+export async function onTurnComplete($: Pick<Engine, 'state'> & Pick<CoreEngineInterface, 'fs'>, turnId: string): Promise<void> {
   const sample = await read($, sampleState)
-  if (!sample.waiting) return
+  if (!sample.waiting || sample.turnId !== turnId) return
   const env = await read($, envState)
   const ready = env?.artifactsDir != null && (await $.fs.exists(`${env.artifactsDir}/agami-example/datasource.yaml`))
-  await update($, sampleState, () => ({ waiting: false, note: ready ? null : SAMPLE_NOTE }))
+  await update($, sampleState, () => ({ waiting: false, turnId: null, note: ready ? null : SAMPLE_NOTE }))
   if (ready) await update($, screenState, () => 'first-answer')
 }
 
