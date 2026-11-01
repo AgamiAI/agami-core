@@ -70,14 +70,16 @@ them to type a reply message.
 
 The HTML renderers stay as an optional "Show the full view" option. When one is shown, serve it
 from `localhost`, never as a `file://` page: the Code tab's built-in browser shows a local file
-outside the project folder as a frozen snapshot.
+outside the project folder as a frozen snapshot. Run `serve_page.py` with `run_in_background`: it
+keeps serving until its time is up, so in the foreground it would hold the turn and the URL would
+never reach the person.
 
 ```
 bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30
-# prints {"url": "http://localhost:<port>/<name>"} and exits when the time is up
+# run_in_background; its first line is {"url": "http://localhost:<port>/<name>"}, and it exits when the time is up
 ```
 
-Give the person that URL. Choices made on a page come back through a card, not a pasted block.
+Read that first line from the background task's output and give the person the URL. Choices made on a page come back through a card, not a pasted block.
 
 ## 7. Where AskUserQuestion is unavailable
 

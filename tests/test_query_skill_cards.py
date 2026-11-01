@@ -235,3 +235,21 @@ def test_no_card_lists_more_than_four_options():
     assert lists
     too_many = [opts for opts in lists if len(opts) > 4]
     assert not too_many, too_many
+
+
+def test_looks_right_on_a_relative_window_asks_the_window_card_first():
+    looks = next(line for line in _answer_card().splitlines() if line.startswith("| Looks right"))
+    assert "Window" in looks and "Name the window" in looks and "Don't save" in looks
+    assert "never re-anchor" in looks.lower()
+    for phrase in ("last 30 days", "this month", "YTD"):
+        assert phrase in looks
+
+
+def test_the_star_ask_has_no_emoji_or_exclamation_and_answers_in_the_same_turn():
+    s = _between("## Phase 6:", "If `<artifacts_dir>/local/.optins` already exists")
+    assert "thank you!" not in s.lower()
+    assert not re.search(r"[\U0001F300-\U0001FAFF]", s)
+    assert "Next turn" not in s
+    assert "same turn" in s
+    trigger = _between("### 4e.5 ", "### 4f ")
+    assert "End the turn here" not in trigger

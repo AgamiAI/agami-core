@@ -53,7 +53,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 
 **If plan mode is active and the user picks `Stay in plan mode`:**
 
-- **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus serving the file with `serve_page.py`. Run that flow if matched.
+- **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus serving the file with `serve_page.py` (run with `run_in_background`). Run that flow if matched.
 - **Anything else** — refuse and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text (verbatim):
 
   > I can't run SQL in plan mode. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me.
@@ -627,7 +627,7 @@ One question, header `Answer`, *"How does this answer look?"*, single pick, no `
 
 | Answer | Do |
 |---|---|
-| Looks right | Set `feedback: "good"` on this answer's `query_log.jsonl` entry (written before the card) and confirm the assumption descriptions (4d.1b). Then hand to **agami-save-golden**'s save door (its Phase 3) with the question, the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
+| Looks right | Set `feedback: "good"` on this answer's `query_log.jsonl` entry (written before the card) and confirm the assumption descriptions (4d.1b). Then, when the question names a window relative to today ("last 30 days", "this month", "YTD") and the SQL that ran is pinned to fixed dates, ask agami-reconcile's window card before handing anything on: header `Window`, *"'The last 30 days' was 2–31 August 2026 when this ran. Save it as '…in August 2026'?"*, options **Name the window: <dates>** / **Don't save**; "Other" takes the question in the person's words. **Name the window** saves with the question rewritten to name those dates; **Don't save** writes no test (the feedback above stands). Never re-anchor the SQL to the current date: the answer key would then move with the calendar and fail against a band nobody moved. Then hand to **agami-save-golden**'s save door (its Phase 3) with the question (rewritten, if it was), the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
 | Something's off | Set `feedback: "bad"` on this answer's `query_log.jsonl` entry and hand **agami-save-correction** three things by name: the "Other" text as the correction, this answer's question, and the SQL that ran for it (the same `question` and `sql` the log line carries), which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). Picked with nothing typed in "Other": say *"Type what looks off in Other."* and ask the same card again. |
 | Show as a chart | Phase 4e: render the report and serve it from localhost, then post the link. |
 | Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)); its **Don't sign anything yet** signs nothing here and goes on to the star ask (4e.5) and the follow-ups (4f), since there is no overview card in this skill. Otherwise one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
@@ -781,7 +781,7 @@ test -f <artifacts_dir>/local/.optins
 **Sample-profile exception (check first):** if `active_profile` is `agami-example`, **skip this star modal entirely** — don't prompt someone to star off the throwaway sample dataset. The sample's one-time orientation footer (4f) carries a single-line star mention instead. Continue to 4f.
 
 - **Exit 0** (`.optins` exists) — skip this step. Continue to 4f.
-- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. **End the turn here.** Do NOT emit Phase 4f. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
+- **Exit 1** (`.optins` missing) AND the query just completed successfully — surface the GitHub-star ask via `AskUserQuestion`. Its answer comes back in the same turn; handle it and the `/agami-serve` pointer before Phase 4f, never 4f first. Full ask + handling in [Phase 6 below](#phase-6-post-install-github-star-ask-full-spec--triggered-from-phase-4e5); the trigger lives here (not only in Phase 6) so it fires before Phase 4f. **Read Phase 6's two HARD RULES (verbatim prose, literal URL `https://github.com/AgamiAI/agami-core`) before emitting.**
 
 The `.optins` file is the never-re-prompt gate. Once it's written (with any of the three response values), this check skips for every future query. If the user reports they never see the ask, they probably had `.optins` from an earlier install — `ls -la <artifacts_dir>/local/.optins` will show whether the file exists, and `rm <artifacts_dir>/local/.optins` re-arms the prompt for the next query.
 
@@ -936,9 +936,9 @@ Sequence:
    Options:
    - `Yes — open GitHub now` — runs `bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" https://github.com/AgamiAI/agami-core` and surfaces a one-line "Thanks — opening GitHub. Star is in the top-right when you get there." (Failure-tolerant: if the open command fails, fall through with the URL printed in chat.)
    - `Maybe later` — write `.optins` so we don't ask again, surface "No problem. The link is github.com/AgamiAI/agami-core if you change your mind." (No `(Recommended)` marker — we'd genuinely prefer "Yes" if the user found it useful, but no marker on any of the three options keeps the ask non-pushy.)
-   - `Already starred — thank you!` — surface "🙏 thanks for the early support" and write `.optins`.
-3. **Wait for the user to answer the modal.** That's the end of this turn. Do NOT emit the 5 follow-up bullets yet.
-4. Next turn: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below). After it, show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
+   - `Already starred` — surface "Thanks for the early support." and write `.optins`.
+3. **Wait for the answer to the card.** It comes back in the same turn. Do NOT emit the 5 follow-up bullets before it.
+4. In the same turn, once the card is answered: process the decision (write `<artifacts_dir>/local/.optins`). Then — **whatever they answered** — surface the one-time **`/agami-serve` pointer** (below). After it, show the 5 follow-up bullets per Phase 4f, with a tiny acknowledgment line ("Now, where next?") before the numbered list.
 
 **The `/agami-serve` pointer (one-time, right after the star answer).** Plain prose — NOT an `AskUserQuestion`, NOT one of the numbered follow-ups. Surface it once, here, regardless of which of the three star responses they gave:
 

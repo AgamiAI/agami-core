@@ -22,7 +22,7 @@ For every decision card and result table: [`shared/question-cards.md`](../../sha
 ## Conversation style
 
 - **Combine acknowledge + next question** — don't waste turns on "Got it!"
-- **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
+- **Use AskUserQuestion for every Yes/No/Skip** — never inline-bullet options. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7). Use `(Recommended)` only when there's a genuine recommendation. For fact-of-environment questions ("which database type?", "which schemas?"), don't mark any option Recommended — the user picks what they have.
 - **Every multiSelect needs an explicit "none / continue" option** — `AskUserQuestion` cannot be submitted with zero boxes checked, so any multiSelect where "pick nothing" is a valid answer MUST offer a selectable "Nothing — continue" (or "Keep everything") option. Never phrase the prompt as "leave all unchecked" — that's unsubmittable and traps the user.
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 - **Plain voice — state what happened, never how impressive it is.** Progress markers, todo labels, and narration describe the action and the result; they do NOT editorialize. Banned: "wow moment", "magic", "watch this", "the exciting part", "you'll love this", exclamation hype. The reader is a data professional — a query running correctly speaks for itself. Say *"Running the first query"*, not *"Now the wow moment"*.
@@ -193,7 +193,7 @@ The password goes from the person's browser straight into the OS credential stor
  "fields": {"host": "<host>", "port": "<port>", "database": "<database>", "user": "<user>"}}
 ```
 
-For a connection with no secret to type (Snowflake browser sign-in, BigQuery, Trino with no password, SQLite, DuckDB) add `"auth": "sso"`. **The `sso` path has no link and no page:** the helper writes the section, tests the connection, and prints only its final line, so skip step 3 and read that line in step 4.
+For a connection with no secret to type (Snowflake browser sign-in, BigQuery, Trino with no password, SQLite, DuckDB) add `"auth": "sso"`. **The `sso` path has no link and no page:** the helper writes the section, tests the connection, and prints only its final line, so skip step 3 and read that line in step 4. Its wait is longer than the password path's (step 2).
 
 **2. Start the helper in the background.** Call Bash with `run_in_background: true`:
 
@@ -203,11 +203,13 @@ echo "agami-helper-pid $$" >&2; exec bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" con
 
 The `exec` chain (this shell, then `scripts/py`) keeps one PID, so the `agami-helper-pid` line on stderr is the helper's own PID, for stopping it where TaskStop isn't available. It is not an error line; ignore it when looking for the last stderr line.
 
-Stdout is JSON lines and nothing else. **Read the background command's output** (the Bash result names the task and its output file; read that file), spaced about 2 seconds apart (Bash `sleep 2` between reads, never a tight loop), until one of these happens:
+Stdout is JSON lines and nothing else. **Wait for the helper's first line with the Monitor tool**: the Bash result names the task and its output file, so use the Monitor tool to watch the helper's output until its first line, or the task's exit (an until-loop on that output file that stops on the first JSON line, which the `agami-helper-pid` line is not, or when the task has exited). Never run a foreground `sleep`: the Desktop Code tab blocks it. As a fallback where Monitor isn't available, re-read the output file at spaced intervals, each read its own tool call, never a tight loop. Stop waiting when one of these happens:
 
 - **The first line has a `status`**: it is the final line. Every check that runs before the page (`missing_driver`, `name_taken`, `no_store`, `stale_install`, and the other refusals), and the whole `sso` path, prints that one line and exits. Skip step 3 and go to step 4 with it.
 - **The first line has a `url`** (`{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}`): the page is listening, usually within a second. Go to step 3.
-- **The background task has exited with no line, or about 15 seconds pass with no line**: the helper failed before it could print (an import error, say, which goes to stderr only). Stop the task if it is still running (below), show the last stderr line in one sentence, and ask a card, header `Next step`: `Try again` (step 2 again) / `Use a file instead (manual)` (0a.4).
+- **The background task has exited with no line, or, on the password path, about 15 seconds pass with no line**: the helper failed before it could print (an import error, say, which goes to stderr only). Stop the task if it is still running (below), show the last stderr line in one sentence, and ask a card, header `Next step`: `Try again` (step 2 again) / `Use a file instead (manual)` (0a.4).
+
+**With `"auth": "sso"` (`auth: sso`) there is no 15-second limit.** The helper tests the connection before it prints anything, and that test can open a browser sign-in (Snowflake's SSO, say) that waits for the person. So tell the person once, when you start the helper, that a browser sign-in may open and that you are waiting for it to finish, then wait until the helper exits, up to 5 minutes, with the same Monitor watch. Don't repeat the line while waiting. Past 5 minutes with no exit, stop the task (below) and ask the `Next step` card above.
 
 Don't run the helper in the foreground: it would hold the turn until the page is submitted, and the link would never reach the person. Where background commands aren't available, use the file path (0a.4) instead.
 
@@ -217,7 +219,7 @@ Don't run the helper in the foreground: it would hold the turn until the page is
 
 (On Windows say "Windows Credential Manager" in place of "your keychain".) Then say you are waiting for the page, and end your message there: no card, nothing to paste. The helper exits when the page is submitted or the 5 minutes pass, and that exit brings you back. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id, or, where TaskStop isn't available, `kill <PID>` with the PID from the `agami-helper-pid` line (`kill` sends SIGTERM, and the helper then takes back whatever it stored), and show the database-type card again.
 
-**4. Read the final line** of the output when the helper exits, and act on it. Exit code is 0 for every outcome; `status` (and a refusal's `reason`) says what happened, and `detail` is the one line to show the person. Each outcome gets one sentence plus the next card:
+**4. Read the final line** of the output when the helper exits, and act on it. The exit is what you wait for after the link is posted: the Monitor tool watching the task until it exits (or, as the fallback, spaced re-reads of the output file), never a foreground `sleep`; the background task's exit notice also brings you back. Exit code is 0 for every outcome; `status` (and a refusal's `reason`) says what happened, and `detail` is the one line to show the person. Each outcome gets one sentence plus the next card:
 
 | final line | say | next |
 |---|---|---|
@@ -561,18 +563,25 @@ When the user chooses **Onboard another database**, ask (AskUserQuestion) whethe
 
 Run `cli areas`/probe is not needed yet — schema discovery happens inside the engine. But **decide scope first**:
 
-- **Catalog reachable (common):** after the engine lists schemas, it introspects all of them. If the DB has many schemas (Snowflake with 50+), narrow first — ask the user which schemas matter (multi-select), then pass them as the engine's table allowlist scope. Pre-check `public` (Postgres) / `PUBLIC` (Snowflake) / the credentials' `database` (MySQL).
+- **Catalog reachable (common):** after the engine lists schemas, it introspects all of them. If the DB has many schemas (Snowflake with 50+), 1.6's summary shows them with their table counts and its **Only some schemas** answer narrows them; there is no separate schema question on a first onboard.
   - **Supabase is handled automatically** — the engine detects it by signature and drops its system schemas (`auth`, `storage`, `vault`, `realtime`, `extensions`, …) so only the user's app schemas (e.g. `public`) are modeled (it surfaces a note saying which it skipped). **Don't hand-build a `--tables` allowlist for Supabase** to dodge the system tables — that's already done, and a manual allowlist is fragile (shell word-splitting, missed tables). Only allowlist when the user genuinely wants a subset of their *own* tables.
-- **Catalog denied (locked-down role):** if a quick probe shows the catalog isn't readable, the engine **cannot enumerate tables** — ask the user for the table list:
-  > Your role can read the data but not the catalog, so I can't list tables automatically. Paste the tables to model (e.g. `sales.orders, sales.customers`) — I'll describe each from the data itself.
+- **Catalog denied (locked-down role):** if a quick probe shows the catalog isn't readable, the engine **cannot enumerate tables**, so ask for them on a card. Say first, in one line: *"Your role can read the data but not the catalog, so I can't list the tables myself; I'll describe each one from the data."* Then call AskUserQuestion, one question, header `Tables`, *"Which tables should I model? Type them in Other, e.g. `sales.orders, sales.customers`."*:
+  - **Type the names in Other**: "Other" takes the names, comma- or line-separated, `schema.table` or a bare table name. Names typed straight into "Other" count as this answer; picked with nothing typed, ask the same card again.
+  - **Stop for now**: nothing is introspected; say they can connect again once the role can read the catalog or they have the list.
 
-  Pass these to the engine via `--tables schema.table …`. Everything the engine then infers (types, grain, FKs) lands `unreviewed` for sign-off.
+  Write the names, one per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`. Where an inventory exists (a re-introspect, or a discover pass that listed some tables), check them first with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --keep names:<artifacts_dir>/local/tmp/agami-names.txt --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"`: an `unmatched` or `ambiguous` name is said back and the same card asked again, never guessed. With no inventory to check against, pass the file as it is. Then run the engine with `--tables-file` on that file (never an unquoted `--tables` list). Everything the engine then infers (types, grain, FKs) lands `unreviewed` for sign-off.
 
-### 1.3 — Schema picker (multi-select)
+### 1.3 — Schema picker (re-introspect only)
 
-For non-SQLite/DuckDB with multiple schemas, **AskUserQuestion** multi-select: "Which schemas should I introspect?" One option per schema + `All schemas` + `Just <default> for now`. Record `selected_schemas`; the engine scopes to these.
+**On a first onboard, skip this step.** 1.6's summary shows every schema with its table count, and its **Only some schemas** answer narrows them, so a schema question here would ask the same thing twice.
 
-**On re-introspect / an existing model — pre-check the schemas already modeled, and make "add" vs "replace" explicit.** Read the schemas already in `<profile>`'s model (the distinct `schema` of its existing tables) and **pre-check those** in the picker, labelled `<schema> (already in your model)`. Tell the user plainly:
+**On re-introspect / an existing model, ask which schemas to rescan, and make "add" vs "replace" explicit.** Read the schemas already in `<profile>`'s model (the distinct `schema` of its existing tables). Call AskUserQuestion, one multiSelect question, header `Schemas`, *"Which schemas should I rescan?"*, with at most 4 options:
+
+- **The <n> schemas already in your model (Recommended)**: rescans exactly those (name them in the description). Picking only this is "nothing new, continue".
+- Then the schemas not yet modeled: one option each when there are 2 or fewer; more are grouped by name prefix (as `groups.schema_groups` does in 1.6), one option per group naming its schema count, at most 2 such options.
+- **All schemas**: every schema the catalog lists, when the options above don't cover them all.
+
+"Other" takes schema names to add, or `drop <schema>` to take one out. Record `selected_schemas` as the union of what was picked; the engine scopes to these. Tell the user plainly:
 
 > The engine re-scans exactly the schemas you check here and rebuilds the structure from them. To **add** a schema, leave the existing ones checked and tick the new one — relationships between them get found in the same pass. **Unchecking a schema removes its tables from the model** (its hand-edits are preserved only if you keep it checked).
 
@@ -631,9 +640,9 @@ Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Se
 > • **A published product schema** — if this DB is a well-known product (ServiceNow, Salesforce, Jira, NetSuite, SAP, HubSpot, Workday…), I can look up its official table/column reference online so the standard fields get correct descriptions automatically.
 > • **A model spec workbook** — agami's template (`shared/model-spec-template.xlsx`) filled in with your subject areas, which area owns each table, the joins, metrics, sensitive columns and rules. The model is built **exactly** as it says — the way to model a warehouse whose joins aren't declared (a star schema of views, keys named for their role).
 
-Options: `Doc / metrics file — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Model spec workbook — I'll attach it` / `Skip — nothing to share`. (Multi-select — combine as needed.)
+Options: `Doc, metrics file or spec workbook — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Skip — nothing to share`. (Multi-select — combine as needed. Four options: the model spec workbook goes under the first, since it is recognised by its sheets.)
 
-**A model spec workbook is recognised by its sheets, whatever the user called it:** an `.xlsx` with `Subject areas`, `Tables` and `Joins` sheets is one, even if they picked "Doc". Take the [model-spec path](#18--apply-a-model-spec-only-when-one-was-attached) for it — **never `Read` it as a doc**: the parser reads every row, and a doc read is trimmed and paraphrased.
+**A model spec workbook is recognised by its sheets, whatever the user called it:** an `.xlsx` with `Subject areas`, `Tables` and `Joins` sheets is one, attached under the first option like any doc. Take the [model-spec path](#18--apply-a-model-spec-only-when-one-was-attached) for it — **never `Read` it as a doc**: the parser reads every row, and a doc read is trimmed and paraphrased.
 
 **If a doc:** `Read` the path (handles PDF/image/md/text/CSV natively; trim huge files to first 20 pages / 50 rows). Any other `.xlsx`/`.docx` → ask for PDF, proceed without if not.
 
@@ -718,6 +727,8 @@ If the person asks to skip this ("just introspect everything"), proceed to 1.7 u
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<prune_html>" --minutes 30
 ```
+
+Run it with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
 
 (`render_prune.py --inventory "<inventory_path>" --out <file.html>` re-renders the page if `prune_html` is gone.) The page's **Generate for Claude** button gives the person an `AGAMI PRUNE` block; that paste is still accepted here. Pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
 
@@ -951,7 +962,7 @@ Metrics come from two sources, handled very differently. **Always prefer declare
 
 Translate the declared SQL/agg to the profile's dialect for `bindings`, set `source_tables`, write **`confidence: inferred, review_state: unreviewed`** (declared = strong signal, still wants a human sign-off on the `/agami-model` Review tab). If there are many (> ~8), **don't** funnel them through a 4-item picker — write them all and tell the user once: *"Added N metrics from your `<LookML/dbt/file>` — review or trim them in /agami-model."* (Offer a single "add all N / let me pick a subset" confirm if you want, but never silently drop declared metrics to fit a cap.)
 
-**(B) Inferred metrics — infer a sensible set for BULK review, don't ask for 4.** Run **`sm suggest-metrics "$ROOT" --profile "$PROFILE_NAME"`**: it infers per-table measures — start→end durations, never a plain aggregate (see below), and no flag rate unless asked (below) — and **prints them without writing anything** (a dry run). `--profile` test-runs every binding against the database first (one bounded read per table — on a pay-per-scan warehouse such as BigQuery or Snowflake that read is billed, so say so before running it there; without `--profile` the output notes the bindings were not test-run). Each proposal shows its `binding`, `calculation`, `source_table`, any `error` (a binding that failed — never written) and `flags`: `degenerate` (constant, all zero or NULL), `low_confidence` (a table under 50 rows), `not_test_run` (a table defined by SQL whose read failed, so its bindings are unproven), `ambiguous_pairing` or `audit_column` (a duration whose start/end pairing needs a person's eye). **Show the user the proposals, flagged ones with their reason, then re-run with `--write`** — it writes the unflagged ones; add `--names <metric> …` to keep only some, or to keep a flagged one the user chose. Every written metric is `proposed`, because each picks a condition or pairs two columns. An unsigned metric is still used — the answer carries a warning that it is unreviewed (Rule 1) — so drop a proposal nobody would ask for rather than leave it for the queue; the user reviews the rest **in bulk in the explorer** (Phase 4). Reserve **AskUserQuestion** only for a bespoke KPI the user describes in words that the column shapes don't imply.
+**(B) Inferred metrics — infer a sensible set for BULK review, don't ask for 4.** Run **`sm suggest-metrics "$ROOT" --profile "$PROFILE_NAME"`**: it infers per-table measures — start→end durations, never a plain aggregate (see below), and no flag rate unless asked (below) — and **prints them without writing anything** (a dry run). `--profile` test-runs every binding against the database first (one bounded read per table — on a pay-per-scan warehouse such as BigQuery or Snowflake that read is billed, so say so before running it there; without `--profile` the output notes the bindings were not test-run). Each proposal shows its `binding`, `calculation`, `source_table`, any `error` (a binding that failed — never written) and `flags`: `degenerate` (constant, all zero or NULL), `low_confidence` (a table under 50 rows), `not_test_run` (a table defined by SQL whose read failed, so its bindings are unproven), `ambiguous_pairing` or `audit_column` (a duration whose start/end pairing needs a person's eye). **Show the user the proposals, flagged ones with their reason, then re-run with `--write`** — it writes the unflagged ones; add `--names <metric> …` to keep only some, or to keep a flagged one the user chose. Every written metric is `proposed`, because each picks a condition or pairs two columns. An unsigned metric is still used — the answer carries a warning that it is unreviewed (Rule 1) — so drop a proposal nobody would ask for rather than leave it for the queue; the user reviews the rest **on the Phase 4 cards**. Reserve **AskUserQuestion** only for a bespoke KPI the user describes in words that the column shapes don't imply.
 
 **Flag rates — only the ones the business defines.** By default `suggest-metrics` proposes **no** share-of-true rate per boolean column (`<table>_<col>_rate`): a boolean column is a dimension and a filter, and the agent can compute its share from the column when a question needs it. The output carries one summary instead, `flag_rates: {available, columns, hint}` — the boolean columns that could each have one. **When the customer's definitions (a data dictionary, spec, KB, metrics file from 1.5) name a share-of-true rate as a measure**, request exactly that one and cite the document: `sm suggest-metrics "$ROOT" --profile "$PROFILE_NAME" --flag-rates <table.column>[,<table.column>…] --cite "<document>"`, show it, then re-run with `--write` (its description becomes `Defined in: <document>.`; when you humanize it below, keep that sentence at the end of the description). A name that matches no boolean column comes back in `errors` — fix the name, don't drop it silently. A table name in more than one schema or subject area is refused before anything is written, with the matching columns listed: name it `schema.table.column` (the column is after the last dot), or pass `--area`. **Otherwise don't request any:** mention the summary line to the user once (*"N boolean columns could each have a share-of-true rate — say if any is a KPI you track"*) and add only the ones they name. `--flag-rates all` restores a rate for every flag column; don't use it in onboarding. Rate metrics already in a model are left as they are; to clear out old ones, the explorer's Review tab (`/agami-model`) has **Reject all** for proposed metrics.
 
@@ -1155,6 +1166,8 @@ Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","na
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minutes 30
 ```
 
+Run it with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
+
 Its "Generate feedback for Claude" block is still accepted when the person pastes it: apply it as `/agami-model` does, then continue at 4b.
 
 **4b — after the cards:** **recount the sign-offs** with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
@@ -1243,6 +1256,8 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py \
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30
 ```
 
+Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
+
 It takes the combined object or a single area's array; repeat `--items-file` to put several files on one page, labelling a single area's array with its area as `--items-file <area>=<path>` (an unlabelled one is refused there, since two areas can share a question; so is the same file twice). Each card shows its area.
 
 The page's block is still accepted when the person pastes it: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
@@ -1269,12 +1284,16 @@ Validation often surfaces a result that's *obviously wrong* — a bounded ratio 
    Use a `caveat` for this (advisory steer), NOT a `default_filter` (that wrongly drops the whole row from every query) and NOT a `value_transform` (you can't cleanly sanitize a sentinel). Apply all of it in **one `sm curate` batch**. A signed-off metric whose binding or calculation this changes goes back to review as `stale` (its old sign-off covered the old definition); when the user approves the corrected definition, add an `approve` op for it **after** the edits in the same batch, with the user's `--signer`/`--role`, which records the new sign-off.
 
 4. **Ask ONE plain-language question — about the NUMBER, never the model's vocabulary.** A first-time user does not know what "bindings" or "caveats" are and cannot be asked to choose between them. **Never surface those words in the question.** Frame it by the wrong number and the consequence, in the user's own domain terms, and make the **complete fix the recommended default**. The skill decides *what* to edit; the user only confirms *whether* to fix (and, when the valid range is ambiguous, confirms that range). The pattern below is the *shape* — fill it with the user's actual column, value, and domain, not these placeholders:
-   > The average <column> came out as **<impossible value>**, which can't be right — some rows hold junk values (e.g. <absurd sentinel>) that look like an encoded "missing", not a real <column>. I'd leave those out. One thing to confirm: can <column> legitimately go past <expected bound> in your data? If so I'll keep those — they look like the records that matter most. Want me to fix it?
-   > • **Fix it everywhere (recommended)** — agami leaves the junk values out whenever it works with <column> (this metric and any question that uses it).
-   > • Just fix this one example — leave everything else as-is.
-   > • Leave it for now — I'll note it; you can fix it later.
+   > The average <column> came out as **<impossible value>**, which can't be right — some rows hold junk values (e.g. <absurd sentinel>) that look like an encoded "missing", not a real <column>. I'd leave those out. One thing to confirm: can <column> legitimately go past <expected bound> in your data? If so I'll keep those — they look like the records that matter most.
 
-   On **"Fix it everywhere"** → apply the seed + metric-binding + column-caveat edits as one batch. Do **not** present a "patch the bindings vs add a caveat" choice — that's the skill's call, not the user's. (If the user is technical and asks for the detail, then show it.)
+   Say that in the chat, then call AskUserQuestion, one question, header `Bad number`, *"Fix the <column> values?"*:
+   - **Fix it everywhere (Recommended)**: agami leaves the junk values out whenever it works with <column> (this metric and any question that uses it).
+   - **Just this example**: fix this one example and leave everything else as it is.
+   - **Leave it for now**: note it; it can be fixed later.
+
+   "Other" takes the valid range in the person's words ("it can go up to 1.5"); use it for the bounds and treat the answer as **Fix it everywhere**.
+
+   On **Fix it everywhere** → apply the seed + metric-binding + column-caveat edits as one batch. Do **not** present a "patch the bindings vs add a caveat" choice — that's the skill's call, not the user's. (If the user is technical and asks for the detail, then show it.)
 
 ---
 
@@ -1304,7 +1323,7 @@ agami-connect just ran. Here's what we found:
 
 After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
-Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
+Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards; when that review ends, come back here to Phase 8, the starter questions, rather than agami-model's overview card, so onboarding still ends on a first question) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 
 ---
 
@@ -1365,7 +1384,7 @@ Options (no `(Recommended)` — it's the user's call): `Yes — look for links` 
 **On "Yes":**
 1. **Propose candidates by name+type** — compare the just-onboarded profile's columns against the other profile(s)' columns (read each model's tables/columns; no DB access needed). A candidate is a column pair with the **same or obviously-equivalent name** (`dept_id` ↔ `department_id`, `customer_id` ↔ `cust_id`) **and a compatible type**, where one side is a key/grain column. Rank by name closeness.
 2. **Be honest about confidence.** Say plainly: *"These are name/type guesses — I can't sample-join across two separate databases to confirm them, so they're lower-confidence than the joins inside one DB. They'll prove out the first time a federated query uses them."* Never present them as confirmed.
-3. **Confirm each, never auto-write.** Show the candidates (`<profileA>.<schema>.<table>.<col>  →  <profileB>.<schema>.<table>.<col>`) and let the user pick which to keep (multi-select) or skip all.
+3. **Confirm each, never auto-write.** Show the candidates as a table (`<profileA>.<schema>.<table>.<col>  →  <profileB>.<schema>.<table>.<col>`, at most 15 rows, saying how many more), then one multiSelect AskUserQuestion, header `Links`, with at most 4 options: up to 3 candidates, best-ranked first, one option each, and **None of these**. With more than 3 candidates, the third option is **All <n> candidates** instead, and "Other" takes the numbers or columns of the ones to keep; past that, ask the next 3 on another card.
 4. **Write the confirmed ones** to `<artifacts_dir>/local/cross_profile_relationships.yaml` in the format [agami-query expects](../agami-query/SKILL.md) — **merge**, never clobber an existing file (load it, append new entries, dedup by the `from_profile/from_dataset/to_profile/to_dataset` tuple), `chmod 600`:
    ```yaml
    version: "0.1.1"

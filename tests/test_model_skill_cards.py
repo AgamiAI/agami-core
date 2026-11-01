@@ -205,3 +205,11 @@ def test_no_card_lists_more_than_four_options():
     assert lists
     too_many = [opts for opts in lists if len(opts) > 4]
     assert not too_many, too_many
+
+
+def test_the_numbered_list_fallback_is_stated():
+    assert "Where AskUserQuestion is unavailable, ask the same as a short numbered list" in _text()
+
+
+def test_a_review_started_from_connect_returns_to_its_starter_questions():
+    assert "agami-connect" in _review() and "Phase 8" in _review()

@@ -29,6 +29,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Plain voice.** Say "database", not "profile". A successful change gets a one-line ack with its counts.
 - **Qualified names everywhere.** Tables are `<area>.<table>`. Columns are `<area>.<table>.<column>` (area = subject area). No bare names.
 - **"Other" you can't act on is re-asked, never guessed.** Say in one line what didn't match and ask the same card again.
+- **Where AskUserQuestion is unavailable, ask the same as a short numbered list** ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7); the options and their order stay the same.
 
 ---
 
@@ -136,7 +137,7 @@ Flagged and suspected columns are picked the same way:
 
 Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
 
-When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card.
+When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
 
 ---
 

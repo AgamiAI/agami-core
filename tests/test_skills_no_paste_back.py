@@ -163,3 +163,54 @@ def test_one_bullet_naming_the_full_view_does_not_cover_its_neighbour():
 def test_reopening_an_app_or_a_workbook_is_not_a_page_instruction():
     text = "Fully quit the app, then reopen it. Do not open it with the Read tool.\n"
     assert violations_in(text) == []
+
+
+SHARED_DIR = REPO_ROOT / "plugins" / "agami" / "shared"
+
+
+def _paragraphs(text: str) -> list[str]:
+    """Blank-line separated paragraphs, where a fenced block joins the prose just before and after it."""
+    chunks: list[str] = []
+    buf: list[str] = []
+    fence = False
+    for line in text.splitlines():
+        if line.strip().startswith("```"):
+            fence = not fence
+        if not line.strip() and not fence:
+            if buf:
+                chunks.append("\n".join(buf))
+                buf = []
+            continue
+        buf.append(line)
+    if buf:
+        chunks.append("\n".join(buf))
+    merged: list[str] = []
+    for chunk in chunks:
+        if merged and (chunk.lstrip().startswith("```") or merged[-1].rstrip().endswith("```")):
+            merged[-1] += "\n\n" + chunk
+        else:
+            merged.append(chunk)
+    return merged
+
+
+def serve_page_without_background(text: str) -> list[str]:
+    return [p for p in _paragraphs(text) if "serve_page.py" in p and "run_in_background" not in p]
+
+
+def test_every_serve_page_call_runs_in_the_background():
+    """serve_page.py runs until its time is up; in the foreground it would hold the turn and its URL
+    would never reach the person."""
+    files = sorted(SKILLS_DIR.glob("*/SKILL.md")) + sorted(SHARED_DIR.glob("*.md"))
+    found = [
+        f"{f.relative_to(REPO_ROOT)}: {p[:120]!r}"
+        for f in files
+        for p in serve_page_without_background(f.read_text(encoding="utf-8"))
+    ]
+    assert not found, found
+
+
+def test_the_background_guard_catches_a_bare_call_and_joins_a_fence_to_its_prose():
+    bare = "Serve it:\n\n```bash\npy serve_page.py x.html\n```\n\nGive the URL."
+    assert serve_page_without_background(bare)
+    ok = "Serve it:\n\n```bash\npy serve_page.py x.html\n```\n\nRun it with `run_in_background`."
+    assert not serve_page_without_background(ok)

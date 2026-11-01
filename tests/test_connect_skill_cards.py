@@ -476,3 +476,88 @@ def test_no_card_example_in_the_skill_lists_more_than_four_options():
     assert lists  # the scan still finds the skill's cards
     too_many = [opts for opts in lists if len(opts) > 4]
     assert not too_many, too_many
+
+
+# --- Final-review fixes: waiting on the helper, card limits, the closing flow ---------------------
+
+
+def _helper_step_2() -> str:
+    return _between("**2. Start the helper in the background.**", "**3. Post the link**")
+
+
+def test_the_15_second_rule_is_for_the_password_path_only():
+    s = _helper_step_2()
+    fifteen = [p for p in s.split("\n\n") if "15 seconds" in p]
+    assert fifteen and all("password path" in p for p in fifteen)
+    # SSO tests the connection before it prints, so it waits for the exit, up to 5 minutes, said once.
+    sso = next(p for p in s.split("\n\n") if "`auth: sso`" in p or '"auth": "sso"' in p)
+    assert "browser sign-in may open" in sso
+    assert "5 minutes" in sso and "once" in sso
+
+
+def test_the_helper_wait_uses_monitor_never_a_foreground_sleep():
+    s = _helper_step_2()
+    assert "Monitor tool" in s
+    assert "first line" in s and "exit" in s
+    assert "fallback" in s.lower()
+    assert not re.search(r"\bsleep \d", SKILL.read_text(encoding="utf-8"))
+
+
+def test_the_final_line_is_also_waited_for_with_monitor():
+    s = _between("**4. Read the final line**", "| final line |")
+    assert "Monitor" in s
+
+
+def test_1_2_asks_for_the_tables_on_a_card():
+    s = _between("### 1.2 ", "### 1.3 ")
+    assert "Paste the tables" not in s
+    assert "AskUserQuestion" in s and "Other" in s
+    assert "--keep names:" in s
+
+
+def test_1_3_is_skipped_on_a_first_onboard_and_stays_within_four_options():
+    s = _between("### 1.3 ", "### 1.4 ")
+    assert "first onboard" in s and "Only some schemas" in s
+    assert "at most 4" in s
+
+
+def test_1_5_folds_the_spec_workbook_into_the_doc_option():
+    s = _between("### 1.5 ", "### 1.6 ")
+    options = next(line for line in s.splitlines() if line.startswith("Options:"))
+    labels = re.findall(r"`([^`]+)`", options.split("(")[0] if "(Multi" in options else options)
+    labels = [lbl for lbl in labels if "—" in lbl]
+    assert len(labels) <= 4, labels
+    assert not any(lbl.startswith("Model spec workbook") for lbl in labels)
+    assert any("spec workbook" in lbl for lbl in labels)
+
+
+def test_6a_asks_its_fix_on_a_card():
+    s = _between("### 6a ", "## Phase 7:")
+    assert "AskUserQuestion" in s
+    assert "> •" not in s
+    for label in ("Fix it everywhere (Recommended)", "Just this example", "Leave it for now"):
+        assert label in s
+
+
+def test_review_from_phase_7_returns_to_the_starter_questions():
+    s = _between("## Phase 7:", "## Phase 8:")
+    line = next(ln for ln in s.splitlines() if "Review what needs sign-off" in ln)
+    assert "Phase 8" in line
+
+
+def test_phase_2c_points_at_the_phase_4_cards_not_the_explorer():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "in bulk in the explorer" not in text
+    assert "on the Phase 4 cards" in _between("### 2c ", "### 2d ")
+
+
+def test_the_numbered_list_fallback_is_stated():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "Where AskUserQuestion is unavailable, ask the same as a short numbered list" in text
+    style = _between("## Conversation style", "## Progress tracking")
+    assert "never inline-bullet options" not in style or "unavailable" in style
+
+
+def test_8_5_link_candidates_card_stays_within_four_options():
+    s = _between("## Phase 8.5:", "## Error handling")
+    assert "at most 4" in s

@@ -199,3 +199,17 @@ def test_a_replacement_and_a_convention_stop_are_asked_on_cards():
 def test_every_card_header_fits_twelve_characters():
     headers = re.findall(r"header `([^`]+)`", SKILL)
     assert headers and [h for h in headers if len(h) > 12] == []
+
+
+def test_a_relative_question_is_renamed_never_re_anchored():
+    """Matches agami-reconcile: the question names its window; the SQL stays as it ran."""
+    assert "CURRENT_DATE" not in SKILL
+    shape = (SHARED / "golden-dataset-shape.md").read_text(encoding="utf-8")
+    assert "Either anchor" not in shape and "Never re-anchor" in shape
+    relative = _section("**A relative question", "---")
+    assert "Never re-anchor" in relative
+
+
+def test_with_no_dataset_yet_the_dataset_card_has_two_options():
+    s = _section("4. **Which dataset**", "**Never glob")
+    assert "Create one named" in s and "Name it myself" in s
