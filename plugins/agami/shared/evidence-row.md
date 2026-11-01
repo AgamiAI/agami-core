@@ -33,7 +33,7 @@ Run it once per input, with every file the person gave:
 
 ```bash
 mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py intake --file <path> [--file <path> ...] \
+bash "<plugin_root>/scripts/py" reconcile.py intake --file <path> [--file <path> ...] \
   [--source "<the person's own words for where this came from>"] > "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json"
 ```
 

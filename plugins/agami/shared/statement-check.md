@@ -13,7 +13,7 @@ Work in the row's directory, `<artifacts_dir>/local/reconcile/<ts>/rows/<n>/`. W
 `statement.sql` first, verbatim, with the Write tool. Then check the row, once:
 
 ```bash
-"$PY" "$AGAMI_PLUGIN_ROOT/scripts/check_statement.py" --profile <profile> --area <area> \
+"$PY" "<plugin_root>/scripts/check_statement.py" --profile <profile> --area <area> \
   --row-dir "<artifacts_dir>/local/reconcile/<ts>/rows/<n>"
 ```
 
@@ -34,7 +34,7 @@ one's.
   credentials do not connect to. `driver_missing` means `$PY` lacks the Python driver for this
   database; the sentence names what to install.
 - **Exit `2`**: it could not start. Either `statement.sql` is missing, or the interpreter lacks
-  agami-core; run `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` and call it with `"$PY"`.
+  agami-core; run `bash "<plugin_root>/scripts/sm" install` and call it with `"$PY"`.
 - **Any other exit**: the script crashed. Stop the run and tell the person. Never run the statement
   or a probe yourself instead.
 
@@ -112,7 +112,7 @@ one's.
    `no_question` for a statement that came alone. This is the one step here that judges by reading;
    the ledger turns a doubtful fit into an open part, and a missing file into one too.
 
-Then, once per row and after the comparison, `bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py
+Then, once per row and after the comparison, `bash "<plugin_root>/scripts/py" reconcile.py
 ledger --row-dir . --with-claims` grades what was found, or without `--with-claims` when agami's own
 statement is missing. One run: every file above is still there, so waiting loses nothing, and the same
 ledger written twice is a step somebody will skip or double.

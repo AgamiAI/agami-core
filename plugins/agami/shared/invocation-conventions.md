@@ -1,5 +1,11 @@
 # Invocation conventions — read this BEFORE telling the user to invoke a skill
 
+**`<plugin_root>`, wherever this doc or another file in `shared/` writes it, stands for the plugin's
+root directory, the same absolute path the skill that sent you here shows in its own commands (Claude
+Code fills `${CLAUDE_PLUGIN_ROOT}` in when a skill loads; it does not do so for files you read
+afterward, and no `AGAMI_PLUGIN_ROOT` variable exists in your shell). Write that absolute path into the
+command, quoted: never paste `<plugin_root>` or an unset variable into Bash.**
+
 agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
 
 | Skill | Slash command | Natural-language triggers (via `when_to_use`) |
@@ -71,7 +77,7 @@ ops file as a second plain argument: `sm curate "$ROOT" ops.json`.
 The skills run in Claude Code's Bash tool, which is Git Bash on Windows. Three habits keep every
 command working there too:
 
-- **Run Python through `py`, never bare `python3`:** `bash "$AGAMI_PLUGIN_ROOT/scripts/py" <script>.py …`
+- **Run Python through `py`, never bare `python3`:** `bash "<plugin_root>/scripts/py" <script>.py …`
   (a plugin script by name) or `… py -c '…'`. On Windows `python3` is often the Microsoft Store stub,
   which runs nothing; `py` finds the interpreter agami-connect configured, exactly as `sm` does.
   Where a step already resolved `$PY` (agami-connect's `connect_resolve.py`), `"$PY"` is fine.
@@ -83,7 +89,7 @@ command working there too:
   slashes (`C:/Users/…`), never backslashes: `\U` is not a valid JSON escape.
 - **Strip `\r` from Python output you capture into a variable:** `x="$(… py … | tr -d '\r')"`. Windows
   Python ends its lines with `\r\n`; `$(…)` drops only the `\n`, and a path ending in `\r` names no file.
-- **Open a page with `open_in_browser`:** `bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "<path or URL>"`,
+- **Open a page with `open_in_browser`:** `bash "<plugin_root>/scripts/open_in_browser" "<path or URL>"`,
   never `open` / `xdg-open` / `start` directly.
 
 `chmod` is harmless on Windows (it does nothing; NTFS protects the file through your user profile), so

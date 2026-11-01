@@ -39,7 +39,7 @@ Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/ru
 ## Phase 1: Choose the dataset
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" run_golden_eval.py --profile <profile> --list
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py --profile <profile> --list
 ```
 
 The JSON names each dataset with its `total`, `confirmed` and `unconfirmed` counts, plus `datasets_dir` — the directory a dataset would live in — and any `findings` the reader raised while reading them. Three outcomes:
@@ -57,7 +57,7 @@ If `findings` is non-empty, keep it: those are dataset-level breakages and they 
 ## Phase 2: Run
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" run_golden_eval.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py \
   --profile <profile> --dataset <dataset> \
   > "<artifacts_dir>/local/tmp/agami-eval-<ts>.json"
 ```
