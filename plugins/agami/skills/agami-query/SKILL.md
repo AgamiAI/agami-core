@@ -14,7 +14,7 @@ This skill orchestrates:
 1. **Setup** (once per session) — resolve the profile + the semantic model at `<artifacts_dir>/<profile>/`, verify the configured database tool still works.
 2. **Generate SQL** — examples-first traversal: pick the subject area → match curated examples → (cold start) resolve entities/metrics + identify opaque literals → compound `get_table_context` → produce one SQL statement → safety checks.
 3. **Execute** — run via the chosen tool; the Python tier runs the fan/chasm pre-flight and the scope/PII gates; auto-retry on classified errors; risk-assess large-table queries.
-4. **Present** — markdown table; CSV via `--csv` or "export this"; Chart.js HTML via `--chart` or "make that a chart".
+4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then one card (Looks right / Something's off / Show as a chart / Sign off the definitions used); CSV via `--csv` or "export this"; the Chart.js report only on "Show as a chart", `--chart` or "make that a chart", served from localhost.
 5. **Log + post-install GitHub-star ask** — write `<artifacts_dir>/local/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
 
 For the model format: [`semantic_model/__init__.py`](../../../../packages/agami-core/src/semantic_model/__init__.py) (layout) + `packages/agami-core/src/semantic_model/models.py`.
@@ -23,6 +23,7 @@ For dialect-specific syntax: [`shared/dialect-rules.md`](../../shared/dialect-ru
 For connection method + execution: [`shared/connection-reference.md`](../../shared/connection-reference.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
 For chart template: [`shared/chart-template.html`](../../shared/chart-template.html).
+For cards (every decision is one): [`shared/question-cards.md`](../../shared/question-cards.md).
 
 ## Invocation conventions
 
@@ -38,7 +39,8 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 ## Conversation style
 
 - **One question per turn unless they're truly bundled.**
-- **Use AskUserQuestion sparingly** — only when the user must pick before the skill can proceed (large-table HIGH-risk approval, the post-install GitHub-star ask, the demo-query Yes/No/Skip in agami-connect). **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
+- **A decision is a card** ([`shared/question-cards.md`](../../shared/question-cards.md)): the answer card after every answer (Phase 4d.2), large-table HIGH-risk approval, the post-install GitHub-star ask. **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
+- **No page opens by default.** The HTML report is rendered only when the person asks for a chart (Phase 4e), and it is served from localhost, never opened as a `file://` page.
 - **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
 - **Don't echo the SQL in chat prose** — that's enforced as a hard rule in Phase 2. Don't paste the raw Bash CSV — Phase 3.
@@ -51,7 +53,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 
 **If plan mode is active and the user picks `Stay in plan mode`:**
 
-- **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus `open <path>`. Run that flow if matched.
+- **Reopen-last-chart intent** (Phase 2a.1 below) — re-displaying an existing HTML chart only needs `Read` plus serving the file with `serve_page.py`. Run that flow if matched.
 - **Anything else** — refuse and end the turn. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text (verbatim):
 
   > I can't run SQL in plan mode. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me.
@@ -167,7 +169,7 @@ If the cached method doesn't work, re-run tool detection per [`agami-connect/SKI
 
 ### HARD RULE — never echo SQL in chat prose
 
-The generated SQL belongs in two places only: (1) the Bash invocation that executes it (which the host shows as a collapsible tool call — outside our control), and (2) the collapsible "SQL" section of the HTML report written in Phase 4. **Never paste, quote, or summarize the SQL in the assistant's narrated text.** No `SELECT ...` lines, no fenced ```sql blocks, no "I'm running this query: ..." prose. Users get the SQL by clicking the SQL details element in the HTML report.
+The generated SQL belongs in two places only: (1) the Bash invocation that executes it (which the host shows as a collapsible tool call — outside our control), and (2) the collapsible "SQL" section of the chart page, when the person asks for one (Phase 4e). **Never paste, quote, or summarize the SQL in the assistant's narrated text.** No `SELECT ...` lines, no fenced ```sql blocks, no "I'm running this query: ..." prose. Users who want the SQL see it in the SQL details element of the chart page.
 
 This rule applies to every retry, every fallback, every regenerate. The chat prose stays focused on approach, fetching, and insight.
 
@@ -190,7 +192,7 @@ Check intents in this order. The first match wins; only that branch runs.
 
 4. **Flag-only** (`--csv` / `--chart bar`) → re-run the previous query with the flag applied.
 
-5. **Follow-up like "make that a chart"** → see Phase 4e.
+5. **Follow-up like "make that a chart"** → the person asked for a chart: Phase 4e on the last answer.
 
 ### 2a.1 — Reopen-last-chart flow (no new SQL)
 
@@ -198,12 +200,12 @@ If the user's intent is to re-display the most recent chart:
 
 1. Read `<artifacts_dir>/local/query_log.jsonl` (each line is a JSON object) and take the last non-empty line **whose `status` is `"ok"` or absent** — the log also records refused and failed executions, and neither of those rendered a chart. Entries written before the log carried a `status` field have none; treat those as `ok`.
 2. Look at the `chart_path` field. Possible cases:
-   - **`chart_path` set AND the file exists on disk** → run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "<path>"` (works on macOS, Linux and Windows). Surface a one-liner in chat:
+   - **`chart_path` set AND the file exists on disk** → serve it from localhost, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<path>" --minutes 30` with `run_in_background`, and read its first line, `{"url": …}`. Surface a one-liner in chat:
      ```
-     Reopened: <artifacts_dir>/local/charts/<profile>/20260507-150912.html
+     Reopened: http://localhost:<port>/<name> (open for 30 minutes)
      ```
      Done. Skip every other phase. Don't re-execute SQL. Don't re-render. Don't add 5 follow-ups (this is a UI action, not a fresh answer).
-   - **`chart_path` is null** (last query was a 1×1 scalar that didn't render a chart) → surface: "The last answer didn't render a chart (it was a single number). Ask me a new question and I'll generate a fresh report."
+   - **`chart_path` is null** (the last answer was never shown as a chart) → render it now: Phase 4e on the last answer, the same as "Show as a chart". A 1×1 scalar has nothing to chart: surface "The last answer was a single number, so there's no chart to show."
    - **`chart_path` set but the file is missing** (user deleted `<artifacts_dir>/local/charts/<profile>/`) → surface: "The chart file is gone — `<path>` no longer exists. Ask me the question again and I'll regenerate it."
    - **Query log empty or missing** → surface: "I don't have any prior queries to reopen. Ask me a question first."
 
@@ -228,13 +230,13 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 1. **System** — "Write one valid SQL statement for `<DB_TYPE>` (ANSI_SQL + `<DB_TYPE>` tweaks per dialect-rules.md). Output ONLY SQL. Prefer indexed/`recommended_filters` columns on large tables. Apply each column's `value_transform` when selecting/filtering it. **A `sensitive` column is the model author asking for care, not a locked door.** Prefer using it in `COUNT`/`COUNT(DISTINCT …)`, `GROUP BY`, `WHERE`, and `JOIN` over projecting its raw per-row values. So: (a) 'how many unique customer emails?' → `SELECT COUNT(DISTINCT email)` and report the count. (b) To disambiguate identical display labels (two customers with the same name), put the entity's **non-sensitive key (`id`)** in the output rather than the raw email/phone. (c) When the question genuinely needs the values — 'I need the mailing list' — project them and **say in the answer that you did**; the receipt records it too. Nothing refuses this, so the care is yours to exercise and yours to be transparent about. A column that must never be readable is not in the model at all, and any statement naming it is refused as out of scope. Use a metric's `bindings` SQL VERBATIM when the question names that metric (or a synonym)."
 2. **Schema context** — the `get_table_context` output for the chosen tables (columns + types + caveats + value_transforms), the area's relationships (rendered as `from.col → to.col [cardinality]`), and the area's metrics (`<name>: <binding> -- <calculation>` + synonyms). **`default_filters` ARE yours to apply.** Nothing applies them for you — but the receipt DOES report whether you did, per table reference, so an omission is visible to the user in the report beside the answer. If a table declares one and the question does not deliberately ask about the rows it excludes, write it into the `WHERE` clause. Two things to watch, because `get_table_context` has already rewritten them: the `{alias}` placeholder is gone — each filter comes back qualified with the **bare table name**, so re-qualify it to whatever alias you actually used, or the database rejects the statement. And a filter that still carries a `:param` marker (e.g. `orders.tenant_id = :tenant_id`) has no value to bind — leave it OUT and say so in the answer rather than emitting SQL that won't parse. Also DO honor any caveats.
 
-   **Unreviewed metrics are USED, not refused.** When the question names a metric whose `review_state ≠ approved`, still use its binding and answer — do NOT block or refuse on it. The trust layer surfaces it **on the receipt**, not as a hard gate: the metric rides on the `receipt.columns.items` entry for the output column that computes it (`kind: "output"`, `status: "matched"`) carrying its own `review_state`, and the report's approve/change banner is driven off exactly that field (Phase 4e.iii.5). The loader already drops only `rejected` metrics; an `unreviewed`/`proposed` one is yours to use, with the surfaced review state carrying the honesty. (Same for unreviewed joins/entities and `stale` entries — surface, never refuse.)
+   **Unreviewed metrics are USED, not refused.** When the question names a metric whose `review_state ≠ approved`, still use its binding and answer — do NOT block or refuse on it. The trust layer surfaces it **on the receipt**, not as a hard gate: the metric rides on the `receipt.columns.items` entry for the output column that computes it (`kind: "output"`, `status: "matched"`) carrying its own `review_state`, and "How this was answered" (and the chart page's approve/change banner) is driven off exactly that field (Phase 4d.1). The loader already drops only `rejected` metrics; an `unreviewed`/`proposed` one is yours to use, with the surfaced review state carrying the honesty. (Same for unreviewed joins/entities and `stale` entries — surface, never refuse.)
 3. **Datasource context** — `datasource.md` (step 1d.2), heading `## Datasource context`. Binding domain context.
 4. **User memory** — `USER_MEMORY.md` (step 1d.1), heading `## User memory (preferences and policies)`.
 5. **Few-shot examples** — the ranked matches from step 2.
 6. **User question.**
 
-**The fan/chasm safety pass runs as a pre-execution step, on every tier.** Before you execute the generated SQL, pass it through `sm prepare "$ROOT" --area <area> --sql-file <path>` (Phase 3a). It runs the fan-trap / chasm-trap pre-flight and the aggregation-semantics checks, and returns the SQL to actually run, which is always the SQL you gave it: this command never rewrites your statement and never refuses it. What it returns alongside is `findings` — see Phase 3a for how to act on them. Tier-independent — works whether you execute via psql, the Python driver, or DuckDB — so the checks never depend on the execution path. It does **not** apply the area's `default_filters`, and nothing else does either: those are declarative only, so put any you need into the statement yourself at step 6, and `sm prepare` emits no `applied_filters` key of its own (an always-empty list would read as "we checked, none applied"). Which ones your finished statement satisfied is settled later, by `sm receipt`, on `tables.items[].filters` (Phase 4e.iii.5). The findings DO ride on the receipt too, in its `aggregates` section, so the panel draws them beside the answer.
+**The fan/chasm safety pass runs as a pre-execution step, on every tier.** Before you execute the generated SQL, pass it through `sm prepare "$ROOT" --area <area> --sql-file <path>` (Phase 3a). It runs the fan-trap / chasm-trap pre-flight and the aggregation-semantics checks, and returns the SQL to actually run, which is always the SQL you gave it: this command never rewrites your statement and never refuses it. What it returns alongside is `findings` — see Phase 3a for how to act on them. Tier-independent — works whether you execute via psql, the Python driver, or DuckDB — so the checks never depend on the execution path. It does **not** apply the area's `default_filters`, and nothing else does either: those are declarative only, so put any you need into the statement yourself at step 6, and `sm prepare` emits no `applied_filters` key of its own (an always-empty list would read as "we checked, none applied"). Which ones your finished statement satisfied is settled later, by `sm receipt`, on `tables.items[].filters` (Phase 4d.1). The findings DO ride on the receipt too, in its `aggregates` section, so the panel draws them beside the answer.
 
 #### 2b.federation — cross-database queries
 
@@ -421,7 +423,7 @@ After 2 retries with no success, stop. Don't loop.
 
 Parse the CSV stdout. Header row = column names. Body rows = data.
 
-**Sanitize column headers before display.** SQL aliasing slips happen — bare `n`, `cnt`, single-letter columns, `?column?` (Postgres unaliased), and shouty all-uppercase Snowflake names are common. Apply this header transform **once** before any rendering surface (4d markdown, 4e HTML, chart axis labels):
+**Sanitize column headers before display.** SQL aliasing slips happen — bare `n`, `cnt`, single-letter columns, `?column?` (Postgres unaliased), and shouty all-uppercase Snowflake names are common. Apply this header transform **once** before any rendering surface (4d markdown, the 4e chart page, chart axis labels):
 
 | Raw header | Display header | Why |
 |---|---|---|
@@ -466,11 +468,11 @@ Format every cell per its column's `type` and **`unit`** (both come from `get_ta
 
 If the user has stated a date-format preference in `<artifacts_dir>/USER_MEMORY.md` (e.g. "use ISO dates" or "use DD/MM/YYYY"), respect that. The defaults above apply only when USER_MEMORY is silent.
 
-If row count > 30:
-- The chat preview shows the first **30** rows only — markdown tables past ~30 rows scroll forever and bury the insight.
-- The HTML report (Phase 4e) contains the full set in a paginated table.
-- For row counts > 30, **auto-write the CSV to `<artifacts_dir>/local/exports/<profile>/<ts>.csv`** at the same time as the HTML report, without waiting for the user to ask. Surface both paths in Phase 4d's footer.
-- Footer line under the table: `Showing first 30 of <N> rows · full set in CSV: <csv-path> · HTML report: <html-path>`. Use thousands separators on `<N>` (e.g. `4,213`).
+If row count > 15:
+- The chat preview shows the first **15** rows only ([`shared/question-cards.md`](../../shared/question-cards.md) rule 3) — longer markdown tables scroll and bury the insight.
+- The chart page (Phase 4e, when the person asks for it) holds the full set in a paginated table.
+- For row counts > 15, **auto-write the CSV to `<artifacts_dir>/local/exports/<profile>/<ts>.csv`** without waiting for the user to ask. Surface its path in Phase 4d's footer.
+- Footer line under the table: `Showing 15 of <N> rows; <N−15> more · full set in CSV: <csv-path>`. Use thousands separators on `<N>` (e.g. `4,213`).
 - If `<N>` is huge (> 100k), additionally suggest tightening the filter inline: "If you want to slice by region or date, say so and I'll re-run."
 
 CSVs open natively in Excel / Numbers / Google Sheets, so "export to Excel" routes to this same CSV path — no separate `.xlsx` flow in v1.
@@ -485,9 +487,9 @@ If row count == 0:
 
 The chat reply follows this **strict order**, with NO other content interleaved (no SQL, no Bash output, no "let me know if…" filler):
 
-  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4e HTML report path → 4f Numbered follow-ups → (optional 4g CSV path)
+  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
 
-Each step is short. The whole reply should fit in a typical chat viewport without scrolling.
+Each step is short. The whole reply should fit in a typical chat viewport without scrolling. **No page is rendered or opened on this path:** the chart page (4e) runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart"). Cards follow [`shared/question-cards.md`](../../shared/question-cards.md).
 
 ### 4a — Approach (one sentence, plain English)
 
@@ -517,25 +519,128 @@ One sentence stating the answer. Lead with the most surprising or actionable fin
 - "Revenue is up **12% MoM**; the surge came from EU customers."
 - "60% of orders shipped on time this month, up from 48% last month."
 
-For multi-section: a 1–3 sentence executive summary across all sections (the same summary that goes into `REPORT_SUMMARY` for the HTML).
+For multi-section: a 1–3 sentence executive summary across all sections (the same summary passed as `--summary` if the chart page is shown).
 
-### 4d — Markdown table (single-section reports only)
+### 4d — Markdown table
 
-**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 30 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
+**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 15 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" format-table --csv-file "<artifacts_dir>/local/tmp/agami-result.csv" --units "$PREPARE_UNITS"
 ```
-`prepare`'s `units` is keyed by output column and **traced through the SQL** — so `SUM(amount) AS total_outstanding` correctly carries amount's currency (a bare name match would miss the summed total). `format-table` then formats every numeric cell in full via `units.py` (symbol + Indian/western grouping, exact decimals) and passes non-numbers through. Same map + formatter the **MCP** uses, so verification numbers are identical regardless of host/LLM. (If a header was prettified in 3c, key the units to the prettified name.) Wide tables (> 8 cols) → vertical layout + "wide table — see HTML for the full grid".
+`prepare`'s `units` is keyed by output column and **traced through the SQL** — so `SUM(amount) AS total_outstanding` correctly carries amount's currency (a bare name match would miss the summed total). `format-table` then formats every numeric cell in full via `units.py` (symbol + Indian/western grouping, exact decimals) and passes non-numbers through. Same map + formatter the **MCP** uses, so verification numbers are identical regardless of host/LLM. (If a header was prettified in 3c, key the units to the prettified name.) Wide tables (> 8 cols) → vertical layout + "wide table — the CSV (or Show as a chart) has the full grid".
 
-**Cap the chat preview at 30 rows** per Phase 3c — even when the user asked for "all leads with credit rating > 700" and the result is 4,213 rows, the chat shows the first 30 and points them at the CSV + HTML report. The full set lives in the artifacts on disk. The footer line ("Showing first 30 of 4,213 rows · full set in CSV: …") is the contract that tells the user where to find everything.
+**Cap the chat preview at 15 rows** per Phase 3c — even when the user asked for "all leads with credit rating > 700" and the result is 4,213 rows, the chat shows the first 15 and points them at the CSV. The full set lives on disk. The footer line ("Showing 15 of 4,213 rows; 4,198 more · full set in CSV: …") is the contract that tells the user where to find everything.
 
-**Multi-section reports skip the table in chat.** The chat already has the insight; the per-section tables live in the HTML report. Multi-section chat output is: approach + fetching + summary + a short bulleted list of section titles + HTML path + 5 follow-ups. No tables in chat.
+**Multi-section answers show one short table per section**, each under its section title and each rendered by `sm format-table` (at most 15 rows, with the same footer when there are more). Keep the section count to what the question needs (4e.i); the chart page, when asked for, holds them all with their charts.
 
-### 4e — Build ONE coherent HTML report (one file, N sections)
+### 4d.1 — How this was answered (the trust receipt via `sm receipt`; do NOT hand-build it)
 
-The output is **one self-contained HTML file** at `<artifacts_dir>/local/charts/<profile>/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never open multiple browser tabs.**
+The receipt documents provenance: the tables the statement touched, the joins and metrics it used, the columns it referenced, the assumptions it leaned on, and the model-version pin. **It is assembled deterministically from the SQL + the model** by `runtime.assemble_receipt` — the SAME builder the MCP server uses — so it never depends on you extracting fields by hand:
 
-Skip the report only when the result is a single 1×1 scalar (e.g., `SELECT COUNT(*) FROM orders` returning `42`) — for those, the chat answer is enough.
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" receipt "$ROOT" \
+  --sql-file "<artifacts_dir>/local/tmp/agami-q-<n>.sql" \
+  > "<artifacts_dir>/local/tmp/agami-receipt-<ts>.json"
+```
+
+It emits `model_version` plus **five sections** — `columns`, `tables`, `joins`, `aggregates`, `assumptions` — each an object of the form `{"items": [...], "undetermined": "<sentence>" | null}`. It parses the FROM/JOIN scope and matches model entries itself:
+
+| section | what `items[]` holds |
+| --- | --- |
+| `columns` | every column the statement referenced, as `{"column": "<schema>.<table>.<col>", "metric": null}` — **plus** each model metric whose binding SQL appears in the statement, as `{"column": null, "metric": {...}}`. A metric match is a statement-level fact today, so it has no owning column. The metric object carries `name`, `area`, `definition_prose`, `expression`, `confidence`, `review_state`, `origin`, `signed_off_by`/`_role`/`_at` |
+| `tables` | **one entry per REFERENCE, not per table** — a table read twice appears twice. `ref` (the name as the statement wrote it), `alias`, `qname` (what the model resolved it to), `declared`, `rows`, `rows_as_of`, `freshness`, `scope`, `filters`, `scan_risk`. `scan_risk` is a sentence, or null, when the table is large (about a million rows or more) and the statement pulls it in from the outer side of a join from a smaller table; say so in the answer and offer the faster-shaped query it suggests. An **undeclared** reference (a CTE name, say) has `declared: false` and null `qname`/`rows`/`rows_as_of`/`freshness`, because there is no model row for those to be about. `scope` is `main` or `cte:<name>`, each carrying a trailing 1-based `#<n>` when that scope is one of **two or more** arms of a set operation (`UNION` / `INTERSECT` / `EXCEPT`) — `main#1`, `main#2`, `cte:recent#2` — or `subquery`, which **never** takes an ordinal because it names no scope to have arms. A plain `SELECT` and a single-arm CTE body take no suffix either. It is the query scope the reference was written in, and the only thing that tells two entries for the same `ref` apart: a table read in two arms is otherwise two identical rows. The ordinal is the arm's position **in the SQL**, not this list's order, which is the parse walk's — so it can skip and go backwards down the list, and the largest one is not the arm count. Strip it from the RIGHT (`rsplit('#', 1)[0]`) if you need the bare scope. `filters` is one `{"expr", "status"}` per declared `default_filters` entry of that table, `status` ∈ `applied` / `omitted` / `undetermined`: whether THAT reference's own scope wrote that exact predicate. `[]` when the table declares none |
+| `joins` | **one entry per join the STATEMENT wrote**, not per declared relationship: `predicate` (the condition the join wrote, as the parser read it — an ON, a `USING` column list, or `NATURAL`; `null` when it wrote none of its own), `from_to` (the two endpoints as the statement named them), `scope` (the same query-scope label the `tables` entries carry), and `status` ∈ `declared` / `undeclared` / `undeclarable` / `undetermined`. `declared` means the predicate the statement wrote matches a relationship the model declares (named on `name`) — matched on the unordered set of `(table, column)` pairs the ON joins on, so operand order does not decide it and an extra filtering conjunct (`AND o.ts > c.ts`) does not weaken it; the declaration itself has to reduce **whole**: a fixed-value condition it declares (`AND d.current_flag = 'Y'`) must be written in the join's own ON, on that join's alias, or the join is `undetermined`; any other kind of conjunct (an inequality, a function, `IS NULL`) makes the declaration match nothing rather than match its unrestricted half. `undeclared` means it matches none, or it wrote no predicate for one to match (an explicit `CROSS JOIN`) — and every declaration between its two tables was one this layer could read; where one could not be (an `on:` that will not parse, or one holding a `:param`), the join is `undetermined` instead, because the gap is ours and not the model's. `undeclarable` means an endpoint is a relation the statement bound for itself (a CTE, a derived table, a `VALUES` list), which no relationship in the model can be about; `undetermined` means the analysis could not read the join — which is **not** a claim that the model does not declare it. The trust block — `name`, `cardinality`, `confidence`, `review_state`, `origin`, `signed_off_by`/`_role`/`_at`, `cross_schema`, `on` — is what the MATCHED declaration contributes, and every one of those keys is `null` on every other status. A `null` `review_state` therefore means "not matched", **not** "not signed off": do not raise an unreviewed-join warning off it |
+| `aggregates` | **one entry per aggregate the statement computes**, each `{aggregate, scope, status, result_affected, joins, findings, reason}`, `reason` a sentence saying why when `status` is `undetermined` and `null` otherwise, `status` ∈ `multiplied` / `not_multiplied` / `undetermined` and `scope` the same query-scope label the `tables` entries carry. `multiplied` means a join multiplied the rows behind THAT number, and `joins` names the join. `result_affected` says whether the duplication can have changed the value: `false` when nothing multiplied or every multiplying finding is `fan_out_invariant` (a MIN, MAX, boolean fold or DISTINCT aggregate under a fan: the rows repeated, the value did not move), so do not flag the duplication; `true` when any finding is a fan or chasm trap (a MIN or MAX under a chasm reads `true`); `null` when undetermined, including an immune aggregate that also reads a subquery or CTE. When it is `true`, whether that is wrong depends on what was asked, because the same total is right for line-item exposure and wrong for order revenue. `undetermined` means the check could not resolve what the aggregate reads (a `COUNT(*)`, an unqualified column, a CTE the walk does not enter), or a join behind it has no declaration that settles its cardinality (the `reason` names the join), so do **not** report it as clean. `findings` is a different question — whether the arithmetic is meaningful at all — and a number can be un-multiplied and still meaningless |
+| `assumptions` | the load-bearing columns whose description is `ai_unvalidated` / `ai_unknown`, at most three. Any beyond the third are COUNTED on this section's `undetermined`, never listed — so a null marker here means the list is whole, not merely short |
+
+**`undetermined` is the half you must not drop.** It is a plain sentence stating what that section did NOT establish. An empty `items` **with** a marker means the section was not checked; an empty `items` with a **null** marker means it was checked and there was nothing to report. Report only `items` and you turn "not checked" back into "nothing wrong", which is the exact reading the receipt exists to prevent. The chart page renders every marker; in "How this was answered", do the same for any section that carries one and bears on the answer.
+
+**Read `tables.items[].filters` before you write the answer.** Nothing applies a declared filter to your statement, so this is where you find out whether yours honored the ones the org declared. A filter whose `status` is `omitted` means the answer counted rows the org's own definition of that table excludes — say so in the answer, and offer to re-run with it written in. `undetermined` means the check could not settle it (a `HAVING`, an outer-join `ON`, a predicate the scope resolver could not read), so it is neither a pass nor a failure and is worth one sentence. The fact lives per reference, inside the `tables` section, and there is no flat statement-level key for it anywhere on the receipt: a filter satisfied inside a CTE body is not satisfied for the statement that reads that CTE, and one list for the whole statement cannot say which was which. The same holds across a set operation — a filter `applied` in one arm and `omitted` in another is a real, reportable asymmetry, and the arm ordinal on `scope` is how you name which arm dropped it. `model_version` comes from the newest `.snapshots/<hash>/` dir (null on a pre-trust-layer model — renders gracefully).
+
+**The ONE thing you add by hand — an ad-hoc metric.** If you composed a non-trivial metric for THIS answer that isn't a model metric (e.g. `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin", with no such model metric), the script can't know it. Append ONE entry to `receipt["columns"]["items"]` (there is no top-level `metrics` key):
+
+```json
+{"column": null,
+ "metric": {"name": "<snake_case>", "area": "<area>", "origin": "ad_hoc",
+            "review_state": "unreviewed", "definition_prose": "<plain English>",
+            "expression": "<SQL fragment>"}}
+```
+
+That is exactly what "How this was answered" and the chart page's "metrics you haven't approved" banner read, so an entry written any other way silently never appears. **Don't flag trivial primitives** (a bare `COUNT(*)` / `SUM(amount)`). For a multi-section answer, run `sm receipt` per section's SQL and merge each section's `items` (dedup tables by `ref`+`qname`, metrics by name, joins by `from_to`+`scope`+`predicate`+`status` — a join has no name to dedup on, and `status` is load-bearing in that key because a join that wrote no predicate of its own has a null one: an explicit `CROSS JOIN` and a comma join over the same two tables in the same scope are otherwise the same key, and they are different facts) while KEEPING each section's `undetermined` — or pass the dominant query's SQL.
+
+For every answer, chart or not, surface in "How this was answered" every join in `joins.items` that HAS a `review_state` and it is `!= "approved"` ("Note: this used 1 unreviewed join, orders → customers") — a `null` one is a join nothing matched to a declaration, which is on the section's `undetermined` marker rather than a sign-off warning. Same for any `columns.items` entry with `kind: "output"` and `status: "matched"` whose `review_state` isn't approved — and name the output column it computes, which the entry now carries. An entry whose status is `unmatched` is the opposite signal and worth saying too: every declared binding was read and this number is not the org's agreed definition.
+
+**Write it up in a few lines**, right after the table, under the plain heading **How this was answered**. Everything in it comes from the receipt (and the ad-hoc metric you appended); nothing is invented, and no SQL is quoted:
+
+```
+How this was answered
+- Definitions: revenue (signed off by you@example.com), avg_order_value (not signed off yet).
+- Tables: sales.orders, sales.customers. The "exclude test orders" filter on orders was applied.
+- Joins: orders → customers (declared, many-to-one); 1 guessed join not yet confirmed.
+- Checks: the total may be counted more than once, because of the join to order_items.
+```
+
+- **Definitions**: each metric in `columns.items`, with whether it is signed off: `approved` → *signed off by <signed_off_by>*; `stale` → *changed since it was signed off*; anything else → *not signed off yet*; an ad-hoc one → *worked out for this answer, not in the model*. An `unmatched` output column is said too (the number is not the org's agreed definition). No metric → leave the line out.
+- **Tables and filters**: each declared `tables.items[].qname` once; each declared filter that is `omitted` or `undetermined` (and offer to re-run with an omitted one written in); a `scan_risk` sentence when there is one.
+- **Joins**: the joins written, with any whose `review_state` is set and not `approved` named as not yet confirmed (a `null` one is not a sign-off warning).
+- **Checks**: any check that fired, in plain words: an aggregate with `result_affected: true` (or `undetermined`), an `undeclared` join, a `findings` sentence from `sm prepare`. Nothing fired → *"Checks: none fired."*
+- An `undetermined` marker that bears on the answer gets one plain sentence, so "not checked" never reads as "nothing wrong".
+
+Keep it to about four lines; a multi-section answer gets one block for all sections.
+
+#### 4d.1a — Assumption nudge
+
+**Assumption nudge (only when `assumptions.items` is non-empty).** If the receipt's `assumptions.items[]` has entries, add ONE short line at the end of "How this was answered" (before the answer card) so a wrong/unknown meaning is caught in context. Phrase by `source`:
+- `ai_unvalidated` (a guess) → *"read `net_margin` as '(revenue − cost) ÷ revenue'"*.
+- `ai_unknown` (no description) → *"used `xyz`, which I don't have a description for — is that the right column?"* (lead with these; they're riskier).
+
+e.g.:
+```
+ℹ This answer used xyz, which I don't have a description for — is that the right column? It also read net_margin as "(revenue − cost) ÷ revenue". If anything's off (or to say what xyz means), use Something's off on the card; Looks right confirms the rest.
+```
+Keep it to the columns in `assumptions.items[]` (≤3), one clause each, plain English. Skip the line entirely when `assumptions.items` is empty. Soft nudge, never a blocking question.
+
+#### 4d.1b — Assumption confirm / correct loop
+
+When the user responds to that nudge:
+
+- **Confirms** (**Looks right** on the answer card, or "yes", "confirmed") → mark those descriptions validated so they never resurface. Build one curate ops array — one `edit` per confirmed column setting `description_source` to `ai_validated` — write it to `<artifacts_dir>/local/tmp/agami-confirm-desc.json` (Write tool), and apply:
+  ```bash
+  bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-confirm-desc.json"
+  ```
+  Each op: `{"op":"edit","kind":"table","area":"<area>","name":"<table>","column":"<col>","field":"description_source","value":"ai_validated"}`. Ack in one line: *"✓ Locked in — won't ask about those again."*
+- **Corrects one, or describes an unknown** (**Something's off** with "net_margin is actually …" or "xyz means customer lifetime value" in "Other", or the same typed) → route to **agami-save-correction**: it writes the column `description` (which flips `description_source` to `human` automatically via the curate edit) AND saves the (question, SQL) example. This is the path for both a wrong `ai_unvalidated` guess and a filled-in `ai_unknown` blank — either way the column now has a trusted, human description. Don't hand-edit here — let save-correction classify + write.
+- **Ignores it / asks something else** → do nothing. An `ai_unvalidated` stays a guess; an `ai_unknown` stays unknown. Either may resurface if a later query uses that column in a load-bearing way. Never auto-confirm on silence — that's the rubber-stamp we're avoiding. (Note: you can't "confirm" an `ai_unknown` — there's nothing to confirm; it needs a description, so only a correction clears it.)
+
+### 4d.2 — The answer card
+
+After "How this was answered", call AskUserQuestion:
+
+- **Looks right**: save it as a test question, so later changes to the model are checked against this answer.
+- **Something's off**: say what in "Other"; I'll fix it and save the correction.
+- **Show as a chart**: the full report with a chart, served from localhost. Left out for a 1×1 scalar, and when the chart was already shown because the person asked for one.
+- **Sign off the definitions used**: shown only when the receipt names an unsigned metric (a model metric in `columns.items` whose `review_state` isn't `approved`); signs those off.
+
+One question, header `Answer`, *"How does this answer look?"*, single pick, no `(Recommended)` (only the person can say whether it's right). With the chart and sign-off options left out the card still has two. Where AskUserQuestion is unavailable, ask the same as a short numbered list (question-cards rule 7).
+
+| Answer | Do |
+|---|---|
+| Looks right | Set `feedback: "good"` on the `query_log.jsonl` entry and confirm the assumption descriptions (4d.1b). Then hand to **agami-save-golden**'s save door (its Phase 3) with the question, the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
+| Something's off | Set `feedback: "bad"` and hand the "Other" text, the question and the SQL that ran to **agami-save-correction**, which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). Picked with nothing typed in "Other": say *"Type what looks off in Other."* and ask the same card again. |
+| Show as a chart | Phase 4e: render the report and serve it from localhost, then post the link. |
+| Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)), then one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
+
+**"Other" with no option picked** is read for what it says: a description of what's wrong is **Something's off**; a new data question is answered as one (Phase 2), the card left behind. Anything else you can't place is said back in one line and the same card asked again; never guess.
+
+After the card is handled: the one-time star ask (4e.5), then the 5 follow-ups (4f).
+
+### 4e — Show as a chart: ONE coherent HTML report (one file, N sections), served from localhost
+
+This runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart", "show me a chart"); in the last two cases the answer card leaves its chart option out. Never by default.
+
+The output is **one self-contained HTML file** at `<artifacts_dir>/local/charts/<profile>/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never serve more than one page per answer.**
+
+A single 1×1 scalar (e.g. a count returning `42`) has nothing to chart: say so in one line instead.
 
 #### 4e.i — decompose the question into sections
 
@@ -608,43 +713,6 @@ It prints `{ok, data:{section_count}, anomalies}`. **Read `anomalies`** and ment
 
 Notes the script handles for you: a time-bucket `label_col` is formatted from its unit/date encoding; a categorical label uses the value as-is; the section's chart-axis `unit` is set automatically only when **all** value columns share one unit (so a currency col plotted next to a count never mis-formats); the `sql` is read verbatim from `sql_file` (no paraphrase, no `...`).
 
-#### 4e.iii.5 — build the trust receipt via `sm receipt` (do NOT hand-build it)
-
-The receipt documents provenance: the tables the statement touched, the joins and metrics it used, the columns it referenced, the assumptions it leaned on, and the model-version pin. **It is assembled deterministically from the SQL + the model** by `runtime.assemble_receipt` — the SAME builder the MCP server uses — so it never depends on you extracting fields by hand:
-
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" receipt "$ROOT" \
-  --sql-file "<artifacts_dir>/local/tmp/agami-q-<n>.sql" \
-  > "<artifacts_dir>/local/tmp/agami-receipt-<ts>.json"
-```
-
-It emits `model_version` plus **five sections** — `columns`, `tables`, `joins`, `aggregates`, `assumptions` — each an object of the form `{"items": [...], "undetermined": "<sentence>" | null}`. It parses the FROM/JOIN scope and matches model entries itself:
-
-| section | what `items[]` holds |
-| --- | --- |
-| `columns` | every column the statement referenced, as `{"column": "<schema>.<table>.<col>", "metric": null}` — **plus** each model metric whose binding SQL appears in the statement, as `{"column": null, "metric": {...}}`. A metric match is a statement-level fact today, so it has no owning column. The metric object carries `name`, `area`, `definition_prose`, `expression`, `confidence`, `review_state`, `origin`, `signed_off_by`/`_role`/`_at` |
-| `tables` | **one entry per REFERENCE, not per table** — a table read twice appears twice. `ref` (the name as the statement wrote it), `alias`, `qname` (what the model resolved it to), `declared`, `rows`, `rows_as_of`, `freshness`, `scope`, `filters`, `scan_risk`. `scan_risk` is a sentence, or null, when the table is large (about a million rows or more) and the statement pulls it in from the outer side of a join from a smaller table; say so in the answer and offer the faster-shaped query it suggests. An **undeclared** reference (a CTE name, say) has `declared: false` and null `qname`/`rows`/`rows_as_of`/`freshness`, because there is no model row for those to be about. `scope` is `main` or `cte:<name>`, each carrying a trailing 1-based `#<n>` when that scope is one of **two or more** arms of a set operation (`UNION` / `INTERSECT` / `EXCEPT`) — `main#1`, `main#2`, `cte:recent#2` — or `subquery`, which **never** takes an ordinal because it names no scope to have arms. A plain `SELECT` and a single-arm CTE body take no suffix either. It is the query scope the reference was written in, and the only thing that tells two entries for the same `ref` apart: a table read in two arms is otherwise two identical rows. The ordinal is the arm's position **in the SQL**, not this list's order, which is the parse walk's — so it can skip and go backwards down the list, and the largest one is not the arm count. Strip it from the RIGHT (`rsplit('#', 1)[0]`) if you need the bare scope. `filters` is one `{"expr", "status"}` per declared `default_filters` entry of that table, `status` ∈ `applied` / `omitted` / `undetermined`: whether THAT reference's own scope wrote that exact predicate. `[]` when the table declares none |
-| `joins` | **one entry per join the STATEMENT wrote**, not per declared relationship: `predicate` (the condition the join wrote, as the parser read it — an ON, a `USING` column list, or `NATURAL`; `null` when it wrote none of its own), `from_to` (the two endpoints as the statement named them), `scope` (the same query-scope label the `tables` entries carry), and `status` ∈ `declared` / `undeclared` / `undeclarable` / `undetermined`. `declared` means the predicate the statement wrote matches a relationship the model declares (named on `name`) — matched on the unordered set of `(table, column)` pairs the ON joins on, so operand order does not decide it and an extra filtering conjunct (`AND o.ts > c.ts`) does not weaken it; the declaration itself has to reduce **whole**: a fixed-value condition it declares (`AND d.current_flag = 'Y'`) must be written in the join's own ON, on that join's alias, or the join is `undetermined`; any other kind of conjunct (an inequality, a function, `IS NULL`) makes the declaration match nothing rather than match its unrestricted half. `undeclared` means it matches none, or it wrote no predicate for one to match (an explicit `CROSS JOIN`) — and every declaration between its two tables was one this layer could read; where one could not be (an `on:` that will not parse, or one holding a `:param`), the join is `undetermined` instead, because the gap is ours and not the model's. `undeclarable` means an endpoint is a relation the statement bound for itself (a CTE, a derived table, a `VALUES` list), which no relationship in the model can be about; `undetermined` means the analysis could not read the join — which is **not** a claim that the model does not declare it. The trust block — `name`, `cardinality`, `confidence`, `review_state`, `origin`, `signed_off_by`/`_role`/`_at`, `cross_schema`, `on` — is what the MATCHED declaration contributes, and every one of those keys is `null` on every other status. A `null` `review_state` therefore means "not matched", **not** "not signed off": do not raise an unreviewed-join warning off it |
-| `aggregates` | **one entry per aggregate the statement computes**, each `{aggregate, scope, status, result_affected, joins, findings, reason}`, `reason` a sentence saying why when `status` is `undetermined` and `null` otherwise, `status` ∈ `multiplied` / `not_multiplied` / `undetermined` and `scope` the same query-scope label the `tables` entries carry. `multiplied` means a join multiplied the rows behind THAT number, and `joins` names the join. `result_affected` says whether the duplication can have changed the value: `false` when nothing multiplied or every multiplying finding is `fan_out_invariant` (a MIN, MAX, boolean fold or DISTINCT aggregate under a fan: the rows repeated, the value did not move), so do not flag the duplication; `true` when any finding is a fan or chasm trap (a MIN or MAX under a chasm reads `true`); `null` when undetermined, including an immune aggregate that also reads a subquery or CTE. When it is `true`, whether that is wrong depends on what was asked, because the same total is right for line-item exposure and wrong for order revenue. `undetermined` means the check could not resolve what the aggregate reads (a `COUNT(*)`, an unqualified column, a CTE the walk does not enter), or a join behind it has no declaration that settles its cardinality (the `reason` names the join), so do **not** report it as clean. `findings` is a different question — whether the arithmetic is meaningful at all — and a number can be un-multiplied and still meaningless |
-| `assumptions` | the load-bearing columns whose description is `ai_unvalidated` / `ai_unknown`, at most three. Any beyond the third are COUNTED on this section's `undetermined`, never listed — so a null marker here means the list is whole, not merely short |
-
-**`undetermined` is the half you must not drop.** It is a plain sentence stating what that section did NOT establish. An empty `items` **with** a marker means the section was not checked; an empty `items` with a **null** marker means it was checked and there was nothing to report. Report only `items` and you turn "not checked" back into "nothing wrong", which is the exact reading the receipt exists to prevent. The HTML report renders every marker; when you talk about the receipt in chat, do the same for any section that carries one and bears on the answer.
-
-**Read `tables.items[].filters` before you write the answer.** Nothing applies a declared filter to your statement, so this is where you find out whether yours honored the ones the org declared. A filter whose `status` is `omitted` means the answer counted rows the org's own definition of that table excludes — say so in the answer, and offer to re-run with it written in. `undetermined` means the check could not settle it (a `HAVING`, an outer-join `ON`, a predicate the scope resolver could not read), so it is neither a pass nor a failure and is worth one sentence. The fact lives per reference, inside the `tables` section, and there is no flat statement-level key for it anywhere on the receipt: a filter satisfied inside a CTE body is not satisfied for the statement that reads that CTE, and one list for the whole statement cannot say which was which. The same holds across a set operation — a filter `applied` in one arm and `omitted` in another is a real, reportable asymmetry, and the arm ordinal on `scope` is how you name which arm dropped it. `model_version` comes from the newest `.snapshots/<hash>/` dir (null on a pre-trust-layer model — renders gracefully).
-
-**The ONE thing you add by hand — an ad-hoc metric.** If you composed a non-trivial metric for THIS answer that isn't a model metric (e.g. `(SUM(net_revenue) - SUM(cogs)) / SUM(net_revenue)` for "gross margin", with no such model metric), the script can't know it. Append ONE entry to `receipt["columns"]["items"]` (there is no top-level `metrics` key):
-
-```json
-{"column": null,
- "metric": {"name": "<snake_case>", "area": "<area>", "origin": "ad_hoc",
-            "review_state": "unreviewed", "definition_prose": "<plain English>",
-            "expression": "<SQL fragment>"}}
-```
-
-That is exactly what the report's "metrics you haven't approved" banner reads, so an entry written any other way silently never appears. **Don't flag trivial primitives** (a bare `COUNT(*)` / `SUM(amount)`). For a multi-section report, run `sm receipt` per section's SQL and merge each section's `items` (dedup tables by `ref`+`qname`, metrics by name, joins by `from_to`+`scope`+`predicate`+`status` — a join has no name to dedup on, and `status` is load-bearing in that key because a join that wrote no predicate of its own has a null one: an explicit `CROSS JOIN` and a comma join over the same two tables in the same scope are otherwise the same key, and they are different facts) while KEEPING each section's `undetermined` — or pass the dominant query's SQL.
-
-For a 1×1 scalar answer with no chart (Phase 4e skips the report), still run `sm receipt`, and surface inline in the chat answer every join in `joins.items` that HAS a `review_state` and it is `!= "approved"` ("Note: this used 1 unreviewed join, orders → customers") — a `null` one is a join nothing matched to a declaration, which is on the section's `undetermined` marker rather than a sign-off warning. Same for any `columns.items` entry with `kind: "output"` and `status: "matched"` whose `review_state` isn't approved — and name the output column it computes, which the entry now carries. An entry whose status is `unmatched` is the opposite signal and worth saying too: every declared binding was read and this number is not the org's agreed definition.
-
 #### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 
 The HTML report is produced by a Python helper that reads the template + SVG logos once and substitutes placeholders. **Do not Read the template + Write the rendered HTML through the LLM** — that path costs ~30KB of token I/O per query and is the dominant slowness in chart rendering.
@@ -653,12 +721,12 @@ Instead:
 
 1. The sections JSON file `<artifacts_dir>/local/tmp/agami-sections-<ts>.json` is produced by `csv_to_sections.py` (4e.iii) — you don't hand-build it; you wrote the spec, the script wrote the numbers.
 
-2. The receipt JSON file `<artifacts_dir>/local/tmp/agami-receipt-<ts>.json` is produced by `sm receipt` (4e.iii.5) — plus any ad-hoc metric you appended.
+2. The receipt JSON file `<artifacts_dir>/local/tmp/agami-receipt-<ts>.json` is produced by `sm receipt` (4d.1) — plus any ad-hoc metric you appended.
 
 3. Run the renderer:
 
 ```bash
-ts=$(date +%Y%m%d-%H%M%S)
+ts="<ts>"   # the stamp the 4d.1 receipt file was written under, so the chart reads that receipt
 # Per-profile subdir so multi-profile users can tell charts apart and
 # clean per-profile via dev/reset-yamls.sh --clean-renders.
 mkdir -p <artifacts_dir>/local/charts/"$profile"
@@ -678,73 +746,31 @@ The helper reads `shared/chart-template.html` + the two logo SVGs once, validate
 
 `--receipt-file` is **MANDATORY — always build and pass it.** The receipt is the answer-side half of the trust pitch; without it the chart renders but loses provenance (no tables-touched list, no relationships-used, no model-version pin, no unreviewed-join banner, and none of the "not established" markers) — an answer no auditor can trace back to a model version. (The LLM has skipped this; don't.)
 
-The receipt construction logic is in Phase 4e.iii.5 above. If trust fields are genuinely missing on every entry the SQL touched (very old model from before the trust spine shipped), pass what `sm receipt` produced anyway: **all five sections must be present**, each with its `items` list (empty is fine) and its `undetermined` marker (null is fine). `render_chart.py` **rejects** a receipt that is missing a section, because a section that is absent and a section that is empty are different facts and a reader cannot tell them apart. Never edit a marker out to make the panel look cleaner, and never omit `--receipt-file` entirely.
+The receipt construction logic is in Phase 4d.1 above. If trust fields are genuinely missing on every entry the SQL touched (very old model from before the trust spine shipped), pass what `sm receipt` produced anyway: **all five sections must be present**, each with its `items` list (empty is fine) and its `undetermined` marker (null is fine). `render_chart.py` **rejects** a receipt that is missing a section, because a section that is absent and a section that is empty are different facts and a reader cannot tell them apart. Never edit a marker out to make the panel look cleaner, and never omit `--receipt-file` entirely.
 
 If the user pinned a chart type via `--chart bar` (etc.), the LLM still chooses per section — the flag from 2a is hint, not override. Multi-section reports often need different chart types per section.
 
-#### 4e.vi — auto-open the file in the user's default browser
+#### 4e.vi — serve it from localhost and post the link
 
-Immediately after writing the HTML, try to launch the browser. **Real-world testing has shown the chart often doesn't auto-open** — the host's permission cache may not include the `open` command pattern, the path may have an unexpected character, or the user is in a headless environment. Treat the open call as best-effort, not load-bearing — the path printed in 4e.vii is the contract.
-
-**Run a multi-command fallback chain** in one Bash invocation. The host typically caches the first successful pattern, so subsequent queries skip straight to it:
+Never open the file by its path or as a `file://` page: the Code tab's built-in browser shows a local file outside the project folder as a frozen snapshot. Serve it:
 
 ```bash
-chart="<artifacts_dir>/local/charts/$profile/<ts>.html"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "$chart"   # macOS, Linux and Windows; prints the path on failure
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/charts/$profile/<ts>.html" --minutes 30
 ```
 
-Surface the outcome explicitly in chat (don't let it disappear into the bash collapsible):
+Run it with `run_in_background` and read its first line, `{"url": "http://localhost:<port>/<name>"}`. Post the link as plain text:
 
-- **Open succeeded** (exit 0, no fallback message printed) — surface in chat: `✓ Chart opened in your browser. (Path: <artifacts_dir>/local/charts/<profile>/<ts>.html)`
-- **Fallback printed** (the `agami: couldn't auto-open` line) — surface: `Couldn't auto-open the chart in this environment. Open it yourself: <artifacts_dir>/local/charts/<profile>/<ts>.html`
-- **First time the user runs a query in this host** — `open` may prompt for permission. The shipped `.claude/settings.json` allowlists `Bash(open <artifacts_dir>/local/charts/**/*.html)` precisely so this prompt doesn't fire, but if the user's local settings override or strip that, they'll see a one-time approval modal. Tell them in chat: "First-run permission prompt — approve `open` and the chart will pop up. Future queries skip the prompt."
-
-If the user reports "the chart never opens", check (a) the path printed in chat exists on disk, (b) `command -v open` returns 0 in their host, (c) their `.claude/settings.json` includes the allowlist. The skill cannot fix mode-blocked hosts on its own; the path-in-chat fallback is the universal-truth surface.
-
-#### 4e.vii — surface in chat
-
-After writing the file and triggering `open`:
-
-- For a **single-section** report: surface the section's insight + the markdown table (Phases 4c + 4d). End with the chart's path as **plain text** (NOT a markdown link):
-  ```
-  Chart: <artifacts_dir>/local/charts/<profile>/20260507-150912.html
-  ```
-- For a **multi-section** report: surface the executive summary + a tight bulleted list of section titles. **Don't** repeat each section's table in the chat. End with:
-  ```
-  Report (N sections): <artifacts_dir>/local/charts/<profile>/20260507-150912.html
-  ```
-
-**Do NOT format the path as `[Open chart](file://...)` or any other clickable markdown link.** Some hosts (notably VS Code's Claude Code chat sandbox) only route workspace-relative paths through their click handler; `file://` URLs and absolute paths outside the workspace die silently. A fake-clickable link is worse UX than a plain path the user knows they can `open` from their terminal.
-
-If you genuinely detect that you're running in Claude Desktop (which has a working preview pane via path clicks), you may format the path as ``Open `<artifacts_dir>/local/charts/<profile>/<ts>.html` `` (backticks, not a link) — Desktop users get the click-to-preview experience naturally.
-
-For hosts that support inline artifacts, also embed the HTML as a Claude artifact block (a single block; don't emit one per section).
-
-**Assumption nudge (only when `assumptions.items` is non-empty).** If the receipt's `assumptions.items[]` has entries, add ONE short line right after the answer (before the follow-ups) so a wrong/unknown meaning is caught in context. Phrase by `source`:
-- `ai_unvalidated` (a guess) → *"read `net_margin` as '(revenue − cost) ÷ revenue'"*.
-- `ai_unknown` (no description) → *"used `xyz`, which I don't have a description for — is that the right column?"* (lead with these; they're riskier).
-
-e.g.:
 ```
-ℹ This answer used xyz, which I don't have a description for — is that the right column? It also read net_margin as "(revenue − cost) ÷ revenue". Tell me if anything's off (or what xyz means); say "looks right" to confirm the rest.
+Chart: http://localhost:<port>/<name> (open for 30 minutes)
 ```
-Keep it to the columns in `assumptions.items[]` (≤3), one clause each, plain English. Skip the line entirely when `assumptions.items` is empty. Soft nudge, never a blocking question.
 
-#### 4e.viii — assumption confirm / correct loop
+For a multi-section report: `Report (N sections): http://localhost:<port>/<name>`. Set `chart_path` on this answer's `query_log.jsonl` entry to the file's absolute path (Phase 5), so "reopen the chart" can serve it again later.
 
-When the user responds to that nudge:
-
-- **Confirms** ("looks right", "yes", "confirmed") → mark those descriptions validated so they never resurface. Build one curate ops array — one `edit` per confirmed column setting `description_source` to `ai_validated` — write it to `<artifacts_dir>/local/tmp/agami-confirm-desc.json` (Write tool), and apply:
-  ```bash
-  bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-confirm-desc.json"
-  ```
-  Each op: `{"op":"edit","kind":"table","area":"<area>","name":"<table>","column":"<col>","field":"description_source","value":"ai_validated"}`. Ack in one line: *"✓ Locked in — won't ask about those again."*
-- **Corrects one, or describes an unknown** ("net_margin is actually …", "xyz means customer lifetime value") → route to **agami-save-correction**: it writes the column `description` (which flips `description_source` to `human` automatically via the curate edit) AND saves the (question, SQL) example. This is the path for both a wrong `ai_unvalidated` guess and a filled-in `ai_unknown` blank — either way the column now has a trusted, human description. Don't hand-edit here — let save-correction classify + write.
-- **Ignores it / asks something else** → do nothing. An `ai_unvalidated` stays a guess; an `ai_unknown` stays unknown. Either may resurface if a later query uses that column in a load-bearing way. Never auto-confirm on silence — that's the rubber-stamp we're avoiding. (Note: you can't "confirm" an `ai_unknown` — there's nothing to confirm; it needs a description, so only a correction clears it.)
+The page's **"Send feedback to Claude"** and **👍 This looks good** blocks are still accepted when pasted (4h).
 
 ### 4e.5 — GitHub-star ask (one-time, gates Phase 4f)
 
-**This step is required between 4e and 4f.** Do not emit the 5 follow-up bullets in 4f without first running this check.
+**This step is required after the answer card (4d.2) is handled and before 4f.** Do not emit the 5 follow-up bullets in 4f without first running this check.
 
 ```bash
 test -f <artifacts_dir>/local/.optins
@@ -770,7 +796,7 @@ Liked it? A GitHub star helps a lot — github.com/AgamiAI/agami-core
 
 Why here, not in agami-connect: when the user asks their first sample question, agami-query owns the turn — a footer placed in agami-connect's Phase 0s never executes. This is the reliable home. (For non-sample profiles this block is skipped; the generic star/serve in 4e.5 + Phase 6 covers them.)
 
-End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
+End every successful answer with **exactly 5 numbered follow-up questions**, formatted as a plain markdown ordered list, after the answer card (and the one-time star ask) has been handled. Always — even for narrow questions, even if some feel slightly broader. **Do not use AskUserQuestion for follow-ups** — that surfaces a modal picker and feels intrusive. The numbered list lets the user glance, ignore, type a number, or type a fresh question.
 
 Format exactly:
 
@@ -805,7 +831,7 @@ These are templates, not rules — adjust to the schema. If a slot doesn't fit, 
 
 Two ways the CSV gets written:
 
-1. **Auto-export for large results** (row count > 30, per Phase 3c). The CSV is written alongside the HTML report without the user asking, and the path is surfaced in Phase 4d's footer.
+1. **Auto-export for large results** (row count > 15, per Phase 3c). The CSV is written without the user asking, and the path is surfaced in Phase 4d's footer.
 2. **Explicit `--csv` / "export this" / "export to Excel"** for any result, including small ones. The user explicitly wants a flat file.
 
 Either way:
@@ -822,13 +848,13 @@ mkdir -p <artifacts_dir>/local/exports/"$profile"
 
 CSVs open natively in Excel / Numbers / Google Sheets — when the user asks for "Excel", the CSV path is the answer. If they specifically want a `.xlsx` (formulas, multiple sheets, formatting), tell them to open the CSV in Excel and Save As — v1 doesn't ship a native `.xlsx` writer.
 
-Surface the path(s) inline. For the auto-export case, the path is already in the Phase 4d footer; the explicit-export case adds a separate confirmation line before Phase 4f.
+Surface the path(s) inline. For the auto-export case, the path is already in the Phase 4d footer; the explicit-export case adds a separate confirmation line before the answer card.
 
 ### 4h — Fix the SQL or add a note (inline correction + routing)
 
 This is the **live-query twin of the onboarding seed-validation flow** (`edit N` to fix an example's SQL / attach `notes[]`). When the user's reply to an answer is a *correction*, handle it **in this turn** — don't bounce them to `/agami-save-correction`. Two shapes:
 
-The correction can arrive two ways: the user **types** it, or they paste the block from the HTML report's **"Send feedback to Claude"** button (Phase 4e — each section has a *"✎ Fix the SQL or add a note"* editor + a footer button that packages every edit/note into a paste-ready block beginning *"Save this as a correction…"*). Either way, route it here.
+The correction can arrive three ways: the answer card's **Something's off** with its "Other" text (Phase 4d.2, which hands it to agami-save-correction), the user **types** it, or they paste the block from the chart page's **"Send feedback to Claude"** button (Phase 4e — each section has a *"✎ Fix the SQL or add a note"* editor + a footer button that packages every edit/note into a paste-ready block beginning *"Save this as a correction…"*). Either way, route it here.
 
 - **Fix the SQL** — "that join is wrong, use `customer_id`", "exclude cancelled rows", or a pasted corrected query. Build the corrected SQL (write it from their words if they described the fix), **re-run it via Phase 3** to confirm it executes, and re-render the answer (4c–4f).
 - **Add a note** — "TOTAL can be negative for refunds", "amounts are in INR", "always exclude test users". A durable fact; no SQL change needed.
@@ -844,7 +870,7 @@ The correction can arrive two ways: the user **types** it, or they paste the blo
 
 **Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and (with your OK) set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
-**Positive confirmation ("This looks good").** The report also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
+**Positive confirmation ("This looks good").** The answer card's **Looks right** hands the answer to agami-save-golden (Phase 4d.2). The chart page also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
 
 ---
 
@@ -869,7 +895,7 @@ Append one line to `<artifacts_dir>/local/query_log.jsonl`:
 }
 ```
 
-`chart_path` is the **absolute** path of the HTML report written in Phase 4e — or `null` if no report was rendered (the result was a 1×1 scalar). Phase 2a.1 reads this field to power the reopen-intent flow.
+`chart_path` is the **absolute** path of the chart page written in Phase 4e — set only when the person picked **Show as a chart** or asked for a chart, and `null` otherwise (no page is rendered by default; a 1×1 scalar never gets one). When a chart is rendered after the entry was written, set `chart_path` on that entry. Phase 2a.1 reads this field to power the reopen-intent flow.
 
 `tables_used` is a list of qualified `<schema>.<table>` strings — the datasets the executed SQL actually FROMs/JOINs. For large-mode (Phase 2b two-pass retrieval), this is the set Pass 1 picked. For small-mode, derive it by parsing the SQL's FROM/JOIN clauses. Used for the verification step ("did Pass 1 pick the right tables?") and for `feedback: "good"/"bad"` analytics.
 
@@ -883,7 +909,7 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ## Phase 6: Post-install GitHub-star ask (full spec — triggered from Phase 4e.5)
 
-**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (between 4e and 4f) — the textual order of phases here is misleading because the ask must run *between* 4e and 4f, not after Phase 5. If you read straight through Phase 4f → 5 → 6 the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
+**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (after the answer card, before 4f) — the textual order of phases here is misleading because the ask must run *between* the answer card and 4f, not after Phase 5. If you read straight through Phase 4f → 5 → 6 the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
 
 **HARD RULES — read before emitting the ask (the LLM has hallucinated both of these):**
 
@@ -896,7 +922,7 @@ A one-time, low-friction ask after the user's first successful query: "if this w
 
 Sequence:
 
-1. Render the answer (Phase 4a–4e: approach, fetching, insight, table, chart path).
+1. Render the answer (Phase 4a–4d.2: approach, fetching, insight, table, how this was answered, and the answer card, handled).
 2. If `<artifacts_dir>/local/.optins` does not exist AND the query just succeeded: **surface the GitHub-star ask NOW**, before Phase 4f's follow-up bullets. Use `AskUserQuestion`:
 
    > Quick one — first query worked. **If this was useful, would you star us on GitHub?**
@@ -942,7 +968,7 @@ The existence of the file (with `github_star_asked: true`) is the never-re-promp
 End with:
 - The result table
 - One natural follow-up suggestion if applicable
-- File paths for any artifacts (CSV export, chart HTML)
+- The CSV path, and the chart's localhost link when one was served
 
 ---
 
