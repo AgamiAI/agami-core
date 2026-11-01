@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import urllib.error
@@ -140,3 +141,47 @@ def test_in_process_serves_then_returns(tmp_path, capsys):
     t.join(timeout=10)
     assert rc == [0]
     assert serve_page.main([str(tmp_path / "gone.html")]) == 1
+
+
+def test_only_the_page_and_web_assets_are_served(tmp_path):
+    root = tmp_path / "site"
+    root.mkdir()
+    (root / "report.data").write_text("the page itself, odd suffix", encoding="utf-8")
+    for name in ("a.css", "notes.txt", "key.pem", ".hidden.json", "x.db"):
+        (root / name).write_text("x", encoding="utf-8")
+    proc, url = _start(root / "report.data")
+    try:
+        port = url.split(":")[2].split("/")[0]
+        base = f"http://127.0.0.1:{port}"
+        assert _get(f"{base}/report.data")[0] == 200  # the page, whatever its suffix
+        assert _get(f"{base}/a.css")[0] == 200
+        for refused in ("notes.txt", "key.pem", "x.db"):  # not an allowlisted extension
+            assert _get(f"{base}/{refused}")[0] == 404, refused
+        assert _get(f"{base}/.hidden.json")[0] == 404  # dotfile
+        assert _get(f"{base}/C:a.css")[0] == 404  # drive-relative on Windows
+        assert _get(f"{base}/a.css:stream.css")[0] == 404
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_a_symlink_out_of_the_folder_is_refused(tmp_path):
+    root = tmp_path / "site"
+    root.mkdir()
+    (root / "p.html").write_text("x", encoding="utf-8")
+    (tmp_path / "outside.json").write_text("secret", encoding="utf-8")
+    (root / "link.json").symlink_to(tmp_path / "outside.json")
+    proc, url = _start(root / "p.html")
+    try:
+        port = url.split(":")[2].split("/")[0]
+        assert _get(f"http://127.0.0.1:{port}/link.json")[0] == 404
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_every_header_quoted_in_the_conventions_doc_fits_a_card():
+    doc = SCRIPT.parent.parent / "shared" / "question-cards.md"
+    headers = re.findall(r'"header":\s*"([^"]*)"', doc.read_text(encoding="utf-8"))
+    assert headers
+    assert all(len(h) <= 12 for h in headers), [h for h in headers if len(h) > 12]

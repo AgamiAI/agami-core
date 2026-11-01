@@ -54,7 +54,7 @@ card, one question each, and put "Approve all remaining" (or its equivalent) on 
 queue can be finished in one press.
 
 ```json
-{"header": "Metric 1 of 9", "question": "Approve the metric \"revenue\" (SUM of orders.amount)?",
+{"header": "Metric 1/9", "question": "Approve the metric \"revenue\" (SUM of orders.amount)?",
  "multiSelect": false,
  "options": [{"label": "Approve", "description": "Sign it off as written"},
              {"label": "Approve all remaining", "description": "Sign off the other 8 as well"},

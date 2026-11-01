@@ -8,8 +8,8 @@ time is up and exits 0. This is the optional "full view" behind a question card:
 opened as file://, because the Code tab's built-in browser shows a local file outside the project
 folder as a frozen snapshot.
 
-The server binds 127.0.0.1 only, on a random port. It serves regular files that sit directly in
-the page's own folder and nothing else, and it refuses any request whose Host is not this
+The server binds 127.0.0.1 only, on a random port. It serves the page and, beside it, regular files with a
+web-asset extension (html css js svg png jpg json) and nothing else, and it refuses any request whose Host is not this
 server's own address (a DNS-rebinding page cannot reach it under its own name). Stdlib only.
 """
 
@@ -26,6 +26,8 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 HOST = "127.0.0.1"
+# The page itself is always served; beside it, only the kinds of file a report page loads.
+_ALLOWED_SUFFIXES = {".html", ".css", ".js", ".svg", ".png", ".jpg", ".json"}
 _REQUEST_TIMEOUT = 10  # a client that stalls mid-request is dropped rather than held open
 
 
@@ -33,10 +35,11 @@ class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True  # a stalled client cannot keep the process alive past its deadline
     block_on_close = False
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, page: Path) -> None:
         super().__init__((HOST, 0), _Handler)
-        self.root = root
+        self.root = page.parent
         self.port = self.server_address[1]
+        self.page = page
         self.hosts = {f"localhost:{self.port}", f"{HOST}:{self.port}"}
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -65,10 +68,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return None
         name = unquote(urlsplit(self.path).path.lstrip("/"))
         # One path segment only: no separators, no "..", so nothing outside the folder is nameable.
-        if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
+        # ":" would be a drive-relative name on Windows; a leading "." is a dotfile or "..".
+        if not name or name.startswith(".") or any(c in name for c in "/\\:\0"):
             return None
         target = self.server.root / name
-        return target if target.is_file() and not target.is_symlink() else None
+        if target.name != self.server.page.name and target.suffix.lower() not in _ALLOWED_SUFFIXES:
+            return None
+        if (
+            not target.is_file()
+            or target.is_symlink()
+            or target.resolve().parent != self.server.root
+        ):
+            return None
+        return target
 
     def _serve(self) -> None:
         target = self._file()
@@ -101,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     if not page.is_file():
         sys.stderr.write(f"serve_page: no such file: {page}\n")
         return 1
-    server = _Server(page.parent)
+    server = _Server(page)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
