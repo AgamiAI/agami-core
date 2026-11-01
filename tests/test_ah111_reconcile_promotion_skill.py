@@ -412,10 +412,10 @@ def test_a_batch_too_small_to_split_is_not_split():
 
 def test_the_user_makes_one_decision_and_it_is_not_the_split():
     """A per-row prompt turns a twelve-number reconcile into twelve interruptions. The override
-    exists and is one line, not twelve."""
+    exists and is one option on the one card, not twelve prompts."""
     assert "Make the offer once, here, after the summary. Never per row." in OFFER
     assert "Save all ten?" in OFFER
-    assert "let me choose" in OFFER
+    assert "**Leave some out**" in OFFER and "not twelve prompts" in OFFER
 
 
 def test_what_went_where_is_said_out_loud():

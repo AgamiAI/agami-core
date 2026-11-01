@@ -1284,6 +1284,34 @@ def test_the_skill_says_a_verdict_is_not_zero_failures():
     assert "completed" in SKILL and "gating_failures" in SKILL and "errored" in SKILL
 
 
+
+def _eval_close() -> str:
+    start = SKILL.index("### 3f")
+    return SKILL[start: SKILL.index("\n---\n", start)]
+
+
+def test_the_close_is_a_card_and_the_report_is_the_full_view():
+    """Question cards: the score and the failing table in chat, then one card. The run's report is
+    served from localhost when the person asks to look, never as a file path to open."""
+    close = _eval_close()
+    assert "AskUserQuestion" in close
+    for label in ("**Look at the failures**", "**Fix one**", "**Done**"):
+        assert label in close, label
+    assert "serve_page.py" in close
+    assert "file://" not in SKILL and "open_in_browser" not in SKILL
+    assert "shared/question-cards.md" in SKILL
+
+
+def test_the_failing_table_is_bounded():
+    failures = SKILL[SKILL.index("### 3b"): SKILL.index("### 3c")]
+    assert "at most 15 rows" in failures
+
+
+def test_fixing_one_routes_through_the_doors_and_never_writes_here():
+    close = _eval_close()
+    assert "/agami-save-correction" in close and "/agami-save-golden" in close
+    assert "--confirm-replace" not in close
+
 # ---------------------------------------------------------------------------
 # The shared docs
 #

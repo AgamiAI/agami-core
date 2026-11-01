@@ -220,7 +220,8 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
 def test_reconcile_takes_input_the_way_connect_does():
     """Nothing given: an options prompt with the four shapes, the rarer inputs named in the prompt. A CSV
     with nothing to hand: a template file written and a hand-off that ends the turn. Rows read: an
-    intake page shown before anything runs, one block back, applied by a parser and never by hand."""
+    intake card shown before anything runs (the page is its full view), its answers applied by the
+    page's parser and never by hand."""
     preflight = SKILL.split("## Phase 0: Preflight", 1)[1].split("## Phase 1: Extract", 1)[0]
     assert "**AskUserQuestion**, the four shapes as options" in preflight
     for label in ("`A screenshot of the dashboard`", "`A CSV or an export`", "`The SQL you trust`", "`A list of questions`"):
@@ -229,6 +230,7 @@ def test_reconcile_takes_input_the_way_connect_does():
     assert "**End the turn.**" in preflight and "never guessed at" in preflight
     intake = _between(SKILL, "### 1n — Normalize", "## Phase 1.5")
     assert "render_reconcile_intake.py" in intake and "--intake-file" in intake
+    assert "**Looks right, run it**" in intake and "serve_page.py" in intake
     assert "parse_reconcile_intake.py" in intake and "--rows-file" in intake
     assert "**end the turn**" in intake and "never hand-edit the rows" in intake
     assert "inbox" in preflight.split("**If they gave nothing**")[0] and "local/reconcile/inbox/" in intake
@@ -333,7 +335,7 @@ def test_the_four_beats_are_also_a_page_and_a_keep_is_never_the_pages_to_grant()
     assert "never from anything typed" in story
     assert "the offer's predicate is the ledger's and never the page's" in story
     assert "No decision writes anything this skill does not already write." in story
-    assert "The chat keeps 3a, the link and one line of next steps" in story
+    assert "The chat keeps 3a, the results table and the cards" in story
     assert "one card per row for a batch and a checklist with a rail for a single audited query" in story
     assert "**Data**, **SQL** and **Checks**" in story and "report-items --run-dir" in story
     assert "Build the report items file with the verb, never by hand" in story
@@ -367,7 +369,7 @@ def test_the_items_file_step_1_writes_is_the_one_step_2_reads_and_the_run_goes_t
     assert '--run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story and "--words-file \"<artifacts_dir>/local/tmp/agami-reconcile-words-<ts>.json\"" in story
     assert 'check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"' in story
     assert "--items-file" not in story and "/tmp/agami-reconcile-report-items" not in story
-    assert "Say the three lines the renderer printed" in story
+    assert "Say the first of the three lines the renderer printed" in story
     assert "Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool" in story
     record = _between(SKILL, "### 2d", "### 2e")
     assert 'record --run-dir "<artifacts_dir>/local/reconcile/<ts>" --row <n>' in record and "never by hand" in record

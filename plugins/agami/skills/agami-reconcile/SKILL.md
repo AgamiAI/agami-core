@@ -25,6 +25,7 @@ Spec for the deterministic helpers: [`scripts/reconcile.py`](../../scripts/recon
 ## Conversation style
 
 - **Tight loops.** This skill is a tool, not a tutorial. One question per turn, max two sentences of prose between phases.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). What was read and what the run found are markdown tables in the chat (at most 15 rows, saying how many more); every decision is a card: the intake (Phase 1n), each chunk's progress (Phase 2), the rows that did not match (3a.5) and the keep offer (3e). The intake page and the report page are the optional **Show the full view**, served from localhost, and their pasted blocks are still accepted. No page opens and nothing waits for a paste unless the person asks for the full view.
 - **Surface mismatches loud.** A reconcile run with 9/12 matches and 3 mismatches is a SUCCESSFUL run — the mismatches are the value. Lead with what didn't match.
 - **Don't paste raw SQL in chat.** The receipt has it. Same hard rule as agami-query — with one exception, Phase 3e's promotion offer, where the statement is shown because it is the thing being accepted into an answer key and cannot be hidden behind a receipt link at the moment somebody agrees to replay it.
 
@@ -73,7 +74,7 @@ Whatever the input shape, the goal is the same normalized rows JSON. **Number pa
 
 1. **Read the image** and extract every labeled number you can see — KPI tiles, table cells, chart value labels — as `(label, raw_value)` pairs. Keep the label the user would recognize ("Total Revenue", "Active Users — Apr"), and the value **exactly as shown, verbatim** (`$4.2M`, `₹2.16Cr`, `42%`, `1,234`) — don't convert it; the normalizer does that.
 2. **Write the pairs as a 2-column CSV** (Write tool — never a heredoc/`python3 -c`) to `<artifacts_dir>/local/tmp/agami-reconcile-<ts>.csv`, then run the SAME normalizer as the CSV branch (below) so value parsing stays deterministic.
-3. **Confirm before reconciling — vision can misread.** Show the extracted pairs as a small table and ask the user to fix any misread label/number: *"I read these N numbers off your screenshot — correct anything I got wrong, then I'll reconcile."* This confirm step is **mandatory**: a wrong expected-value isn't a model bug but it reads like one. If a tile is ambiguous or partly cut off, say so and skip it rather than guess.
+3. **Confirm before reconciling — vision can misread.** The pairs are confirmed on the intake card (Phase 1n): the table of what was read, then **Looks right, run it** / **Fix a number** / **Drop some rows**. This confirm step is **mandatory**: a wrong expected-value isn't a model bug but it reads like one. If a tile is ambiguous or partly cut off, say so and skip it rather than guess.
 
 ### CSV branch — a CSV path or inline-pasted CSV
 
@@ -113,25 +114,56 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py intake --file <path> [--fil
 
 Create the run directory `<artifacts_dir>/local/reconcile/<ts>/`, and `rows/<n>/` under it for every row that carries a statement.
 
-**Show what was read before anything runs, and hand off**, the way `agami-connect` shows the prune page before it introspects. The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. The person fixes a question we read wrong or unticks a row, generates the block, and pastes it back. It is the same design language and the same paste-back grammar as the report page.
+**Show what was read before anything runs, and confirm it on a card**, the way `agami-connect` shows the tables before it introspects. Read the rows file and show a markdown table, at most 15 rows, then *"Showing 15 of <N> rows; <N−15> more."* when there are more:
+
+```markdown
+| Row | Question we'll ask | Expected | Your SQL | From |
+|---|---|---|---|---|
+| 1 | How many orders were placed in Q3 2025? | 12,450 | — | the screenshot, tile 1 |
+| 2 | What was total revenue in Q3 2025? | $4.2M | yes | reconcile.csv, line 3 |
+```
+
+`Question we'll ask` is the row's `question` (read from a label when the input had none), `Expected` its `raw_value` as the person gave it, `Your SQL` whether a `statement` came with it, `From` its `provenance`. Under the table, one line: *"I read `<N>` rows from `<the screenshot / csv_path / the statements / the questions>`: `<n>` numbers, `<m>` with your SQL, `<k>` questions. Typically `<N> × 5–15s` per row."*
+
+Then call AskUserQuestion, one question, header `What I read`, *"Run these `<N>` rows as read?"*, single pick, no `(Recommended)` (only the person can say whether a number was read right). Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7).
+
+- **Looks right, run it**: run the rows as shown.
+- **Fix a number**: type the row and the right number in "Other" (*"row 2 is 4.2M"*). A question read wrong is fixed the same way, in the person's words (*"row 1: How many orders were placed in Q3 2025, cancelled ones included?"*).
+- **Drop some rows**: type the rows to leave out in "Other" (*"3, 7"*).
+- **Show the full view**: the intake page with every row, served from localhost (below).
+
+| Answer | Do |
+|---|---|
+| Looks right, run it | When nothing was dropped and no question reworded, go to Phase 2: its first `next-chunk --rows-file` call copies the rows into the run directory unchanged. Otherwise apply the card's answers first (below), then Phase 2. |
+| Fix a number | Change that value in the CSV this run reads: the one you wrote for a screenshot or a pasted list, or, for the person's own file, a copy under `<artifacts_dir>/local/tmp/` with that one value changed (their file is never edited). Then run `reconcile.py intake` again with the same flags, so the number is parsed by `reconcile.py` and never typed into the rows. A reworded question is held for the intake block below. Show the table again and ask the same card. |
+| Drop some rows | Hold the rows for the intake block below, show the table again with them marked dropped, and ask the same card. |
+| Show the full view | The full view below. |
+
+**Applying the card's answers.** The drops and reworded questions go through the same parser as the page's block, so you never hand-edit the rows: write the block the page would have written with the Write tool to `<artifacts_dir>/local/tmp/agami-reconcile-intake-<ts>.txt`, `profile: <profile>`, `reconcile-run: <ts>`, `intake:` and one JSON array (`{"row": 3, "keep": false}` per dropped row, `{"row": 1, "keep": true, "question": "<the person's words>"}` per reworded question), `done`, and apply it with the `parse_reconcile_intake.py` call below. Its answer is read as below.
+
+**"Fix a number" or "Drop some rows" picked with nothing typed in "Other"**: say *"Type the row and the right number in Other."* (or *"Type the rows to leave out in Other."*) and ask the same card again. **"Other" with no option picked** is read for what it says: a number, a question in other words, or rows to leave out. Words that name a row the table does not have, a value `reconcile.py` cannot parse, or anything you cannot place on one row are said back in one line and the same card asked again: re-asked, never guessed.
+
+A per-row "is this the question?" in chat is never asked.
+
+**Show the full view (optional, only when asked).** The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. Render it and serve it from localhost, giving the person the URL, never a local file path, which the built-in browser can show as a frozen snapshot:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_reconcile_intake.py --title "What we read · <profile>" \
   --profile <profile> --run <ts> --intake-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" \
   --out "<artifacts_dir>/local/reconcile/<ts>/intake.html"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/intake.html" --minutes 30
 ```
 
-Then say it in two lines and **end the turn**:
-> I read `<N>` rows from `<the screenshot / csv_path / the statements / the questions>`: `<n>` numbers, `<m>` with your SQL, `<k>` questions. Open the page, fix any question I read wrong or untick a row, and paste the block back; then I run. Typically `<N> × 5–15s` per row.
+Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`. Say: *"The page: `<url>`. Fix any question I read wrong or untick a row, generate the block and paste it back; then I run."* and **end the turn**. The person may still answer in chat instead ("looks right, go ahead"): run with the rows as read.
 
-**On re-entry** (the block arrives, `profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`), never hand-edit the rows: pipe the block to the parser, which applies it to the rows file and says what it did:
+**On re-entry** (the block arrives, `profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`), never hand-edit the rows: pipe the block to the parser, which applies it to the rows file and says what it did. The card's own block goes through the same call:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_reconcile_intake.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-intake-<ts>.txt" \
   --rows-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" --run <ts> --out "<artifacts_dir>/local/reconcile/<ts>/intake.json"
 ```
 
-`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `<artifacts_dir>/local/tmp/` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: ask for the block again. If the person answers in chat instead ("looks right, go ahead"), run with the rows as read: Phase 2's first `next-chunk --rows-file` call copies them into the run directory unchanged. A per-row "is this the question?" in chat is never asked.
+`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `<artifacts_dir>/local/tmp/` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: for a pasted block, ask for the block again; for the card's block, say what it names and ask the intake card again.
 
 ---
 
@@ -170,11 +202,18 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py next-chunk --run-dir "<arti
   --rows-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json"    # seeds the run's intake.json once; later calls need only --run-dir
 ```
 
-Exit `0` hands back `chunk`, the next five rows not yet in `rows.jsonl`, with `finished`, `remaining`, `chunk_index` of `chunks_total`, and `progress`, the counts by status over the rows done so far, read from the checkpoint and never tallied by hand. Take the five through Phase 1.5 (statement rows) and 2a to 2f below; each lands in `rows.jsonl` as it finishes. When the chunk is done: build the report items for every row finished so far and render the report page (3a.5), so the person can already read the first rows, say one progress line, and **end the turn**:
+Exit `0` hands back `chunk`, the next five rows not yet in `rows.jsonl`, with `finished`, `remaining`, `chunk_index` of `chunks_total`, and `progress`, the counts by status over the rows done so far, read from the checkpoint and never tallied by hand. Take the five through Phase 1.5 (statement rows) and 2a to 2f below; each lands in `rows.jsonl` as it finishes. When the chunk is done: build the report items for every row finished so far and render the report page (3a.5), so the full view is current if the person asks for it, then say one progress line:
 
-> Rows 6 to 10 of 50 done. So far: `<progress as colored words, in 3a's wording>`. Page: `<artifacts_dir>/local/reconcile/<ts>/report.html`. Say **continue** for the next five, or **continue all** to run the rest without stopping.
+> Rows 6 to 10 of 50 done. So far: `<progress as colored words, in 3a's wording>`.
 
-`continue` calls `next-chunk` again. `continue all` runs chunk after chunk, a progress line per chunk and no stop, until exit `4`. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day is `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py resume --reconcile-dir "<artifacts_dir>/local/reconcile"`, which names the newest run directory that still has rows remaining (exit `4` when none does), then `next-chunk` on it. Exit `2` is a refusal and stderr says which: a run directory or rows file that is not there, a rows file that is not a list of row objects, or a checkpoint line that cannot be read. When it names a `rows.jsonl` line, fix or remove that line before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
+and call AskUserQuestion, one question, header `Progress`, *"Run the next five?"*:
+
+- **Next five (Recommended)**: run the next chunk, then this card again.
+- **Run the rest**: run chunk after chunk, a progress line per chunk and no card, until every row is done.
+- **Pause here**: stop now; say "resume the reconcile" any time to carry on from the checkpoint.
+- **Show the full view**: the report page so far, served from localhost as 3a.5's full view says; then this card again.
+
+**Next five** (or the person typing **continue**) calls `next-chunk` again. **Run the rest** (or **continue all**) runs chunk after chunk until exit `4`. **Pause here** says how to resume and does **end the turn**; nothing is lost, because `rows.jsonl` is the checkpoint. When no rows remain after a chunk, skip the card and call `next-chunk` once more: its exit `4` goes to Phase 3. Exit `4` means every row is in the checkpoint: go to Phase 3. **A run interrupted anywhere resumes with the same call**: a row in `rows.jsonl` is never run twice, and "resume the reconcile" on a later day is `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py resume --reconcile-dir "<artifacts_dir>/local/reconcile"`, which names the newest run directory that still has rows remaining (exit `4` when none does), then `next-chunk` on it. Exit `2` is a refusal and stderr says which: a run directory or rows file that is not there, a rows file that is not a list of row objects, or a checkpoint line that cannot be read. When it names a `rows.jsonl` line, fix or remove that line before continuing, never skip it, since skipping would run its row again. The first five are a smoke test: a wrong profile, a misread file or a question in the wrong words is caught at five rows, not fifty. The keep-offer stays one per run (3e), never one per chunk.
 
 For each row in the chunk:
 
@@ -360,7 +399,7 @@ When any row carried a statement, add one more line, counting the two statuses t
 
 ### 3a.5 — Every row in four beats
 
-The four beats are told on the **report page**, one card per row for a batch and a checklist with a rail for a single audited query, and the chat carries only three lines: the summary of 3a with the counts as colored words, the report's path, and one line of next steps naming what to fix, what to decide and how many rows are ready to keep. A person reading the transcript later keeps the counts and the actions; the page carries the checks. When the page cannot be written, the four beats below are said in chat instead, one block per row, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every check passed has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
+The four beats are told on the **report page**, one card per row for a batch and a checklist with a rail for a single audited query, and the page is the optional full view. The chat carries the summary of 3a with the counts as colored words, the results table, and the cards that decide each row that did not match (below). A person reading the transcript later keeps the counts and the actions; the page carries the checks. When the page cannot be written, the four beats below are said in chat instead, one block per row, in the words of `shared/plain-language.md`. A row with no statement skips beat 1's parts and says so; a row that matched with every check passed has a one-line beat 4: keep it. Beat 4 never asks anything per row; the keep question is 3e's, once.
 
 What each card says, whether on the page or, without one, in chat:
 
@@ -380,7 +419,7 @@ What each card says, whether on the page or, without one, in chat:
 
 Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap, "the question" for a doubtful fit, and "agami's answer" for a mismatch where your statement passed every check (a worked example is the fix). It never says "the model".
 
-**Render the four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. Every row is the same card: the question, one verdict carrying the measurement behind it, the one thing to do, and three sections closed at rest, **Data**, **SQL** and **Checks**, each with a one-line summary that names what did not pass when something did not, and a count when everything did. Render it after every chunk with every row finished so far; the render after Phase 2's exit `4` is the one 3a points at. The page filters by status, by who acts and by a word in the question or the beats; a filter narrows what is shown, never what the block sends, so a row decided and then filtered away is still in the block. The chat keeps 3a, the link and one line of next steps; 3b to 3d below still render when the page could not be written.
+**Render the four beats as a page**, the way `/agami-connect` hands over the model explorer, so the run is shown the way the semantic model is shown. Every row is the same card: the question, one verdict carrying the measurement behind it, the one thing to do, and three sections closed at rest, **Data**, **SQL** and **Checks**, each with a one-line summary that names what did not pass when something did not, and a count when everything did. Render it after every chunk with every row finished so far; the render after Phase 2's exit `4` is the one 3a points at. The page filters by status, by who acts and by a word in the question or the beats; a filter narrows what is shown, never what the block sends, so a row decided and then filtered away is still in the block. The chat keeps 3a, the results table and the cards; 3b to 3d below still render when the page could not be written.
 
 1. **Build the report items file with the verb, never by hand.** The renderer runs `reconcile.py report-items --run-dir` itself from the run directory: one item per row of `rows.jsonl`, from each row's ledger, its comparison, its claims and the two receipts, every item carrying `diff` (one row per check, `{key, state, yours, agami, note, yours_hi?, agami_hi?}`, the check named first and the two sides as values with the differing tokens marked), `result` (`data`: matches, partly, differs or could_not_compare; `query`: same, different or not_comparable; the plain-word `label`; `unchecked`, the checks on your query that could not run; `differs_in`), `fix` (your query, the semantic model, the examples, the question, agami again, or nothing), `fix_words`, `prefill`, `sentence` and `change`. You hand it words only: a words file `{"<row>": {"sentence": "…", "change": ["…"]}}` with one entry per row whose sentence or change you rewrote in the plain words of `shared/plain-language.md`. You rewrite only `sentence` and `change`, and never touch `diff`, `result`, `fix` or any other field; a words file carrying another key is refused. (`report-items --run-dir` on its own prints the items for reading.)
 2. **Render from the run directory, check it, and point at it:**
@@ -391,12 +430,54 @@ Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap
      --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"
    ```
-   The renderer writes `<run_dir>/report-items.json` beside the page (for the parser and for reading), stamps the page with the digest of the items it rendered, and prints three lines: the counts by result and by fix as words, the page's path, and the next step. `check-run` exits `0` only when every row in the checkpoint has its files and the page's stamp is the digest of the current items; on `4`, fix what it names and render again. **Say the three lines the renderer printed**, the counts as colored words (match, differs, a mistake on your side, could not check): the 3a summary, the report's path, and one line of next steps. The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from the items, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's. **Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool**; the only files this session writes by hand in Phases 2 and 3 are the words file and the chunk file.
-3. **Read the decisions back** when the block arrives (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), handing the parser the run directory the page was rendered from. It reads which rows may be kept from `rows.jsonl` and each row's `ledger.json`, never from anything typed, and refuses a block whose `reconcile-run` is not this run:
-   ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_reconcile_report.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt" --run-dir "<artifacts_dir>/local/reconcile/<ts>"
-   ```
-   A `needs_judgment` means the block did not parse, came from another run, or carries a decision that could not be applied as written (a keep the run does not allow, words beside a keep, a misspelt decision): ask for it again, apply nothing. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`example`** takes a statement and its question to `/agami-save-correction` as a prompt example, with the words as its note, so agami writes the query that way next time (the same door 3e's keep uses for an example, without 3e's split). **Which statement, on which row:** the person's when they supplied one; on a question-only row there is none, and the person choosing `example` there is saying agami's own query is right, so agami's is what gets sent; **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
+   The renderer writes `<run_dir>/report-items.json` beside the page (for the parser and for reading), stamps the page with the digest of the items it rendered, and prints three lines: the counts by result and by fix as words, the page's path, and the next step. `check-run` exits `0` only when every row in the checkpoint has its files and the page's stamp is the digest of the current items; on `4`, fix what it names and render again. **Say the first of the three lines the renderer printed**, the counts as colored words (match, differs, a mistake on your side, could not check), as the 3a summary. The page's path and its next step stay behind the full view; the results table and the cards below are the next step. The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from the items, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's. **Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool**; the only files this session writes by hand in Phases 2 and 3 are the words file and the chunk file.
+**The results in chat.** Read `<run_dir>/report-items.json` and show one markdown table, the rows that did not match first, then those that could not be checked, then the matches; at most 15 rows, then *"Showing 15 of <N> rows; <N−15> more."* when there are more:
+
+```markdown
+| Row | Question | Result | What to do |
+|---|---|---|---|
+| 3 | What was total revenue in Q3 2025? | differs: $3.89M, yours $4.2M | your query |
+| 5 | How many items are open? | couldn't check | the semantic model |
+| 1 | How many orders were placed in Q3 2025? | match | keep it |
+```
+
+`Result` is the item's `result.data` in three words, **match** (`matches`), **differs** (`partly` or `differs`, with the two values when there is one cell each) and **couldn't check** (`could_not_compare`, or a row whose status is `error`); an `ungraded` row reads **agami answered** with its answer. `What to do` is the item's `fix_words`.
+
+**The rows that did not match, on cards.** Every row whose status is not `match` (`mismatch`, `expected_doubtful`, `match_unverified`, `error` and `ungraded`) is decided one by one, up to 4 rows per card, one question each, in the table's order. A `match` row is never on these cards; its one decision is the keep, which is 3e's single card.
+
+- `header` is `Row <n>`, the row's number in the table.
+- The question carries the row's label and its one-line verdict, the item's `sentence` shortened to one line: *"Q3 Revenue: agami $3.89M, yours $4.2M (7.4% apart); your query leaves out the declared filter on status. What should happen?"* On an `ungraded` row the verdict is agami's answer, since there is nothing to compare it with.
+- The options are the row's allowed decisions in plain words, at most 4:
+
+| Option | Decision | Offered |
+|---|---|---|
+| Change the definition | `change` | always |
+| My query is wrong | `fix` | only when the row carries the person's own statement |
+| Reword the question | `reword` | always |
+| Add as an example | `example` | not when the row's ledger found a mistake in the person's query (the parser refuses it there) |
+| Nothing | `nothing` | always, last |
+
+The run's suggested decision comes first, marked `(Recommended)`: it is the item's `fix` as a decision (`query` is `fix`, `semantic_model` is `change`, `examples` is `example`, `question` is `reword`, `ask_again` and `none` are `nothing`), the same one the page pre-selects. An `ungraded` row has no suggestion, so nothing is marked. Then the other allowed decisions in the table's order until there are three, then **Nothing**. When the queue holds more than 4 rows, every card carries **Suggested for all remaining** in place of the third decision: it takes the suggestion on this row and on every row not yet shown (a row with no suggestion gets `nothing`), so a long queue finishes in one press; answers given to the other questions on the same card still stand. A decision left off a row's options is still reachable by typing it in "Other".
+
+What each answer carries: an option picked takes the item's `prefill` for that decision as its `words`, the run's own words for the row, when it has one. **"Other" is the person's own words for one decision**: *"revenue should net refunds"* is `change` with those words, *"ask it as orders placed, cancelled ones included"* is `reword`, *"agami's query is right"* is `example`. **An "Other" that asks to stop** ("stop here", "I'll do the rest later") is a stop, not a decision on that row: keep the card's other answers, ask no more row cards, and leave the rows not yet decided undecided. Any other "Other" you cannot place on one of the row's allowed decisions, or a decision the row does not allow, is said back in one line and the same card asked again: re-asked, never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7).
+
+Before any card, add one line: *"Say 'show the full view' for the report page with every row's checks."* After the last row card, ask 3e's keep card when there is anything to keep, then apply both, so every decision is made before a hand-off to `/agami-save-correction` starts a conversation of its own.
+
+**Applying the decisions.** The card answers become the block the page would have sent: write it with the Write tool to `<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt`, `profile: <profile>`, `reconcile-run: <ts>`, `decisions:` and one JSON array, `{"row": 3, "decision": "change", "words": "<the words>"}` per decided row (no `words` on a `nothing`), `done`. Hand it to the parser with the run directory the page was rendered from. It reads which rows may be kept from `rows.jsonl` and each row's `ledger.json`, never from anything typed, and refuses a block whose `reconcile-run` is not this run:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_reconcile_report.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt" --run-dir "<artifacts_dir>/local/reconcile/<ts>"
+```
+
+A `needs_judgment` means the block did not parse, came from another run, or carries a decision that could not be applied as written (a keep the run does not allow, words beside a keep, a misspelt decision, an `example` on a row whose ledger found a mistake in the person's query): apply nothing, say what it names in one line, and ask that row's card again. Then, per decision: **`keep`** is the person's yes to Phase 3e's offer for that row, applied through 3e's own doors and its own rules (the split, the band, one call per row); **`change`** takes the finding and the person's words to `/agami-save-correction`, one definition at a time; **`example`** takes a statement and its question to `/agami-save-correction` as a prompt example, with the words as its note, so agami writes the query that way next time (the same door 3e's keep uses for an example, without 3e's split). **Which statement, on which row:** the person's when they supplied one; on a question-only row there is none, and the person choosing `example` there is saying agami's own query is right, so agami's is what gets sent; **`fix`** and **`reword`** come back to the person as the next thing to do, with the row's beat 4 repeated; **`nothing`** changes nothing. No decision writes anything this skill does not already write.
+
+**Show the full view (optional, only when asked).** The report page rendered in step 2, with every row's four beats and its checks. Serve it from localhost and give the person the URL, never a local file path:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/report.html" --minutes 30
+```
+
+Run it with `run_in_background` and read its first line, `{"url": …}`. The page's **Generate decisions** button gives the person the same block the cards write; when they paste it (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), write it to the decisions file above and read it back with the same `parse_reconcile_report.py` call. A pasted block's `needs_judgment` is answered by asking for the block again. Rows the person already decided on cards and decides again on the page take the page's answer, which arrives later.
 
 ### 3b — Mismatches table (lead with what didn't match)
 
@@ -506,9 +587,16 @@ Two adjustments, and both are about not splitting something too small to split:
 > Ten of these agreed — I'll keep all ten.
 > **Four as examples**, so questions like them get answered this way from now on.
 > **Six as tests**, with a ±<the run's tolerance> band, so you're told if any of those numbers move.
-> Save all ten?
 
-Someone who presses enter without reading gets the right outcome; someone who reads it learns the distinction by watching it happen, which is the only way anybody will. The override is one line — "let me choose" — and not twelve prompts.
+Under those lines, the rows themselves as a table (below: the question, the statement and the result), then one card. Call AskUserQuestion, header `Keep`, *"Save all ten?"*:
+
+- **Save all ten (Recommended)**: write them as said, the examples through `sm add-example` and the tests through `golden_author.py save`.
+- **Leave some out**: type the rows to leave out in "Other" (*"3, 7"*), or a question in other words (*"row 4: …in August 2026"*); then this card again with the new counts and split.
+- **Don't save**: nothing is written.
+
+When the dataset is not settled (none named, or more than one exists), the same card carries a second question, header `Dataset`, *"Which golden dataset should the tests go in?"*: one option per existing dataset, up to three, and **A new one, `reconciled`**; "Other" takes another plain name. A row whose question is asked relative to today (below) adds one question per such row, header `Window`, *"'The last 30 days' was 2–31 August 2026 when this ran. Save it as '…in August 2026'?"*: **Name the window** / **Leave this row out**; "Other" takes the question in the person's words. A card holds four questions; more windows go on a second card before anything is written.
+
+Someone who presses the first option without reading gets the right outcome; someone who reads it learns the distinction by watching it happen, which is the only way anybody will. The override is one option, **Leave some out**, and not twelve prompts. "Leave some out" picked with nothing typed, an "Other" naming a row that is not offered, or words you cannot place are said back in one line and the card asked again: never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list.
 
 **Only rows whose `status` is `match` are offered.** That is the run's own tolerance — `reconcile.diff` decided it back in Phase 2c, and it is the only notion of agreement this skill has, so nothing here re-judges a number. One predicate drops `mismatch` and `error` together, and with them the `missing_expected` and `missing_actual` rows — those are `reconcile.diff`'s own reasons rather than a row status, and a row that could not be diffed never reached `match` either. **A row with no statement is never offered**: an error row never reached a verified answer, so there is nothing worth promoting even though its statement is on the record (Phase 2d).
 
@@ -516,9 +604,9 @@ Someone who presses enter without reading gets the right outcome; someone who re
 
 **If no row agreed, make no offer at all** — not an empty one, not "there's nothing to promote here". A run where nothing matched is having a different conversation (Phase 3b), and an offer with nothing in it interrupts it.
 
-**Every agreeing row starts selected.** The person reviewed each row's agreement as it landed; asking them to opt each one back in asks the same question twice. They can deselect any row, and **they can edit any question before it is written** — a later run regenerates SQL from the question, so the wording *is* the item.
+**Every agreeing row starts selected.** The person reviewed each row's agreement as it landed; asking them to opt each one back in asks the same question twice. They can leave out any row, and **they can edit any question before it is written** (both through **Leave some out**) — a later run regenerates SQL from the question, so the wording *is* the item.
 
-**Show the statement and the result, not just the number.** Per row: the question (editable), the statement that answered it, and the recorded result. What they are accepting is that this statement answers this question — that is what gets replayed — and a row accepted on its number alone is a row nobody checked the meaning of.
+**Show the statement and the result, not just the number.** Per row, in the table before the card (at most 15 rows, then how many more): the question (editable through **Leave some out**), the statement that answered it, and the recorded result. What they are accepting is that this statement answers this question — that is what gets replayed — and a row accepted on its number alone is a row nobody checked the meaning of.
 
 **Declining writes nothing.** No dataset is created, no file is touched, and the run ends exactly where Phase 3f leaves it. Say that when you ask, and say it again if they decline.
 
@@ -617,7 +705,7 @@ The method line is what somebody consults a year later to find out where this it
 
 **Read which payload the `1` carries before you answer it — there are two, and the wrong flag clears neither.** A `needs_confirmation_convention` payload means the statement departs from the profile's own curated examples; on a promotion that is expected and not interesting, because the statement being saved is the one agami generated *from* those examples minutes ago. Pass `--confirm-convention` for it. Everything below is the other payload.
 
-Exit `1`, a `needs_confirmation` payload, and **nothing written**. Render the `before` AND the `after` for every id — the item on disk and the one that would take its place — ask, and only on an explicit yes re-run the **same command with `--confirm-replace` appended**. **Never pass `--confirm-replace` pre-emptively**: the flag means one thing, that a person saw both sides and said yes, and passing it before that has happened makes the stop decorative.
+Exit `1`, a `needs_confirmation` payload, and **nothing written**. Render the `before` AND the `after` for every id — the item on disk and the one that would take its place — ask on a card (header `Replace`, **Replace it** / **Keep the existing one**), and only on **Replace it** re-run the **same command with `--confirm-replace` appended**. **Never pass `--confirm-replace` pre-emptively**: the flag means one thing, that a person saw both sides and said yes, and passing it before that has happened makes the stop decorative.
 
 A replacement is wholesale — the item sent is the item written — so read the `before` and carry forward whatever it holds that still applies (its `tags`, a `must_filter`) into the item JSON before you re-run. On a no, say the file is untouched and stop.
 

@@ -27,6 +27,7 @@ Spec for the deterministic half: [`scripts/golden_author.py`](../../scripts/gold
 - **One question per turn.** This is a tool, not a tutorial. At most two sentences of prose between phases.
 - **Show before you write.** Nothing reaches disk that the user has not seen rendered first — parsed rows as a table, a replacement as a before and an after.
 - **Never volunteer SQL for a question that has none.** See the rule above; it is the reason this skill exists in the shape it does.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). What was parsed is a markdown table in the chat (at most 15 rows, saying how many more); every decision is a card. The golden-datasets page is the optional **Show the full view**, served from localhost, and its pasted block is still accepted.
 
 ---
 
@@ -71,7 +72,7 @@ Route on what the user brought, and say which door you are opening:
 The parse reads the question bank straight from the file, and there is still **one parser**: a workbook is read into rows and then parsed exactly as a CSV is, so there is one place a column can be misread.
 
 - **A `.csv` path** — use it as given.
-- **A `.xlsx` path** — use it as given. Do not open it with the Read tool (it cannot read a workbook) and do not guess at its contents; the parse reads it. A workbook often holds several sheets — a cover page, a schema reference, the questions — and **which sheet holds the questions is the user's call, not yours**. Run the parse without `--sheet` first: a workbook with more than one sheet stops with exit `2` and lists every sheet. Show the list, suggest the one whose name reads like the question bank, and re-run with `--sheet "<name>"` once they confirm.
+- **A `.xlsx` path** — use it as given. Do not open it with the Read tool (it cannot read a workbook) and do not guess at its contents; the parse reads it. A workbook often holds several sheets — a cover page, a schema reference, the questions — and **which sheet holds the questions is the user's call, not yours**. Run the parse without `--sheet` first: a workbook with more than one sheet stops with exit `2` and lists every sheet. Ask on a card, header `Sheet`, *"Which sheet holds the questions?"*: one option per sheet, up to 4, the one whose name reads like the question bank first (no `(Recommended)`: it is a fact about their file); "Other" takes any other sheet's name. Re-run with `--sheet "<name>"` on the answer.
 - **A `.xls` path** (Excel's older binary format) — it cannot be read. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke.
 - **A table pasted into chat** — write it out as a CSV with the **Write tool** and then parse that file. One parser, one code path, and the file is also the thing the user can fix and re-run. Per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md): **never a heredoc, never `python3 -c`, never a shell variable** — quoting mangles the commas and quotes that are the whole point of a CSV. Write it to `<artifacts_dir>/local/tmp/agami-golden-pasted-<ts>.csv` and tell the user where it went.
 
@@ -94,9 +95,9 @@ The payload carries `columns` (the header as found), `header_row` (the sheet's o
 
 **Say what was read, before the rows.** For a workbook, name the sheet and the header row (*"Read the **Questions** sheet, header on row 4."*) and quote every `above_header` row, so the user can see nothing they meant as a question sat above the header. A right-looking table from the wrong tab is the one mistake the rows alone won't show.
 
-**Ask about every `unrecognized` column, before anything else.** Each is a column the parse did not read whose header looks like a field the sheet hasn't supplied — `{"column": "Warehouse SQL", "could_be": "sql"}`. Ask about each by its header: *"The sheet has a column **Warehouse SQL** that wasn't read. Is that the SQL for each question? If so, rows that have it will import as confirmed."* On a yes, re-run the parse with `--column sql="Warehouse SQL"` (one `--column` per field) and show the new payload instead; on a no, carry on without it. Wait for the answer and never map a column on your own, even when the header plainly says SQL, because a statement column the person didn't mean becomes an answer key every future run is scored against.
+**Ask about every `unrecognized` column, before anything else.** Each is a column the parse did not read whose header looks like a field the sheet hasn't supplied — `{"column": "Warehouse SQL", "could_be": "sql"}`. Ask about each by its header, on one card, one question per column (up to 4; more go on a second card), header `Column`: *"The sheet has a column **Warehouse SQL** that wasn't read. Is that the SQL for each question? If so, rows that have it will import as confirmed."*, options **Read it as the SQL** (the field from `could_be`) / **Leave it out**. On **Read it as …**, re-run the parse with `--column sql="Warehouse SQL"` (one `--column` per field) and show the new payload instead; on **Leave it out**, carry on without it. Wait for the answer and never map a column on your own, even when the header plainly says SQL, because a statement column the person didn't mean becomes an answer key every future run is scored against.
 
-**Show the rows as a markdown table.** Not a count, not a summary — the rows:
+**Show the rows as a markdown table.** Not a count, not a summary — the rows, at most 15 rows, then *"Showing 15 of <N> rows; <N−15> more."* when there are more (the skipped rows and the counts on the card still cover all of them):
 
 ```markdown
 | id | Question | Expected | SQL in the sheet? | Tags |
@@ -109,9 +110,14 @@ Ids are derived from the question when the sheet has none, so they are stable ac
 
 If `skipped` is non-empty, list every skipped row with its number and reason **before** asking. A question missing from a dataset is one nobody notices is missing.
 
-Derived ids are unique by construction, but a sheet with its **own `id` column** can repeat one. The import refuses the whole batch and names the id, because an id is the key a result is stored under and the second row would otherwise overwrite the first inside one write. The table you just rendered is where to spot it — ask the user which row keeps the id.
+Derived ids are unique by construction, but a sheet with its **own `id` column** can repeat one. The import refuses the whole batch and names the id, because an id is the key a result is stored under and the second row would otherwise overwrite the first inside one write. The table you just rendered is where to spot it — ask on a card, header `Id`, which row keeps the id: one option per row carrying it (its question); "Other" takes a new id for the other row.
 
-Then ask, plainly, naming both counts when they differ: *"Import these `<N>` questions into `<dataset>`? `<K>` of them already carry an answer in the sheet and will be written confirmed, able to gate a run immediately; the rest have no answer yet and stay unconfirmed until someone saves one."* **Wait for an explicit yes.** Never skip this and never infer it from the user having handed you the file.
+Then ask on a card (AskUserQuestion), header `Import`, naming both counts when they differ: *"Import these `<N>` questions into `<dataset>`? `<K>` of them already carry an answer in the sheet and will be written confirmed, able to gate a run immediately; the rest have no answer yet and stay unconfirmed until someone saves one."*
+
+- **Import them**: run the import (2d).
+- **Don't import**: nothing is written; say so.
+
+No `(Recommended)`: whether these rows belong in the answer key is the person's call. "Other" takes a change ("leave out row 7", "the dataset is called orders"): make it on the CSV or the flags, parse again, show the table again and ask the same card; words you cannot place are said back and the card asked again, never guessed. **Wait for an explicit yes**, which is **Import them**. Never skip this and never infer it from the user having handed you the file.
 
 ### 2d — Import
 
@@ -172,7 +178,7 @@ The payload carries the nearest example's question and statement, and the claims
 
 > Your examples for this kind of question filter on `created`; this one uses `opened`. Save it anyway?
 
-**It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On an explicit yes, re-run the same command with `--confirm-convention` appended. On a no, nothing was written, and the fix is usually to the statement rather than to the dataset.
+Ask it on a card, header `Convention`: **Save anyway** / **Don't save**. **It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On **Save anyway**, re-run the same command with `--confirm-convention` appended. On **Don't save**, nothing was written, and the fix is usually to the statement rather than to the dataset.
 
 Only three claims can stop a save this way — the tables read, the filters written, and the resolved date window — because those are the ones that change *which rows are counted*. Two statements answering one question differ in ordering and limit all the time, and stopping for those would make this a prompt people learn to click through.
 
@@ -182,9 +188,15 @@ Only three claims can stop a save this way — the tables read, the filters writ
 
 ## Phase 3b: The curation door — the explorer page's queued actions
 
-The explorer page (`/agami-eval`, or rendered directly) shows a profile's datasets and lets the reader queue changes against them. It writes nothing itself; it hands back one block. This is the door that applies it.
+The explorer page shows a profile's datasets and lets the reader queue changes against them. It writes nothing itself; it hands back one block. This is the door that applies it.
 
-**Render the page:**
+**When the person asks to see the datasets** ("show me the golden datasets"), the default is the chat. Read the counts with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py --profile <profile> --list` (it reads the files and runs nothing) and show them as a table, `Dataset | Questions | Confirmed | Unconfirmed`, at most 15 rows, saying how many more. Then a card, header `Datasets`, *"What next?"*:
+
+- **Show the full view**: the explorer page, where tags, `match`, a question or a removal can be queued (below).
+- **Import questions**: the import door (Phase 2).
+- **Done**: end here.
+
+**Show the full view (optional, only when asked).** Render the page:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
@@ -193,6 +205,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
 ```
 
 `--out` must land under `local/`, the gitignored half — the page carries every confirmed answer key in full, and that is only safe where it is not committed. The script refuses any other destination.
+
+Serve it from localhost and give the person the URL, never a local file path:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html" --minutes 30
+```
+
+Run it with `run_in_background` and read its first line, `{"url": …}`. Say that queued changes come back as one block to paste here, and end the turn.
 
 **When the user pastes the block back**, parse it before you read it:
 
@@ -241,7 +261,7 @@ On a `needs_confirmation` payload — a list of `{id, before, after}` — **rend
 
 **A replacement is wholesale** — the item that is written is the item you sent, so anything the existing one carries and yours does not (its `tags`, a `must_filter`, a `match`) is gone. Read the `before` and carry forward what still applies before you ask; that is also what the user is agreeing to when they look at the two sides.
 
-Then ask, and only after an explicit yes re-run the **same command with `--confirm-replace` appended**:
+Then ask on a card, header `Replace`, *"Replace the existing item?"*: **Replace it** / **Keep the existing one** (for removals, **Remove them** / **Keep them**). Only after **Replace it** (or **Remove them**) re-run the **same command with `--confirm-replace` appended**:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
@@ -250,7 +270,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
-**Never pass `--confirm-replace` pre-emptively.** Not on the first attempt, not because a re-import "is probably the same sheet", not to save a round trip. The flag means one thing — a person saw the before and the after and said yes — and passing it before that has happened makes the stop decorative. If the user says no, say the file is untouched and stop; it is byte-identical, not merely equivalent.
+**Never pass `--confirm-replace` pre-emptively.** Not on the first attempt, not because a re-import "is probably the same sheet", not to save a round trip. The flag means one thing — a person saw the before and the after and said yes — and passing it before that has happened makes the stop decorative. If the user picks **Keep the existing one**, say the file is untouched and stop; it is byte-identical, not merely equivalent.
 
 ---
 
