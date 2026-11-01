@@ -487,7 +487,7 @@ If row count == 0:
 
 The chat reply follows this **strict order**, with NO other content interleaved (no SQL, no Bash output, no "let me know if…" filler):
 
-  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
+  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
 
 Each step is short. The whole reply should fit in a typical chat viewport without scrolling. **No page is rendered or opened on this path:** the chart page (4e) runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart"). Cards follow [`shared/question-cards.md`](../../shared/question-cards.md).
 
@@ -614,7 +614,9 @@ When the user responds to that nudge:
 
 ### 4d.2 — The answer card
 
-After "How this was answered", call AskUserQuestion:
+**Log the query first.** Append this answer's `query_log.jsonl` line (Phase 5) before the card is asked, silently. Every card answer reads that line: agami-save-correction takes the last ok entry for its question and SQL, and Looks right / Something's off set `feedback` on it. Asked before the line exists, a correction would attach to the previous query.
+
+After "How this was answered" and the log line, call AskUserQuestion:
 
 - **Looks right**: save it as a test question, so later changes to the model are checked against this answer.
 - **Something's off**: say what in "Other"; I'll fix it and save the correction.
@@ -625,10 +627,10 @@ One question, header `Answer`, *"How does this answer look?"*, single pick, no `
 
 | Answer | Do |
 |---|---|
-| Looks right | Set `feedback: "good"` on the `query_log.jsonl` entry and confirm the assumption descriptions (4d.1b). Then hand to **agami-save-golden**'s save door (its Phase 3) with the question, the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
-| Something's off | Set `feedback: "bad"` and hand the "Other" text, the question and the SQL that ran to **agami-save-correction**, which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). Picked with nothing typed in "Other": say *"Type what looks off in Other."* and ask the same card again. |
+| Looks right | Set `feedback: "good"` on this answer's `query_log.jsonl` entry (written before the card) and confirm the assumption descriptions (4d.1b). Then hand to **agami-save-golden**'s save door (its Phase 3) with the question, the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
+| Something's off | Set `feedback: "bad"` on this answer's `query_log.jsonl` entry and hand **agami-save-correction** three things by name: the "Other" text as the correction, this answer's question, and the SQL that ran for it (the same `question` and `sql` the log line carries), which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). Picked with nothing typed in "Other": say *"Type what looks off in Other."* and ask the same card again. |
 | Show as a chart | Phase 4e: render the report and serve it from localhost, then post the link. |
-| Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)), then one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
+| Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)); its **Don't sign anything yet** signs nothing here and goes on to the star ask (4e.5) and the follow-ups (4f), since there is no overview card in this skill. Otherwise one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
 
 **"Other" with no option picked** is read for what it says: a description of what's wrong is **Something's off**; a new data question is answered as one (Phase 2), the card left behind. Anything else you can't place is said back in one line and the same card asked again; never guess.
 
@@ -875,6 +877,8 @@ The correction can arrive three ways: the answer card's **Something's off** with
 ---
 
 ## Phase 5: Log
+
+**When:** once per answer, right after 4d.1 and before the answer card (4d.2), never again at the end of the turn: by the time Phase 5 is reached in reading order, the line is already written. Later steps only update that line (`feedback`, `chart_path`).
 
 Append one line to `<artifacts_dir>/local/query_log.jsonl`:
 

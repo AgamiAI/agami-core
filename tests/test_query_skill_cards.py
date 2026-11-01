@@ -82,7 +82,36 @@ def test_answer_card_has_the_four_options():
 def test_sign_off_option_shows_only_when_a_metric_is_unsigned():
     s = _answer_card()
     row = next(line for line in s.splitlines() if "**Sign off the definitions used**" in line)
-    assert "only when" in row.lower() and "unsigned" in row.lower()
+    # The condition itself: the receipt names a metric whose review_state is not approved.
+    assert re.search(
+        r"shown only when the receipt names an unsigned metric \(a model metric in `columns\.items` "
+        r"whose `review_state` isn't `approved`\)",
+        row,
+    ), row
+
+
+def test_the_query_is_logged_before_the_answer_card_is_asked():
+    """agami-save-correction reads the last ok log line for its question and SQL; asked first, the card
+    would hand a correction to the previous query."""
+    p4 = _phase_4()
+    order = next(line for line in p4.splitlines() if "4a Approach" in line)
+    assert order.index("log the query") < order.index("4d.2 Answer card")
+    card = _answer_card()
+    assert card.index("**Log the query first.**") < card.index("call AskUserQuestion")
+    phase_5 = _between("## Phase 5:", "## Phase 6:")
+    assert "before the answer card (4d.2)" in phase_5
+    assert "never again at the end of the turn" in phase_5
+
+
+def test_something_off_names_the_question_and_the_sql():
+    off = next(line for line in _answer_card().splitlines() if line.startswith("| Something's off"))
+    assert "this answer's question" in off and "the SQL that ran for it" in off
+
+
+def test_dont_sign_anything_yet_continues_to_the_star_ask_and_follow_ups():
+    sign = next(line for line in _answer_card().splitlines() if line.startswith("| Sign off the definitions used"))
+    assert "Don't sign anything yet" in sign
+    assert "4e.5" in sign and "4f" in sign
 
 
 def test_card_answers_hand_to_the_right_skill():
