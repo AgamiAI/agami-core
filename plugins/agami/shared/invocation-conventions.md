@@ -12,7 +12,7 @@ agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Co
 |---|---|---|
 | agami-connect | `/agami-connect` | "set up agami", "connect to my database", "introspect the schema", "reload the schema", "reintrospect", "add a new database" |
 | agami-query | `/agami-query` | any data question — "how many", "show me", "top N", "trend over time", etc. |
-| agami-model | `/agami-model` | "open the model explorer", "show me the model", "exclude a table", "remove this column" — AND review/sign-off: "open the review dashboard", "review my model", "sign off the metrics", "approve N", "walk the review queue" (its Review tab absorbed the former `/agami-review`) |
+| agami-model | `/agami-model` | "open the model explorer", "show me the model", "exclude a table", "remove this column" — AND review/sign-off: "open the review dashboard", "review my model", "sign off the metrics", "approve N", "walk the review queue" (it absorbed the former `/agami-review`; sign-off is on cards in the chat) |
 | agami-save-correction | `/agami-save-correction` | "save this as a correction", "remember this", "use this SQL next time" |
 | agami-reconcile | `/agami-reconcile` | "reconcile against this dashboard", "do these numbers match?", "validate against my Tableau export", "here is the SQL behind each tile", "validate this query part by part", "audit this SQL", "check these questions" — and after a run: "keep these as golden questions", "promote these to a golden dataset" |
 | agami-eval | `/agami-eval` | "run the evals", "run the golden dataset", "score the model against my golden questions", "did anything regress?", "how accurate is agami on my data?" |
@@ -37,7 +37,7 @@ The model often reaches for slash patterns it's seen on other plugins. None of t
 - `/agami:connect`, `/agami:query-database`, etc. — colon-namespaced forms **do not exist**.
 - `/init`, `/connect`, `/query-database`, etc. — bare forms without the `agami-` prefix. **`/init` collides with Claude Code's built-in `/init`** (which generates a CLAUDE.md), so we explicitly avoid it. The others are too generic and collide with other plugins.
 - `/agami-init` — **deprecated and removed.** Its flow now lives at `/agami-connect` Phase 0a. If you see references in older docs, ignore them.
-- `/agami-review` — **removed.** Its trust-review dashboard was folded into `/agami-model` (the Review tab). Use `/agami-model` (or `/agami-model review` to open straight on the sign-off queue). Ignore older references.
+- `/agami-review` — **removed.** Its trust review was folded into `/agami-model`, which now asks for sign-off on cards in the chat. Use `/agami-model` (or `/agami-model review` to open straight on the sign-off queue). Ignore older references.
 - `agami init`, `agami connect` (no slash, no @) — **do not exist** as commands.
 - `@agami:init`, `@agami:connect` — colon-namespaced @-forms **do not exist**.
 
@@ -51,7 +51,7 @@ For most chat replies, **prefer natural-language phrasing over slash commands** 
 |---|---|
 | "Run `/agami-connect reintrospect`" | "Say 'reload the schema' and I'll re-introspect from your DB." |
 | "Run `/agami-save-correction`" | "Say 'save this as a correction' and I'll add it to the examples library." |
-| "Run `/agami-review`" (removed) | "Say 'open the review dashboard' to walk the sign-off queue." (routes to `/agami-model`'s Review tab) |
+| "Run `/agami-review`" (removed) | "Say 'review my model' to sign off what's waiting." (routes to `/agami-model review`) |
 | "Type `/agami-query`" | Just answer the question directly. Slash commands are unnecessary. |
 
 ## When the model invents a new form
@@ -89,8 +89,11 @@ command working there too:
   slashes (`C:/Users/…`), never backslashes: `\U` is not a valid JSON escape.
 - **Strip `\r` from Python output you capture into a variable:** `x="$(… py … | tr -d '\r')"`. Windows
   Python ends its lines with `\r\n`; `$(…)` drops only the `\n`, and a path ending in `\r` names no file.
-- **Open a page with `open_in_browser`:** `bash "<plugin_root>/scripts/open_in_browser" "<path or URL>"`,
-  never `open` / `xdg-open` / `start` directly.
+- **Show an agami page only as the full view, served from localhost:**
+  `bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30`, then give the person the
+  URL it prints (rule 6 of [`question-cards.md`](question-cards.md)). Never open a page file as `file://`. `open_in_browser`
+  (`bash "<plugin_root>/scripts/open_in_browser" "<URL>"`) is only for a web address the person chose
+  to open on a card, such as the GitHub page; never `open` / `xdg-open` / `start` directly.
 
 `chmod` is harmless on Windows (it does nothing; NTFS protects the file through your user profile), so
 the steps that lock a file down need no change.

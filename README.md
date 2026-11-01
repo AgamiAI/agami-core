@@ -98,20 +98,22 @@ Full flow: [docs/usage.md](docs/usage.md).
 
 ### Your own database
 
-Connecting your database is a short back-and-forth with agami — you fill in one
-template, and it handles the rest:
+Connecting your database is a short back-and-forth with agami, in the chat: each choice is a
+question card you answer with a click, and you can type your own answer in "Other".
 
 1. **Start setup.** Run `/agami-connect` (or just say *"connect to my database"*).
-  agami asks which database you use, has you name the connection, and writes a
-   credentials template for you to fill in.
-2. **Fill in the template.** Open the file agami points you to, add your connection
-  details, and save it — leave the filename as-is. agami only ever runs **read-only**
-   queries, so a read-only database user is all it needs; ask agami for *"the read-only
-   grant"* and it gives you the exact SQL to create one.
-3. **Say *"introspect my database"*** (or just *"continue"*). agami takes it from there:
-  it locks the file down for you (no manual `chmod`), reads your schema, builds the
-   semantic model, and seeds a few validated example queries. You don't move or rename
-   anything.
+   agami asks which database you use and has you name the connection.
+2. **Give the connection details.** On macOS and Windows, a card asks for the host, port,
+   database and user, and agami posts a one-time `localhost` link where you type the password;
+   it goes to your OS keychain, never the chat. On Linux (and for Databricks) agami writes a
+   credentials template instead: fill it in, save it (leave the filename as-is), and press
+   **I've filled it in** on the card. agami only ever runs **read-only** queries, so a read-only
+   database user is all it needs; ask agami for *"the read-only grant"* and it gives you the
+   exact SQL to create one.
+3. **Pick tables and sign off.** agami summarises your tables in the chat and asks which to keep,
+   then builds the semantic model, asks you to sign off the definitions it proposed, and seeds a
+   few validated example queries. No page opens on its own; each step offers an optional
+   "Show the full view" page if you want to see everything at once.
 4. **Ask a question** — *"how many orders did we ship last month?"*
 
 That's the whole setup. Along the way agami scores its confidence in every join and
@@ -195,7 +197,7 @@ and quietly return a number. agami makes every one of those decisions auditable:
 carries a flat trust block (`confidence`, `review_state`, and a sign-off
 identity once approved) — no vendor blobs, no scores to tune. DB-declared FKs
 and structural column names auto-approve; everything inferred stays
-`unreviewed` and surfaces in the Review tab.
+`unreviewed` and comes up for sign-off in `/agami-model review`.
 - **Metrics must be signed off (Rule 1).** A metric needs an approver email, a
 role, and a non-empty `calculation` before the runtime treats it as truth —
 one bad metric skews every report that uses it. A query that uses an unsigned
@@ -226,16 +228,17 @@ examples validation: **[docs/trust-layer.md](docs/trust-layer.md)**.
 
 ## Skills (slash commands)
 
-Natural-language phrasing routes to each skill automatically — "open the review
-dashboard" / "save this as a correction" / "introspect my schema" all work without
-typing the slash command.
+Natural-language phrasing routes to each skill automatically — "review my model" /
+"save this as a correction" / "introspect my schema" all work without typing the slash
+command. Every skill asks its questions as cards in the chat; the HTML pages are an optional
+full view, served from `localhost` only when you ask.
 
 
 | Command                                       | What it does                                                                                                                                                                                                                                                                                                                                                                   |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `/agami-connect`                              | One-stop setup + introspect: detect/collect credentials, introspect the live DB into the semantic model (tables, columns, PK grain, FK relationships, sensitive-column flags), layer LLM enrichment, generate EXPLAIN-validated seed examples. Builds from a **model spec workbook** when you attach one, and asks for the one-line datasource description an agent uses to pick the right database. Validator-gated, snapshotted. Also `/agami-connect sample` for the no-DB sample. |
 | `/agami-query`                                | Answers a natural-language question: picks examples + relationships, generates and runs SQL, formats the result + chart, and surfaces a provenance receipt. Flags any unreviewed entry it relied on. (Usually you don't type this — plain language routes here.)                                                                                                               |
-| `/agami-model`                                | One dashboard to **browse, curate, and sign off** the model: every table/field/metric/entity/join, per-table/column Exclude/Include, edits, new metrics. The **Review** tab is the trust-layer sign-off queue. Open it on the queue with `/agami-model review`.                                                                                                                |
+| `/agami-model`                                | **See, curate, and sign off** the model in the chat: an overview of what needs sign-off and the subject areas, then cards to approve or reject definitions, hide tables or columns, or look one up. Go straight to sign-off with `/agami-model review`. The model explorer page is the optional full view.                                                                     |
 | `/agami-save-correction`                      | Records a correction and routes it to the right home (SQL example, column metadata, display preference, business concept, or a new metric), showing its classification before writing. Attribution surfaces on future answers it influences.                                                                                                                                   |
 | `/agami-reconcile`                            | Point it at numbers you already trust — a dashboard **screenshot** (Metabase / Power BI / Tableau / Looker), a CSV, or a pasted table — and it asks each question through agami and shows a side-by-side diff with tolerances. Hand it **SQL you trust** and it grades that query part by part against the model instead of taking it as the answer. Matching rows can be kept as golden questions. |
 | `/agami-eval`                                 | Run a **golden dataset** through the agent loop — every question regenerated, executed and scored against its confirmed answer key — and see, failures first, what stopped matching. It's your model's regression suite: it says whether the questions your team already agreed still get the agreed answer. |

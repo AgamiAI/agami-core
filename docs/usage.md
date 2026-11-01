@@ -46,12 +46,16 @@ $ /agami-connect
   definitions, so signing them off first means the seeds inherit
   approved truth instead of LLM guesses.
 
-  Opening Rule 1 review dashboard…
-  <artifacts_dir>/local/review/main/20260511-204100.html
+  | Definition    | Meaning                                  |
+  |---------------|------------------------------------------|
+  | revenue       | Sum of paid order totals, refunds excluded |
+  | ...           | ...                                      |
 
-You (in dashboard): click Approve on 6 metrics by you@example.com role=data_lead,
-                    Edit 1 (calculation tweak), Reject 1.
-                    Generate feedback → paste back.
+  [card] Approve all · Review one by one (Recommended) · Skip for now
+
+You (on the cards, 4 per card): Approve 6, type a calculation tweak in "Other"
+                                for 1, Reject 1. Your email and role are asked
+                                once on a card (you@example.com, data_lead).
 
 ✓ Applied: 7 approved (1 with edit), 1 rejected. Rule 1 complete.
 
@@ -63,16 +67,15 @@ You (in dashboard): click Approve on 6 metrics by you@example.com role=data_lead
   ✓ Generated 11 seed examples (≥6 multi-table, ≥1 time-comparison shape)
 
 [Phase 5: examples validation]
-  Rendered dashboard: <artifacts_dir>/local/examples-validation/main/20260511-204500.html
+  | # | Question                         | Result      |
+  |---|----------------------------------|-------------|
+  | 1 | Top 5 customers by lifetime spend | 5 rows      |
+  | ...                                                 |
 
-You (in chat): validate 1, 3, 4, 5, 7 by you@example.com
-               edit 8 sql>>>
-               SELECT ...
-               <<<
-               note 4 >>>
-               Format counts with commas
-               <<<
-               done
+  [card] Keep all that ran (Recommended) · Review the failing ones ·
+         Drop the failing ones · Review all one by one
+
+You: Review all one by one — Keep 6, and for #8 type the fix in "Other".
 
 ✓ Validation complete: 6 validated, 1 edited, 4 unreviewed (errors).
 
@@ -83,9 +86,9 @@ You (in chat): validate 1, 3, 4, 5, 7 by you@example.com
   ⚠ 14 inferred relationships unreviewed (lazy — confirm as you query)
   ⚠ 23 field descriptions awaiting review
 
-  Open the Rule 2 polish queue? (y / skip — they self-approve as you query)
+  [card] Review what needs sign-off · See the model · Skip — I'll review later
 
-You: skip
+You: Skip — I'll review later
 
 You: how many customers placed an order in the last 30 days?
 ```
@@ -94,8 +97,11 @@ The receipt panel on the answer shows the tables it touched, the relationships
 used (with their confidence + review state), the columns and metric definitions
 it leaned on, and the model version (`.snapshots/45f0fefa2403/`). The SQL is not
 in that panel: each report section carries its own, next to the numbers it
-produced. If a query touched an unreviewed join, the report carries a trust
-banner pointing back at `/agami-model` (its Review tab); an unapproved metric
+produced. After the answer, one card asks: **Looks right** (save it as a test question),
+**Something's off** (type what in "Other"), **Show as a chart**, or **Sign off the
+definitions used** when it relied on an unsigned metric. On the chart page (the
+answer's full view), a query that touched an unreviewed join carries a trust
+banner pointing back at `/agami-model review`; an unapproved metric
 gets its own banner with Approve / Change buttons, which queue the decision for
 Claude to apply.
 
@@ -112,9 +118,10 @@ means "checked, nothing to report" — see
 top 10 active customers by spend last 30 days
 ```
 
-The skill loads your model + examples, generates SQL, runs it, returns a markdown
-table AND a chart (by default — every result gets a chart unless the shape doesn't
-lend itself to one). The receipt panel below the chart shows the SQL, the tables
+The skill loads your model + examples, generates SQL, runs it, and returns a markdown
+table with "How this was answered" and the answer card. A chart is drawn only when you
+pick **Show as a chart** (or ask for one), served from `localhost`. The chart page's
+receipt panel shows the SQL, the tables
 touched (one row per reference), the relationships used (with confidence + review
 state), the metrics invoked, the columns referenced, the assumptions agami made,
 and the model snapshot hash — plus, per section, what it did not establish. If a touched table is large (> 1M rows) without a date filter, the
@@ -124,19 +131,20 @@ If the question relies on a definition with multiple candidates — e.g. you ask
 "show me revenue" and there are three `revenue`-synonym metrics — the skill asks
 you which one, instead of silently picking.
 
-### Open the review dashboard
+### Review what needs sign-off
 
 ```
-You: open the review dashboard
+You: review my model
 # or: /agami-model review
-# (the Review tab lists everything needing sign-off; confident items have a one-click "Approve all")
 ```
 
-Walk the cards. Each shows the inferred SQL + signal breakdown + an inline editable
-textarea. Click Approve / Reject / Edit on the cards you want, then hit "Generate
-feedback for Claude" at the bottom and paste back. agami applies each edit, runs
-the validator, commits to `<artifacts_dir>/<profile>/.git/`, and re-renders to a
-new timestamped HTML file.
+agami lists what needs sign-off in the chat, then asks on a card: **Approve all**,
+**Review one by one** or **Skip for now**. One by one, each card holds up to four
+items with **Approve** / **Reject** / **Approve all remaining**; type a change to a
+definition in "Other". agami applies each decision, runs the validator and commits
+to `<artifacts_dir>/<profile>/.git/`. The review page (the model explorer's Review
+tab) is the optional full view, served from `localhost` when you pick **Show the full
+view**.
 
 ### Browse the model + exclude tables / columns
 
@@ -146,7 +154,10 @@ You: open the model explorer
 # or: "remove the staging tables and PII columns from the model"
 ```
 
-Renders a self-contained HTML browser of every subject area → table → field →
+Posts an overview in the chat (what needs sign-off, the subject areas and their
+tables) and a card: review, hide tables or columns, look up a table or metric, or
+**Show the full view**. The full view is a self-contained HTML browser, served from
+`localhost`, of every subject area → table → field →
 **metric → entity → join**. Dedicated tabs surface every metric (with its prose
 `calculation` + per-dialect `bindings`), entity, and relationship so you can see
 exactly what the model contains without reading YAML.
