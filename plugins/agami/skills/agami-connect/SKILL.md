@@ -1095,7 +1095,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate-gate "$ROOT"
 
 > **PII is advisory, not a seed blocker.** A non-zero `pii_count` is a *review nudge* (the person's call to hide or keep), **not** a gate on seed generation. Only a non-zero `preseed_count` (unreviewed metrics/entities) blocks `seed-examples`. Don't tell the person personal data is stopping their seeds; it isn't.
 
-**If BOTH counts are 0 → say "Nothing to review before examples; continuing."** and go to Phase 5.
+Also run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"` every time: besides the flagged columns it prints `suspected` and `suspected_count`, columns that look personal but aren't flagged (`pii_count` doesn't count them).
+
+**Guessed joins: one line, no card.** Read them with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule2` and keep the items whose `kind` is `relationship` (that scope also returns entities, which the Sign-off step covers). When there are any, post: *"<N> joins were guessed from names and data; they're used as you query and flagged on the answer until confirmed. Review them any time in agami-model."* With 5 or fewer, a short table under it (`Join | Kind`, the item's `title` and `cardinality`); more, just the line. They are not put on a card.
+
+**If `pii_count`, `preseed_count` and `suspected_count` are all 0 → say "Nothing to review before examples; continuing."** and go to Phase 5.
 
 Otherwise run the two steps below that apply (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). When both apply, the review question and the personal-data question can go on the same card, two questions on one AskUserQuestion call.
 
@@ -1129,7 +1133,9 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 **"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
 
-**An "Other" you can't act on is re-asked, never guessed.** An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
+**An "Other" that asks to stop is a stop, not a change.** When the words on an item card ask to stop, pause or finish later ("stop here", "I'll do the rest later", "pause") rather than change that item, apply the card's other answers, approve or change nothing more, and go to 4b's Continue / Pause card.
+
+**Any other "Other" you can't act on is re-asked, never guessed.** An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
 
 **Sign-off identity: asked once, on the first approval.** Before the first `approve` op of the run (from Approve all, Approve, or Approve all remaining), read `reviewer_email` and `reviewer_role` from `<artifacts_dir>/local/.config` (the keys `/agami-model` uses). When both are there, use them and don't ask. When either is missing, ask one card with two questions:
 
@@ -1138,18 +1144,14 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login, and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+`, or **Type it in Other** picked with nothing typed, is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this run nor `/agami-model` asks again.
 
-**Personal-data columns (when `pii_count` > 0).** Read them from the engine:
+**Personal-data columns (when `pii_count` or `suspected_count` > 0).** From the `sm sensitive` output above, `{count, columns:[{area, table, column}], suspected, suspected_count}`: `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)`; at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
-```
+Flagged and suspected columns are picked the same way:
 
-It prints `{count, columns:[{area, table, column}]}`. Show them as a table, `Table | Columns`, at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
-
-- 3 columns or fewer: one option per column, `customers.email`.
-- More: grouped by table, one option per table with its count, `customers (3: email, phone, birth_date)`. With more than 3 tables, the options are **All <count> flagged columns** and the 2 tables with the most flagged columns.
+- 3 columns or fewer in all: one option per column, `customers.email`, or `customers.ip_address (suspected)`.
+- More: grouped by table, one option per table with its count, `customers (3: email, phone, ip_address (suspected))`; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns** and the 2 tables with the most listed columns.
 - Always last: **Keep them all queryable**.
-- "Other" takes `table.column` names to hide, including any the build listed under `suspected personal data (review)`.
+- "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
 Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
 
@@ -1164,7 +1166,7 @@ Its "Generate feedback for Claude" block is still accepted when the person paste
 **4b — after the cards:** **recount the sign-offs** with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
 
 - the person picked **Skip for now** or **Don't sign anything yet** → that is their decision to continue: say in one line that <n> definitions are unsigned and answers using them carry a warning, and go to Phase 5.
-- they stopped part-way (said so in "Other") → AskUserQuestion: `Continue (Recommended)` (seeds run against the current state; answers warn) / `Pause — I'll finish review first` (stop here; resume via `/agami-connect`).
+- they stopped part-way (an "Other" on an item card asked to stop, pause or finish later) → AskUserQuestion: `Continue (Recommended)` (seeds run against the current state; answers warn) / `Pause — I'll finish review first` (stop here; resume via `/agami-connect`).
 
 This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **Personal data left queryable does NOT block seeds** — keeping a sensitive column queryable is the person's call; only unreviewed *sign-offs* gate the seeds.
 
@@ -1228,7 +1230,7 @@ Then call AskUserQuestion, one question (header `Examples`), *"What should I do 
 
 | Answer | Do |
 |---|---|
-| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet. Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
+| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
 | Review the failing ones | The one-by-one cards over the failed items. |
 | Drop the failing ones | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example "$ROOT" --question "<area>/<question>" …` (one `--question` per failed item, `--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
 | Review all one by one | The one-by-one cards over every item. |

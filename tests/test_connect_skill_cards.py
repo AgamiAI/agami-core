@@ -406,3 +406,73 @@ def test_6_keeps_the_examples_page_as_the_full_view():
     full = _phase_6().split("**Show the full view")[1]
     assert "render_examples_validation.py" in full and "serve_page.py" in full
     assert "validate N" in full  # its pasted block is still accepted
+
+
+# --- fix round 1 (Task 4) -----------------------------------------------------------------------
+
+
+def test_personal_data_card_lists_and_hides_suspected_columns():
+    s = _phase_4()
+    assert "suspected_count" in s and "`suspected`" in s
+    assert "(suspected)" in s
+    assert "Flagged and suspected columns are picked the same way" in s
+
+
+def test_an_other_that_asks_to_stop_goes_to_the_continue_or_pause_card():
+    s = _phase_4()
+    assert "asks to stop is a stop, not a change" in s
+    assert "stop, pause or finish later" in _between("**4b ", "## Phase 5:")
+    assert "Any other \"Other\" you can't act on is re-asked, never guessed" in s
+
+
+def test_review_summary_mentions_guessed_joins_without_a_card():
+    s = _phase_4()
+    assert 'review-items "$ROOT" --scope rule2' in s
+    assert "joins were guessed from names and data" in s
+    assert "Review them any time in agami-model" in s
+    assert "not put on a card" in s
+
+
+def test_phase_6_unsigned_identity_answer_continues_to_phase_7():
+    s = _phase_6()
+    assert "Don't sign anything yet" in s
+    assert "goes on to Phase 7 (not 4b)" in s
+
+
+def _card_headers(text: str) -> list[str]:
+    headers = re.findall(r'"header":\s*"([^"]+)"', text)
+    headers += re.findall(r"header `([^`]+)`", text)
+    headers += re.findall(r"`((?:Metric|Entity|Example|Ex) \d+/\d+)`", text)
+    return headers
+
+
+def test_every_card_header_in_the_skill_fits_twelve_characters():
+    headers = _card_headers(SKILL.read_text(encoding="utf-8"))
+    assert len(headers) >= 10  # the pattern still finds the skill's headers
+    too_long = [h for h in headers if len(h) > 12]
+    assert not too_long, too_long
+
+
+def _option_lists(text: str) -> list[list[str]]:
+    """Each card's options: a JSON "options" array, or the `- **…**` bullets after an AskUserQuestion line."""
+    lists = [re.findall(r'"label"', m) for m in re.findall(r'"options":\s*\[(.*?)\]', text, re.S)]
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if "AskUserQuestion" not in line or not line.rstrip().endswith(":"):
+            continue
+        bullets, j = [], i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        while j < len(lines) and lines[j].startswith("- **"):
+            bullets.append(lines[j])
+            j += 1
+        if bullets:
+            lists.append(bullets)
+    return lists
+
+
+def test_no_card_example_in_the_skill_lists_more_than_four_options():
+    lists = _option_lists(SKILL.read_text(encoding="utf-8"))
+    assert lists  # the scan still finds the skill's cards
+    too_many = [opts for opts in lists if len(opts) > 4]
+    assert not too_many, too_many
