@@ -523,14 +523,38 @@ def test_1_3_is_skipped_on_a_first_onboard_and_stays_within_four_options():
     assert "at most 4" in s
 
 
-def test_1_5_folds_the_spec_workbook_into_the_doc_option():
+def _card_labels(section: str) -> list[str]:
+    return re.findall(r"^\| `([^`]+)` \|", section, re.M)
+
+
+def test_1_5_context_card_asks_for_definitions_questions_and_reports():
+    # A live review found onboarding never asked for the questions people ask or the reports they trust.
     s = _between("### 1.5 ", "### 1.6 ")
-    options = next(line for line in s.splitlines() if line.startswith("Options:"))
-    labels = re.findall(r"`([^`]+)`", options.split("(")[0] if "(Multi" in options else options)
-    labels = [lbl for lbl in labels if "—" in lbl]
-    assert len(labels) <= 4, labels
-    assert not any(lbl.startswith("Model spec workbook") for lbl in labels)
-    assert any("spec workbook" in lbl for lbl in labels)
+    assert "header `Context`" in s and "multiSelect" in s
+    labels = _card_labels(s)
+    assert labels == ["Definitions or a semantic layer", "Questions people ask", "Report SQL or dashboards", "Nothing to share"]
+    assert "spec workbook" in s and "dbt / LookML / Cube" in s
+    assert "agami-asked-questions.txt" in s and "reconcile/inbox" in s
+
+
+def test_1_4_asks_the_company_and_the_database_on_cards():
+    s = _between("### 1.4 ", "### 1.5 ")
+    assert "header `Company`" in s and "header `Database`" in s
+    assert "**Skip for now**" in s and "**Draft it from the database**" in s
+    assert "**Generate one for me (Recommended)** / **Skip**" in s
+    # typed values go in the question text, never as an option (question-cards rule 5)
+    assert "Write it now (Other field)" not in s
+    assert "sm\" set-org" in s and "set-description" in s
+
+
+def test_asked_questions_and_reports_are_used_after_the_build():
+    text = SKILL.read_text(encoding="utf-8")
+    phase5 = text[text.index("## Phase 5"):text.index("## Phase 6")]
+    assert "agami-asked-questions.txt" in phase5 and "*(yours)*" in phase5
+    six_b = text[text.index("### 6b "):text.index("## Phase 7")]
+    assert "header `Reports`" in six_b and "**Check them now (Recommended)** / **Later**" in six_b
+    assert "agami-reconcile" in six_b
+
 
 
 def test_6a_asks_its_fix_on_a_card():

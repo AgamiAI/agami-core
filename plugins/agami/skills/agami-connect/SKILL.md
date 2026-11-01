@@ -597,51 +597,51 @@ Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll m
 
 ### 1.4 — Datasource context (MANDATORY — ALWAYS ASK)
 
-Two levels: a **company** description written **once** at the deployment root and shared by every datasource, and a **per-database** narrative for the datasource being connected now. The skill never decides yes/skip for the user; "don't ask clarifying questions" does NOT cancel this — it's required state-gathering. Ask **A** then **B**.
+Three cards, asked right after the connection works and before tables are listed: the company (once per deployment), what the person can share (1.5), and this database's one line. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../shared/question-cards.md). The sample path skips all three (its model is ready-made).
 
-**A. Company context — ask ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: treat it as done only if the root `<artifacts_dir>/organization.md` exists **or** the root `<artifacts_dir>/organization.yaml` already has a non-empty `name`/`description`. If neither, this is the first onboard → ask:
-> What's your **company/organization** called, and a sentence or two on what it does? It's shared across every database you connect here and improves NL→SQL. (e.g. what the company/product is, what "MRR" or "active user" means company-wide.)
+**A. Company card — ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
 
-On an answer, do **BOTH** of these (not one — the record write is what populates `organization.yaml`):
-1. **Run this command** to write the company `name` + a short `description` into the record (this is the ONLY thing that fills those fields — a file write alone will not):
-   `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-org "<artifacts_dir>" --name "<company name>" --description "<one-line summary>"`
-2. **Write** the fuller paragraph to the **root** `<artifacts_dir>/organization.md` under `# About this company` (**narrative prose ONLY** — no model facts).
+> *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
-Then confirm both landed: `<artifacts_dir>/organization.yaml` now shows `name:`/`description:`, and `<artifacts_dir>/organization.md` exists.
+Options: **Skip for now** (no company context; say it can be added later in `/agami-model`) and **Draft it from the database** (after the build, Phase 2f drafts a short description from the model and Phase 7 shows it as a draft to correct). Text in "Other" is the answer. Write it as both of these (the record write is the only thing that fills `organization.yaml`):
+1. `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-org "<artifacts_dir>" --name "<company name>" --description "<one-line summary>"`
+2. The full text to the **root** `<artifacts_dir>/organization.md` under `# About this company` (**narrative prose ONLY** — no model facts).
 
-`Skip` → leave the company context empty (the composition simply omits the company block). Mention that richer company context (conventions, glossary) can be added later in `/agami-model`. On a **subsequent** onboard (company context already authored) **do NOT re-ask** — narrate *"Sharing the **`<company>`** context you set earlier."*
+Then confirm both landed. On a **later** onboard (company context already there) don't ask: say *"Sharing the **`<company>`** context you set earlier."*
 
-**B. This-database narrative — ask on EVERY onboard.** For the datasource being connected now:
-> Want a one-paragraph description of what **this database** is about — what it holds, and any term that means something specific here? Optional.
+**B. Context card — every onboard.** This is 1.5 below; ask it after A.
 
-`Yes` → write to the **per-profile** `<artifacts_dir>/<profile>/datasource.md` under `# About this database` (this datasource's narrative only). `Skip` → leave it absent; Phase 2f writes a short per-database starter from the enriched model.
+**C. Database card — every onboard.** The one line `list_datasources` shows an agent so it can pick the right datasource (an organization with several refuses a query that names none), and, when the person writes more, this database's narrative. AskUserQuestion, one question, header `Database`:
 
-**C. One-line datasource description — ask on EVERY onboard.** This is a different thing from B's narrative: it is the single line `list_datasources` shows an agent so it can pick the right datasource for a question, and an organization with several datasources refuses a query that names none. A datasource with no description routes on its name alone. **AskUserQuestion**:
-> In one line, what does **this database** hold, and when would someone query it? (e.g. *"Invoices, payments, products and margins — use for revenue and profitability questions."*)
+> *"In one line, what does this database hold, and when would someone query it? Type it in Other, e.g. "Invoices, payments and products: use for revenue questions." Add more sentences if a term means something specific here."*
 
-Options: `Write it now (Other field)` / `Generate one for me (Recommended)` / `Skip`.
+Options: **Generate one for me (Recommended)** / **Skip**.
 
 **Nothing is written at this step** — `datasource.yaml` does not exist until introspection (1.7) creates it. Bind the answer and act on it after 1.7:
-- **Write it now** → bind `$DATASOURCE_DESCRIPTION` to their line. Right after 1.7 succeeds, write it: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"`.
-- **Generate one for me** → bind `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched (see 2f), and the Phase 7 summary shows it as a draft they can edit.
+- **Text in "Other"** → its first sentence is `$DATASOURCE_DESCRIPTION`, written right after 1.7: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"`. When it has more than one sentence, the whole text also goes to `<artifacts_dir>/<profile>/datasource.md` under `# About this database`.
+- **Generate one for me** → `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched, and the Phase 7 summary shows it as a draft they can edit.
 - **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
 
-If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → bind `$DATASOURCE_DESCRIPTION = keep`; nothing is written (re-introspection preserves it). **Replace it** → ask the three options above and bind from that answer.
+If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → `$DATASOURCE_DESCRIPTION = keep`; nothing is written. **Replace it** → ask the card above and bind from that answer. Without a narrative from this card, Phase 2f writes a short per-database starter from the enriched model.
 
 `chmod 644` whatever you write — these are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy); never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
-Independent of 1.4 (paragraph ≠ doc). Same "required state-gathering" rule. Several very different sources qualify, so ask once and branch on the answer. **AskUserQuestion** (multi-select; the repo path is the high-value one — it encodes metrics + joins, not just structure):
+The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion, one question, header `Context`, **multiSelect**:
 
-> Got an existing data model or metrics list I can read? A few kinds help:
-> • **A doc** — ERD, data dictionary, schema diagram (PDF, PNG/JPG, text, markdown, CSV).
-> • **A metrics / KPI list** — a spreadsheet, CSV, or doc of your metrics and how each is defined (e.g. "Approval rate = approved ÷ applications"). I'll turn each into a reusable metric so answers match your numbers.
-> • **A semantic-layer / transform repo** — LookML, dbt, Cube, MetricFlow. These define your metrics, dimensions, and joins explicitly, which is gold for NL→SQL accuracy. They're usually git-backed — just point me at the folder.
-> • **A published product schema** — if this DB is a well-known product (ServiceNow, Salesforce, Jira, NetSuite, SAP, HubSpot, Workday…), I can look up its official table/column reference online so the standard fields get correct descriptions automatically.
-> • **A model spec workbook** — agami's template (`shared/model-spec-template.xlsx`) filled in with your subject areas, which area owns each table, the joins, metrics, sensitive columns and rules. The model is built **exactly** as it says — the way to model a warehouse whose joins aren't declared (a star schema of views, keys named for their role).
+> *"What can you share so answers match how your team works? Pick any that you have."*
 
-Options: `Doc, metrics file or spec workbook — I'll attach it` / `Semantic-layer repo — I'll give a path` / `Published product schema — look it up` / `Skip — nothing to share`. (Multi-select — combine as needed. Four options: the model spec workbook goes under the first, since it is recognised by its sheets.)
+| label | description | then |
+|---|---|---|
+| `Definitions or a semantic layer` | A data dictionary, metrics list, ERD, spec workbook, or a dbt / LookML / Cube repo | A follow-up card: *"Type the file or folder path in Other, or attach the file to your next message."*, options **Skip this one** / **I'll attach it** (wait for the attachment). Then read it as the sections below say: a doc, a column dictionary, a model spec workbook, or a semantic-layer repo by what the path holds. |
+| `Questions people ask` | Real questions from your team; they become checked examples | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
+| `Report SQL or dashboards` | SQL you trust, an export, or a screenshot; checked against the model after the build | A follow-up card: *"Type a path to a .sql or .csv file in Other, or attach a screenshot to your next message."*, options **Skip this one** / **I'll attach it**. Copy files or pasted SQL into `<artifacts_dir>/local/reconcile/inbox/` (SQL as `<ts>.sql`, a CSV as is; note a screenshot's path). Phase 6b hands them to `/agami-reconcile`. |
+| `Nothing to share` | Build from the database alone | Go to 1.6. Picked with another option: say it back and ask the card again. |
+
+**"Other" on the context card** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
+
+Ask the follow-up cards one at a time, in the table's order. Nothing here is required: every follow-up's **Skip this one** goes on to the next.
 
 **A model spec workbook is recognised by its sheets, whatever the user called it:** an `.xlsx` with `Subject areas`, `Tables` and `Joins` sheets is one, attached under the first option like any doc. Take the [model-spec path](#18--apply-a-model-spec-only-when-one-was-attached) for it — **never `Read` it as a doc**: the parser reads every row, and a doc read is trimmed and paraphrased.
 
@@ -657,7 +657,7 @@ Options: `Doc, metrics file or spec workbook — I'll attach it` / `Semantic-lay
 
 Stay anchored to the tables you actually introspected; don't invent fields the live DB doesn't have.
 
-**If a semantic-layer repo:** ask for the directory (a local clone / monorepo path — no upload needed since it's git-backed). Glob the **definition** files and `Read` them up to a budget (~30 files / ~250 KB total; if larger, prefer metric/model definitions and tell the user what you sampled). **Skip compiled SQL and data files** — you want the declared metrics/joins, not the warehouse output:
+**If a semantic-layer repo:** use the directory from the follow-up card (a local clone / monorepo path — no upload needed since it's git-backed). Glob the **definition** files and `Read` them up to a budget (~30 files / ~250 KB total; if larger, prefer metric/model definitions and tell the user what you sampled). **Skip compiled SQL and data files** — you want the declared metrics/joins, not the warehouse output:
 > | Layer | Read these | Carries |
 > |---|---|---|
 > | **LookML** | `*.view.lkml`, `*.explore.lkml`, `*.model.lkml` | dimensions, **measures** (→ metrics), **joins** (→ relationships), `sql_table_name` |
@@ -1062,6 +1062,8 @@ If the user **did** write a narrative in 1.4, leave it untouched. The glossary f
   ```
 - skipped → leave it; `datasource.yaml` keeps whatever description it already had (re-introspection preserves it).
 
+**The company draft (from 1.4 A's "Draft it from the database").** Write two or three plain sentences on what the business does, inferred only from the subject areas and table descriptions you just wrote (never from general knowledge of a company name), and apply them as 1.4 A says (`sm set-org` plus `organization.md`), with the first line of `organization.md` reading *"Draft from the database; correct it in /agami-model."*. Phase 7 shows it for correction.
+
 ---
 
 ## Phase 3: Review the subject-area split
@@ -1193,6 +1195,8 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 - **Cross-schema seeds — the highest-value few-shots, include them deliberately.** The cross-schema / cross-area joins are in that same output (and in `cross_subject_area_relationships`). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
 - **Count scales with the model:** a single-schema DB is fine at ~10–12; a multi-schema one wants ~2–3 per subject area **plus** the 2–4 cross-schema seeds — don't undersample a 5-schema DB at a flat 12.
 
+**The person's own questions come first.** When 1.5 saved `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, write one candidate per question, its `question` as the person wrote it and SQL from the model, before any you make up; they go through the same validation and the same Keep / Drop cards as the rest, and Phase 6's table marks them *(yours)*. A question the model can't answer (a table that was left out, say) is not forced: list it in one line after the table with the reason.
+
 Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metrics` (**every** model metric it computes, by `name`, so it is found under each; a name the model doesn't declare rejects the seed). **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `<artifacts_dir>/local/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metrics`.
 
 **5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error. Post one progress line from its output (`totals`, or `added` and `rejected` for one area): *"✓ Wrote <added> examples; <rejected> failed the dry run."*
@@ -1297,6 +1301,10 @@ Validation often surfaces a result that's *obviously wrong* — a bounded ratio 
 
 ---
 
+### 6b — Check the reports the person shared (only when 1.5 saved some)
+
+When `<artifacts_dir>/local/reconcile/inbox/` has files (or a screenshot path) from 1.5, say in one line what was shared, then AskUserQuestion, one question, header `Reports`: *"Check your <n> reports against the new model now?"* Options: **Check them now (Recommended)** / **Later** (say they can run `/agami-reconcile` any time; the files stay in the inbox). **Check them now** hands the files to [agami-reconcile](../agami-reconcile/SKILL.md), which grades any SQL part by part, compares the numbers, and asks about each mismatch on cards; come back to Phase 7 when it is done.
+
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
 **Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered, or while a full view page is out and its block hasn't come back** — wait for the person, don't summarize over them.
@@ -1321,7 +1329,7 @@ agami-connect just ran. Here's what we found:
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
 
-After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
+When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
 Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards; when that review ends, come back here to Phase 8, the starter questions, rather than agami-model's overview card, so onboarding still ends on a first question) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 

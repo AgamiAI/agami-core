@@ -14,6 +14,12 @@ below corresponds to one such version.
 
 ### Added
 
+- **Onboarding asks for context on cards.** Right after connecting, three cards: the company
+  (once per deployment, or drafted from the database), what the person can share (definitions or a
+  semantic layer, the questions people ask, report SQL or dashboards), and the database's one line.
+  The questions become examples checked with the rest; the reports go to agami-reconcile after the
+  build.
+
 - **Charts drawn in the chat.** "Show as a chart" on the answer card now draws horizontal bars as
   text in the chat (`scripts/text_chart.py`), from the same sections file the HTML chart reads, so
   the bars, the table and the page agree. The HTML report is the full view, served only when asked.
@@ -133,6 +139,13 @@ below corresponds to one such version.
   more than once (a single area's file labelled `AREA=PATH`; an unlabelled one, or the same file
   twice, is refused), and shows each card's area. An area the model doesn't have is refused with the list of valid ones, where one
   `--area` used to run against an empty area (and `seed-examples` created its folder).
+
+### Removed
+
+- **The table-picker page.** `sm discover` writes only the inventory (`--out` is accepted and
+  ignored); tables, a schema's list, a table's columns and columns to leave out are all handled in
+  the chat (`inventory_summary.py --show` and `--check-columns`). `render_prune.py`,
+  `prune-template.html` and `parse_prune_block.py` are gone.
 
 ### Fixed
 
