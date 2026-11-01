@@ -8,7 +8,7 @@ import { ACCENT, BRAND, logoSvg, logoSvgAnimated } from '../brand'
 // reading the atom where it is used, so an imported atom would not be seen.
 const screenState = atom({ plugin: 'agami-core', key: 'screen' } as const, 'home' as AgamiScreen)
 const envState = atom({ plugin: 'agami-core', key: 'env' } as const, null as AgamiEnv | null, {
-  shape: 'env-2',
+  shape: 'env-3',
 })
 
 const IDLE: AgamiSampleState = { waiting: false, turnId: null, note: null }

@@ -4,8 +4,16 @@
 export type AgamiScreen = 'home' | 'connect' | 'first-answer'
 
 export type AgamiConnectState = {
-  phase: 'form' | 'waiting' | 'connected' | 'failed' | 'manual'
+  /**
+   * `store`: the OS store's library is missing and `sm install` would add it; `driver`: the database
+   * driver is missing and pip would add `package`; `installing`: one of those is running.
+   */
+  phase: 'form' | 'waiting' | 'connected' | 'failed' | 'manual' | 'store' | 'driver' | 'installing'
   profile?: string
+  /** The pip package(s) the helper said are missing, space-separated (`duckdb pytz`). */
+  package?: string
+  /** The last install of `package` failed, so its button says Try again. */
+  installFailed?: boolean
   dbType?: string
   url?: string
   detail?: string
@@ -31,6 +39,8 @@ export type AgamiEnv = {
   os: AgamiOs
   /** Where agami keeps its files; null when the check could not run. */
   artifactsDir: string | null
+  /** The bash every agami command runs through (Git Bash on Windows); null when none was found. */
+  bash: string | null
 }
 
 declare module 'claude-code' {

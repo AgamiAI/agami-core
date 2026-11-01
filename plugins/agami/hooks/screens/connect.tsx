@@ -9,12 +9,12 @@ import { readEnv } from '../env'
 // reading the atom where it is used, so an imported atom would not be seen.
 const screenState = atom({ plugin: 'agami-core', key: 'screen' } as const, 'home' as AgamiScreen)
 const envState = atom({ plugin: 'agami-core', key: 'env' } as const, null as AgamiEnv | null, {
-  shape: 'env-2',
+  shape: 'env-3',
 })
 const FORM: AgamiConnectState = { phase: 'form', dbType: 'postgres', fields: {} }
-const connectState = atom({ plugin: 'agami-core', key: 'connect' } as const, FORM, { shape: 'connect-1' })
+const connectState = atom({ plugin: 'agami-core', key: 'connect' } as const, FORM, { shape: 'connect-2' })
 
-type Engine = Pick<CoreEngineInterface, 'ui' | 'state' | 'prompt' | 'process' | 'fs' | 'plugin'>
+type Engine = Pick<CoreEngineInterface, 'ui' | 'state' | 'prompt' | 'process' | 'fs' | 'plugin' | 'env'>
 
 /** Merges `change` into the Connect screen's state, read afresh so two quick writes both land. */
 function patch($: Pick<Engine, 'state'>, change: Partial<AgamiConnectState>): Promise<unknown> {
@@ -53,8 +53,21 @@ const PROFILE_RE = /^[a-z0-9_-]{1,32}$/
 const LINK_NOTE = 'Opens a page on this computer. The password goes to your keychain, not the chat.'
 const EXPIRED = 'The page expired before a password was entered. Connect again when you are ready.'
 
+const NO_STORE = 'The secure store isn’t set up for agami yet.'
+
 export const continuePrompt = (profile: string): string =>
-  `The agami profile ${profile} is connected. Continue /agami-core:agami-connect from Phase 1.3 for it (skip Phase 0).`
+  `The agami profile ${profile} is connected and its credentials are secured. Continue /agami-core:agami-connect for it: ` +
+  'run Phase 0a.5 to 0a.8 (skip the credential template and promotion), then Phase 1.'
+
+// The bash the setup check found (Git Bash on Windows, never WSL's); `bash` before the check has run.
+const bashOf = (env: AgamiEnv | null): string => env?.bash ?? 'bash'
+
+const lastLine = (text: string): string =>
+  text
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(Boolean)
+    .pop() ?? ''
 
 const fieldsOf = (dbType: string | undefined): Field[] => DB_TYPES.find(d => d.value === dbType)?.fields ?? []
 
@@ -62,10 +75,12 @@ const fieldsOf = (dbType: string | undefined): Field[] => DB_TYPES.find(d => d.v
 // of this module kills the child anyway, so nothing outlives the variable.
 let running: { stop: () => void } | null = null
 
-// Starts the helper for the request the Connect screen recorded in its state. Set from `session.start`
-// with that hook's `$`: the helper waits up to 300 s for a password, so its loop belongs to the session,
-// not to a press or a render, each of which ends in seconds.
-let kick: (() => void) | null = null
+// Runs long work (the helper, which waits up to 300 s for a password, or an install) with the `$` kept
+// from `session.start`: that work belongs to the session, not to a press or a render, each of which ends
+// in seconds. A press records what it wants in the state, then hands the work here.
+// (The engine follows `$` only into functions declared in this file, so the work is named, not passed.)
+type Job = 'helper' | 'store' | 'driver'
+let detach: ((job: Job) => void) | null = null
 
 // Which run wrote each spec path last. A stopped run cleans up after a newer one may have written the
 // same path (the same profile, tried again at once), and must not delete that newer spec.
@@ -73,11 +88,18 @@ const specOwner = new Map<string, object>()
 
 /** Called once from `session.start`: keeps that hook's `$` to run the helper with. */
 export function startConnectRunner($: Engine): void {
-  kick = () => {
-    runHelper($).catch(() => {
+  detach = job => {
+    runJob($, job).catch(() => {
       // The session or the module is going away, and the pane's state with it; nothing to tell.
     })
   }
+}
+
+function runJob($: Engine, job: Job): Promise<void> {
+  if (job === 'store') return setUpStore($)
+  if (job === 'driver') return installDriver($)
+
+  return runHelper($)
 }
 
 /** Stops a waiting helper and puts the Connect screen back to an empty form. */
@@ -112,9 +134,9 @@ function specOf(st: AgamiConnectState): Record<string, unknown> {
 const specPath = (env: AgamiEnv, profile: string): string => `${env.artifactsDir}/local/tmp/connect-${profile}.json`
 
 // No `$.fs` call removes a file; `bash` is already what every agami script runs through.
-async function removeSpec($: Pick<Engine, 'process'>, path: string): Promise<void> {
+async function removeSpec($: Pick<Engine, 'process'>, bash: string, path: string): Promise<void> {
   try {
-    await $.process.run(['bash', '-c', 'rm -f -- "$1"', 'agami', path])
+    await $.process.run([bash, '-c', 'rm -f -- "$1"', 'agami', path])
   } catch {
     // The spec holds no secret; a leftover file is untidy, not a leak.
   }
@@ -122,6 +144,13 @@ async function removeSpec($: Pick<Engine, 'process'>, path: string): Promise<voi
 
 /** The end every successful path shares: Claude takes over, the pane goes home and reads the new profile. */
 async function finishConnected($: Engine, profile: string): Promise<void> {
+  // Before the hand-off, so Claude's turn and every script after it work on the new profile.
+  let isActive = false
+  try {
+    isActive = (await $.env.set('AGAMI_PROFILE', profile)).deny === undefined
+  } catch {
+    isActive = false
+  }
   let isSent = false
   try {
     const sent = await $.prompt.submit({ text: continuePrompt(profile) })
@@ -139,13 +168,18 @@ async function finishConnected($: Engine, profile: string): Promise<void> {
   await update($, screenState, () => 'home')
   try {
     const env = await readEnv($)
-    await update($, envState, () => env)
+    // Shown active only when it is: a held AGAMI_PROFILE leaves the profile the check reported.
+    const shown =
+      isActive && env.python.ok
+        ? { ...env, active: profile, profiles: env.profiles.includes(profile) ? env.profiles : [...env.profiles, profile] }
+        : env
+    await update($, envState, () => shown)
   } catch {
     // The home screen keeps the setup it had; the next open of the pane reads it again.
   }
 }
 
-type Final = { status?: string; detail?: string; url?: string }
+type Final = { status?: string; reason?: string; package?: string; detail?: string; url?: string }
 
 async function onLine($: Engine, msg: Final, profile: string): Promise<boolean> {
   if (typeof msg.url === 'string') {
@@ -157,6 +191,13 @@ async function onLine($: Engine, msg: Final, profile: string): Promise<boolean> 
     await finishConnected($, profile)
   } else if (msg.status === 'expired') {
     await patch($, { phase: 'form', url: undefined, detail: EXPIRED })
+  } else if (msg.status === 'refused' && msg.reason === 'no_store') {
+    await patch($, { phase: 'store', url: undefined, detail: undefined })
+  } else if (msg.status === 'refused') {
+    // A name taken, a field the helper cannot write: fixed in the form, which keeps what was typed.
+    await patch($, { phase: 'form', url: undefined, detail: msg.detail || 'The helper refused this connection.' })
+  } else if (msg.status === 'missing_driver' && msg.package) {
+    await patch($, { phase: 'driver', url: undefined, package: msg.package, installFailed: false, detail: msg.detail })
   } else {
     await patch($, { phase: 'failed', url: undefined, detail: msg.detail || 'The connection could not be made.' })
   }
@@ -178,6 +219,7 @@ async function runHelper($: Engine): Promise<void> {
   running = mine
   const env = await read($, envState)
   const st = await read($, connectState)
+  const bash = bashOf(env)
   if (st.phase !== 'waiting' || !st.profile || !env?.artifactsDir || isStopped) {
     if (running === mine) running = null
 
@@ -202,7 +244,7 @@ async function runHelper($: Engine): Promise<void> {
   let heard = false
   try {
     if (isStopped) return
-    stream = $.process.spawn({ argv: ['bash', `${$.plugin.root}/scripts/py`, 'connect_helper.py', '--spec', path] })
+    stream = $.process.spawn({ argv: [bash, `${$.plugin.root}/scripts/py`, 'connect_helper.py', '--spec', path] })
     for await (const chunk of stream) {
       heard = true
       if (running !== mine) break
@@ -233,7 +275,7 @@ async function runHelper($: Engine): Promise<void> {
   } finally {
     if (specOwner.get(path) === mine) {
       specOwner.delete(path)
-      await removeSpec($, path)
+      await removeSpec($, bash, path)
     }
   }
   if (running !== mine) return
@@ -282,14 +324,88 @@ async function start($: Engine): Promise<void> {
 
     return
   }
-  if (kick === null) {
+  if (detach === null) {
     await patch($, { detail: 'agami could not start its connect helper. Start a new session and try again.' })
 
     return
   }
   // The press only records the request; the session's runner does the long work.
   await patch($, { profile, phase: 'waiting', url: undefined, detail: undefined })
-  kick()
+  detach('helper')
+}
+
+/** Hands a press's install to the session's runner, showing `progress` meanwhile. */
+async function install($: Engine, progress: string, job: Job): Promise<void> {
+  if (detach === null || running !== null) return
+  const st = await read($, connectState)
+  if (st.phase === 'installing') return  // a second press before the pane redrew
+  await patch($, { phase: 'installing', detail: progress })
+  detach(job)
+}
+
+// Whether the install this work started is still what the screen shows: Back or a reopen resets the
+// screen, and an install that finishes after that must not start the helper behind it.
+async function stillInstalling($: Pick<Engine, 'state'>, profile: string | undefined): Promise<boolean> {
+  const now = await read($, connectState)
+
+  return now.phase === 'installing' && now.profile === profile
+}
+
+/** After an install worked, the helper runs again for the same request. */
+async function retryHelper($: Engine): Promise<void> {
+  await patch($, { phase: 'waiting', url: undefined, detail: undefined, package: undefined, installFailed: false })
+  await runHelper($)
+}
+
+/** `sm install` adds the keyring library (the press was the person's yes); if it cannot, the file you edit. */
+async function setUpStore($: Engine): Promise<void> {
+  const st = await read($, connectState)
+  const env = await read($, envState)
+  let reason = ''
+  try {
+    const run = await $.process.run([bashOf(env), `${$.plugin.root}/scripts/sm`, 'install'], { timeoutMs: 600_000 })
+    if (run.exitCode !== 0) reason = lastLine(run.stderr) || lastLine(run.stdout) || `sm install exited with code ${run.exitCode}.`
+  } catch (err) {
+    reason = err instanceof Error ? err.message : String(err)
+  }
+  if (!(await stillInstalling($, st.profile))) return
+  if (!reason) {
+    await retryHelper($)
+
+    return
+  }
+  const profile = st.profile ?? ''
+  await $.prompt.submit({ text: manualPrompt(st.dbType ?? 'postgres', profile) })
+  await patch($, { phase: 'manual', detail: `Secure storage could not be set up: ${reason}` })
+}
+
+/** pip installs the missing driver into the Python the helper runs with (`scripts/py`), then the helper runs again. */
+async function installDriver($: Engine): Promise<void> {
+  const st = await read($, connectState)
+  const env = await read($, envState)
+  const packages = (st.package ?? '').split(/\s+/).filter(Boolean)
+  const py = [bashOf(env), `${$.plugin.root}/scripts/py`, '-m', 'pip', 'install']
+  let error = ''
+  // --user first, as agami-connect does; a venv's Python refuses it, and there a plain install is right.
+  for (const args of [[...py, '--user', ...packages], [...py, ...packages]]) {
+    try {
+      const run = await $.process.run(args, { timeoutMs: 600_000 })
+      if (run.exitCode === 0) {
+        error = ''
+        break
+      }
+      error = lastLine(run.stderr) || lastLine(run.stdout) || `pip exited with code ${run.exitCode}.`
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err)
+    }
+  }
+  if (!(await stillInstalling($, st.profile))) return
+  if (!error) {
+    await retryHelper($)
+
+    return
+  }
+  await patch($, { phase: 'driver', installFailed: true, detail: error })
 }
 
 const PROMOTE_MESSAGES: Record<string, string> = {
@@ -303,7 +419,8 @@ async function checkAgain($: Engine): Promise<void> {
   let first = ''
   let rest = ''
   try {
-    const run = await $.process.run(['bash', `${$.plugin.root}/scripts/py`, 'promote_credentials.py'])
+    const env = await read($, envState)
+    const run = await $.process.run([bashOf(env), `${$.plugin.root}/scripts/py`, 'promote_credentials.py'])
     const out = run.stdout.trim()
     first = out.split(/\s+/)[0] ?? ''
     rest = out.slice(first.length).trim()
@@ -364,6 +481,51 @@ export async function connect($: Engine, e: RenderInput): Promise<RenderElement>
         <Box flexDirection="column" marginTop={1}>
           {body}
         </Box>
+        <Box flexDirection="column" marginTop={1}>
+          {backButton}
+        </Box>
+      </Box>
+    )
+  }
+
+  if (st.phase === 'store') {
+    return (
+      <Box flexDirection="column">
+        {header}
+        <Text>{NO_STORE}</Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Button key="setup-store" label="Set up secure storage" variant="primary" onPress={() => install($, 'Setting up secure storage…', 'store')} />
+          {backButton}
+        </Box>
+      </Box>
+    )
+  }
+
+  if (st.phase === 'driver') {
+    const label = st.installFailed ? 'Try again' : `Install ${st.package ?? ''}`
+
+    return (
+      <Box flexDirection="column">
+        {header}
+        {detail}
+        <Box flexDirection="column" marginTop={1}>
+          <Button
+            key="install-driver"
+            label={label}
+            variant="primary"
+            onPress={() => install($, `Installing ${st.package ?? ''}…`, 'driver')}
+          />
+          {backButton}
+        </Box>
+      </Box>
+    )
+  }
+
+  if (st.phase === 'installing') {
+    return (
+      <Box flexDirection="column">
+        {header}
+        <Text dimColor>{st.detail ?? 'Installing…'}</Text>
         <Box flexDirection="column" marginTop={1}>
           {backButton}
         </Box>

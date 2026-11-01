@@ -41,9 +41,77 @@ test('no interpreter at all hides Connect, and says to install Python', async ($
   await ui.unmount()
 })
 
-test('a script that fails to run is no usable Python, and nothing throws', async ($, on) => {
-  await openPane($, on, { exitCode: 3, stderr: 'agami: no Python interpreter found', uname: 'Darwin' })
+test('a script that finds no Python says to install one, and nothing throws', async ($, on) => {
+  await openPane($, on, { exitCode: 3, stderr: 'agami: no Python interpreter found (tried $AGAMI_PYTHON, PATH).' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
+  expect(await ui.find({ type: 'Text', text: /Install it from python.org/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button' })).toBeUndefined()
+  await ui.unmount()
+})
+
+const textOn = async ($: Engine, pattern: RegExp): Promise<string | undefined> => {
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const found = await ui.find({ type: 'Text', text: pattern })
+  await ui.unmount()
+
+  return found?.text
+}
+
+test('a check that cannot start says so plainly, not that Python is missing', async ($, on) => {
+  await openPane($, on, { spawnError: 'spawn bash ENOENT' })
+
+  expect(await textOn($, /^Couldn't run agami's setup check: .*spawn bash ENOENT$/)).toBeDefined()
+  expect(await textOn($, /python.org/)).toBeUndefined()
+  expect(await buttonsOn($)).toEqual([])
+})
+
+test('a check that fails for another reason names its last line', async ($, on) => {
+  await openPane($, on, { exitCode: 2, stderr: 'warming up\nconnect_resolve.py: error: bad flag\n' })
+
+  expect(await textOn($, /^Couldn't run agami's setup check: connect_resolve.py: error: bad flag$/)).toBeDefined()
+})
+
+test('elsewhere than Windows the check runs through bash on the PATH', async ($, on) => {
+  const argvs = await openPane($, on, { data: READY, env: { CLAUDE_CODE_GIT_BASH_PATH: 'C:\\Git\\bin\\bash.exe' } })
+
+  expect(argvs.map(a => a[0])).toEqual(['bash'])
+})
+
+test('on Windows the check runs through CLAUDE_CODE_GIT_BASH_PATH when it is set', async ($, on) => {
+  const pinned = 'D:\\Tools\\Git\\bin\\bash.exe'
+  const argvs = await openPane($, on, {
+    data: { ...READY, platform: 'Windows' },
+    env: { OS: 'Windows_NT', CLAUDE_CODE_GIT_BASH_PATH: pinned },
+  })
+
+  expect(argvs).toHaveLength(1)
+  expect(argvs[0]?.[0]).toBe(pinned)
+  expect(argvs[0]?.[2]).toBe('connect_resolve.py')
+})
+
+test('on Windows the check runs through the bash.exe beside git.exe, never WSL’s', async ($, on) => {
+  const gitBash = 'C:\\Program Files\\Git\\bin\\bash.exe'
+  const argvs = await openPane($, on, {
+    data: { ...READY, platform: 'Windows' },
+    env: { OS: 'Windows_NT' },
+    whereGit: 'C:\\Program Files\\Git\\cmd\\git.exe\r\n',
+    files: [gitBash, 'C:\\Windows\\System32\\bash.exe'],
+  })
+
+  expect(argvs.map(a => a[0])).toEqual(['where', gitBash])
+  expect(await buttonsOn($)).toContain('Connect a database')
+})
+
+test('on Windows with no Git Bash the pane says what to install, and runs no bash at all', async ($, on) => {
+  const argvs = await openPane($, on, {
+    data: { ...READY, platform: 'Windows' },
+    env: { OS: 'Windows_NT' },
+    files: ['C:\\Windows\\System32\\bash.exe'],
+  })
+
+  expect(argvs.filter(a => a[0] !== 'where')).toEqual([])
+  expect(await textOn($, /^Couldn't run agami's setup check: .*Git for Windows/)).toBeDefined()
   expect(await buttonsOn($)).toEqual([])
 })
 
