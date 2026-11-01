@@ -77,14 +77,17 @@ On macOS and Windows, connecting a database from the agami pane asks for the pas
 in your browser instead of in the chat. `scripts/connect_helper.py` serves that page:
 
 - **What it binds:** `127.0.0.1` only, on a random port, behind a one-time token of 43 random characters
-  in the URL. Nothing off your machine can reach it. Any other path, a wrong token, or a second submit
-  gets a 404. The page loads no scripts, fonts, or files from anywhere.
+  in the URL. Nothing off your machine can reach it. Any other path, a wrong token, a second submit, a
+  request addressed to another host name, or a post from another page gets a 404. An idle or half-sent
+  request is dropped after 10 seconds and cannot hold the helper open. The page loads no scripts, fonts, or files from anywhere.
 - **For how long:** until the first password is submitted, or 5 minutes, whichever comes first. Then it
   stops listening and exits.
 - **What it stores, and where:** the password goes into the OS credential store (Keychain on macOS,
   Credential Manager on Windows) under the service `agami` and the profile name. The credentials file
   gets the non-secret fields and a reference, `password = keyring:agami/<profile>`, never the password.
-  The password is not written to the chat, the pane, a command line, a log, or any other file.
+  The password is not written to the chat, the pane, a command line, a log, or any other file. If the
+  connection test fails, the helper removes both the section it wrote and the stored password, so you
+  can try again with the same profile name.
 - **What it calls:** after saving, it runs `SELECT 1` against your own database through `execute_sql`, the
   same local connection every query uses.
 

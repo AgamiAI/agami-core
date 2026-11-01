@@ -31,6 +31,7 @@ SRC = REPO / "packages" / "agami-core" / "src"
 # Source path -> path under lib/, as in dev.py::_VENDORED.
 VENDORED = {
     "agami_paths.py": "agami_paths.py",
+    "credential_store.py": "credential_store.py",
     "execute_sql.py": "execute_sql.py",
     "guardrail.py": "guardrail.py",
     "sql_guard.py": "sql_guard.py",

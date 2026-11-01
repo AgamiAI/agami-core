@@ -57,6 +57,25 @@ def put(profile: str, secret: str) -> str:
     return f"{REF_PREFIX}{SERVICE}/{profile}"
 
 
+def delete(profile: str) -> None:
+    """Remove `profile`'s stored secret. Idempotent: nothing stored (or no store here) is not an error."""
+    if platform.system() not in _PLATFORMS:
+        return  # `put` is only ever used on macOS/Windows, so nothing can be stored elsewhere
+    try:
+        backend = _backend()
+    except CredentialStoreError:
+        return  # no keyring package, so nothing was stored through it
+    try:
+        # Checked first because each backend raises its own "not found" error from delete_password.
+        if backend.get_password(SERVICE, profile) is not None:
+            backend.delete_password(SERVICE, profile)
+    except Exception as e:
+        raise CredentialStoreError(
+            f"Could not remove the password for [{profile}] from the OS credential store; "
+            f"remove the {SERVICE} entry for {profile} by hand."
+        ) from e
+
+
 def resolve(value: str, *, profile: str) -> str:
     """`value` unchanged unless it is a `keyring:` reference, in which case the stored secret."""
     if not value.startswith(REF_PREFIX):

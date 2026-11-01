@@ -65,7 +65,11 @@ _KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _DB_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 # `password` is what the page is for; `url` can carry a password inside it; `type` comes from db_type.
 _RESERVED_FIELDS = {"password", "url", "type"}
+_UNREADABLE_VALUE_RE = re.compile(r"%|^[#;]|\s[#;]")
 _MAX_BODY = 8192
+# Seconds a connection may sit idle or mid-request. Each request has its own daemon thread, so a slow
+# or idle client holds only that thread, never the server or the 300-second exit.
+_REQUEST_TIMEOUT = 10
 _STORE_NAMES = {"Darwin": "your Keychain", "Windows": "Windows Credential Manager"}
 
 
@@ -123,9 +127,12 @@ def _spec_error(spec: Any) -> str | None:
     for key, value in fields.items():
         if not isinstance(key, str) or not _KEY_RE.match(key) or key in _RESERVED_FIELDS:
             return f"The field {key!r} cannot be set here."
-        # A line break would start a new key or [section] in the credentials file.
-        if not isinstance(value, (str, int)) or isinstance(value, bool) or re.search(r"[\r\n]", str(value)):
+        if not isinstance(value, (str, int)) or isinstance(value, bool) or "\n" in str(value) or "\r" in str(value):
             return f"The value for {key} must be one line of text or a number."
+        # execute_sql reads the file with `%` interpolation and `#`/`;` inline comments, so these
+        # would reach the driver changed or cut short (or break the read altogether).
+        if _UNREADABLE_VALUE_RE.search(str(value)):
+            return f"The value for {key} cannot contain %, or # or ; after a space; enter it in the credentials file by hand."
     return None
 
 
@@ -141,19 +148,39 @@ def _section_text(spec: dict[str, Any], password_ref: str | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _write_section(creds: Path, section: str) -> None:
-    """Create the credentials file at 0600, or append to it and put it back to 0600."""
+def _write_section(creds: Path, section: str) -> str:
+    """Create the credentials file at 0600, or append to it and put it back to 0600. Returns the exact
+    text added, so `_remove_section` can take it out again."""
     creds.parent.mkdir(parents=True, exist_ok=True)
     if not creds.exists():
         fd = os.open(creds, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(section)
+        added = section
     else:
         existing = creds.read_bytes()
-        sep = "" if not existing or existing.endswith(b"\n") else "\n"
+        added = ("" if not existing or existing.endswith(b"\n") else "\n") + "\n" + section
         with creds.open("a", encoding="utf-8", newline="\n") as fh:
-            fh.write(sep + "\n" + section)
+            fh.write(added)
     creds.chmod(0o600)
+    return added
+
+
+def _remove_section(creds: Path, added: str) -> None:
+    """Undo `_write_section`: drop the text it added, or the file if it created it. Only when that text is
+    still the end of the file; anything written after it is someone else's, so the file is left alone."""
+    text = creds.read_bytes().decode("utf-8")
+    if not text.endswith(added):
+        return
+    rest = text[: len(text) - len(added)]
+    if not rest:
+        creds.unlink()
+        return
+    tmp = creds.with_name(creds.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+        fh.write(rest)
+    os.replace(tmp, creds)
 
 
 @contextlib.contextmanager
@@ -175,13 +202,17 @@ def _quiet(*loggers: logging.Logger | None) -> Iterator[None]:
 
 def _connection_test(profile: str) -> tuple[str, str]:
     """`SELECT 1` through execute_sql's guarded chokepoint; (status, one-line detail)."""
-    import execute_sql
+    try:
+        import execute_sql
 
-    execute_sql.CREDENTIALS_PATH = agami_paths.credentials_path()
-    with _quiet(getattr(execute_sql, "_RAW_LOG", None), getattr(execute_sql, "_LOG", None)):
-        env = execute_sql.execute_guarded(
-            "SELECT 1", profile, None, executor=execute_sql.BUILTIN_EXECUTOR, no_safety=True
-        )
+        execute_sql.CREDENTIALS_PATH = agami_paths.credentials_path()
+        with _quiet(getattr(execute_sql, "_RAW_LOG", None), getattr(execute_sql, "_LOG", None)):
+            env = execute_sql.execute_guarded(
+                "SELECT 1", profile, None, executor=execute_sql.BUILTIN_EXECUTOR, no_safety=True
+            )
+    except (ImportError, AttributeError):
+        # An SSO profile skips the stale-install guard, so an old agami-core can land here.
+        return "connect_failed", "The installed agami-core could not run the connection test. Run sm install, then connect again."
     if env.status == "ok":
         return "connected", f"Connected. A test query ran on {profile}."
     if env.status == "refused":
@@ -201,25 +232,36 @@ def render_page(profile: str, state: str) -> str:
     )
 
 
-class _Server(http.server.HTTPServer):
+class _Server(http.server.ThreadingHTTPServer):
     """Holds the one-time state the handler checks: the token, and whether it has been used."""
+
+    daemon_threads = True  # a client that never finishes its request cannot keep the process alive
+    block_on_close = False
 
     def __init__(self, profile: str) -> None:
         super().__init__((HOST, 0), _Handler)
+        self.origin = f"http://{HOST}:{self.server_address[1]}"
         self.profile = profile
         self.path_ok = f"/{secrets.token_urlsafe(32)}/"
         self.secret = ""
         self.submitted = threading.Event()
         self.lock = threading.Lock()
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        pass  # a dropped or timed-out connection is not news, and a traceback on stderr is not wanted
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     server: _Server
+    timeout = _REQUEST_TIMEOUT
 
     def log_message(self, *args: Any) -> None:
         pass  # the request line carries the token; nothing about a request is logged
 
     def _live(self) -> bool:
+        # The Host check stops a DNS-rebinding page from reaching this port under its own name.
+        if self.headers.get("Host") != self.server.origin[len("http://"):]:
+            return False
         path = self.path.encode("utf-8", "surrogateescape")
         return secrets.compare_digest(path, self.server.path_ok.encode()) and not self.server.submitted.is_set()
 
@@ -229,7 +271,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        # Not no-referrer: under that policy a browser sends `Origin: null` with the form POST, which
+        # the Origin check would refuse. The page links nowhere, so same-origin leaks the token nowhere.
+        self.send_header("Referrer-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header(
             "Content-Security-Policy",
@@ -244,10 +288,19 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send(200, render_page(self.server.profile, "form"))
 
     def do_POST(self) -> None:  # noqa: N802
-        length = int(self.headers.get("Content-Length") or 0)
-        if not self._live() or not 0 < length <= _MAX_BODY:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = -1
+        origin = self.headers.get("Origin")
+        if not self._live() or not 0 < length <= _MAX_BODY or origin not in (None, self.server.origin):
             return self._send(404)
-        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        try:
+            body = self.rfile.read(length)
+        except OSError:  # the client stopped sending before Content-Length bytes arrived
+            self.close_connection = True
+            return
+        form = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
         password = (form.get("password") or [""])[0]
         if not password:
             return self._send(400, render_page(self.server.profile, "empty"))
@@ -264,25 +317,49 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
 
     profile = spec["profile"]
     creds = agami_paths.credentials_path()
+    ref = None
     try:
         # Checked again: another profile with this name may have been added while the page was open.
         if profile in _existing_profiles(creds):
             return _final(out, "refused", profile, f"A profile named {profile} already exists. Pick another name.")
         ref = credential_store.put(profile, secret) if secret else None
-        _write_section(creds, _section_text(spec, ref))
+        added = _write_section(creds, _section_text(spec, ref))
     except credential_store.CredentialStoreError as e:
         return _final(out, "refused", profile, str(e), secret)
     except (OSError, configparser.Error):
-        return _final(out, "refused", profile, "Could not write the credentials file under <artifacts_dir>/local.")
+        detail = "Could not write the credentials file under <artifacts_dir>/local."
+        return _final(out, "refused", profile, detail + _forget(profile, ref), secret)
     status, detail = _connection_test(profile)
+    if status == "connect_failed":
+        # Leave nothing behind, so trying again with the same profile name is not a name collision.
+        try:
+            _remove_section(creds, added)
+        except (OSError, UnicodeDecodeError):
+            detail += f" Remove [{profile}] from the credentials file before trying again."
+        detail += _forget(profile, ref)
     return _final(out, status, profile, detail, secret)
+
+
+def _forget(profile: str, ref: str | None) -> str:
+    """Delete the stored secret this run put in the OS store; '' or a sentence saying it could not."""
+    import credential_store
+
+    if not ref:
+        return ""
+    try:
+        credential_store.delete(profile)
+    except credential_store.CredentialStoreError as e:
+        return " " + str(e)
+    return ""
 
 
 def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
     """Refuse, or serve the page once and act on the submit. Every outcome is one final JSON line."""
     profile = spec.get("profile", "") if isinstance(spec, dict) else ""
     profile = profile if isinstance(profile, str) else ""
-    stale = _stale_install_detail()
+    sso = isinstance(spec, dict) and spec.get("auth") == "sso"
+    # An SSO profile writes no keyring reference, so an older agami-core reads it correctly.
+    stale = None if sso else _stale_install_detail()
     if stale:
         return _final(out, "refused", profile, stale)
     problem = _spec_error(spec)
@@ -294,7 +371,7 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
         return _final(out, "refused", profile, "The credentials file could not be read. Fix or move it, then try again.")
     if taken:
         return _final(out, "refused", profile, f"A profile named {profile} already exists. Pick another name.")
-    if spec.get("auth") == "sso":
+    if sso:
         return _store_and_connect(spec, "", out)
 
     import credential_store

@@ -32,6 +32,9 @@ class _FakeBackend:
     def get_password(self, service: str, username: str) -> str | None:
         return self.data.get((service, username))
 
+    def delete_password(self, service: str, username: str) -> None:
+        del self.data[(service, username)]
+
 
 @pytest.fixture(autouse=True)
 def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,3 +182,40 @@ def test_load_credentials_ref_error_is_executor_error(
         execute_sql._load_credentials("demo")
     assert exc.value.code == 2
     assert "reconnect" in exc.value.msg
+
+
+def test_delete_removes_and_is_idempotent(backend: _FakeBackend) -> None:
+    backend.data[("agami", "demo")] = "s3cret"
+    backend.data[("agami", "acme")] = "other"
+    credential_store.delete("demo")
+    assert backend.data == {("agami", "acme"): "other"}
+    credential_store.delete("demo")  # already gone: not an error
+    assert backend.data == {("agami", "acme"): "other"}
+
+
+def test_delete_is_a_no_op_off_macos_and_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom() -> None:
+        raise AssertionError("the store must not be touched")
+
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(credential_store, "_backend", boom)
+    credential_store.delete("demo")
+
+
+def test_delete_without_keyring_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    credential_store.delete("demo")
+
+
+def test_delete_backend_error_raises_with_fix(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Broken:
+        def get_password(self, service: str, username: str) -> str:
+            return "x"
+
+        def delete_password(self, service: str, username: str) -> None:
+            raise OSError("locked")
+
+    monkeypatch.setattr(credential_store, "_backend", lambda: Broken())
+    with pytest.raises(credential_store.CredentialStoreError, match="by hand") as exc:
+        credential_store.delete("demo")
+    assert "\n" not in str(exc.value)

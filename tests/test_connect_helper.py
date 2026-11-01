@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -53,6 +54,9 @@ class _FakeBackend:
 
     def get_password(self, service: str, username: str) -> str | None:
         return self.data.get((service, username))
+
+    def delete_password(self, service: str, username: str) -> None:
+        del self.data[(service, username)]
 
     def get_keyring(self) -> _FakeBackend:
         return self
@@ -184,10 +188,60 @@ def test_connect_failure_reported_without_the_secret(
     t.join(10)
     final = out.wait(2)[1]
     assert final["status"] == "connect_failed" and final["detail"] and "\n" not in final["detail"]
-    assert "password = keyring:agami/demo" in _creds(art).read_text(encoding="utf-8")
+    # Rolled back, so "Try again" with the same profile name is not a collision.
+    assert not _creds(art).exists()
+    assert backend.data == {}
     captured = capfd.readouterr()
     assert SECRET not in "\n".join(out.lines) + captured.out + captured.err
     assert _secret_on_disk(tmp_path) == []
+
+
+def test_connect_failure_rolls_back_only_its_own_section(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).parent.mkdir(parents=True)
+    before = "[acme]\ntype = sqlite\npath = /tmp/acme.db"  # no final newline
+    _creds(art).write_text(before, encoding="utf-8")
+    backend.data[("agami", "acme")] = "keep-me"
+    t, out = _start(_spec(tmp_path, fields={"path": str(tmp_path / "missing-dir" / "demo.db")}))
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connect_failed"
+    assert _creds(art).read_text(encoding="utf-8") == before
+    assert backend.data == {("agami", "acme"): "keep-me"}
+    # And the same name now goes through.
+    out2 = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out2, expires_in=1)
+    assert json.loads(out2.lines[0])["status"] == "connected"
+
+
+def test_rollback_leaves_a_file_someone_else_changed(tmp_path: Path, art: Path, monkeypatch) -> None:
+    creds = _creds(art)
+
+    def failing_test(profile: str) -> tuple[str, str]:
+        with creds.open("a", encoding="utf-8") as fh:
+            fh.write("\n[acme]\ntype = sqlite\n")  # another writer appended after the helper
+        return "connect_failed", "The connection test failed."
+
+    monkeypatch.setattr(connect_helper, "_connection_test", failing_test)
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    assert json.loads(out.lines[0])["status"] == "connect_failed"
+    assert "[demo]" in creds.read_text(encoding="utf-8") and "[acme]" in creds.read_text(encoding="utf-8")
+
+
+def test_rollback_that_cannot_delete_the_secret_says_so(tmp_path: Path, art: Path, monkeypatch) -> None:
+    class Stuck(_FakeBackend):
+        def delete_password(self, service: str, username: str) -> None:
+            raise OSError("locked")
+
+    fake = Stuck()
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(credential_store, "_backend", lambda: fake)
+    t, out = _start(_spec(tmp_path, fields={"path": str(tmp_path / "missing-dir" / "demo.db")}))
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "connect_failed" and "by hand" in final["detail"]
+    assert SECRET not in json.dumps(final)
 
 
 def test_wrong_token_404_and_nothing_stored(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
@@ -260,6 +314,11 @@ def test_invalid_or_existing_profile_refused_before_listening(
         {"fields": {"host": "h\n[evil]"}},
         {"fields": {"Bad Key": "x"}},
         {"fields": {"port": True}},
+        {"fields": {"database": "sales%2025"}},
+        {"fields": {"host": "db.example.com #primary"}},
+        {"fields": {"host": "db.example.com\t;x"}},
+        {"fields": {"user": "#admin"}},
+        {"fields": {"host": "h\r"}},
         {"fields": "not-a-dict"},
         {"db_type": "Postgres; x"},
         {"auth": "token"},
@@ -299,6 +358,17 @@ def test_profile_added_while_the_page_was_open_refused(tmp_path: Path, art: Path
     assert out.wait(2)[1]["status"] == "refused"
     assert backend.data == {}
     assert "keyring" not in _creds(art).read_text(encoding="utf-8")
+
+
+def test_write_failure_after_store_deletes_the_secret(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    _creds(art).mkdir(parents=True)  # the file cannot be written once the password is stored
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "refused" and "credentials file" in final["detail"]
+    assert backend.data == {}
 
 
 def test_credentials_write_failure_refused(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
@@ -374,6 +444,26 @@ def test_appends_after_existing_profiles(tmp_path: Path, art: Path, backend: _Fa
         assert _creds(art).stat().st_mode & 0o777 == 0o600
 
 
+def test_sso_passes_the_stale_install_guard(tmp_path: Path, art: Path, monkeypatch) -> None:
+    ok = type("Env", (), {"status": "ok"})()
+    stale = type(sys)("execute_sql")  # an older agami-core: no credential_store, but it can run SELECT 1
+    stale.BUILTIN_EXECUTOR = object()
+    stale.execute_guarded = lambda *a, **k: ok
+    monkeypatch.setitem(sys.modules, "execute_sql", stale)
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    assert json.loads(out.lines[0])["status"] == "connected"
+
+
+def test_sso_on_an_install_that_cannot_run_the_test(tmp_path: Path, art: Path, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "execute_sql", type(sys)("execute_sql"))  # no execute_guarded at all
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    line = json.loads(out.lines[0])
+    assert line["status"] == "connect_failed" and "sm install" in line["detail"]
+    assert not _creds(art).exists()
+
+
 def test_stale_install_refused_before_listening(tmp_path: Path, art: Path, monkeypatch) -> None:
     stale = type(sys)("execute_sql")  # an older agami-core: an executor that never resolves references
     monkeypatch.setitem(sys.modules, "execute_sql", stale)
@@ -436,3 +526,106 @@ def test_page_has_no_external_resources() -> None:
     page = connect_helper.render_page("demo", "form")
     assert "#2B38FC" in page and "<svg" in page and "{{" not in page
     assert "!" not in re.sub(r"<!--.*?-->|<!doctype html>", "", page, flags=re.S | re.I).replace("!important", "")
+
+
+def _raw(port: int, request: bytes) -> bytes:
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as sock:
+        sock.sendall(request)
+        chunks = []
+        while chunk := sock.recv(65536):
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _port_and_path(url: str) -> tuple[int, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.port or 0, parts.path
+
+
+def test_idle_and_half_sent_connections_do_not_block_the_exit(
+    tmp_path: Path, art: Path, backend: _FakeBackend, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # The handler's own timeout (10 s) is left as shipped: the exit must not wait on it.
+    t, out = _start(_spec(tmp_path), expires_in=1.5)
+    port, path = _port_and_path(out.wait(1)[0]["url"])
+    idle = socket.create_connection(("127.0.0.1", port))  # connects and never sends a byte
+    half = socket.create_connection(("127.0.0.1", port))
+    half.sendall(
+        f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 8000\r\n\r\npassword=x".encode()
+    )
+    try:
+        t.join(6)
+        assert not t.is_alive(), "run() did not return with an idle connection open"
+        assert out.wait(2)[1] == {"status": "expired"}
+    finally:
+        idle.close()
+        half.close()
+    assert backend.data == {} and not _creds(art).exists()
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_a_half_sent_post_times_out_quietly(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(connect_helper._Handler, "timeout", 0.5)
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    port, path = _port_and_path(url)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as half:
+        half.sendall(
+            f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 8000\r\n\r\npassword=x".encode()
+        )
+        assert half.recv(1024) == b""  # the server gave up on it and closed the connection
+    assert "Traceback" not in capfd.readouterr().err
+    assert _post(url, SECRET) == 200  # the page still works afterwards
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connected"
+
+
+def test_wrong_host_or_origin_404(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    port, path = _port_and_path(url)
+    body = "password=" + SECRET
+    for host, origin in [
+        ("localhost:%d" % port, None),                     # a rebinding name, not the address the URL gave
+        ("127.0.0.1:%d" % port, "http://evil.example"),     # a page elsewhere posting to the helper
+        ("127.0.0.1:%d" % port, "null"),
+    ]:
+        extra = f"Origin: {origin}\r\n" if origin else ""
+        req = (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Type: application/x-www-form-urlencoded\r\n"
+               f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}")
+        assert _raw(port, req.encode()).startswith(b"HTTP/1.0 404"), (host, origin)
+    get = f"GET {path} HTTP/1.1\r\nHost: evil.example:{port}\r\nConnection: close\r\n\r\n"
+    assert _raw(port, get.encode()).startswith(b"HTTP/1.0 404")
+    assert backend.data == {}
+    # The page's own origin is accepted.
+    req = urllib.request.Request(url, data=body.encode(), method="POST", headers={"Origin": f"http://127.0.0.1:{port}"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        assert r.status == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connected"
+
+
+def test_bad_content_length_404_without_a_traceback(
+    tmp_path: Path, art: Path, backend: _FakeBackend, capfd: pytest.CaptureFixture[str]
+) -> None:
+    t, out = _start(_spec(tmp_path), expires_in=1.5)
+    port, path = _port_and_path(out.wait(1)[0]["url"])
+    req = f"POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: abc\r\nConnection: close\r\n\r\n"
+    assert _raw(port, req.encode()).startswith(b"HTTP/1.0 404")
+    t.join(10)
+    assert out.wait(2)[1] == {"status": "expired"}
+    assert "Traceback" not in capfd.readouterr().err
+
+
+def test_rollback_that_cannot_edit_the_file_says_so(tmp_path: Path, art: Path, monkeypatch) -> None:
+    def cannot(creds: Path, added: str) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(connect_helper, "_connection_test", lambda profile: ("connect_failed", "It failed."))
+    monkeypatch.setattr(connect_helper, "_remove_section", cannot)
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    line = json.loads(out.lines[0])
+    assert line["status"] == "connect_failed" and "Remove [demo] from the credentials file" in line["detail"]
