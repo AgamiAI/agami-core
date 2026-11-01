@@ -7,13 +7,13 @@ const WITH_PROFILES = { ...READY, profile: 'acme', profiles: ['acme', 'demo'] }
 
 test('the actions are the ones the brief names, each with its exact prompt', () => {
   expect(actions.map(a => [a.key, a.label, a.prompt])).toEqual([
-    ['connect', 'Connect a database', undefined],
-    ['sample', 'Try the sample data', 'Run /agami-core:agami-connect sample and take the "Just let me query it" path.'],
     ['ask', 'Ask a question', 'I want to ask a question about my data with agami. Ask me what I want to know.'],
-    ['review', 'Review the model', 'Run /agami-core:agami-model.'],
     ['reconcile', 'Check numbers against a dashboard', 'Run /agami-core:agami-reconcile. Ask me for the dashboard first.'],
+    ['review', 'Review the model', 'Run /agami-core:agami-model.'],
     ['golden', 'Save and run test questions', 'Run /agami-core:agami-eval.'],
     ['reload', 'Reload a changed schema', 'Run /agami-core:agami-connect reintrospect for the active profile.'],
+    ['connect', 'Connect a database', undefined],
+    ['sample', 'Try the sample data', 'Run /agami-core:agami-connect sample and take the "Just let me query it" path.'],
     ['serve', 'Use agami from other apps', 'Run /agami-core:agami-serve.'],
   ])
 })
@@ -74,7 +74,9 @@ test('every skill action sends its prompt as given, and Connect sends none', asy
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   // Connect last: it leaves the home screen.
-  for (const a of [...actions.slice(1), actions[0]!]) await ui.press({ key: a.key })
+  for (const a of [...actions.filter(x => x.key !== 'connect'), ...actions.filter(x => x.key === 'connect')]) {
+    await ui.press({ key: a.key })
+  }
   await ui.unmount()
 
   expect(sent).toEqual(actions.flatMap(a => (a.prompt === undefined ? [] : [a.prompt])))

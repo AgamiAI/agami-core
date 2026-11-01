@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { CoreEngineInterface, RenderElement, RenderInput } from 'claude-code'
 
 import type { AgamiEnv, AgamiSampleState, AgamiScreen } from '../../types'
-import { ACCENT, BRAND, logoSvg, logoSvgAnimated } from '../brand'
+import { BRAND, SOFT, logoSvg } from '../brand'
 
 // Declared in each file that reads or writes them: the engine lists the values a module touches by
 // reading the atom where it is used, so an imported atom would not be seen.
@@ -16,35 +16,46 @@ const sampleState = atom({ plugin: 'agami-core', key: 'sample' } as const, IDLE,
 
 type Engine = Pick<CoreEngineInterface, 'ui' | 'state' | 'prompt' | 'env'>
 
-type Action = { key: string; label: string; prompt?: string }
+type Group = 'answers' | 'improve' | 'setup'
+type Action = { key: string; label: string; group: Group; prompt?: string }
 
-// Every top-level thing agami does, in plain words. Each but `connect` starts the matching skill's
-// existing flow; `connect` opens the guided Connect screen instead of asking the model anything.
+// Every top-level thing agami does, in plain words, in the order the home screen shows them. Each but
+// `connect` starts the matching skill's existing flow; `connect` opens the guided Connect screen.
 export const actions: readonly Action[] = [
-  { key: 'connect', label: 'Connect a database' },
-  {
-    key: 'sample',
-    label: 'Try the sample data',
-    prompt: 'Run /agami-core:agami-connect sample and take the "Just let me query it" path.',
-  },
   {
     key: 'ask',
     label: 'Ask a question',
+    group: 'answers',
     prompt: 'I want to ask a question about my data with agami. Ask me what I want to know.',
   },
-  { key: 'review', label: 'Review the model', prompt: 'Run /agami-core:agami-model.' },
   {
     key: 'reconcile',
     label: 'Check numbers against a dashboard',
+    group: 'answers',
     prompt: 'Run /agami-core:agami-reconcile. Ask me for the dashboard first.',
   },
-  { key: 'golden', label: 'Save and run test questions', prompt: 'Run /agami-core:agami-eval.' },
+  { key: 'review', label: 'Review the model', group: 'improve', prompt: 'Run /agami-core:agami-model.' },
+  { key: 'golden', label: 'Save and run test questions', group: 'improve', prompt: 'Run /agami-core:agami-eval.' },
   {
     key: 'reload',
     label: 'Reload a changed schema',
+    group: 'improve',
     prompt: 'Run /agami-core:agami-connect reintrospect for the active profile.',
   },
-  { key: 'serve', label: 'Use agami from other apps', prompt: 'Run /agami-core:agami-serve.' },
+  { key: 'connect', label: 'Connect a database', group: 'setup' },
+  {
+    key: 'sample',
+    label: 'Try the sample data',
+    group: 'setup',
+    prompt: 'Run /agami-core:agami-connect sample and take the "Just let me query it" path.',
+  },
+  { key: 'serve', label: 'Use agami from other apps', group: 'setup', prompt: 'Run /agami-core:agami-serve.' },
+]
+
+const GROUPS: readonly { key: Group; title: string }[] = [
+  { key: 'answers', title: 'Get answers' },
+  { key: 'improve', title: 'Improve the model' },
+  { key: 'setup', title: 'Set up' },
 ]
 
 // The rest need a model to work from, so they wait until a database is connected.
@@ -117,75 +128,94 @@ export async function home($: Engine, e: RenderInput): Promise<RenderElement> {
   }
 
   const hasProfile = env.profiles.length > 0
-  const shown = hasProfile ? actions : actions.filter(a => FIRST_RUN.has(a.key))
-  const leads = !hasProfile
-  // The terminal has no `Svg`: its logo is the name, drawn below as text on every surface.
+  // A still mark: the terminal has no `Svg`, so there the name alone stands for the logo.
   let logo: RenderElement | null = null
-  if (e.surface === 'desktop') {
+  if (e.surface === 'desktop' || e.surface === 'vscode') {
     const { Svg } = $.ui.resolve(e)
-    logo = <Svg source={logoSvgAnimated()} alt="agami logo" isInteractive width={48} />
-  } else if (e.surface === 'vscode') {
-    const { Svg } = $.ui.resolve(e)
-    logo = <Svg source={logoSvg()} alt="agami logo" width={48} />
+    logo = <Svg source={logoSvg()} alt="agami logo" width={32} />
   }
 
-  // The phone has no `Select`; the profile is still named in the header.
-  let profile: RenderElement | null = null
-  if (e.surface !== 'mobile' && env.active !== null) {
-    const { Select } = $.ui.resolve(e)
-    profile = (
-      <Select
-        key="profile"
-        label="Profile"
-        options={env.profiles.map(value => ({ value }))}
-        value={env.active}
-        onSelect={async (value: string) => {
-          // AGAMI_PROFILE is what every agami script reads first, so the pick holds for the session.
-          await $.env.set('AGAMI_PROFILE', value)
-          await update($, envState, current => (current ? { ...current, active: value } : current))
-        }}
-      />
+  // A "profile" is agami's name for one saved database connection; on screen it is just the database.
+  let database: RenderElement | null = null
+  if (env.active !== null) {
+    let switcher: RenderElement | null = null
+    if (e.surface !== 'mobile' && env.profiles.length > 1) {
+      const { Select } = $.ui.resolve(e)
+      switcher = (
+        <Select
+          key="profile"
+          label="Switch database"
+          options={env.profiles.map(value => ({ value }))}
+          value={env.active}
+          onSelect={async (value: string) => {
+            // AGAMI_PROFILE is what every agami script reads first, so the pick holds for the session.
+            await $.env.set('AGAMI_PROFILE', value)
+            await update($, envState, current => (current ? { ...current, active: value } : current))
+          }}
+        />
+      )
+    }
+    database = (
+      <Box flexDirection="column" rowGap="xs">
+        <Text dimColor size="caption">
+          Connected database
+        </Text>
+        <Text size="heading" weight="semibold">
+          {env.active}
+        </Text>
+        {switcher}
+      </Box>
     )
   }
 
-  return (
-    <Box flexDirection="column">
-      <Box flexDirection="row">
-        {logo}
-        <Box flexDirection="column">
-          <Text bold color={BRAND}>
-            agami
-          </Text>
-          {env.active !== null && (
-            <Text bold color={ACCENT}>
-              {env.active}
+  const usable = actions.filter(a => env.python.ok || !FIRST_RUN.has(a.key))
+  const button = (a: Action, primary: boolean): RenderElement => (
+    <Button key={a.key} label={a.label} variant={primary ? 'primary' : 'secondary'} onPress={() => runAction($, a.key)} />
+  )
+
+  const body = !hasProfile ? (
+    <Box flexDirection="column" rowGap="md" paddingY="sm">
+      <Text>Connect your database to start asking questions. Credentials and data stay on this computer.</Text>
+      <Box flexDirection="column" alignItems="flex-start" rowGap="sm">
+        {usable.filter(a => FIRST_RUN.has(a.key)).map(a => button(a, a.key === 'connect'))}
+      </Box>
+    </Box>
+  ) : (
+    <Box flexDirection="column" rowGap="lg">
+      {GROUPS.map(g => {
+        const items = usable.filter(a => a.group === g.key)
+        if (items.length === 0) return null
+
+        return (
+          <Box key={g.key} flexDirection="column" rowGap="sm">
+            <Text dimColor size="caption" weight="medium">
+              {g.title}
             </Text>
-          )}
-        </Box>
+            <Box flexDirection="column" alignItems="flex-start" rowGap="xs">
+              {items.map(a => button(a, a.key === 'ask'))}
+            </Box>
+          </Box>
+        )
+      })}
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column" rowGap="lg" padding="md">
+      <Box flexDirection="row" alignItems="center" columnGap="md">
+        {logo}
+        <Text size="heading" weight="semibold" color={BRAND}>
+          agami
+        </Text>
       </Box>
-      {profile}
-      {!env.python.ok ? (
-        <Box flexDirection="column" marginTop={1}>
-          <Text>{env.python.fix ?? 'agami cannot find a usable Python.'}</Text>
+      {database !== null ? (
+        <Box borderStyle="round" borderColor={SOFT} paddingX="md" paddingY="sm">
+          {database}
         </Box>
       ) : null}
-      {note !== null ? (
-        <Box marginTop={1}>
-          <Text>{note}</Text>
-        </Box>
-      ) : null}
-      <Box flexDirection="column" marginTop={1}>
-        {shown
-          .filter(a => env.python.ok || !FIRST_RUN.has(a.key))
-          .map(a => (
-            <Button
-              key={a.key}
-              label={a.label}
-              variant={leads && a.key === 'connect' ? 'primary' : undefined}
-              onPress={() => runAction($, a.key)}
-            />
-          ))}
-      </Box>
+      {!env.python.ok ? <Text>{env.python.fix ?? 'agami cannot find a usable Python.'}</Text> : null}
+      {note !== null ? <Text>{note}</Text> : null}
+      {body}
     </Box>
   )
 }
