@@ -581,13 +581,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inven
 It prints `{tables, schemas, schemas_more, likely_noise, groups}`. Show:
 
 1. One sentence: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty).
-2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one; if the person wants the noise list, show `likely_noise` (also at most 15 rows, with "and N more").
+2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
+3. The first 5 names in `likely_noise` with their `why`, then "and N more", so the person sees what "Drop staging and backups" would remove (a real table such as `test_results` shows up here before they press it). If they ask for the whole list, show up to 15 rows and "and N more".
 
 Then call AskUserQuestion, one question (header `Tables`):
 
 - **Keep everything**: model all `<N>` tables.
-- **Drop staging and backups**: skip the `<M>` likely-noise tables. Mark it **(Recommended)** and put it first only when `likely_noise` is not empty; with none, leave this option out.
-- **Only some schemas**: pick which schemas to model.
+- **Drop staging and backups**: skip the `<M>` likely-noise tables. Mark it **(Recommended)** and put it first only when `likely_noise` is not empty and does not cover every table. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
+- **Only some schemas**: pick which schemas to model. Leave it out when there is a single schema.
 - **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
 
 Add one line before the card: *"Say 'show the full view' for the page with every table and column."*
@@ -598,10 +599,10 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 |---|---|
 | Keep everything | Skip the file. Run 1.7 with neither `--tables-file` nor `--exclude-columns`. |
 | Drop staging and backups | `inventory_summary.py --inventory "<inventory_path>" --keep drop_noise --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` |
-| Only some schemas | Ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Add a "None of these" option where picking nothing is valid. Then `--keep schemas:<a,b,c>`. |
+| Only some schemas | Ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Name each group option's `schema_count` and `tables`. Add a "None of these" option only when that leaves fewer than 4 options; at 4, "Other" is the way out (a card holds 2 to 4 options). Then `--keep schemas:<a,b,c>`. |
 | Let me name them | Write the names (one per line, `schema.table` or a bare table name) with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`, then `--keep names:<artifacts_dir>/local/tmp/agami-names.txt`. |
 
-`--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with exit 1 and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
+`--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **`{"error": "no tables kept"}` (exit 1, nothing written) means the choice left no tables: say so and ask the same card again.** **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with exit 1 and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
 
 If the person asks to skip this ("just introspect everything"), proceed to 1.7 unscoped.
 

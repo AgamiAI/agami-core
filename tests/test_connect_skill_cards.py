@@ -51,3 +51,21 @@ def test_1_6_keeps_the_full_view_as_an_option():
     assert "Show the full view" in s
     assert "render_prune.py" in s and "serve_page.py" in s
     assert "parse_prune_block.py" in s
+
+
+def test_1_6_handles_all_noise_and_the_empty_result():
+    s = _section_16()
+    assert "no tables kept" in s
+    assert "covers every table" in s
+
+
+def test_1_6_follow_up_card_stays_within_four_options():
+    s = _section_16()
+    assert "fewer than 4" in s
+    assert "single schema" in s.lower()
+
+
+def test_1_6_lists_the_first_noise_names_before_the_card():
+    s = _section_16()
+    assert "first 5" in s and "and N more" in s
+    assert "schema_count" in s

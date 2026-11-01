@@ -155,3 +155,56 @@ def test_large_inventory_is_summarised_to_15_rows(tmp_path):
 def test_few_schemas_have_no_overflow_or_groups(tmp_path):
     code, out = _run(tmp_path, _inventory({"a": ["x"], "b": ["y"]}))
     assert out["schemas_more"] is None and out["groups"]["schema_groups"] == []
+
+
+def test_every_table_in_a_noise_named_schema_is_flagged():
+    for schema in ("staging", "Scratch", "tmp"):
+        assert "schema" in inventory_summary.noise_reason("orders", schema)
+    assert inventory_summary.noise_reason("orders", "sales") is None
+
+
+@pytest.mark.parametrize("name", ["orders_2023_q1", "orders_2023_v2", "orders_20230115_v3"])
+def test_a_date_before_a_version_or_quarter_is_flagged(name):
+    assert inventory_summary.noise_reason(name)
+
+
+def test_a_version_alone_is_not_noise():
+    assert inventory_summary.noise_reason("order_items_v2") is None
+
+
+def test_summary_flags_the_tables_of_a_noise_schema(tmp_path):
+    code, out = _run(tmp_path, _inventory({"staging": ["orders"], "sales": ["orders"]}))
+    assert [n["table"] for n in out["likely_noise"]] == ["staging.orders"]
+    assert "staging" in out["likely_noise"][0]["why"]
+
+
+def test_keeping_nothing_is_an_error_and_writes_nothing(tmp_path):
+    out_file = tmp_path / "k"
+    inv = _inventory({"staging": ["a", "b"]})
+    code, out = _run(tmp_path, inv, "--keep", "drop_noise", "--tables-out", str(out_file))
+    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    names = tmp_path / "names.txt"
+    names.write_text("\n", encoding="utf-8")
+    code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(out_file))
+    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    code, out = _run(
+        tmp_path, _inventory({"a": ["x"]}), "--keep", "schemas:", "--tables-out", str(out_file)
+    )
+    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+
+
+def test_names_match_case_insensitively_and_strip_quotes(tmp_path):
+    inv = _inventory({"sales": ["Orders", "customers"]})
+    names = tmp_path / "names.txt"
+    names.write_text('"SALES.orders"\n`Customers`,\n', encoding="utf-8")
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(out_file))
+    assert code == 0 and out["kept"] == 2
+    assert out_file.read_text().splitlines() == ["sales.Orders", "sales.customers"]
+
+
+def test_schema_groups_carry_schema_and_table_counts(tmp_path):
+    inv = _inventory({f"s{i}": ["t", "u"] for i in range(6)})
+    _, out = _run(tmp_path, inv)
+    for g in out["groups"]["schema_groups"]:
+        assert g["schema_count"] == len(g["schemas"]) and g["tables"] == 2 * g["schema_count"]

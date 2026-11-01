@@ -14,7 +14,7 @@ Summary (default):
         "schemas_more": {"schemas": k, "tables": m} | null,   # what the 15 rows leave out
         "likely_noise": [{"table": "schema.table", "why": "..."}],
         "groups": {"noise_by_pattern": {"<word>": count},
-                   "schema_groups": [{"label", "schemas", "tables"}]}}   # [] unless > 4 schemas
+                   "schema_groups": [{"label", "schemas", "schema_count", "tables"}]}}   # [] unless > 4 schemas
 
 `likely_noise` matches whole words of the table name (split on `_`, `-`, `.` and case or digit
 boundaries): stg, staging, tmp, temp, bak, backup, old, archive, test, or a trailing date or year.
@@ -26,6 +26,7 @@ Keep (writes the file, one `schema.table` per line, in inventory order):
     <choice> = all | drop_noise | schemas:<a,b> | names:<file of table names, one per line>
     -> {"tables_file": "<file>", "kept": n}
 
+A choice that keeps no tables prints `{"error": "no tables kept"}` (exit 1, nothing written).
 A schema or table name that matches nothing (or a bare table name that matches several) is
 reported as `{"unmatched": [...], "ambiguous": {...}}` with exit code 1, and nothing is written:
 the skill asks the same card again rather than guessing.
@@ -40,6 +41,8 @@ import sys
 from pathlib import Path
 
 NOISE_WORDS = {"stg", "staging", "tmp", "temp", "bak", "backup", "old", "archive", "test"}
+# A schema with one of these names is a whole area of scratch or copies, so all its tables are noise.
+NOISE_SCHEMA_WORDS = {"staging", "stg", "tmp", "temp", "scratch", "backup", "archive", "test"}
 MAX_SCHEMA_ROWS = 15
 MAX_SCHEMA_GROUPS = 4
 _SPLIT = re.compile(
@@ -53,13 +56,18 @@ def _words(name: str) -> list[str]:
     return [w for w in _SPLIT.split(name) if w]
 
 
-def noise_reason(table: str) -> str | None:
-    """Why a table name looks like staging, a backup or a dated copy; None if it does not."""
+def noise_reason(table: str, schema: str = "") -> str | None:
+    """Why a table looks like staging, a backup or a dated copy; None if it does not."""
+    if schema.lower() in NOISE_SCHEMA_WORDS:
+        return f"schema is named '{schema.lower()}'"
     words = _words(table)
     for word in words:
         if word.lower() in NOISE_WORDS:
             return f"name has the word '{word.lower()}'"
-    # A trailing run of digit words (2023, 2023_01, 20230115) that reads as a date.
+    # A trailing run of digit words (2023, 2023_01, 20230115) that reads as a date, optionally
+    # followed by a version or quarter token (v2, q1).
+    if len(words) > 2 and words[-2].lower() in ("v", "q") and words[-1].isdigit():
+        words = words[:-2]
     tail: list[str] = []
     for word in reversed(words):
         if not word.isdigit():
@@ -92,6 +100,7 @@ def _schema_groups(counts: dict[str, int]) -> list[dict]:
             {
                 "label": f"{chunk[0]} to {chunk[-1]}",
                 "schemas": chunk,
+                "schema_count": len(chunk),
                 "tables": sum(counts[s] for s in chunk),
             }
         )
@@ -107,7 +116,7 @@ def summarise(inventory: dict) -> dict:
     shown, rest = ranked[:MAX_SCHEMA_ROWS], ranked[MAX_SCHEMA_ROWS:]
     noise, by_pattern = [], {}
     for t in tables:
-        why = noise_reason(t["table"])
+        why = noise_reason(t["table"], t.get("schema") or "")
         if why:
             noise.append({"table": _qualified(t), "why": why})
             key = why.split("'")[1] if "'" in why else "date or year"
@@ -123,7 +132,7 @@ def summarise(inventory: dict) -> dict:
 
 def _read_names(path: str) -> list[str]:
     lines = Path(path).expanduser().read_text(encoding="utf-8").splitlines()
-    return [ln.strip().strip(",") for ln in lines if ln.strip()]
+    return [ln.strip().strip(",").strip("\"'`").strip() for ln in lines if ln.strip()]
 
 
 def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
@@ -132,7 +141,9 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
     if choice == "all":
         return [_qualified(t) for t in tables], None
     if choice == "drop_noise":
-        return [_qualified(t) for t in tables if not noise_reason(t["table"])], None
+        return [
+            _qualified(t) for t in tables if not noise_reason(t["table"], t.get("schema") or "")
+        ], None
     if choice.startswith("schemas:"):
         wanted = [s.strip() for s in choice[len("schemas:") :].split(",") if s.strip()]
         known = {t.get("schema") or "" for t in tables}
@@ -142,18 +153,20 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
         return [_qualified(t) for t in tables if (t.get("schema") or "") in wanted], None
     if choice.startswith("names:"):
         qualified = [_qualified(t) for t in tables]
+        by_full = {q.lower(): q for q in qualified}
         by_bare: dict[str, list[str]] = {}
         for t in tables:
-            by_bare.setdefault(t["table"], []).append(_qualified(t))
+            by_bare.setdefault(t["table"].lower(), []).append(_qualified(t))
         picked: set[str] = set()
         unmatched, ambiguous = [], {}
         for name in _read_names(choice[len("names:") :]):
-            if name in qualified:
-                picked.add(name)
-            elif len(by_bare.get(name, [])) == 1:
-                picked.add(by_bare[name][0])
-            elif name in by_bare:
-                ambiguous[name] = by_bare[name]
+            key = name.lower()
+            if key in by_full:
+                picked.add(by_full[key])
+            elif len(by_bare.get(key, [])) == 1:
+                picked.add(by_bare[key][0])
+            elif key in by_bare:
+                ambiguous[name] = by_bare[key]
             else:
                 unmatched.append(name)
         if unmatched or ambiguous:
@@ -184,6 +197,9 @@ def main(argv: list[str] | None = None) -> int:
     kept, problem = choose(inventory, args.keep)
     if problem:
         print(json.dumps(problem))
+        return 1
+    if not kept:
+        print(json.dumps({"error": "no tables kept"}))
         return 1
     out = Path(args.tables_out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
