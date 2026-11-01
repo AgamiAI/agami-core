@@ -8,7 +8,7 @@
 # or path (Git Bash quotes an argument only when it has a space) splits it into two commands, and
 # `%NAME%` expands. Exit 1 with a one-line hint when nothing can open it.
 #
-# Usage:  bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "<path or URL>"
+# Usage:  bash "<plugin dir>/scripts/open_in_browser" "<path or URL>"
 set -u
 target="${1:?usage: open_in_browser <path or URL>}"
 case "$(uname -s 2>/dev/null)" in

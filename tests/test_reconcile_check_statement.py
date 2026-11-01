@@ -723,4 +723,6 @@ def test_an_interpreter_with_no_agami_core_at_all_is_told_the_same_thing(tmp_pat
     # because an import error's text can name an absolute path.
     assert r.stderr.strip().endswith("(ImportError)")
     assert "Traceback" not in r.stderr and "sync-lib" not in r.stderr
-    assert str(tmp_path) not in r.stderr
+    # The one path it does print is the `sm` launcher it tells Claude to run, which sits beside the
+    # script; nothing else of the import failure's text may carry a path.
+    assert str(tmp_path) not in r.stderr.replace(str(bare / "sm"), "")

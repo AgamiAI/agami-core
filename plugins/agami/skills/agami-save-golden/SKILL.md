@@ -81,7 +81,7 @@ The table needs a header row with a **question column** — `question`, `query`,
 
 ```bash
 mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py parse \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py parse \
   --file <path-to-csv-or-xlsx> [--sheet "<sheet name>"] [--column <field>="<header>"] \
   > "<artifacts_dir>/local/tmp/agami-golden-parse-<ts>.json"
 ```
@@ -118,7 +118,7 @@ Then ask, plainly, naming both counts when they differ: *"Import these `<N>` que
 Pass the **same parse payload** to `--rows` — the file you just showed them, not a re-derivation of it:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py import \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py import \
   --profile <profile> --dataset <dataset> \
   --rows "<artifacts_dir>/local/tmp/agami-golden-parse-<ts>.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-import-<ts>.json"
@@ -160,7 +160,7 @@ Write the item with the **Write tool** as JSON — the same rule as any JSON fil
 `match`, `bounds` and `must_filter` all reach the written item exactly as sent — which is why a replacement has to repeat whatever the existing item carried (Phase 4).
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
   --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
@@ -187,7 +187,7 @@ The explorer page (`/agami-eval`, or rendered directly) shows a profile's datase
 **Render the page:**
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_golden_datasets.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
   --profile <profile> \
   --out "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html"
 ```
@@ -197,7 +197,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_golden_datasets.py \
 **When the user pastes the block back**, parse it before you read it:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_golden_feedback.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_golden_feedback.py \
   --block-file "<artifacts_dir>/local/tmp/agami-golden-block-<ts>.txt" \
   > "<artifacts_dir>/local/tmp/agami-golden-ops-<ts>.json"
 ```
@@ -207,7 +207,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_golden_feedback.py \
 **Then apply, one dataset at a time.** The block's `profile:` line names its target — use that, not the active profile, or a page rendered for one model applies to another:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py apply \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py apply \
   --profile <the block's own profile> --dataset <stem> \
   --ops "<artifacts_dir>/local/tmp/agami-golden-ops-<ts>.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-apply-<ts>.json"
@@ -244,7 +244,7 @@ On a `needs_confirmation` payload — a list of `{id, before, after}` — **rend
 Then ask, and only after an explicit yes re-run the **same command with `--confirm-replace` appended**:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
   --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" --confirm-replace \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
