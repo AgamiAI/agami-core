@@ -46,11 +46,13 @@ def test_1_6_default_path_opens_no_page_and_waits_for_no_paste():
     assert "AGAMI PRUNE" not in default
 
 
-def test_1_6_keeps_the_full_view_as_an_option():
+def test_1_6_has_no_page_and_shows_tables_in_the_chat():
+    # The prune page was removed: listing, picking and leaving columns out all happen in the chat.
     s = _section_16()
-    assert "Show the full view" in s
-    assert "render_prune.py" in s and "serve_page.py" in s
-    assert "parse_prune_block.py" in s
+    for gone in ("render_prune.py", "parse_prune_block.py", "prune_html", "serve_page.py", "--out"):
+        assert gone not in s, gone
+    assert "inventory_summary.py --inventory \"<inventory_path>\" --show" in s
+    assert "--check-columns" in s and "--exclude-columns" in s
 
 
 def test_1_6_handles_all_noise_and_the_empty_result():

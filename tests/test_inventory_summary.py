@@ -208,3 +208,60 @@ def test_schema_groups_carry_schema_and_table_counts(tmp_path):
     _, out = _run(tmp_path, inv)
     for g in out["groups"]["schema_groups"]:
         assert g["schema_count"] == len(g["schemas"]) and g["tables"] == 2 * g["schema_count"]
+
+
+# --- --show and --check-columns: what replaced the prune page -----------------
+
+from inventory_summary import check_columns, show  # noqa: E402
+
+_INV = {
+    "tables": [
+        {"schema": "sales", "table": "orders", "columns": [{"name": "id", "type": "int"}, {"name": "Notes", "type": "text"}]},
+        {"schema": "sales", "table": "customers", "columns": [{"name": "email", "type": "text"}]},
+        {"schema": "billing", "table": "orders", "columns": [{"name": "id", "type": "int"}]},
+    ]
+}
+
+
+def test_show_a_schema_lists_its_tables_with_column_counts():
+    result, ok = show(_INV, "Sales")
+    assert ok and result == {"schema": "sales", "tables": [{"table": "orders", "columns": 2}, {"table": "customers", "columns": 1}], "more": 0}
+
+
+def test_show_a_table_lists_its_columns():
+    result, ok = show(_INV, "sales.orders")
+    assert ok and result["table"] == "sales.orders" and [c["name"] for c in result["columns"]] == ["id", "Notes"]
+    result, ok = show(_INV, "customers")
+    assert ok and result["table"] == "sales.customers"
+
+
+def test_show_caps_the_list_and_counts_the_rest():
+    inv = {"tables": [{"schema": "s", "table": f"t{i}", "columns": []} for i in range(20)]}
+    result, ok = show(inv, "s")
+    assert ok and len(result["tables"]) == 15 and result["more"] == 5
+
+
+def test_show_says_what_did_not_match():
+    assert show(_INV, "orders") == ({"ambiguous": {"orders": ["sales.orders", "billing.orders"]}}, False)
+    assert show(_INV, "nope") == ({"unmatched": ["nope"]}, False)
+
+
+def test_check_columns_spells_names_as_the_inventory_does():
+    assert check_columns(_INV, ["sales.orders.notes", "SALES.CUSTOMERS.EMAIL"]) == (["sales.orders.Notes", "sales.customers.email"], [])
+    assert check_columns(_INV, ["sales.orders.ssn"]) == ([], ["sales.orders.ssn"])
+
+
+def test_check_columns_cli(tmp_path, capsys):
+    import json
+
+    from inventory_summary import main
+
+    inv = tmp_path / "inv.json"
+    inv.write_text(json.dumps(_INV))
+    names = tmp_path / "cols.txt"
+    names.write_text("sales.orders.notes\n")
+    assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"exclude_columns": ["sales.orders.Notes"]}
+    names.write_text("sales.orders.ssn\n")
+    assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 1
+    assert main(["--inventory", str(inv), "--show", "nope"]) == 1

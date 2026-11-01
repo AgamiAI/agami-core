@@ -1762,34 +1762,11 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     return dict(intra), cross, skipped_target
 
 
-def _load_render_prune():
-    """Import the `render_prune` script (the prune-page renderer) and return the module.
-
-    render_prune lives in the PLUGIN (`plugins/agami/scripts/`), not this package — a package-relative
-    import fails on every layout (`site-packages/` installed, `src/` in a dev checkout; neither has it).
-    Locate it via `AGAMI_PLUGIN_ROOT`, which the `sm` launcher always exports (deriving it from its own
-    location if the caller didn't), so it's present in this `python -m semantic_model.cli` subprocess even
-    under `sm`'s `cd /` + `PYTHONSAFEPATH` (an explicit `sys.path.insert` is honored). Raise a clear error
-    if it's unset or doesn't point at the plugin.
-    """
-    plugin_root = os.environ.get("AGAMI_PLUGIN_ROOT")
-    scripts_dir = Path(plugin_root).expanduser() / "scripts" if plugin_root else None
-    if scripts_dir and (scripts_dir / "render_prune.py").is_file():
-        d = str(scripts_dir)
-        if d not in sys.path:
-            sys.path.insert(0, d)
-        import render_prune  # noqa: E402
-        return render_prune
-    raise RuntimeError(
-        "render_prune.py not found — set AGAMI_PLUGIN_ROOT to the agami plugin dir (its scripts/ holds "
-        f"the prune-page renderer). AGAMI_PLUGIN_ROOT={plugin_root!r}"
-    )
-
-
 def cmd_discover(args) -> int:
-    """First pass: cheap discovery (tables + columns only) → inventory JSON +
-    a prune HTML page. The user prunes, then `introspect --tables <kept>` runs
-    the full build on only the kept tables. No grain/FK/row-count probes here."""
+    """First pass: cheap discovery (tables + columns only) → inventory JSON. The person picks
+    tables on a card in the chat, then `introspect --tables <kept>` runs the full build on only
+    the kept tables. No grain/FK/row-count probes here. No page is written: the prune page was
+    removed, and `--out` is still accepted from older callers but ignored (said in `note`)."""
     from . import introspect as INTRO
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
@@ -1808,13 +1785,6 @@ def cmd_discover(args) -> int:
     inv_path.parent.mkdir(parents=True, exist_ok=True)
     inv_path.write_text(json.dumps(inventory, indent=2, default=str), encoding="utf-8")
 
-    # Render the standalone prune page via the plugin's render_prune script (located by AGAMI_PLUGIN_ROOT).
-    render_prune = _load_render_prune()
-
-    manifest = render_prune.build_manifest(inventory)
-    out_path = Path(args.out).expanduser()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_prune.render(manifest), encoding="utf-8")
 
     _print_json({
         "profile": args.profile,
@@ -1822,7 +1792,9 @@ def cmd_discover(args) -> int:
         "column_mode": inventory["column_mode"],
         "schemas": inventory["schemas"],
         "inventory_path": str(inv_path),
-        "prune_html": str(out_path),
+        "prune_html": None,
+        **({"note": "--out is ignored: the prune page was removed; tables are picked on a card in the chat"}
+           if args.out else {}),
     })
     return 0
 
@@ -2185,7 +2157,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="postgres|mysql|snowflake|bigquery|redshift|sqlite|sqlserver|"
                          "databricks|trino|oracle|duckdb|supabase")
     sp.add_argument("--artifacts", required=True, help="artifacts_dir (inventory: <artifacts>/<profile>/.introspect/)")
-    sp.add_argument("--out", required=True, help="output HTML path for the prune page")
+    sp.add_argument("--out", default=None, help="ignored (the prune page was removed); kept so older callers don't fail")
     sp.add_argument("--inventory-out", default=None, dest="inventory_out",
                     help="override inventory JSON path (default <artifacts>/<profile>/.introspect/inventory.json)")
     sp.add_argument("--tables", nargs="*", default=None,

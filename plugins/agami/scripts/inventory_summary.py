@@ -26,6 +26,20 @@ Keep (writes the file, one `schema.table` per line, in inventory order):
     <choice> = all | drop_noise | schemas:<a,b> | names:<file of table names, one per line>
     -> {"tables_file": "<file>", "kept": n}
 
+Show (a list for the chat, when the person asks what is in a schema or a table):
+
+    inventory_summary.py --inventory <inventory.json> --show <schema | schema.table | table>
+    -> {"schema": s, "tables": [{"table", "columns"}], "more": n}           # a schema: its tables
+    -> {"table": "schema.table", "columns": [{"name", "type"}], "more": n}   # a table: its columns
+    (at most 15 rows; `more` counts the rest; a name that matches nothing, or several tables, is
+    reported as {"unmatched"} or {"ambiguous"} with exit 1)
+
+Check columns (names typed in "Other" to leave out, one `schema.table.column` per line):
+
+    inventory_summary.py --inventory <inventory.json> --check-columns <file>
+    -> {"exclude_columns": ["schema.table.column", ...]}   # spelled as the inventory spells them
+    (any name that is not a column of the inventory: {"unmatched": [...]}, exit 1)
+
 A choice that keeps no tables prints `{"error": "no tables kept"}` (exit 1, nothing written).
 A schema or table name that matches nothing (or a bare table name that matches several) is
 reported as `{"unmatched": [...], "ambiguous": {...}}` with exit code 1, and nothing is written:
@@ -178,6 +192,41 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
     }
 
 
+MAX_SHOW_ROWS = 15
+
+
+def show(inventory: dict, name: str) -> tuple[dict, bool]:
+    """A schema's tables, or a table's columns, capped for the chat. → (result, ok)."""
+    tables = inventory.get("tables") or []
+    key = name.strip().lower()
+    in_schema = [t for t in tables if (t.get("schema") or "").lower() == key]
+    if in_schema:
+        rows = [{"table": t["table"], "columns": len(t.get("columns") or [])} for t in in_schema]
+        return {"schema": in_schema[0].get("schema"), "tables": rows[:MAX_SHOW_ROWS],
+                "more": max(0, len(rows) - MAX_SHOW_ROWS)}, True
+    hits = [t for t in tables if _qualified(t).lower() == key] or [t for t in tables if t["table"].lower() == key]
+    if len(hits) > 1:
+        return {"ambiguous": {name: [_qualified(t) for t in hits]}}, False
+    if not hits:
+        return {"unmatched": [name]}, False
+    cols = [{"name": c.get("name"), "type": c.get("type")} for c in hits[0].get("columns") or []]
+    return {"table": _qualified(hits[0]), "columns": cols[:MAX_SHOW_ROWS],
+            "more": max(0, len(cols) - MAX_SHOW_ROWS)}, True
+
+
+def check_columns(inventory: dict, names: list[str]) -> tuple[list[str], list[str]]:
+    """→ (the names as the inventory spells them, the names that are not a column)."""
+    known = {}
+    for t in inventory.get("tables") or []:
+        for c in t.get("columns") or []:
+            full = f"{_qualified(t)}.{c.get('name')}"
+            known[full.lower()] = full
+    found, unmatched = [], []
+    for n in names:
+        (found if n.lower() in known else unmatched).append(known.get(n.lower(), n))
+    return list(dict.fromkeys(found)), unmatched
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description="Summarise a discover inventory; write the kept-tables file."
@@ -185,9 +234,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inventory", required=True, help="inventory.json written by `sm discover`")
     ap.add_argument("--keep", help="all | drop_noise | schemas:<a,b> | names:<file>")
     ap.add_argument("--tables-out", help="where --keep writes the kept schema.table list")
+    ap.add_argument("--show", help="a schema (its tables) or a table (its columns), for the chat")
+    ap.add_argument("--check-columns", help="file of schema.table.column names to leave out")
     args = ap.parse_args(argv)
 
     inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
+    if args.show:
+        result, ok = show(inventory, args.show)
+        print(json.dumps(result, indent=2))
+        return 0 if ok else 1
+    if args.check_columns:
+        found, unmatched = check_columns(inventory, _read_names(args.check_columns))
+        print(json.dumps({"unmatched": unmatched} if unmatched else {"exclude_columns": found}))
+        return 1 if unmatched else 0
     if not args.keep:
         print(json.dumps(summarise(inventory), indent=2))
         return 0

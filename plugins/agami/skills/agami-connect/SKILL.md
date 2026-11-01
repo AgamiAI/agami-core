@@ -490,7 +490,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 
    - **6A (copy, < 1 min):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "${CLAUDE_PLUGIN_ROOT}/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **mint the deployment `org_id`** (a *copy* carries no id — introspect mints inline, a copy bypasses it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id "<artifacts_dir>/agami-example"` — idempotent, writes a locally-minted uuid into `datasource.yaml` so the sample deployment has a portable identity like any other. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
    - **6B (rebuild live — "watch it build"):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. It takes a few minutes (the non-default option). **Don't mention tokens, cost, or billing** — surface time (~5–10 min), not scary money words.
-     - **Sample carve-outs — the dataset is small + curated, so DON'T prompt (build silently over ALL tables):** skip the [Phase 1.6](#16--discover--prune-the-table-list-cheap-first-pass) **prune** page, skip the **org-description** prompt (Phase 2f / 0a), and skip the **doc/metrics intake** (Phase 1's "do you have a data dictionary / dbt repo?"). These prompts exist for a real unknown DB; for the sample they're noise. Introspect + enrich every sample table without asking.
+     - **Sample carve-outs — the dataset is small + curated, so DON'T prompt (build silently over ALL tables):** skip the [Phase 1.6](#16--discover--prune-the-table-list-cheap-first-pass) **table** card, skip the **org-description** prompt (Phase 2f / 0a), and skip the **doc/metrics intake** (Phase 1's "do you have a data dictionary / dbt repo?"). These prompts exist for a real unknown DB; for the sample they're noise. Introspect + enrich every sample table without asking.
      - **Clear the pre-seed gate before seeding (the silent build has no human to sign off).** Enrichment lands the sample's metrics/entities `unreviewed`, so `seed-examples` would refuse with `preseed_review_pending`. Because the sample is curated and trusted, **auto-approve the queue as a system signer** right before seeding — the silent path clears its own gate:
        ```bash
        bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" approve-queue "<artifacts_dir>/agami-example" --signer system --role system
@@ -677,7 +677,6 @@ ts=$(date -u +%Y%m%d-%H%M%S)
 AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
   --profile <profile> --db-type <db_type> \
   --artifacts "<artifacts_dir>" \
-  --out "<artifacts_dir>/local/prune/<profile>/$ts.html" \
   [--schemas <selected_schemas…>]   # the 1.3 pick, if you narrowed schemas
 ```
 
@@ -687,9 +686,9 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
 > - **Never on `seed-examples` (Phase 5).** That command validates SQL which later runs as a real user query; validating under a raised cap green-lights examples that get refused in production.
 > - **Tell the user you did it**, once, with the real numbers the commands print — and say their query-time cap is unchanged. See 2a.0 for the wording.
 
-It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count`, `inventory_path` and `prune_html`. (`--out` is required, so the prune page is written too; **it is not opened** and nothing waits on it. It is only the file behind "Show the full view" below.)
+It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count` and `inventory_path`. No page is written: everything about picking tables happens in the chat.
 
-**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing waits on a pasted block on this path; the only page is the full view below, and only when asked.
+**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing waits on a pasted block.
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
@@ -708,7 +707,7 @@ Then call AskUserQuestion, one question (header `Tables`):
 - **Only some schemas**: pick which schemas to model. Leave it out when there is a single schema.
 - **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
 
-Add one line before the card: *"Say 'show the full view' for the page with every table and column."*
+Add one line before the card: *"Ask to see any schema's tables or any table's columns, or type columns to leave out in Other (`schema.table.column`)."*
 
 Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep.txt`:
 
@@ -723,25 +722,25 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 
 If the person asks to skip this ("just introspect everything"), proceed to 1.7 unscoped.
 
-**Show the full view (optional, only when asked).** The page with every table and column, where individual tables and columns can be unchecked. Serve `prune_html` from localhost and give the person the URL; a `file://` page can show as a frozen snapshot in the built-in browser:
+**Showing what is there (when asked).** "What's in sales?", "show me the columns of orders": list it in the chat from the inventory, then ask the same card again.
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<prune_html>" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --show "<schema | schema.table | table>"
 ```
 
-Run it with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
+A schema prints its tables with their column counts; a table prints its columns with their types. Show them as a markdown table (`Table | Columns` or `Column | Type`), at most 15 rows, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (exit 1): say which name didn't match, or list the tables it could mean, and ask the same card again.
 
-(`render_prune.py --inventory "<inventory_path>" --out <file.html>` re-renders the page if `prune_html` is gone.) The page's **Generate for Claude** button gives the person an `AGAMI PRUNE` block; that paste is still accepted here. Pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
+**Columns to leave out, typed in "Other".** Names of the form `schema.table.column` (alongside a table answer or on their own) are columns to exclude from the build. Write them one per line with the Write tool to `<artifacts_dir>/local/tmp/agami-drop-columns.txt` and check them:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_prune_block.py --block-file <pasted> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --check-columns "<artifacts_dir>/local/tmp/agami-drop-columns.txt"
 ```
 
-It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
+`{"exclude_columns": [...]}` → pass them to 1.7 as `--exclude-columns <names…>` and say how many columns are left out. `{"unmatched": [...]}` (exit 1) → say which names are not columns and ask the same card again; never guess. Personal-data columns are asked about again on their own card after the build (Phase 4), and any column can be hidden later from `/agami-model`, so nobody has to find every column now.
 
 ### 1.6s — With a model spec: the spec IS the kept set
 
-When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 prune page — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
+When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 table card — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
 
 ```bash
 "$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/model_spec_workbook.py" parse --file "<workbook.xlsx>" \
