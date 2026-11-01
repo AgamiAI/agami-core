@@ -25,6 +25,8 @@ import re
 import sys
 from pathlib import Path
 
+from _read_only_view import make_read_only
+
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "reconcile-intake-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
@@ -126,6 +128,8 @@ def main(argv=None) -> int:
     p.add_argument("--items-file", help="JSON array of page items")
     p.add_argument("--intake-file", help="the output of `reconcile.py intake`; the items are derived from it")
     p.add_argument("--out", required=True)
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args(argv)
     if bool(args.items_file) == bool(args.intake_file):
         sys.stderr.write("pass exactly one of --items-file or --intake-file\n")
@@ -142,7 +146,7 @@ def main(argv=None) -> int:
         return 1
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(page, encoding="utf-8")
+    out_path.write_text(make_read_only(page) if args.read_only else page, encoding="utf-8")
     print(f"Wrote {out_path} ({len(items)} row{'s' if len(items) != 1 else ''})")
     return 0
 

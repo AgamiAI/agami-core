@@ -150,7 +150,7 @@ A per-row "is this the question?" in chat is never asked.
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_reconcile_intake.py --title "What we read · <profile>" \
   --profile <profile> --run <ts> --intake-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" \
-  --out "<artifacts_dir>/local/reconcile/<ts>/intake.html"
+  --read-only --out "<artifacts_dir>/local/reconcile/<ts>/intake.html"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/intake.html" --minutes 30
 ```
 
@@ -427,7 +427,7 @@ Beat 4 names the side: "your query" for a defect, "the semantic model" for a gap
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_reconcile_report.py --title "Reconcile · <profile>" \
      --profile <profile> --run-dir "<artifacts_dir>/local/reconcile/<ts>" \
      --words-file "<artifacts_dir>/local/tmp/agami-reconcile-words-<ts>.json" \
-     --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
+     --read-only --out "<artifacts_dir>/local/reconcile/<ts>/report.html"
    bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py check-run --run-dir "<artifacts_dir>/local/reconcile/<ts>"
    ```
    The renderer writes `<run_dir>/report-items.json` beside the page (for the parser and for reading), stamps the page with the digest of the items it rendered, and prints three lines: the counts by result and by fix as words, the page's path, and the next step. `check-run` exits `0` only when every row in the checkpoint has its files and the page's stamp is the digest of the current items; on `4`, fix what it names and render again. **Say the first of the three lines the renderer printed**, the counts as colored words (match, differs, a mistake on your side, could not check), as the 3a summary. The page's path and its next step stay behind the full view; the results table and the cards below are the next step. The page offers `keep` only on rows whose status is `match` with a single recorded cell, Phase 3e's own predicate; the page draws that from the items, and the parser checks it again from the run's own files, because the offer's predicate is the ledger's and never the page's. **Never write `report.html`, `report-items.json` or `rows.jsonl` with the Write tool**; the only files this session writes by hand in Phases 2 and 3 are the words file and the chunk file.

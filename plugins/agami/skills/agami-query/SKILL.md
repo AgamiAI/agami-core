@@ -737,7 +737,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_chart.py \
   --summary "$EXECUTIVE_SUMMARY" \
   --sections-file "<artifacts_dir>/local/tmp/agami-sections-$ts.json" \
   --receipt-file "<artifacts_dir>/local/tmp/agami-receipt-$ts.json" \
-  --out "<artifacts_dir>/local/charts/$profile/$ts.html"
+  --read-only --out "<artifacts_dir>/local/charts/$profile/$ts.html"
 ```
 
 The helper reads `shared/chart-template.html` + the two logo SVGs once, validates each section + receipt, runs `template.replace(...)` for each placeholder, and writes the file. Stdlib only — no extra deps.
@@ -768,7 +768,7 @@ Chart: http://localhost:<port>/<name> (open for 30 minutes)
 
 For a multi-section report: `Report (N sections): http://localhost:<port>/<name>`. Set `chart_path` on this answer's `query_log.jsonl` entry to the file's absolute path (Phase 5), so "reopen the chart" can serve it again later.
 
-The page's **"Send feedback to Claude"** and **👍 This looks good** blocks are still accepted when pasted (4h).
+The page is read-only (`--read-only`): the answer card is where the person says it looks right or something is off. A block pasted from an older, editable page is still accepted (4h).
 
 ### 4e.5 — GitHub-star ask (one-time, gates Phase 4f)
 

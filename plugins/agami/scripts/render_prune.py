@@ -34,6 +34,8 @@ import os
 import sys
 from pathlib import Path
 
+from _read_only_view import make_read_only
+
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "prune-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
@@ -101,6 +103,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Render the agami prune view from a discover inventory.")
     p.add_argument("--inventory", required=True, help="Path to the discover inventory JSON")
     p.add_argument("--out", required=True, help="Output HTML path")
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args(argv)
 
     inv_path = Path(os.path.expanduser(args.inventory)).resolve()
@@ -115,7 +119,8 @@ def main(argv: list[str] | None = None) -> int:
 
     out_path = Path(os.path.expanduser(args.out)).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(manifest), encoding="utf-8")
+    html = render(manifest)
+    out_path.write_text(make_read_only(html) if args.read_only else html, encoding="utf-8")
 
     t = manifest["totals"]
     sys.stderr.write(

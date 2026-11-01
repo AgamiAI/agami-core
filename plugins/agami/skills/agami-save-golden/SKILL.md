@@ -201,7 +201,7 @@ The explorer page shows a profile's datasets and lets the reader queue changes a
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
   --profile <profile> \
-  --out "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html"
+  --read-only --out "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html"
 ```
 
 `--out` must land under `local/`, the gitignored half — the page carries every confirmed answer key in full, and that is only safe where it is not committed. The script refuses any other destination.

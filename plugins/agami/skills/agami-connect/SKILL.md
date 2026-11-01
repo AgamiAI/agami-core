@@ -1161,7 +1161,7 @@ Flagged and suspected columns are picked the same way:
 
 Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
 
-**Show the full view (optional, only when asked).** The model explorer, with every metric, entity, join and column: render it the way `/agami-model preseed` does (`render_model_explorer.py … --initial-tab review`) and serve it from localhost, giving the person the URL:
+**Show the full view (optional, only when asked).** The model explorer, with every metric, entity, join and column: render it the way `/agami-model preseed` does (`render_model_explorer.py … --initial-tab review --read-only`) and serve it from localhost, giving the person the URL:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minutes 30
@@ -1169,7 +1169,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minute
 
 Run it with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
 
-Its "Generate feedback for Claude" block is still accepted when the person pastes it: apply it as `/agami-model` does, then continue at 4b.
+The page is read-only; decisions stay on the cards. A "Generate feedback for Claude" block from an older, editable page is still accepted: apply it as `/agami-model` does, then continue at 4b.
 
 **4b — after the cards:** **recount the sign-offs** with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
 
@@ -1253,7 +1253,7 @@ When every example has an answer, go to Phase 7.
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py \
   --title "Seed examples · <profile>" --profile <profile> \
   --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" \
-  --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
+  --read-only --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30
 ```
 
@@ -1261,7 +1261,7 @@ Run `serve_page.py` with `run_in_background` and read its first line, `{"url": �
 
 It takes the combined object or a single area's array; repeat `--items-file` to put several files on one page, labelling a single area's array with its area as `--items-file <area>=<path>` (an unlabelled one is refused there, since two areas can share a question; so is the same file twice). Each card shows its area.
 
-The page's block is still accepted when the person pastes it: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
+The page is read-only; decisions stay on the cards. A block pasted from an older, editable page is still accepted: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
 - **`validate N`** → the example is a trusted anchor; if the block carries a `by <email>` clause, record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written).
 - **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). To reject several across areas in one call, leave out `--area` and name each as `--question "<area>/<question>"` (looked up in that area only); a bare question is matched in whichever area has it, and one that more than one area has is refused (`refused: ambiguous_question`, with the areas) and nothing is rejected. That call adds `areas` and `totals` to the output. It marks the example `status: rejected`: kept in `examples.yaml` for audit (not deleted), dropped from the runtime ranker. Tell the person it's rejected and kept, not deleted.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.

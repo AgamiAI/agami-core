@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from _read_only_view import make_read_only
+
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "reconcile-report-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
@@ -233,6 +235,8 @@ def main(argv=None) -> int:
     source.add_argument("--items-file", dest="items_file",
                    help="JSON array of {row, label, question, source, status, expected, answer, read, how, words, disagreement, change, report_path}")
     p.add_argument("--out", required=True)
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args(argv)
 
     run_dir = Path(os.path.expanduser(args.run_dir)) if args.run_dir else None
@@ -265,7 +269,7 @@ def main(argv=None) -> int:
     if run_dir is not None:
         page = _stamped(page, _reconcile().stamp_for(run, items))
         (run_dir / "report-items.json").write_text(json.dumps(items, indent=2), encoding="utf-8")
-    out_path.write_text(page, encoding="utf-8")
+    out_path.write_text(make_read_only(page) if args.read_only else page, encoding="utf-8")
     if run_dir is not None:
         for line in _three_lines(items, out_path):
             print(line)

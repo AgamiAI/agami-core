@@ -82,7 +82,7 @@ Then call AskUserQuestion, one question (header `Model`), *"What would you like 
 - **Look up a table or metric**: its description, columns and caveats, in the chat (Phase 4).
 - **Show the full view**: the model explorer page, served from localhost (Phase 5).
 
-"Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), or "done". Route it to the phase it asks for; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
+"Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), an edit ("add a metric: refund rate = refunds / captured payments", "describe orders.status as …"), or "done". Route it to the phase it asks for; an edit becomes `sm curate` edit ops, or `sm add --kind metric` for a new metric, applied as Phase 6 says, then shown back in one line; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
 
 **After each action** (Phases 2–4), post one line on what changed and ask this card again, with the counts recomputed. Dismissing the card, or "done" in "Other", ends the session (Phase 7).
 
@@ -208,7 +208,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
   ${initial_tab:+--initial-tab "$initial_tab"} \
-  --out "$out"
+  --read-only --out "$out"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" --minutes 30
 ```
 
@@ -218,16 +218,15 @@ Post the link and what the page does, in a few lines:
 
 ```
 Full view: http://localhost:<port>/<name> (open for 30 minutes)
-Review tab: approve or reject the definitions, entities and guessed joins. Other tabs: browse,
-edit, hide tables or columns, add metrics, edit datasource.md. When you're done, press
-"Generate feedback for Claude" and paste the block here.
+A read-only view of every table, metric, entity and join. Make changes on the card here:
+approve, hide, or type an edit in Other ("add a metric …", "describe orders.status as …").
 ```
 
-Then go back to the overview card; the page's block is accepted whenever it arrives.
+Then go back to the overview card. The page is read-only; a block pasted from an older, editable page is still applied (5b).
 
 ### 5b — The pasted block
 
-The page's "Generate feedback for Claude" block is still accepted. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
+A "Generate feedback for Claude" block from an older, editable page (rendered without `--read-only`) is still accepted. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file <pasted>

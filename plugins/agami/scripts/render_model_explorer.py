@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import _interp  # noqa: F401 — re-exec under agami's configured interpreter if PyYAML is missing
+from _read_only_view import make_read_only
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "model-explorer-template.html"
@@ -287,6 +288,21 @@ def render(*, title: str, profile: str, manifest: dict) -> str:
     return out
 
 
+def saved_signoff(artifacts_dir: Path) -> dict:
+    """The sign-off email and role saved in `local/.config` by the cards or an earlier page.
+
+    The page also remembers what was typed in this browser; this fills the field on a first visit,
+    so a person who signed off on a card isn't shown a blank "Sign off as".
+    """
+    try:
+        config = json.loads((artifacts_dir / "local" / ".config").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(config, dict):
+        return {}
+    return {k: v for k in ("email", "role") if isinstance(v := config.get(f"reviewer_{k}"), str) and v}
+
+
 def _join_key(r: Any) -> str:
     """A key that tells joins between the SAME two tables apart — one per date or person role. The
     table pair alone gave every date role's join the same key, so approving one approved (and overwrote) all.
@@ -316,6 +332,8 @@ def main() -> int:
                             "joins", "examples", "review", "queued"],
                    help="Tab the dashboard opens on. 'auto' (default) opens on Review when "
                         "anything needs sign-off, else Tables; 'review' forces the sign-off queue.")
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args()
 
     artifacts_dir = Path(os.path.expanduser(args.artifacts_dir)).resolve()
@@ -339,6 +357,7 @@ def main() -> int:
                                if f.get("description_source") == "ai_unknown" and not f.get("excluded"))
         initial = "review" if pending > 0 else "tables"
     manifest["initial_tab"] = initial
+    manifest["signoff"] = saved_signoff(artifacts_dir)
     if not manifest["schemas"]:
         sys.stderr.write(
             f"agami: no subject areas found in {profile_dir}. Run /agami-connect first.\n"
@@ -348,7 +367,8 @@ def main() -> int:
     title = args.title or f"Model explorer · {args.profile}"
     out_path = Path(os.path.expanduser(args.out)).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(title=title, profile=args.profile, manifest=manifest), encoding="utf-8")
+    html = render(title=title, profile=args.profile, manifest=manifest)
+    out_path.write_text(make_read_only(html) if args.read_only else html, encoding="utf-8")
 
     if args.manifest_out:
         mpath = Path(os.path.expanduser(args.manifest_out)).resolve()

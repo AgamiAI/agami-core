@@ -53,6 +53,8 @@ import os
 import sys
 from pathlib import Path
 
+from _read_only_view import make_read_only
+
 VALID_TYPES = {"bar", "line", "pie", "doughnut", "scatter"}
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
@@ -246,6 +248,8 @@ def main() -> int:
     )
 
     p.add_argument("--out", required=True)
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args()
 
     if args.sections_file:
@@ -267,7 +271,8 @@ def main() -> int:
 
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(title=args.title, summary=args.summary, sections=sections, receipt=receipt), encoding="utf-8")
+    html = render(title=args.title, summary=args.summary, sections=sections, receipt=receipt)
+    out_path.write_text(make_read_only(html) if args.read_only else html, encoding="utf-8")
     print(f"Wrote {out_path} ({len(sections)} section{'s' if len(sections) != 1 else ''}"
           f"{', with trust receipt' if receipt else ''})")
     return 0
