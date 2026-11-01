@@ -8,7 +8,6 @@ decide on the cards; tabs keep working. Every renderer a skill calls must be giv
 from __future__ import annotations
 
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -46,7 +45,7 @@ def test_a_page_without_a_plain_body_tag_is_refused() -> None:
     raise AssertionError("expected ValueError")
 
 
-def test_render_chart_writes_a_read_only_page(tmp_path: Path) -> None:
+def test_render_chart_writes_a_read_only_page(tmp_path: Path, monkeypatch) -> None:
     sections = tmp_path / "sections.json"
     sections.write_text(
         '[{"title": "Orders by status", "insights": "", "chart_type": "bar", "labels": ["paid"],'
@@ -60,9 +59,11 @@ def test_render_chart_writes_a_read_only_page(tmp_path: Path) -> None:
         + "}"
     )
     out = tmp_path / "chart.html"
-    cmd = [sys.executable, str(SCRIPTS / "render_chart.py"), "--title", "Orders", "--sections-file", str(sections),
-           "--receipt-file", str(receipt), "--out", str(out), "--read-only"]  # fmt: skip
-    subprocess.run(cmd, check=True, capture_output=True)
+    import render_chart
+
+    args = ["render_chart.py", "--title", "Orders", "--sections-file", str(sections), "--receipt-file", str(receipt)]
+    monkeypatch.setattr(sys, "argv", [*args, "--out", str(out), "--read-only"])
+    assert render_chart.main() == 0
     assert BANNER_TEXT in out.read_text()
 
 

@@ -14,7 +14,7 @@ This skill orchestrates:
 1. **Setup** (once per session) — resolve the profile + the semantic model at `<artifacts_dir>/<profile>/`, verify the configured database tool still works.
 2. **Generate SQL** — examples-first traversal: pick the subject area → match curated examples → (cold start) resolve entities/metrics + identify opaque literals → compound `get_table_context` → produce one SQL statement → safety checks.
 3. **Execute** — run via the chosen tool; the Python tier runs the fan/chasm pre-flight and the scope/PII gates; auto-retry on classified errors; risk-assess large-table queries.
-4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then the log line (`<artifacts_dir>/local/query_log.jsonl`, written right after 4d.1 and before the card; its shape is in Phase 5), then one card (Looks right / Something's off / Show as a chart / Sign off the definitions used); CSV via `--csv` or "export this"; the Chart.js report only on "Show as a chart", `--chart` or "make that a chart", served from localhost.
+4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then the log line (`<artifacts_dir>/local/query_log.jsonl`, written right after 4d.1 and before the card; its shape is in Phase 5), then one card (Looks right / Something's off / Show as a chart / Sign off the definitions used); CSV via `--csv` or "export this"; on "Show as a chart", `--chart` or "make that a chart", a text bar chart in the chat (`text_chart.py`), with the Chart.js report as the full view on request, served from localhost.
 5. **Post-install GitHub-star ask** — after the answer card, ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
 
 For the model format: [`semantic_model/__init__.py`](../../../../packages/agami-core/src/semantic_model/__init__.py) (layout) + `packages/agami-core/src/semantic_model/models.py`.
@@ -620,7 +620,7 @@ After "How this was answered" and the log line, call AskUserQuestion:
 
 - **Looks right**: save it as a test question, so later changes to the model are checked against this answer.
 - **Something's off**: say what in "Other"; I'll fix it and save the correction.
-- **Show as a chart**: the full report with a chart, served from localhost. Left out for a 1×1 scalar, and when the chart was already shown because the person asked for one.
+- **Show as a chart**: a bar chart drawn here in the chat (4e). Left out for a 1×1 scalar, and when the chart was already shown because the person asked for one.
 - **Sign off the definitions used**: shown only when the receipt names an unsigned metric (a model metric in `columns.items` whose `review_state` isn't `approved`); signs those off.
 
 One question, header `Answer`, *"How does this answer look?"*, single pick, no `(Recommended)` (only the person can say whether it's right). With the chart and sign-off options left out the card still has two. Where AskUserQuestion is unavailable, ask the same as a short numbered list (question-cards rule 7).
@@ -629,16 +629,18 @@ One question, header `Answer`, *"How does this answer look?"*, single pick, no `
 |---|---|
 | Looks right | Set `feedback: "good"` on this answer's `query_log.jsonl` entry (written before the card) and confirm the assumption descriptions (4d.1b). Then, when the question names a window relative to today ("last 30 days", "this month", "YTD") and the SQL that ran is pinned to fixed dates, ask agami-reconcile's window card before handing anything on: header `Window`, *"'The last 30 days' was 2–31 August 2026 when this ran. Save it as '…in August 2026'?"*, options **Name the window: <dates>** / **Don't save**; "Other" takes the question in the person's words. **Name the window** saves with the question rewritten to name those dates; **Don't save** writes no test (the feedback above stands). Never re-anchor the SQL to the current date: the answer key would then move with the calendar and fail against a band nobody moved. Then hand to **agami-save-golden**'s save door (its Phase 3) with the question (rewritten, if it was), the SQL that ran and the result; how it was checked is that the person pressed Looks right on this answer. |
 | Something's off | Set `feedback: "bad"` on this answer's `query_log.jsonl` entry and hand **agami-save-correction** three things by name: the "Other" text as the correction, this answer's question, and the SQL that ran for it (the same `question` and `sql` the log line carries), which fixes the answer, routes the learning and asks before any shared-model edit (the same tree as 4h). Picked with nothing typed in "Other": say *"Type what looks off in Other."* and ask the same card again. |
-| Show as a chart | Phase 4e: render the report and serve it from localhost, then post the link. |
+| Show as a chart | Phase 4e: draw the chart in the chat (4e.iii, then 4e.iii-b). The HTML report (4e.iv–vi) only when the person then asks for the full view. |
 | Sign off the definitions used | The identity card first if `reviewer_email` / `reviewer_role` aren't in `<artifacts_dir>/local/.config` (the one in [agami-model Phase 0](../agami-model/SKILL.md#phase-0-preflight)); its **Don't sign anything yet** signs nothing here and goes on to the star ask (4e.5) and the follow-ups (4f), since there is no overview card in this skill. Otherwise one batch, `{"op":"approve","kind":"metric","area":"<area>","name":"<name>"}` per unsigned model metric in the receipt, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. A `stale` one: say what changed in the line before, from its `changes_since_approval` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope rule1`. An ad-hoc metric isn't in the model, so it can't be signed off; offer to save it as a metric through agami-save-correction. |
 
 **"Other" with no option picked** is read for what it says: a description of what's wrong is **Something's off**; a new data question is answered as one (Phase 2), the card left behind. A question about this answer ("show me the SQL", "why these tables?") is answered, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is said back in one line and the same card asked again; never guess.
 
 After the card is handled: the one-time star ask (4e.5), then the 5 follow-ups (4f).
 
-### 4e — Show as a chart (the answer's full view): ONE coherent HTML report (one file, N sections), served from localhost
+### 4e — Show as a chart: drawn in the chat; the HTML report is the full view
 
 This runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart", "show me a chart"); in the last two cases the answer card leaves its chart option out. Never by default.
+
+**The chart goes in the chat.** The chat shows no image or page, so the chart is bars drawn in text: build the sections file (4e.i–iii), then draw it with `text_chart.py` (4e.iii-b) and post what it prints. That is the whole default path. Then say in one line that the full view (an HTML page with an interactive chart, the table, the SQL and the receipt) is there if they want it; render and serve it (4e.iv–vi) only when they ask.
 
 The output is **one self-contained HTML file** at `<artifacts_dir>/local/charts/<profile>/<ts>.html`, no matter how broad the question is. Broad questions decompose into multiple sub-questions; each sub-question becomes a **section** inside the same file. Each section has its own chart + table + insight + SQL. **Never write multiple HTML files for one user question. Never serve more than one page per answer.**
 
@@ -714,6 +716,14 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" csv_to_sections.py \
 It prints `{ok, data:{section_count}, anomalies}`. **Read `anomalies`** and mention/act on them if they matter (e.g. a value column that isn't numeric → left out of the chart; a query that returned 0 rows) — they're not fatal. The `--out` sections file is what `render_chart.py` reads (4e.iv).
 
 Notes the script handles for you: a time-bucket `label_col` is formatted from its unit/date encoding; a categorical label uses the value as-is; the section's chart-axis `unit` is set automatically only when **all** value columns share one unit (so a currency col plotted next to a count never mis-formats); the `sql` is read verbatim from `sql_file` (no paraphrase, no `...`).
+
+#### 4e.iii-b — draw it in the chat via `text_chart.py` (do NOT draw bars by hand)
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" text_chart.py --sections-file "<artifacts_dir>/local/tmp/agami-sections-<ts>.json"
+```
+
+Post its output as it is: per section a bold title and a fenced `text` block of horizontal bars, the bar lengths from the section's raw numbers and the values from its formatted `table_rows`, so the bars, the table and the full view agree. It draws at most 15 rows and says how many more there are; with several value columns it bars the first and says so; negative values get one line pointing at the table instead. A line or time trend is drawn the same way, one bar per period in the order the rows came. Keep the sections file until the turn ends: the full view (4e.iv) reads it.
 
 #### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 

@@ -14,6 +14,18 @@ below corresponds to one such version.
 
 ### Added
 
+- **Charts drawn in the chat.** "Show as a chart" on the answer card now draws horizontal bars as
+  text in the chat (`scripts/text_chart.py`), from the same sections file the HTML chart reads, so
+  the bars, the table and the page agree. The HTML report is the full view, served only when asked.
+
+- **Read-only full views.** Every page renderer takes `--read-only`, and the skills pass it: the
+  page's change controls and its copy-and-paste dialog are hidden and a banner says to decide on
+  the cards. The password page lists the host, port, database and user it is for.
+
+- **Cards answer questions.** A question typed in "Other" ("show me the SQL", "why?") is answered
+  and the same card asked again (question-cards rule 5a); a value to type, such as the sign-off
+  email, is asked for in the question rather than offered as an option.
+
 - **`scripts/serve_page.py`: an agami page served from localhost for a short while.** It serves
   one HTML file and the web assets beside it on `127.0.0.1` at a random port, prints
   `{"url": "http://localhost:<port>/<name>"}`, and exits when its time is up (`--minutes`, 30 by
@@ -123,6 +135,14 @@ below corresponds to one such version.
   `--area` used to run against an empty area (and `seed-examples` created its folder).
 
 ### Fixed
+
+- **The model explorer no longer says an unsigned metric is refused.** It is answered with a
+  warning until signed off, as the runtime does. The page fills "Sign off as" from the identity
+  saved in `local/.config`, and opens Review on the sub-tab that has items.
+
+- **Product, plan and category names are no longer listed as possible personal data.** A bare
+  `name` on a table of things is left out of the suspected tier when the table is known; names that
+  may be a person's still are.
 
 - **The chart page loads nothing from the network.** `chart-template.html` loaded Chart.js from
   `cdn.jsdelivr.net`, which broke the no-egress rule and drew no chart offline. The library now

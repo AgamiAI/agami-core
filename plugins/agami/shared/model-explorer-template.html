@@ -826,7 +826,7 @@
     }
     // A read-only full view (rendered with --read-only) is for reading; its edit prompts would point
     // at controls it hides.
-    const READ_ONLY = document.body.classList.contains('agami-read-only');
+    const READ_ONLY = !!(document.body && document.body.classList && document.body.classList.contains('agami-read-only'));
     function labelLine(text) {
       return el('div', { class: 'label-line', text: READ_ONLY ? text.replace(/ \(click to edit\)$/, '') : text });
     }
