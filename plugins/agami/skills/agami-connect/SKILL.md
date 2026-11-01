@@ -115,7 +115,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
 **Two paths, chosen by the operating system** (`uname -s`: `Darwin` is macOS; `MINGW*` / `MSYS*` / `CYGWIN*`, or `$OS` = `Windows_NT`, is Windows):
 
-- **macOS and Windows: the password page.** 0a.1 → 0a.2 → 0a.3 → **0a.4c** (connection fields card) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
+- **macOS and Windows: the password page.** 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
 - **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
@@ -154,10 +154,14 @@ Bind `$DB_TYPE` ∈ `postgres | mysql | snowflake | bigquery | sqlserver | oracl
 
 Ask the user to **name** this connection — don't pick for them. The name is how they'll switch databases later (`AGAMI_PROFILE=<name>`) and it names the model folder (`<artifacts_dir>/<name>/`), so a name that means something to them — their database, product, team, or environment — beats a generic default.
 
-**AskUserQuestion**, header `Name`, with the **Other** free-text as the encouraged path (that's where they type their own name):
-> What should I call this database? Pick a name you'll recognize when you connect more than one — e.g. your database or product name, or an environment.
+**On the password-page path this card comes after the connection fields (0a.4c)**, because the fields card asks for the database's own name and a separate "what should I call this database?" before it reads as the same question twice. Here the name is for the *connection*, and the database name the person just gave is the natural answer. **AskUserQuestion**, header `Name`:
+> *"What should agami call this connection? It's how you'll pick it when you connect more than one. Type your own in Other."*
 
-Offer a few *examples* as options (`prod`, `staging`, `analytics`) but make clear in the prompt that typing their own in **Other** is the point — **don't present a `main` default that nudges them past the choice.** Bind `$PROFILE_NAME` to their answer (the Other text, or a picked example). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `<artifacts_dir>/local/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later. On the password-page path the helper checks again, and also refuses a name the OS store already holds a password under.) Say "database", not "profile", to the person.
+Options: `<database> (Recommended)`, the database name from 0a.4c made valid (lowercased, any other character turned into `-`, trimmed to 32), and `<database>-<where>`, with `<where>` = `local` for `localhost`/`127.0.0.1` or the first label of the host otherwise (`<database>-<account>` on Snowflake, `<project>` alone on BigQuery, the file's stem for SQLite and DuckDB). Leave out an option that would equal the other or fail the rules below.
+
+**On the file path** (no fields card), ask it here, before the file: *"What should agami call this database? It's how you'll pick it when you connect more than one, so your database or product name works well. Type it in Other."* with `prod`, `staging` and `analytics` as examples. **Don't present a `main` default that nudges them past the choice.**
+
+Bind `$PROFILE_NAME` to their answer (the Other text, or a picked option). Validate: lowercase letters/digits/dashes/underscores, 1–32 chars; **and not already a `[section]` in `<artifacts_dir>/local/credentials`** (a profile name is a unique key — reusing one would clash). If it fails either rule, show the reason and re-ask. (The 0a.10 promote helper enforces the uniqueness backstop too — it returns `COLLISION` rather than overwrite — but catch it here so the user isn't surprised later. On the password-page path the helper checks again, and also refuses a name the OS store already holds a password under.) Say "database", not "profile", to the person.
 
 ### 0a.4c — The connection fields as one card (macOS and Windows)
 

@@ -598,3 +598,12 @@ def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
     assert "A numbered list of ~6 starter questions" not in wrap_up
     options = [line for line in wrap_up.splitlines() if line.strip().startswith("| `")]
     assert 2 <= len(options) <= 4
+
+
+def test_the_name_card_follows_the_fields_and_offers_the_database_name():
+    # A live run asked "what should I call this database?" and then "database name": the same question twice.
+    text = SKILL.read_text(encoding="utf-8")
+    order = next(line for line in text.splitlines() if line.startswith("- **macOS and Windows: the password page.**"))
+    assert order.index("0a.4c") < order.index("0a.3")
+    s = _between("### 0a.3 ", "### 0a.4c ")
+    assert "What should agami call this connection?" in s and "`<database> (Recommended)`" in s
