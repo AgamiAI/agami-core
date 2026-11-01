@@ -221,7 +221,13 @@ Don't run the helper in the foreground: it would hold the turn until the page is
 
 > [Enter your password](http://127.0.0.1:<port>/<token>/). Enter the password on this page; it goes to your keychain, not the chat. The link expires after 5 minutes.
 
-(On Windows say "Windows Credential Manager" in place of "your keychain".) Then say you are waiting for the page, and end your message there: no card, nothing to paste. The helper exits when the page is submitted or the 5 minutes pass, and that exit brings you back. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id, or, where TaskStop isn't available, `kill <PID>` with the PID from the `agami-helper-pid` line (`kill` sends SIGTERM, and the helper then takes back whatever it stored), and show the database-type card again.
+(On Windows say "Windows Credential Manager" in place of "your keychain".) **Then a card, so the link isn't missed** (a line of chat is easy to scroll past; a live run showed exactly that). AskUserQuestion, one question, header `Password`: *"Enter the password on the page at http://127.0.0.1:<port>/<token>/ (open for 5 minutes), then come back here."* Options: **I've saved it** / **New link** / **Use a file instead (manual)**.
+
+- **I've saved it** → read the helper's output: a final line is there → step 4. None yet → say the page hasn't been submitted, and ask the card again.
+- **New link** → stop the running helper (below) and start step 2 again with the same spec.
+- **Use a file instead (manual)** → stop the helper, then 0a.4.
+
+The helper exits when the page is submitted or the 5 minutes pass, and that exit also brings you back if the card is still open: go to step 4 and don't ask the card again. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id, or, where TaskStop isn't available, `kill <PID>` with the PID from the `agami-helper-pid` line (`kill` sends SIGTERM, and the helper then takes back whatever it stored), and show the database-type card again.
 
 **4. Read the final line** of the output when the helper exits, and act on it. The exit is what you wait for after the link is posted: the Monitor tool watching the task until it exits (or, as the fallback, spaced re-reads of the output file), never a foreground `sleep`; the background task's exit notice also brings you back. Exit code is 0 for every outcome; `status` (and a refusal's `reason`) says what happened, and `detail` is the one line to show the person. Each outcome gets one sentence plus the next card:
 

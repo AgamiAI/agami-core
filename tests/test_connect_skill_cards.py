@@ -607,3 +607,12 @@ def test_the_name_card_follows_the_fields_and_offers_the_database_name():
     assert order.index("0a.4c") < order.index("0a.3")
     s = _between("### 0a.3 ", "### 0a.4c ")
     assert "What should agami call this connection?" in s and "`<database> (Recommended)`" in s
+
+
+def test_the_password_link_comes_with_a_card():
+    # A live run showed the link in a line of chat being missed.
+    text = SKILL.read_text(encoding="utf-8")
+    step = text[text.index("**3. Post the link**"):text.index("**4. Read the final line**")]
+    assert "header `Password`" in step
+    assert "**I've saved it** / **New link** / **Use a file instead (manual)**" in step
+    assert "no card, nothing to paste" not in step
