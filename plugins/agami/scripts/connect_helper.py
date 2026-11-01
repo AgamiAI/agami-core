@@ -262,7 +262,20 @@ def _connection_test(profile: str) -> tuple[str, str]:
     return "connect_failed", (env.failure.message.splitlines() or ["The connection test failed."])[0]
 
 
-def render_page(profile: str, state: str) -> str:
+def target_rows(fields: dict | None) -> str:
+    """The connection the password is for, as table rows, so the person can check it before typing.
+
+    Only the spec's fields, which hold no secret by construction; empty ones are left out.
+    """
+    rows = [
+        f"<tr><th>{html.escape(str(k))}</th><td><code>{html.escape(str(v))}</code></td></tr>"
+        for k, v in (fields or {}).items()
+        if str(v) != ""
+    ]
+    return "\n".join(rows)
+
+
+def render_page(profile: str, state: str, fields: dict | None = None) -> str:
     """The helper's one page, with the logo inlined and nothing loaded from anywhere else."""
     store = _STORE_NAMES.get(platform.system(), "the OS credential store")
     return (
@@ -270,6 +283,7 @@ def render_page(profile: str, state: str) -> str:
         .replace("{{LOGO}}", _LOGO.read_text(encoding="utf-8"))
         .replace("{{STORE}}", html.escape(store))
         .replace("{{PROFILE}}", html.escape(profile))
+        .replace("{{TARGET}}", target_rows(fields))
         .replace("{{STATE}}", state)
     )
 
@@ -280,10 +294,11 @@ class _Server(http.server.ThreadingHTTPServer):
     daemon_threads = True  # a client that never finishes its request cannot keep the process alive
     block_on_close = False
 
-    def __init__(self, profile: str) -> None:
+    def __init__(self, profile: str, fields: dict | None = None) -> None:
         super().__init__((HOST, 0), _Handler)
         self.origin = f"http://{HOST}:{self.server_address[1]}"
         self.profile = profile
+        self.fields = fields or {}
         self.path_ok = f"/{secrets.token_urlsafe(32)}/"
         self.secret = ""
         self.submitted = threading.Event()
@@ -327,7 +342,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if not self._live():
             return self._send(404)
-        self._send(200, render_page(self.server.profile, "form"))
+        self._send(200, render_page(self.server.profile, "form", self.server.fields))
 
     def do_POST(self) -> None:  # noqa: N802
         try:
@@ -345,7 +360,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         form = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
         password = (form.get("password") or [""])[0]
         if not password:
-            return self._send(400, render_page(self.server.profile, "empty"))
+            return self._send(400, render_page(self.server.profile, "empty", self.server.fields))
         with self.server.lock:
             if self.server.submitted.is_set():  # a second submit that raced the first
                 return self._send(404)
@@ -489,7 +504,7 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
     saved = _saved_elsewhere(profile)
     if saved:
         return _refuse(out, saved[0], profile, saved[1])
-    server = _Server(profile)
+    server = _Server(profile, spec.get("fields"))
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:

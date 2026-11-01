@@ -914,3 +914,14 @@ def test_sigterm_after_storing_rolls_back(tmp_path: Path) -> None:
     assert not (art_dir / "local" / "credentials").exists()
     assert json.loads(store.read_text()) == {}
     assert SECRET not in p.stdout.read() + p.stderr.read()
+
+
+def test_page_shows_the_connection_the_password_is_for() -> None:
+    # A live run showed only the name, so nobody could check which host and user they were typing for.
+    page = connect_helper.render_page(
+        "demo", "form", {"host": "db.example.com", "port": "5432", "database": "demo", "user": "<ro>", "schema": ""}
+    )
+    for shown in ("db.example.com", "5432", "<th>database</th>", "&lt;ro&gt;"):
+        assert shown in page
+    assert "<th>schema</th>" not in page
+    assert "{{" not in connect_helper.render_page("demo", "form")

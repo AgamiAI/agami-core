@@ -67,6 +67,9 @@
   }
   button:hover { background: var(--brand-hover); }
   .note { font-size: 14px; margin: 16px 0 0; }
+  .target { border-collapse: collapse; margin: 0 0 20px; font-size: 14px; }
+  .target th { text-align: left; font-weight: 500; padding: 2px 16px 2px 0; color: var(--muted); }
+  .target td { padding: 2px 0; }
   .error { color: var(--bad); }
   .done, .error { display: none; }
   [data-state="empty"] .error { display: block; }
@@ -80,6 +83,9 @@
   <section class="form">
     <h1>Enter the password for <code>{{PROFILE}}</code></h1>
     <p>agami saves it in {{STORE}} on this computer. It does not go into the chat or a file.</p>
+    <table class="target" aria-label="The connection this password is for">
+{{TARGET}}
+    </table>
     <form method="post" autocomplete="off">
       <label for="password">Database password</label>
       <input id="password" name="password" type="password" required autofocus autocomplete="off">
