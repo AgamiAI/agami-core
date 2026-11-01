@@ -103,3 +103,18 @@ def test_urllib_parse_is_still_allowed():
     # Sanity: the precise rules must NOT trip on urllib.parse (used for DSN parsing).
     sample = "import urllib.parse\nu = urllib.parse.urlparse(dsn)\n"
     assert not any(rx.search(sample) for rx in _FORBIDDEN_RE)
+
+
+# A listener is not egress, so the scan above has nothing to say about one. But a shipped script that
+# accepts connections is a surface of its own, so pin it: only the connect helper listens, and only on
+# the loopback interface, where nothing off this machine can reach it.
+LISTEN = re.compile(r"\bhttp\.server\b|\bsocketserver\b")
+LISTENERS = {"connect_helper.py"}
+
+
+def test_only_the_connect_helper_listens_and_only_on_loopback():
+    found = {p.name for p in SCRIPTS if LISTEN.search(p.read_text())}
+    assert found == LISTENERS, f"unexpected listener(s): {sorted(found - LISTENERS)}"
+    text = (SCRIPTS_DIR / "connect_helper.py").read_text()
+    assert '"127.0.0.1"' in text
+    assert not re.search(r"""["'](?:0\.0\.0\.0|::|localhost)?["']\s*,\s*\d""", text.replace('"127.0.0.1"', ""))

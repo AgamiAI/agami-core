@@ -1,0 +1,438 @@
+"""The loopback password helper: a one-time page on 127.0.0.1 that puts the password in the OS store.
+
+The helper runs in a thread against a temp artifacts dir and an in-memory keyring backend, so the
+password's whole path (page -> helper -> credential store -> credentials file -> connection test) is
+exercised without a real Keychain. The connection test uses a SQLite profile, so no network either.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parent.parent
+SCRIPTS = REPO / "plugins" / "agami" / "scripts"
+PKG_SRC = REPO / "packages" / "agami-core" / "src"
+PAGE = REPO / "plugins" / "agami" / "shared" / "connect-helper-page.html"
+for _p in (str(SCRIPTS), str(PKG_SRC)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import connect_helper  # noqa: E402
+import credential_store  # noqa: E402
+import execute_sql  # noqa: E402
+
+SECRET = "demo-Pa55-Xq9vZ-not-real"
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
+
+
+class _FakeBackend:
+    """The calls credential_store makes, backed by a dict. `gate` holds set_password until released."""
+
+    def __init__(self) -> None:
+        self.data: dict[tuple[str, str], str] = {}
+        self.gate: threading.Event | None = None
+        self.entered = threading.Event()
+
+    def set_password(self, service: str, username: str, secret: str) -> None:
+        self.entered.set()
+        if self.gate is not None:
+            self.gate.wait(10)
+        self.data[(service, username)] = secret
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.data.get((service, username))
+
+    def get_keyring(self) -> _FakeBackend:
+        return self
+
+
+class _Lines(io.TextIOBase):
+    """A stdout stand-in the test can wait on, line by line."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self._buf = ""
+        self._cv = threading.Condition()
+
+    def write(self, s: str) -> int:
+        with self._cv:
+            self._buf += s
+            *done, self._buf = self._buf.split("\n")
+            self.lines.extend(done)
+            self._cv.notify_all()
+        return len(s)
+
+    def wait(self, n: int, timeout: float = 10) -> list[dict]:
+        with self._cv:
+            assert self._cv.wait_for(lambda: len(self.lines) >= n, timeout), self.lines
+            return [json.loads(line) for line in self.lines[:n]]
+
+
+@pytest.fixture
+def art(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    root = tmp_path / "art"
+    root.mkdir()
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(root))
+    for name in ("DATASOURCE_URL", "LOCAL_DATASOURCE_URL", "DATASOURCE_URL__DEMO", "LOCAL_DATASOURCE_URL__DEMO"):
+        monkeypatch.delenv(name, raising=False)
+    # The helper points execute_sql at this run's credentials file; put the module back afterwards.
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", execute_sql.CREDENTIALS_PATH)
+    return root
+
+
+@pytest.fixture
+def backend(monkeypatch: pytest.MonkeyPatch) -> _FakeBackend:
+    fake = _FakeBackend()
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(credential_store, "_backend", lambda: fake)
+    return fake
+
+
+def _spec(tmp_path: Path, **over: object) -> dict:
+    spec: dict = {"profile": "demo", "db_type": "sqlite", "fields": {"path": str(tmp_path / "demo.db")}}
+    spec.update(over)
+    return spec
+
+
+def _start(spec: dict, *, expires_in: float = connect_helper.EXPIRES_IN) -> tuple[threading.Thread, _Lines]:
+    out = _Lines()
+    t = threading.Thread(target=connect_helper.run, args=(spec, out), kwargs={"expires_in": expires_in}, daemon=True)
+    t.start()
+    return t, out
+
+
+def _post(url: str, password: str) -> int:
+    data = urllib.parse.urlencode({"password": password}).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST"), timeout=10) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _get(url: str) -> tuple[int, str]:
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            return r.status, r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        return e.code, ""
+
+
+def _creds(art: Path) -> Path:
+    return art / "local" / "credentials"
+
+
+def _secret_on_disk(root: Path) -> list[Path]:
+    return [p for p in root.rglob("*") if p.is_file() and SECRET.encode() in p.read_bytes()]
+
+
+def test_prints_loopback_url_with_token(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    first = out.wait(1)[0]
+    url = urllib.parse.urlsplit(first["url"])
+    assert url.scheme == "http" and url.hostname == "127.0.0.1" and url.port
+    token = url.path.strip("/")
+    assert _TOKEN_RE.match(token), token
+    assert url.path == f"/{token}/"
+    assert first["expires_in"] == 300
+    status, page = _get(first["url"])
+    assert status == 200 and 'type="password"' in page and "demo" in page
+    assert _post(first["url"], SECRET) == 200
+    t.join(10)
+    assert not t.is_alive()
+
+
+def test_submit_stores_ref_not_secret(
+    tmp_path: Path, art: Path, backend: _FakeBackend, capfd: pytest.CaptureFixture[str]
+) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "connected", final
+    assert final["profile"] == "demo"
+    creds = _creds(art).read_text(encoding="utf-8")
+    assert "password = keyring:agami/demo" in creds
+    assert "[demo]" in creds and "type = sqlite" in creds
+    if os.name == "posix":
+        assert _creds(art).stat().st_mode & 0o777 == 0o600
+    assert backend.data == {("agami", "demo"): SECRET}
+    assert _secret_on_disk(tmp_path) == []
+    captured = capfd.readouterr()
+    assert SECRET not in "\n".join(out.lines) + captured.out + captured.err
+
+
+def test_connect_failure_reported_without_the_secret(
+    tmp_path: Path, art: Path, backend: _FakeBackend, capfd: pytest.CaptureFixture[str]
+) -> None:
+    spec = _spec(tmp_path, fields={"path": str(tmp_path / "missing-dir" / "demo.db")})
+    t, out = _start(spec)
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "connect_failed" and final["detail"] and "\n" not in final["detail"]
+    assert "password = keyring:agami/demo" in _creds(art).read_text(encoding="utf-8")
+    captured = capfd.readouterr()
+    assert SECRET not in "\n".join(out.lines) + captured.out + captured.err
+    assert _secret_on_disk(tmp_path) == []
+
+
+def test_wrong_token_404_and_nothing_stored(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path), expires_in=1.5)
+    url = urllib.parse.urlsplit(out.wait(1)[0]["url"])
+    base = f"http://127.0.0.1:{url.port}"
+    wrong = base + "/" + "x" * 43 + "/"
+    assert _post(wrong, SECRET) == 404
+    assert _get(wrong)[0] == 404
+    assert _get(base + "/")[0] == 404
+    assert _post(base + url.path.rstrip("/"), SECRET) == 404  # the exact path only
+    t.join(10)
+    assert out.wait(2)[1] == {"status": "expired"}
+    assert backend.data == {}
+    assert not _creds(art).exists()
+
+
+def test_second_submit_404(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    backend.gate = threading.Event()
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    assert _post(url, SECRET) == 200
+    assert backend.entered.wait(10)  # the first submit is being stored; the server still answers
+    assert _post(url, "another-password") == 404
+    assert _get(url)[0] == 404
+    backend.gate.set()
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connected"
+    assert backend.data == {("agami", "demo"): SECRET}
+
+
+def test_empty_password_is_not_a_submit(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    assert _post(url, "") == 400
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connected"
+
+
+@pytest.mark.parametrize("case", ["invalid_name", "existing_section"])
+def test_invalid_or_existing_profile_refused_before_listening(
+    tmp_path: Path, art: Path, backend: _FakeBackend, case: str
+) -> None:
+    spec = _spec(tmp_path)
+    before = None
+    if case == "invalid_name":
+        spec["profile"] = "Acme Prod"
+    else:
+        _creds(art).parent.mkdir(parents=True)
+        _creds(art).write_text("[demo]\ntype = sqlite\npath = /tmp/old.db\n", encoding="utf-8")
+        before = _creds(art).read_text(encoding="utf-8")
+    out = _Lines()
+    assert connect_helper.run(spec, out, expires_in=1) == 0
+    assert len(out.lines) == 1
+    line = json.loads(out.lines[0])
+    assert line["status"] == "refused" and "url" not in line and line["detail"]
+    assert backend.data == {}
+    if before is None:
+        assert not _creds(art).exists()
+    else:
+        assert _creds(art).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize(
+    "over",
+    [
+        {"fields": {"password": "x"}},
+        {"fields": {"url": "postgresql://u@h/db"}},
+        {"fields": {"host": "h\n[evil]"}},
+        {"fields": {"Bad Key": "x"}},
+        {"fields": {"port": True}},
+        {"fields": "not-a-dict"},
+        {"db_type": "Postgres; x"},
+        {"auth": "token"},
+    ],
+)
+def test_bad_spec_refused(tmp_path: Path, art: Path, backend: _FakeBackend, over: dict) -> None:
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, **over), out, expires_in=1)
+    assert [json.loads(x)["status"] for x in out.lines] == ["refused"]
+    assert not _creds(art).exists()
+
+
+def test_spec_that_is_not_an_object_refused(art: Path, backend: _FakeBackend) -> None:
+    out = _Lines()
+    connect_helper.run(["demo"], out, expires_in=1)
+    assert json.loads(out.lines[0]) == {
+        "status": "refused", "profile": "", "detail": "The connection spec must be a JSON object."
+    }
+
+
+def test_unreadable_credentials_file_refused(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_text("type = sqlite\n", encoding="utf-8")  # no [section] header
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path), out, expires_in=1)
+    assert json.loads(out.lines[0])["status"] == "refused"
+    assert _creds(art).read_text(encoding="utf-8") == "type = sqlite\n"
+
+
+def test_profile_added_while_the_page_was_open_refused(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_text("[demo]\ntype = sqlite\npath = /tmp/other.db\n", encoding="utf-8")
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "refused"
+    assert backend.data == {}
+    assert "keyring" not in _creds(art).read_text(encoding="utf-8")
+
+
+def test_credentials_write_failure_refused(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).mkdir(parents=True)  # a directory where the file should be
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    line = json.loads(out.lines[0])
+    assert line["status"] == "refused" and "credentials file" in line["detail"]
+
+
+def test_a_refused_connection_test_is_connect_failed(tmp_path: Path, art: Path, monkeypatch) -> None:
+    class Refused:
+        status = "refused"
+        refusal = type("R", (), {"detail": "The statement was refused."})()
+
+    monkeypatch.setattr(execute_sql, "execute_guarded", lambda *a, **k: Refused())
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    assert json.loads(out.lines[0]) == {"status": "connect_failed", "profile": "demo", "detail": "The statement was refused."}
+
+
+def test_not_supported_os_refuses(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path), out, expires_in=1)
+    assert len(out.lines) == 1
+    line = json.loads(out.lines[0])
+    assert line["status"] == "refused" and "manual" in line["detail"]
+    assert not _creds(art).exists()
+
+
+def test_store_failure_refused_and_nothing_written(tmp_path: Path, art: Path, monkeypatch) -> None:
+    class Broken(_FakeBackend):
+        def set_password(self, service: str, username: str, secret: str) -> None:
+            raise OSError(f"locked: {secret}")  # a backend that leaks the secret into its error
+
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(credential_store, "_backend", lambda: Broken())
+    t, out = _start(_spec(tmp_path))
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "refused" and SECRET not in json.dumps(final)
+    assert not _creds(art).exists()
+
+
+def test_sso_profile_serves_no_page_and_stores_no_secret(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch
+) -> None:
+    # No credential store is needed for a browser or cloud sign-in, so it works off macOS/Windows too.
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
+    out = _Lines()
+    assert connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1) == 0
+    assert len(out.lines) == 1
+    line = json.loads(out.lines[0])
+    assert line["status"] == "connected" and "url" not in line
+    assert backend.data == {}
+    creds = _creds(art).read_text(encoding="utf-8")
+    assert "[demo]" in creds and "password" not in creds and "auth" not in creds
+
+
+def test_appends_after_existing_profiles(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_text("[acme]\ntype = sqlite\npath = /tmp/acme.db", encoding="utf-8")  # no final newline
+    _creds(art).chmod(0o644)
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    assert json.loads(out.lines[-1])["status"] == "connected"
+    text = _creds(art).read_text(encoding="utf-8")
+    assert text.startswith("[acme]\ntype = sqlite\npath = /tmp/acme.db\n")
+    assert "[demo]" in text
+    if os.name == "posix":
+        assert _creds(art).stat().st_mode & 0o777 == 0o600
+
+
+def test_stale_install_refused_before_listening(tmp_path: Path, art: Path, monkeypatch) -> None:
+    stale = type(sys)("execute_sql")  # an older agami-core: an executor that never resolves references
+    monkeypatch.setitem(sys.modules, "execute_sql", stale)
+    out = _Lines()
+    assert connect_helper.run(_spec(tmp_path), out, expires_in=1) == 0
+    line = json.loads(out.lines[0])
+    assert len(out.lines) == 1 and line["status"] == "refused" and "sm install" in line["detail"]
+    assert not _creds(art).exists()
+
+
+def test_no_credential_store_module_refused(tmp_path: Path, art: Path, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "credential_store", None)  # `import credential_store` raises
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path), out, expires_in=1)
+    assert json.loads(out.lines[0])["status"] == "refused" and "sm install" in json.loads(out.lines[0])["detail"]
+
+
+def test_stale_install_refused_from_the_command_line(tmp_path: Path) -> None:
+    """The real shape: a pip-installed agami-core that predates credential_store shadows the plugin's lib/."""
+    pkg = tmp_path / "site"
+    pkg.mkdir()
+    (pkg / "agami_paths.py").write_text(
+        "from pathlib import Path\n"
+        f"def artifacts_dir(): return Path({str(tmp_path / 'art')!r})\n"
+        "def bootstrap(): return artifacts_dir()\n"
+        "def local_dir(art=None): return artifacts_dir() / 'local'\n"
+        "def credentials_path(art=None): return local_dir() / 'credentials'\n",
+        encoding="utf-8",
+    )
+    (pkg / "execute_sql.py").write_text("CREDENTIALS_PATH = None\n", encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(_spec(tmp_path)), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(pkg)}
+    r = subprocess.run(
+        [sys.executable, str(SCRIPTS / "connect_helper.py"), "--spec", str(spec)],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert r.returncode == 0, r.stderr
+    lines = [json.loads(x) for x in r.stdout.splitlines()]
+    assert len(lines) == 1 and lines[0]["status"] == "refused" and "sm install" in lines[0]["detail"]
+
+
+def test_main_reads_the_spec_file(tmp_path: Path, art: Path, backend: _FakeBackend, capsys) -> None:
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(_spec(tmp_path, profile="Acme Prod")), encoding="utf-8")
+    assert connect_helper.main(["--spec", str(spec)]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+    assert connect_helper.main(["--spec", str(tmp_path / "nope.json")]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "refused"
+
+
+_EXTERNAL = re.compile(r"""\b(?:src|href|action)\s*=\s*["']?\s*(?:[a-z]+:)?//""", re.IGNORECASE)
+
+
+def test_page_has_no_external_resources() -> None:
+    for html in (PAGE.read_text(encoding="utf-8"), connect_helper.render_page("demo", "form")):
+        assert not _EXTERNAL.search(html)
+        assert not re.search(r"https?://", re.sub(r'xmlns(?::\w+)?="[^"]*"', "", html))
+        assert "<link" not in html.lower() and "<script" not in html.lower() and "@import" not in html
+    page = connect_helper.render_page("demo", "form")
+    assert "#2B38FC" in page and "<svg" in page and "{{" not in page
+    assert "!" not in re.sub(r"<!--.*?-->|<!doctype html>", "", page, flags=re.S | re.I).replace("!important", "")
