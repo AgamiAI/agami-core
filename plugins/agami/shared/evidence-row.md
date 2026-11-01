@@ -1,5 +1,7 @@
 # The evidence row
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 Shared by `agami-reconcile` (which reads every input through it) and `agami-save-correction` (which
 reads a pasted statement the same way). Read this before writing code or prose that consumes what a
 person hands over: a screenshot, a spreadsheet, a query they trust, a list of questions, or a mix.

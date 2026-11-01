@@ -1,5 +1,7 @@
 # Version-check probe
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 A best-effort, non-blocking check that surfaces "agami X.Y.Z is available" when a newer plugin version exists on `main`. Used by `agami-connect/SKILL.md` Phase 0 step 7 (and reusable from any skill that wants to nudge users to update).
 
 ## Why it exists

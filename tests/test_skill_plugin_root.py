@@ -9,6 +9,7 @@ docs) get no substitution, so those use the `<plugin_root>` placeholder instead.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -16,6 +17,7 @@ PLUGIN = REPO_ROOT / "plugins" / "agami"
 SKILLS = sorted(PLUGIN.glob("skills/*/SKILL.md"))
 SHARED = sorted(PLUGIN.glob("shared/*.md"))
 
+_UNBRACED = re.compile(r"\$CLAUDE_PLUGIN_ROOT\b")
 _UNSET_VAR = re.compile(r"\$\{?AGAMI_PLUGIN_ROOT\}?")
 _ROOT_PATH = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/([A-Za-z0-9_./-]+)")
 
@@ -57,6 +59,40 @@ def test_shared_docs_use_the_placeholder_not_a_variable():
     assert not found, f"Shared docs must say <plugin_root>: {found}"
 
 
-def test_the_placeholder_is_defined_once_in_the_conventions_doc():
-    text = (PLUGIN / "shared" / "invocation-conventions.md").read_text(encoding="utf-8")
-    assert "`<plugin_root>`" in text.split("## What works")[0]
+def test_no_skill_uses_the_unbraced_form():
+    # Claude Code substitutes `${CLAUDE_PLUGIN_ROOT}` only; `$CLAUDE_PLUGIN_ROOT` would reach Bash as-is.
+    found = [s.name for s in SKILLS if _UNBRACED.search(s.read_text(encoding="utf-8"))]
+    assert not found, f"Use the braced ${{CLAUDE_PLUGIN_ROOT}}: {found}"
+
+
+def test_the_placeholder_is_defined_once_at_the_top_of_the_conventions_doc():
+    lines = (PLUGIN / "shared" / "invocation-conventions.md").read_text(encoding="utf-8").splitlines()
+    defining = [n for n, line in enumerate(lines) if "stands for the" in line and "`<plugin_root>`" in line]
+    assert len(defining) == 1, "the definition must appear exactly once"
+    assert defining[0] < 12, "the definition must sit at the top, before the skills table"
+    assert not any(line.startswith("|") for line in lines[: defining[0]])
+
+
+def test_every_shared_doc_using_the_placeholder_points_to_its_definition():
+    missing = []
+    for s in SHARED:
+        text = s.read_text(encoding="utf-8")
+        if s.name == "invocation-conventions.md" or "<plugin_root>" not in text:
+            continue
+        head = "\n".join(text.splitlines()[:6])
+        if "`<plugin_root>`" not in head or "invocation-conventions.md" not in head:
+            missing.append(s.name)
+    assert not missing, f"Add the one-line `<plugin_root>` pointer at the top of: {missing}"
+
+
+def test_runtime_messages_name_a_real_launcher_not_the_unset_variable():
+    scripts = PLUGIN / "scripts"
+    sys.path.insert(0, str(scripts))
+    try:
+        import check_statement
+    finally:
+        sys.path.remove(str(scripts))
+    message = check_statement._missing_library_message(ImportError("x"))
+    assert "AGAMI_PLUGIN_ROOT" not in message
+    named = re.search(r'bash "([^"]+)" install', message)
+    assert named and Path(named.group(1)).is_file() and Path(named.group(1)).name == "sm"

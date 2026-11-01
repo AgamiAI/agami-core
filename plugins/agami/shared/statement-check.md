@@ -1,5 +1,7 @@
 # Checking a statement a person supplied
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 The person's statement runs through the guard agami's own SQL runs through, and it runs there in
 code. **It is never run on a command-line tier**: not psql, mysql, snowsql, sqlite3 or DuckDB,
 whatever tier the profile queries on. Those tools have no read-only gate, no scope gate and no row

@@ -100,7 +100,7 @@ below corresponds to one such version.
   Claude Code replaces with the plugin's absolute path when the skill loads. The shared docs, which
   Claude reads without that substitution, say `<plugin_root>` and tell Claude to write the real path
   its skill showed. The `py` and `sm` launchers still export `AGAMI_PLUGIN_ROOT` for the scripts they
-  start. `tests/test_skill_plugin_root.py` fails if a skill goes back to the unset variable or names a
+  start, and `check_statement.py`'s "agami-core is missing" message now names the real path of `sm`. `tests/test_skill_plugin_root.py` fails if a skill goes back to the unset variable or names a
   path under the plugin root that does not exist.
 
 - **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at

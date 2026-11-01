@@ -1,5 +1,7 @@
 # Metric & Entity YAML shape — the canonical reference
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 This is the **sanctioned source of truth** for the shape of a metric or entity
 YAML when building them during onboarding/enrichment. The data below is
 **synthetic** (a made-up `widgets`/`shipments` store) — it exists to show the

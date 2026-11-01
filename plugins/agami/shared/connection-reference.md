@@ -1,5 +1,7 @@
 # Database Connection Reference
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 How `agami` connects to your database. Used by the `connect`, `query-database`, and `agami-save-correction` skills.
 
 ## HARD RULES — read first
