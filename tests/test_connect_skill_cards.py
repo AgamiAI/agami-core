@@ -108,7 +108,7 @@ def test_start_card_offers_first_run_and_returning_options():
         assert label in s
     for label in (
         "Ask a question (Recommended)",
-        "Review the model",
+        "Reload the schema",
         "Connect another database",
     ):
         assert label in s
@@ -200,3 +200,58 @@ def test_linux_path_keeps_the_file_and_asks_with_a_card():
     assert "Show me the file again" in s
     assert not re.search(r"say\W+.?introspect my database", s, re.I)
     assert "END THE TURN" not in s
+
+
+# --- fix round 1 ---------------------------------------------------------------------------------
+
+
+def _start_card() -> str:
+    return _between("1a. **The start card**", "2. **Update-check")
+
+
+def test_password_page_treats_a_first_status_line_as_final():
+    s = _password_page()
+    assert "first line has a `status`" in s
+
+
+def test_password_page_wait_is_bounded_and_checks_for_exit():
+    s = _password_page()
+    assert "15 seconds" in s
+    assert "has exited" in s
+    assert "stderr" in s
+    assert "tight loop" in s
+
+
+def test_password_page_names_how_to_stop_the_helper():
+    s = _password_page()
+    assert "TaskStop" in s and "PID" in s
+
+
+def test_returning_card_reloads_the_schema_instead_of_review():
+    s = _start_card()
+    assert "Reload the schema" in s
+    assert "`Review the model`" not in s
+    assert "reintrospect" in s
+
+
+def test_returning_card_routes_other_text_by_what_it_asks_for():
+    s = _start_card()
+    assert "re-introspect" in s.lower() and "add a schema" in s.lower()
+    assert "only a question goes to agami-query" in s.lower()
+
+
+def test_connect_another_database_passes_through_1_1a():
+    s = _start_card()
+    row = next(line for line in s.splitlines() if "`Connect another database`" in line)
+    assert "1.1a" in row
+
+
+def test_ready_branch_matches_the_start_card():
+    text = SKILL.read_text(encoding="utf-8")
+    line = next(ln for ln in text.splitlines() if ln.startswith("1. **Resolve the environment**"))
+    assert "a reload or re-introspect request skips the card" in line
+
+
+def test_fields_card_prompt_rules_out_passwords_and_urls():
+    s = _between("### 0a.4c ", "### 0a.4k ")
+    assert "never a password or a URL that holds one" in s
