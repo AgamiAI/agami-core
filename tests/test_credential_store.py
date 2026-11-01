@@ -33,6 +33,12 @@ class _FakeBackend:
         return self.data.get((service, username))
 
 
+@pytest.fixture(autouse=True)
+def _darwin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolution is macOS/Windows only; pin it so the suite behaves the same on any CI runner."""
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+
+
 @pytest.fixture
 def backend(monkeypatch: pytest.MonkeyPatch) -> _FakeBackend:
     fake = _FakeBackend()
@@ -62,6 +68,22 @@ def test_missing_entry_raises_with_fix(backend: _FakeBackend) -> None:
         credential_store.resolve("keyring:agami/gone", profile="demo")
     assert "gone" in str(exc.value) and "reconnect" in str(exc.value)
     assert "\n" not in str(exc.value)
+
+
+@pytest.mark.parametrize("ref", ["keyring:login/other", "keyring:agami", "keyring:agami/", "keyring:/demo"])
+def test_foreign_or_malformed_reference_rejected(backend: _FakeBackend, ref: str) -> None:
+    backend.data[("login", "other")] = "not-yours"
+    with pytest.raises(credential_store.CredentialStoreError, match=r"keyring:agami/<profile>") as exc:
+        credential_store.resolve(ref, profile="demo")
+    assert "not-yours" not in str(exc.value) and "\n" not in str(exc.value)
+
+
+def test_resolve_refused_off_macos_and_windows(backend: _FakeBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    backend.data[("agami", "demo")] = "s3cret"
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
+    with pytest.raises(credential_store.CredentialStoreError, match="only on macOS and Windows"):
+        credential_store.resolve("keyring:agami/demo", profile="demo")
+    assert credential_store.resolve("plain", profile="demo") == "plain"
 
 
 def test_backend_error_raises_with_fix(monkeypatch: pytest.MonkeyPatch) -> None:

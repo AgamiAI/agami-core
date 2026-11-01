@@ -713,6 +713,9 @@ def _load_credentials(profile: str, org_id: str = "local") -> dict[str, str]:
          the selected profile a `url = ...` DSN (merged with per-field overrides) or
          per-field host / port / user / password / database / type / sslmode is read.
 
+    Values in the file may be `keyring:agami/<profile>` references, resolved from the OS credential
+    store after the file is read (`_resolve_references`); the env DSN is never resolved this way.
+
     The env is an added *source*, not a fork: the file path — and its chmod-600 gate
     (never on a command line) — is unchanged, and is skipped only when a deployment
     opts into the env var (and so has no file to protect).

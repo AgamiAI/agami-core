@@ -61,7 +61,18 @@ def resolve(value: str, *, profile: str) -> str:
     """`value` unchanged unless it is a `keyring:` reference, in which case the stored secret."""
     if not value.startswith(REF_PREFIX):
         return value
+    if platform.system() not in _PLATFORMS:
+        raise CredentialStoreError(
+            "The OS credential store is used only on macOS and Windows; "
+            "put the password in the credentials file instead."
+        )
     service, _, username = value[len(REF_PREFIX) :].partition("/")
+    # The file is user-editable, so a reference must not be able to name another app's Keychain item.
+    if service != SERVICE or not username:
+        raise CredentialStoreError(
+            f"Invalid credential reference [{value}] for profile [{profile}]; "
+            f"use the form {REF_PREFIX}{SERVICE}/<profile>."
+        )
     try:
         secret = _backend().get_password(service, username)
     except CredentialStoreError:
