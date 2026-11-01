@@ -16,10 +16,12 @@ below corresponds to one such version.
 
 - **Database passwords in the OS credential store on macOS and Windows.** A credentials-file
   profile can hold `password = keyring:agami/<profile>`, which agami resolves from Keychain or
-  Credential Manager when it connects (install the `agami-core[keyring]` extra). A new one-time
-  local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1` and stores it there, so
-  it never reaches the chat, a command line or a plain-text file. `setup_pgauth.py` never writes
-  such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
+  Credential Manager when it connects (`sm install` adds the `agami-core[keyring]` extra on those two
+  systems). A new one-time local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1`
+  and stores it there, so it never reaches the chat, a command line or a plain-text file. Its refusals
+  carry a machine-readable `reason`, a missing database driver is reported as `missing_driver` with the
+  package to install, and a run that fails or is stopped removes what it stored. `setup_pgauth.py`
+  never writes such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
 - **An `/agami` pane: connect a database, or try the sample, from one screen.** `/agami` opens a
   pane (a Claude Code mod, so it needs a build with mod support; other builds load the plugin
   as before) with a home screen listing everything agami does. Connect asks for the host and user
@@ -170,6 +172,9 @@ below corresponds to one such version.
   label a set operation's output columns against the wrong position. The `model` extra and the
   semantic model's `requirements.txt` now pin `sqlglot>=20,<30.26` until the receipt reads the new
   parse; an installed 30.26 is replaced by the latest earlier release on the next install.
+- **The built wheel ships `credential_store`.** It was missing from `py-modules`, so an installed
+  (non-editable) agami-core could not import `execute_sql`. A test now checks every top-level module
+  reaches the wheel.
 
 ## [0.9.21] — 2026-10-29
 

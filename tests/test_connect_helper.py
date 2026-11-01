@@ -338,7 +338,7 @@ def test_spec_that_is_not_an_object_refused(art: Path, backend: _FakeBackend) ->
     out = _Lines()
     connect_helper.run(["demo"], out, expires_in=1)
     assert json.loads(out.lines[0]) == {
-        "status": "refused", "profile": "", "detail": "The connection spec must be a JSON object."
+        "status": "refused", "reason": "bad_spec", "profile": "", "detail": "The connection spec must be a JSON object."
     }
 
 
@@ -707,3 +707,240 @@ def test_sso_does_not_check_the_store(tmp_path: Path, art: Path, backend: _FakeB
     connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
     assert json.loads(out.lines[0])["status"] == "connected"
     assert backend.data == {("agami", "demo"): "another-projects-password"}
+
+
+# --- Structured refusals: the pane branches on `reason`, never on the prose in `detail`. ---
+
+
+def _only_line(spec: object) -> dict:
+    out = _Lines()
+    assert connect_helper.run(spec, out, expires_in=1) == 0
+    assert len(out.lines) == 1, out.lines
+    return json.loads(out.lines[0])
+
+
+@pytest.mark.parametrize(
+    "over,reason",
+    [
+        ({"profile": "Acme Prod"}, "bad_name"),
+        ({"profile": 7}, "bad_name"),
+        ({"fields": {"password": "x"}}, "bad_field"),
+        ({"fields": {"host": "db.example.com #primary"}}, "bad_field"),
+        ({"fields": "not-a-dict"}, "bad_field"),
+        ({"db_type": "Postgres; x"}, "bad_field"),
+        ({"auth": "token"}, "bad_field"),
+    ],
+)
+def test_a_bad_spec_names_its_reason(tmp_path: Path, art: Path, backend: _FakeBackend, over: dict, reason: str) -> None:
+    line = _only_line(_spec(tmp_path, **over))
+    assert line["status"] == "refused" and line["reason"] == reason and line["detail"]
+
+
+def test_a_spec_that_is_not_an_object_is_bad_spec(art: Path, backend: _FakeBackend) -> None:
+    assert _only_line(["demo"])["reason"] == "bad_spec"
+
+
+def test_an_existing_section_is_name_taken(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_text("[demo]\ntype = sqlite\n", encoding="utf-8")
+    assert _only_line(_spec(tmp_path))["reason"] == "name_taken"
+
+
+def test_a_section_added_while_the_page_was_open_is_name_taken(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_text("[demo]\ntype = sqlite\n", encoding="utf-8")
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["reason"] == "name_taken"
+
+
+def test_an_unreadable_credentials_file_has_a_reason(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_text("type = sqlite\n", encoding="utf-8")
+    assert _only_line(_spec(tmp_path))["reason"] == "unreadable_credentials"
+
+
+def test_linux_is_unsupported_os(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
+    line = _only_line(_spec(tmp_path))
+    assert line["reason"] == "unsupported_os" and "manual" in line["detail"]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Windows"])
+def test_no_keyring_package_is_no_store(tmp_path: Path, art: Path, monkeypatch, system: str) -> None:
+    # The real shape before `sm install` adds the extra: macOS or Windows, and `import keyring` fails.
+    def missing() -> object:
+        raise credential_store.CredentialStoreError("The OS credential store needs the keyring package.")
+
+    monkeypatch.setattr(credential_store.platform, "system", lambda: system)
+    monkeypatch.setattr(credential_store, "_backend", missing)
+    line = _only_line(_spec(tmp_path))
+    assert line["status"] == "refused" and line["reason"] == "no_store" and line["detail"]
+    assert not _creds(art).exists()
+
+
+def test_a_fail_backend_is_no_store(tmp_path: Path, art: Path, monkeypatch) -> None:
+    fail_cls = type("Keyring", (), {"__module__": "keyring.backends.fail"})
+    module = type("M", (), {"get_keyring": staticmethod(lambda: fail_cls())})
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(credential_store, "_backend", lambda: module)
+    assert _only_line(_spec(tmp_path))["reason"] == "no_store"
+
+
+def test_a_stale_install_is_stale_install(tmp_path: Path, art: Path, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "execute_sql", type(sys)("execute_sql"))
+    assert _only_line(_spec(tmp_path))["reason"] == "stale_install"
+
+
+@pytest.mark.parametrize(
+    "system,how",
+    [("Darwin", "Keychain Access, search agami"), ("Windows", "Credential Manager, Windows Credentials, agami")],
+)
+def test_a_saved_password_says_how_to_clear_it(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch, system: str, how: str
+) -> None:
+    monkeypatch.setattr(credential_store.platform, "system", lambda: system)
+    backend.data[("agami", "demo")] = "another-projects-password"
+    line = _only_line(_spec(tmp_path))
+    assert line["reason"] == "saved_password_exists" and how in line["detail"]
+    assert "another-projects-password" not in json.dumps(line)
+
+
+def test_a_store_that_cannot_be_read_has_a_reason(tmp_path: Path, art: Path, monkeypatch) -> None:
+    class Locked(_FakeBackend):
+        def get_password(self, service: str, username: str) -> str | None:
+            raise OSError("locked")
+
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(credential_store, "_backend", lambda: Locked())
+    assert _only_line(_spec(tmp_path))["reason"] == "store_error"
+
+
+# --- A missing database driver: say which package, and leave nothing behind. ---
+
+
+def _pg_spec(tmp_path: Path) -> dict:
+    return _spec(tmp_path, db_type="postgres", fields={"host": "your-cluster.example.com", "port": 5432, "user": "demo"})
+
+
+def test_a_missing_driver_is_reported_before_listening(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "psycopg2", None)  # `import psycopg2` raises
+    line = _only_line(_pg_spec(tmp_path))
+    assert line["status"] == "missing_driver" and line["package"] == "psycopg2-binary" and line["detail"]
+    assert "url" not in line and not _creds(art).exists() and backend.data == {}
+
+
+def test_a_driver_gone_by_the_submit_rolls_back(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
+    t, out = _start(_pg_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    monkeypatch.setitem(sys.modules, "psycopg2", None)
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "missing_driver" and final["package"] == "psycopg2-binary"
+    assert not _creds(art).exists() and backend.data == {}
+    assert SECRET not in json.dumps(final)
+
+
+@pytest.mark.parametrize("gone,package", [(("pytz",), "pytz"), (("duckdb", "pytz"), "duckdb pytz")])
+def test_only_the_missing_driver_packages_are_named(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch, gone: tuple, package: str
+) -> None:
+    monkeypatch.setitem(sys.modules, "duckdb", type(sys)("duckdb"))  # present unless the case removes it
+    for mod in gone:
+        monkeypatch.setitem(sys.modules, mod, None)
+    line = _only_line(_spec(tmp_path, db_type="duckdb", auth="sso"))
+    assert line["status"] == "missing_driver" and line["package"] == package
+
+
+def test_the_driver_table_is_connect_resolves(tmp_path: Path) -> None:
+    # One table of drivers in code: the helper asks connect_resolve, it does not keep a second copy.
+    import connect_resolve
+
+    assert connect_resolve.driver_packages("postgres") == {"psycopg2": "psycopg2-binary"}
+    assert connect_resolve.driver_packages("sqlite") == {}
+    assert "_DRIVER_MOD" not in (SCRIPTS / "connect_helper.py").read_text(encoding="utf-8")
+
+
+# --- A run that ends without a final line leaves nothing behind. ---
+
+
+def test_an_unexpected_error_rolls_back(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
+    def boom(profile: str) -> tuple[str, str]:
+        raise RuntimeError("driver crashed")
+
+    monkeypatch.setattr(connect_helper, "_connection_test", boom)
+    t, out = _start(_spec(tmp_path))
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "connect_failed" and final["detail"]
+    assert not _creds(art).exists() and backend.data == {}
+
+
+_SIGTERM_RUNNER = r"""
+import json, sys, time
+from pathlib import Path
+sys.path[:0] = [{scripts!r}, {pkg!r}]
+import connect_helper, credential_store
+
+store = Path({store!r})
+
+class FileBackend:
+    def _load(self):
+        return json.loads(store.read_text()) if store.exists() else {{}}
+    def set_password(self, s, u, p):
+        d = self._load(); d[u] = p; store.write_text(json.dumps(d))
+    def get_password(self, s, u):
+        return self._load().get(u)
+    def delete_password(self, s, u):
+        d = self._load(); d.pop(u); store.write_text(json.dumps(d))
+    def get_keyring(self):
+        return self
+
+credential_store.platform.system = lambda: "Darwin"
+credential_store._backend = lambda: FileBackend()
+
+def stuck(profile):
+    Path({ready!r}).write_text("x")
+    time.sleep(60)
+
+connect_helper._connection_test = stuck
+sys.exit(connect_helper.main(["--spec", {spec!r}]))
+"""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGTERM delivery to a child is POSIX-only")
+def test_sigterm_after_storing_rolls_back(tmp_path: Path) -> None:
+    import signal
+    import time
+
+    art_dir = tmp_path / "art"
+    store, ready, spec = tmp_path / "store.json", tmp_path / "ready", tmp_path / "spec.json"
+    spec.write_text(json.dumps(_spec(tmp_path)), encoding="utf-8")
+    runner = tmp_path / "runner.py"
+    runner.write_text(
+        _SIGTERM_RUNNER.format(scripts=str(SCRIPTS), pkg=str(PKG_SRC), store=str(store), ready=str(ready), spec=str(spec)),
+        encoding="utf-8",
+    )
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art_dir)}
+    p = subprocess.Popen([sys.executable, str(runner)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        url = json.loads(p.stdout.readline())["url"]
+        assert _post(url, SECRET) == 200
+        deadline = time.monotonic() + 20
+        while not ready.exists():
+            assert time.monotonic() < deadline, "the helper never reached the connection test"
+            time.sleep(0.05)
+        assert json.loads(store.read_text())  # stored, and the section written
+        assert (art_dir / "local" / "credentials").exists()
+        p.send_signal(signal.SIGTERM)
+        p.wait(20)
+    finally:
+        if p.poll() is None:
+            p.kill()
+    assert not (art_dir / "local" / "credentials").exists()
+    assert json.loads(store.read_text()) == {}
+    assert SECRET not in p.stdout.read() + p.stderr.read()

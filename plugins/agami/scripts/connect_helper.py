@@ -14,9 +14,13 @@ section to `<artifacts_dir>/local/credentials` with `password = keyring:agami/<p
 
 Stdout is JSON lines, nothing else:
     {"url": "http://localhost:<port>/<token>/", "expires_in": 300}       once listening
-    {"status": "connected" | "connect_failed" | "refused", "profile": ..., "detail": "<one line>"}
+    {"status": "connected" | "connect_failed", "profile": ..., "detail": "<one line>"}
+    {"status": "refused", "reason": <REASONS>, "profile": ..., "detail": "<one line>"}
+    {"status": "missing_driver", "package": "<pip package(s)>", "profile": ..., "detail": "<one line>"}
     {"status": "expired"}                                                 no submit in 300 s; nothing written
-Exit code is 0 for every outcome; the status says what happened.
+Exit code is 0 for every outcome; the status (and a refusal's `reason`) says what happened, and `detail` is
+the line to show a person. A run that ends without a final line (an unexpected error, SIGTERM) removes the
+section and the stored password it wrote.
 
 The server binds 127.0.0.1 only, on a random port, behind a token of 43 URL-safe characters. The URL
 names it `localhost`, because the desktop app and VS Code make a link of `http://localhost` but not of
@@ -32,12 +36,14 @@ import configparser
 import contextlib
 import html
 import http.server
+import importlib
 import json
 import logging
 import os
 import platform
 import re
 import secrets
+import signal
 import sys
 import threading
 import urllib.parse
@@ -51,7 +57,9 @@ from _agami_lib import ensure_importable  # noqa: E402
 ensure_importable()
 import agami_paths  # noqa: E402
 
-# promote_credentials owns the "never overwrite an existing [profile]" rule; reuse its reader, not a copy.
+# connect_resolve owns the db_type -> driver table; promote_credentials owns the "never overwrite an
+# existing [profile]" rule. Reuse both, not copies.
+from connect_resolve import driver_packages  # noqa: E402
 from promote_credentials import _sections  # noqa: E402
 
 EXPIRES_IN = 300
@@ -76,6 +84,16 @@ _MAX_BODY = 8192
 # or idle client holds only that thread, never the server or the 300-second exit.
 _REQUEST_TIMEOUT = 10
 _STORE_NAMES = {"Darwin": "your Keychain", "Windows": "Windows Credential Manager"}
+# Where a person removes an entry the store already holds under a profile's name.
+_STORE_CLEAR = {
+    "Darwin": "open Keychain Access, search agami",
+    "Windows": "open Credential Manager, Windows Credentials, agami",
+}
+# Every `reason` a refusal can carry; the pane branches on these and shows `detail`.
+REASONS = (
+    "bad_spec", "bad_name", "bad_field", "name_taken", "unreadable_credentials", "stale_install",
+    "unsupported_os", "no_store", "saved_password_exists", "store_error", "write_failed",
+)
 
 
 def _emit(out: TextIO, obj: dict[str, Any]) -> None:
@@ -83,13 +101,18 @@ def _emit(out: TextIO, obj: dict[str, Any]) -> None:
     out.flush()
 
 
-def _final(out: TextIO, status: str, profile: str, detail: str, secret: str = "") -> int:
+def _final(out: TextIO, status: str, profile: str, detail: str, secret: str = "", **extra: str) -> int:
     # Every message below is written without the secret; this is the backstop for one that a
     # driver or backend put into its own error text.
     if secret:
         detail = detail.replace(secret, "[hidden]")
-    _emit(out, {"status": status, "profile": profile, "detail": " ".join(detail.split())})
+    _emit(out, {"status": status, **extra, "profile": profile, "detail": " ".join(detail.split())})
     return 0
+
+
+def _refuse(out: TextIO, reason: str, profile: str, detail: str, secret: str = "") -> int:
+    assert reason in REASONS, reason
+    return _final(out, "refused", profile, detail, secret, reason=reason)
 
 
 def _stale_install_detail() -> str | None:
@@ -111,34 +134,53 @@ def _stale_install_detail() -> str | None:
     return None
 
 
-def _spec_error(spec: Any) -> str | None:
-    """What is wrong with the spec, in one line, or None."""
+def _spec_error(spec: Any) -> tuple[str, str] | None:
+    """(reason, one-line detail) for what is wrong with the spec, or None."""
     if not isinstance(spec, dict):
-        return "The connection spec must be a JSON object."
+        return "bad_spec", "The connection spec must be a JSON object."
     profile = spec.get("profile")
     if not isinstance(profile, str) or not _PROFILE_RE.match(profile):
-        return (
+        return "bad_name", (
             f"The profile name {profile!r} is not valid. Use 1 to 32 lowercase letters, digits, "
             "hyphens or underscores, for example demo."
         )
     db_type = spec.get("db_type")
     if not isinstance(db_type, str) or not _DB_TYPE_RE.match(db_type):
-        return "The database type is missing or not valid."
+        return "bad_field", "The database type is missing or not valid."
     if spec.get("auth", "password") not in ("password", "sso"):
-        return "auth must be password or sso."
+        return "bad_field", "auth must be password or sso."
     fields = spec.get("fields", {})
     if not isinstance(fields, dict):
-        return "fields must be a JSON object of connection settings."
+        return "bad_field", "fields must be a JSON object of connection settings."
     for key, value in fields.items():
         if not isinstance(key, str) or not _KEY_RE.match(key) or key in _RESERVED_FIELDS:
-            return f"The field {key!r} cannot be set here."
+            return "bad_field", f"The field {key!r} cannot be set here."
         if not isinstance(value, (str, int)) or isinstance(value, bool) or "\n" in str(value) or "\r" in str(value):
-            return f"The value for {key} must be one line of text or a number."
+            return "bad_field", f"The value for {key} must be one line of text or a number."
         # execute_sql reads the file with `%` interpolation and `#`/`;` inline comments, so these
         # would reach the driver changed or cut short (or break the read altogether).
         if _UNREADABLE_VALUE_RE.search(str(value)):
-            return f"The value for {key} cannot contain %, or # or ; after a space; enter it in the credentials file by hand."
+            return "bad_field", (
+                f"The value for {key} cannot contain %, or # or ; after a space; enter it in the credentials file by hand."
+            )
     return None
+
+
+def _missing_driver(db_type: str) -> tuple[str, str] | None:
+    """(pip package(s), one-line detail) when this Python cannot import the driver `db_type` needs, else None.
+
+    Checked in this process because the connection test runs here. Several packages are space-separated
+    (duckdb also needs pytz), and only the missing ones are named."""
+    missing = []
+    for module, package in driver_packages(db_type).items():
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            missing.append(package)
+    if not missing:
+        return None
+    package = " ".join(missing)
+    return package, f"The {db_type} driver is not installed for this Python. Install {package}, then connect again."
 
 
 def _existing_profiles(creds: Path) -> list[str]:
@@ -328,31 +370,55 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
     try:
         # Checked again: another profile with this name may have been added while the page was open.
         if profile in _existing_profiles(creds):
-            return _final(out, "refused", profile, f"A profile named {profile} already exists. Pick another name.")
+            return _refuse(out, "name_taken", profile, f"A profile named {profile} already exists. Pick another name.")
         if secret:
             saved = _saved_elsewhere(profile)  # checked again, as the section is above
             if saved:
-                return _final(out, "refused", profile, saved)
+                return _refuse(out, saved[0], profile, saved[1])
         ref = credential_store.put(profile, secret) if secret else None
         added = _write_section(creds, _section_text(spec, ref))
     except credential_store.CredentialStoreError as e:
-        return _final(out, "refused", profile, str(e), secret)
+        return _refuse(out, "store_error", profile, str(e), secret)
     except (OSError, configparser.Error):
         detail = "Could not write the credentials file under <artifacts_dir>/local."
-        return _final(out, "refused", profile, detail + _forget(profile, ref), secret)
-    status, detail = _connection_test(profile)
-    if status == "connect_failed":
-        # Leave nothing behind, so trying again with the same profile name is not a name collision.
-        try:
-            _remove_section(creds, added)
-        except (OSError, UnicodeDecodeError):
-            detail += f" Remove [{profile}] from the credentials file before trying again."
-        detail += _forget(profile, ref)
-    return _final(out, status, profile, detail, secret)
+        return _refuse(out, "write_failed", profile, detail + _forget(profile, ref), secret)
+    # From here a section and (for a password) a stored secret exist. Any way out that is not
+    # `connected` takes both back, including an error nobody planned for and a SIGTERM (`main` turns
+    # that into SystemExit), so a half-made profile never blocks the same name next time.
+    connected = False
+    try:
+        missing = _missing_driver(spec["db_type"])
+        if missing:
+            package, detail = missing
+            detail += _rollback(creds, added, profile, ref)
+            return _final(out, "missing_driver", profile, detail, secret, package=package)
+        status, detail = _connection_test(profile)
+        connected = status == "connected"
+        if not connected:
+            detail += _rollback(creds, added, profile, ref)
+        return _final(out, status, profile, detail, secret)
+    except Exception:
+        detail = "Something went wrong while testing the connection, so nothing was saved. Try again."
+        detail += _rollback(creds, added, profile, ref)
+        return _final(out, "connect_failed", profile, detail, secret)
+    except BaseException:
+        if not connected:
+            _rollback(creds, added, profile, ref)
+        raise
 
 
-def _saved_elsewhere(profile: str) -> str | None:
-    """Why `profile` cannot be used, if the OS store already holds a password under its name.
+def _rollback(creds: Path, added: str, profile: str, ref: str | None) -> str:
+    """Remove the section this run added and the secret it stored; '' or the sentences saying what to remove by hand."""
+    note = ""
+    try:
+        _remove_section(creds, added)
+    except (OSError, UnicodeDecodeError):
+        note = f" Remove [{profile}] from the credentials file before trying again."
+    return note + _forget(profile, ref)
+
+
+def _saved_elsewhere(profile: str) -> tuple[str, str] | None:
+    """(reason, detail) when `profile` cannot be used because the OS store already holds a password under its name.
 
     The store is shared by every artifacts dir on this computer. Taking the name would overwrite
     another project's password, and a failed connection's rollback would then delete it."""
@@ -361,9 +427,13 @@ def _saved_elsewhere(profile: str) -> str | None:
     try:
         taken = credential_store.has(profile)
     except credential_store.CredentialStoreError as e:
-        return str(e)
+        return "store_error", str(e)
     if taken:
-        return f"A saved password for {profile} already exists on this computer; choose another profile name."
+        where = _STORE_CLEAR.get(platform.system())
+        clear = f" To clear it, {where} and delete the entry for {profile}." if where else ""
+        return "saved_password_exists", (
+            f"A saved password for {profile} already exists on this computer; choose another profile name.{clear}"
+        )
     return None
 
 
@@ -388,30 +458,44 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
     # An SSO profile writes no keyring reference, so an older agami-core reads it correctly.
     stale = None if sso else _stale_install_detail()
     if stale:
-        return _final(out, "refused", profile, stale)
+        return _refuse(out, "stale_install", profile, stale)
     problem = _spec_error(spec)
     if problem:
-        return _final(out, "refused", profile, problem)
+        return _refuse(out, problem[0], profile, problem[1])
     try:
         taken = profile in _existing_profiles(agami_paths.credentials_path())
     except configparser.Error:
-        return _final(out, "refused", profile, "The credentials file could not be read. Fix or move it, then try again.")
+        return _refuse(
+            out, "unreadable_credentials", profile,
+            "The credentials file could not be read. Fix or move it, then try again.",
+        )
     if taken:
-        return _final(out, "refused", profile, f"A profile named {profile} already exists. Pick another name.")
+        return _refuse(out, "name_taken", profile, f"A profile named {profile} already exists. Pick another name.")
+    # Before the page, so nobody types a password for a connection this Python cannot make.
+    missing = _missing_driver(spec["db_type"])
+    if missing:
+        return _final(out, "missing_driver", profile, missing[1], package=missing[0])
     if sso:
         return _store_and_connect(spec, "", out)
 
     import credential_store
 
     if not credential_store.supported():
-        return _final(
-            out, "refused", profile,
+        if platform.system() in _STORE_NAMES:
+            # macOS or Windows, so the store exists; agami's keyring library is missing or has no working backend.
+            return _refuse(
+                out, "no_store", profile,
+                f"The secure store isn't set up for agami yet: {_STORE_NAMES[platform.system()]} needs the keyring "
+                "library, which sm install adds.",
+            )
+        return _refuse(
+            out, "unsupported_os", profile,
             "No OS credential store is available here, so use the manual setup: put the password in "
             "credentials.example and run promote_credentials.py.",
         )
     saved = _saved_elsewhere(profile)
     if saved:
-        return _final(out, "refused", profile, saved)
+        return _refuse(out, saved[0], profile, saved[1])
     server = _Server(profile)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -436,8 +520,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         spec = json.loads(Path(args.spec).expanduser().read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return _final(sys.stdout, "refused", "", "Could not read the connection spec file.")
+        return _refuse(sys.stdout, "bad_spec", "", "Could not read the connection spec file.")
+    # The pane stops the helper with SIGTERM (Cancel, or the pane closing). As an exception it unwinds
+    # through `_store_and_connect`, which takes back what this run stored; the default action would not.
+    signal.signal(signal.SIGTERM, _terminated)
     return run(spec, sys.stdout)
+
+
+def _terminated(signum: int, frame: Any) -> None:
+    raise SystemExit(128 + signum)
 
 
 if __name__ == "__main__":
