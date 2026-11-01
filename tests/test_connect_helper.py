@@ -629,3 +629,51 @@ def test_rollback_that_cannot_edit_the_file_says_so(tmp_path: Path, art: Path, m
     connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
     line = json.loads(out.lines[0])
     assert line["status"] == "connect_failed" and "Remove [demo] from the credentials file" in line["detail"]
+
+
+def test_a_password_saved_by_another_project_is_refused_before_listening(
+    tmp_path: Path, art: Path, backend: _FakeBackend
+) -> None:
+    backend.data[("agami", "demo")] = "another-projects-password"  # same name, another artifacts dir
+    out = _Lines()
+    assert connect_helper.run(_spec(tmp_path), out, expires_in=1) == 0
+    assert len(out.lines) == 1
+    line = json.loads(out.lines[0])
+    assert line["status"] == "refused" and "url" not in line
+    assert "already exists on this computer" in line["detail"] and "another-projects-password" not in line["detail"]
+    assert backend.data == {("agami", "demo"): "another-projects-password"}
+    assert not _creds(art).exists()
+
+
+def test_a_password_saved_while_the_page_was_open_is_not_overwritten(
+    tmp_path: Path, art: Path, backend: _FakeBackend
+) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    backend.data[("agami", "demo")] = "another-projects-password"
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "refused"
+    assert backend.data == {("agami", "demo"): "another-projects-password"}
+    assert not _creds(art).exists()
+
+
+def test_an_unreadable_store_is_refused_before_listening(tmp_path: Path, art: Path, monkeypatch) -> None:
+    class Locked(_FakeBackend):
+        def get_password(self, service: str, username: str) -> str | None:
+            raise OSError("locked")
+
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(credential_store, "_backend", lambda: Locked())
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path), out, expires_in=1)
+    line = json.loads(out.lines[0])
+    assert len(out.lines) == 1 and line["status"] == "refused" and "unlock" in line["detail"]
+
+
+def test_sso_does_not_check_the_store(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    backend.data[("agami", "demo")] = "another-projects-password"
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
+    assert json.loads(out.lines[0])["status"] == "connected"
+    assert backend.data == {("agami", "demo"): "another-projects-password"}

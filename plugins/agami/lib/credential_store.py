@@ -57,6 +57,25 @@ def put(profile: str, secret: str) -> str:
     return f"{REF_PREFIX}{SERVICE}/{profile}"
 
 
+def has(profile: str) -> bool:
+    """True when the OS store already holds a secret for `profile`. Never returns or keeps the secret.
+
+    The store is shared by every artifacts dir on the machine, so a new profile must not take a name
+    another project already saved a password under: `put` would overwrite it."""
+    if platform.system() not in _PLATFORMS:
+        return False
+    try:
+        backend = _backend()
+    except CredentialStoreError:
+        return False  # no keyring package, so nothing was stored through it
+    try:
+        return backend.get_password(SERVICE, profile) is not None
+    except Exception as e:
+        raise CredentialStoreError(
+            f"Could not check the OS credential store for [{profile}]; unlock it and try again."
+        ) from e
+
+
 def delete(profile: str) -> None:
     """Remove `profile`'s stored secret. Idempotent: nothing stored (or no store here) is not an error."""
     if platform.system() not in _PLATFORMS:

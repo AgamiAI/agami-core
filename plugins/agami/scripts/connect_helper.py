@@ -322,6 +322,10 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
         # Checked again: another profile with this name may have been added while the page was open.
         if profile in _existing_profiles(creds):
             return _final(out, "refused", profile, f"A profile named {profile} already exists. Pick another name.")
+        if secret:
+            saved = _saved_elsewhere(profile)  # checked again, as the section is above
+            if saved:
+                return _final(out, "refused", profile, saved)
         ref = credential_store.put(profile, secret) if secret else None
         added = _write_section(creds, _section_text(spec, ref))
     except credential_store.CredentialStoreError as e:
@@ -338,6 +342,22 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
             detail += f" Remove [{profile}] from the credentials file before trying again."
         detail += _forget(profile, ref)
     return _final(out, status, profile, detail, secret)
+
+
+def _saved_elsewhere(profile: str) -> str | None:
+    """Why `profile` cannot be used, if the OS store already holds a password under its name.
+
+    The store is shared by every artifacts dir on this computer. Taking the name would overwrite
+    another project's password, and a failed connection's rollback would then delete it."""
+    import credential_store
+
+    try:
+        taken = credential_store.has(profile)
+    except credential_store.CredentialStoreError as e:
+        return str(e)
+    if taken:
+        return f"A saved password for {profile} already exists on this computer; choose another profile name."
+    return None
 
 
 def _forget(profile: str, ref: str | None) -> str:
@@ -382,6 +402,9 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
             "No OS credential store is available here, so use the manual setup: put the password in "
             "credentials.example and run promote_credentials.py.",
         )
+    saved = _saved_elsewhere(profile)
+    if saved:
+        return _final(out, "refused", profile, saved)
     server = _Server(profile)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()

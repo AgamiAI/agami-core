@@ -88,6 +88,8 @@ in your browser instead of in the chat. `scripts/connect_helper.py` serves that 
   The password is not written to the chat, the pane, a command line, a log, or any other file. If the
   connection test fails, the helper removes both the section it wrote and the stored password, so you
   can try again with the same profile name.
+  The store is shared by every agami project on the computer, so if a password is already saved under
+  that profile name, the helper refuses and asks for another name rather than overwrite it.
 - **What it calls:** after saving, it runs `SELECT 1` against your own database through `execute_sql`, the
   same local connection every query uses.
 

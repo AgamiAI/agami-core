@@ -219,3 +219,35 @@ def test_delete_backend_error_raises_with_fix(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(credential_store.CredentialStoreError, match="by hand") as exc:
         credential_store.delete("demo")
     assert "\n" not in str(exc.value)
+
+
+def test_has_reports_presence_only(backend: _FakeBackend) -> None:
+    assert credential_store.has("demo") is False
+    backend.data[("agami", "demo")] = "s3cret"
+    assert credential_store.has("demo") is True
+    assert credential_store.has("acme") is False
+
+
+def test_has_is_false_off_macos_and_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom() -> None:
+        raise AssertionError("the store must not be touched")
+
+    monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(credential_store, "_backend", boom)
+    assert credential_store.has("demo") is False
+
+
+def test_has_is_false_without_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "keyring", None)
+    assert credential_store.has("demo") is False
+
+
+def test_has_backend_error_raises_without_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Broken:
+        def get_password(self, service: str, username: str) -> str:
+            raise OSError("locked")
+
+    monkeypatch.setattr(credential_store, "_backend", lambda: Broken())
+    with pytest.raises(credential_store.CredentialStoreError, match="unlock") as exc:
+        credential_store.has("demo")
+    assert "\n" not in str(exc.value)
