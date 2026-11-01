@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Database passwords in the OS credential store on macOS and Windows.** A credentials-file
+  profile can hold `password = keyring:agami/<profile>`, which agami resolves from Keychain or
+  Credential Manager when it connects (install the `agami-core[keyring]` extra). A new one-time
+  local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1` and stores it there, so
+  it never reaches the chat, a command line or a plain-text file. `setup_pgauth.py` never writes
+  such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
+
 ### Changed
 
 - **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
