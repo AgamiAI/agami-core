@@ -66,3 +66,9 @@ previews/
 # whatever `--outdir` says. Untracked and unignored, it is one `git add -A` away from a commit: a
 # release PR that should be five lines picked up 81 files and 36k insertions this way.
 packages/*/build/
+
+# The Claude Code API declarations the engine writes beside the pane's mod each time it loads it
+# (`dev.py mod`, CI's `mod` job, a `--plugin-dir` session). Generated per Claude Code build, ~870 KB,
+# and the MCP part lists the tools of whoever loaded it, so never committed. The engine writes its own
+# `.gitignore` there too; this line keeps the rule visible.
+plugins/agami/.claude-plugin/types/

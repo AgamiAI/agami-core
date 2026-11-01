@@ -118,3 +118,26 @@ def test_only_the_connect_helper_listens_and_only_on_loopback():
     text = (SCRIPTS_DIR / "connect_helper.py").read_text()
     assert '"127.0.0.1"' in text
     assert not re.search(r"""["'](?:0\.0\.0\.0|::|localhost)?["']\s*,\s*\d""", text.replace('"127.0.0.1"', ""))
+
+
+# The pane's hooks module is TypeScript, so the Python patterns above never see it. A mod reaches
+# the network through the engine's `$.http` noun or the environment's web APIs; none belongs in it.
+HOOKS_DIR = REPO_ROOT / "plugins" / "agami" / "hooks"
+HOOKS_FORBIDDEN = re.compile(r"\$\.http\b|\bfetch\s*\(|\bWebSocket\b|\bXMLHttpRequest\b|\bEventSource\b")
+HOOK_SOURCES = sorted(
+    p for p in HOOKS_DIR.rglob("*") if p.suffix in {".ts", ".tsx", ".js", ".mjs", ".jsx"} and ".test." not in p.name
+)
+
+
+def test_there_are_hook_sources_to_scan():
+    assert HOOK_SOURCES, f"no hooks module sources found under {HOOKS_DIR}"
+
+
+@pytest.mark.parametrize("source", HOOK_SOURCES, ids=lambda p: p.relative_to(HOOKS_DIR).as_posix())
+def test_hooks_module_has_no_network_egress(source: Path):
+    hits = [
+        f"  {source.name}:{n}: {line.strip()}"
+        for n, line in enumerate(source.read_text().splitlines(), 1)
+        if HOOKS_FORBIDDEN.search(line)
+    ]
+    assert not hits, "network call found in the agami pane's hooks module:\n" + "\n".join(hits)

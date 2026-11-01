@@ -1,0 +1,5 @@
+{
+  // The engine writes this base config, with the Claude Code API's declarations beside it, each time it
+  // loads the mod (see `uv run dev.py mod`); it is git-ignored, so load the mod once before `tsc -p`.
+  "extends": "./.claude-plugin/types/tsconfig.json"
+}

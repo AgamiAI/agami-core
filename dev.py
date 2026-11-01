@@ -10,10 +10,11 @@ unbypassable version that runs on every PR.
 
 Tasks:
   setup   wire the local pre-commit hooks (ruff + gitleaks on commit; tests on push)
-  check   the full local gate: ruff lint + tests + gitleaks (what CI runs)
+  check   the full local gate: ruff lint + tests + gitleaks + the mod checks (what CI runs)
   test    just the test suite
   lint    just ruff (lint + format check)
   fmt     apply ruff's auto-formatter to the tree
+  mod     the pane's mod checks: validate, tsc, `claude plugin test` (needs `claude` on PATH)
   cover   patch coverage — are the lines you changed covered by a test?
   sync-lib  regenerate plugins/agami/lib/ (the vendored slice the plugin scripts import)
 """
@@ -21,6 +22,7 @@ Tasks:
 from __future__ import annotations
 
 import filecmp
+import os
 import shutil
 import subprocess
 import sys
@@ -63,11 +65,22 @@ _VENDORED = {
     "semantic_model/units.py": "_semantic_model_units.py",
 }
 
+# The pane is a mod: a TypeScript hooks module under plugins/agami/hooks/. CI's `mod` job runs the same
+# commands against the Claude Code version it pins; locally they run against whatever `claude` is
+# installed, and are skipped when there is none, so a Python-only contributor's check still passes.
+PLUGIN = "plugins/agami"
+TSC = ["npx", "-y", "-p", "typescript@5.9.3", "tsc"]
+# tsc reads the API's declarations from <plugin>/.claude-plugin/types/, which the engine writes only
+# when it loads the mod from a folder it watches. A headless run of `/agami` is that load: the command
+# answers locally (no model turn, nothing spent), and the watch switch makes `-p` lay the types down.
+LOAD_MOD = ["claude", "--plugin-dir", PLUGIN, "--strict-mcp-config", "-p", "/agami"]
 
-def run(cmd: list[str], *, allow_fail: bool = False) -> int:
+
+def run(cmd: list[str], *, allow_fail: bool = False, env: dict[str, str] | None = None) -> int:
     """Echo and run a command; return its exit code (0 == ok)."""
     print(f"\n$ {' '.join(cmd)}")
-    code = subprocess.run(cmd).returncode
+    # No task reads input, and `claude -p` waits 3s for stdin that never comes when it inherits a TTY.
+    code = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL).returncode
     if code and not allow_fail:
         print(f"  -> failed (exit {code})")
     return code
@@ -116,12 +129,25 @@ def _lib_drift() -> int:
     return 0
 
 
+def mod() -> int:
+    """The pane's mod checks: validate the plugin, type-check the hooks module, run its tests."""
+    if shutil.which("claude") is None:
+        print("\n$ mod checks\n  - skipped: `claude` is not on PATH (CI's `mod` job runs them)")
+        return 0
+    rc = run(["claude", "plugin", "validate", PLUGIN, "--strict"])
+    rc |= run(LOAD_MOD, env={**os.environ, "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"})
+    rc |= run([*TSC, "-p", PLUGIN])
+    rc |= run(["claude", "plugin", "test", PLUGIN])
+    return rc
+
+
 def check() -> int:
-    """ruff lint + tests + gitleaks + the vendored-lib drift check — the same checks CI gates on."""
+    """ruff lint + tests + gitleaks + the vendored-lib drift check + the mod checks — what CI gates on."""
     rc = lint()
     rc |= test()
     rc |= secrets()
     rc |= _lib_drift()
+    rc |= mod()
     print("\n✓ all checks passed" if rc == 0 else "\n✗ some checks failed")
     return rc
 
@@ -143,7 +169,7 @@ def setup() -> int:
 
 
 TASKS = {"setup": setup, "check": check, "test": test, "lint": lint, "fmt": fmt, "cover": cover,
-         "sync-lib": sync_lib}
+         "sync-lib": sync_lib, "mod": mod}
 
 
 def main() -> int:

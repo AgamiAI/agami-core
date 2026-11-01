@@ -291,6 +291,40 @@ jobs:
           --with-editable "packages/agami-core[model,server]"
           pytest tests/e2e -q
 
+  # The agami pane is a mod: a TypeScript hooks module the plugin ships (`plugins/agami/hooks/`), which
+  # nothing in `lint-and-test` reads. These are the three checks Claude Code gives a mod, run against
+  # the Claude Code release it was written for, so a new release changing the API is an upgrade made on
+  # purpose here (with `dev.py`'s TypeScript pin), not a red build on an unrelated PR.
+  mod:
+    name: mod (validate, tsc, plugin test)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.tests == 'true'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # The runner's own Node; no setup-node, since npm only installs the CLI and the TypeScript
+      # compiler, both pinned by version.
+      - name: install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.316
+
+      # --strict: a warning the runtime would tolerate (an unknown manifest field, a wrong shape) fails.
+      - name: claude plugin validate
+        run: claude plugin validate plugins/agami --strict
+
+      # tsc reads the API's declarations from `.claude-plugin/types/`, which the engine writes (and
+      # git-ignores) only when it loads the mod from a folder it watches. A headless `/agami` is that
+      # load: the command answers inside the mod, so it needs no login and makes no model call.
+      - name: tsc
+        env:
+          CLAUDE_CODE_PLUGIN_DIR_WATCH: "1"
+        run: |
+          claude --plugin-dir plugins/agami --strict-mcp-config -p /agami < /dev/null
+          npx -y -p typescript@5.9.3 tsc -p plugins/agami
+
+      - name: claude plugin test
+        run: claude plugin test plugins/agami
+
   gitleaks:
     name: gitleaks (secret scan)
     runs-on: ubuntu-latest
