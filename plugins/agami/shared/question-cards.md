@@ -66,6 +66,25 @@ queue can be finished in one press.
 A definition change, a host name, a reworded question: the person types it in "Other". Never ask
 them to type a reply message.
 
+A value the person must type (an email, a host) is asked for in the question text, *"Which email
+should sign-offs be recorded under? Type it in Other."*, never offered as an option such as "Type it
+in Other": people click that option and nothing gets typed. The options are the alternatives to
+typing ("Don't sign anything yet").
+
+### 5a. A question typed in "Other" is answered, then the same card is asked again
+
+People use "Other" to ask before they decide: "show me the SQL", "show me the rows", "why do I
+need this?". That is not a change, a stop, or something you can't place. Answer it in the chat,
+then ask the same card again, with only the questions still open:
+
+- **The SQL**: the item's SQL in a fenced block (its binding for a metric, the statement for an
+  example or an answer), with the tables it reads in one line.
+- **The rows or values**: up to 15 rows of the result, or of a breakdown behind a single number
+  (by its most telling column), run through the same guarded path the skill already uses.
+- **Why**: one or two sentences on what the step is for and what happens if they skip it.
+
+Answers given to the card's other questions stand: apply them before asking again.
+
 ## 6. No page opens by default, and nothing is pasted back
 
 The HTML renderers stay as an optional "Show the full view" option. When one is shown, serve it

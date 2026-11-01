@@ -28,7 +28,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Tables and cards.** Every result is a short markdown table (at most 15 rows, saying how many more); every decision is a card. No page opens unless the person picks **Show the full view**.
 - **Plain voice.** Say "database", not "profile". A successful change gets a one-line ack with its counts.
 - **Qualified names everywhere.** Tables are `<area>.<table>`. Columns are `<area>.<table>.<column>` (area = subject area). No bare names.
-- **"Other" you can't act on is re-asked, never guessed.** Say in one line what didn't match and ask the same card again.
+- **"Other" you can't act on is re-asked, never guessed.** A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Otherwise say in one line what didn't match and ask the same card again.
 - **Where AskUserQuestion is unavailable, ask the same as a short numbered list** ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7); the options and their order stay the same.
 
 ---
@@ -48,10 +48,10 @@ Trust-spine semantics — three actions on the same `review_state` field:
 
 **The identity card (sign-off identity: asked once, on the first approval).** Needed to stamp sign-off on an approve, and recorded on `curation_log.jsonl` and commits. It is resolved lazily: only when a batch holds an `approve`. Before the first `approve` op of the session, read `reviewer_email` and `reviewer_role` from `<artifacts_dir>/local/.config` (the keys `/agami-connect` uses too); a pasted full-view block's `signed-off-by:` line also supplies them. When both are there, use them and don't ask. When either is missing, ask one card with two questions, the same card as agami-connect Phase 4:
 
-- header `Email`, *"Which email should sign-offs be recorded under?"*: options **Type it in Other** and **Don't sign anything yet** (nothing is approved; the items stay as they are and you return to the overview card). The email is typed in "Other", e.g. `you@example.com`.
+- header `Email`, *"Which email should sign-offs be recorded under? Type it in Other below."*: options **Don't sign anything yet** (nothing is approved; the items stay as they are and you return to the overview card) and **Go back** (ask again the card that led here, with nothing approved). The email is typed in "Other", e.g. `you@example.com`; it is asked for in the question, never offered as an option, because an option like "Type it in Other" gets clicked with nothing typed ([question-cards rule 5](../../shared/question-cards.md#5-free-text-goes-in-other)).
 - header `Role`, *"What is your role?"*: options **Data Lead**, **Engineer**, **Analyst**; "Other" takes any other role (≤ 40 characters).
 
-The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login / session email (the host exposes it, but using it produces a silently-wrong audit trail), and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+`, or **Type it in Other** picked with nothing typed, is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this session nor `/agami-connect` asks again. Hide/edit-only sessions never need it.
+The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login / session email (the host exposes it, but using it produces a silently-wrong audit trail), and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+` is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this session nor `/agami-connect` asks again. Hide/edit-only sessions never need it.
 
 ---
 
@@ -82,7 +82,7 @@ Then call AskUserQuestion, one question (header `Model`), *"What would you like 
 - **Look up a table or metric**: its description, columns and caveats, in the chat (Phase 4).
 - **Show the full view**: the model explorer page, served from localhost (Phase 5).
 
-"Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), or "done". Route it to the phase it asks for; "done" goes to Phase 7. Anything you can't place is re-asked, never guessed.
+"Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), or "done". Route it to the phase it asks for; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
 
 **After each action** (Phases 2–4), post one line on what changed and ask this card again, with the counts recomputed. Dismissing the card, or "done" in "Other", ends the session (Phase 7).
 
@@ -124,7 +124,7 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 **An "Other" that asks to stop is a stop, not a change.** When the words on an item card ask to stop, pause or finish later ("stop here", "I'll do the rest later", "pause") rather than change that item, apply the card's other answers, approve or change nothing more, say how many are still unsigned, and go back to the overview card.
 
-**Any other "Other" you can't act on is re-asked, never guessed.** An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
+**Any other "Other" you can't act on is re-asked, never guessed.** A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
 
 **Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)`; at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
