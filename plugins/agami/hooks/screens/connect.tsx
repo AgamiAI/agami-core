@@ -62,6 +62,24 @@ const fieldsOf = (dbType: string | undefined): Field[] => DB_TYPES.find(d => d.v
 // of this module kills the child anyway, so nothing outlives the variable.
 let running: { stop: () => void } | null = null
 
+// Starts the helper for the request the Connect screen recorded in its state. Set from `session.start`
+// with that hook's `$`: the helper waits up to 300 s for a password, so its loop belongs to the session,
+// not to a press or a render, each of which ends in seconds.
+let kick: (() => void) | null = null
+
+// Which run wrote each spec path last. A stopped run cleans up after a newer one may have written the
+// same path (the same profile, tried again at once), and must not delete that newer spec.
+const specOwner = new Map<string, object>()
+
+/** Called once from `session.start`: keeps that hook's `$` to run the helper with. */
+export function startConnectRunner($: Engine): void {
+  kick = () => {
+    runHelper($).catch(() => {
+      // The session or the module is going away, and the pane's state with it; nothing to tell.
+    })
+  }
+}
+
 /** Stops a waiting helper and puts the Connect screen back to an empty form. */
 export async function resetConnect($: Pick<Engine, 'state'>): Promise<void> {
   const helper = running
@@ -104,11 +122,27 @@ async function removeSpec($: Pick<Engine, 'process'>, path: string): Promise<voi
 
 /** The end every successful path shares: Claude takes over, the pane goes home and reads the new profile. */
 async function finishConnected($: Engine, profile: string): Promise<void> {
-  await $.prompt.submit({ text: continuePrompt(profile) })
+  let isSent = false
+  try {
+    const sent = await $.prompt.submit({ text: continuePrompt(profile) })
+    isSent = sent.drop === undefined
+  } catch {
+    isSent = false
+  }
+  if (!isSent) {
+    // The database is connected and saved; only the hand-off to Claude failed, so offer it again.
+    await patch($, { phase: 'connected', profile, url: undefined, detail: `${profile} is connected, but the next step could not start.` })
+
+    return
+  }
   await update($, connectState, () => FORM)
   await update($, screenState, () => 'home')
-  const env = await readEnv($)
-  await update($, envState, () => env)
+  try {
+    const env = await readEnv($)
+    await update($, envState, () => env)
+  } catch {
+    // The home screen keeps the setup it had; the next open of the pane reads it again.
+  }
 }
 
 type Final = { status?: string; detail?: string; url?: string }
@@ -130,25 +164,45 @@ async function onLine($: Engine, msg: Final, profile: string): Promise<boolean> 
   return true
 }
 
-/**
- * Reads the helper's JSON lines as they arrive. It runs detached from the press that started it: the
- * helper waits up to 300 s for the password, far past a hook's 10 s budget.
- */
-async function watchHelper($: Engine, path: string, profile: string): Promise<void> {
-  const stream: HookStream<ProcessSpawnChunk, ProcessSpawnResult> = $.process.spawn({
-    argv: ['bash', `${$.plugin.root}/scripts/py`, 'connect_helper.py', '--spec', path],
-  })
+/** Writes the recorded request's spec, starts the helper, and reads its JSON lines as they arrive. */
+async function runHelper($: Engine): Promise<void> {
+  let stream: HookStream<ProcessSpawnChunk, ProcessSpawnResult> | null = null
+  let isStopped = false
   // Ending the stream kills the child. Not awaited, so a close or a Back never waits on the helper.
   const mine = {
     stop: () => {
-      stream.return(undefined as unknown as ProcessSpawnResult).catch(() => undefined)
+      isStopped = true
+      stream?.return(undefined as unknown as ProcessSpawnResult).catch(() => undefined)
     },
   }
   running = mine
+  const env = await read($, envState)
+  const st = await read($, connectState)
+  if (st.phase !== 'waiting' || !st.profile || !env?.artifactsDir || isStopped) {
+    if (running === mine) running = null
+
+    return
+  }
+  const profile = st.profile
+  const path = specPath(env, profile)
+  specOwner.set(path, mine)
+  try {
+    await $.fs.write(path, JSON.stringify(specOf(st)))
+  } catch {
+    if (specOwner.get(path) === mine) specOwner.delete(path)
+    if (running === mine) {
+      running = null
+      await patch($, { phase: 'form', detail: `agami could not write ${path}. Check that its folder can be written to.` })
+    }
+
+    return
+  }
   let ended = false
   let pending = ''
   let heard = false
   try {
+    if (isStopped) return
+    stream = $.process.spawn({ argv: ['bash', `${$.plugin.root}/scripts/py`, 'connect_helper.py', '--spec', path] })
     for await (const chunk of stream) {
       heard = true
       if (running !== mine) break
@@ -177,7 +231,10 @@ async function watchHelper($: Engine, path: string, profile: string): Promise<vo
       ended = true
     }
   } finally {
-    await removeSpec($, path)
+    if (specOwner.get(path) === mine) {
+      specOwner.delete(path)
+      await removeSpec($, path)
+    }
   }
   if (running !== mine) return
   running = null
@@ -225,18 +282,14 @@ async function start($: Engine): Promise<void> {
 
     return
   }
-  const path = specPath(env, profile)
-  try {
-    await $.fs.write(path, JSON.stringify(specOf({ ...st, profile, dbType })))
-  } catch {
-    await patch($, { detail: `agami could not write ${path}. Check that its folder can be written to.` })
+  if (kick === null) {
+    await patch($, { detail: 'agami could not start its connect helper. Start a new session and try again.' })
 
     return
   }
+  // The press only records the request; the session's runner does the long work.
   await patch($, { profile, phase: 'waiting', url: undefined, detail: undefined })
-  void watchHelper($, path, profile).catch(() => {
-    // The pane is gone (closed, or the module reloaded) and its state with it; nothing to tell.
-  })
+  kick()
 }
 
 const PROMOTE_MESSAGES: Record<string, string> = {
@@ -258,7 +311,10 @@ async function checkAgain($: Engine): Promise<void> {
     first = 'ERROR'
   }
   if (first === 'SECURED' || first === 'APPENDED') {
-    await finishConnected($, st.profile ?? '')
+    // The script names what it promoted; the file, not the pane, is what was edited.
+    const printed = rest.split(/\s+/).filter(Boolean)
+    const profile = printed.includes(st.profile ?? '') ? (st.profile ?? '') : (printed[0] ?? st.profile ?? '')
+    await finishConnected($, profile)
 
     return
   }
@@ -290,20 +346,9 @@ export async function connect($: Engine, e: RenderInput): Promise<RenderElement>
       body = <Text>Signing in through your browser. Finish there and this updates.</Text>
     } else if (st.url) {
       const { Link } = ui
-      const url = st.url
-      // Desktop and VS Code make a link only of https: and http://localhost, and the helper answers
-      // on 127.0.0.1 alone (its Host check), so there the address is also shown to copy.
-      const copy =
-        e.surface === 'terminal' ? null : (
-          <Box flexDirection="column">
-            <Text>{url}</Text>
-            <Button key="copy" label="Copy the link" onPress={press => $.ui.copy({ text: url, surface: press.surface })} />
-          </Box>
-        )
       body = (
         <Box flexDirection="column">
-          <Link href={url} label="Enter the password" />
-          {copy}
+          <Link href={st.url} label="Enter the password" />
           <Text>{LINK_NOTE}</Text>
           <Text dimColor>The page closes after 5 minutes.</Text>
         </Box>
@@ -320,6 +365,21 @@ export async function connect($: Engine, e: RenderInput): Promise<RenderElement>
           {body}
         </Box>
         <Box flexDirection="column" marginTop={1}>
+          {backButton}
+        </Box>
+      </Box>
+    )
+  }
+
+  if (st.phase === 'connected') {
+    const profile = st.profile ?? ''
+
+    return (
+      <Box flexDirection="column">
+        {header}
+        {detail}
+        <Box flexDirection="column" marginTop={1}>
+          <Button key="continue" label="Try again" variant="primary" onPress={() => finishConnected($, profile)} />
           {backButton}
         </Box>
       </Box>

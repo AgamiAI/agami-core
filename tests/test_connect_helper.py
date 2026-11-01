@@ -1,5 +1,7 @@
 """The loopback password helper: a one-time page on 127.0.0.1 that puts the password in the OS store.
 
+The page is bound to 127.0.0.1 and linked as `localhost`, the same address.
+
 The helper runs in a thread against a temp artifacts dir and an in-memory keyring backend, so the
 password's whole path (page -> helper -> credential store -> credentials file -> connection test) is
 exercised without a real Keychain. The connection test uses a SQLite profile, so no network either.
@@ -146,7 +148,8 @@ def test_prints_loopback_url_with_token(tmp_path: Path, art: Path, backend: _Fak
     t, out = _start(_spec(tmp_path))
     first = out.wait(1)[0]
     url = urllib.parse.urlsplit(first["url"])
-    assert url.scheme == "http" and url.hostname == "127.0.0.1" and url.port
+    # Named `localhost` so the desktop app and VS Code make a link of it; the bind stays 127.0.0.1.
+    assert url.scheme == "http" and url.hostname == "localhost" and url.port
     token = url.path.strip("/")
     assert _TOKEN_RE.match(token), token
     assert url.path == f"/{token}/"
@@ -247,7 +250,7 @@ def test_rollback_that_cannot_delete_the_secret_says_so(tmp_path: Path, art: Pat
 def test_wrong_token_404_and_nothing_stored(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
     t, out = _start(_spec(tmp_path), expires_in=1.5)
     url = urllib.parse.urlsplit(out.wait(1)[0]["url"])
-    base = f"http://127.0.0.1:{url.port}"
+    base = f"http://localhost:{url.port}"
     wrong = base + "/" + "x" * 43 + "/"
     assert _post(wrong, SECRET) == 404
     assert _get(wrong)[0] == 404
@@ -582,27 +585,54 @@ def test_a_half_sent_post_times_out_quietly(
     assert out.wait(2)[1]["status"] == "connected"
 
 
+def _form_post(port: int, path: str, host: str, origin: str | None, body: str) -> bytes:
+    extra = f"Origin: {origin}\r\n" if origin else ""
+    req = (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Type: application/x-www-form-urlencoded\r\n"
+           f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}")
+    return _raw(port, req.encode())
+
+
 def test_wrong_host_or_origin_404(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
     t, out = _start(_spec(tmp_path))
     url = out.wait(1)[0]["url"]
     port, path = _port_and_path(url)
     body = "password=" + SECRET
     for host, origin in [
-        ("localhost:%d" % port, None),                     # a rebinding name, not the address the URL gave
+        ("evil.example:%d" % port, None),                   # a rebinding name
+        ("localhost.evil.example:%d" % port, None),
+        ("127.0.0.1:%d" % (port + 1), None),                # the right name, the wrong port
         ("127.0.0.1:%d" % port, "http://evil.example"),     # a page elsewhere posting to the helper
+        ("localhost:%d" % port, "http://evil.example"),
         ("127.0.0.1:%d" % port, "null"),
+        ("localhost:%d" % port, "null"),
+        ("localhost:%d" % port, "http://localhost:%d" % (port + 1)),
     ]:
-        extra = f"Origin: {origin}\r\n" if origin else ""
-        req = (f"POST {path} HTTP/1.1\r\nHost: {host}\r\n{extra}Content-Type: application/x-www-form-urlencoded\r\n"
-               f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}")
-        assert _raw(port, req.encode()).startswith(b"HTTP/1.0 404"), (host, origin)
+        assert _form_post(port, path, host, origin, body).startswith(b"HTTP/1.0 404"), (host, origin)
     get = f"GET {path} HTTP/1.1\r\nHost: evil.example:{port}\r\nConnection: close\r\n\r\n"
     assert _raw(port, get.encode()).startswith(b"HTTP/1.0 404")
     assert backend.data == {}
     # The page's own origin is accepted.
-    req = urllib.request.Request(url, data=body.encode(), method="POST", headers={"Origin": f"http://127.0.0.1:{port}"})
+    req = urllib.request.Request(url, data=body.encode(), method="POST", headers={"Origin": f"http://localhost:{port}"})
     with urllib.request.urlopen(req, timeout=10) as r:
         assert r.status == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connected"
+
+
+@pytest.mark.parametrize(
+    "name, with_origin",
+    [("localhost", True), ("localhost", False), ("127.0.0.1", True), ("127.0.0.1", False)],
+)
+def test_both_loopback_names_are_served(
+    tmp_path: Path, art: Path, backend: _FakeBackend, name: str, with_origin: bool
+) -> None:
+    t, out = _start(_spec(tmp_path))
+    port, path = _port_and_path(out.wait(1)[0]["url"])
+    host = f"{name}:{port}"
+    get = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    assert _raw(port, get.encode()).startswith(b"HTTP/1.0 200")
+    origin = f"http://{host}" if with_origin else None
+    assert _form_post(port, path, host, origin, "password=" + SECRET).startswith(b"HTTP/1.0 200")
     t.join(10)
     assert out.wait(2)[1]["status"] == "connected"
 

@@ -77,8 +77,9 @@ On macOS and Windows, connecting a database from the agami pane asks for the pas
 in your browser instead of in the chat. `scripts/connect_helper.py` serves that page:
 
 - **What it binds:** `127.0.0.1` only, on a random port, behind a one-time token of 43 random characters
-  in the URL. Nothing off your machine can reach it. Any other path, a wrong token, a second submit, a
-  request addressed to another host name, or a post from another page gets a 404. An idle or half-sent
+  in the URL. Nothing off your machine can reach it. The URL reads `http://localhost:<port>/<token>/`,
+  which is the same address. Any other path, a wrong token, a second submit, a request addressed to a
+  host name other than `localhost` or `127.0.0.1`, or a post from another page gets a 404. An idle or half-sent
   request is dropped after 10 seconds and cannot hold the helper open. The page loads no scripts, fonts, or files from anywhere.
 - **For how long:** until the first password is submitted, or 5 minutes, whichever comes first. Then it
   stops listening and exits.

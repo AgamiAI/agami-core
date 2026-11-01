@@ -5,7 +5,7 @@ import type { Engine, Resolve } from '../pane-kit'
 
 type Hooks = Parameters<typeof openPane>[1]
 
-const URL = 'http://127.0.0.1:50123/tok/'
+const URL = 'http://localhost:50123/tok/'
 const SPEC_PATH = '/art/local/tmp/connect-demo.json'
 const LINK_NOTE = 'Opens a page on this computer. The password goes to your keychain, not the chat.'
 const CONTINUE = 'The agami profile demo is connected. Continue /agami-core:agami-connect from Phase 1.3 for it (skip Phase 0).'
@@ -29,6 +29,7 @@ async function openConnect(
   on: Hooks,
   lines: (string | number)[],
   resolve: Resolve = { data: READY },
+  options: { killDelay?: number; drops?: number } = {},
 ): Promise<World & { clock: ReturnType<typeof mock.clock> }> {
   const clock = mock.clock(on)
   const world: World = { argvs: [], spawned: [], writes: [], sent: [], stopped: { value: false } }
@@ -37,7 +38,13 @@ async function openConnect(
 
     return { value: undefined }
   })
+  let drops = options.drops ?? 0
   on('prompt.submit', (_, e) => {
+    if (drops > 0) {
+      drops -= 1
+
+      return { drop: 'A turn is running.' }
+    }
     world.sent.push(e.text)
 
     return { text: e.text }
@@ -50,6 +57,9 @@ async function openConnect(
       for (const piece of lines) {
         if (typeof piece !== 'number') yield { stream: 'stdout' as const, text: piece }
         else if ((await Promise.race([clock.sleep(piece), killed])) === 'killed') {
+          // A child can take a moment to go once signalled; its run's cleanup comes after that.
+          if (options.killDelay) await clock.sleep(options.killDelay)
+
           return { value: { code: null, signal: 'SIGTERM' } }
         }
       }
@@ -124,14 +134,7 @@ test('on a Mac the helper starts from a spec file and its page shows as a Link',
     expect(w.spawned[0]?.slice(2)).toEqual(['connect_helper.py', '--spec', SPEC_PATH])
     expect(w.spawned[0]?.[1]).toMatch(/\/scripts\/py$/)
     expect(await ui.find({ type: 'Text', text: LINK_NOTE })).toBeDefined()
-    if (surface === 'terminal') {
-      expect((await ui.find({ type: 'Link' }))?.props).toEqual({ href: URL, label: 'Enter the password' })
-    } else {
-      // Desktop and VS Code link only https: and http://localhost, and the helper answers on
-      // 127.0.0.1 alone, so there the address is shown to copy.
-      expect(await ui.find({ type: 'Text', text: URL })).toBeDefined()
-      expect(await ui.find({ type: 'Button', key: 'copy' })).toBeDefined()
-    }
+    expect((await ui.find({ type: 'Link' }))?.props).toEqual({ href: URL, label: 'Enter the password' })
     // A drawing unmounts once the work under way settles, and the helper waits until stopped.
     await ui.press({ key: 'back' })
     await ui.unmount()
@@ -283,6 +286,64 @@ test('elsewhere the template is Claude’s to write, and Check again promotes it
   promote = 'SECURED demo'
   await ui.press({ key: 'check' })
   expect(w.sent).toEqual([w.sent[0], CONTINUE])
+  expect(await ui.find({ type: 'Button', text: 'Connect a database' })).toBeDefined()
+  await ui.unmount()
+})
+
+const removals = (argvs: string[][]): number => argvs.filter(a => a[1] === '-c' && a.includes(SPEC_PATH)).length
+
+// Each press that leaves a helper asleep on the mocked clock takes about a second to settle.
+test('a stopped helper’s late cleanup leaves the spec of the run that replaced it', { timeoutMs: 15_000 }, async ($, on) => {
+  const w = await openConnect($, on, [line({ url: URL, expires_in: 300 }), 300_000], { data: READY }, { killDelay: 50 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'connect' })
+  await fillForm(ui)
+  await ui.press({ key: 'start' })
+  await ui.press({ key: 'back' })
+  // The same profile again, before the first helper has gone.
+  await ui.press({ key: 'connect' })
+  await fillForm(ui)
+  await ui.press({ key: 'start' })
+  expect(w.writes.map(x => x.path)).toEqual([SPEC_PATH, SPEC_PATH])
+
+  await w.clock.advance(50)
+  expect(removals(w.argvs)).toBe(0)
+
+  await ui.press({ key: 'back' })
+  await w.clock.advance(50)
+  expect(removals(w.argvs)).toBe(1)
+  await ui.unmount()
+})
+
+test('Check again continues with the profile the script promoted', async ($, on) => {
+  const w = await openConnect($, on, [], {
+    data: { ...READY, platform: 'Linux' },
+    scripts: { 'promote_credentials.py': 'APPENDED analytics\n' },
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'connect' })
+  await fillForm(ui)
+  await ui.press({ key: 'start' })
+
+  await ui.press({ key: 'check' })
+
+  expect(w.sent.slice(1)).toEqual([CONTINUE.replace('demo', 'analytics')])
+  await ui.unmount()
+})
+
+test('a connected profile whose hand-off fails says so, and Try again sends it', async ($, on) => {
+  const w = await openConnect($, on, [line({ status: 'connected', profile: 'demo', detail: 'ok' })], { data: READY }, { drops: 1 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'connect' })
+  await fillForm(ui)
+  await ui.press({ key: 'start' })
+
+  expect(await ui.find({ type: 'Text', text: 'demo is connected, but the next step could not start.' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /helper/ })).toBeUndefined()
+  expect(w.sent).toEqual([])
+
+  await ui.press({ key: 'continue' })
+  expect(w.sent).toEqual([CONTINUE])
   expect(await ui.find({ type: 'Button', text: 'Connect a database' })).toBeDefined()
   await ui.unmount()
 })

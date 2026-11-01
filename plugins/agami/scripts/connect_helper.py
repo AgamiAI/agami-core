@@ -13,13 +13,15 @@ section to `<artifacts_dir>/local/credentials` with `password = keyring:agami/<p
            "auth": "sso"  (optional: a browser or cloud sign-in; no page, no secret)}
 
 Stdout is JSON lines, nothing else:
-    {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}       once listening
+    {"url": "http://localhost:<port>/<token>/", "expires_in": 300}       once listening
     {"status": "connected" | "connect_failed" | "refused", "profile": ..., "detail": "<one line>"}
     {"status": "expired"}                                                 no submit in 300 s; nothing written
 Exit code is 0 for every outcome; the status says what happened.
 
-The server binds 127.0.0.1 only, on a random port, behind a token of 43 URL-safe characters. Any
-other path, a wrong token, or a second submit gets 404. Stdlib only, apart from agami-core's own
+The server binds 127.0.0.1 only, on a random port, behind a token of 43 URL-safe characters. The URL
+names it `localhost`, because the desktop app and VS Code make a link of `http://localhost` but not of
+`http://127.0.0.1`; requests addressed either way are served. Any other host name, any other path, a
+wrong token, or a second submit gets 404. Stdlib only, apart from agami-core's own
 `credential_store` and `execute_sql`.
 """
 
@@ -54,6 +56,9 @@ from promote_credentials import _sections  # noqa: E402
 
 EXPIRES_IN = 300
 HOST = "127.0.0.1"
+# The names a request may address the helper by: the bound address, and `localhost`, which the URL uses.
+# A DNS-rebinding page reaches the port under its own name, so any other Host is refused.
+_NAMES = (HOST, "localhost")
 _SHARED = Path(__file__).resolve().parent.parent / "shared"
 _PAGE = _SHARED / "connect-helper-page.html"
 _LOGO = _SHARED / "agami-logo-dark.svg"
@@ -240,7 +245,9 @@ class _Server(http.server.ThreadingHTTPServer):
 
     def __init__(self, profile: str) -> None:
         super().__init__((HOST, 0), _Handler)
-        self.origin = f"http://{HOST}:{self.server_address[1]}"
+        port = self.server_address[1]
+        self.hosts = {f"{name}:{port}" for name in _NAMES}
+        self.origins = {f"http://{host}" for host in self.hosts}
         self.profile = profile
         self.path_ok = f"/{secrets.token_urlsafe(32)}/"
         self.secret = ""
@@ -260,7 +267,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 
     def _live(self) -> bool:
         # The Host check stops a DNS-rebinding page from reaching this port under its own name.
-        if self.headers.get("Host") != self.server.origin[len("http://"):]:
+        if self.headers.get("Host") not in self.server.hosts:
             return False
         path = self.path.encode("utf-8", "surrogateescape")
         return secrets.compare_digest(path, self.server.path_ok.encode()) and not self.server.submitted.is_set()
@@ -293,7 +300,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             length = -1
         origin = self.headers.get("Origin")
-        if not self._live() or not 0 < length <= _MAX_BODY or origin not in (None, self.server.origin):
+        if not self._live() or not 0 < length <= _MAX_BODY or (origin is not None and origin not in self.server.origins):
             return self._send(404)
         try:
             body = self.rfile.read(length)
@@ -409,7 +416,7 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        _emit(out, {"url": f"http://{HOST}:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in)})
+        _emit(out, {"url": f"http://localhost:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in)})
         if not server.submitted.wait(expires_in):
             _emit(out, {"status": "expired"})
             return 0

@@ -3,7 +3,7 @@ import type { Register } from 'claude-code'
 
 import type { AgamiEnv, AgamiScreen } from '../types'
 import { readEnv } from './env'
-import { connect, resetConnect } from './screens/connect'
+import { connect, resetConnect, startConnectRunner } from './screens/connect'
 import { home } from './screens/home'
 
 // The pane's id and title are `agami`, the same word as the command that opens it: one name for the
@@ -24,6 +24,8 @@ export const register: Register = on => {
       name: 'agami',
       description: 'Open the agami pane: connect a database, try the sample, ask a question',
     })
+    // The Connect screen's helper outlives any press, so it runs with this session's `$`.
+    startConnectRunner($)
 
     return next(e)
   })
