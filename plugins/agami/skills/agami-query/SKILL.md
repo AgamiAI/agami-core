@@ -14,8 +14,8 @@ This skill orchestrates:
 1. **Setup** (once per session) — resolve the profile + the semantic model at `<artifacts_dir>/<profile>/`, verify the configured database tool still works.
 2. **Generate SQL** — examples-first traversal: pick the subject area → match curated examples → (cold start) resolve entities/metrics + identify opaque literals → compound `get_table_context` → produce one SQL statement → safety checks.
 3. **Execute** — run via the chosen tool; the Python tier runs the fan/chasm pre-flight and the scope/PII gates; auto-retry on classified errors; risk-assess large-table queries.
-4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then one card (Looks right / Something's off / Show as a chart / Sign off the definitions used); CSV via `--csv` or "export this"; the Chart.js report only on "Show as a chart", `--chart` or "make that a chart", served from localhost.
-5. **Log + post-install GitHub-star ask** — write `<artifacts_dir>/local/query_log.jsonl` and ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
+4. **Present** — the answer as a markdown table, "How this was answered" from the receipt, then the log line (`<artifacts_dir>/local/query_log.jsonl`, written right after 4d.1 and before the card; its shape is in Phase 5), then one card (Looks right / Something's off / Show as a chart / Sign off the definitions used); CSV via `--csv` or "export this"; the Chart.js report only on "Show as a chart", `--chart` or "make that a chart", served from localhost.
+5. **Post-install GitHub-star ask** — after the answer card, ask the user (once, after first successful query) to star us on GitHub; once they answer, point them to `/agami-serve` (wire the model into Claude Desktop — the experience their business users get).
 
 For the model format: [`semantic_model/__init__.py`](../../../../packages/agami-core/src/semantic_model/__init__.py) (layout) + `packages/agami-core/src/semantic_model/models.py`.
 For SQL safety: [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md).
@@ -40,7 +40,7 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 
 - **One question per turn unless they're truly bundled.**
 - **A decision is a card** ([`shared/question-cards.md`](../../shared/question-cards.md)): the answer card after every answer (Phase 4d.2), large-table HIGH-risk approval, the post-install GitHub-star ask. **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
-- **No page opens by default.** The HTML report is rendered only when the person asks for a chart (Phase 4e), and it is served from localhost, never opened as a `file://` page.
+- **No page opens by default.** The chart page is the answer's full view: rendered only when the person asks for a chart (Phase 4e), and served from localhost, never opened as a `file://` page.
 - **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
 - **Don't echo the SQL in chat prose** — that's enforced as a hard rule in Phase 2. Don't paste the raw Bash CSV — Phase 3.
@@ -89,7 +89,7 @@ The model is the semantic-model tree at `<artifacts_dir>/<profile>/` (`datasourc
 
 **Never hand-read OR hand-roll the model.** Don't `cat`/`Read` `datasource.yaml`, `subject_areas/**`, `tables/*.yaml`, or `relationships.yaml`, and **never write a `python -c` / ad-hoc script to load, dump, or walk the model tree** — that guesses the schema, breaks on a wrong key, and can leak a traceback to the user. The CLI returns the same data structured, and the layout is already known (relationships + entities + metrics live at the **area** level, not inside a table file). `sm areas "$ROOT"` is the **one-call model map**: per area it returns `table_count`, `entity_count`, `metric_count`, `relationship_count` + description — the whole shape in a single call. (Column-level detail → `sm context`; browsable table/column tree → `sm model-tree`.) **When the user asks "what does the model look like" / "show me the model," run `sm model-tree` (or open `/agami-model`) — don't improvise Python.**
 
-**Don't run a separate existence probe either** (no `ls datasource.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). That same first `sm areas` call doubles as the check: model present → you get the map; absent → the CLI returns `{"error":"no_model"}` with **exit code 3** → invoke `agami-connect` and stop.
+**Don't run a separate existence probe either** (no `ls datasource.yaml`, and never probe for the plugin's own scripts — `sm`, `execute_sql.py`, `semantic_model/` always ship with the plugin). That same first `sm areas` call doubles as the check: model present → you get the map; absent → the CLI returns `{"error":"no_model"}` with **exit code 3** → invoke `agami-connect` and stop, unless `AGAMI_PROFILE` names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): then say so in one line and stop.
 
 Drive everything through the CLI — the `sm` wrapper resolves the interpreter + deps. (These granular steps are CLI operations; on the MCP surface they're folded into the smart `get_datasource_schema`, which advertises the 4 product tools — so don't invoke the steps below as MCP tools.)
 
@@ -636,7 +636,7 @@ One question, header `Answer`, *"How does this answer look?"*, single pick, no `
 
 After the card is handled: the one-time star ask (4e.5), then the 5 follow-ups (4f).
 
-### 4e — Show as a chart: ONE coherent HTML report (one file, N sections), served from localhost
+### 4e — Show as a chart (the answer's full view): ONE coherent HTML report (one file, N sections), served from localhost
 
 This runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart", "show me a chart"); in the last two cases the answer card leaves its chart option out. Never by default.
 
@@ -870,9 +870,9 @@ The correction can arrive three ways: the answer card's **Something's off** with
 
 **This applies doubly when YOU discovered the issue, not the user.** If mid-analysis you find a model-level subtlety (a column that needs a caveat, a metric that's mis-defined), your interpretation can be wrong — so **propose** the edit, never auto-apply it to the shared model, and **never stamp the user's sign-off on their behalf.** Sign-off is the user's explicit act (the Review tab, or saying "approve") — a correction doesn't grant it. Fixing *your own* answer for the current turn is always fine; persisting a change to the shared model is what needs the nod.
 
-**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and (with your OK) set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on the prior `query_log.jsonl` entry (Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
+**Make the routing visible** — name where each piece landed: *"Saved the corrected SQL as an example for `sales`, and (with your OK) set `ORDERS.TOTAL` unit → INR."* Never silent. Then set `feedback: "bad"` on this answer's `query_log.jsonl` entry, the one written right after 4d.1 and before the answer card (its shape is in Phase 5). `$ROOT` and `<area>` come from the model already loaded in Phase 1b; the original SQL is in this turn (and `query_log.jsonl`).
 
-**Positive confirmation ("This looks good").** The answer card's **Looks right** hands the answer to agami-save-golden (Phase 4d.2). The chart page also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
+**Positive confirmation ("This looks good").** The answer card's **Looks right** hands the answer to agami-save-golden (Phase 4d.2). The chart page (the full view, 4e) also has a **👍 This looks good** button (and the user may just say so) — a paste-back beginning *"This agami answer looked correct."* This is the inverse: set `feedback: "good"` on the log entry, and **consider** saving the question + SQL as a **confirmed** prompt example (`sm add-example`, `status: confirmed`) — **your discretion, not reflexively.** Add it when it's a genuinely reusable, non-trivial pattern (a real join, a metric definition exercised, a non-obvious filter); **skip** trivial one-offs (`SELECT COUNT(*)`), near-duplicates of an existing example, or throwaway exploration. Say what you did — *"Good to hear — saved it as an example so the next similar question reuses this SQL"* or *"Glad it's right (didn't add an example — it's close to one already in the library)."* A confirmed-good example is a strong few-shot, but the library's value is precision, not volume — don't dilute it.
 
 ---
 
@@ -913,7 +913,7 @@ If the user takes a positive follow-up action — picking one of the 5 numbered 
 
 ## Phase 6: Post-install GitHub-star ask (full spec — triggered from Phase 4e.5)
 
-**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (after the answer card, before 4f) — the textual order of phases here is misleading because the ask must run *between* the answer card and 4f, not after Phase 5. If you read straight through Phase 4f → 5 → 6 the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
+**This is the full spec for the GitHub-star ask. The trigger lives in Phase 4e.5 above** (after the answer card, before 4f) — the textual order of phases here is misleading because the ask must run *between* the answer card and 4f, not after Phase 5. If you read straight through 4f → Phase 5 (whose log line was already written right after 4d.1, before the answer card) → Phase 6, the ask never fires; that's why the trigger is duplicated up in 4e.5 with a pointer down here for the details.
 
 **HARD RULES — read before emitting the ask (the LLM has hallucinated both of these):**
 
@@ -980,7 +980,7 @@ End with:
 
 | Symptom | Action |
 |---|---|
-| `<artifacts_dir>/<profile>/datasource.yaml` missing AND `<artifacts_dir>/local/<profile>.yaml` missing | Invoke `connect` |
+| `<artifacts_dir>/<profile>/datasource.yaml` missing AND `<artifacts_dir>/local/<profile>.yaml` missing | Invoke `connect`, unless `connect_resolve.py` reports `env_profile_has_no_model`: then say its `detail` and stop ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)) |
 | Model file fails to parse as YAML | Surface error; tell the user "say 'reload the schema' to re-introspect from your DB" (the agami-connect skill handles it) |
 | `version` ≠ `"0.1.1"` | Warn but proceed; suggest "say 'reload the schema'" to regenerate the model in the latest format |
 | Credentials chmod wrong | Refuse, offer `chmod 600` |

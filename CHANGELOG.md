@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Added
 
+- **`scripts/serve_page.py`: an agami page served from localhost for a short while.** It serves
+  one HTML file and the web assets beside it on `127.0.0.1` at a random port, prints
+  `{"url": "http://localhost:<port>/<name>"}`, and exits when its time is up (`--minutes`, 30 by
+  default). It refuses a request whose Host is not its own address. Every skill's optional full view
+  (the model explorer, the table picker, the reconcile pages, the chart) is now served this way
+  instead of opened as a `file://` page, which the Desktop Code tab's built-in browser shows as a
+  frozen snapshot when the file sits outside the project folder.
+
 - **Database passwords in the OS credential store on macOS and Windows.** A credentials-file
   profile can hold `password = keyring:agami/<profile>`, which agami resolves from Keychain or
   Credential Manager when it connects (`sm install` adds the `agami-core[keyring]` extra on those two
@@ -24,6 +32,18 @@ below corresponds to one such version.
   never writes such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
 
 ### Changed
+
+- **Every agami decision is a question card in the chat; no page opens on its own and nothing is
+  pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and
+  agami-eval used to open an HTML page and wait for a block the person generated there and pasted
+  into the chat. Each now shows the result as a short table in the chat and asks with Claude's own
+  question cards (AskUserQuestion): picking tables, the connection fields, signing off definitions
+  one by one or all at once, hiding personal-data columns, keeping the seed examples, the answer
+  card after a query, the reconcile intake, mismatches and keep offer, a golden import. The rules
+  are in `shared/question-cards.md`. The pages stay as an optional "Show the full view", served
+  from localhost, and a block pasted from one is still accepted. Where the card tool is missing
+  (`claude -p`), the same question is asked as a numbered list. `tests/test_skills_no_paste_back.py`
+  fails if a skill's default path opens a page or waits for a paste again.
 
 - **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
   `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
@@ -103,6 +123,16 @@ below corresponds to one such version.
   `--area` used to run against an empty area (and `seed-examples` created its folder).
 
 ### Fixed
+
+- **The chart page loads nothing from the network.** `chart-template.html` loaded Chart.js from
+  `cdn.jsdelivr.net`, which broke the no-egress rule and drew no chart offline. The library now
+  ships in `shared/vendor/` and `render_chart.py` inlines it, so a chart is one self-contained file.
+
+- **A stale `AGAMI_PROFILE` is named, not read as "no model yet".** The variable wins over
+  `.config`'s active database, so one left set to a database with no model (say `main`) pointed
+  every skill at nothing, and the skills offered to connect a database again. `connect_resolve.py`
+  now reports an `env_profile_has_no_model` anomaly naming the variable, the database and the
+  databases that have a model, when at least one does, and the skills say that in one line and stop.
 
 - **Skill commands now use the plugin root Claude Code fills in, not an `AGAMI_PLUGIN_ROOT` nothing
   sets.** Every skill ran `bash "$AGAMI_PLUGIN_ROOT/scripts/py" …`, but a Claude Code session (CLI or

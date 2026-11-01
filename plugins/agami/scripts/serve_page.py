@@ -8,9 +8,10 @@ time is up and exits 0. This is the optional "full view" behind a question card:
 opened as file://, because the Code tab's built-in browser shows a local file outside the project
 folder as a frozen snapshot.
 
-The server binds 127.0.0.1 only, on a random port. It serves the page and, beside it, regular files with a
-web-asset extension (html css js svg png jpg json) and nothing else, and it refuses any request whose Host is not this
-server's own address (a DNS-rebinding page cannot reach it under its own name). Stdlib only.
+The server binds 127.0.0.1 only, on a random port. It serves the page and, beside it, regular
+files with a web-asset extension (html css js svg png jpg json) and nothing else, and it refuses
+any request whose Host is not this server's own address (a DNS-rebinding page cannot reach it
+under its own name). Stdlib only.
 """
 
 from __future__ import annotations

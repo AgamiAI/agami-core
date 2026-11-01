@@ -81,7 +81,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 ### Preflight steps
 
 0. **Sample-path short-circuit (check FIRST, before resolving any profile).** If the user explicitly asked for the sample — `$ARGUMENTS` is `sample`, or they said *"try the sample"* / *"I don't have a database"* / *"use the sample (or example) data"* / *"demo data"* — then bind `$PROFILE_NAME = agami-example`, `$DB_TYPE = sample`, and **go straight to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection)**. Do this **regardless of any existing `active_profile` or onboarded profiles** — the sample is a deliberate, explicit choice and must not be intercepted by another profile's credential/existing-model checks. (A returning person also gets "Try the sample data" on the start card in step 1a; this short-circuit covers the request that already says so.) If `agami-example` is already set up, Phase 0s sends them to the demo. Only fall through to step 1 when there's **no** sample signal.
-1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → the start card for a returning person (step 1a); a reload or re-introspect request skips the card and goes straight to Phase 1 with `reintrospect`; **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → the first-run start card (step 1a), then Phase 0a. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`; `library_older_than_plugin` → offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, or the `AGAMI_PYTHON` fix it names; `agami_python_cannot_be_brought_current` → the `$AGAMI_PYTHON` the user set has no pip and an old or missing agami-core, so say so). `interpreter.chosen_because` says why that Python was picked, and a candidate passed over carries a `reason`; never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
+1. **Resolve the environment** — `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py [--db-type <t>] [--profile <p>]` prints `{data, anomalies}` (self-describing JSON): profile, artifacts_dir, the `[<profile>]` credentials section + chmod, the cached config, the **scored** `interpreter.python3` (the one with model deps + driver — use it everywhere; never a Python missing a dep), native `tools`, and a `next` decision. Branch on `data.next`: **`ready`** → the start card for a returning person (step 1a); a reload or re-introspect request skips the card and goes straight to Phase 1 with `reintrospect`; **`promote`** → run 0a.10 to promote the filled template, then continue; **`bootstrap`** → the first-run start card (step 1a), then Phase 0a. On a first-time bootstrap `data.profile` is **`null`** (`profile_source: "default"`) — there's no profile yet, so narrate it **without a name**: *"No credentials yet — first-time setup."* (Never say "profile `main`" — the user names their profile in 0a.3.) Only when `data.profile` is non-null (a `bootstrap` for an explicitly-named/env profile) may you name it. Surface `anomalies` (e.g. `credentials_world_readable` → offer `chmod 600`; `library_older_than_plugin` → offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`, or the `AGAMI_PYTHON` fix it names; `agami_python_cannot_be_brought_current` → the `$AGAMI_PYTHON` the user set has no pip and an old or missing agami-core, so say so; `env_profile_has_no_model` → `AGAMI_PROFILE` names a database with no model while others have one: say its `detail` in one line before the start card, and offer the databases it lists rather than a new connection under that name, unless the person asked to connect one). `interpreter.chosen_because` says why that Python was picked, and a candidate passed over carries a `reason`; never substitute a `missing_fields` value — surface "missing field X for profile Y" and stop.
 1a. **The start card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). One AskUserQuestion, one question, header `Start`. Skip it when the request already names the action: `$ARGUMENTS` is `reintrospect` or `profile NAME`, the person asked to reload or re-introspect, to add a new database (go to Phase 0a), or `agami-query` invoked this skill because a model is missing (go to Phase 0a).
    - **First run** (`data.next` is `bootstrap`, nothing connected yet). Question: *"How do you want to start?"* No option is marked Recommended: whether there is a database to connect is a fact about the person's setup.
 
@@ -494,16 +494,10 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
        bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" approve-queue "<artifacts_dir>/agami-example" --signer system --role system
        ```
        (This is only sanctioned for the curated sample; a real database keeps the human sign-off gate.)
-     - **When the model validates, OPEN THE MODEL-EXPLORER so the user sees what was built** — render it in **browse mode** (i.e. `/agami-model` browse — **not** the `/agami-model preseed` sign-off gate that ends the turn elsewhere in this skill). The script takes the profile and artifacts dir as **separate** flags (there is no `--root`); use the same invocation the [`/agami-model` skill documents](../agami-model/SKILL.md):
-       ```bash
-       bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
-         --profile agami-example --artifacts-dir "<artifacts_dir>" \
-         --out "<artifacts_dir>/local/model/agami-example/<ts>.html"
-       ```
-       This is the whole point of "watch it build"; a prose-only wrap would defeat it. Render it *together with* step 7's short dataset description + starter questions (so don't cede the turn), so the user can both look at the model and start asking. (Do **not** render the NL→SQL examples-validation page — lower-value for the curated sample.)
+     - **When the model validates, show what was built in the chat**, the overview [`/agami-model`](../agami-model/SKILL.md#phase-1-overview-and-the-card) posts (its Phase 1: read the model with `sm model-tree` and `sm review-items`, never the YAML): one sentence on what needs sign-off (after the system approval above, usually nothing) and the `Subject area | Tables | Hidden` table. This is the whole point of "watch it build"; a wrap with no numbers would defeat it. Post it *together with* step 7's short dataset description + starter questions (so don't cede the turn). No page opens: the model explorer is the full view, rendered and served from localhost by `/agami-model` only when the person asks for it. (Do **not** render the NL→SQL examples-validation page either.)
 
-   **6A** → **step 7** (describe + stop). **6B** → step 7's description + starter questions **and** open `/agami-model`. Both end with a validated `<artifacts_dir>/agami-example/` model.
-7. **Wrap up — describe the dataset, offer questions, then STOP. Do NOT auto-run a query.** This is the entire closing for the sample path: **skip the rest of Phases 3–8** (no introspect summary, no "re-introspect `<profile>`" / "when you want the real thing" framing — that pushes the user off the sample they just picked and can surface another profile's name). The user asked to *query* the sample, not watch a scripted demo — so hand them the keys, don't drive. **(Exception: 6B already opened `/agami-model` — that's the one review surface the "watch it build" path keeps; see 6B. The 6A copy path opens nothing.)**
+   **6A** → **step 7** (describe + stop). **6B** → the model overview above, then step 7's description + starter questions. Both end with a validated `<artifacts_dir>/agami-example/` model.
+7. **Wrap up — describe the dataset, offer questions, then STOP. Do NOT auto-run a query.** This is the entire closing for the sample path: **skip the rest of Phases 3–8** (no introspect summary, no "re-introspect `<profile>`" / "when you want the real thing" framing — that pushes the user off the sample they just picked and can surface another profile's name). The user asked to *query* the sample, not watch a scripted demo — so hand them the keys, don't drive. **(6B adds the model overview in the chat, see 6B. Neither path opens a page.)**
    - **Short description (2–3 lines, plain):** what the dataset is, drawn from `<artifacts_dir>/agami-example/datasource.md` — Acme Store, a retailer with one-time **commerce** (customers, products by category, orders, line items, payments, refunds) and recurring **subscriptions** (plans, subscriptions, invoices). ~500 customers, ~4,000 orders over ~2 years. State it; don't sell it.
    - **A numbered list of ~6 starter questions — and DO NOT answer any of them.** The user picks. **Include at least two genuinely complex multi-table joins** so they see agami handle real joins, not just single-table counts (a flat list of trivial questions undersells it). A good set:
      ```
@@ -541,7 +535,7 @@ Introspection can take a while against cloud DBs. Tell the user **before** the f
 
 If `<artifacts_dir>/<profile>/datasource.yaml` exists and `$ARGUMENTS != reintrospect`: the profile is already onboarded. When the start card (Phase 0, step 1a) already took the person's choice, act on it and skip this menu. Otherwise offer (AskUserQuestion, no `(Recommended)` — these are equal-weight choices), capped at 4:
 - **Re-introspect `<profile>`** — refresh the structure from the live DB (new/changed tables, columns, FKs) while preserving descriptions, entities, metrics, caveats, and sign-offs (the `reintrospect` path; 2e: preview, then write).
-- **Open model explorer** — browse + curate the existing model and review/sign off the trust layer (`/agami-model`).
+- **Review the model** — the model overview in the chat, then cards to sign off definitions, hide tables or columns, or look one up (`/agami-model`; its explorer page is the full view, only when asked).
 - **Onboard another database** — set up a **different** database (a different connection), leaving `<profile>` untouched. On this choice, **first ask whether it's the same company or a different one** (see 1.1a), then start a fresh onboarding: jump to the profile-naming step (Phase 0a's naming question) → have the user name the new profile (must differ from `<profile>` and any existing `[section]` in `<artifacts_dir>/local/credentials`) and pick its DB type → write that profile's `credentials.example` → run the full flow for it. Never reuse or overwrite the current profile's credentials or model.
 - **Try the sample database** — explore agami's bundled **`agami-example`** sample (retail + subscriptions, no connection needed), leaving `<profile>` untouched. Routes to [Phase 0s](#phase-0s-sample-database-bootstrap-no-connection). This MUST be a real selectable option here (not a prose aside) — a returning user with an onboarded profile has no other visible path to the sample, since plain `/agami-connect` resolves their active profile and lands on this menu.
 
@@ -685,7 +679,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
 
 It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count`, `inventory_path` and `prune_html`. (`--out` is required, so the prune page is written too; **it is not opened** and nothing waits on it. It is only the file behind "Show the full view" below.)
 
-**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing is pasted back on this path.
+**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing waits on a pasted block on this path; the only page is the full view below, and only when asked.
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
@@ -1310,7 +1304,7 @@ agami-connect just ran. Here's what we found:
 
 After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
-Then **AskUserQuestion**: `Open the review queue` (→ `/agami-model review` — sign off the pending metrics/entities) / `Browse the full model` (→ `/agami-model` — explore + exclude tables/columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
+Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 
 ---
 
@@ -1333,7 +1327,7 @@ Five things you could ask:
 1.–5. <count / top-N / time-bucket / breakdown / recency — grounded in real tables>
 Pick a number, or keep going:
 • /agami-model review — sign off the pending metrics (+ review joins/entities) to clear the warnings.
-• /agami-model — browse the whole model and refine it (exclude raw PII / staging tables, edit descriptions).
+• /agami-model — see the model in the chat and refine it (hide personal-data or staging tables, edit descriptions).
 • Ask questions — if an answer's off, say "save this as a correction" and I'll teach the model.
 ```
 
@@ -1350,8 +1344,8 @@ Reply with a number, or ask anything else.
 The model keeps improving as you use it:
 • Just ask questions — and if an answer looks off, say "save this as a correction"
   (or paste the right SQL) and I'll teach the model so next time is right.
-• /agami-model — one dashboard to review & sign off metrics/joins/entities (Review tab),
-  exclude tables/columns you don't want queried, add metrics, and edit descriptions.
+• /agami-model — the model in the chat: sign off metrics/joins/entities, hide tables
+  or columns you don't want queried, add metrics, and edit descriptions.
 ```
 End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
 

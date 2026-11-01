@@ -5,8 +5,8 @@ HTML report renderer for agami-query.
 Reads plugins/agami/shared/chart-template.html, substitutes every placeholder
 (including the inline agami logos from shared/agami-logo-{dark,light}.svg),
 and writes a self-contained HTML file (Chart.js is inlined, so it loads nothing from the
-network) containing one or more sections. Each section has its own chart + table + insight + SQL — but they all live in
-the same file. Stdlib only.
+network) containing one or more sections. Each section has its own chart + table + insight +
+SQL — but they all live in the same file. Stdlib only.
 
 The agami-query SKILL invokes this script in Phase 4e instead of
 doing template substitution through the LLM's Read + Write tools — that

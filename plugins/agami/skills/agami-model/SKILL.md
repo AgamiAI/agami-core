@@ -37,7 +37,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke."* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`). `ROOT="<artifacts_dir>/<profile>"`.
   - **A pasted full-view block names its own target.** Its first line is `profile: <name>` — that page was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one page's approvals to whatever happens to be active (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named model, target it directly — don't fall back to `active_profile` or hunt with `find`.
-- **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model yet.
+- **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model yet. First rule out an `AGAMI_PROFILE` that names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): when it does, say so and stop instead.
 - **Verify Python + PyYAML are importable**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
 
 **Scope.** Look at `$ARGUMENTS`:
