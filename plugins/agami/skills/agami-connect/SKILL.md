@@ -17,6 +17,7 @@ For the model format: [`semantic_model/__init__.py`](../../../../packages/agami-
 For credentials: [`shared/credentials-format.md`](../../shared/credentials-format.md).
 For connection method + local execution: [`shared/connection-reference.md`](../../shared/connection-reference.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
+For every decision card and result table: [`shared/question-cards.md`](../../shared/question-cards.md).
 
 ## Conversation style
 
@@ -550,7 +551,7 @@ Stash everything gathered (doc text + repo definitions) as `$DATA_MODEL_DOC_TEXT
 
 ### 1.6 — Discover & prune the table list (cheap first pass)
 
-**Before the full, expensive introspection, show the user every table + its columns so they can drop what they don't need** — staging/backup/scratch tables, dated partition snapshots, irrelevant columns. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
+**Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
 
 **Run the discover pass** — it lists tables + columns only (no grain, FK, or row-count probes, so it's fast even over a tunnel):
 
@@ -569,20 +570,54 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
 > - **Never on `seed-examples` (Phase 5).** That command validates SQL which later runs as a real user query; validating under a raised cap green-lights examples that get refused in production.
 > - **Tell the user you did it**, once, with the real numbers the commands print — and say their query-time cap is unchanged. See 2a.0 for the wording.
 
-It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json`, renders a standalone **prune page**, and prints JSON with `table_count` + `prune_html`. (This page is a deliberately minimal, separate artifact — *not* the model explorer — so there's no description/metric/review machinery, just tables + columns + checkboxes.)
+It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count`, `inventory_path` and `prune_html`. (`--out` is required, so the prune page is written too; **it is not opened** and nothing waits on it. It is only the file behind "Show the full view" below.)
 
-**Open the page, hand off, and END THE TURN** — same pattern as the credentials hand-off; pruning is interactive:
-- Auto-open the printed `prune_html` path.
-- Tell the user: *"I listed all `<N>` tables and their columns. Uncheck any you don't need (staging, backups, snapshots); you can also expand a table and drop irrelevant columns. Then click **Generate for Claude** and paste the block back here."*
-- **End the turn. Do NOT introspect yet.**
+**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing is pasted back on this path.
 
-**On re-entry — the user pastes an `AGAMI PRUNE …` block.** Don't hand-parse it — pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
+```
+
+It prints `{tables, schemas, schemas_more, likely_noise, groups}`. Show:
+
+1. One sentence: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty).
+2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one; if the person wants the noise list, show `likely_noise` (also at most 15 rows, with "and N more").
+
+Then call AskUserQuestion, one question (header `Tables`):
+
+- **Keep everything**: model all `<N>` tables.
+- **Drop staging and backups**: skip the `<M>` likely-noise tables. Mark it **(Recommended)** and put it first only when `likely_noise` is not empty; with none, leave this option out.
+- **Only some schemas**: pick which schemas to model.
+- **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
+
+Add one line before the card: *"Say 'show the full view' for the page with every table and column."*
+
+Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep.txt`:
+
+| Answer | Do |
+|---|---|
+| Keep everything | Skip the file. Run 1.7 with neither `--tables-file` nor `--exclude-columns`. |
+| Drop staging and backups | `inventory_summary.py --inventory "<inventory_path>" --keep drop_noise --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` |
+| Only some schemas | Ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Add a "None of these" option where picking nothing is valid. Then `--keep schemas:<a,b,c>`. |
+| Let me name them | Write the names (one per line, `schema.table` or a bare table name) with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`, then `--keep names:<artifacts_dir>/local/tmp/agami-names.txt`. |
+
+`--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with exit 1 and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
+
+If the person asks to skip this ("just introspect everything"), proceed to 1.7 unscoped.
+
+**Show the full view (optional, only when asked).** The page with every table and column, where individual tables and columns can be unchecked. Serve `prune_html` from localhost and give the person the URL; a `file://` page can show as a frozen snapshot in the built-in browser:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<prune_html>" --minutes 30
+```
+
+(`render_prune.py --inventory "<inventory_path>" --out <file.html>` re-renders the page if `prune_html` is gone.) The page's **Generate for Claude** button gives the person an `AGAMI PRUNE` block; that paste is still accepted here. Pipe it to the parser, which writes a **shell-safe** tables file (sidestepping the zsh word-split that collapses an unquoted list into one garbage table):
+
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_prune_block.py --block-file <pasted> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
 ```
-It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
 
-If the user instead asks to skip pruning ("just introspect everything"), proceed to 1.7 unscoped.
+It prints `{data: {tables_kept, tables_file, excluded_columns, kept_everything}, anomalies}`. Pass `--tables-file "$tables_file"` and `--exclude-columns <excluded_columns…>` to 1.7. **`kept_everything: true`** → run 1.7 with neither flag. Surface `anomalies` (a `bad_table_line`, a `keep_count_mismatch`) rather than silently dropping a line.
 
 ### 1.6s — With a model spec: the spec IS the kept set
 
