@@ -106,15 +106,16 @@ def test_urllib_parse_is_still_allowed():
 
 
 # A listener is not egress, so the scan above has nothing to say about one. But a shipped script that
-# accepts connections is a surface of its own, so pin it: only the connect helper listens, and only on
-# the loopback interface, where nothing off this machine can reach it.
+# accepts connections is a surface of its own, so pin it: only the connect helper and the page server
+# listen, and only on the loopback interface, where nothing off this machine can reach them.
 LISTEN = re.compile(r"\bhttp\.server\b|\bsocketserver\b")
-LISTENERS = {"connect_helper.py"}
+LISTENERS = {"connect_helper.py", "serve_page.py"}
 
 
-def test_only_the_connect_helper_listens_and_only_on_loopback():
+def test_only_the_local_helpers_listen_and_only_on_loopback():
     found = {p.name for p in SCRIPTS if LISTEN.search(p.read_text())}
     assert found == LISTENERS, f"unexpected listener(s): {sorted(found - LISTENERS)}"
-    text = (SCRIPTS_DIR / "connect_helper.py").read_text()
-    assert '"127.0.0.1"' in text
-    assert not re.search(r"""["'](?:0\.0\.0\.0|::|localhost)?["']\s*,\s*\d""", text.replace('"127.0.0.1"', ""))
+    for name in sorted(LISTENERS):
+        text = (SCRIPTS_DIR / name).read_text()
+        assert '"127.0.0.1"' in text, name
+        assert not re.search(r"""["'](?:0\.0\.0\.0|::|localhost)?["']\s*,\s*\d""", text.replace('"127.0.0.1"', "")), name

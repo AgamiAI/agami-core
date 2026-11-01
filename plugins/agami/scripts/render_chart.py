@@ -4,7 +4,7 @@ HTML report renderer for agami-query.
 
 Reads plugins/agami/shared/chart-template.html, substitutes every placeholder
 (including the inline agami logos from shared/agami-logo-{dark,light}.svg),
-and writes a self-contained HTML file containing one or more sections. Each
+and writes a self-contained HTML file (Chart.js is inlined, so it loads nothing from the network) containing one or more sections. Each
 section has its own chart + table + insight + SQL — but they all live in
 the same file. Stdlib only.
 
@@ -57,6 +57,7 @@ VALID_TYPES = {"bar", "line", "pie", "doughnut", "scatter"}
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "chart-template.html"
+CHARTJS_PATH = SHARED_DIR / "vendor" / "chart.umd.min.js"  # Chart.js 4.4.1, MIT; inlined, never fetched
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"   # dark text — for light backgrounds
 LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"  # light text — for dark backgrounds
 
@@ -199,6 +200,7 @@ def render(
     logo_dark_svg = LOGO_DARK_PATH.read_text(encoding="utf-8")
     logo_light_svg = LOGO_LIGHT_PATH.read_text(encoding="utf-8")
     theme_css = (SHARED_DIR / "theme.css").read_text(encoding="utf-8")
+    chartjs = CHARTJS_PATH.read_text(encoding="utf-8")
 
     # JSON embeds carry user/model text (SQL, insights, descriptions). Escape `</` so a
     # `</script>` can't terminate the <script> block (JS unescapes `<\/` → `</`). The
@@ -206,8 +208,11 @@ def render(
     def j(obj):
         return json.dumps(obj).replace("</", "<\\/")
 
+    # Chart.js goes in first and the library carries no `{{` token, so no later replace touches it;
+    # a `{{CHARTJS}}` typed into a title or section can't pull the library in a second time.
     out = (
         template
+        .replace("{{CHARTJS}}", chartjs, 1)
         .replace("{{REPORT_TITLE}}", title)
         .replace("{{REPORT_TITLE_JSON}}", j(title))
         .replace("{{REPORT_SUMMARY_JSON}}", j(summary or ""))

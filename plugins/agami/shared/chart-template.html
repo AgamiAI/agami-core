@@ -24,6 +24,8 @@
     SECTIONS_JSON    — JSON array of section objects (see schema below)
     RECEIPT_JSON     — Trust receipt object (or `null` to skip the receipt
                        panel entirely — see RECEIPT_JSON schema below).
+    CHARTJS          — Chart.js 4.4.1 (MIT), inlined from shared/vendor/chart.umd.min.js so the
+                       page loads nothing from the network.
     AGAMI_LOGO_DARK_TEXT   — full SVG content of shared/agami-logo-dark.svg  (light bg)
     AGAMI_LOGO_LIGHT_TEXT  — full SVG content of shared/agami-logo-light.svg (dark bg)
 
@@ -166,7 +168,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{{REPORT_TITLE}} — agami</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+{{CHARTJS}}
+  </script>
   <style>
 {{THEME_CSS}}
     * { box-sizing: border-box; }

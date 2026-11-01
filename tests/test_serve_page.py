@@ -1,0 +1,142 @@
+"""serve_page.py: a short-lived loopback server for one page and the files beside it."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parent.parent / "plugins" / "agami" / "scripts" / "serve_page.py"
+
+
+def _start(page: Path, minutes: str = "30") -> tuple[subprocess.Popen, str]:
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), str(page), "--minutes", minutes],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    line = proc.stdout.readline()
+    assert line, proc.stderr.read()
+    return proc, json.loads(line)["url"]
+
+
+@pytest.fixture
+def served(tmp_path):
+    root = tmp_path / "site"
+    root.mkdir()
+    (root / "report.html").write_text("<p>hello</p>", encoding="utf-8")
+    (root / "app.js").write_text("var x=1;", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("nope", encoding="utf-8")
+    proc, url = _start(root / "report.html")
+    yield proc, url
+    proc.kill()
+    proc.wait()
+
+
+def _get(url: str) -> tuple[int, bytes]:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+
+
+def test_serves_the_file_on_loopback_only(served):
+    _, url = served
+    assert url.startswith("http://localhost:") and url.endswith("/report.html")
+    port = url.split(":")[2].split("/")[0]
+    status, body = _get(f"http://127.0.0.1:{port}/report.html")
+    assert (status, body) == (200, b"<p>hello</p>")
+    assert _get(f"http://127.0.0.1:{port}/app.js")[0] == 200  # a file beside the page
+
+
+def test_binds_only_the_loopback_interface(served):
+    proc, url = served
+    port = url.split(":")[2].split("/")[0]
+    out = subprocess.run(
+        ["lsof", "-nP", "-a", "-p", str(proc.pid), "-iTCP", "-sTCP:LISTEN"],
+        capture_output=True,
+        text=True,
+    ).stdout
+    if not out:
+        pytest.skip("lsof unavailable")
+    assert f"127.0.0.1:{port}" in out
+    assert "*:" not in out
+
+
+def test_refuses_paths_outside_its_folder(served):
+    _, url = served
+    port = url.split(":")[2].split("/")[0]
+    for path in ("/../secret.txt", "/%2e%2e/secret.txt", "/..%2fsecret.txt", "/missing.html"):
+        assert _get(f"http://127.0.0.1:{port}{path}")[0] == 404, path
+
+
+def test_refuses_a_foreign_host_header(served):
+    _, url = served
+    port = url.split(":")[2].split("/")[0]
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/report.html", headers={"Host": "evil.example"}
+    )
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=5)
+    assert e.value.code == 404
+
+
+def test_exits_after_timeout(tmp_path):
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    proc, _ = _start(page, minutes="0.01")  # 0.6 seconds
+    try:
+        assert proc.wait(timeout=10) == 0
+    finally:
+        proc.kill()
+
+
+def test_missing_page_is_an_error(tmp_path):
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), str(tmp_path / "nope.html")], capture_output=True, text=True
+    )
+    assert r.returncode != 0
+    assert "nope.html" in r.stderr
+
+
+def test_in_process_serves_then_returns(tmp_path, capsys):
+    """The same behaviour with main() called directly, so the coverage gate can see the lines."""
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text("<b>x</b>", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    rc: list[int] = []
+    t = threading.Thread(
+        target=lambda: rc.append(serve_page.main([str(page), "--minutes", "0.05"]))
+    )
+    t.start()
+    url = ""
+    for _ in range(100):
+        out = capsys.readouterr().out
+        if out:
+            url = json.loads(out.splitlines()[0])["url"]
+            break
+        threading.Event().wait(0.05)
+    port = url.split(":")[2].split("/")[0]
+    base = f"http://127.0.0.1:{port}"
+    assert _get(url.replace("localhost", "127.0.0.1"))[0] == 200
+    assert _get(f"{base}/sub")[0] == 404  # a folder is not a file
+    assert _get(f"{base}/")[0] == 404
+    req = urllib.request.Request(f"{base}/p.html", data=b"x", method="POST")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req, timeout=5)
+    assert e.value.code == 405
+    t.join(timeout=10)
+    assert rc == [0]
+    assert serve_page.main([str(tmp_path / "gone.html")]) == 1
