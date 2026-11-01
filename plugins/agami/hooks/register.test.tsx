@@ -16,8 +16,12 @@ const PANE = {
 
 test('/agami opens the agami pane', async ($, on) => {
   // These hooks stand for the engine beneath the plugin.
+  const registered: string[] = []
   const opened: { id: string; title?: string }[] = []
-  on('command.register', () => ({ value: { command: 'agami' } }))
+  on('command.register', (_, e) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('ui.open', (_, e) => {
     opened.push({ id: e.id, title: e.title })
     return { value: { isPlaced: true } }
@@ -33,6 +37,7 @@ test('/agami opens the agami pane', async ($, on) => {
     presentation: { isFullscreen: true, columns: 160 },
   })
 
+  expect(registered).toEqual(['agami'])
   expect(opened).toEqual([{ id: 'agami', title: 'agami' }])
 })
 

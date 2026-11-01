@@ -26,6 +26,19 @@ def test_without_claude_the_mod_checks_print_a_skip_and_pass(monkeypatch, capsys
     assert "skipped" in capsys.readouterr().out
 
 
+def test_without_npx_the_mod_checks_print_a_skip_and_pass(monkeypatch, capsys):
+    dev = _dev()
+    monkeypatch.setattr(
+        dev.shutil, "which", lambda name: None if name == "npx" else f"/usr/bin/{name}"
+    )
+    ran = []
+    monkeypatch.setattr(dev, "run", lambda cmd, **kw: ran.append(cmd) or 0)
+
+    assert dev.mod() == 0
+    assert ran == []
+    assert "npx" in capsys.readouterr().out
+
+
 def test_with_claude_the_mod_checks_validate_typecheck_and_test(monkeypatch):
     dev = _dev()
     monkeypatch.setattr(dev.shutil, "which", lambda name: f"/usr/bin/{name}")

@@ -9,6 +9,5 @@
   },
   "homepage": "https://github.com/AgamiAI/agami-core",
   "repository": "https://github.com/AgamiAI/agami-core",
-  "license": "LicenseRef-Agami-FUL",
-  "types": "./types/index.d.ts"
+  "license": "LicenseRef-Agami-FUL"
 }

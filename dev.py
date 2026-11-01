@@ -14,7 +14,7 @@ Tasks:
   test    just the test suite
   lint    just ruff (lint + format check)
   fmt     apply ruff's auto-formatter to the tree
-  mod     the pane's mod checks: validate, tsc, `claude plugin test` (needs `claude` on PATH)
+  mod     the pane's mod checks: validate, tsc, `claude plugin test` (needs `claude` and `npx` on PATH)
   cover   patch coverage — are the lines you changed covered by a test?
   sync-lib  regenerate plugins/agami/lib/ (the vendored slice the plugin scripts import)
 """
@@ -67,7 +67,7 @@ _VENDORED = {
 
 # The pane is a mod: a TypeScript hooks module under plugins/agami/hooks/. CI's `mod` job runs the same
 # commands against the Claude Code version it pins; locally they run against whatever `claude` is
-# installed, and are skipped when there is none, so a Python-only contributor's check still passes.
+# installed (tsc through `npx`), and are skipped when either is missing, so a Python-only contributor's check still passes.
 PLUGIN = "plugins/agami"
 TSC = ["npx", "-y", "-p", "typescript@5.9.3", "tsc"]
 # tsc reads the API's declarations from <plugin>/.claude-plugin/types/, which the engine writes only
@@ -131,8 +131,9 @@ def _lib_drift() -> int:
 
 def mod() -> int:
     """The pane's mod checks: validate the plugin, type-check the hooks module, run its tests."""
-    if shutil.which("claude") is None:
-        print("\n$ mod checks\n  - skipped: `claude` is not on PATH (CI's `mod` job runs them)")
+    missing = [tool for tool in ("claude", "npx") if shutil.which(tool) is None]
+    if missing:
+        print(f"\n$ mod checks\n  - skipped: {', '.join(missing)} not on PATH (CI's `mod` job runs them)")
         return 0
     rc = run(["claude", "plugin", "validate", PLUGIN, "--strict"])
     rc |= run(LOAD_MOD, env={**os.environ, "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"})
