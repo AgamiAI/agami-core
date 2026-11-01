@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 
@@ -295,3 +296,24 @@ def test_later_pythons_on_path_are_candidates_too(monkeypatch, tmp_path):
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     got = CR._candidate_interpreters()
     assert got.index(str(first / "python3")) < got.index(str(second / "python3"))
+
+
+def test_profiles_lists_section_names_only(tmp_path, monkeypatch):
+    # The pane lists profiles from this output, so it must carry every section name and no value.
+    local = tmp_path / "local"
+    local.mkdir()
+    creds = local / "credentials"
+    creds.write_text(
+        "[acme]\ntype = postgres\nhost = h\npassword = s3cret-value\n\n[demo]\ntype = sqlite\npath = /x/y.db\n",
+        encoding="utf-8",
+    )
+    os.chmod(creds, 0o600)
+    data, _ = _run(monkeypatch, tmp_path, AGAMI_PROFILE="acme")
+    assert data["profiles"] == ["acme", "demo"]
+    assert "s3cret-value" not in json.dumps(data)
+
+
+def test_profiles_empty_without_a_credentials_file_and_platform_is_reported(tmp_path, monkeypatch):
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["profiles"] == []
+    assert data["platform"] == platform.system()

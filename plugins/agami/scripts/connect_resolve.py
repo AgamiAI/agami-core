@@ -12,6 +12,8 @@ Output (the standard refactor contract):
   {
     "ok": true,
     "data": {
+      "profiles": ["main", ...],  # every [section] name in the credentials file; names only
+      "platform": "Darwin" | "Linux" | "Windows",
       "profile": "main" | null,   # null on a first-time bootstrap (no profile yet — don't invent a name)
       "profile_source": "explicit" | "env" | "active_profile" | "default",
       "artifacts_dir": "/Users/me/agami-artifacts",
@@ -46,6 +48,7 @@ import argparse
 import configparser
 import json
 import os
+import platform
 import re
 import shutil
 import stat
@@ -279,6 +282,7 @@ def main(argv=None) -> int:
 
     # credentials section + chmod
     creds = {"present": False, "chmod_ok": True, "type": None, "fields": {}, "missing_fields": []}
+    profiles: list[str] = []  # section names only: the pane lists them, and never needs a value
     example_present = (creds_path.parent / "credentials.example").exists()
     if creds_path.exists():
         mode = creds_path.stat().st_mode
@@ -289,6 +293,7 @@ def main(argv=None) -> int:
         cp = configparser.ConfigParser()
         try:
             cp.read(creds_path, encoding="utf-8-sig")
+            profiles = cp.sections()
             if cp.has_section(profile):
                 creds["present"] = True
                 creds["fields"] = _redact(dict(cp.items(profile)))
@@ -319,6 +324,8 @@ def main(argv=None) -> int:
     data = {
         "profile": emitted_profile,
         "profile_source": profile_source,
+        "profiles": profiles,
+        "platform": platform.system(),
         "artifacts_dir": str(art),
         "credentials": creds,
         "example_present": example_present,
