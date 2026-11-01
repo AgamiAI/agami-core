@@ -255,3 +255,154 @@ def test_ready_branch_matches_the_start_card():
 def test_fields_card_prompt_rules_out_passwords_and_urls():
     s = _between("### 0a.4c ", "### 0a.4k ")
     assert "never a password or a URL that holds one" in s
+
+
+# --- Phase 1.7 / 2 progress, Phase 4 review, Phase 6 seed check: cards, not pages -----------------
+
+
+def _phase(start: str, end: str) -> str:
+    return _between(start, end)
+
+
+def _phase_4() -> str:
+    return _phase("## Phase 4:", "## Phase 5:")
+
+
+def _phase_6() -> str:
+    return _phase("## Phase 6:", "## Phase 7:")
+
+
+def _default_path(section: str) -> str:
+    """The part of a section before its optional full view."""
+    return section.split("**Show the full view")[0]
+
+
+def test_build_progress_lines_carry_only_the_engines_numbers():
+    s = _phase("### 1.7 ", "### 1.8 ")
+    assert "progress line" in s.lower()
+    assert "from the engine's output" in s
+    assert "never estimate" in s.lower() or "nothing invented" in s.lower()
+    assert 'origin: "fk"' in s  # declared foreign keys are counted from review-items, not guessed
+
+
+def test_enrich_phase_names_a_progress_line_per_step_with_its_source():
+    s = _phase("## Phase 2:", "### 2a.0 ")
+    assert "progress line" in s.lower()
+    for source in ("enrich-metadata", "coverage_pct", "suggest-metrics"):
+        assert source in s, source
+    assert "one finding" in s.lower()
+
+
+def test_4a_default_path_opens_no_explorer_and_waits_for_no_paste():
+    default = _default_path(_phase_4())
+    assert not re.search(r"end the turn|paste|feedback block", default, re.I)
+    assert "invoke `/agami-model preseed`" not in default
+    assert "AskUserQuestion" in default
+
+
+def test_4a_reads_the_queue_and_the_personal_data_columns_from_the_engine():
+    s = _phase_4()
+    assert 'sm" review-items "$ROOT" --scope preseed' in s
+    assert 'sm" sensitive "$ROOT"' in s
+    assert "extra_lines" in s
+
+
+def test_4a_review_card_has_the_three_options():
+    s = _phase_4()
+    for label in ("Approve all", "Review one by one", "Skip for now"):
+        assert label in s, label
+    assert "(Recommended)" in s
+
+
+def test_4a_one_by_one_is_four_per_card_with_approve_all_remaining():
+    s = _phase_4()
+    assert "up to 4" in s
+    assert "Approve all remaining" in s
+    assert "Approve" in s and "Reject" in s
+
+
+def test_4a_other_is_a_change_applied_with_curate_then_reasked():
+    s = _phase_4()
+    assert '"op":"edit"' in s and 'sm" curate' in s
+    assert "ask about that item again" in s.lower()
+    assert "never a generator script" in s.lower() or "never hand-edit" in s.lower()
+
+
+def test_4a_unparseable_other_is_reasked_never_guessed():
+    s = _phase_4()
+    assert "ask the same card again" in s.lower()
+    assert "never guess" in s.lower()
+
+
+def test_4a_personal_data_card_hides_columns_with_exclude_ops():
+    s = _phase_4()
+    assert "Hide these from queries" in s
+    assert "Keep them all queryable" in s
+    assert "multiSelect" in s
+    assert '"op":"exclude","kind":"table"' in s and '"column"' in s
+    assert "grouped by table" in s.lower()
+
+
+def test_4a_identity_card_asks_once_and_saves_to_config():
+    s = _phase_4()
+    assert "reviewer_email" in s and "reviewer_role" in s
+    assert "chmod 600" in s
+    assert "first approval" in s.lower()
+    assert "never infer" in s.lower()
+    assert "you@example.com" in s
+
+
+def test_4a_keeps_the_explorer_as_the_full_view():
+    s = _phase_4()
+    assert "Show the full view" in s
+    assert "serve_page.py" in s
+    assert "/agami-model preseed" in s.split("**Show the full view")[1]
+
+
+def test_4b_is_the_only_place_after_review_is_passed():
+    text = SKILL.read_text(encoding="utf-8")
+    four_b = _between("**4b ", "## Phase 5:")
+    assert "--after-review" in four_b
+    assert "Skip for now" in four_b
+    phase_5 = _phase("## Phase 5:", "## Phase 6:")
+    assert "columns_unenriched" in phase_5 and "preseed_review_pending" in phase_5
+    assert "open `/agami-model preseed`, end the turn" not in phase_5
+    assert text.count("--after-review") == four_b.count("--after-review") + phase_5.count("--after-review")
+
+
+def test_6_shows_a_table_of_seeds_then_the_four_option_card():
+    s = _phase_6()
+    assert 'sm" seed-validate' in s
+    assert "15 rows" in s
+    for label in (
+        "Keep all that ran (Recommended)",
+        "Review the failing ones",
+        "Drop the failing ones",
+        "Review all one by one",
+    ):
+        assert label in s, label
+
+
+def test_6_keep_signs_with_add_example_and_drop_uses_remove_example():
+    s = _phase_6()
+    assert 'sm" add-example' in s and "--signer" in s and "--role" in s
+    assert 'sm" remove-example' in s
+
+
+def test_6_one_by_one_uses_keep_drop_and_other_for_a_fix():
+    s = _phase_6()
+    assert "Keep all remaining" in s
+    assert "up to 4" in s
+    assert "ask the same card again" in s.lower() and "never guess" in s.lower()
+
+
+def test_6_default_path_renders_no_dashboard_and_waits_for_no_reply_grammar():
+    default = _default_path(_phase_6())
+    assert not re.search(r"end the turn|paste|Open it", default, re.I)
+    assert "render_examples_validation.py" not in default
+
+
+def test_6_keeps_the_examples_page_as_the_full_view():
+    full = _phase_6().split("**Show the full view")[1]
+    assert "render_examples_validation.py" in full and "serve_page.py" in full
+    assert "validate N" in full  # its pasted block is still accepted

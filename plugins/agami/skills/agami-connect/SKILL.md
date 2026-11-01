@@ -41,7 +41,7 @@ Seed (one task per major phase, in order):
 5. Enrich: descriptions, entities, metrics (LLM, validated into the model)
 6. Curate before examples: exclude columns/tables + sign off metrics & entities
 7. Generate seed NL→SQL examples (validated against the live DB)
-8. Validate every seed example (user reviews via dashboard)
+8. Validate every seed example (user reviews on cards)
 9. Post-introspect trust summary
 10. Follow-up suggestions
 ```
@@ -783,7 +783,11 @@ It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: st
 
 The validator gates the write — **if it fails, the model is not persisted.** Surface the errors verbatim and stop (this should be rare; the engine emits valid models).
 
-Surface: `✓ Introspected <N> tables across <A> subject area(s) (<catalog|probe> mode); <R> relationships, <D> deep tables, <S> sensitive columns flagged.`
+**Post one progress line, with numbers from the engine's output only.** No card here: the build asks nothing. Every number comes from the report it printed (`tables:`, `relationships:`, `subject_areas (<A>)`, `capability modes:`, `deep tables:`, `sensitive columns:`); never estimate, round up or fill a number the output didn't give. For how many joins came from declared foreign keys, count the relationship items with `origin: "fk"` in `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT"`; if you didn't run it, leave that clause out.
+
+`✓ Read <N> tables into <A> subject area(s) (<catalog|probe> mode); <R> joins, <F> from declared foreign keys; <S> columns flagged personal; <D> wide tables.`
+
+Add **one finding** on the next line when the report has one worth a person's attention, quoted from it: a `suspected personal data (review):` line, a `large table` line, or a note that dropped a table. One, not a list; none when there is none. Batched builds post `batch 3/5 (+12 tables)` between calls, then this line once at the end.
 
 **Backstop reconciliation — if `<N>` is fewer than the catalog held, say what's NOT in the model and why** (the 1.3 guard should have covered this up front; repeat it here so it can't slip). E.g. *"Modeled 52 of 70 tables — left out `public` (17, separate Salesforce dataset) and `pg_auto_copy` (1, system). Say the word if you want any of them."* A user who picked "all" should never have to diff the catalog themselves to notice a schema is missing.
 
@@ -812,6 +816,18 @@ Surface any `notes` too — in particular a metric flagged as a plain aggregate:
 ## Phase 2: Enrich (the LLM layer — validated into the model)
 
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
+
+**One progress line per step, no card.** After each step below, post one line with the numbers that step's command printed, and nothing invented: never a count you worked out by reading YAML, never a percentage you estimated. Leave out a step that didn't run.
+
+| Step | Line | Numbers from |
+|---|---|---|
+| 2a.0 | `✓ Read the database's own dictionary: <n> columns described, <j> joins added` | `enrich-metadata`'s `columns_enriched` and `relationships_added` (left out when it printed `enriched: false` with no `fetched`) |
+| 2a | `✓ Described <C>% of columns` | `sm coverage`'s `coverage_pct` |
+| 2b | `✓ Added <E> entities` | `sm add --kind entity`'s `applied` |
+| 2c | `✓ Proposed <M> metrics (<f> flagged, left out)` | `sm suggest-metrics`'s proposals, then `--write`'s `applied` |
+| 2d | `✓ Set units on <U> money columns` | `sm set-units`'s plan as applied |
+
+Add **one finding** to a line when the step surfaced one, in the person's terms and quoted from what you read, e.g. *"`status` stores 1–6; decoded as pending, paid, shipped, …"* or *"`amount` is in cents."* One per step at most.
 
 > **HARD RULE — decisions to you, plumbing to the engine. NEVER write a generator script** (`build_ops.py`, `build_desc.py`, `enrich_*.py`, a one-off that loops to build curate ops). It's the recurring failure mode and it's banned. When you have many edits, emit them as data and let a tested command apply them: `sm describe-file` (TSV of descriptions; a customer's CSV/JSON dictionary with `--source metadata`), `sm enrich-metadata` (in-DB metadata), `sm set-units`, `sm suggest-metrics`, or `sm curate --ops-file <json>`. You decide *what* (currency, which metrics, a column's meaning); the engine does the *applying*.
 
@@ -1054,11 +1070,9 @@ I split <N> tables into <A> subject areas:
 <C> joins span areas (kept as cross-area relationships).
 ```
 
-**The model explorer is the review surface — route adjustment through it, don't pre-empt it with a modal.** So:
-- **Trivial split** (single area, or a handful of obviously-right areas with nothing else to curate): a quick **AskUserQuestion** `Looks good (Recommended)` / `Adjust — merge/rename/move (Other field)` is fine. Skip silently for a single-area small DB.
-- **Non-trivial model** (many areas, or there's PII / proposed metrics / sign-offs pending — i.e. the Phase 4 curate gate will fire anyway): **make `Open the model explorer` the default** and let the user review the area split *there*, in one pass alongside PII, descriptions, and metric sign-off — rather than eyeballing a text table in a modal then opening the explorer separately. Don't ask the same thing twice.
+Show the split as above (at most 15 areas; say how many more), then one **AskUserQuestion** (header `Areas`): `Looks good (Recommended)` / `Adjust`, with "Other" taking the change in the person's words ("move `refunds` to `payments`"). Skip silently for a single-area small DB. A change that names an area or table the model doesn't have is said back and the same card asked again; never guess which one they meant.
 
-If they adjust, move tables with the curate `move` op (the explorer's **Move to area** queues it) — never by editing the `subject_areas/` tree: `{"op":"move","kind":"table","area":"<from>","name":"<table>","to_area":"<to>"}` (add `"schema"` when two schemas share the table name; a `to_area` the model doesn't have yet is created). Its joins follow it — a join that now spans two areas becomes a cross-area join and the reverse — and metrics and entities move with it once every table they read is in the new area; the result's `notes` list what it moved and what stayed because it also reads another table. The whole batch is validated and undone on failure (sizing warns at 25 tables, errors at 30).
+If they adjust, move tables with the curate `move` op — never by editing the `subject_areas/` tree: `{"op":"move","kind":"table","area":"<from>","name":"<table>","to_area":"<to>"}` (add `"schema"` when two schemas share the table name; a `to_area` the model doesn't have yet is created). Its joins follow it — a join that now spans two areas becomes a cross-area join and the reverse — and metrics and entities move with it once every table they read is in the new area; the result's `notes` list what it moved and what stayed because it also reads another table. The whole batch is validated and undone on failure (sizing warns at 25 tables, errors at 30).
 
 **Replace each area's auto-proposed description with a real one** — the engine seeds `"Auto-proposed subject area covering: <tables>"`, which is boilerplate, but the **subject-area description is load-bearing**: it's what the MCP shows in its first pass so the LLM can ROUTE a question to the right area (`get_datasource_schema` returns name + description per area). A blank/boilerplate description means the router is guessing. So write one business line per area — what domain it covers and when you'd query it — grounded in its tables/columns (NOT product memory). Apply through the validated path, one batch (no generator script):
 ```bash
@@ -1072,29 +1086,87 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_di
 
 Seeds reference **columns, tables, metrics, and entities** — so settle those *before* generating examples (a seed that uses a column you'd later exclude breaks at query time, and a seed built on an unreviewed metric bakes in a guessed definition). **Relationships are NOT gated here** — they stay lazy: FK joins are already auto-approved by the engine (the DB declared them), and inferred joins self-approve as you query, and an unreviewed one raises the trust banner on the answer's report. So you're not asked to rubber-stamp database-declared foreign keys.
 
-**4a — The curate gate: open the explorer whenever there's anything to curate.** One call returns the decision (turn-boundary-safe — same answer on a fresh run or a resume):
+**4a — What needs a decision, asked on cards.** One call returns the counts (turn-boundary-safe — same answer on a fresh run or a resume):
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate-gate "$ROOT"
 ```
-→ `{pii_count, preseed_count, should_open_explorer}`. **PII count** = columns flagged `sensitive` still queryable (an excluded column, or any column under an excluded table, isn't counted — so once the user excludes them it drops to 0 and the gate stops re-opening). **preseed count** = metrics + named-filters + entities needing sign-off (relationships are NOT gated — FK joins are engine-approved, inferred joins self-approve as you query).
+→ `{pii_count, preseed_count, should_open_explorer}`. **PII count** = columns flagged `sensitive` still queryable (an excluded column, or any column under an excluded table, isn't counted — so once the person hides them it drops to 0). **preseed count** = metrics + named-filters + entities needing sign-off (relationships are NOT gated — FK joins are engine-approved, inferred joins self-approve as you query). `should_open_explorer` only means "something to decide": nothing opens on this path.
 
-> **PII is advisory, not a seed blocker.** `should_open_explorer` can be true purely from a non-zero `pii_count` (sensitive columns still queryable) — that's a *review nudge* (the user's call to exclude or keep), **not** a gate on seed generation. Only a non-zero `preseed_count` (unreviewed metrics/entities) actually blocks `seed-examples`. Don't tell the user PII is stopping their seeds; it isn't.
+> **PII is advisory, not a seed blocker.** A non-zero `pii_count` is a *review nudge* (the person's call to hide or keep), **not** a gate on seed generation. Only a non-zero `preseed_count` (unreviewed metrics/entities) blocks `seed-examples`. Don't tell the person personal data is stopping their seeds; it isn't.
 
-**If `should_open_explorer` is true → invoke `/agami-model preseed` and END THE TURN.** The explorer is the **single** curation surface, with task-focused tabs so nothing is buried:
-- the **PII tab** — every flagged column *and* every suspected-but-unflagged one (e.g. `ip_address`, or a column whose sampled values look like phone numbers or birth dates) in one list, each with a confirm/clear toggle. This is where the user reviews PII without hunting through tables.
-- the **Metrics tab** — the proposed measures grouped by table and collapsed (`incident · 9 [✓ Approve 9]`), with per-table and "approve all proposed" bulk buttons, so a few-hundred-metric set signs off fast.
-- the **Review** tab — metrics/entities/joins under "Needs your eyes" for anything needing a closer look; per-column **Exclude** toggles live on **Tables**.
+**If BOTH counts are 0 → say "Nothing to review before examples; continuing."** and go to Phase 5.
 
-Lead with one plain line of what's waiting — e.g. *"I flagged 12 PII columns and surfaced 8 more that look like PII, plus ~180 proposed metrics to sign off — opening the model explorer. Review on the PII and Metrics tabs and send the feedback block back when you're done."* — then **stop and wait** for their batch.
+Otherwise run the two steps below that apply (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). When both apply, the review question and the personal-data question can go on the same card, two questions on one AskUserQuestion call.
 
-**Do NOT** present an inline `AskUserQuestion` to quick-exclude a few columns, and do NOT offer "continue now vs open explorer" here. The explorer **is** the exclude-and-review surface; a 4-option modal holds a fraction of what a real DB needs dropped, and splitting PII exclusion across a modal + the explorer is exactly the fragmented flow we're removing. (This replaces the old inline PII multiSelect — PII now routes through the explorer like every other exclusion.)
+**Sign-offs (when `preseed_count` > 0).** Read the queue from the engine:
 
-**If BOTH counts are 0 → surface "Nothing to curate before examples — proceeding"** and continue to Phase 5.
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed
+```
 
-> **This gate OPENS the explorer; it is not a choice.** When either count is > 0 you open `/agami-model preseed` and end the turn. A high count is a reason to open it, not to skip it (bulk-approve the *Looks right* pile, eyeball PII + the cross-schema joins there). The "continue anyway" option exists **only** at the 4b return gate — after the user has been in the explorer at least once.
+Each item is `{kind, area, name, extra_lines:[{label,text}], bindings, review_state, …}`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set). An item with `changes_since_approval` was signed off before and has changed since: say so on its row. Show a markdown table, `Kind | Name | What it means`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more.
 
-**4b — return gate:** when they're back, **recount the sign-offs** with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0** (partial — they reviewed some and stopped) → AskUserQuestion: `Continue (Recommended)` (seeds run against current state; receipts warn) / `Pause — I'll finish review first` (end; resume via `/agami-connect`). This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **PII left un-excluded does NOT block seeds** — keeping a sensitive column queryable is the user's call; only unreviewed *sign-offs* gate the seeds.
+Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do with the <P> definitions waiting for sign-off?"*:
+
+- **Approve all**: sign off every item as listed. Mark it **(Recommended)** and put it first only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`. Otherwise put **Review one by one** first and mark that one (Recommended).
+- **Review one by one**: up to 4 items per card (below).
+- **Skip for now**: nothing is signed; they still work, and answers that use one carry a warning until it is signed off.
+
+| Answer | Do |
+|---|---|
+| Approve all | The identity card first if needed (below), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
+| Review one by one | The one-by-one cards below. |
+| Skip for now | Nothing is written. Go to 4b. |
+
+**One by one.** Up to 4 items per card, one question each. `header` is `Metric 3/9` or `Entity 3/9` (at most 12 characters; drop the word when the numbers are long). The question is the item's name and its one-line meaning, *"revenue: sum of paid order totals, refunds excluded"*. Options:
+
+- **Approve**: sign it off as written.
+- **Reject**: drop it from the model (`{"op":"reject",…}`).
+- **Approve all remaining**: sign off this item and every item not yet shown. Every card carries it, so a long queue finishes in one press. Answers given on the same card to the other questions still stand.
+
+After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
+
+**"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
+
+**An "Other" you can't act on is re-asked, never guessed.** An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
+
+**Sign-off identity: asked once, on the first approval.** Before the first `approve` op of the run (from Approve all, Approve, or Approve all remaining), read `reviewer_email` and `reviewer_role` from `<artifacts_dir>/local/.config` (the keys `/agami-model` uses). When both are there, use them and don't ask. When either is missing, ask one card with two questions:
+
+- header `Email`, *"Which email should sign-offs be recorded under?"*: options **Type it in Other** and **Don't sign anything yet** (nothing is approved; the items stay as they are and you go to 4b). The email is typed in "Other", e.g. `you@example.com`.
+- header `Role`, *"What is your role?"*: options **Data Lead**, **Engineer**, **Analyst**; "Other" takes any other role (≤ 40 characters).
+
+The identity is typed by the person: **never infer it** from git config, the environment, the credentials, or the Claude login, and don't pre-fill a domain. An email that doesn't match `\S+@\S+\.\S+`, or **Type it in Other** picked with nothing typed, is said back and the same card asked again. Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key), then `chmod 600 <artifacts_dir>/local/.config`, so neither this run nor `/agami-model` asks again.
+
+**Personal-data columns (when `pii_count` > 0).** Read them from the engine:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
+```
+
+It prints `{count, columns:[{area, table, column}]}`. Show them as a table, `Table | Columns`, at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
+
+- 3 columns or fewer: one option per column, `customers.email`.
+- More: grouped by table, one option per table with its count, `customers (3: email, phone, birth_date)`. With more than 3 tables, the options are **All <count> flagged columns** and the 2 tables with the most flagged columns.
+- Always last: **Keep them all queryable**.
+- "Other" takes `table.column` names to hide, including any the build listed under `suspected personal data (review)`.
+
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
+
+**Show the full view (optional, only when asked).** The model explorer, with every metric, entity, join and column: render it the way `/agami-model preseed` does (`render_model_explorer.py … --initial-tab review`) and serve it from localhost, giving the person the URL:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minutes 30
+```
+
+Its "Generate feedback for Claude" block is still accepted when the person pastes it: apply it as `/agami-model` does, then continue at 4b.
+
+**4b — after the cards:** **recount the sign-offs** with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
+
+- the person picked **Skip for now** or **Don't sign anything yet** → that is their decision to continue: say in one line that <n> definitions are unsigned and answers using them carry a warning, and go to Phase 5.
+- they stopped part-way (said so in "Other") → AskUserQuestion: `Continue (Recommended)` (seeds run against the current state; answers warn) / `Pause — I'll finish review first` (stop here; resume via `/agami-connect`).
+
+This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **Personal data left queryable does NOT block seeds** — keeping a sensitive column queryable is the person's call; only unreviewed *sign-offs* gate the seeds.
 
 On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip silently.
 
@@ -1114,7 +1186,7 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 Tag each with its `tables` (list **all** tables it touches — both schemas for a cross-area one), `columns`, and `metrics` (**every** model metric it computes, by `name`, so it is found under each; a name the model doesn't declare rejects the seed). **Store a cross-area seed under its primary/driving table's area** (tagged with both schemas' tables, so the ranker can surface it from either side). Write the candidates as a JSON array to `<artifacts_dir>/local/tmp/agami-seeds.json` — each: **required** `question`, `sql`; optional `tables`, `columns`, `metrics`.
 
-**5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error:
+**5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error. Post one progress line from its output (`totals`, or `added` and `rejected` for one area): *"✓ Wrote <added> examples; <rejected> failed the dry run."*
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-examples "$ROOT" --profile <profile> --file "<artifacts_dir>/local/tmp/agami-seeds.json"
 ```
@@ -1122,7 +1194,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-examples "$ROOT" --profile <profile
 
 > **The command enforces Phases 2 and 4 for you.** It runs two gates before writing anything:
 > - `{refused: "columns_unenriched", unenriched_tables}` → a table got no column descriptions at all (you skipped the Phase-2 column pass). Go back, run the column pass on those tables, re-run. **NOT bypassable** — naked columns degrade every answer.
-> - `{refused: "preseed_review_pending", pending_count}` → metrics/entities the seeds depend on are still unreviewed (you skipped the explorer-first review). **Go back to Phase 4a**, open `/agami-model preseed`, end the turn. Bypass only via `--after-review`, and **only** on the Phase-4b return path (the user has already been in the explorer and chose to continue with some items unreviewed). Never pass `--after-review` to force past a *fresh* refusal.
+> - `{refused: "preseed_review_pending", pending_count}` → metrics/entities the seeds depend on are still unreviewed (you skipped the review). **Go back to Phase 4a** and ask its Sign-off card. Bypass only via `--after-review`, and **only** on the Phase-4b path (the person has answered the Sign-off card and chose to continue with some items unreviewed). Never pass `--after-review` to force past a *fresh* refusal.
 
 ---
 
@@ -1138,36 +1210,53 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 
 (Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected, and run it in the background if it's slow.)
 
-Then render the examples-validation dashboard (per-profile subdir) from those items:
+**Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
+
+| # | Question | Rows | Result |
+|---|---|---|---|
+| 3 | Revenue by month this year | 12 | 2024-01 $41,200 · 2024-02 $39,850 · … |
+| 7 | Top 5 customers by orders | — | failed: `column "cust_id" does not exist` |
+
+`#` is the item's `n`, `Rows` its `row_count`, `Result` the first row or two of `row_preview` under `row_headers` (already unit-formatted), or `failed:` and its `error`. A result that looks wrong though it ran (a ratio far outside its range, a count of 0, a trend sorted by name) goes in one sentence under the table: that is 6a's case.
+
+Then call AskUserQuestion, one question (header `Examples`), *"What should I do with these examples?"*:
+
+- **Keep all that ran (Recommended)**: sign off every example that returned rows. Drop the (Recommended) and put **Review all one by one** first when a result that ran looks wrong (6a).
+- **Review the failing ones**: one by one, only the ones with an `error`. Leave it out when none failed.
+- **Drop the failing ones**: mark every failed example rejected. Leave it out when none failed.
+- **Review all one by one**: every example, 4 per card.
+
+| Answer | Do |
+|---|---|
+| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet. Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
+| Review the failing ones | The one-by-one cards over the failed items. |
+| Drop the failing ones | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example "$ROOT" --question "<area>/<question>" …` (one `--question` per failed item, `--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
+| Review all one by one | The one-by-one cards over every item. |
+
+**One by one.** Ask up to 4 examples per card, one question each, header `Example 3/9` (at most 12 characters; past 9/99 use `Ex 12/40`). The question is the example's question and what it returned, *"Revenue by month this year: 12 rows, 2024-01 $41,200"* (or *"failed: <error>"*). Options: **Keep** (the `add-example` sign-off above, for that one), **Drop** (`remove-example` for that one), and **Keep all remaining** (keep this one and every remaining one that ran). "Other" describes a fix in the person's words ("should only count paid orders"): rewrite that example's SQL, write it with `sm add-example` (same question, so it replaces), re-run its area with `sm seed-validate "$ROOT" --profile <profile> --area <area>`, and ask about it again showing the new result. A fix that touches a column or metric beyond this one example is 6a's: fix it everywhere, as 6a says. **An "Other" you can't act on is re-asked, never guessed**: an empty fix, or one naming a column the model doesn't have, is said back and you ask the same card again.
+
+When every example has an answer, go to Phase 7.
+
+**Show the full view (optional, only when asked).** The examples-validation page, with every result and its SQL. Render it from the items and serve it from localhost, giving the person the URL:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py \
   --title "Seed examples · <profile>" --profile <profile> \
   --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" \
   --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30
 ```
 
-It takes the combined object or a single area's array; repeat `--items-file` to put several files on one dashboard, labelling a single area's array with its area as `--items-file <area>=<path>` (an unlabelled one is refused there, since two areas can share a question; so is the same file twice). Each card shows its area.
+It takes the combined object or a single area's array; repeat `--items-file` to put several files on one page, labelling a single area's array with its area as `--items-file <area>=<path>` (an unlabelled one is refused there, since two areas can share a question; so is the same file twice). Each card shows its area.
 
-The user reviews matches (green) / mismatches (red) with drill-down. This is the strongest "do these numbers match?" trust moment — surface it.
-
-**Then END THE TURN and WAIT — do NOT continue to Phase 7/8 in the same message.** Like the Phase 4 gate, this is a hard stop: render the dashboard, give the one-line hand-off + the chat grammar (`approve` / `reject` / `edit` / `done`), and **stop**. The user is *in* the dashboard validating; printing the post-introspect summary or the "things you could ask" closing now (before they've validated) is exactly the bug we're avoiding. Re-render after each batch they send back, and only when they reply **`done`** (or have actioned every example) do you proceed to Phase 7.
-
-Hand-off line (then end the turn):
-```
-Examples validated against your live DB → <artifacts_dir>/local/examples-validation/<profile>/<ts>.html
-Open it: green = numbers match, red = mismatch (drill in to see the SQL).
-Reply: approve N · reject N · edit N · done (when you're through).
-```
-
-**Processing the batch:** the dashboard emits `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all` — apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the dashboard's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back (the per-area seed numbers no longer collide):
-- **`validate N`** → the example is a trusted anchor; if the user signed in (the `by <email>` clause), record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written). The sign-off is recorded in `curation_log.jsonl`, not on the example: an example carries no signer field, so don't look for one there.
-- **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). The item carries its `area`. To reject several examples across areas in one call, leave out `--area` and name each as `--question "<area>/<question>"` (looked up in that area only); a bare question is matched in whichever area has it, and one that more than one area has is refused (`refused: ambiguous_question`, with the areas) and nothing is rejected. That call adds `areas` (one result per area) and `totals` to the output. It marks the example `status: rejected`: kept in `examples.yaml` for audit (not deleted), dropped from the runtime ranker. Its JSON lists each example under `rejected` (`example (rejected) <area>/<full question>`) and under `examples` (`area`, `question`, `id` when the example has one, `status`), with a `note` saying they were marked rejected and kept; tell the user it's rejected and kept, not deleted. **Do NOT hand-delete or hand-rewrite the YAML** (there's a command now); map `N` → the example's question from the items you rendered.
+The page's block is still accepted when the person pastes it: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
+- **`validate N`** → the example is a trusted anchor; if the block carries a `by <email>` clause, record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written).
+- **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). To reject several across areas in one call, leave out `--area` and name each as `--question "<area>/<question>"` (looked up in that area only); a bare question is matched in whichever area has it, and one that more than one area has is refused (`refused: ambiguous_question`, with the areas) and nothing is rejected. That call adds `areas` and `totals` to the output. It marks the example `status: rejected`: kept in `examples.yaml` for audit (not deleted), dropped from the runtime ranker. Tell the person it's rejected and kept, not deleted.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
 
 When the user gives a **cross-cutting display/formatting rule** (currency, units, number formatting — applies to many examples, not one), classify it like any correction (see [`agami-save-correction`](../agami-save-correction/SKILL.md) → "DISPLAY / FORMATTING preference"): a currency/unit fact attaches to the **column** (a `caveat`/`value_transform` in the shared model — org-wide by construction); a cross-cutting presentation convention → `datasource.md`; a personal tic → `USER_MEMORY.md`. Don't reflexively file to USER_MEMORY, and don't reflexively ask — only ask if personal-vs-org is genuinely unclear. **Display rounding is a convention, not SQL** — a "show fewer decimals" rule → `datasource.md`, never `ROUND()` baked into the example's SQL (that corrupts the exact-number verification anchor; the system formats numbers in full via `units.py`).
 
-**`note all >>>…<<<` — the model-wide note. Apply it ONCE; the user never repeats themselves.** The dashboard has a "note for the whole model" box (separate from per-example `note N`). Its content arrives as a single **`note all >>>…<<<`** block. Treat it as one correction that applies across the board: classify it like any other (see [`agami-save-correction`](../agami-save-correction/SKILL.md)) and write it to the **right place, once** — a column `unit`/`caveat`/`value_transform` (a data fact: "amounts are in INR", "TOTAL can be negative"), a cross-cutting presentation convention → `datasource.md`, a personal display tic → `USER_MEMORY.md`, or a filter/business rule the user wants applied → the relevant column/example. Then **re-render so every affected example reflects it**, and name where it landed in one line — *"Got it — set `<col>`'s unit to INR model-wide; it'll show on every example now."* If the user is still typing the same thing into per-example `note N` boxes, that's a smell: lift it to a single model-wide change and tell them they don't need to repeat it. (Formatting is just the common case — the rule is generic: any cross-cutting fact is stated once, written once, applied everywhere.) Note the result preview is already unit-formatted — `sm seed-validate` runs numbers through the same `units.py` as the live query path — so a money column showing a **bare** number means a missing column `unit`, not a per-example note.
+**`note all >>>…<<<` — the model-wide note. Apply it ONCE; the user never repeats themselves.** The full view page has a "note for the whole model" box (separate from per-example `note N`). Its content arrives as a single **`note all >>>…<<<`** block. Treat it as one correction that applies across the board: classify it like any other (see [`agami-save-correction`](../agami-save-correction/SKILL.md)) and write it to the **right place, once** — a column `unit`/`caveat`/`value_transform` (a data fact: "amounts are in INR", "TOTAL can be negative"), a cross-cutting presentation convention → `datasource.md`, a personal display tic → `USER_MEMORY.md`, or a filter/business rule the user wants applied → the relevant column/example. Then **re-render so every affected example reflects it**, and name where it landed in one line — *"Got it — set `<col>`'s unit to INR model-wide; it'll show on every example now."* If the user is still typing the same thing into per-example `note N` boxes, that's a smell: lift it to a single model-wide change and tell them they don't need to repeat it. (Formatting is just the common case — the rule is generic: any cross-cutting fact is stated once, written once, applied everywhere.) Note the result preview is already unit-formatted — `sm seed-validate` runs numbers through the same `units.py` as the live query path — so a money column showing a **bare** number means a missing column `unit`, not a per-example note.
 
 ### 6a — A bad number is the highest-value catch: fix it COMPLETELY, and ask in PLAIN language
 
@@ -1195,7 +1284,7 @@ Validation often surfaces a result that's *obviously wrong* — a bounded ratio 
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-**Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after they replied `done` (or actioned everything) at the Phase 6 examples gate, and after the Phase 4 curate gate returned. **Never print this summary or the Phase 8 closing in the same turn that you rendered a dashboard, and never while the user is mid-review.** If a dashboard (Phase 4 review, Phase 6 validation) is still open and unanswered, you should have ended the turn there — wait for the user, don't summarize over them.
+**Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered, or while a full view page is out and its block hasn't come back** — wait for the person, don't summarize over them.
 
 Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved. Lead with the **must-do** count, break out optional polish separately.
 
