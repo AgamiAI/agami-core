@@ -188,6 +188,19 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A description edit without `source` keeps whose words the description is (#549).** A `sm curate`
+  edit to a table or column description that passed no `source` stamped it `description_source:
+  human`, so fixing a typo in a description from the customer's data dictionary silently dropped
+  its `metadata` origin. Such an edit now keeps the provenance it finds: `metadata` stays
+  `metadata`, and a description agami wrote stays `ai_unvalidated` and still comes up for a check.
+  A first description, or one written for a column agami couldn't read (`ai_unknown`), is `human`
+  as before. Changing provenance takes an explicit `source` (`human`, `metadata` or `ai`; any other
+  value is skipped), and `sm curate`, `sm describe-file` and `sm enrich-metadata` report each
+  change as `provenance_changed: [{item, from, to}]`. The curation log records
+  `description_source_before` and `description_source_after` on every description edit. A
+  correction saved through agami-save-correction now passes `source: human`.
+
+
 - **Numbers in the examples preview and in query answers are formatted by their column's type and
   unit (#547).** A year shows as `2011`, not `2,011`; a ZIP code read as text keeps its leading
   zero (`07094`); `-719` no longer shows as `-,719`; a NUMERIC value drops its trailing zeros
