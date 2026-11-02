@@ -147,6 +147,43 @@ across schemas. Table and column
 names are quoted where the engine needs it, so a mixed-case table such as `"OrderLines"` works on
 PostgreSQL.
 
+`sm add` and `sm curate` refuse a new or edited binding that puts an aggregate inside another in
+the same SELECT, including in a `WITHIN GROUP (ORDER BY ...)` or `FILTER (WHERE ...)` clause
+(`PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY SUM(amount))`), or a window function inside an
+aggregate (`AVG(SUM(amount) OVER ())`) or inside another (`SUM((SUM(amount) OVER ())) OVER ()`),
+because the database refuses every query that uses it. A window over an aggregate is fine
+(`SUM(SUM(amount)) OVER ()`), and so is an aggregate over a subquery that groups first. SQL Server
+refuses any subquery inside an aggregate, so there aggregate over a derived table instead:
+`(SELECT AVG(t.v) FROM (SELECT ... AS v FROM ...) AS t)`. An aggregate in a scalar subquery counts
+as the outer query's when it reads only the outer query's columns, so `AVG((SELECT SUM(orders.amount)))` is refused too, while
+`AVG((SELECT SUM(o2.amount) FROM orders o2 WHERE o2.customer_id = orders.customer_id))`, which sums
+the subquery's own rows, is accepted. The one exception is an Oracle binding: Oracle runs two levels of
+aggregate in the argument of a SELECT that has its own GROUP BY, so
+`(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is accepted there. A bare
+`AVG(SUM(amount))` has no GROUP BY of its own and is still refused on Oracle, as is a third level,
+and the same binding for any other engine is refused. A metric already in the model that nests
+aggregates gets a `metric_binding_nested_aggregate` warning instead.
+
+**An average of the values that exist.** A missing value is not a zero, so don't fill it before
+averaging. For one column write `AVG(col)`: it already leaves missing values out. For several
+columns, divide the sum of the present values by the count of the present values, without a
+`VALUES` list or a per-row subquery:
+
+```yaml
+bindings:
+  PostgreSQL: "SUM(COALESCE(score_a, 0) + COALESCE(score_b, 0)) * 1.0 / NULLIF(COUNT(score_a) + COUNT(score_b), 0)"
+```
+
+The `* 1.0` keeps the average fractional: without it an integer sum divided by a count is integer
+division on PostgreSQL, SQLite and SQL Server (scores 1 and 2 give 1, not 1.5). The zero added for a
+missing score is not counted in the denominator, so it changes nothing, and `metric_null_filled`
+does not warn on this shape: a `SUM` of `COALESCE(col, 0)` terms in the numerator whose denominator
+counts only the present values of the same columns, written the same way (`a.score` is not
+`b.score`, and on PostgreSQL, Snowflake and Oracle a quoted `"Score"` is not `score`), with
+`COUNT(col)` or the searched `SUM(CASE WHEN col IS NOT NULL THEN 1 ELSE 0 END)`. Any other
+fallback than 0, another aggregate such as `AVG(COALESCE(col, 0))` (it averages the invented zeros),
+or a denominator term such as `COUNT(*)` that counts the missing rows still warns.
+
 ## Entity
 
 Fields: `name`, `plural`, `other_names`, `description`, `maps_to` (one entry per

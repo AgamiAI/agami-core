@@ -738,7 +738,8 @@
         return txt;
       }
       if (state === 'rejected') return 'rejected';
-      if (state === 'stale')    return 'stale (schema drift — needs reconciliation)';
+      // Stale: approved once, then changed (an edit, or the database moved under it) — not signed off.
+      if (state === 'stale')    return 'stale (changed since it was approved — not signed off until re-approved)';
       // unreviewed. `confidence` is a LABEL (confirmed / inferred / proposed), never a number — the
       // branch here used to be `typeof entry.confidence === 'number' ? toFixed(2) : '?'`, which
       // never matched, so every unreviewed entry read "confidence ?" to every user who opened the
