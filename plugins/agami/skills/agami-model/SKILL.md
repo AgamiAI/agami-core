@@ -113,7 +113,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_model_feedback.py --block-file <paste
 
 It prints `{data, anomalies, needs_judgment}`:
 - `data.profile` — the dashboard's target model. **Use it, overriding the active-profile default** (a block was rendered for THAT model; never apply it to whatever's active).
-- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
+- `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/add/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call.
 - `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
 - An example the user wants dropped rather than edited → `sm remove-example "$ROOT" --question "<area>/<question>"` (repeat `--question`; with no `--area` one call covers every area, and a bare question found in more than one area is refused, not rejected everywhere).
@@ -139,9 +139,13 @@ It prints `{data, anomalies, needs_judgment}`:
   {"op": "reject",  "kind": "entity", "area": "sales", "name": "region"},
   {"op": "exclude", "kind": "metric", "area": "sales", "name": "avg_discount", "reason": "not a real metric"},
   {"op": "approve", "kind": "relationship", "area": "sales", "name": "orders->customers", "at": "2026-06-10T17:51:41Z"},
+  {"op": "add",     "kind": "relationship", "from_table": "orders", "from_column": "cust_ref",
+                    "to_table": "customers", "to_column": "id", "relationship": "many_to_one"},
   {"op": "move",    "kind": "table", "area": "sales", "name": "shipments", "to_area": "fulfilment"}
 ]
 ```
+
+An `add` (the explorer's **+ Add a join** on the Joins tab) writes a new join. It takes `from_table`, `to_table`, `relationship` (`many_to_one` / `one_to_one` / `one_to_many`) and either `from_column` + `to_column` or an `on` condition for a key over several columns or a filtered join (`"on": "orders.region = customers.region AND orders.cust_no = customers.cust_no"`); `from_schema` / `to_schema`, `join_type` and `description` are optional. It needs no `area`: a join between two tables of one area goes in that area, one between two areas goes in the cross-area joins. It is always written `unreviewed`, so it shows in the Review tab for sign-off (an `add` never approves). A table or column the model doesn't serve (missing, excluded or stale) fails the batch and undoes it, and so does any column an `on` names (a filter or a cast too, and beside an explicit `from_column` / `to_column`) that isn't on one of the join's two tables, written `<table>.<column>` (`<schema>.<table>.<column>` when both tables share a name); the same join already in the model is skipped with a reason in `skipped` (an `on` that differs only in a quoted value's case, `'Y'` against `'y'` or `$$Y$$` against `$$y$$`, is another join, approved or rejected on its own by passing its `on`). The join is placed by the areas that serve its two tables. The join is written with the model's own spelling of its tables and columns. Joins introspection tested but didn't write are listed in `<ROOT>/.introspect/join_candidates.json`, each as a ready `add` op; to accept one, run `sm curate "$ROOT" --ops-file "$ROOT/.introspect/join_candidates.json" --candidate <id>` (see agami-connect 1.7).
 
 A `move` (the explorer's **Move to area**) gives the table a new owning area, created if the model doesn't have it yet. Its joins follow it (a join that now spans two areas becomes a cross-area join, and the reverse), and the metrics and entities on it move too once every table they read is in the new area. Ones that also read a table outside it stay; the result's `notes` lists them (*"left in sales: metric units_per_order also reads orders"*). A join the new area already holds is kept once: a person's sign-off over the engine's approval, and that over an unreviewed copy; two copies a person signed off that disagree refuse the move until one is approved or rejected to match. Pass `notes` on to the user verbatim; a batch that was undone reports none.
 

@@ -58,6 +58,34 @@ below corresponds to one such version.
 
 ### Added
 
+- **A join can be added through `sm curate` and the model explorer, and introspection reports the
+  joins it tested but didn't write (#512).** The curate op `{"op":"add","kind":"relationship",
+  "from_table","from_column","to_table","to_column","relationship"}` (or an `on` condition instead
+  of the columns, for a key over several columns or a filtered join; `from_schema`, `to_schema`,
+  `join_type` and `description` optional) writes the join `unreviewed`, in its tables' area or in
+  the cross-area joins when they are in two areas. It is validated, logged in the curation history
+  and listed in the review queue; an add never approves. The same join already in the model is
+  skipped with a reason (an `on` that differs only in a quoted value's case, `'Y'` against `'y'`, is
+  another join, with the engine's own string forms read as quoted values too, such as PostgreSQL's
+  `$$Y$$`, `E'..'` and `N'..'` and MySQL's backslash escapes, and a quoted name keeping its case
+  where the engine compares names by case; a refresh, a model spec and approve, reject, edit,
+  exclude and move compare `on` conditions the same way, so each such join is curated on its own),
+  and a table or column the model doesn't serve fails the batch and undoes it, including every column
+  an `on` names (beside an explicit column, filters and casts too), each matched to its end by schema
+  and name. The join is placed by the areas that serve its tables, never by an excluded or stale copy,
+  and keeps the model's spelling of its tables. A moved table's joins are placed the same way. The explorer's Joins tab
+  has a **+ Add a join** form that queues the op. Introspection now tests each column no join covers
+  against the other tables' one-column keys when the name or the type matches (`orders.cust_ref`
+  against `customers.id`; a column with a value list, or one column of a key over several, when its
+  name points at the table), skipping excluded or stale columns and keys, also beside declared
+  foreign keys, and lists what it found in the report with each match rate, and in
+  `.introspect/join_candidates.json` as a ready `add` op; `sm curate <model> --ops-file <that file>
+  --candidate <id>` adds one. These candidates are never written to the model, so a refresh writes
+  the same model as before. Each test is a read-only query over at most 1,000 sampled values, at
+  most 300 per run, skipping tables over 3,000,000 rows; the report says when the cap stopped the
+  scan. A column flagged sensitive, or whose sampled values look personal, is never tested at either
+  end, and the report and the file carry only names and counts, never a sampled value.
+
 - **An example can be tagged with several metrics, and is found under each (#546).** A prompt
   example's tag held one metric name (`metric: revenue`), so an example computing two metrics could
   be linked to only one of them. It is now a list, `metrics: [revenue, order count]`; a single
