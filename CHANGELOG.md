@@ -12,6 +12,113 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
+  `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
+  tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
+  approved` with the old signer and time, so a receipt reported a definition nobody approved as
+  signed off. Such an edit now sets the item to `stale`: it is back in the review queue and a receipt
+  reports it as not signed off until someone re-approves it, which records the new signer and time.
+  Only `description`, `other_names`, a metric's `business_question`, a metric's or entity's `caveats`, an entity's
+  `plural`, and a join's `for_questions_about` keep the approval; every other field,
+  including any added later, counts as a change, and an edit that sets a field to the value it
+  already has changes nothing. Edits to an unreviewed, stale or rejected item leave its state as it
+  was. The old `signed_off_*` stay on a stale item as the record of the approval it lost, and an
+  approve with no signer can't reuse them. An edit can no longer set a sign-off field
+  (`review_state`, `signed_off_by`, `signed_off_at`, `signed_off_role`, `confidence`,
+  `migrated_from`) on any entry, so a stale item can't be re-approved under its old stamp: the op is
+  skipped and points to approve / reject / include. In one batch an approve after the edit signs off the
+  edited version (the explorer now sends approvals after edits) and an edit after the approve leaves
+  the item stale; `sm curate` lists the items an edit sent back to review under `stale`. The Review
+  tab, `sm review-queue` and `sm approve-queue` show what changed on a stale item since its approval,
+  read from `curation_log.jsonl` (e.g. "binding (sqlite) changed from SUM(amount) to SUM(amount) -
+  SUM(discount)"), or "changes not recorded" when the log doesn't reach back to it ("some changes not
+  recorded" after the changes it could read, when a line since the edit can't be read). This
+  supersedes #559's re-stamp of a person's structural join edit as their approval (#511): the edited
+  join goes stale instead, and a refresh still leaves it alone, since it re-labels only the joins
+  introspection approved itself, and never merges an edited split join into a database's composite
+  foreign key (`composite foreign key not applied: … edited since its approval`); a refresh that
+  lowers a stale join's confidence because a column's type changed keeps it `stale`, and a stale
+  `on:` join keeps its confidence. A table move (#513) keeps a stale join, metric or entity stale
+  with its old signer, and the review surfaces still show what changed; when a move finds two copies
+  of one join, a stale copy counts as a person's sign-off, so it is kept over an engine-approved one,
+  and a move where it disagrees with a copy a person signed off is refused. A move's log entry lists
+  the metrics and entities it carried (`carried`), and an item's changes follow it back only through
+  a move that carried it (a move logged without that list gives "changes not recorded"). The log entry
+  also lists each join the move placed again (`joins`: where it was and is, its identity before and
+  after with its schemas, and, when it met a copy already there, that the copies were `merged` and
+  which was `kept`); a join's changes follow back only the copy kept, say the copies were merged and
+  the other copy's changes are not recorded, and ignore a move of a same-named table in another
+  schema. An item's
+  changes come only from edits of that item: a cross-area metric or entity reads only edits of the
+  datasource-level lists, and an op that named no area (or another one) logs the area it resolved
+  to (`resolved_area`). `stale` names a moved item where it now is, and an approve after the move in
+  the same batch clears it.
+
+### Added
+
+- **A join can be added through `sm curate` and the model explorer, and introspection reports the
+  joins it tested but didn't write (#512).** The curate op `{"op":"add","kind":"relationship",
+  "from_table","from_column","to_table","to_column","relationship"}` (or an `on` condition instead
+  of the columns, for a key over several columns or a filtered join; `from_schema`, `to_schema`,
+  `join_type` and `description` optional) writes the join `unreviewed`, in its tables' area or in
+  the cross-area joins when they are in two areas. It is validated, logged in the curation history
+  and listed in the review queue; an add never approves. The same join already in the model is
+  skipped with a reason (an `on` that differs only in a quoted value's case, `'Y'` against `'y'`, is
+  another join, with the engine's own string forms read as quoted values too, such as PostgreSQL's
+  `$$Y$$`, `E'..'` and `N'..'` and MySQL's backslash escapes, and a quoted name keeping its case
+  where the engine compares names by case; a refresh, a model spec and approve, reject, edit,
+  exclude and move compare `on` conditions the same way, so each such join is curated on its own),
+  and a table or column the model doesn't serve fails the batch and undoes it, including every column
+  an `on` names (beside an explicit column, filters and casts too), each matched to its end by schema
+  and name. The join is placed by the areas that serve its tables, never by an excluded or stale copy,
+  and keeps the model's spelling of its tables. A moved table's joins are placed the same way. The explorer's Joins tab
+  has a **+ Add a join** form that queues the op. Introspection now tests each column no join covers
+  against the other tables' one-column keys when the name or the type matches (`orders.cust_ref`
+  against `customers.id`; a column with a value list, or one column of a key over several, when its
+  name points at the table), skipping excluded or stale columns and keys, also beside declared
+  foreign keys, and lists what it found in the report with each match rate, and in
+  `.introspect/join_candidates.json` as a ready `add` op; `sm curate <model> --ops-file <that file>
+  --candidate <id>` adds one. These candidates are never written to the model, so a refresh writes
+  the same model as before. Each test is a read-only query over at most 1,000 sampled values, at
+  most 300 per run, skipping tables over 3,000,000 rows; the report says when the cap stopped the
+  scan. A column flagged sensitive, or whose sampled values look personal, is never tested at either
+  end, and the report and the file carry only names and counts, never a sampled value.
+
+- **An example can be tagged with several metrics, and is found under each (#546).** A prompt
+  example's tag held one metric name (`metric: revenue`), so an example computing two metrics could
+  be linked to only one of them. It is now a list, `metrics: [revenue, order count]`; a single
+  `metric:` and a `metrics:` given as one string still read. `sm add-example` and `sm seed-examples`
+  write one metric as `metric:`, as before, and several as `metrics:`; the examples a call doesn't
+  name are written back as they were, so existing files don't change. Each tagged metric must be one
+  the model declares, by name: an example naming another is refused and listed in `skipped` (in
+  `rejected` for `sm seed-examples`). `get_prompt_examples` takes `metric_names` and `sm examples`
+  takes `--metric` (repeatable): the examples tagged with more of those metrics rank first, then
+  by the question as before. Without them the ranking is unchanged. A metric two areas both declare
+  is named by the selector `get_datasource_schema` gives it (`revenue (finance)`); that selector
+  matches the `revenue` tag on that area's examples and on cross-area ones, not on the other
+  area's, on a local and a served deployment alike. Only the first 100 distinct names are used, so
+  an oversized `metric_names` can't tie up the server.
+
+  **Reading a model:** a release older than this one serves a `metrics:` list unchanged but cannot
+  rank by it, so upgrade the server before or with a model whose examples carry several metrics.
+  Examples with one metric are written as `metric:`, which every release reads.
+
+- **`seed-examples`, `seed-validate`, `remove-example` and the examples dashboard take several subject areas in one call (#544).**
+  Each command took one `--area`, so writing or checking the examples of a database with 30–50
+  areas took dozens of calls. Repeat `--area`, or leave it out for every area in the model, and the
+  command prints one result: the single-area fields, each area's own result labelled with its
+  `area`, and `totals`. One `--area` prints exactly what it printed before. `seed-examples` then
+  writes each seed to the area it names in an `area` field. `seed-validate` runs each area's seeds
+  through `execute_sql` scoped to that area, with the same per-statement limits. `remove-example`
+  takes a question as `<area>/<question>`, looked up in that area only, or matches it in whichever
+  area has it; a question that more than one area has is refused, with the areas, and nothing is
+  rejected. The dashboard renderer reads the combined `seed-validate` output, takes `--items-file`
+  more than once (a single area's file labelled `AREA=PATH`; an unlabelled one, or the same file
+  twice, is refused), and shows each card's area. An area the model doesn't have is refused with the list of valid ones, where one
+  `--area` used to run against an empty area (and `seed-examples` created its folder).
+
 ### Fixed
 
 - **Numbers in the examples preview and in query answers are formatted by their column's type and
@@ -40,6 +147,62 @@ below corresponds to one such version.
   `sm prepare` returns these label columns as `labels`, and `sm format-table --labels` takes them.
   Big integers are no longer rounded through a float. Reports built by `csv_to_sections.py` follow
   the same rules.
+- **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
+  query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
+  every query that used it, while the check for derived metrics refused a legal aggregate over a
+  subquery and missed a `SUM` inside a percentile's `WITHIN GROUP`. The rule is now judged per
+  SELECT: an aggregate directly inside another, or in its `WITHIN GROUP` or `FILTER` clause, is
+  refused, and so is a window function inside an aggregate (`AVG(SUM(amount) OVER ())`); an
+  aggregate over a derived table or a scalar subquery is not, nor is a window over an aggregate.
+  An aggregate in a scalar subquery that reads only the outer query's columns belongs to the outer
+  query, as on PostgreSQL and SQLite, so `AVG((SELECT SUM(orders.amount)))` is refused, while one
+  that sums the subquery's own rows is not. A column's table is matched by schema and name as the
+  engine compares them (on PostgreSQL, Snowflake and Oracle a quoted alias keeps its case, so
+  `FROM orders AS "ORDERS"` does not hide an outer `orders`), and a source can be an aliased
+  `VALUES` list or a parenthesized table or join. A window function inside another window
+  function's argument or `OVER` clause (`SUM((SUM(amount) OVER ())) OVER ()`) is refused too. On
+  SQL Server, which refuses any subquery inside an aggregate, `AVG((SELECT SUM(amount) FROM
+  orders))` is refused with the derived-table rewrite; on a derived metric that is a warning. The
+  one exception is Oracle, which runs two levels of aggregate in the argument of a SELECT with its
+  own GROUP BY: an Oracle binding `(SELECT AVG(SUM(amount)) FROM orders GROUP BY customer_id)` is
+  accepted, while a bare `AVG(SUM(amount))`, a third level, or that binding on any other engine is
+  still refused. `sm add` (a subject area or `--area _cross`) and a `curate` edit of a metric's
+  `bindings` or `inner_grain` refuse such a binding with the reason, and write nothing for it. A metric already in a model gets a
+  `metric_binding_nested_aggregate` warning, never an error, so no model that validated before stops
+  validating; a derived metric nested in its argument is still the `derived_metric` error it was,
+  also when its base only nests in a `WITHIN GROUP`. An `sm add` batch reads the model once, not
+  once per derived metric. `resolve_metrics` names why a matched metric will not run, and a
+  database's own "aggregate function calls cannot be nested" (or its equivalent on SQLite,
+  Snowflake, BigQuery, Databricks, SQL Server and MySQL) is answered with a sentence naming the
+  rewrite, with the same failure kind and exit code as before. `metric_null_filled` no longer warns
+  on an average of the values present, `SUM(COALESCE(score, 0)) * 1.0 / NULLIF(COUNT(score), 0)`: a
+  numerator that only zero-fills columns inside a `SUM`, over a denominator that only counts the
+  present values of those same columns (a qualifier included, so `a.score` is not `b.score`, and on
+  PostgreSQL, Snowflake and Oracle a quoted `"Score"` is not `score`), counted with `COUNT(col)` or
+  a searched `CASE WHEN col IS NOT NULL`. Any other fallback, another aggregate or a term such as
+  `COUNT(*)` keeps the warning. The metric guidance shows that form for several columns, with the `*
+  1.0` that stops integer division. An `sm add` batch judges a derived metric with the batch's other
+  metrics known, whatever their order, and a `SUM(...) FILTER (...)` inside `AVG(...)` is nesting in
+  the argument, not in a clause.
+
+- **`sm` resolves a relative path from the folder you run it in (#542).** The launcher runs the CLI
+  from `/` so nothing in your folder can shadow the installed package, and every relative path
+  argument resolved there too: `sm curate <root> --ops-file ops.json` looked for `/ops.json`, and a
+  relative model root or output path failed the same way. The CLI now moves back to the caller's
+  folder once it has loaded. `sm curate` also takes the ops file as a second plain argument
+  (`sm curate <root> ops.json`, before or after the other options, or after `--`, which also lets
+  a file name start with `-`); `--ops-file` still works, and giving both is a usage error.
+
+- **The `measured_figure` check also finds ranges, counts in words and figures tied to now
+  (#541).** Model text such as "values range 49–142 here", "covers twelve of forty sites", "about
+  1,200 sites", "40 sites today", "1,204 orders carry no region" or "hundreds of rows have no region"
+  passed the check. It now finds numeric ranges stated as seen in the data, counts written in words
+  (up to the thousands, plus "a dozen" and "hundreds of"), hedged figures, figures with a unit or
+  next to "here", "today", "currently" or "as of", and counts inside a caveat sentence. Statements
+  about how a formula behaves ("returns 0 because no row meets the threshold"), its literals ("ELSE
+  0", "divide by 100"), scales ("ranges 0–100"), bounds ("more than 5 users", "top 10 customers"),
+  years used as dates ("since 2024"), versions and labels ("status 9 rows") are not flagged, and "2
+  rows per order" is no longer read as a count. It stays a warning.
 
 - **agami-core requires sqlglot below 30.26.** sqlglot 30.26.0 (released 2026-10-29) parses a
   `VALUES` arm of a `UNION` as one more `SELECT`, so the receipt counted an extra arm and could

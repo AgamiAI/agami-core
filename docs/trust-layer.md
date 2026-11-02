@@ -62,6 +62,43 @@ Auto-approve collapses the queue to what actually needs human eyes:
 
 Everything inferred stays `unreviewed` and surfaces in the Review tab.
 
+## Editing an approved entry sends it back to review
+
+A sign-off covers the definition that was approved, not whatever the entry says later. An edit
+(`sm curate`, the explorer's Edit) that changes what an approved metric, entity or join computes
+or connects — a binding or calculation, unit, source tables, filters, an entity's mappings, a
+join's columns, `on:` or cardinality — sets it to `stale`. A stale entry is back in the Review
+tab and is **not signed off**: a receipt shows its `review_state: stale` like any other entry that
+isn't `approved`. Its old `signed_off_*` stay as a record of the approval it lost; re-approving it
+records the new signer and time. A sign-off field (`review_state`, `signed_off_*`, `confidence`,
+`migrated_from`) is never set by an edit: use approve, reject or include, so an approval always
+records who gave it.
+
+Only cosmetic fields keep the approval: `description` and `other_names`, a metric's
+`business_question`, a metric's or entity's `caveats`, an entity's `plural`, and a join's `for_questions_about`. They
+describe an entry or steer which one a question picks, and change no SQL; an entity's
+`value_pattern` and `value_format_hint` change which rows a typed value matches, so they are not
+cosmetic. The list is an allow-list, so a field added later counts as a change to the
+definition. An edit that sets a field to the value it already has changes nothing, and an edit of
+an `unreviewed` or `stale` entry leaves its state as it is. In one batch, an approve after the
+edit signs off the edited version (the explorer sends approvals after edits); an edit after the
+approve leaves the entry stale.
+
+The Review tab, `sm review-queue` and `sm approve-queue` show what changed on a stale entry since
+its approval, read from `curation_log.jsonl` — e.g. *binding (sqlite) changed from SUM(amount) to
+SUM(amount) - SUM(discount)*, with who made each edit and when. When the log doesn't reach back to
+the edit that took the approval away, the entry still shows as stale, with *changes not
+recorded*. Only that entry's own edits are shown: a cross-area metric's history never includes a
+same-named metric's edits in a subject area, and a table move brings an entry's earlier edits with
+it only when the move carried that entry (its log entry lists them under `carried`). A join's
+history follows only the copy a move kept (the move's log entry lists the joins it placed under
+`joins`); when the move merged two copies, the history says so and that the other copy's changes
+are not recorded.
+
+A refresh (`introspect --append`) re-labels only the joins introspection approved itself, so it
+never touches a join a person edited: a stale join is not one of those, and it keeps its edited
+columns, cardinality and `stale` state.
+
 ## Rule 1 vs Rule 2 — and the hybrid review order
 
 - **Rule 1 — metrics** (always queue): a metric must be signed off — a
