@@ -131,7 +131,7 @@ grep -qxF 'local/' "<artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n'
 
 ### 0a.2 — Ask the database type
 
-**AskUserQuestion**, one question, header `Database`, no `(Recommended)` — fact-of-environment. The sample data is on the start card (1a), not here.
+**AskUserQuestion**, one question, header `DB type`, no `(Recommended)` — fact-of-environment. The sample data is on the start card (1a), not here.
 
 **Name the Other-only engines in the QUESTION PROMPT** so they're visibly supported — the auto-provided "Other" field can't carry its own description/examples, so the examples must live in the prompt. End the prompt with a line like:
 > *Something else — BigQuery, SQL Server, Oracle, Databricks, Trino/Presto, DuckDB, or SQLite? Choose **Other** and type it (a name or a file path).*
@@ -560,7 +560,7 @@ The engine **auto-backs-up any legacy (v1) model** (`index.yaml` + per-schema `_
 
 ### 1.1a — Same company vs different company
 
-When the user chooses **Onboard another database**, ask (AskUserQuestion) whether the new database belongs to the **same company** or a **different** one. A deployment (one artifacts dir) holds exactly **one** company/organization with many datasources under it; a genuinely different company is a **different folder**.
+When the user chooses **Onboard another database**, ask (AskUserQuestion, header `Same org`) whether the new database belongs to the **same company** or a **different** one. A deployment (one artifacts dir) holds exactly **one** company/organization with many datasources under it; a genuinely different company is a **different folder**.
 
 - **Same company (the common case)** → the new profile **attaches under the deployment org**: it lands in the **same** `<artifacts_dir>`, shares the same `org_id` from the root `organization.yaml`, and **shares the company context** authored earlier. Do **not** re-ask the company description (1.4 detects the already-authored company context and skips it); the per-database note is still asked. Narrate it: *"This attaches under your **`<company name>`** organization, sharing the company context you set earlier — its per-database notes stay its own."*
 - **Different company** → set up a **new deployment folder**. Pick/confirm a new artifacts dir path, create it, and **repoint** the pointer to it (the same idiom Phase 0a.1 uses for a non-default dir):
@@ -622,7 +622,7 @@ Then confirm both landed. On a **later** onboard (company context already there)
 
 **B. Context card — every onboard.** This is 1.5 below; ask it after A.
 
-**C. Database card — every onboard.** The one line `list_datasources` shows an agent so it can pick the right datasource (an organization with several refuses a query that names none), and, when the person writes more, this database's narrative. AskUserQuestion, one question, header `Database`:
+**C. About-it card — every onboard.** The one line `list_datasources` shows an agent so it can pick the right datasource (an organization with several refuses a query that names none), and, when the person writes more, this database's narrative. AskUserQuestion, one question, header `About it`:
 
 > *"In one line, what does this database hold, and when would someone query it? Type it in Other, e.g. "Invoices, payments and products: use for revenue questions." Add more sentences if a term means something specific here."*
 

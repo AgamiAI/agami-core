@@ -5,7 +5,9 @@ table in the chat, and a page opens only when the person asks for one. Link this
 skill; do not copy it. `<plugin_root>` is defined at the top of `invocation-conventions.md`.
 
 A card holds 1 to 4 questions. Each question has 2 to 4 options, plus the automatic "Other", and
-may allow several picks (`multiSelect`). `header` is at most 12 characters.
+may allow several picks (`multiSelect`). `header` is at most 12 characters. Give each question a header no other
+question in the same flow uses: two different questions both headed "Database" read as the same
+question asked twice.
 
 ## 1. A decision is a card, never prose
 

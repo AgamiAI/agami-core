@@ -44,3 +44,15 @@ def test_every_other_fallback_answers_questions_first() -> None:
             if _FALLBACK.search(paragraph) and _RULE_5A not in paragraph:
                 offenders.append(f"{p.parent.name}: {paragraph[:80]!r}")
     assert not offenders, offenders
+
+
+def test_no_two_questions_in_a_skill_share_a_header():
+    # A live run showed three different questions all headed "Database", read as one asked thrice.
+    allowed = {("agami-connect", "Tables")}  # the catalog-denied card and 1.6 never both run
+    offenders = []
+    for p in _skills():
+        headers = re.findall(r"header `([^`]+)`", p.read_text())
+        for h in sorted({h for h in headers if headers.count(h) > 1}):
+            if (p.parent.name, h) not in allowed and not re.search(r"\d|<", h):
+                offenders.append(f"{p.parent.name}: {h}")
+    assert not offenders, offenders

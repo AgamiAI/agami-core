@@ -539,7 +539,7 @@ def test_1_5_context_card_asks_for_definitions_questions_and_reports():
 
 def test_1_4_asks_the_company_and_the_database_on_cards():
     s = _between("### 1.4 ", "### 1.5 ")
-    assert "header `Company`" in s and "header `Database`" in s
+    assert "header `Company`" in s and "header `About it`" in s
     assert "**Skip for now**" in s and "**Draft it from the database**" in s
     assert "**Generate one for me (Recommended)** / **Skip**" in s
     # typed values go in the question text, never as an option (question-cards rule 5)
