@@ -38,12 +38,12 @@ PostgreSQL has the richest SQL feature set. Prefer native PostgreSQL features wh
 - `STRING_AGG(name, ', ' ORDER BY name)` — NOT LISTAGG
 
 ### DISTINCT ON
-- `SELECT DISTINCT ON (account_id) * FROM contacts ORDER BY account_id, created_date DESC`
+- `SELECT DISTINCT ON (account_id) account_id, contact_id, created_date FROM contacts ORDER BY account_id, created_date DESC`
 - Use for "latest per group" without subqueries
 
 ### Window Functions
 - Full support: ROW_NUMBER(), RANK(), LAG(), LEAD(), etc.
-- No QUALIFY clause — use subquery: `SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) AS rn FROM t) sub WHERE rn = 1`
+- No QUALIFY clause — use subquery: `SELECT id, amount FROM (SELECT id, amount, ROW_NUMBER() OVER (...) AS rn FROM t) sub WHERE rn = 1`
 
 ### Other
 - `GENERATE_SERIES(start, end, step)` for sequences and date ranges
@@ -82,7 +82,7 @@ PostgreSQL-based but with significant restrictions. Many PostgreSQL features are
 - Standard window functions supported
 - **No QUALIFY clause** — use a subquery instead:
   ```sql
-  SELECT * FROM (SELECT *, ROW_NUMBER() OVER (...) AS rn FROM t) sub WHERE rn = 1
+  SELECT id, amount FROM (SELECT id, amount, ROW_NUMBER() OVER (...) AS rn FROM t) sub WHERE rn = 1
   ```
 - Cannot use window functions in same SELECT that has GROUP BY — aggregate first in subquery
 
@@ -118,7 +118,7 @@ Snowflake uppercases all unquoted identifiers. Use UPPERCASE for column/table na
 - `LISTAGG(name, ', ') WITHIN GROUP (ORDER BY name)` — NOT STRING_AGG
 
 ### QUALIFY Clause
-- **Natively supported**: `SELECT *, ROW_NUMBER() OVER (...) AS rn FROM t QUALIFY rn = 1`
+- **Natively supported**: `SELECT id, amount, ROW_NUMBER() OVER (...) AS rn FROM t QUALIFY rn = 1`
 - Prefer QUALIFY over subquery wrapper
 
 ### Type Conversion
@@ -352,8 +352,7 @@ QUALIFY ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY order_date DESC) = 
 ```
 
 ### SELECT extensions
-- `SELECT * EXCEPT (col1, col2) FROM t` — all columns except the listed ones.
-- `SELECT * REPLACE (expr AS col) FROM t` — replace one column's expression while keeping `*`.
+- The star modifiers (`* EXCEPT (…)`, `* REPLACE (…)`) are refused like any projected star — list the columns instead.
 - `AS` keyword is optional for aliases (`SELECT x alias_name`), but writing `AS` explicitly is recommended.
 - **Reuse a `SELECT` alias only as a whole `ORDER BY` or `GROUP BY` item, or a window alias in `QUALIFY`.** BigQuery (and Snowflake) also read aliases in `WHERE` and `HAVING`, but agami's column check refuses that, because a same-named column of the table would be read instead: write the expression out (`HAVING SUM(amount) > 1000`, not `HAVING revenue > 1000`).
 - `SELECT AS STRUCT ...` / `SELECT AS VALUE ...` — produce a struct-typed or value-typed row (used inside `ARRAY(...)` subqueries).

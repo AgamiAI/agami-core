@@ -239,13 +239,14 @@ def test_the_forked_child_writes_no_raw_driver_text_to_stderr(warehouse):
 
     The parent relays the child's stderr into `failure.message` for any classified code, so
     anything the child prints there reaches the caller. The child must print the sanitized
-    line and nothing else.
+    line and nothing else. It runs with the marker the MCP tool puts on the child it forks; a
+    person's own command line also gets the database's first line (#523).
     """
     proc = subprocess.run(
         [sys.executable, "-m", "execute_sql", "--profile", PROFILE,
          "--sql", "SELECT missing_column FROM orders"],
         capture_output=True, text=True, timeout=120,
-        env={**os.environ, "AGAMI_ARTIFACTS_DIR": str(warehouse)},
+        env={**os.environ, "AGAMI_ARTIFACTS_DIR": str(warehouse), execute_sql.SERVED_CHILD_ENV: "1"},
         cwd=str(pathlib.Path(execute_sql.__file__).parent),
     )
     assert proc.returncode == guardrail_exit_for("column_not_found")
