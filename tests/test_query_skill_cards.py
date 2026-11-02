@@ -253,3 +253,9 @@ def test_the_star_ask_has_no_emoji_or_exclamation_and_answers_in_the_same_turn()
     assert "same turn" in s
     trigger = _between("### 4e.5 ", "### 4f ")
     assert "End the turn here" not in trigger
+
+
+def test_rates_are_rounded_in_the_sql():
+    # A live run showed 79.6501901140684411 in an answer table.
+    text = (Path(__file__).resolve().parent.parent / "plugins" / "agami" / "skills" / "agami-query" / "SKILL.md").read_text()
+    assert "**Round what a person reads, in the SQL.**" in text

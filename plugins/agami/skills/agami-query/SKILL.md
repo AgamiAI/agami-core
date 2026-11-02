@@ -319,6 +319,8 @@ Options: `Run anyway (Recommended for one-off)` / `Let me add a filter` / `Cance
 
 **No Snowflake federation.** DuckDB's `snowflake_scanner` is experimental and not packaged with the standard binary. If a profile in the picked set has `db_type=snowflake`, `build_duckdb_attach.py` exits with a clear error: surface it to the user and suggest pre-aggregating one side as a CSV.
 
+**Round what a person reads, in the SQL.** A rate, a percentage or an average comes out of the database with a dozen decimals (`79.6501901140684411`), and the table formatter shows numbers exactly as they arrive, on purpose. So wrap a rate or percentage in `ROUND(…, 1)` and an average or money value in `ROUND(…, 2)` in the statement itself. Never round a count or a sum of whole things. A metric wrapped in `ROUND` still matches its signed-off definition on the receipt.
+
 ### 2c — safety checks
 
 Apply [`shared/sql-generation-rules.md`](../../shared/sql-generation-rules.md):
