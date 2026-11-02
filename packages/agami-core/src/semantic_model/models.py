@@ -35,6 +35,7 @@ validator gives via `additionalProperties: false`.
 
 from __future__ import annotations
 
+import functools
 import re
 from typing import Any, Iterable, Literal, NamedTuple, Optional
 
@@ -96,6 +97,56 @@ def table_key(name: str, schema: Optional[str] = None) -> tuple[str, str]:
     bare = bare_name(name or "")
     embedded = parts[-2] if len(parts) > 1 else None
     return ((schema if schema not in (None, "") else embedded) or "").lower(), bare.lower()
+
+
+_SQL_STRING_RE = re.compile(r"'(?:[^']|'')*'")
+
+
+_LITERAL_TOKENS = ("STRING", "NATIONAL_STRING", "BYTE_STRING", "HEREDOC_STRING", "RAW_STRING",
+                   "HEX_STRING", "BIT_STRING", "UNICODE_STRING")
+
+
+def _fold_gap(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower())
+
+
+def on_text_key(on: Optional[str], dialect: Optional[str] = None) -> str:
+    """An `on:` condition's text for comparing two joins: case and spacing folded outside string
+    literals only, since `b.flag = 'Y'` and `b.flag = 'y'` select different rows on most engines.
+
+    The literals are found by `dialect`'s own tokenizer, so `$$Y$$`, `E'..'`, `N'..'` and a
+    backslash-escaped quote are each one literal where the engine reads them so. A quoted identifier
+    keeps its case too, unless the dialect compares identifiers case-insensitively."""
+    return _on_text_key(on or "", dialect)
+
+
+@functools.lru_cache(maxsize=4096)
+def _on_text_key(text: str, dialect: Optional[str]) -> str:
+    try:
+        from sqlglot.dialects.dialect import Dialect, NormalizationStrategy
+        from sqlglot.tokens import TokenType
+
+        d = Dialect.get_or_raise(dialect)
+        tokens = d.tokenize(text)
+    except Exception:
+        # No sqlglot, or text the tokenizer can't read: the standard-SQL reading of literals.
+        out, at = [], 0
+        for m in _SQL_STRING_RE.finditer(text):
+            out += [_fold_gap(text[at:m.start()]), m.group(0)]
+            at = m.end()
+        out.append(_fold_gap(text[at:]))
+        return "".join(out).strip()
+    literal = {getattr(TokenType, n) for n in _LITERAL_TOKENS if hasattr(TokenType, n)}
+    keep_quoted = d.normalization_strategy is not NormalizationStrategy.CASE_INSENSITIVE
+    out, at = [], 0
+    for t in tokens:
+        raw = text[t.start:t.end + 1]
+        kept = t.token_type in literal or (keep_quoted and t.token_type is TokenType.IDENTIFIER)
+        # What lies between tokens (spacing, comments) is folded as before.
+        out += [_fold_gap(text[at:t.start]), raw if kept else raw.lower()]
+        at = t.end + 1
+    out.append(_fold_gap(text[at:]))
+    return "".join(out).strip()
 
 
 def stored_identity(name: str, schema: Optional[str] = None) -> tuple[str, str]:
@@ -284,6 +335,8 @@ SemiAdditiveAgg = Literal["last", "first", "average", "min", "max"]
 # context instead of rubber-stamping a giant list. An `ai_unknown` column used in an answer
 # is surfaced the same way ("I used `xyz` but don't know what it is — is this right?").
 DescriptionSource = Literal["human", "ai_unvalidated", "ai_validated", "ai_unknown", "metadata"]
+# What a placeholder value stands for (#445): an unknown member, a still-open row, or nothing set.
+PlaceholderMeaning = Literal["unknown", "current", "not_set"]
 Cardinality = Literal["many_to_one", "one_to_many", "one_to_one"]
 JoinType = Literal["INNER", "LEFT", "RIGHT", "FULL", "CROSS"]
 # `federated` is metric-only (a cross-datasource metric fans across engines and reconciles the
@@ -402,6 +455,25 @@ class DenormalizedFrom(_Base):
     freshness: Optional[str] = None
 
 
+class Placeholder(_Base):
+    """A stored value that stands in for something else (#445): `-99999`, `9999-12-31`, `'-'`.
+
+    Introspection proposes it (`review_state: unreviewed`, no `meaning`) and a person says what it
+    means; approving records the meaning with that person's sign-off, rejecting says it is real data
+    so a refresh doesn't ask again. Only an approved entry is served, and nothing filters a query."""
+
+    # Exactly as stored, never trimmed: `''` and `' - '` are different values.
+    value: constr(strip_whitespace=False)
+    meaning: Optional[PlaceholderMeaning] = None
+    reason: str = ""  # the shape introspection saw, e.g. "a date more than 50 years ahead"
+    rows: Optional[int] = None
+    confidence: Confidence = "proposed"
+    review_state: ReviewState = "unreviewed"
+    signed_off_by: Optional[str] = None
+    signed_off_at: Optional[str] = None
+    signed_off_role: Optional[str] = None
+
+
 class Column(_Base):
     name: str
     type: ColumnType
@@ -440,6 +512,7 @@ class Column(_Base):
     timezone: Optional[str] = None
     denormalized_from: Optional[DenormalizedFrom] = None
     caveats: list[str] = Field(default_factory=list)
+    placeholders: list[Placeholder] = Field(default_factory=list)
     # curation/trust — structure is trusted by default (introspected); the curator
     # sets review_state='rejected' via /agami-model to exclude a column from the
     # runtime, or signs off enriched detail via /agami-model.
@@ -456,6 +529,18 @@ class Column(_Base):
             if not c or not c.strip():
                 raise ValueError("caveats entries must be non-empty strings")
         return v
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_placeholders(self, handler: Any) -> Any:
+        # Left out when empty so a column without any dumps as before; an older release forbids the key.
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("placeholders"):
+            data.pop("placeholders", None)
+        return data
+
+    def served_placeholders(self) -> list[Placeholder]:
+        """The placeholders a person has given a meaning to."""
+        return [p for p in self.placeholders if p.review_state == "approved" and p.meaning]
 
 
 # ---------------------------------------------------------------------------

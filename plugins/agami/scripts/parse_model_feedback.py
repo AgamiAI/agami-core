@@ -16,6 +16,8 @@ Input (stdin or --block-file):
     include tables:  <area>.<table>
     exclude columns: <area>.<table>.<column>, ...
     curate-ops: [ {"op":"approve","kind":"metric","area":"...","name":"...","at":"..."},
+                  {"op":"add","kind":"relationship","from_table":"<t>","from_column":"<c>",
+                   "to_table":"<t>","to_column":"<c>","relationship":"many_to_one"},
                   {"op":"move","kind":"table","area":"<from>","name":"<table>","to_area":"<to>"}, ... ]
                 (a reject may carry a "reason"; it is kept and lands in curation_log.jsonl)
     new-metrics: [ {"area":"...","name":"...","calculation":"...", ...}, ... ]
@@ -161,6 +163,11 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
         elif jk == "datasource-md":
             data["datasource_md"] = parsed  # JSON-encoded string → the full datasource.md text
 
+    for o in ops:
+        if isinstance(o, dict) and o.get("op") == "add" and not (
+                o.get("from_table") and o.get("to_table") and o.get("relationship")
+                and (o.get("on") or (o.get("from_column") and o.get("to_column")))):
+            anomalies.append({"kind": "add_join_missing_field", "detail": json.dumps(o)})
     # A move changes the area every other op on that table names, so it runs after them.
     moves = [o for o in ops if isinstance(o, dict) and o.get("op") == "move"]
     for o in moves:
