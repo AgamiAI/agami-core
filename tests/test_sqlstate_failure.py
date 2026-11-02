@@ -235,3 +235,42 @@ def test_a_coded_sentence_on_another_sanitized_code_is_not_relayed():
         tools._child_failure_message(code, _CODED)
         == execute_sql._ERROR_MESSAGES["column_not_found"]
     )
+
+
+# --- An aggregate inside another (#519) -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "sqlstate"),
+    [
+        ("Postgres execution error: aggregate function calls cannot be nested\n"
+         "LINE 1: SELECT AVG(SUM(amount)) FROM orders", "42803"),
+        ("SQLite execution error: misuse of aggregate function SUM()", None),
+        ("Snowflake execution error: 002065 (42601): SQL compilation error:\n"
+         "Aggregate functions cannot be nested: [SUM(AMOUNT)] nested in [AVG]", None),
+        ("BigQuery execution error: Aggregations of aggregations are not allowed", None),
+    ],
+)
+def test_a_nested_aggregate_is_explained_and_keeps_its_kind(text, sqlstate, engine, monkeypatch):
+    env = _run(_Raiser(text, sqlstate=sqlstate))
+    assert env.failure.message == execute_sql.NESTED_AGGREGATE_MESSAGE
+    assert "amount" not in env.failure.message.lower()
+    # the kind, and so the exit code, is what it was without the sentence: only the message is new
+    monkeypatch.setattr(execute_sql, "_is_nested_aggregate_error", lambda text: False)
+    before = _run(_Raiser(text, sqlstate=sqlstate))
+    assert env.failure.kind == before.failure.kind
+    assert env.status == before.status == "failed"
+
+
+def test_an_echoed_statement_does_not_pick_the_nested_aggregate_sentence(engine):
+    env = _run(_Raiser("Postgres execution error: something else\n"
+                       "LINE 1: SELECT 'aggregate function calls cannot be nested'"))
+    assert env.failure.message == execute_sql.UNEXPECTED_FAILURE_MESSAGE
+
+
+@pytest.mark.parametrize("kind", ["syntax", "other"])
+def test_the_parent_relays_the_nested_aggregate_sentence_exactly(kind):
+    code = execute_sql.FAILURE_KIND_TO_EXIT[kind]
+    msg = execute_sql.NESTED_AGGREGATE_MESSAGE
+    assert tools._child_failure_message(code, f"a library line\n{msg}\n") == msg
+    assert tools._child_failure_message(code, f"{msg} amount=4521.17") != f"{msg} amount=4521.17"

@@ -98,7 +98,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/sm" context "$ROOT" --area A --tables t1 t2   #
 bash "$AGAMI_PLUGIN_ROOT/scripts/sm" examples "$ROOT" --area A --query "…"     # examples-first ranking
 ```
 
-The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-model to reconcile."*
+The model loader already drops `review_state: rejected` entries from what it serves and applies the area's `expose_column_groups` scoping, so you never see excluded tables/columns/relationships. (Rejections are the curator's choice via `/agami-model` — surfaced nowhere.) When a query would touch a `stale` entry, warn once. A stale metric, entity or join was approved and then edited, so it is not signed off: *"This uses `<entity>`, which changed since it was approved and needs re-approving in /agami-model."* A stale table or column is schema drift: *"This would use `<entity>`, marked stale (schema drift). Run /agami-connect to re-introspect, then /agami-model to reconcile."*
 
 ### 1c — what the model gives you
 
@@ -213,7 +213,7 @@ For a single profile, follow the **examples-first canonical loop** — the subje
 
 **Step 1 — pick the subject area(s).** `cli areas "$ROOT"` → choose the area(s) whose description matches the question's intent. Most questions touch one area; cross-area ones (a join spanning two areas) select both, and the org's `cross_subject_area_relationships` supply the join.
 
-**Step 2 — examples first (strongest signal).** `cli examples "$ROOT" --area <area> --query "<question>"`. If `high_confidence` is true, mirror the top match's tagged tables / columns / metric / SQL shape and jump to step 5 — skip cold-start resolution.
+**Step 2 — examples first (strongest signal).** `cli examples "$ROOT" --area <area> --query "<question>"`, adding `--metric "<name>"` for each model metric the question names, so the examples tagged with it rank first. If `high_confidence` is true, mirror the top match's tagged tables / columns / metrics / SQL shape and jump to step 5 — skip cold-start resolution.
 
 **Step 3 *(cold start only)* — resolve entities + metrics + opaque literals.** Match the question's terms to the area's entities (and `metrics`). For any opaque literal in the question (an ID-looking token), the CLI entity matching recognizes its type via `value_pattern` (folded into `get_datasource_schema` on the MCP surface, not a separate tool); if it returns `clarify`, ask the user one targeted question rather than guessing.
 

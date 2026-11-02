@@ -468,6 +468,42 @@ def _sqlstate_failure(sqlstate: str) -> tuple[FailureKind, str]:
 
 
 
+# --- Nested aggregates (#519) ----------------------------------------------------------------------
+#
+# Every engine refuses an aggregate inside another (`AVG(SUM(x))`), often from a metric binding the
+# statement copied, and each words it its own way; read generically it was the unexplained `other`.
+# The sentence names the rewrite and nothing the database said. The kind (and so the exit code) stays
+# whatever the classifier and the SQLSTATE made it: only the message is ours.
+NESTED_AGGREGATE_MESSAGE = (
+    "The database refused an aggregate used where aggregates are not allowed, most often one "
+    "aggregate inside another such as AVG(SUM(x)). Compute the inner aggregate in a subquery grouped "
+    "by the finer grain, then aggregate its result in the outer query. If the statement copied a "
+    "metric's binding, the model's validator names that metric (metric_binding_nested_aggregate)."
+)
+_NESTED_AGGREGATE_FRAGMENTS = (
+    "aggregate function calls cannot be nested",            # PostgreSQL, Redshift, DuckDB
+    "aggregate functions cannot be nested",                 # Snowflake
+    "aggregations of aggregations are not allowed",         # BigQuery
+    "aggregate function in the argument of another aggregate function",  # Databricks
+    "cannot perform an aggregate function on an expression containing an aggregate",  # SQL Server
+    "misuse of aggregate function",                         # SQLite
+    "invalid use of group function",                        # MySQL
+)
+
+
+def _is_nested_aggregate_error(text: str) -> bool:
+    """Whether the database's own diagnosis is an aggregate it does not allow there. Only the primary
+    line is read (and the next one when it ends a header such as "SQL compilation error:"), never
+    the echoed statement, so a literal in the SQL cannot pick this."""
+    first = sql_dialect_rules.primary_diagnostic(text or "")
+    lines = [first]
+    rest = (text or "").strip().splitlines()[1:2]
+    if first.rstrip().endswith(":") and rest:
+        lines.append(rest[0])
+    lowered = " ".join(lines).lower()
+    return any(fragment in lowered for fragment in _NESTED_AGGREGATE_FRAGMENTS)
+
+
 # The kinds a dialect rule may never replace (#566): failures whose fix is not a rewrite. Everything
 # else the classifier reads from an execution error is open to a rule matched on the primary message,
 # since the classifier reads the WHOLE text and an echoed statement can push a function error into
@@ -3378,6 +3414,9 @@ def execute_guarded(
             sqlstate = sqlstate_of(exc)
             if sqlstate is not None:
                 kind, message = _sqlstate_failure(sqlstate)
+        if fix is None and exc.code == 5 and kind in ("syntax", "other") \
+                and _is_nested_aggregate_error(exc.msg):
+            message = NESTED_AGGREGATE_MESSAGE
         return _envelope("failed", failure=Failure(kind=kind, message=message),
                          receipt=_receipt_for(received_sql, profile, bounded=True))
     except Exception:

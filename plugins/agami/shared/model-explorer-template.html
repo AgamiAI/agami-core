@@ -35,6 +35,8 @@
       "relationships":[ { "qname", "from_table", "from_column", "to_table", "to_column", "on",
                           "from_schema", "to_schema", "cross_schema",
                           "cardinality", "description", "review_state", "excluded", "area" } ],
+      (a stale metric / entity / join also carries "changes_since_approval":
+         { "recorded", "changes": [ { "field", "before", "after", "by", "at", "text" } ], "summary" })
       "examples":     [ { "n", "qname", "question", "sql", "tables", "source", "status", "area" } ]
     }
     A table:
@@ -696,6 +698,7 @@
     // newExamples[]  = {area, question, sql}   (human-added NL→SQL examples)
     // dsEdit        = new datasource.md text | null
     // moves[qname]  = {op:'move', kind:'table', area, name, to_area, [schema]}  (table → another area)
+    // newJoins[]    = {op:'add', kind:'relationship', from_table, to_table, from_column + to_column | on, relationship, ...}
     const pending = {};
     const ops = {};
     const moves = {};
@@ -703,6 +706,9 @@
     const exampleEdits = {};
     const newMetrics = [];
     const newExamples = [];
+    const newJoins = [];
+    let addJoinOpen = false;
+    let joinDraft = {};   // the Add join form's choices, kept across re-renders
     let dsEdit = null;
     let dsRaw = false;   // datasource.md editor mode: false = rich text, true = raw Markdown
     let termEdits = null; // edited curated glossary {term: def} | null — written back via set-terminology
@@ -1726,11 +1732,24 @@
       return header;
     }
 
+    // A stale item was approved, then edited: show what changed since that approval (#537).
+    function sinceApprovalBlock(item, body) {
+      const since = item.changes_since_approval;
+      if (item.review_state !== 'stale' || !since) return;
+      const who = item.signed_off_by ? ' (approved by ' + item.signed_off_by + ')' : '';
+      body.appendChild(labelLine('Changed since it was approved' + who));
+      const lines = since.recorded && (since.changes || []).length
+        ? since.changes.map(c => c.text + (c.by ? ' — ' + c.by : '') + (c.at ? ', ' + c.at : ''))
+        : [since.summary || 'changes not recorded'];
+      lines.forEach(t => body.appendChild(descBlock(t)));
+    }
+
     function renderMetricCard(m) {
       const eff = effExcluded(m);
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(m.qname) ? ' queued-' + queuedAction(m.qname) : '') });
       card.appendChild(flatCardHeader(m.name, m, eff));
       const body = el('div', { class: 'table-body' });
+      sinceApprovalBlock(m, body);
       body.appendChild(labelLine('What it measures (click to edit)'));
       body.appendChild(hintLine('The plain-language definition — this is what agami matches a question against. The SQL below is how it’s computed.'));
       body.appendChild(inlineBlock({ qname: m.qname, area: m.area, name: m.name, kind: 'metric',
@@ -1773,6 +1792,7 @@
       const card = el('div', { class: 'table-card' + (eff ? ' excluded' : '') + (queuedAction(e.qname) ? ' queued-' + queuedAction(e.qname) : '') });
       card.appendChild(flatCardHeader(e.name + (e.plural ? ' / ' + e.plural : ''), e, eff));
       const body = el('div', { class: 'table-body' });
+      sinceApprovalBlock(e, body);
       if ((e.maps_to || []).length) { body.appendChild(labelLine('Maps to')); body.appendChild(descBlock(e.maps_to.join(', '))); }
       if ((e.other_names || []).length) { body.appendChild(labelLine('Also called')); body.appendChild(descBlock(e.other_names.join(', '))); }
       if (e.value_pattern) { body.appendChild(labelLine('Value pattern (regex)')); body.appendChild(preBlock(e.value_pattern)); }
@@ -1801,6 +1821,7 @@
                                  : `${fq}${r.from_table} → ${tq}${r.to_table}${r.on ? ' ON ' + r.on : ''}`;
       card.appendChild(flatCardHeader(join, r, eff));
       const body = el('div', { class: 'table-body' });
+      sinceApprovalBlock(r, body);
       if (r.cardinality) { body.appendChild(labelLine('Cardinality')); body.appendChild(descBlock(r.cardinality)); }
       body.appendChild(labelLine('Description (click to edit)'));
       body.appendChild(inlineBlock({ qname: r.qname, area: r.area, name: relName(r), kind: 'relationship',
@@ -1960,6 +1981,92 @@
         shown.forEach(r => sec.appendChild(renderRelCard(r)));
       }
       root.appendChild(sec);
+    }
+
+    // "Add join": queues a curate `add` op; the engine checks the tables and columns, skips a join
+    // the model already has, and writes it unreviewed where the two tables' areas say.
+    const JOIN_TABLES = (manifest.schemas || []).flatMap(s => (s.tables || []).map(t => ({
+      name: t.name, schema: t.db_schema || '', area: s.name,
+      label: (t.db_schema ? t.db_schema + '.' : '') + t.name + ' (' + s.name + ')',
+      columns: (t.fields || []).filter(f => !f.excluded).map(f => f.name) })));
+    function renderAddJoinForm() {
+      const d = joinDraft;
+      const wrap = el('div', { class: 'table-card add-form' });
+      wrap.appendChild(el('div', { class: 'table-header static' }, el('div', { class: 'table-name' }, 'New join')));
+      const body = el('div', { class: 'table-body' });
+      const pick = (key, choices, blank, redraw) => {
+        const sel = el('select', { 'data-join': key, onchange: (ev) => {
+          d[key] = ev.target.value;
+          if (redraw) { d[key.replace('_table', '_column')] = ''; renderAll(); }
+        } });
+        sel.appendChild(el('option', { value: '' }, blank));
+        choices.forEach(([v, label]) => sel.appendChild(el('option', { value: v }, label)));
+        sel.value = d[key] || '';
+        return sel;
+      };
+      ['from', 'to'].forEach(side => {
+        body.appendChild(labelLine(side === 'from' ? 'From table (the many side)' : 'To table (the key it points at)'));
+        body.appendChild(pick(side + '_table', JOIN_TABLES.map((t, i) => [String(i), t.label]), 'Choose a table…', true));
+        const t = JOIN_TABLES[d[side + '_table']];
+        body.appendChild(labelLine(side === 'from' ? 'From column' : 'To column'));
+        body.appendChild(pick(side + '_column', (t ? t.columns : []).map(c => [c, c]),
+                              t ? 'Choose a column…' : 'Choose the table first', false));
+      });
+      body.appendChild(labelLine('Cardinality'));
+      body.appendChild(pick('relationship', [['many_to_one', 'many to one'], ['one_to_one', 'one to one'],
+                                             ['one_to_many', 'one to many']], 'Choose…', false));
+      body.appendChild(labelLine('Join condition (optional, instead of the columns)'));
+      body.appendChild(hintLine('For a key over several columns or a filtered join, e.g. orders.region = customers.region AND orders.cust_no = customers.cust_no'));
+      const onTa = textarea(d.on || '', 2); onTa.setAttribute('data-join', 'on');
+      onTa.addEventListener('input', ev => { d.on = ev.target.value; });
+      body.appendChild(onTa);
+      body.appendChild(labelLine('Description (optional)'));
+      const descTa = textarea(d.description || '', 1); descTa.setAttribute('data-join', 'description');
+      descTa.addEventListener('input', ev => { d.description = ev.target.value; });
+      body.appendChild(descTa);
+      const errLine = el('div', { class: 'validate-result bad', style: 'padding:0 18px;' });
+      body.appendChild(errLine);
+      const actions = el('div', { class: 'card-actions' });
+      actions.appendChild(el('button', { type: 'button', class: 'btn-sm primary add-join-go', onclick: () => {
+        const ft = JOIN_TABLES[d.from_table], tt = JOIN_TABLES[d.to_table];
+        const on = (onTa.value || '').trim();
+        const problems = [];
+        if (!ft || !tt) problems.push('Choose both tables.');
+        if (!on && !(d.from_column && d.to_column)) problems.push('Choose both columns, or write the join condition.');
+        if (!d.relationship) problems.push('Choose the cardinality.');
+        if (problems.length) { errLine.textContent = '⚠ ' + problems.join(' '); return; }
+        const op = { op: 'add', kind: 'relationship', from_table: ft.name, to_table: tt.name, relationship: d.relationship };
+        if (ft.schema) op.from_schema = ft.schema;
+        if (tt.schema) op.to_schema = tt.schema;
+        if (on) op.on = on; else { op.from_column = d.from_column; op.to_column = d.to_column; }
+        const desc = (descTa.value || '').trim();
+        if (desc) op.description = desc;
+        newJoins.push(op);
+        joinDraft = {}; addJoinOpen = false; renderAll();
+      } }, '✓ Add join'));
+      actions.appendChild(btnSm('Cancel', () => { joinDraft = {}; addJoinOpen = false; renderAll(); }));
+      body.appendChild(actions);
+      wrap.appendChild(body);
+      return wrap;
+    }
+    function newJoinLabel(o) {
+      return o.on ? `${o.from_table} → ${o.to_table} on ${o.on}`
+                  : `${o.from_table}.${o.from_column} → ${o.to_table}.${o.to_column}`;
+    }
+    function renderNewJoinCard(o, idx) {
+      const card = el('div', { class: 'table-card queued-include' });
+      const h = el('div', { class: 'table-header static' });
+      h.appendChild(el('div', { class: 'table-name' }, newJoinLabel(o)));
+      h.appendChild(el('span', { class: 'table-state-badge badge-approved', text: 'new' }));
+      card.appendChild(h);
+      const body = el('div', { class: 'table-body' });
+      body.appendChild(hintLine(o.relationship.replace(/_/g, ' ') + ' · written unreviewed, for sign-off on the Review tab'));
+      const a = el('div', { class: 'card-actions' });
+      a.appendChild(el('button', { type: 'button', class: 'queued-exclude',
+        onclick: () => { newJoins.splice(idx, 1); renderAll(); } }, 'Remove'));
+      body.appendChild(a);
+      card.appendChild(body);
+      return card;
     }
 
     // =====================================================================
@@ -2779,6 +2886,8 @@
       qGroup('Placeholders', opv.filter(([, o]) => o.kind === 'placeholder').map(([q, o]) =>
         queueRow(o.op, o.op, `${o.name}.${o.column} '${o.value}' → ${o.meaning || 'real data'}`, () => delete ops[q])));
       qGroup('Other', opv.filter(([, o]) => !['metric', 'relationship', 'entity', 'placeholder'].includes(o.kind)).map(opRow));
+      qGroup('New joins', newJoins.map((o, i) =>
+        queueRow('add', 'add', `add join: ${newJoinLabel(o)}`, () => newJoins.splice(i, 1))));
       qGroup('Moves', Object.entries(moves).map(([q, o]) =>
         queueRow('move', 'move', `move table ${o.area}.${o.name} → ${o.to_area}`, () => delete moves[q])));
 
@@ -2948,6 +3057,7 @@
     // ---- Queued totals + footer ----
     function totalQueued() {
       return Object.keys(pending).length + Object.keys(ops).length + Object.keys(moves).length + Object.keys(edits).length
+           + newJoins.length
            + Object.keys(exampleEdits).length + newMetrics.length + newExamples.length + (dsEdit !== null ? 1 : 0)
            + (termEdits !== null ? 1 : 0);
     }
@@ -2978,6 +3088,7 @@
         if (Object.keys(exampleEdits).length) parts.push(`${Object.keys(exampleEdits).length} example`);
         if (newExamples.length) parts.push(`${newExamples.length} new example${newExamples.length === 1 ? '' : 's'}`);
         if (newMetrics.length) parts.push(`${newMetrics.length} new metric${newMetrics.length === 1 ? '' : 's'}`);
+        if (newJoins.length) parts.push(`${newJoins.length} new join${newJoins.length === 1 ? '' : 's'}`);
         if (dsEdit !== null) parts.push('org context');
         if (termEdits !== null) parts.push('glossary');
         sum.innerHTML = '<span class="count">' + total + '</span> queued · ' + parts.join(', ');
@@ -3023,8 +3134,11 @@
       const _joinByq = {};
       [...(manifest.relationships || []), ...(manifest.cross_relationships || [])]
         .forEach(r => { _joinByq[r.qname] = r; });
+      // A join's identity as the queued edits leave it: each op names the join as it stands when that
+      // op runs, so the second column edit and the approval follow the first edit's new column.
+      const _joinNow = {};
       const withJoinIdentity = (qname, o) => {
-        const r = o.kind === 'relationship' ? _joinByq[qname] : null;
+        const r = o.kind === 'relationship' ? (_joinNow[qname] || _joinByq[qname]) : null;
         if (!r) return o;
         const id = {};
         if (r.from_column) id.from_column = r.from_column;
@@ -3035,11 +3149,12 @@
         return { ...o, ...id };
       };
       const opList = [];
+      const approvals = [];
       Object.entries(ops).forEach(([qname, o]) => {
         if (o.op === 'approve') {
           const it = _byq[qname];
           if (it && mootReason(it)) return;  // skip moot approval
-          opList.push(withJoinIdentity(qname, _approveAt ? { ...o, at: _approveAt } : o));
+          approvals.push([qname, _approveAt ? { ...o, at: _approveAt } : o]);
         } else opList.push(withJoinIdentity(qname, o));
       });
       Object.entries(edits).forEach(([qname, e]) => {
@@ -3047,8 +3162,17 @@
           const op = { op: 'edit', kind: e.kind, area: e.area, name: e.name, field, value: e.fields[field] };
           if (e.column) op.column = e.column;
           opList.push(withJoinIdentity(qname, op));
+          if (e.kind === 'relationship' && _joinByq[qname]
+              && ['from_column', 'to_column', 'on', 'from_schema', 'to_schema'].includes(field)) {
+            _joinNow[qname] = { ...(_joinNow[qname] || _joinByq[qname]), [field]: e.fields[field] };
+          }
         });
       });
+      // Approvals go after the edits: approving an item you also edited signs off the edited version,
+      // where an edit applied after the approval would send it straight back to review.
+      approvals.forEach(([qname, o]) => opList.push(withJoinIdentity(qname, o)));
+      // A new join is placed by its tables' current areas, and a move then carries it along.
+      newJoins.forEach(o => opList.push(o));
       // After every op that names the table by its current area.
       Object.values(moves).forEach(o => opList.push(o));
       if (opList.length) { lines.push('curate-ops:'); lines.push(JSON.stringify(opList)); }
@@ -3102,6 +3226,7 @@
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
       newMetrics.length = 0; newExamples.length = 0; dsEdit = null; termEdits = null; addMetricOpen = false; addExampleOpen = false;
+      newJoins.length = 0; addJoinOpen = false; joinDraft = {};
       editOpen.clear();
       renderAll();
     });
@@ -3148,6 +3273,11 @@
             renderEntityCard, 'entity');
           break;
         case 'joins':
+          if (addJoinOpen) { root.appendChild(renderAddJoinForm()); }
+          else { const a = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
+                 a.appendChild(el('button', { type: 'button', class: 'add-metric-open', onclick: () => { addJoinOpen = true; renderAll(); } }, '+ Add a join'));
+                 root.appendChild(a); }
+          newJoins.forEach((o, i) => root.appendChild(renderNewJoinCard(o, i)));
           renderJoinsTab(root);  // one tab, split into In-schema + Cross-schema sections
           break;
         case 'examples':
