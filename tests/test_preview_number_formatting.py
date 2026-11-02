@@ -588,3 +588,214 @@ def test_a_label_cell_as_written():
     assert units.format_rows(["store_id"], [[Decimal("5.00")]]) == [["5"]]
     assert units.format_rows(["postal_area"], [["07094"]]) == [["07094"]]
     assert units.format_rows(["flag"], [[True]]) == [["True"]]
+
+
+# --- two columns of one name, constant branches, EXCEPT, runaway exponents and depth ---
+
+
+JOIN_ON = "FROM orders o JOIN eu_orders e ON e.id = o.id"
+JOIN_NO_UNIT = "FROM orders o JOIN stock_moves s ON s.id = o.id"
+
+
+@pytest.mark.parametrize("sql, expected, row", [
+    (f"SELECT o.amount, e.amount {JOIN_ON}", {"#0": "USD", "#1": "EUR"}, ["$5.00", "€5.00"]),
+    (f"SELECT e.amount, o.amount {JOIN_ON}", {"#0": "EUR", "#1": "USD"}, ["€5.00", "$5.00"]),
+    (f"SELECT o.amount, s.amount {JOIN_NO_UNIT}", {"#0": "USD"}, ["$5.00", "5"]),
+    (f"SELECT s.amount, o.amount {JOIN_NO_UNIT}", {"#1": "USD"}, ["5", "$5.00"]),
+    (f"SELECT o.amount AS x, e.amount AS X {JOIN_ON}", {"#0": "USD", "#1": "EUR"}, ["$5.00", "€5.00"]),
+])
+def test_each_of_two_columns_of_one_name_has_its_own_unit(tmp_path, sql, expected, row):
+    _currency_model(tmp_path)
+    resolved = RT.resolve_result_units(load_datasource(tmp_path), sql)
+    assert resolved == expected
+    headers = ["amount", "amount"]
+    assert units.format_rows(headers, [["5", "5"]], resolved) == [row]
+    table = units.format_table(headers, [["5", "5"]], resolved)
+    assert table.splitlines()[-1] == f"| {row[0]} | {row[1]} |"
+
+
+def test_a_name_two_columns_share_gives_neither_a_unit_or_a_label():
+    # a star leaves no positions to go by, whatever the map was built from
+    assert units.format_rows(["v", "v"], [["5", "5"]], {"v": "EUR"}) == [["5", "5"]]
+    assert units.format_rows(["v", "v"], [[1234, 1234]], {}, {"v"}) == [["1,234", "1,234"]]
+    assert units.format_rows(["v", "v"], [[1234, 1234]], {}, {"#1"}) == [["1,234", "1234"]]
+    assert units.format_rows(["v", "w"], [["5", "5"]], {"v": "EUR"}) == [["€5.00", "5"]]
+
+
+def test_a_label_of_a_repeated_name_stays_with_its_position(tmp_path):
+    _currency_model(tmp_path)
+    labels = RT.resolve_result_labels(load_datasource(tmp_path), "SELECT o.id, s.amount AS id " + JOIN_NO_UNIT)
+    assert labels == {"#0"}
+
+
+def test_a_report_reads_two_columns_of_one_name_by_position(tmp_path):
+    import csv_to_sections as C
+
+    path = tmp_path / "r.csv"
+    path.write_text("amount,amount\n5,5\n")
+    unit_map = {"#0": "USD", "#1": "EUR"}
+    section = C._build_section({"csv_file": str(path), "units": unit_map, "label_col": 0}, 0, [])
+    assert section["table_rows"] == [["$5.00", "€5.00"]]
+    assert section["labels"] == ["$5.00"]
+    assert C._unit_for(unit_map, ["amount", "amount"], 1) == "EUR"
+
+
+@pytest.mark.parametrize("branch", ["100", "-1", "'n/a'", "CAST(100 AS DECIMAL(18,2))", "0", "NULL"])
+def test_a_constant_branch_takes_no_unit_away(tmp_path, branch):
+    _currency_model(tmp_path)
+    org = load_datasource(tmp_path)
+    for expr in (f"CASE WHEN id > 1 THEN amount ELSE {branch} END",
+                 f"CASE WHEN id > 1 THEN {branch} ELSE amount END",
+                 f"IIF(id > 1, amount, {branch})"):
+        assert RT.resolve_result_units(org, f"SELECT {expr} AS v FROM orders") == {"v": "USD", "#0": "USD"}
+
+
+@pytest.mark.parametrize("expr", [
+    "CASE WHEN id > 1 THEN 1 ELSE 100 END",     # nothing but constants
+    "CASE WHEN id > 1 THEN amount ELSE id END",  # a value with no unit beside one
+])
+def test_a_branch_without_a_known_unit_still_gives_none(tmp_path, expr):
+    _currency_model(tmp_path)
+    assert RT.resolve_result_units(load_datasource(tmp_path), f"SELECT {expr} AS v FROM orders") == {}
+
+
+@pytest.mark.parametrize("sql, expected", [
+    ("SELECT amount FROM orders EXCEPT SELECT amount FROM eu_orders", {"amount": "USD", "#0": "USD"}),
+    ("SELECT amount FROM eu_orders EXCEPT SELECT amount FROM orders", {"amount": "EUR", "#0": "EUR"}),
+    ("SELECT id FROM orders EXCEPT SELECT amount FROM orders", {}),
+    ("WITH t AS (SELECT amount FROM orders EXCEPT SELECT amount FROM eu_orders) SELECT amount FROM t",
+     {"amount": "USD", "#0": "USD"}),
+    ("SELECT (SELECT amount FROM orders EXCEPT SELECT amount FROM eu_orders) AS v", {"v": "USD", "#0": "USD"}),
+    ("SELECT amount FROM orders INTERSECT SELECT amount FROM eu_orders", {}),
+    ("(SELECT amount FROM orders EXCEPT SELECT amount FROM eu_orders) UNION ALL SELECT amount FROM orders",
+     {"amount": "USD", "#0": "USD"}),
+    ("(SELECT amount FROM orders EXCEPT SELECT amount FROM orders) UNION ALL SELECT amount FROM eu_orders", {}),
+])
+def test_an_except_returns_only_its_left_arm(tmp_path, sql, expected):
+    _currency_model(tmp_path)
+    assert RT.resolve_result_units(load_datasource(tmp_path), sql) == expected
+
+
+RUNAWAY = ["12e345678901", "1e1234567890", "1e-1234567890", "0e1234567890", "1e401",
+           "1e99999999999999999999", "1e" + "9" * 5000]
+
+
+@pytest.mark.parametrize("text", RUNAWAY)
+def test_a_runaway_exponent_is_shown_as_written(text):
+    for unit in (None, "USD", "INR", "USD_millions", "kg", "percent", "epoch_s", "epoch_ms", "yyyymmdd"):
+        if unit == "percent" and text.startswith(("1e-", "0e")):
+            continue    # a finite value, in `%g`
+        if unit and text in ("1e-1234567890", "0e1234567890"):
+            continue    # reads as 0.0, which is a number any unit can show
+        assert units.format_cell(text, unit) == text
+    assert units.format_rows(["v"], [[text]]) == [[text]]
+    assert units.format_rows(["store_id"], [[text]]) == [[text]]
+    assert text in units.format_table(["v"], [[text]])
+
+
+@pytest.mark.parametrize("value", [Decimal("1E+1234567890"), Decimal("1E-1234567890")])
+def test_a_runaway_decimal_is_shown_as_written(value):
+    assert units.format_cell(value, None) == str(value)
+    assert units.format_rows(["store_id"], [[value]]) == [[str(value)]]
+
+
+def test_an_exponent_in_a_doubles_range_still_expands():
+    assert units.format_cell("1e400", None) == "10" + ",000" * 133
+    assert units.format_cell("1e3", None) == "1,000"
+    assert units.format_cell(1e22, None) == "10,000,000,000,000,000,000,000"
+    assert units.format_cell("1e-3", None) == "0.001"
+
+
+def test_a_date_out_of_range_is_shown_as_written():
+    assert units.format_date("1e300", "epoch_s") == "1e300"
+    assert units.format_date("1e999", "yyyymmdd") == "1e999"
+    assert units.format_date("1e308", "yyyymmdd") == "1e308"
+
+
+def test_a_report_leaves_a_runaway_exponent_out_of_the_chart():
+    import csv_to_sections as C
+
+    assert C._raw_number("1e1234567890") is None
+
+
+def _star_chain(n: int, body: str = "SELECT * FROM c{p}") -> str:
+    bodies = ["c0 AS (SELECT * FROM orders)"] + [f"c{i} AS ({body.format(p=i - 1)})" for i in range(1, n)]
+    return f"WITH {', '.join(bodies)} SELECT id, amount FROM c{n - 1}"
+
+
+@pytest.mark.parametrize("body", [
+    "SELECT * FROM c{p}",
+    "SELECT * FROM c{p} UNION ALL SELECT * FROM c{p}",
+    "SELECT a.* FROM c{p} a JOIN c{p} b ON a.id = b.id",
+])
+def test_a_deep_chain_of_stars_is_read_in_one_pass(tmp_path, body, monkeypatch):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    reads = []
+    original = RT._DerivedSource._read
+    monkeypatch.setattr(RT._DerivedSource, "_read",
+                        lambda self, *a: reads.append(a) or original(self, *a))
+    sql = _star_chain(40, body)
+    assert RT.resolve_result_units(org, sql) == {"amount": "USD", "#1": "USD"}
+    assert len(reads) <= 2 * 40 * 2     # two names, per level; doubling per level never finishes
+
+
+@pytest.mark.parametrize("sql", [
+    _star_chain(600),
+    "SELECT " + "+".join(["amount"] * 3000) + " AS s FROM orders",
+])
+def test_a_statement_too_deep_to_trace_loses_its_units_not_the_answer(tmp_path, sql):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == {}
+    assert RT.resolve_result_labels(org, sql) == set()
+
+
+def test_thousands_of_union_arms_keep_their_unit(tmp_path):
+    _model(tmp_path)
+    sql = " UNION ALL ".join(["SELECT amount FROM orders"] * 5000)
+    assert RT.resolve_result_units(load_datasource(tmp_path), sql) == {"amount": "USD", "#0": "USD"}
+
+
+def test_prepare_answers_a_statement_too_deep_to_check(tmp_path, capsys):
+    _model(tmp_path)
+    sql = " UNION ALL ".join(["SELECT amount FROM orders"] * 5000)
+    assert cli.main(["prepare", str(tmp_path), "--area", "s", "--sql", sql]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["unchecked"] == RT.UNCHECKED_TOO_DEEP and out["findings"] == []
+    assert out["units"] == {"amount": "USD", "#0": "USD"}
+
+
+def test_prepare_answers_when_the_trace_overflows(tmp_path, capsys, monkeypatch):
+    _model(tmp_path)
+
+    def _overflow(*_a):
+        raise RecursionError
+
+    monkeypatch.setattr(RT, "_statement_outputs", _overflow)
+    assert cli.main(["prepare", str(tmp_path), "--area", "s", "--sql", "SELECT amount FROM orders"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["units"] == {} and out["labels"] == []
+
+
+@pytest.mark.parametrize("fn", ["DATE_PART", "date_part", "datepart"])
+def test_duckdbs_date_part_is_a_year(tmp_path, fn):
+    _model(tmp_path)
+    storage = tmp_path / "datasources" / "c" / "storage.yaml"
+    storage.write_text(yaml.safe_dump({"name": "c", "storage_type": "DuckDB"}))
+    org = load_datasource(tmp_path)
+    assert "v" in RT.resolve_result_labels(org, f"SELECT {fn}('year', opened_on) AS v FROM stores")
+    assert "v" not in RT.resolve_result_labels(org, f"SELECT {fn}('day', opened_on) AS v FROM stores")
+
+
+@pytest.mark.parametrize("cell, shown", [
+    ("2011.0", "2011"),     # Postgres' DATE_PART, once the row is text
+    (2011.0, "2011"),
+    (Decimal("2011"), "2011"),
+    ("001.0", "001.0"),     # a code
+    ("2011.00", "2011.00"),  # a label cast to DECIMAL stays as cast
+    ("12345.0", "12345.0"),
+    (Decimal("2011.50"), "2011.50"),
+])
+def test_a_year_label_loses_a_doubles_zero_and_nothing_else_does(cell, shown):
+    assert units.format_rows(["sold"], [[cell]], {}, {"#0"}) == [[shown]]

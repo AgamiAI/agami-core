@@ -33,6 +33,10 @@ below corresponds to one such version.
   the outer row's), and a UNION's column has a unit only when every arm gives it the same one.
   `ARG_MAX`, `FIRST(… ORDER BY …)`, `LAG`, `NVL2`, `DECODE` and the like keep the unit of the value
   they return, whatever other column they take.
+  Two output columns of one name each keep their own unit and label, by position, and an `EXCEPT`
+  takes its column's unit from its left arm. A constant branch of a CASE (`ELSE 100`, `ELSE 'n/a'`)
+  takes no unit away. A text value with a huge exponent (`12e345678901`) is shown as written rather
+  than expanded, and a statement too deep to trace loses its units instead of failing `sm prepare`.
   `sm prepare` returns these label columns as `labels`, and `sm format-table --labels` takes them.
   Big integers are no longer rounded through a float. Reports built by `csv_to_sections.py` follow
   the same rules.

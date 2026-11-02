@@ -15,8 +15,9 @@ day, week, month, quarter, year. Any other text is shown as a plain label.
 from __future__ import annotations
 
 import datetime as _dt
+import math
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Iterable, NamedTuple, Optional
 
 # ISO code -> symbol. Extend freely; unknown codes fall back to the bare code.
@@ -119,17 +120,17 @@ def format_date(value, date_format: Optional[str]) -> str:
     if t in _EPOCH_DIVISORS:
         try:
             secs = float(value) / _EPOCH_DIVISORS[t]
-        except (TypeError, ValueError):
+            return _dt.datetime.fromtimestamp(secs, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
+        except (TypeError, ValueError, OverflowError, OSError):
             return str(value)
-        return _dt.datetime.fromtimestamp(secs, tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S") + " UTC"
     if t == "yyyymmdd":
         try:
             i = int(float(value))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return str(value)
         try:
             return _dt.date(i // 10000, (i // 100) % 100, i % 100).strftime("%Y-%m-%d")
-        except ValueError:
+        except (ValueError, OverflowError):
             return str(value)
     return str(value)
 
@@ -153,6 +154,8 @@ def format_value(value, unit: Optional[str]) -> str:
     try:
         num = float(value)
     except (TypeError, ValueError):
+        return str(value)
+    if not math.isfinite(num):      # `1e999` in a text column is no amount
         return str(value)
 
     cu = parse_unit(unit)
@@ -188,12 +191,14 @@ def _format_currency(num: float, cu: CurrencyUnit) -> str:
 _NUMBER_RE = re.compile(r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")
 # A number never prints with a leading zero, so `07094` or `001` is a code read as a string.
 _LEADING_ZERO_RE = re.compile(r"^[+-]?0\d")
+# Past a double's range a value expands to more digits than anyone reads: `12e345678901` is 460 MB.
+_MAX_EXPANDED_EXPONENT = 400
 
 
 def _plain_number(value) -> Optional[str]:
     """The value as a plain decimal string with no exponent and no trailing fractional zeros
-    (`Decimal('12.50000000')` -> `12.5`), or None when it is not a number. Exact: a NUMERIC(38)
-    value or a big id never goes through a float."""
+    (`Decimal('12.50000000')` -> `12.5`), or None when it is not a number or its exponent is too
+    large to write out. Exact: a NUMERIC(38) value or a big id never goes through a float."""
     if isinstance(value, bool):
         return None
     if isinstance(value, float):
@@ -204,8 +209,11 @@ def _plain_number(value) -> Optional[str]:
         s = str(value).strip().replace(",", "")
         if not _NUMBER_RE.match(s) or _LEADING_ZERO_RE.match(s):
             return None
-        d = Decimal(s)
-    if not d.is_finite():
+        try:
+            d = Decimal(s)
+        except InvalidOperation:    # an exponent past what Decimal holds
+            return None
+    if not d.is_finite() or max(d.as_tuple().exponent, -d.adjusted()) > _MAX_EXPANDED_EXPONENT:
         return None
     text = format(d, "f")
     if "." in text:
@@ -262,16 +270,31 @@ def _values_are_labels(header: str, values: list) -> bool:
     return bool(seen) and all(shape.match(v) for v in seen)
 
 
+# A year that was a double before the row was turned into text, as Postgres' DATE_PART returns it.
+_YEAR_AS_DOUBLE_RE = re.compile(r"^[12]\d{3}\.0$")
+
+
 def _as_label(value) -> str:
-    """The value as written, minus a float's `.0` a driver may add to a whole number. A string is
-    shown exactly as stored: "001.0" is a code, not a number."""
+    """The value as written, minus a float's `.0` a driver may add to a whole number, or to a year
+    that reached here as text. Any other string is shown exactly as stored: "001.0" is a code, not
+    a number."""
     if value is None:
         return ""
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
-    if isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value():
-        return str(int(value))
+    if isinstance(value, Decimal):
+        plain = _plain_number(value)
+        return plain if plain is not None and "." not in plain else str(value)
+    if isinstance(value, str) and _YEAR_AS_DOUBLE_RE.match(value):
+        return value[:-2]
     return str(value)
+
+
+def unit_for_column(units: dict, headers: list, i: int) -> Optional[str]:
+    """The unit of result column `i`: its position's, then its name's. A name two columns share
+    can't say which of them it means, so it gives neither a unit."""
+    h = headers[i] if i < len(headers) else ""
+    return units.get(f"#{i}") or (None if headers.count(h) > 1 else units.get(h))
 
 
 def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = None,
@@ -286,23 +309,18 @@ def format_rows(headers: list[str], rows: list[list], units: Optional[dict] = No
     known = set(labels or ())
     cols = [str(h) for h in headers]
 
-    def _unit_for(i: int) -> Optional[str]:
-        # by output name first, then by position (`#i`) — the positional key carries
-        # units for columns the DB auto-named (an unaliased MAX(amount), etc.)
-        h = cols[i] if i < len(cols) else ""
-        return units.get(h) or units.get(f"#{i}")
-
     def _is_label(i: int) -> bool:
         h = cols[i] if i < len(cols) else ""
-        if h in known or f"#{i}" in known or _names_a_label(h):
+        if f"#{i}" in known or (h in known and cols.count(h) == 1) or _names_a_label(h):
             return True
         return _values_are_labels(h, [r[i] for r in rows if i < len(r)])
 
     width = max([len(cols)] + [len(r) for r in rows])
-    label_cols = {i for i in range(width) if not _unit_for(i) and _is_label(i)}
+    col_units = [unit_for_column(units, cols, i) for i in range(width)]
+    label_cols = {i for i in range(width) if not col_units[i] and _is_label(i)}
 
     def _fmt(i: int, c) -> str:
-        return _as_label(c) if i in label_cols else format_cell(c, _unit_for(i))
+        return _as_label(c) if i in label_cols else format_cell(c, col_units[i])
 
     return [[_fmt(i, c) for i, c in enumerate(r)] for r in rows]
 

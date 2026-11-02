@@ -49,6 +49,7 @@ from __future__ import annotations
 import decimal
 import functools
 import re
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any, Callable, Iterator, NamedTuple, Optional
@@ -1130,6 +1131,9 @@ UNCHECKED_UNPARSEABLE = (
 )
 UNCHECKED_NO_SELECT = (
     "The statement contains no SELECT, so there was no aggregate to check."
+)
+UNCHECKED_TOO_DEEP = (
+    "The statement is nested too deeply to walk, so no aggregate in it was checked."
 )
 
 
@@ -2380,7 +2384,10 @@ def pre_flight_check(sql: str, org: Datasource,
         return PreFlightResult(unchecked=UNCHECKED_UNPARSEABLE)
     if tree.find(exp.Select) is None:
         return PreFlightResult(unchecked=UNCHECKED_NO_SELECT)
-    reports = _aggregate_reports(tree, org, ctx=ctx)
+    try:
+        reports = _aggregate_reports(tree, org, ctx=ctx)
+    except RecursionError:
+        return PreFlightResult(unchecked=UNCHECKED_TOO_DEEP)
     # The flat list is DERIVED, never gathered a second time: two walks producing "the findings"
     # and "the findings per aggregate" is two chances for one statement to be described two ways.
     return PreFlightResult(
@@ -6595,12 +6602,35 @@ def _value_arguments(e: "exp.Expression") -> list["exp.Expression"]:
 
 
 def _query_arms(body: "exp.Expression") -> list["exp.Select"]:
-    """The SELECTs whose rows a query returns: itself, or every arm of a UNION / INTERSECT / EXCEPT."""
-    while isinstance(body, (exp.Subquery, exp.Paren)):
-        body = body.this
-    if isinstance(body, exp.SetOperation):
-        return _query_arms(body.this) + _query_arms(body.expression)
-    return [body] if isinstance(body, exp.Select) else []
+    """The SELECTs whose rows a query returns: itself, every arm of a UNION / INTERSECT, or an
+    EXCEPT's left arm, the only one it returns rows from. Walked with a stack: thousands of arms
+    parse to a tree that deep."""
+    arms: list["exp.Select"] = []
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        while isinstance(node, (exp.Subquery, exp.Paren)):
+            node = node.this
+        if isinstance(node, exp.SetOperation):
+            if not isinstance(node, exp.Except):
+                stack.append(node.expression)
+            stack.append(node.this)
+        elif isinstance(node, exp.Select):
+            arms.append(node)
+    return arms
+
+
+def _lose_when_too_deep(empty: Callable[[], Any]) -> Callable:
+    """A statement nested past the stack gets no display hints, rather than failing the caller."""
+    def wrap(trace: Callable) -> Callable:
+        @functools.wraps(trace)
+        def traced(org: Datasource, sql: str) -> Any:
+            try:
+                return trace(org, sql)
+            except RecursionError:
+                return empty()
+        return traced
+    return wrap
 
 
 class _TableSource:
@@ -6631,7 +6661,7 @@ class _DerivedSource:
 
     def __init__(self, ctx: "_DisplayContext", body: "exp.Expression", alias: object,
                  outer: "Optional[_DisplayScope]") -> None:
-        self.key, self.ctx, self.outer = id(body), ctx, outer
+        self.key, self.ctx, self.outer, self.alias = id(body), ctx, outer, alias
         self.arms = _query_arms(body)
         self.names = ([c.name for c in alias.columns] if isinstance(alias, exp.TableAlias) else [])
 
@@ -6664,20 +6694,27 @@ class _DerivedSource:
         return reads[0] if len(reads) == 1 else []
 
     def read(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
+        # once per column: chains of `SELECT *` reach the same body along many paths
+        key = (self.key, id(self.outer), id(self.alias), name, quoted)
+        if key not in self.ctx.reads:
+            self.ctx.reads[key] = self._read(name, quoted)
+        return self.ctx.reads[key]
+
+    def _read(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
         if not self.arms:
             return None
         if any(_star_projection(p) for arm in self.arms for p in arm.expressions):
             if self.names:
                 return [] if name in self.names or _tkey(name) in map(_tkey, self.names) else None
-            out: list[tuple] = []
+            out: dict[tuple[int, int], tuple] = {}
             for i, arm in enumerate(self.arms):
                 found = self._read_starred(arm, name, quoted)
                 if found is None:
                     return None if i == 0 else []
                 if not found:
                     return []
-                out += found
-            return out
+                out.update({(id(r[0]), id(r[1])): r for r in found})
+            return list(out.values())
         found_at = self._positions(self.names or [p.alias_or_name for p in self.arms[0].expressions], name, quoted)
         if not found_at:
             return None
@@ -6765,10 +6802,13 @@ class _DisplayScope:
             source = next(iter(found.values())) if len(found) == 1 else None
             return source.read(col.name, quoted) if source is not None else None
         while scope is not None:
-            owners = {s.key: s for ss in scope.sources.values() for s in ss
-                      if s is not None and s.read(col.name, quoted) is not None}
+            owners: dict[object, list[tuple]] = {}
+            for s in (s for ss in scope.sources.values() for s in ss if s is not None):
+                found = s.read(col.name, quoted)
+                if found is not None:
+                    owners[s.key] = found
             if owners:
-                return next(iter(owners.values())).read(col.name, quoted) if len(owners) == 1 else None
+                return next(iter(owners.values())) if len(owners) == 1 else None
             if local:
                 return None
             # a table the model doesn't know may be what has it, so the outer row can't claim it
@@ -6791,6 +6831,7 @@ class _DisplayContext:
         self.active: set[tuple[int, int]] = set()
         self._scopes: dict[tuple[int, int], _DisplayScope] = {}
         self._traced: dict[tuple[int, int], Any] = {}
+        self.reads: dict[tuple, "Optional[list[tuple]]"] = {}
 
     def scope(self, select: "exp.Select", outer: "Optional[_DisplayScope]") -> _DisplayScope:
         key = (id(select), id(outer))
@@ -6880,6 +6921,13 @@ def _branch_values(e: "exp.Expression") -> "list[Optional[exp.Expression]]":
     return [*args[2::2], *(args[-1:] if len(args) % 2 == 0 else [])]
 
 
+def _repeated_names(projs: "list[exp.Expression]") -> set[str]:
+    """Output names, lower-cased, that two projections share: such a name can't say which it means."""
+    seen = Counter(p.alias_or_name.lower() for p in projs if p.alias_or_name)
+    return {name for name, count in seen.items() if count > 1}
+
+
+@_lose_when_too_deep(dict)
 def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
     """Map each SELECT output column -> display unit, **tracing the SQL** (not matching
     names): an aggregate/expression over a column inherits that column's unit, so
@@ -6893,10 +6941,12 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
         a CTE's or derived table's column (`t.amount`) is what its body computed, and a scalar
         subquery is its own projection, read in its own FROM;
       - a CASE or IF takes its unit from the values it returns, never from its conditions, and
-        a 0 or NULL branch takes nothing away; a window or FILTER takes it from its value;
+        a constant branch takes nothing away; a window or FILTER takes it from its value;
       - GREATEST/LEAST/COALESCE/MIN/MAX/NULLIF return an argument, so they keep its unit or
         date encoding, and a constant beside it (`CAST(0 AS DECIMAL(18,2))`, `-1`) takes none away;
-      - a UNION's column has a unit only when every arm gives it the same one;
+      - a UNION's column has a unit only when every arm gives it the same one, an EXCEPT's is
+        its left arm's;
+      - two output columns of one name are keyed by position only;
       - COUNT(...), ratios (any division) and the difference of two dates get NO unit (a
         count / rate isn't money, and a duration isn't a date). Returns {} if the model
         carries no units or sqlglot can't parse.
@@ -6968,9 +7018,9 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
         if isinstance(e, exp.Distinct):                   # SUM(DISTINCT …) is its value
             return _same([_unit_of(a, scope) for a in e.expressions])
         if isinstance(e, _BRANCHING):
-            # a 0 or NULL branch carries no unit and takes none away
+            # a constant branch is written in the unit of the others, as beside COALESCE
             return _same([_unit_of(v, scope) for v in _branch_values(e)
-                          if v is not None and not _is_zero_or_null(v)])
+                          if v is not None and not _is_bare_literal(v)])
         if isinstance(e, _DIVIDING):
             num, den = _unit_of(e.this, scope), _unit_of(e.expression, scope)
             return num if (num and not den) else None      # currency/count → currency; X/X → none
@@ -6998,13 +7048,14 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
             return metric_units[proj.alias_or_name.lower()]
         return _traced(read)
 
+    repeated = _repeated_names(projs)
     out: dict[str, str] = {}
     for i, (proj, read) in enumerate(zip(projs, outputs)):
         unit = _unit_for(proj, read)
         if unit is None:
             continue
         name = proj.alias_or_name
-        if name:
+        if name and name.lower() not in repeated:
             out[name] = unit                 # by output name (aliased / named columns)
         if not has_star:
             out[f"#{i}"] = unit              # by position — covers unaliased MAX(amount) etc.
@@ -7018,9 +7069,13 @@ _YEAR_FORMATS = frozenset({"%Y", "YYYY", "yyyy"})
 def _is_year_part(e: "exp.Expression") -> bool:
     if isinstance(e, exp.Year):
         return True
-    if isinstance(e, exp.Extract):   # EXTRACT(YEAR …) and DATE_PART('year', …) both parse to this
+    if isinstance(e, exp.Extract):   # EXTRACT(YEAR …), and DATE_PART('year', …) on most dialects
         return isinstance(e.this, (exp.Var, exp.Literal, exp.Identifier, exp.Column)) \
             and e.this.name.upper() == "YEAR"
+    if isinstance(e, exp.Anonymous):  # DuckDB's DATE_PART stays a plain function call
+        args = e.expressions
+        return e.name.upper() in ("DATE_PART", "DATEPART") and bool(args) \
+            and isinstance(args[0], exp.Literal) and args[0].name.upper() == "YEAR"
     if isinstance(e, (exp.TimeToStr, exp.ToChar)):
         fmt = e.args.get("format")
         return isinstance(fmt, exp.Literal) and fmt.this in _YEAR_FORMATS
@@ -7033,6 +7088,7 @@ def _is_label_column(c: Column) -> bool:
             or bool(c.choice_field))
 
 
+@_lose_when_too_deep(set)
 def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
     """The output columns that hold labels rather than quantities — a year, a code, an id —
     keyed by output name and by position (`#i`) like `resolve_result_units`, for
@@ -7066,11 +7122,12 @@ def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
             return read is not None and _traced(read)
         return False
 
+    repeated = _repeated_names(projs)
     out: set[str] = set()
     for i, (proj, read) in enumerate(zip(projs, outputs)):
         if not _traced(read):
             continue
-        if proj.alias_or_name:
+        if proj.alias_or_name and proj.alias_or_name.lower() not in repeated:
             out.add(proj.alias_or_name)
         if not has_star:
             out.add(f"#{i}")
