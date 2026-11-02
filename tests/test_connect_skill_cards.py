@@ -624,3 +624,14 @@ def test_sign_off_shows_the_sql_each_definition_maps_to():
         text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
         assert "`Kind | Name | What it means | SQL`" in text, skill
         assert "its one-line meaning and the SQL it maps to" in text, skill
+
+
+def test_the_onboarding_steps_are_shown_in_plain_words():
+    # Live-run feedback: show where the person is in onboarding, the same way every time.
+    text = SKILL.read_text(encoding="utf-8")
+    section = text[text.index("## Progress tracking"):text.index("## Phase −1")]
+    steps = [line.split(". ", 1)[1] for line in section.splitlines() if line[:2].rstrip(".").isdigit()]
+    assert steps[0] == "Connect your database" and steps[-1] == "Summary and first question"
+    for jargon in ("ntrospect", "nrich", "NL→SQL", "Preflight"):
+        assert not any(jargon in s for s in steps), jargon
+    assert "never add your own working steps" in section

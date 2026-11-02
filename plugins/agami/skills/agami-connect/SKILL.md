@@ -27,28 +27,27 @@ For every decision card and result table: [`shared/question-cards.md`](../../sha
 - **Keep the user oriented** — print one-line progress markers between phases (`✓ Introspected 12 tables`, `✓ Validator passed`, `✓ Generated 10 examples`).
 - **Plain voice — state what happened, never how impressive it is.** Progress markers, todo labels, and narration describe the action and the result; they do NOT editorialize. Banned: "wow moment", "magic", "watch this", "the exciting part", "you'll love this", exclamation hype. The reader is a data professional — a query running correctly speaks for itself. Say *"Running the first query"*, not *"Now the wow moment"*.
 
-## Progress tracking — set up a todo list at the very start
+## Progress tracking — the onboarding steps, shown the whole way
 
-This is a multi-phase skill that often takes 5–15 minutes end-to-end. **The very first action on every invocation is to show the skill's major phases as a checklist**, so the user can watch progress: with `TodoWrite` where the client has it, otherwise as a short numbered list in your first message, updated as each phase finishes. Validated as a strong UX signal — it makes the wait feel intentional rather than opaque.
+This is a multi-phase skill that often takes 5–15 minutes, with cards in between. **The very first action on every invocation is to show the onboarding steps as a task list, and to keep it current**, so the person always knows where they are and what's left. Use the task-list tool the host gives you (`TodoWrite`, `TaskCreate`, or the app's own task list, such as the one shown under your message in the Desktop app); where there is none, a short numbered list in your first message, repeated with the current step marked whenever a step finishes.
 
-Seed (one task per major phase, in order):
+The same steps every run, in the person's words (no "introspect", "enrich" or "NL→SQL"):
 
 ```
-1. Preflight: credentials check + tool detection
-2. Organization context (MANDATORY): first onboard → company name + description (root record via `sm set-org`); every onboard → this-database narrative
-3. Discover & prune: list tables + columns, user prunes what they don't need
-4. Introspect the KEPT tables → semantic model (engine: grain, FK cardinality)
-5. Enrich: descriptions, entities, metrics (LLM, validated into the model)
-6. Curate before examples: exclude columns/tables + sign off metrics & entities
-7. Generate seed NL→SQL examples (validated against the live DB)
-8. Validate every seed example (user reviews on cards)
-9. Post-introspect trust summary
-10. Follow-up suggestions
+1. Connect your database
+2. Tell agami about your data
+3. Pick the tables
+4. Read the tables and joins
+5. Describe columns and add metrics
+6. Sign off definitions and hide personal data
+7. Write and check example questions
+8. Check your reports
+9. Summary and first question
 ```
 
-Use `content` for the imperative form and `activeForm` for the present-continuous form. **Mark each todo `in_progress` when its phase starts and `completed` immediately when it ends.** Exactly one `in_progress` at a time.
+Leave out a step that won't run (8 when no reports were shared in 1.5; 3 with a model spec workbook, which names the tables); never add your own working steps to this list. **Mark each step in progress when it starts and done the moment it ends**, exactly one in progress at a time, and keep it in progress while a card for that step is waiting, so the list shows where the person is while they decide. The sample path uses its own short list (Phase 0s).
 
-**Skip the seeding if the todo list already contains these items** (the skill is resuming after Phase 0 wrote the credentials template and waited). When `$ARGUMENTS == reintrospect`, the same todos apply.
+**Don't seed it again if the list already holds these steps** (the skill is resuming after a hand-off, a password page or a file wait). When `$ARGUMENTS == reintrospect`, the list starts at step 3.
 
 ---
 
