@@ -216,7 +216,7 @@ def test_connect_failure_rolls_back_only_its_own_section(tmp_path: Path, art: Pa
 def test_rollback_leaves_a_file_someone_else_changed(tmp_path: Path, art: Path, monkeypatch) -> None:
     creds = _creds(art)
 
-    def failing_test(profile: str) -> tuple[str, str]:
+    def failing_test(profile: str, fields: dict | None = None) -> tuple[str, str]:
         with creds.open("a", encoding="utf-8") as fh:
             fh.write("\n[acme]\ntype = sqlite\n")  # another writer appended after the helper
         return "connect_failed", "The connection test failed."
@@ -623,7 +623,7 @@ def test_rollback_that_cannot_edit_the_file_says_so(tmp_path: Path, art: Path, m
     def cannot(creds: Path, added: str) -> None:
         raise OSError("read-only")
 
-    monkeypatch.setattr(connect_helper, "_connection_test", lambda profile: ("connect_failed", "It failed."))
+    monkeypatch.setattr(connect_helper, "_connection_test", lambda profile, fields=None: ("connect_failed", "It failed."))
     monkeypatch.setattr(connect_helper, "_remove_section", cannot)
     out = _Lines()
     connect_helper.run(_spec(tmp_path, auth="sso"), out, expires_in=1)
@@ -838,7 +838,7 @@ def test_the_driver_table_is_connect_resolves(tmp_path: Path) -> None:
 
 
 def test_an_unexpected_error_rolls_back(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
-    def boom(profile: str) -> tuple[str, str]:
+    def boom(profile: str, fields: dict | None = None) -> tuple[str, str]:
         raise RuntimeError("driver crashed")
 
     monkeypatch.setattr(connect_helper, "_connection_test", boom)
@@ -873,7 +873,7 @@ class FileBackend:
 credential_store.platform.system = lambda: "Darwin"
 credential_store._backend = lambda: FileBackend()
 
-def stuck(profile):
+def stuck(profile, fields=None):
     Path({ready!r}).write_text("x")
     time.sleep(60)
 
@@ -925,3 +925,18 @@ def test_page_shows_the_connection_the_password_is_for() -> None:
         assert shown in page
     assert "<th>schema</th>" not in page
     assert "{{" not in connect_helper.render_page("demo", "form")
+
+
+@pytest.mark.parametrize(
+    ("kind", "fields", "says"),
+    [
+        ("auth", {"user": "readonly", "host": "localhost"}, "the user `readonly`"),
+        ("dsn", {"host": "db.example.com"}, "`db.example.com` couldn't be found"),
+        ("network", {"host": "db.example.com"}, "Nothing answered at `db.example.com`"),
+        ("permission", {"database": "demo"}, "couldn't open the database `demo`"),
+        ("other", {"user": "readonly"}, "GENERIC"),
+    ],
+)
+def test_a_failure_says_what_to_check(kind: str, fields: dict, says: str) -> None:
+    # A live run's "rejected the connection's credentials" read as a wrong password; the user didn't exist.
+    assert says in connect_helper._failure_detail(kind, "GENERIC", fields)

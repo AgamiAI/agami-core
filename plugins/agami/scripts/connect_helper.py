@@ -242,7 +242,31 @@ def _quiet(*loggers: logging.Logger | None) -> Iterator[None]:
             log.propagate = propagate
 
 
-def _connection_test(profile: str) -> tuple[str, str]:
+def _failure_detail(kind: str, generic: str, fields: dict[str, Any]) -> str:
+    """The person's own words for why their connection failed.
+
+    The guard's sentence is written for an agent ("rejected the connection's credentials"); here the
+    person is fixing a form they just filled in, and a live run showed that sentence read as "wrong
+    password" when the user name was the problem. The database's own text never travels (it can
+    hold a value from a row), so this names what to check from the failure's kind and the fields.
+    """
+    user, host, database = fields.get("user"), fields.get("host") or fields.get("account"), fields.get("database")
+    if kind == "auth":
+        who = f"the user `{user}`" if user else "that user"
+        return (f"The database didn't accept {who} with that password. Check that the user exists on "
+                f"this server and the password is right; on a server that trusts local connections, "
+                f"the password is ignored and the user name is what's wrong.")
+    if kind == "dsn":
+        return f"The host `{host}` couldn't be found. Check its spelling." if host else generic
+    if kind == "network":
+        return (f"Nothing answered at `{host}`. Check the host and port, and that the database is running."
+                if host else generic)
+    if kind in ("permission", "table_not_found") and database:
+        return f"Connected, but couldn't open the database `{database}`. Check its name and that this user can read it."
+    return generic
+
+
+def _connection_test(profile: str, fields: dict[str, Any] | None = None) -> tuple[str, str]:
     """`SELECT 1` through execute_sql's guarded chokepoint; (status, one-line detail)."""
     try:
         import execute_sql
@@ -259,7 +283,8 @@ def _connection_test(profile: str) -> tuple[str, str]:
         return "connected", f"Connected. A test query ran on {profile}."
     if env.status == "refused":
         return "connect_failed", env.refusal.detail
-    return "connect_failed", (env.failure.message.splitlines() or ["The connection test failed."])[0]
+    generic = (env.failure.message.splitlines() or ["The connection test failed."])[0]
+    return "connect_failed", _failure_detail(getattr(env.failure, "kind", ""), generic, fields or {})
 
 
 def target_rows(fields: dict | None) -> str:
@@ -400,7 +425,7 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
             package, detail = missing
             detail += _rollback(creds, added, profile, ref)
             return _final(out, "missing_driver", profile, detail, secret, package=package)
-        status, detail = _connection_test(profile)
+        status, detail = _connection_test(profile, spec.get("fields") or {})
         connected = status == "connected"
         if not connected:
             detail += _rollback(creds, added, profile, ref)
