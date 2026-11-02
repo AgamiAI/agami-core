@@ -1923,10 +1923,52 @@ def _probe_relationships(
     # candidate targets: names with a single-column grain; the key column is read off the Table
     # resolved schema-aware below, so a same-named table in another schema can't lend its key.
     targets = [name for name, ts in tables_by_name.items() if any(len(x.grain) == 1 for x in ts)]
+    # Natural keys: a column named exactly like another table's single-column key (`cds_code` ->
+    # schools.cds_code, `test_id` -> subjects.test_id). The `_id`-stem rule below never sees these,
+    # and warehouses keyed on codes got no joins at all.
+    key_targets: dict[str, list[str]] = {}
+    for name, ts in tables_by_name.items():
+        for x in ts:
+            if len(x.grain) == 1:
+                key_targets.setdefault(x.grain[0].lower(), []).append(name)
     rels: list[Relationship] = []
+
+    def _add(t: Table, c, tgt_name: str, tgt: Table, how: str) -> None:
+        cross = bool(t.schema_name and tgt.schema_name and t.schema_name != tgt.schema_name)
+        desc = f"inferred by {how} + value-overlap probe"
+        if cross:
+            desc += f"; crosses schemas {t.schema_name} → {tgt.schema_name}"
+            report.notes.append(
+                f"cross-schema relationship: {t.schema_name}.{t.name} → {tgt.schema_name}.{tgt_name} (inferred)")
+        rels.append(Relationship(
+            from_table=t.name, from_column=c.name,
+            to_table=tgt_name, to_column=tgt.grain[0],
+            from_schema=t.schema_name, to_schema=tgt.schema_name,
+            relationship=build.infer_cardinality(t, tgt, [c.name], [tgt.grain[0]]),
+            join_type="LEFT", confidence="proposed", review_state="unreviewed",
+            description=desc,
+        ))
+
     for t in tables:
         for c in t.columns:
             low = c.name.lower()
+            # A table's own single-column key is never a reference (every ServiceNow table has
+            # `sys_id`), and a bare `id` names too many keys to mean one of them.
+            own_key = len(t.grain) == 1 and t.grain[0].lower() == low
+            if low != "id" and not own_key and low in key_targets:
+                matched = False
+                for tgt_name in key_targets[low]:
+                    if tgt_name == t.name:
+                        continue
+                    tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
+                    if tgt is None or len(tgt.grain) != 1 or tgt.grain[0].lower() != low:
+                        continue
+                    if _overlaps(dialect, runner, t, c.name, tgt, tgt.grain[0]):
+                        _add(t, c, tgt_name, tgt, "same-name key match")
+                        matched = True
+                        break
+                if matched:
+                    continue
             if not low.endswith("_id") and low != "id":
                 continue
             stem = low[:-3] if low.endswith("_id") else None
@@ -1939,23 +1981,8 @@ def _probe_relationships(
                     tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
                     if tgt is None or len(tgt.grain) != 1:
                         continue
-                    tgt_col = tgt.grain[0]
-                    if _overlaps(dialect, runner, t, c.name, tgt, tgt_col):
-                        cross = bool(t.schema_name and tgt.schema_name and t.schema_name != tgt.schema_name)
-                        desc = "inferred by name+type match + value-overlap probe"
-                        if cross:
-                            desc += f"; crosses schemas {t.schema_name} → {tgt.schema_name}"
-                            report.notes.append(
-                                f"cross-schema relationship: {t.schema_name}.{t.name} → "
-                                f"{tgt.schema_name}.{tgt_name} (inferred)")
-                        rels.append(Relationship(
-                            from_table=t.name, from_column=c.name,
-                            to_table=tgt_name, to_column=tgt_col,
-                            from_schema=t.schema_name, to_schema=tgt.schema_name,
-                            relationship=build.infer_cardinality(t, tgt, [c.name], [tgt_col]),
-                            join_type="LEFT", confidence="proposed", review_state="unreviewed",
-                            description=desc,
-                        ))
+                    if _overlaps(dialect, runner, t, c.name, tgt, tgt.grain[0]):
+                        _add(t, c, tgt_name, tgt, "name+type match")
                         break
     return rels
 
