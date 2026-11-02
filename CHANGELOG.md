@@ -149,6 +149,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Things found in live onboardings of real databases.** Joins on same-named natural keys
+  (`cds_code` → `schools.cds_code`) are inferred, so a warehouse keyed on codes no longer gets 0
+  joins. An empty database is said before the build goes on. `sm add --profile` runs each metric's
+  SQL over zero rows and writes nothing if one fails. A metric wrapped in `ROUND(…)` still matches
+  its definition on the receipt. A connection failure names what to check (the user, the host,
+  the database). `full_name` and bare `name` on a table of things are not flagged as personal.
+
 - **The model explorer no longer says an unsigned metric is refused.** It is answered with a
   warning until signed off, as the runtime does. The page fills "Sign off as" from the identity
   saved in `local/.config`, and opens Review on the sub-tab that has items.
