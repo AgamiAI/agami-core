@@ -34,7 +34,7 @@ import connect_helper  # noqa: E402
 import credential_store  # noqa: E402
 import execute_sql  # noqa: E402
 
-SECRET = "demo-Pa55-Xq9vZ-not-real"
+SECRET = "not-a-real-password"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
 
 
