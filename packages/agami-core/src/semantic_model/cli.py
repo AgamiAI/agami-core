@@ -293,6 +293,8 @@ def cmd_prepare(args) -> int:
         # {output_column: unit}, traced through the caller's own statement — feed straight to
         # `format-table --units` so summed/aliased currency formats correctly.
         "units": RT.resolve_result_units(org, sql),
+        # the output columns holding a year, a code or an id — `format-table --labels`
+        "labels": sorted(RT.resolve_result_labels(org, sql)),
     })
     return 0
 
@@ -610,10 +612,19 @@ def cmd_approve_queue(args) -> int:
     path (the HTML explorer's CLI equivalent). Reads the same queue `review-queue` builds
     (Rule 1 metrics/named-filters + Rule 2 joins/entities), turns each item into a
     self-stamped `approve` op, and applies via curate.apply. `--kind` narrows to one item
-    type; `--dry-run` prints the ops without touching the model."""
+    type; `--dry-run` prints the ops without touching the model.
+
+    Placeholder values are never approved here: what one means is a person's choice, so they are
+    listed under `placeholders_awaiting_choice` for the person to answer (#445)."""
     from . import curate
     org = L.load_datasource(args.root)
     queue = curate.review_queue(org, root=args.root)
+    waiting = queue.get("placeholders", [])
+    held = ({"placeholders_awaiting_choice": [it["question"] for it in waiting],
+             "placeholder_note": "not approved: ask what each value means and record it with a "
+                                 "curate op {op: approve, kind: placeholder, name, column, value, "
+                                 "meaning: unknown|current|not_set}, or reject it as real data"}
+            if waiting else {})
     kinds = set(args.kind) if args.kind else None
     items = [it for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
              if kinds is None or it["kind"] in kinds]
@@ -630,10 +641,10 @@ def cmd_approve_queue(args) -> int:
                for it in items if it.get("changes_since_approval")]
     shown = {"changed_since_approval": changed} if changed else {}
     if args.dry_run:
-        _print_json({"dry_run": True, "count": len(ops), "ops": ops, **shown})
+        _print_json({"dry_run": True, "count": len(ops), "ops": ops, **shown, **held})
         return 0
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
-    _print_json({"approved": len(ops), **shown, **res.as_dict()})
+    _print_json({"approved": len(ops), **shown, **res.as_dict(), **held})
     return 0 if res.validated else 1
 
 
@@ -1140,7 +1151,8 @@ def cmd_format_table(args) -> int:
         return 0
     headers, rows = reader[0], reader[1:]
     unit_map = json.loads(args.units) if args.units else {}
-    print(units.format_table(headers, rows, unit_map))
+    labels = json.loads(args.labels) if args.labels else []
+    print(units.format_table(headers, rows, unit_map, labels))
     return 0
 
 
@@ -1305,15 +1317,17 @@ def cmd_seed_validate(args) -> int:
                 data = rows[1:]
                 # trace each output column → unit through the seed's SQL, then format every
                 # cell exactly like the query path (units.format_table): a unit'd column gets
-                # its symbol/grouping, a bare number gets grouping; non-numbers pass through.
-                unit_map = {}
+                # its symbol/grouping, a year or a code is shown as written, a bare number gets
+                # grouping; non-numbers pass through.
+                unit_map, labels = {}, set()
                 if fmt_org is not None:
                     try:
                         unit_map = RT.resolve_result_units(fmt_org, sql)
+                        labels = RT.resolve_result_labels(fmt_org, sql)
                     except Exception:
-                        unit_map = {}
+                        unit_map, labels = {}, set()
                 if data:
-                    data = units.format_rows(headers, data, unit_map)
+                    data = units.format_rows(headers, data, unit_map, labels)
                 item["row_headers"] = headers
                 item["row_count"] = len(data)
                 item["row_preview"] = data[:cap]
@@ -2140,6 +2154,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("format-table", help="format a result CSV into a deterministic markdown table (exact numbers)")
     sp.add_argument("--csv-file", default=None, help="result CSV (header row + rows); omit to read stdin")
     sp.add_argument("--units", default=None, help='JSON header->unit map, e.g. {"outstanding":"INR"}')
+    sp.add_argument("--labels", default=None,
+                    help='JSON list of label columns shown as written (a year, a code), e.g. ["ship_year"]')
     sp.set_defaults(func=cmd_format_table)
 
     sp = sub.add_parser("seed-examples", help="validate candidate seeds against the live DB + write the passing ones")

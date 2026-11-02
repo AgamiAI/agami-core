@@ -644,6 +644,18 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
         return {}
 
 
+def _resolve_labels(profile: str, sql: str) -> set[str]:
+    """Best-effort set of result columns that hold a year, a code or an id (shown as written, not
+    grouped), read from the model like `_resolve_units`. Empty without the model deps."""
+    try:
+        org = get_cached_org(profile)
+        from semantic_model import runtime as RT
+
+        return RT.resolve_result_labels(org, sql)
+    except Exception:
+        return set()
+
+
 # What ONE tool call may resolve more than once and must not resolve more than once: the model
 # version pin. Keyed inside by profile, and scoped to a request rather than to the process, for two
 # different reasons that both matter.
@@ -1654,7 +1666,7 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
 # Column-detail keys that make a column worth sending in full even when its group wasn't asked for:
 # a caveat, a cleaning rule or a date encoding changes how the column must be written, and a
 # sensitive flag changes whether it may be projected.
-_ALWAYS_FULL_KEYS = ("caveats", "value_transform", "sensitive", "date_format", "timezone")
+_ALWAYS_FULL_KEYS = ("caveats", "placeholders", "value_transform", "sensitive", "date_format", "timezone")
 
 
 def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> None:
@@ -3701,7 +3713,7 @@ def _finalize_execution(
     try:
         from semantic_model import units  # stdlib-only; safe even without model deps
 
-        markdown = units.format_table(columns, data_rows, unit_map)
+        markdown = units.format_table(columns, data_rows, unit_map, _resolve_labels(profile, sql))
     except Exception:
         markdown = None
 
@@ -5597,7 +5609,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`caveats` and `value_transforms`. An entry in `default_filters` is the org's own "
             "definition of what that table means and is NOT applied to your SQL — read them HERE, "
             "while you are writing the statement, rather than meeting them on the receipt "
-            "afterwards. When the datasource has stored examples the response also carries "
+            "afterwards. A column's `placeholders` lists stored values a person said stand for "
+            "something else (`meaning` unknown / current / not_set), each with `how` to write the "
+            "SQL for it; follow it, as nothing filters them for you. "
+            "When the datasource has stored examples the response also carries "
             "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
             "get_prompt_examples, which ranks them — no example is sent here. The response names "
             "the engine under `dialect` and points at list_datasources for its `dialect_rules` "

@@ -54,10 +54,8 @@ except ImportError:  # the bundled lib/ ships it under a private name so it can'
 
 
 def _unit_for(unit_map: dict, headers: list[str], i: int):
-    """Unit for column i: by output name, then by positional key `#i` (carries the
-    unit for DB-auto-named columns) — same lookup as units.format_table."""
-    h = headers[i] if i < len(headers) else ""
-    return unit_map.get(h) or unit_map.get(f"#{i}")
+    """Unit for column i: the same lookup as units.format_table."""
+    return units.unit_for_column(unit_map, headers, i)
 
 
 def _raw_number(cell: str):
@@ -68,7 +66,7 @@ def _raw_number(cell: str):
     try:
         f = float(s)
         return int(f) if f == int(f) else f
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
 
 
@@ -101,8 +99,7 @@ def _build_section(spec: dict, idx: int, anomalies: list) -> dict:
 
     # table_rows — every cell formatted EXACTLY via units (no LLM, no abbreviation).
     table_headers = [relabels.get(h, h) for h in headers]
-    table_rows = [[units.format_cell(c, _unit_for(unit_map, headers, i)) for i, c in enumerate(r)]
-                  for r in rows]
+    table_rows = units.format_rows(headers, rows, unit_map)
 
     # labels — the label column, formatted (handles date encodings / choice labels).
     label_unit = _unit_for(unit_map, headers, label_col)

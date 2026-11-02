@@ -49,6 +49,7 @@ from __future__ import annotations
 import decimal
 import functools
 import re
+from collections import Counter
 from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Any, Callable, Iterator, NamedTuple, Optional
@@ -87,6 +88,7 @@ from .models import (
 from .models import table_key as _table_key
 from .sql_dialect import DialectUnresolved, engines_disagree, resolve_datasource_dialect
 from .suggest import did_you_mean
+from .units import is_date_format
 
 
 def _exp_nodes(*names: str) -> tuple[type, ...]:
@@ -1383,6 +1385,9 @@ UNCHECKED_UNPARSEABLE = (
 )
 UNCHECKED_NO_SELECT = (
     "The statement contains no SELECT, so there was no aggregate to check."
+)
+UNCHECKED_TOO_DEEP = (
+    "The statement is nested too deeply to walk, so no aggregate in it was checked."
 )
 
 
@@ -2702,7 +2707,10 @@ def pre_flight_check(sql: str, org: Datasource,
         return PreFlightResult(unchecked=UNCHECKED_UNPARSEABLE)
     if tree.find(exp.Select) is None:
         return PreFlightResult(unchecked=UNCHECKED_NO_SELECT)
-    reports = _aggregate_reports(tree, org, ctx=ctx)
+    try:
+        reports = _aggregate_reports(tree, org, ctx=ctx)
+    except RecursionError:
+        return PreFlightResult(unchecked=UNCHECKED_TOO_DEEP)
     # The flat list is DERIVED, never gathered a second time: two walks producing "the findings"
     # and "the findings per aggregate" is two chances for one statement to be described two ways.
     return PreFlightResult(
@@ -6953,6 +6961,386 @@ def _term_score(query_lower: str, name: str) -> float:
     return 0.0
 
 
+def _column_token(c: Column) -> Optional[str]:
+    # a date-encoded column contributes its date_format token (so an epoch column renders as a
+    # human date); otherwise its unit/currency.
+    return c.date_format or c.unit
+
+
+def _unanimous_tokens(org: Datasource) -> dict[str, str]:
+    """column name -> token, for a name every model column carrying it agrees on. The fallback for a
+    column no table in the statement declares (a CTE's output, say): a name one table gives `USD`
+    and another leaves bare is not evidence for either."""
+    seen: dict[str, set[Optional[str]]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            for c in t.columns:
+                seen.setdefault(c.name.lower(), set()).add(_column_token(c))
+    return {name: next(iter(toks)) for name, toks in seen.items()
+            if len(toks) == 1 and next(iter(toks))}
+
+
+def _star_projection(proj: "exp.Expression") -> bool:
+    """`*` or `t.*`: a projection that expands to columns of its own, so result positions no longer
+    line up with the select list. A star inside `COUNT(*)` expands nothing."""
+    return isinstance(proj, exp.Star) or (isinstance(proj, exp.Column) and isinstance(proj.this, exp.Star))
+
+
+# Functions that return one of their arguments unchanged, so the result is in that argument's unit
+# or date encoding. A literal argument (`GREATEST(created_ts, 1704067200)`) is written in it too.
+_VALUE_SELECTING = _exp_nodes("Greatest", "Least", "Coalesce", "Min", "Max") if _HAVE_SQLGLOT else ()
+# Functions returning a row's value of their first argument, whatever else they take: `ARG_MAX(amount,
+# id)`, `FIRST(amount ORDER BY id)`, `LAG(amount, 1, 0)`.
+_VALUE_PICKING = _exp_nodes("ArgMax", "ArgMin", "First", "Last", "FirstValue", "LastValue", "NthValue", "Lag", "Lead",
+                            "Mode", "IgnoreNulls", "RespectNulls", "Order", "Ordered") if _HAVE_SQLGLOT else ()
+# Functions computing a value in their first argument's unit, not one of its values.
+_VALUE_KEEPING = _exp_nodes("Median", "PercentileCont", "PercentileDisc", "ApproxQuantile", "Quantile", "Trunc",
+                            "Mod") if _HAVE_SQLGLOT else ()
+_BRANCHING = _exp_nodes("Case", "If", "Nvl2", "DecodeCase") if _HAVE_SQLGLOT else ()
+_DIVIDING = _exp_nodes("Div", "SafeDivide") if _HAVE_SQLGLOT else ()
+_WITHIN_GROUP = _exp_nodes("WithinGroup") if _HAVE_SQLGLOT else ()
+
+
+def _is_bare_literal(e: "exp.Expression") -> bool:
+    """A constant, through casts, parentheses and a sign: `CAST(0 AS DECIMAL(18,2))`, `-1`, `NULL`.
+    It is written in whatever its neighbours are, so it neither gives nor takes a unit or a label."""
+    while isinstance(e, (exp.Paren, exp.Cast, exp.Neg)):
+        e = e.this
+    return isinstance(e, (exp.Literal, exp.Null))
+
+
+def _value_arguments(e: "exp.Expression") -> list["exp.Expression"]:
+    """The arguments a value-selecting function may return, constants left out."""
+    return [a for a in (e.this, *(e.args.get("expressions") or [])) if a is not None and not _is_bare_literal(a)]
+
+
+def _query_arms(body: "exp.Expression") -> list["exp.Select"]:
+    """The SELECTs whose rows a query returns: itself, every arm of a UNION / INTERSECT, or an
+    EXCEPT's left arm, the only one it returns rows from. Walked with a stack: thousands of arms
+    parse to a tree that deep."""
+    arms: list["exp.Select"] = []
+    stack = [body]
+    while stack:
+        node = stack.pop()
+        while isinstance(node, (exp.Subquery, exp.Paren)):
+            node = node.this
+        if isinstance(node, exp.SetOperation):
+            if not isinstance(node, exp.Except):
+                stack.append(node.expression)
+            stack.append(node.this)
+        elif isinstance(node, exp.Select):
+            arms.append(node)
+    return arms
+
+
+def _lose_when_too_deep(empty: Callable[[], Any]) -> Callable:
+    """A statement nested past the stack gets no display hints, rather than failing the caller."""
+    def wrap(trace: Callable) -> Callable:
+        @functools.wraps(trace)
+        def traced(org: Datasource, sql: str) -> Any:
+            try:
+                return trace(org, sql)
+            except RecursionError:
+                return empty()
+        return traced
+    return wrap
+
+
+class _TableSource:
+    """A model table in a FROM or JOIN."""
+
+    def __init__(self, key: object, cols: dict[str, Column]) -> None:
+        self.key, self.cols = key, cols
+
+    def read(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
+        found = _ci_get(self.cols, name, quoted=quoted)
+        return [(found, None)] if found is not None else None
+
+
+class _OpaqueSource:
+    """`VALUES`, `UNNEST`, a table function: its named columns are real, with nothing known of them."""
+
+    def __init__(self, names: set[str]) -> None:
+        self.key, self.names = id(self), names
+
+    def read(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
+        return [] if _tkey(name) in self.names else None
+
+
+class _DerivedSource:
+    """A CTE or a derived table: a column of it is its body's projection of that name, or at that
+    position when the alias renames the columns (`t(a, b)`). An empty read is a column that exists
+    but can't be traced, so it says nothing, where None is a column this source doesn't have."""
+
+    def __init__(self, ctx: "_DisplayContext", body: "exp.Expression", alias: object,
+                 outer: "Optional[_DisplayScope]") -> None:
+        self.key, self.ctx, self.outer, self.alias = id(body), ctx, outer, alias
+        self.arms = _query_arms(body)
+        self.names = ([c.name for c in alias.columns] if isinstance(alias, exp.TableAlias) else [])
+
+    @staticmethod
+    def _positions(names: list[str], name: str, quoted: bool) -> list[int]:
+        exact = [i for i, n in enumerate(names) if n == name]
+        if exact or quoted:
+            return exact
+        return [i for i, n in enumerate(names) if n and _tkey(n) == _tkey(name)]
+
+    def _read_starred(self, arm: "exp.Select", name: str, quoted: bool) -> "Optional[list[tuple]]":
+        """A column of `SELECT *`: its own projection of that name, or whichever table the star
+        expands has it. Never the enclosing query's, which a star doesn't expand."""
+        scope = self.ctx.scope(arm, self.outer)
+        named = [p for p in arm.expressions if not _star_projection(p)]
+        own = self._positions([p.alias_or_name for p in named], name, quoted)
+        reads: list[list[tuple]] = [[(named[i], scope)] for i in own]
+        for star in arm.expressions:
+            if not _star_projection(star):
+                continue
+            star_node = star.this if isinstance(star, exp.Column) else star
+            if any(v for k, v in star_node.args.items() if not k.startswith("except")):
+                return []       # `* REPLACE (id AS amount)` computes a name of its own
+            col = exp.column(name, table=star.table if isinstance(star, exp.Column) else None, quoted=quoted)
+            found = scope.resolve(col, local=True)
+            if found is not None:
+                reads.append(found)
+        if not reads:
+            return None
+        return reads[0] if len(reads) == 1 else []
+
+    def read(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
+        # once per column: chains of `SELECT *` reach the same body along many paths
+        key = (self.key, id(self.outer), id(self.alias), name, quoted)
+        if key not in self.ctx.reads:
+            self.ctx.reads[key] = self._read(name, quoted)
+        return self.ctx.reads[key]
+
+    def _read(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
+        if not self.arms:
+            return None
+        if any(_star_projection(p) for arm in self.arms for p in arm.expressions):
+            if self.names:
+                return [] if name in self.names or _tkey(name) in map(_tkey, self.names) else None
+            out: dict[tuple[int, int], tuple] = {}
+            for i, arm in enumerate(self.arms):
+                found = self._read_starred(arm, name, quoted)
+                if found is None:
+                    return None if i == 0 else []
+                if not found:
+                    return []
+                out.update({(id(r[0]), id(r[1])): r for r in found})
+            return list(out.values())
+        found_at = self._positions(self.names or [p.alias_or_name for p in self.arms[0].expressions], name, quoted)
+        if not found_at:
+            return None
+        if len(found_at) > 1 or any(found_at[0] >= len(arm.expressions) for arm in self.arms):
+            return []
+        return [(arm.expressions[found_at[0]], self.ctx.scope(arm, self.outer)) for arm in self.arms]
+
+
+class _DisplayScope:
+    """What the columns of one SELECT read, for their display unit or label (#547). A table is known
+    by its (schema, name), as the scope gates know it (#507), so `sales.orders.amount` never takes
+    `archive.orders.amount`'s unit; a CTE's or derived table's column is what its body computed under
+    that name. A column no source here has is the enclosing SELECT's, as a correlated subquery reads
+    it. A qualifier naming two sources, or a bare column two sources have, reads nothing."""
+
+    def __init__(self, ctx: "_DisplayContext", select: "exp.Select",
+                 outer: "Optional[_DisplayScope]") -> None:
+        self.ctx, self.outer, self.select = ctx, outer, select
+        self.sources: dict[str, list] = {}
+        from_ = select.args.get("from_") or select.args.get("from")
+        for src in (from_, *(select.args.get("joins") or []), *(select.args.get("laterals") or [])):
+            if src is not None:
+                self._add(src.this if isinstance(src, (exp.From, exp.Join)) else src)
+
+    def _add(self, node: "exp.Expression") -> None:
+        ctx = self.ctx
+        if isinstance(node, exp.Paren) or (isinstance(node, exp.Subquery) and not _query_arms(node)):
+            self._add(node.this)            # `(a JOIN b)` only groups tables
+            return
+        for join in node.args.get("joins") or []:
+            self._add(join.this)
+        if isinstance(node, exp.Subquery):
+            # a derived table reads no sibling, but may read the row of a query enclosing this one
+            source = _DerivedSource(ctx, node.this, node.args.get("alias"), self.outer)
+            self.sources.setdefault(_tkey(node.alias_or_name), []).append(source)
+            return
+        if isinstance(node, exp.Lateral) and isinstance(node.this, exp.Subquery):
+            # LATERAL and CROSS APPLY do read their siblings
+            source = _DerivedSource(ctx, node.this.this, node.args.get("alias"), self)
+            self.sources.setdefault(_tkey(node.alias_or_name), []).append(source)
+            return
+        if not isinstance(node, exp.Table) or not node.name:
+            alias = node.args.get("alias")
+            names = {_tkey(c.name) for c in alias.columns} if isinstance(alias, exp.TableAlias) else set()
+            # a bare `generate_series(1, 3) g` names its one column after the alias
+            if not names and node.alias_or_name:
+                names = {_tkey(node.alias_or_name)}
+            self.sources.setdefault(_tkey(node.alias_or_name), []).append(_OpaqueSource(names))
+            return
+        cte = ctx.cte_refs.get(id(node))
+        source = None
+        if cte is not None:
+            source = _DerivedSource(ctx, cte.this, cte.args.get("alias"), None)
+        else:
+            resolved = _resolve_table(ctx.sidx, node, ctx.decls, ctx.dialect)
+            if isinstance(resolved, tuple):
+                named = [t for t in ctx.decls.get(resolved, []) if _names_declared(node, t, ctx.dialect)]
+                source = _TableSource(frozenset(id(t) for t in named),
+                                      {c.name: c for t in named for c in t.columns})
+        self.sources.setdefault(_tkey(node.alias_or_name), []).append(source)
+        if node.db and not node.alias:
+            self.sources.setdefault(_tkey(f"{node.db}.{node.name}"), []).append(source)
+
+    def _own_alias(self, name: str, quoted: bool) -> "Optional[list[tuple]]":
+        """`SELECT id AS revenue, revenue * 2`: where an engine allows it, the name is this alias."""
+        named = [p for p in self.select.expressions if isinstance(p, exp.Alias)
+                 and (p.alias == name if quoted else _tkey(p.alias) == _tkey(name))]
+        if len(named) != 1 or any(_tkey(c.name) == _tkey(name) for c in named[0].find_all(exp.Column)):
+            return None
+        return [(named[0], self)]
+
+    def resolve(self, col: "exp.Column", local: bool = False) -> "Optional[list[tuple]]":
+        """(model Column, None) or (expression, the scope computing it): one entry, or one per arm
+        of a UNION. None when nothing here or outside binds the column; `local` looks only here."""
+        # SQLite, MySQL, SQL Server and the rest match even a quoted column name ignoring case
+        quoted = _is_quoted(col) and self.ctx.dialect in _QUOTED_EXACT
+        scope: Optional[_DisplayScope] = self
+        if col.table:
+            key = _tkey(f"{col.db}.{col.table}" if col.db else col.table)
+            while scope is not None and key not in scope.sources:
+                scope = None if local else scope.outer
+            if scope is None:
+                return None
+            found = {getattr(s, "key", None): s for s in scope.sources[key]}
+            source = next(iter(found.values())) if len(found) == 1 else None
+            return source.read(col.name, quoted) if source is not None else None
+        while scope is not None:
+            owners: dict[object, list[tuple]] = {}
+            for s in (s for ss in scope.sources.values() for s in ss if s is not None):
+                found = s.read(col.name, quoted)
+                if found is not None:
+                    owners[s.key] = found
+            if owners:
+                return next(iter(owners.values())) if len(owners) == 1 else None
+            if local:
+                return None
+            # a table the model doesn't know may be what has it, so the outer row can't claim it
+            if any(s is None for ss in scope.sources.values() for s in ss):
+                return None
+            alias = scope._own_alias(col.name, quoted)
+            if alias is not None:
+                return alias
+            scope = scope.outer
+        return None
+
+
+class _DisplayContext:
+    """One statement's scopes, built once each, and each traced expression's result, so a long chain
+    of CTEs costs one pass; a recursive CTE's reference to itself adds nothing."""
+
+    def __init__(self, org: Datasource, tree: "exp.Expression") -> None:
+        self.sidx, self.decls, self.dialect = _schema_index(org), _table_decls(org), _dialect_of(org)[0]
+        self.cte_refs = _cte_bindings(tree)
+        self.active: set[tuple[int, int]] = set()
+        self._scopes: dict[tuple[int, int], _DisplayScope] = {}
+        self._traced: dict[tuple[int, int], Any] = {}
+        self.reads: dict[tuple, "Optional[list[tuple]]"] = {}
+
+    def scope(self, select: "exp.Select", outer: "Optional[_DisplayScope]") -> _DisplayScope:
+        key = (id(select), id(outer))
+        if key not in self._scopes:
+            self._scopes[key] = _DisplayScope(self, select, outer)
+        return self._scopes[key]
+
+    def trace(self, read: "list[tuple]", of_column: Callable[[Column], Any],
+              of_expr: Callable[["exp.Expression", _DisplayScope], Any]) -> list:
+        """`of_column` of each model column `read` names and `of_expr` of each expression; a
+        constant arm of a UNION (`SELECT NULL`) is left out while another arm says something."""
+        values = [r for r in read if isinstance(r[0], Column) or not _is_bare_literal(r[0])] or read
+        out = []
+        for item, scope in values:
+            if isinstance(item, Column):
+                out.append(of_column(item))
+                continue
+            key = (id(item), id(scope))
+            if key in self.active:              # a recursive CTE reading itself
+                continue
+            if len(self.active) >= _MAX_CTE_CHAIN:
+                return []                       # too deep to trace: say nothing rather than overflow
+            if key not in self._traced:
+                self.active.add(key)
+                try:
+                    self._traced[key] = of_expr(item, scope)
+                finally:
+                    self.active.discard(key)
+            out.append(self._traced[key])
+        return out
+
+
+def _subquery_read(ctx: _DisplayContext, sub: "exp.Subquery", scope: _DisplayScope
+                   ) -> "Optional[list[tuple]]":
+    """A scalar subquery's value: its own one projection, read in its own FROM, then the row of the
+    query around it."""
+    arms = _query_arms(sub.this)
+    if not arms or any(len(a.expressions) != 1 or _star_projection(a.expressions[0]) for a in arms):
+        return None
+    return [(a.expressions[0], ctx.scope(a, scope)) for a in arms]
+
+
+def _statement_outputs(ctx: _DisplayContext, tree: "exp.Expression"
+                       ) -> "tuple[list[exp.Expression], bool, list[list[tuple]]]":
+    """The statement's projections as its first SELECT writes them, whether a star is among them,
+    and for each the expressions every arm of a UNION computes in that position."""
+    arms = _query_arms(tree) or [s for s in [tree.find(exp.Select)] if s is not None]
+    if not arms:
+        return [], False, []
+    projs = list(arms[0].expressions)
+    has_star = any(_star_projection(p) for a in arms for p in a.expressions)
+    if has_star or any(len(a.expressions) != len(projs) for a in arms):
+        arms = arms[:1]
+    scopes = [ctx.scope(a, None) for a in arms]
+    return projs, has_star, [[(a.expressions[i], s) for a, s in zip(arms, scopes)]
+                             for i in range(len(projs))]
+
+
+def _value_nodes(e: "exp.Expression") -> Iterator["exp.Expression"]:
+    """The nodes under `e` that can become its value: not a comparison's operands (a boolean is no
+    amount) and not inside a nested subquery, which stands for its own value (yielded itself)."""
+    stack = list(e.iter_expressions())
+    while stack:
+        node = stack.pop()
+        if isinstance(node, exp.Predicate):
+            continue
+        yield node
+        if not isinstance(node, (exp.Subquery, exp.Select)):
+            stack.extend(node.iter_expressions())
+
+
+def _holds_value(e: "exp.Expression") -> bool:
+    """Whether an argument can carry a unit at all: a constant or a condition can't."""
+    if isinstance(e, (exp.Predicate, exp.Select)):
+        return False
+    return any(isinstance(n, exp.Subquery) or (isinstance(n, exp.Column) and n.name)
+               for n in (e, *_value_nodes(e)))
+
+
+def _branch_values(e: "exp.Expression") -> "list[Optional[exp.Expression]]":
+    """What a CASE, IF, NVL2 or DECODE can return, not what it tests."""
+    if isinstance(e, exp.Case):
+        return [*(i.args.get("true") for i in e.args.get("ifs") or []), e.args.get("default")]
+    if "true" in e.arg_types:           # IF and NVL2
+        return [e.args.get("true"), e.args.get("false")]
+    args = e.expressions                # DECODE(tested, key, value, …, default)
+    return [*args[2::2], *(args[-1:] if len(args) % 2 == 0 else [])]
+
+
+def _repeated_names(projs: "list[exp.Expression]") -> set[str]:
+    """Output names, lower-cased, that two projections share: such a name can't say which it means."""
+    seen = Counter(p.alias_or_name.lower() for p in projs if p.alias_or_name)
+    return {name for name, count in seen.items() if count > 1}
+
+
+@_lose_when_too_deep(dict)
 def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
     """Map each SELECT output column -> display unit, **tracing the SQL** (not matching
     names): an aggregate/expression over a column inherits that column's unit, so
@@ -6961,90 +7349,201 @@ def resolve_result_units(org: Datasource, sql: str) -> dict[str, str]:
       - output name that matches a metric name -> the metric's unit;
       - otherwise inherit the unit of the column(s) referenced, IF they share exactly
         one unit (so SUM/AVG/MIN/MAX/`col*1.1` of a currency column stay that currency);
-      - COUNT(...) and ratios (any division) get NO currency unit (a count / rate isn't
-        money). Returns {} if the model carries no units or sqlglot can't parse.
+      - a column is the one its table declares: a bare `days_open` has no unit even when
+        another table's `days_open` is money (#547), and `sales.orders` is never `archive.orders`;
+        a CTE's or derived table's column (`t.amount`) is what its body computed, and a scalar
+        subquery is its own projection, read in its own FROM;
+      - a CASE or IF takes its unit from the values it returns, never from its conditions, and
+        a constant branch takes nothing away; a window or FILTER takes it from its value;
+      - GREATEST/LEAST/COALESCE/MIN/MAX/NULLIF return an argument, so they keep its unit or
+        date encoding, and a constant beside it (`CAST(0 AS DECIMAL(18,2))`, `-1`) takes none away;
+      - a UNION's column has a unit only when every arm gives it the same one, an EXCEPT's is
+        its left arm's;
+      - two output columns of one name are keyed by position only;
+      - COUNT(...), ratios (any division) and the difference of two dates get NO unit (a
+        count / rate isn't money, and a duration isn't a date). Returns {} if the model
+        carries no units or sqlglot can't parse.
     """
     from sqlglot import expressions as exp
 
-    col_units: dict[str, str] = {}
+    any_token = False
     metric_units: dict[str, str] = {}
     for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            for c in t.columns:
-                # a date-encoded column contributes its date_format token (so an
-                # epoch column renders as a human date); otherwise its unit/currency.
-                token = c.date_format or c.unit
-                if token:
-                    col_units.setdefault(c.name.lower(), token)
+        any_token = any_token or any(_column_token(c) for t in sa.tables_defined for c in t.columns)
         for m in sa.metrics:
             if m.unit:
                 metric_units.setdefault(m.name.lower(), m.unit)
     for m in getattr(org, "cross_subject_area_metrics", []):
         if getattr(m, "unit", None):
             metric_units.setdefault(m.name.lower(), m.unit)
-    if not col_units and not metric_units:
+    if not any_token and not metric_units:
         return {}
 
     tree = _parse_sql(sql, _dialect_of(org)[0])
-    select = tree.find(exp.Select) if tree is not None else None
-    if select is None:
+    if tree is None:
         return {}
-
-    projs = list(select.expressions)
+    ctx = _DisplayContext(org, tree)
     # `SELECT *` expands to an unknown number of columns, so projection index no longer
     # lines up with result-column index — disable the positional fallback in that case
     # (the star's columns keep their real names, so name-matching still covers them).
-    has_star = any(isinstance(p, exp.Star) or p.find(exp.Star) is not None for p in projs)
+    projs, has_star, outputs = _statement_outputs(ctx, tree)
+    by_name = _unanimous_tokens(org)
+
+    def _traced(read: list[tuple]) -> Optional[str]:
+        return _same(ctx.trace(read, _column_token, _unit_of))
+
+    def _col_token(col: "exp.Column", scope: _DisplayScope) -> Optional[str]:
+        read = scope.resolve(col)
+        if read is not None:
+            return _traced(read)
+        return by_name.get((col.name or "").lower())
 
     # Unit-preserving scalar ops: an aggregate/round of a currency is still that currency.
-    _preserving = (exp.Sum, exp.Avg, exp.Min, exp.Max, exp.Round, exp.Coalesce,
-                   exp.Abs, exp.Ceil, exp.Floor)
+    _preserving = (exp.Sum, exp.Avg, exp.Round, exp.Abs, exp.Ceil, exp.Floor, exp.Nullif)
 
-    def _unit_of(e) -> Optional[str]:
+    def _same(found: list[Optional[str]]) -> Optional[str]:
+        return found[0] if found and len(set(found)) == 1 else None
+
+    def _unit_of(e, scope: _DisplayScope) -> Optional[str]:
         """Dimensional analysis: the unit a (sub)expression produces, or None when it's
         dimensionless/ambiguous. Conservative — defaults to None so we never label a
         value with a unit it doesn't have (a wrong symbol is worse than none on a
         verification surface)."""
         if e is None:
             return None
-        if isinstance(e, (exp.Alias, exp.Paren, exp.Cast)):
-            return _unit_of(e.this)
+        # a window or FILTER is its value: PARTITION BY, ORDER BY and the predicate add no unit
+        if isinstance(e, (exp.Alias, exp.Paren, exp.Cast, exp.Window, exp.Filter)):
+            return _unit_of(e.this, scope)
         if isinstance(e, exp.Column):
-            return col_units.get((e.name or "").lower())
+            return _col_token(e, scope)
+        if isinstance(e, exp.Subquery):
+            read = _subquery_read(ctx, e, scope)
+            return _traced(read) if read is not None else None
         if isinstance(e, exp.Count):
             return None                                   # a count is dimensionless
-        if isinstance(e, _preserving):
-            return _unit_of(e.this)
-        if isinstance(e, exp.Div):
-            num, den = _unit_of(e.this), _unit_of(e.expression)
+        if isinstance(e, _WITHIN_GROUP):                # PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY v)
+            order = e.expression
+            return _same([_unit_of(o, scope) for o in order.expressions]) if isinstance(order, exp.Order) else None
+        if isinstance(e, _preserving + _VALUE_PICKING + _VALUE_KEEPING):
+            return _unit_of(e.this, scope)
+        if isinstance(e, _VALUE_SELECTING):
+            return _same([_unit_of(a, scope) for a in _value_arguments(e)])
+        if isinstance(e, exp.Distinct):                   # SUM(DISTINCT …) is its value
+            return _same([_unit_of(a, scope) for a in e.expressions])
+        if isinstance(e, _BRANCHING):
+            # a constant branch is written in the unit of the others, as beside COALESCE
+            return _same([_unit_of(v, scope) for v in _branch_values(e)
+                          if v is not None and not _is_bare_literal(v)])
+        if isinstance(e, _DIVIDING):
+            num, den = _unit_of(e.this, scope), _unit_of(e.expression, scope)
             return num if (num and not den) else None      # currency/count → currency; X/X → none
         if isinstance(e, exp.Mul):
-            return _unit_of(e.this) or _unit_of(e.expression)  # currency × scalar → currency
+            return _unit_of(e.this, scope) or _unit_of(e.expression, scope)  # currency × scalar
         if isinstance(e, (exp.Add, exp.Sub)):
-            a, b = _unit_of(e.this), _unit_of(e.expression)
+            a, b = _unit_of(e.this, scope), _unit_of(e.expression, scope)
+            if isinstance(e, exp.Sub) and is_date_format(a):
+                return None                               # date − date is a duration
             return a if a == b else None
-        # fallback: a single distinct column unit, only if no count/division muddies it
-        if e.find(exp.Count) is not None or e.find(exp.Div) is not None:
+        if isinstance(e, exp.Predicate):
+            return None                                   # a comparison is true or false
+        # fallback: a single distinct unit among the values, only if no count/division muddies
+        # it. A function of a date (`strftime('%Y', ts)`, a day difference) is no longer that
+        # date, and a value with no unit beside one with a unit leaves the result unknown.
+        if any(isinstance(n, (exp.Count, exp.Div)) for n in _value_nodes(e)):
             return None
-        units = {col_units[c.name.lower()] for c in e.find_all(exp.Column)
-                 if c.name and c.name.lower() in col_units}
-        return next(iter(units)) if len(units) == 1 else None
+        found = [_unit_of(a, scope) for a in e.iter_expressions() if _holds_value(a)]
+        if any(t is None or is_date_format(t) for t in found):
+            return None
+        return _same(found)
 
-    def _unit_for(proj) -> Optional[str]:
+    def _unit_for(proj, read: list[tuple]) -> Optional[str]:
         if proj.alias_or_name and proj.alias_or_name.lower() in metric_units:
             return metric_units[proj.alias_or_name.lower()]
-        return _unit_of(proj)
+        return _traced(read)
 
+    repeated = _repeated_names(projs)
     out: dict[str, str] = {}
-    for i, proj in enumerate(projs):
-        unit = _unit_for(proj)
+    for i, (proj, read) in enumerate(zip(projs, outputs)):
+        unit = _unit_for(proj, read)
         if unit is None:
             continue
         name = proj.alias_or_name
-        if name:
+        if name and name.lower() not in repeated:
             out[name] = unit                 # by output name (aliased / named columns)
         if not has_star:
             out[f"#{i}"] = unit              # by position — covers unaliased MAX(amount) etc.
+    return out
+
+
+# A year pulled out of a date is a label, and so is a column the model calls a dimension or a key.
+_YEAR_FORMATS = frozenset({"%Y", "YYYY", "yyyy"})
+
+
+def _is_year_part(e: "exp.Expression") -> bool:
+    if isinstance(e, exp.Year):
+        return True
+    if isinstance(e, exp.Extract):   # EXTRACT(YEAR …), and DATE_PART('year', …) on most dialects
+        return isinstance(e.this, (exp.Var, exp.Literal, exp.Identifier, exp.Column)) \
+            and e.this.name.upper() == "YEAR"
+    if isinstance(e, exp.Anonymous):  # DuckDB's DATE_PART stays a plain function call
+        args = e.expressions
+        return e.name.upper() in ("DATE_PART", "DATEPART") and bool(args) \
+            and isinstance(args[0], exp.Literal) and args[0].name.upper() == "YEAR"
+    if isinstance(e, (exp.TimeToStr, exp.ToChar)):
+        fmt = e.args.get("format")
+        return isinstance(fmt, exp.Literal) and fmt.this in _YEAR_FORMATS
+    return False
+
+
+def _is_label_column(c: Column) -> bool:
+    return (c.type not in ("integer", "decimal", "float") or c.primary_key
+            or c.foreign_key is not None or c.aggregation == "dimension"
+            or bool(c.choice_field))
+
+
+@_lose_when_too_deep(set)
+def resolve_result_labels(org: Datasource, sql: str) -> set[str]:
+    """The output columns that hold labels rather than quantities — a year, a code, an id —
+    keyed by output name and by position (`#i`) like `resolve_result_units`, for
+    `units.format_rows`. Read from the model: a projected column whose type is not numeric, a
+    key, a `dimension`, a choice field; and a year taken out of a date. A value only passes
+    through MIN/MAX/COALESCE/CAST and keeps being that column; a NULL beside it changes nothing. So `ship_year` stays `2011`, not
+    `2,011`, and a TEXT zip `07094` is never read as the number 7,094 (#547). A CTE's, derived
+    table's or scalar subquery's column is traced to what it computed, like a unit."""
+    tree = _parse_sql(sql, _dialect_of(org)[0])
+    if tree is None:
+        return set()
+    ctx = _DisplayContext(org, tree)
+    projs, has_star, outputs = _statement_outputs(ctx, tree)
+    passing = (exp.Alias, exp.Paren, exp.Cast, exp.AnyValue, exp.Nullif, exp.Window, exp.Filter, *_VALUE_PICKING)
+
+    def _traced(read: list[tuple]) -> bool:
+        found = ctx.trace(read, _is_label_column, _is_label)
+        return bool(found) and all(found)
+
+    def _is_label(e: "exp.Expression", scope: _DisplayScope) -> bool:
+        if _is_year_part(e):
+            return True
+        if isinstance(e, passing):
+            return _is_label(e.this, scope)
+        if isinstance(e, _VALUE_SELECTING + (exp.Distinct,)):
+            # every column it may return is a label; a NULL or other constant beside them is neither
+            args = e.expressions if isinstance(e, exp.Distinct) else _value_arguments(e)
+            return bool(args) and all(_is_label(a, scope) for a in args)
+        if isinstance(e, (exp.Column, exp.Subquery)):
+            read = scope.resolve(e) if isinstance(e, exp.Column) else _subquery_read(ctx, e, scope)
+            return read is not None and _traced(read)
+        return False
+
+    repeated = _repeated_names(projs)
+    out: set[str] = set()
+    for i, (proj, read) in enumerate(zip(projs, outputs)):
+        if not _traced(read):
+            continue
+        if proj.alias_or_name and proj.alias_or_name.lower() not in repeated:
+            out.add(proj.alias_or_name)
+        if not has_star:
+            out.add(f"#{i}")
     return out
 
 
@@ -7950,6 +8449,7 @@ __all__ = [
     "Prober",
     "AMBIGUITY_DELTA",
     "resolve_result_units",
+    "resolve_result_labels",
     "list_subject_areas",
     "ExampleMatch",
     "get_prompt_examples",
