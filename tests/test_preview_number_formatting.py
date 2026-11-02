@@ -553,3 +553,38 @@ def test_a_picked_value_stays_a_label(tmp_path, expr, label):
     _model(tmp_path)
     org = load_datasource(tmp_path)
     assert ("v" in RT.resolve_result_labels(org, f"SELECT {expr} AS v FROM stores")) is label
+
+
+@pytest.mark.parametrize("sql, expected", [
+    ("WITH t AS (SELECT id AS x, * FROM orders) SELECT amount FROM t", {"amount": "USD", "#0": "USD"}),
+    ("WITH t AS (SELECT * REPLACE (id AS amount) FROM orders) SELECT amount FROM t", {}),
+    # a name the body gives twice, or a position no arm has, can't be traced
+    ("WITH t AS (SELECT id AS amount, amount FROM orders) SELECT t.amount FROM t", {}),
+    ("WITH t(a, b) AS (SELECT amount FROM orders) SELECT b FROM t", {}),
+    ("WITH t AS (VALUES (1)) SELECT t.amount FROM t", {}),
+    # the derived table lacks it, so it is the outer row's
+    ("SELECT (SELECT revenue FROM (SELECT id FROM stock_moves) x) AS v FROM stores", {"v": "USD", "#0": "USD"}),
+    ("SELECT a.amount FROM (orders a JOIN stock_moves b ON a.id = b.id)", {"amount": "USD", "#0": "USD"}),
+    ("SELECT b.amount FROM (orders a JOIN stock_moves b ON a.id = b.id)", {}),
+    ("SELECT nope.amount FROM orders", {}),
+    ("SELECT (SELECT * FROM orders) AS v", {}),
+    ("DELETE FROM orders", {}),
+])
+def test_what_cannot_be_traced_says_nothing(tmp_path, sql, expected):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == expected
+
+
+def test_labels_of_a_year_part_and_of_what_does_not_parse(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert "v" in RT.resolve_result_labels(org, "SELECT YEAR(opened_on) AS v FROM stores")
+    assert RT.resolve_result_labels(org, "SELECT (") == set()
+
+
+def test_a_label_cell_as_written():
+    assert units.format_rows(["store_id"], [[5.0]]) == [["5"]]
+    assert units.format_rows(["store_id"], [[Decimal("5.00")]]) == [["5"]]
+    assert units.format_rows(["postal_area"], [["07094"]]) == [["07094"]]
+    assert units.format_rows(["flag"], [[True]]) == [["True"]]
