@@ -148,6 +148,32 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Numbers in the examples preview and in query answers are formatted by their column's type and
+  unit (#547).** A year shows as `2011`, not `2,011`; a ZIP code read as text keeps its leading
+  zero (`07094`); `-719` no longer shows as `-,719`; a NUMERIC value drops its trailing zeros
+  (`0.12500000000000000000` shows `0.125`), while a money column keeps its symbol, grouping and
+  two decimals. A column the model types as text, a key, a `dimension` or a choice field, and a
+  year taken out of a date, is shown as written; without the model, a column named like a year or
+  a postal code is shown as written only when every value has that shape. A column now gets a unit
+  only when that column has one: a CASE takes it from the values it returns, not from a money
+  column in its condition, a bare column is read from its own table (and schema), and the
+  difference of two dates is not a date, so a duration in days no longer shows as dollars. A `0`
+  or `NULL` branch, a window's `PARTITION BY` and a `FILTER`'s condition take no unit away, and
+  `GREATEST`, `LEAST`, `COALESCE` and `NULLIF` keep the unit, date encoding or label of what they
+  return, whatever constant or `NULL` sits beside it. A table inside `WHERE EXISTS (…)` lends no
+  column to the outer SELECT, and a quoted column name matches as the engine matches it. A CTE's
+  or derived table's column (`t.amount`) is whatever its body computed under that name, a scalar
+  subquery in the select list is its own projection read in its own FROM (a correlated column is
+  the outer row's), and a UNION's column has a unit only when every arm gives it the same one.
+  `ARG_MAX`, `FIRST(… ORDER BY …)`, `LAG`, `NVL2`, `DECODE` and the like keep the unit of the value
+  they return, whatever other column they take.
+  Two output columns of one name each keep their own unit and label, by position, and an `EXCEPT`
+  takes its column's unit from its left arm. A constant branch of a CASE (`ELSE 100`, `ELSE 'n/a'`)
+  takes no unit away. A text value with a huge exponent (`12e345678901`) is shown as written rather
+  than expanded, and a statement too deep to trace loses its units instead of failing `sm prepare`.
+  `sm prepare` returns these label columns as `labels`, and `sm format-table --labels` takes them.
+  Big integers are no longer rounded through a float. Reports built by `csv_to_sections.py` follow
+  the same rules.
 - **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
   query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
   every query that used it, while the check for derived metrics refused a legal aggregate over a
