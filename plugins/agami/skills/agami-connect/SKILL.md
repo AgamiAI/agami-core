@@ -98,6 +98,8 @@ If you reach for a command that doesn't fit, stop and re-read this section.
      | `Connect another database` | Add a different database alongside this one | 1.1a first (same company or a different one), then Phase 0a (the new database gets its own name in 0a.3). |
      | `Try the sample data` | A small demo store, no connection needed | Phase 0s |
 
+     **An empty database gets no recommendation to ask it.** When every table in the active database's `sm model-tree` has `rows` of 0, the first option is `Ask a question` without "(Recommended)", its description says *"<database> has no rows, so answers will be empty"*, and `Connect another database` is marked **(Recommended)** instead.
+
      Route "Other" text by what it asks for. An action goes to that action: re-introspect, reload or refresh the schema → `Reload the schema`; add a schema that lives in the same database → `Reload the schema` with the schema selection in 1.3 widened to the old and new schemas (see the note under 1.1: same database, another schema is a re-introspect, never a new database); review or sign off the model, edit descriptions, exclude tables → [agami-model](../agami-model/SKILL.md); add or connect a different database → `Connect another database`. Only a question goes to agami-query. When the text could be either (a schema name alone, say), ask which with a card rather than guess.
 
      This card replaces the 1.1 menu for a returning person; don't ask 1.1 again after it.
