@@ -24,8 +24,8 @@ import tools  # noqa: E402
 PROFILE = "acme"
 # `amount` is declared but the warehouse lacks it, so the database itself rejects the statement.
 MISSING_COLUMN = "SELECT amount FROM orders"
-# A nested aggregate: no needle reads it, so it is `other` and exit 6.
-NESTED_AGGREGATE = "SELECT SUM(SUM(id)) AS n FROM orders"
+# A misspelt function: no needle reads it, so it is `other` and exit 6.
+UNKNOWN_FUNCTION = "SELECT SUMM(id) AS n FROM orders"
 
 
 def _write_model(root: pathlib.Path) -> None:
@@ -77,7 +77,7 @@ def _cli(sql: str, **extra_env: str) -> subprocess.CompletedProcess:
 
 @pytest.mark.parametrize(("sql", "kind", "said"), [
     (MISSING_COLUMN, "column_not_found", "no such column: amount"),
-    (NESTED_AGGREGATE, "other", "misuse of aggregate function SUM()"),
+    (UNKNOWN_FUNCTION, "other", "no such function: SUMM"),
 ])
 def test_a_local_command_line_shows_the_database_s_first_line(warehouse, sql, kind, said):
     proc = _cli(sql)
@@ -88,15 +88,15 @@ def test_a_local_command_line_shows_the_database_s_first_line(warehouse, sql, ki
     assert second == f"Database error: SQLite execution error: {said}"
 
 
-@pytest.mark.parametrize("sql", [MISSING_COLUMN, NESTED_AGGREGATE])
+@pytest.mark.parametrize("sql", [MISSING_COLUMN, UNKNOWN_FUNCTION])
 def test_the_child_the_mcp_tool_forks_writes_only_the_fixed_sentence(warehouse, sql):
     proc = _cli(sql, **{execute_sql.SERVED_CHILD_ENV: "1"})
     assert proc.stderr.strip() in (execute_sql._ERROR_MESSAGES["column_not_found"],
                                    execute_sql.UNEXPECTED_FAILURE_MESSAGE)
-    assert "amount" not in proc.stderr and "misuse" not in proc.stderr
+    assert "amount" not in proc.stderr and "no such function" not in proc.stderr
 
 
-@pytest.mark.parametrize("sql", [MISSING_COLUMN, NESTED_AGGREGATE])
+@pytest.mark.parametrize("sql", [MISSING_COLUMN, UNKNOWN_FUNCTION])
 def test_a_hosted_server_writes_only_the_fixed_sentence(warehouse, sql):
     from store import Store
 
@@ -107,12 +107,12 @@ def test_a_hosted_server_writes_only_the_fixed_sentence(warehouse, sql):
     proc = _cli(sql, AGAMI_DB_URL=f"sqlite:///{app_db}", AGAMI_GOVERNANCE_ENFORCED="true")
     assert proc.stderr.strip() in (execute_sql._ERROR_MESSAGES["column_not_found"],
                                    execute_sql.UNEXPECTED_FAILURE_MESSAGE)
-    assert "Database error" not in proc.stderr and "misuse" not in proc.stderr
+    assert "Database error" not in proc.stderr and "no such function" not in proc.stderr
 
 
 @pytest.mark.parametrize(("sql", "kind", "message"), [
     (MISSING_COLUMN, "column_not_found", execute_sql._ERROR_MESSAGES["column_not_found"]),
-    (NESTED_AGGREGATE, "other", execute_sql.UNEXPECTED_FAILURE_MESSAGE),
+    (UNKNOWN_FUNCTION, "other", execute_sql.UNEXPECTED_FAILURE_MESSAGE),
 ])
 @pytest.mark.parametrize("path", ["forked", "in_process"])
 def test_the_mcp_tool_s_failure_payload_is_unchanged(warehouse, sql, kind, message, path):
@@ -125,13 +125,13 @@ def test_the_mcp_tool_s_failure_payload_is_unchanged(warehouse, sql, kind, messa
     assert body["status"] == "failed"
     assert body["failure"] == {"kind": kind, "message": message}
     rendered = json.dumps(body)
-    assert "Database error" not in rendered and "misuse" not in rendered and "no such column" not in rendered
+    assert "Database error" not in rendered and "no such function" not in rendered and "no such column" not in rendered
 
 
 def test_the_detail_never_rides_on_the_envelope(warehouse, cli_detail):
-    env = execute_sql.execute_guarded(NESTED_AGGREGATE, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
+    env = execute_sql.execute_guarded(UNKNOWN_FUNCTION, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
     assert env.failure.message == execute_sql.UNEXPECTED_FAILURE_MESSAGE
-    assert "misuse" in execute_sql._last_error_cli_detail.get()
+    assert "no such function" in execute_sql._last_error_cli_detail.get()
     # Cleared by the next call, so it is never attributed to a statement that did not produce it.
     execute_sql.execute_guarded("SELECT id FROM orders", PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
     assert execute_sql._last_error_cli_detail.get() is None
@@ -261,12 +261,12 @@ def test_no_served_caller_spends_time_on_the_command_line_detail(warehouse, monk
     calls = []
     monkeypatch.setattr(execute_sql, "_db_error_first_line", lambda *a: calls.append(a) or "x")
     if path == "direct":
-        env = execute_sql.execute_guarded(NESTED_AGGREGATE, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
+        env = execute_sql.execute_guarded(UNKNOWN_FUNCTION, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR)
         assert env.status == "failed"
     else:
         tools.set_injected_executor(execute_sql.BUILTIN_EXECUTOR)
         try:
-            assert json.loads(tools.tool_execute_sql({"sql": NESTED_AGGREGATE, "datasource": PROFILE}))["status"] == "failed"
+            assert json.loads(tools.tool_execute_sql({"sql": UNKNOWN_FUNCTION, "datasource": PROFILE}))["status"] == "failed"
         finally:
             tools.set_injected_executor(None)
     assert calls == [] and execute_sql._last_error_cli_detail.get() is None
@@ -314,7 +314,7 @@ def test_a_profile_value_cut_between_its_words_is_never_half_shown():
 
 
 def test_an_in_process_main_leaves_no_command_line_detail_behind(warehouse, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", PROFILE, "--sql", NESTED_AGGREGATE])
+    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", PROFILE, "--sql", UNKNOWN_FUNCTION])
     assert execute_sql.main() == execute_sql.FAILURE_KIND_TO_EXIT["other"]
     assert "Database error:" in capsys.readouterr().err
     assert execute_sql._cli_detail_wanted.get() is False

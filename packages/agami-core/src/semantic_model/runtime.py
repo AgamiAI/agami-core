@@ -4883,7 +4883,12 @@ def _same_alias(spelling: tuple, written: tuple, dialect: "str | None") -> bool:
             return False
         if (a.name, bool(a.quoted)) == (b.name, bool(b.quoted)):
             continue
-        if dialect not in _ALIAS_CASE_KNOWN or _engine_name(a, dialect) != _engine_name(b, dialect):
+        if dialect in _ALIAS_CASE_KNOWN:
+            if _engine_name(a, dialect) != _engine_name(b, dialect):
+                return False
+        # MySQL, SQL Server and BigQuery: quoting changes nothing, only the case is unknown. With no
+        # engine at all, a quoted name may not be the unquoted one (an engine may fold to upper case).
+        elif dialect is None or a.name != b.name:
             return False
     return True
 

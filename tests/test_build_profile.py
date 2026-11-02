@@ -609,6 +609,50 @@ def test_an_inner_alias_differing_only_in_case_does_not_hide_the_outer_table(eng
         assert res is None
 
 
+@pytest.mark.parametrize(("engine", "inner", "written"), [
+    ("MySQL", "`o`", "o"), ("MySQL", "o", "`o`"), ("MySQL", "`o`", "`o`"),
+    ("SQLServer", "[o]", "o"), ("SQLServer", "o", "[o]"), ('SQLServer', '"o"', "[o]"),
+    ("BigQuery", "`o`", "o"), ("BigQuery", "o", "`o`"),
+])
+def test_quoting_an_alias_does_not_change_which_table_it_names(engine, inner, written):
+    from semantic_model import runtime
+
+    top, limit = ("TOP 1 ", "") if engine == "SQLServer" else ("", " LIMIT 1")
+
+    def statement(inner_table: str, outer_table: str) -> str:
+        return (f"SELECT (SELECT {top}{written}.secret FROM sales.{inner_table} {inner}{limit}) AS x "
+                f"FROM sales.{outer_table} o")
+
+    assert runtime.check_column_scope(statement("customers", "orders"), _org(engine)) is None
+    # Either spelling names the inner table, so one that leaves the column out is refused.
+    res = runtime.check_column_scope(statement("orders", "customers"), _org(engine))
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+
+
+@pytest.mark.parametrize(("engine", "inner", "written"), [
+    ("MySQL", "`O`", "o"), ("MySQL", "O", "`o`"), ("MySQL", "`o`", "O"),
+    ("SQLServer", "[O]", "o"), ("SQLServer", "O", "[o]"),
+    ("BigQuery", "`O`", "o"), ("BigQuery", "O", "`o`"),
+])
+def test_quoted_aliases_differing_only_in_case_are_still_refused(engine, inner, written):
+    from semantic_model import runtime
+
+    top, limit = ("TOP 1 ", "") if engine == "SQLServer" else ("", " LIMIT 1")
+    sql = f"SELECT (SELECT {top}{written}.secret FROM sales.customers {inner}{limit}) AS x FROM sales.orders o"
+    res = runtime.check_column_scope(sql, _org(engine))
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+    assert "differ only in case" in res.remediation
+
+
+def test_with_no_engine_a_quoted_alias_is_not_assumed_to_be_the_unquoted_one():
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    quoted, bare = exp.to_identifier("o", quoted=True), exp.to_identifier("o", quoted=False)
+    assert not runtime._same_alias((quoted,), (bare,), None)
+    assert runtime._same_alias((quoted,), (bare,), "mysql")
+
+
 # ------------------------------------------------- a catalog view's alias over a model table's
 
 

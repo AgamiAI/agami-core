@@ -251,11 +251,11 @@ def test_an_unreadable_plan_still_writes_a_manifest_saying_why(warehouse, monkey
 
 def test_a_failed_item_records_the_database_s_first_line_locally(warehouse, monkeypatch, capsys):
     out = warehouse / "rows" / "5"
-    plan = _plan(warehouse, [{"id": "nested", "sql": "SELECT SUM(SUM(id)) FROM orders", "out": str(out / "a.csv")}])
+    plan = _plan(warehouse, [{"id": "typo", "sql": "SELECT SUMM(id) FROM orders", "out": str(out / "a.csv")}])
     assert _main(monkeypatch, "--batch", str(plan)) == 6
     run = json.loads((out / "a.run.json").read_text())
     assert run["detail"] == execute_sql.UNEXPECTED_FAILURE_MESSAGE
-    assert run["database_error"] == "SQLite execution error: misuse of aggregate function SUM()"
+    assert run["database_error"] == "SQLite execution error: no such function: SUMM"
     monkeypatch.setenv(execute_sql.SERVED_CHILD_ENV, "1")
     assert _main(monkeypatch, "--batch", str(plan)) == 6
     assert "database_error" not in json.loads((out / "a.run.json").read_text())
