@@ -616,3 +616,11 @@ def test_the_password_link_comes_with_a_card():
     assert "header `Password`" in step
     assert "**I've saved it** / **New link** / **Use a file instead (manual)**" in step
     assert "no card, nothing to paste" not in step
+
+
+def test_sign_off_shows_the_sql_each_definition_maps_to():
+    # Live-run feedback: a definition was signed off from its words alone.
+    for skill in ("agami-connect", "agami-model"):
+        text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
+        assert "`Kind | Name | What it means | SQL`" in text, skill
+        assert "its one-line meaning and the SQL it maps to" in text, skill
