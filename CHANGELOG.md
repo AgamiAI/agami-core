@@ -24,14 +24,18 @@ below corresponds to one such version.
   query text (MySQL's `COLUMN_STATISTICS` and `PROCESSLIST`, BigQuery's `JOBS`) stay refused. A
   column the model leaves out is still refused, `SELECT *` is still refused, a `USING` or `NATURAL`
   join is refused under the flag (write an explicit `ON`), and the 50,000-character cap is
-  unchanged. Beside a model table every column is qualified, except a name the table function returns,
+  unchanged. Beside a table function over a model table every column is qualified, except a name the table function returns,
   such as BigQuery's `UNNEST(o.tags) AS tag` value or `WITH OFFSET AS i` position, or on Postgres the
   function's own outputs (`key` and `value` for `jsonb_each`) and its alias column list. A bare alias
   over `jsonb_each` names the row, not a column, and a column inside a table function's argument is
   always read from the tables before it, so it must be qualified. A column qualified by an alias two
   sources share apart from case (`c` and `"C"`) is refused unless every one of them declares it, with
   or without the flag, and so is one whose alias an inner SELECT spells differently in case
-  (`"O"` inside, `o` outside), since the engine may read the outer table. Agami's own catalog query that calls `pg_get_constraintdef` runs under it too, matched by its exact shape, so a statement an
+  (`"O"` inside, `o` outside), since the engine may read the outer table. Under the flag a statement
+  cannot read a catalog view and a model table together: SQLite, MySQL and DuckDB read a column the view
+  lacks from an enclosing table of that alias (`(SELECT o.x FROM sqlite_master o) … FROM orders o`). Also
+  under the flag, beside a model table a dotted name no source of the query supplies (`info.x`, `o.info.x`)
+  and DuckDB's `COLUMNS()` are refused. Agami's own catalog query that calls `pg_get_constraintdef` runs under it too, matched by its exact shape, so a statement an
   agent writes cannot use that function. The flag is refused on a hosted server and the MCP tool
   cannot set it, so apart from those alias rules what the tool accepts and refuses is unchanged.
 

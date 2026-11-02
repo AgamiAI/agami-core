@@ -461,6 +461,8 @@ def _expands_a_column(node: "exp.Expression | None") -> bool:
     return (name or "").lower() in _PROFILING_TABLE_FUNCTIONS
 
 
+# Engines where `a.b` can be field `b` of a column `a`.
+_DOT_READS_A_FIELD = frozenset({"duckdb", "bigquery", "trino", "databricks"})
 # Engines with a native information_schema. Oracle and SQLite have none, so there the name could only
 # be an ordinary schema or an attached database.
 _HAS_INFORMATION_SCHEMA = frozenset({
@@ -531,9 +533,10 @@ def _bound_by_expansion(col: "exp.Column", dialect: "str | None") -> bool:
 
 def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
                                       ctx: "GuardContext | None") -> "guardrail.Refusal | None":
-    """Under the build profile, a statement that reads a model table and also a catalog view or a
-    table function names every column with its table. A bare name the inner source lacks resolves to
-    the outer model table, and column scope does not follow it there (#523)."""
+    """Under the build profile, a statement that reads a model table reads no catalog view, names each
+    column it qualifies with a source that supplies it, and beside a table function qualifies every
+    column. A name the inner source lacks resolves to the outer model table, and column scope does not
+    follow it there (#523)."""
     sidx = ctx.schema_index if ctx is not None and ctx.schema_index is not None else _schema_index(org)
     dialect = ctx.dialect if ctx is not None else _dialect_of(org)[0]
     cte_refs = _cte_references(tree)
@@ -543,7 +546,36 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
                    if not _is_catalog_relation(t, dialect))
     expands = (any(not t.name for t in tree.find_all(exp.Table))
                or tree.find(exp.Lateral, exp.Unnest) is not None)
-    if not declared or not (catalog or expands):
+    if not declared:
+        return None
+    if catalog:
+        # A catalog alias declares nothing, and SQLite, MySQL and DuckDB read a column the view lacks
+        # from any enclosing source of that alias. Which one is read is the engine's to decide, so the
+        # two never share a statement; profiling reads a catalog on its own.
+        return guardrail.refuse(
+            guardrail.RULE_UNSCOPABLE,
+            detail="under the build profile, a statement cannot read a catalog view and a model table "
+                   "together: which of them a column is read from cannot be checked",
+            remediation="Run the catalog read and the model table read as two statements.",
+        )
+    if tree.find(exp.Columns) is not None:
+        # DuckDB's COLUMNS() picks columns by pattern, so column scope never sees their names.
+        return guardrail.refuse(
+            guardrail.RULE_UNSCOPABLE,
+            detail="under the build profile, COLUMNS() is refused: the columns it reads are not named",
+            remediation="Name each column (alias.column), then run it again.",
+        )
+    bindings = _cte_bindings(tree)
+    dotted = sorted({".".join(p.name for p in c.parts) for c in tree.find_all(exp.Column)
+                     if c.table and _unsourced_qualifier(c, bindings, dialect)})
+    if dotted:
+        return guardrail.refuse(
+            guardrail.RULE_UNSCOPABLE,
+            detail="under the build profile, a statement that reads a model table must qualify each "
+                   "column with a source of the query; not one: " + _echo_identifiers(dotted),
+            remediation="Qualify each column with its table's alias (alias.column), then run it again.",
+        )
+    if not expands:
         return None
     bare = sorted({c.name for c in tree.find_all(exp.Column)
                    if c.name and not c.table and not _ordered_by_own_alias(c, dialect)
@@ -552,10 +584,52 @@ def _bare_column_beside_a_model_table(tree: "exp.Expression", org: Datasource,
         return None
     return guardrail.refuse(
         guardrail.RULE_UNSCOPABLE,
-        detail="under the build profile, a statement that reads a model table beside a catalog view "
-               "or a table function must qualify every column; unqualified: " + _echo_identifiers(bare),
+        detail="under the build profile, a statement that reads a model table beside a table function "
+               "must qualify every column; unqualified: " + _echo_identifiers(bare),
         remediation="Qualify each column with its table or alias (alias.column), then run it again.",
     )
+
+
+def _sources_answering(sel: "exp.Select", name: str) -> list["exp.Expression"]:
+    """The sources of `sel` a qualifier `name` names: by alias or table name, or BigQuery's UNNEST
+    value alias."""
+    found = []
+    for src in _from_sources(sel):
+        for node in src.walk(prune=lambda n: isinstance(n, exp.Select)):
+            if isinstance(node, (exp.Table, exp.Subquery, exp.Lateral, exp.Unnest)):
+                alias = node.args.get("alias")
+                values = alias.columns if isinstance(node, exp.Unnest) and isinstance(alias, exp.TableAlias) else []
+                if name in {node.alias_or_name.lower()} | {c.name.lower() for c in values}:
+                    found.append(node)
+    return found
+
+
+def _unsourced_qualifier(col: "exp.Column", cte_refs: dict, dialect: "str | None") -> bool:
+    """A dotted name no enclosing source certainly supplies. DuckDB reads `info.x` and `o.info.x` as
+    field `x` of a column `info`, which column scope takes for a table's column, and does the same
+    where a derived table or CTE called `info` lacks `x`."""
+    chain = _enclosing_selects(col)
+    if col.args.get("catalog"):
+        return True
+    if col.db:
+        return not any(t.db.lower() == col.db.lower() and not t.alias
+                       for s in chain for t in _sources_answering(s, col.table.lower())
+                       if isinstance(t, exp.Table))
+    for s in chain:
+        found = _sources_answering(s, col.table.lower())
+        if found:
+            break
+    else:
+        return True
+    if dialect not in _DOT_READS_A_FIELD:
+        return False
+    key = _column_key(col.this, dialect)
+    for src in found:
+        is_value = isinstance(src, exp.Unnest) and src.alias_or_name.lower() != col.table.lower()
+        names = None if is_value else _source_column_names(src, cte_refs, dialect)
+        if names is not None and key not in names:
+            return True
+    return False
 
 
 def _implicit_join_columns(tree: "exp.Expression") -> "guardrail.Refusal | None":

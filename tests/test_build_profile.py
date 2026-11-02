@@ -110,7 +110,7 @@ def test_a_profiling_read_runs_under_build_profile_and_is_refused_without_it(mod
     ("SELECT kv.key FROM orders o, jsonb_each(o.secret) AS kv", guardrail.RULE_COLUMN_SCOPE),
     ("SELECT kv.key FROM orders o CROSS JOIN LATERAL jsonb_each(o.secret) AS kv", guardrail.RULE_COLUMN_SCOPE),
     ("SELECT o.secret, c.column_name FROM orders o JOIN information_schema.columns c "
-     "ON c.table_name = 'orders'", guardrail.RULE_COLUMN_SCOPE),
+     "ON c.table_name = 'orders'", guardrail.RULE_UNSCOPABLE),
     # A column nobody declared.
     ("SELECT kv.key FROM orders o, jsonb_each(o.notes) AS kv", guardrail.RULE_COLUMN_SCOPE),
     # Undeclared user tables, and catalog tables that hold row values rather than structure.
@@ -461,26 +461,17 @@ def test_the_catalog_name_rule_agrees_with_the_table_name_rule(dialect):
 
 
 @pytest.mark.parametrize("sql", [
-    # Postgres keeps a quoted alias's case: `c` is orders and `"C"` the catalog view, either order.
     'SELECT c.secret FROM orders c CROSS JOIN information_schema.columns AS "C"',
     'SELECT c.secret FROM information_schema.columns AS "C" CROSS JOIN orders c',
-    # An unaliased catalog view registers under its own name too.
     "SELECT columns.secret FROM orders columns CROSS JOIN information_schema.columns",
-    # Fail closed: which source the alias names is not known, so even a declared column is refused.
     'SELECT c.id FROM orders c CROSS JOIN information_schema.columns AS "C"',
+    "SELECT o.id, c.column_name FROM orders o CROSS JOIN information_schema.columns AS c",
 ])
-def test_an_alias_shared_apart_from_case_is_refused_under_build_profile(model, sql):
+def test_a_catalog_view_and_a_model_table_never_share_a_statement(model, sql):
     refused, executor = _run(sql, build_profile=True)
     assert refused.status == "refused" and not executor.seen
-    assert refused.refusal.rule == guardrail.RULE_COLUMN_SCOPE
-    assert "differ only in case" in refused.refusal.remediation
-
-
-def test_distinct_aliases_beside_a_catalog_view_still_run_under_build_profile(model):
-    sql = "SELECT o.id, c.column_name FROM orders o CROSS JOIN information_schema.columns AS c"
-    ran, executor = _run(sql, build_profile=True)
-    assert ran.status == "ok", ran.refusal
-    assert executor.seen == [sql]
+    assert refused.refusal.rule == guardrail.RULE_UNSCOPABLE
+    assert "catalog view and a model table" in refused.refusal.detail
 
 
 def _org(engine: str):
@@ -579,9 +570,6 @@ def test_a_left_out_column_behind_a_table_function_or_an_inner_alias_is_refused(
     "SELECT k, value FROM orders o CROSS JOIN LATERAL jsonb_each(o.payload) AS kv(k)",
     "SELECT value FROM orders o, jsonb_array_elements(o.payload) AS e",
     "SELECT k FROM orders o, jsonb_object_keys(o.payload) AS k",
-    # The same alias, spelt the same, in the inner select: the engine reads the inner source.
-    "SELECT o.id, (SELECT c.column_name FROM information_schema.columns AS c LIMIT 1) AS n FROM orders o",
-    'SELECT o.id FROM orders "o" WHERE EXISTS (SELECT 1 FROM information_schema.columns c WHERE o.status = c.table_name)',
 ])
 def test_a_table_function_s_real_outputs_and_distinct_aliases_still_run(model, sql):
     ran, executor = _run(sql, build_profile=True)
@@ -619,3 +607,196 @@ def test_an_inner_alias_differing_only_in_case_does_not_hide_the_outer_table(eng
         assert "differ only in case" in res.remediation
     else:
         assert res is None
+
+
+# ------------------------------------------------- a catalog view's alias over a model table's
+
+
+_VIEWS = {"SQLite": ["sqlite_master", "main.sqlite_schema"],
+          "MySQL": ["information_schema.columns", "INFORMATION_SCHEMA.TABLES"],
+          "DuckDB": ["information_schema.columns"],
+          "PostgreSQL": ["information_schema.columns", "pg_catalog.pg_class"]}
+_SHADOWS = [
+    "SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT O.SECRET FROM {view} o LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT o.secret FROM {view} O LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT secret FROM {view} LIMIT 1) AS v FROM sales.orders",
+    "SELECT (SELECT (SELECT o.secret FROM {view} o LIMIT 1) FROM sales.customers c LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT orders.secret FROM {view} AS orders LIMIT 1) AS v FROM sales.orders",
+    "SELECT (WITH c AS (SELECT o.secret AS v FROM {view} o LIMIT 1) SELECT c.v FROM c) AS v FROM sales.orders o",
+    "SELECT d.v FROM (SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM sales.orders o) d",
+    "WITH d AS (SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM sales.orders o) SELECT d.v FROM d",
+    "SELECT l.v FROM sales.orders o, LATERAL (SELECT o.secret AS v FROM {view} o LIMIT 1) l",
+    "SELECT o.id FROM sales.orders o WHERE EXISTS (SELECT 1 FROM {view} o WHERE o.secret = 'x')",
+    # A column the view does have is refused too: which source answers is not this gate's to guess.
+    "SELECT (SELECT o.name FROM {view} o LIMIT 1) AS v FROM sales.orders o",
+]
+
+
+@pytest.mark.parametrize("engine", sorted(_VIEWS))
+@pytest.mark.parametrize("shape", _SHADOWS)
+def test_a_catalog_view_s_alias_cannot_reach_an_outer_model_table(engine, shape):
+    for view in _VIEWS[engine]:
+        sql = shape.format(view=view)
+        res = _gates(sql, _org(engine), build_profile=True)
+        assert res is not None and res.rule == guardrail.RULE_UNSCOPABLE, sql
+        # Without the flag the catalog view itself is what is refused, or the LATERAL ahead of it.
+        res = _gates(sql, _org(engine))
+        assert res is not None and res.rule in (guardrail.RULE_TABLE_SCOPE, guardrail.RULE_UNSCOPABLE), sql
+
+
+def test_a_cte_named_like_a_catalog_view_is_judged_as_what_it_reads():
+    sql = "WITH sqlite_master AS (SELECT o.secret AS v FROM sales.orders o) SELECT m.v FROM sqlite_master m"
+    res = _gates(sql, _org("SQLite"), build_profile=True)
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+
+
+@pytest.mark.parametrize(("engine", "sql"), [
+    ("SQLite", "SELECT s.name, s.sql FROM sqlite_master s WHERE s.type = 'table'"),
+    ("SQLite", "SELECT name FROM sqlite_master WHERE type = 'table'"),
+    ("SQLite", "SELECT m.name, m.tbl_name FROM main.sqlite_schema m"),
+    ("MySQL", "SELECT c.column_name, c.column_type FROM information_schema.columns c"),
+    ("MySQL", "SELECT k.constraint_name, k.referenced_table_name FROM information_schema.key_column_usage k"),
+    ("DuckDB", "SELECT t.table_name, t.table_type FROM information_schema.tables t"),
+    ("DuckDB", "WITH c AS (SELECT y.column_name AS a FROM information_schema.columns y) SELECT c.a FROM c"),
+    ("DuckDB", "SELECT u.x, COUNT(*) AS n FROM sales.orders o, unnest(o.tags) AS u(x) GROUP BY u.x"),
+    ("PostgreSQL", "SELECT a.attname FROM pg_catalog.pg_attribute a "
+                   "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid WHERE c.relname = 'orders'"),
+    ("PostgreSQL", "SELECT o.id FROM sales.orders o"),
+])
+def test_a_catalog_read_on_its_own_and_an_expansion_still_run(engine, sql):
+    assert _gates(sql, _org(engine), build_profile=True) is None
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT info.x FROM sales.orders o",
+    "SELECT o.info.x FROM sales.orders o",
+    "SELECT o.info.x.y FROM sales.orders o",
+    "SELECT u.x FROM sales.orders o, unnest(o.tags) AS u(x) WHERE info.x = 'a'",
+    "SELECT o.info.x FROM sales.orders o, unnest(o.tags) AS u(z)",
+    # A source of that name that lacks the column does not take it.
+    "SELECT (SELECT info.x FROM unnest(o.tags) AS info(y) LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT info.x FROM (SELECT c.id AS a FROM sales.customers c) info LIMIT 1) AS v FROM sales.orders o",
+    "WITH info AS (SELECT c.id AS a FROM sales.customers c) SELECT (SELECT info.x FROM info LIMIT 1) AS v "
+    "FROM sales.orders o",
+    "SELECT COLUMNS('sec.*') FROM sales.orders",
+    "SELECT COLUMNS('sec.*') FROM sales.orders o, unnest(o.tags) AS u(z)",
+    "SELECT k.v FROM (SELECT COLUMNS(c -> c LIKE 'sec%') AS v FROM sales.orders) k",
+])
+def test_a_duckdb_struct_field_or_columns_pattern_is_refused_under_build_profile(sql):
+    res = _gates(sql, _org("DuckDB"), build_profile=True)
+    assert res is not None and res.rule == guardrail.RULE_UNSCOPABLE, sql
+
+
+@pytest.mark.parametrize(("engine", "sql"), [
+    ("DuckDB", "SELECT d.a FROM (SELECT c.id AS a FROM sales.customers c) d, sales.orders o"),
+    ("DuckDB", "WITH c AS (SELECT y.id AS a FROM sales.customers y) SELECT c.a, o.id FROM c, sales.orders o"),
+    ("DuckDB", "SELECT sales.orders.id FROM sales.orders"),
+    ("BigQuery", "SELECT tag.x FROM sales.orders o, UNNEST(o.tags) AS tag"),
+])
+def test_a_source_that_supplies_the_dotted_name_still_runs(engine, sql):
+    assert _gates(sql, _org(engine), build_profile=True) is None
+
+
+# ------------------------------------------------- the same shapes against real engines
+
+
+def _real_model(root: Path, engine: str, connection: list[str]) -> None:
+    """orders(id, status, payload) and customers(id) in the model, over a file with hidden columns."""
+    (root / "local").mkdir(parents=True)
+    creds = root / "local" / "credentials"
+    creds.write_text("\n".join([f"[{PROFILE}]", *connection]) + "\n")
+    creds.chmod(0o600)
+    area = root / PROFILE / "subject_areas" / "sales"
+    (area / "tables").mkdir(parents=True)
+    (root / PROFILE / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "Shop", "version": 1, "storage_connections": [{"name": "c", "storage_type": engine}],
+        "subject_areas": ["subject_areas/sales"]}))
+    (area / "subject_area.yaml").write_text(yaml.safe_dump({"name": "sales", "tables": [
+        {"storage_connection": "c", "schema": "main", "table": t} for t in ("orders", "customers")]}))
+    for table, cols in (("orders", ["id", "status", "payload"]), ("customers", ["id"])):
+        (area / "tables" / f"{table}.yaml").write_text(yaml.safe_dump({
+            "name": table, "schema": "main", "storage_connection": "c", "grain": ["id"], "description": table,
+            "columns": [{"name": c, "type": "string"} for c in cols]}))
+
+
+def _seed(run, extra_columns: str = "", extra_values: str = "") -> None:  # noqa: ANN001
+    run(f"CREATE TABLE orders (id INT, status VARCHAR, payload VARCHAR, secret VARCHAR, name VARCHAR{extra_columns})")
+    run("CREATE TABLE customers (id INT)")
+    run(f"""INSERT INTO orders VALUES (1, 'open', '{{"a": 1}}', 'HIDDEN', 'HIDDEN'{extra_values})""")
+    run("INSERT INTO customers VALUES (1)")
+
+
+@pytest.fixture(params=["SQLite", "DuckDB"])
+def real_engine(request, tmp_path, monkeypatch):
+    """The real database behind `execute_guarded`: its catalog view, and a column that view has."""
+    db = tmp_path / "shop.db"
+    if request.param == "SQLite":
+        import sqlite3
+
+        conn = sqlite3.connect(db)
+        _seed(conn.execute)
+        conn.commit()
+        conn.close()
+        _real_model(tmp_path, "SQLite", ["type = sqlite", f"path = {db}"])
+        view, known = "sqlite_master", "name"
+    else:
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(str(db))
+        _seed(conn.execute, ", info STRUCT(x VARCHAR)", ", {'x': 'HIDDEN'}")
+        conn.close()
+        _real_model(tmp_path, "DuckDB", ["type = duckdb", f"path = {db}"])
+        view, known = "information_schema.columns", "column_name"
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", tmp_path / "local" / "credentials")
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "DATASOURCE_URL", f"DATASOURCE_URL__{PROFILE.upper()}",
+                execute_sql.SERVED_CHILD_ENV):
+        monkeypatch.delenv(var, raising=False)
+    return request.param, view, known
+
+
+def _on_engine(sql: str, **kw):
+    return execute_sql.execute_guarded(sql, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR,
+                                       **(kw or {"build_profile": True}))
+
+
+@pytest.mark.parametrize("shape", [
+    "SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM orders o",
+    "SELECT (SELECT O.SECRET FROM {view} o LIMIT 1) AS v FROM orders o",
+    'SELECT (SELECT o.secret FROM {view} "O" LIMIT 1) AS v FROM orders o',
+    "SELECT (SELECT secret FROM {view} LIMIT 1) AS v FROM orders",
+    "SELECT (SELECT (SELECT o.secret FROM {view} o LIMIT 1) FROM customers c LIMIT 1) AS v FROM orders o",
+    "SELECT (WITH c AS (SELECT o.secret AS v FROM {view} o LIMIT 1) SELECT c.v FROM c) AS v FROM orders o",
+    "SELECT d.v FROM (SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM orders o) d",
+    "SELECT (SELECT o.secret FROM ({view} a CROSS JOIN {view} b) o LIMIT 1) AS v FROM orders o",
+    "SELECT (SELECT orders.secret FROM {view} AS orders LIMIT 1) AS v FROM orders",
+])
+def test_a_real_engine_never_returns_the_hidden_column(real_engine, shape):
+    _, view, _ = real_engine
+    sql = shape.format(view=view)
+    # The shape does reach the value when nothing stands in the way, or this test proves nothing.
+    assert "HIDDEN" in str(_on_engine(sql, no_safety=True).data.rows), sql
+    assert _on_engine(sql).status == "refused", sql
+
+
+def test_a_real_engine_still_runs_profiling_reads(real_engine):
+    _, view, known = real_engine
+    assert _on_engine(f"SELECT x.{known} FROM {view} x").status == "ok"
+    assert _on_engine("SELECT o.id, o.status FROM orders o LIMIT 5").data.rows == [(1, "open")]
+
+
+def test_a_real_engine_s_table_function_cannot_reach_the_hidden_column(real_engine):
+    engine, _, _ = real_engine
+    fn = "json_each(o.payload)" if engine == "SQLite" else "unnest(['a'])"
+    for sql in (f"SELECT (SELECT o.secret FROM {fn} AS o LIMIT 1) AS v FROM orders o",
+                f"SELECT (SELECT secret FROM {fn} AS k LIMIT 1) AS v FROM orders o"):
+        assert "HIDDEN" not in str(_on_engine(sql))
+
+
+def test_duckdb_s_struct_field_and_columns_pattern_are_refused_on_the_real_engine(real_engine):
+    if real_engine[0] != "DuckDB":
+        pytest.skip("DuckDB only")
+    for sql in ("SELECT info.x FROM orders o", "SELECT o.info.x FROM orders o",
+                "SELECT COLUMNS('sec.*') FROM orders"):
+        assert "HIDDEN" in str(_on_engine(sql, no_safety=True).data.rows), sql
+        assert _on_engine(sql).status == "refused", sql
