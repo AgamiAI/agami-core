@@ -352,3 +352,204 @@ def test_a_value_function_is_a_label_when_everything_it_returns_is(tmp_path, exp
     _model(tmp_path)
     org = load_datasource(tmp_path)
     assert (RT.resolve_result_labels(org, f"SELECT {expr} AS v FROM stores") == {"v", "#0"}) is label
+
+
+@pytest.mark.parametrize("sql, expected", [
+    # the subquery's own WHERE and correlation columns carry no unit and take none away
+    ("SELECT o.id, (SELECT SUM(amount) FROM orders WHERE id > 0) AS total FROM orders o", {"total": "USD", "#1": "USD"}),
+    ("SELECT (SELECT SUM(revenue) FROM stores WHERE year_opened > 2000) AS recent_revenue",
+     {"recent_revenue": "USD", "#0": "USD"}),
+    ("SELECT s.id, (SELECT MAX(o.amount) FROM orders o WHERE o.id = s.id) AS max_order FROM stock_moves s",
+     {"max_order": "USD", "#1": "USD"}),
+    # a correlated subquery reads the outer row's column and its own
+    ("SELECT o2.id, (SELECT o2.amount - MIN(o.amount) FROM orders o) AS above_min FROM orders o2",
+     {"above_min": "USD", "#1": "USD"}),
+    # an inner alias shadows the outer one
+    ("SELECT (SELECT MAX(o.amount) FROM stock_moves o) AS m FROM orders o", {}),
+    ("SELECT (SELECT MAX(x.amount) FROM (SELECT amount FROM orders) x) AS m FROM stock_moves", {"m": "USD", "#0": "USD"}),
+])
+def test_a_scalar_subquery_is_its_own_projection(tmp_path, sql, expected):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == expected
+
+
+@pytest.mark.parametrize("sql, expected", [
+    ("WITH t AS (SELECT amount FROM orders) SELECT t.amount FROM t", {"amount": "USD", "#0": "USD"}),
+    ("SELECT x.amount FROM (SELECT amount FROM orders) x", {"amount": "USD", "#0": "USD"}),
+    ("WITH a AS (SELECT amount FROM orders), b AS (SELECT a.amount AS amt FROM a) SELECT b.amt FROM b",
+     {"amt": "USD", "#0": "USD"}),
+    ("WITH t(v) AS (SELECT revenue FROM stores) SELECT v FROM t", {"v": "USD", "#0": "USD"}),
+    # a name is what the body computed, not another table's column of that name
+    ("WITH t AS (SELECT net_change AS revenue FROM stores) SELECT t.revenue FROM t", {}),
+    ("SELECT amount FROM (SELECT id AS amount FROM stock_moves) x", {}),
+    ("WITH t AS (SELECT amount FROM stock_moves) SELECT t.amount FROM t", {}),
+    # every arm of a UNION must agree
+    ("SELECT amount FROM orders UNION ALL SELECT amount FROM stock_moves", {}),
+    ("SELECT amount FROM orders UNION ALL SELECT NULL", {"amount": "USD", "#0": "USD"}),
+    ("WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT n FROM t", {}),
+    # a comparison is true or false, never an amount
+    ("SELECT amount > 100 AS big FROM orders", {}),
+])
+def test_a_cte_or_derived_column_is_what_its_body_computed(tmp_path, sql, expected):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == expected
+
+
+def test_labels_trace_through_ctes_and_subqueries(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_labels(org, "WITH t AS (SELECT postcode FROM stores) SELECT t.postcode FROM t") == {
+        "postcode", "#0"}
+    assert RT.resolve_result_labels(org, "SELECT (SELECT MAX(postcode) FROM stores) AS p") == {"p", "#0"}
+    assert RT.resolve_result_labels(org, "SELECT x.v FROM (SELECT net_change AS v FROM stores) x") == set()
+    assert RT.resolve_result_labels(
+        org, "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 3) SELECT n FROM t") == set()
+
+
+def _currency_model(root: Path) -> None:
+    """`orders.amount` in dollars and `eu_orders.amount` in euros; only `orders.created_ts` is a date."""
+    _model(root)
+    (root / "subject_areas" / "s" / "tables" / "eu_orders.yaml").write_text(yaml.safe_dump({
+        "name": "eu_orders", "schema": "main", "storage_connection": "c", "grain": ["id"],
+        "description": "eu orders", "columns": [{"name": "id", "type": "integer", "primary_key": True},
+                                               {"name": "amount", "type": "decimal", "unit": "EUR"},
+                                               {"name": "created_ts", "type": "integer"}]}))
+    area = root / "subject_areas" / "s" / "subject_area.yaml"
+    doc = yaml.safe_load(area.read_text())
+    doc["tables"].append({"storage_connection": "c", "schema": "main", "table": "eu_orders"})
+    area.write_text(yaml.safe_dump(doc))
+
+
+@pytest.mark.parametrize("sql, expected", [
+    ("SELECT amount, (SELECT SUM(amount) FROM eu_orders) AS eur FROM orders",
+     {"amount": "USD", "#0": "USD", "eur": "EUR", "#1": "EUR"}),
+    ("SELECT o.id, (SELECT MAX(e.amount) FROM eu_orders e WHERE e.id = o.id) AS eur FROM orders o",
+     {"eur": "EUR", "#1": "EUR"}),
+    ("WITH t AS (SELECT amount FROM eu_orders) SELECT t.amount FROM t", {"amount": "EUR", "#0": "EUR"}),
+    ("WITH u AS (SELECT amount FROM orders), e AS (SELECT amount FROM eu_orders) "
+     "SELECT (SELECT SUM(amount) FROM u) AS usd, (SELECT SUM(amount) FROM e) AS eur",
+     {"usd": "USD", "#0": "USD", "eur": "EUR", "#1": "EUR"}),
+    ("SELECT amount FROM orders UNION ALL SELECT amount FROM eu_orders", {}),
+    ("WITH t AS (SELECT created_ts FROM orders) SELECT t.created_ts FROM t",
+     {"created_ts": "epoch_s", "#0": "epoch_s"}),
+    ("SELECT MAX(x.created_ts) FROM (SELECT created_ts FROM orders) x", {"#0": "epoch_s"}),
+    ("WITH t AS (SELECT created_ts FROM eu_orders) SELECT t.created_ts FROM t", {}),
+])
+def test_each_subquery_keeps_its_own_unit(tmp_path, sql, expected):
+    _currency_model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == expected
+
+
+def test_a_subquery_answer_keeps_its_unit_and_its_rows(tmp_path, monkeypatch):
+    import tools
+
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    monkeypatch.setattr(tools, "get_cached_org", lambda profile: org)
+    sql = "SELECT s.id, (SELECT SUM(o.amount) FROM orders o WHERE o.id = s.id) AS paid FROM stock_moves s"
+    rows = [[1, "714.23"]]
+    payload = json.loads(tools._finalize_execution(["id", "paid"], rows, profile="demo", sql=sql, execution_ms=1))
+    assert payload["markdown"].splitlines()[2] == "| 1 | $714.23 |"
+    assert payload["rows"] == [[1, "714.23"]]
+
+
+@pytest.mark.parametrize("sql, expected", [
+    # a CTE of a table's name is the CTE; one defined inside a subquery is seen there
+    ("WITH orders AS (SELECT id AS amount FROM stock_moves) SELECT amount FROM orders", {}),
+    ("SELECT x.v FROM (WITH t AS (SELECT amount AS v FROM orders) SELECT v FROM t) x", {"v": "USD", "#0": "USD"}),
+    # a recursive CTE's reference to itself takes away nothing its seed gives
+    ("WITH RECURSIVE t(i, v) AS (SELECT id, amount FROM orders UNION ALL SELECT i + 1, v * 2 FROM t WHERE i < 3) "
+     "SELECT v FROM t", {"v": "USD", "#0": "USD"}),
+    # a star expands its own table, by its qualifier
+    ("WITH t AS (SELECT * FROM orders) SELECT t.amount FROM t", {"amount": "USD", "#0": "USD"}),
+    ("WITH t AS (SELECT * FROM stock_moves) SELECT t.amount FROM t", {}),
+    ("WITH t AS (SELECT a.* FROM orders a JOIN stock_moves b ON a.id = b.id) SELECT t.amount FROM t",
+     {"amount": "USD", "#0": "USD"}),
+    ("WITH t AS (SELECT b.* FROM orders a JOIN stock_moves b ON a.id = b.id) SELECT t.amount FROM t", {}),
+    ("WITH t AS (SELECT a.*, b.* FROM orders a JOIN stock_moves b ON a.id = b.id) SELECT t.amount FROM t", {}),
+    ("WITH t AS (SELECT * FROM orders UNION ALL SELECT * FROM orders) SELECT amount FROM t",
+     {"amount": "USD", "#0": "USD"}),
+    ("WITH t AS (SELECT * FROM orders UNION ALL SELECT * FROM stock_moves) SELECT amount FROM t", {}),
+    ("WITH t(revenue) AS (SELECT * FROM stock_moves) SELECT revenue FROM t", {}),
+    # no table the star expands has it, so it is the outer row's
+    ("SELECT (SELECT revenue FROM (SELECT * FROM stock_moves) x) AS v FROM stores", {"v": "USD", "#0": "USD"}),
+    # LATERAL reads its sibling; VALUES and a table function compute their own columns
+    ("SELECT l.a FROM orders o, LATERAL (SELECT o.amount AS a) l", {"a": "USD", "#0": "USD"}),
+    ("SELECT revenue FROM (VALUES (1)) v(revenue)", {}),
+    ("SELECT revenue FROM generate_series(1, 3) revenue", {}),
+    ("SELECT amount FROM orders, generate_series(1, 3) g", {"amount": "USD", "#0": "USD"}),
+    # a table the model doesn't know may hold the column, so the outer row can't claim it
+    ("SELECT (SELECT days_open FROM undeclared) AS v FROM stores", {}),
+    # an earlier alias in the same select list, not another table's column of that name
+    ("SELECT id AS revenue, revenue * 2 AS doubled FROM stock_moves", {}),
+    ("SELECT SUM(amount) AS total, total * 2 AS doubled FROM orders",
+     {"total": "USD", "#0": "USD", "doubled": "USD", "#1": "USD"}),
+])
+def test_what_a_column_reads_through_stars_laterals_and_aliases(tmp_path, sql, expected):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql) == expected
+
+
+def test_a_very_long_cte_chain_says_nothing_rather_than_failing(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    bodies = ["c0 AS (SELECT amount AS v FROM orders)"]
+    bodies += [f"c{i} AS (SELECT c{i - 1}.v + c{i - 1}.v AS v FROM c{i - 1})" for i in range(1, 400)]
+    sql = f"WITH {', '.join(bodies)} SELECT v FROM c399"
+    assert RT.resolve_result_units(org, sql) == {}
+    assert RT.resolve_result_labels(org, sql) == set()
+    short = f"WITH {', '.join(bodies[:30])} SELECT v FROM c29"
+    assert RT.resolve_result_units(org, short) == {"v": "USD", "#0": "USD"}
+
+
+@pytest.mark.parametrize("sql, expected", [
+    # the other arguments say which row, not what unit
+    ("SELECT ARG_MIN(amount, id) AS x FROM orders", "USD"),
+    ("SELECT MAX_BY(amount, created_ts) AS x FROM orders", "USD"),
+    ("SELECT ARG_MAX(created_ts, id) AS x FROM orders", "epoch_s"),
+    ("SELECT ARG_MAX(id, amount) AS x FROM orders", None),
+    ("SELECT FIRST(amount ORDER BY id) AS x FROM orders", "USD"),
+    ("SELECT LAST(created_ts ORDER BY id) AS x FROM orders", "epoch_s"),
+    ("SELECT STRING_AGG(id, ',' ORDER BY amount) AS x FROM orders", None),
+    ("SELECT LAG(created_ts, id) OVER (ORDER BY id) AS x FROM orders", "epoch_s"),
+    ("SELECT NTH_VALUE(amount, id) OVER (ORDER BY id) AS x FROM orders", "USD"),
+    ("SELECT ROW_NUMBER() OVER (ORDER BY amount) AS x FROM orders", None),
+    ("SELECT MEDIAN(created_ts) AS x FROM orders", "epoch_s"),
+    ("SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY amount) AS x FROM orders", "USD"),
+    ("SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY id) AS x FROM orders", None),
+    # an unknown function's argument is a value expression, whatever it multiplies or tests
+    ("SELECT TOTAL(amount * id) AS x FROM orders", "USD"),
+    ("SELECT TOTAL(amount + id) AS x FROM orders", None),
+    ("SELECT TOTAL(CASE id WHEN 1 THEN amount END) AS x FROM orders", "USD"),
+    ("SELECT TOTAL(CASE WHEN id > 0 THEN id ELSE 0 END) AS x FROM orders", None),
+    ("SELECT TOTAL(id > 0) AS x FROM orders", None),
+    ("SELECT TOTAL((SELECT SUM(amount) FROM orders)) AS x", "USD"),
+    ("SELECT TOTAL(amount / 2) AS x FROM orders", None),
+    ("SELECT TRUNC(amount, id) AS x FROM orders", "USD"),
+    ("SELECT amount % id AS x FROM orders", "USD"),
+    ("SELECT NVL2(id, amount, 0) AS x FROM orders", "USD"),
+    ("SELECT NVL2(amount, id, 0) AS x FROM orders", None),
+    ("SELECT SAFE_DIVIDE(amount, id) AS x FROM orders", "USD"),
+    ("SELECT SAFE_DIVIDE(amount, amount) AS x FROM orders", None),
+    ("SELECT DECODE(id, 1, amount, 2, amount, 0) AS x FROM orders", "USD"),
+    ("SELECT DECODE(amount, 1, id) AS x FROM orders", None),
+])
+def test_a_function_has_the_unit_of_the_value_it_returns(tmp_path, sql, expected):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert RT.resolve_result_units(org, sql).get("x") == expected
+
+
+@pytest.mark.parametrize("expr, label", [
+    ("ARG_MAX(postcode, revenue)", True),
+    ("LAG(postcode) OVER (ORDER BY id)", True),
+    ("ARG_MAX(net_change, postcode)", False),
+])
+def test_a_picked_value_stays_a_label(tmp_path, expr, label):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    assert ("v" in RT.resolve_result_labels(org, f"SELECT {expr} AS v FROM stores")) is label

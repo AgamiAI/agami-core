@@ -27,7 +27,12 @@ below corresponds to one such version.
   or `NULL` branch, a window's `PARTITION BY` and a `FILTER`'s condition take no unit away, and
   `GREATEST`, `LEAST`, `COALESCE` and `NULLIF` keep the unit, date encoding or label of what they
   return, whatever constant or `NULL` sits beside it. A table inside `WHERE EXISTS (…)` lends no
-  column to the outer SELECT, and a quoted column name matches as the engine matches it.
+  column to the outer SELECT, and a quoted column name matches as the engine matches it. A CTE's
+  or derived table's column (`t.amount`) is whatever its body computed under that name, a scalar
+  subquery in the select list is its own projection read in its own FROM (a correlated column is
+  the outer row's), and a UNION's column has a unit only when every arm gives it the same one.
+  `ARG_MAX`, `FIRST(… ORDER BY …)`, `LAG`, `NVL2`, `DECODE` and the like keep the unit of the value
+  they return, whatever other column they take.
   `sm prepare` returns these label columns as `labels`, and `sm format-table --labels` takes them.
   Big integers are no longer rounded through a float. Reports built by `csv_to_sections.py` follow
   the same rules.
