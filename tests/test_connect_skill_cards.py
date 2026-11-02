@@ -623,7 +623,8 @@ def test_sign_off_shows_the_sql_each_definition_maps_to():
     for skill in ("agami-connect", "agami-model"):
         text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
         assert "`Kind | Name | What it means | SQL`" in text, skill
-        assert "its one-line meaning and the SQL it maps to" in text, skill
+        assert "**The SQL goes in the `Approve` option's `preview`**" in text, skill
+        assert "Never put the SQL in the question" in text, skill
 
 
 def test_the_onboarding_steps_are_shown_in_plain_words():
@@ -646,3 +647,11 @@ def test_an_empty_database_is_said_before_the_build_goes_on():
 def test_the_start_card_does_not_recommend_asking_an_empty_database():
     text = SKILL.read_text(encoding="utf-8")
     assert "**An empty database gets no recommendation to ask it.**" in text
+
+
+def test_finished_steps_carry_their_numbers():
+    # Live-run feedback: the step list should fill in counts as they're learned.
+    text = SKILL.read_text(encoding="utf-8")
+    section = text[text.index("## Progress tracking"):text.index("## Phase −1")]
+    assert "**When a step finishes, add its numbers to its label**" in section
+    assert "never an estimate" in section

@@ -56,3 +56,8 @@ def test_no_two_questions_in_a_skill_share_a_header():
             if (p.parent.name, h) not in allowed and not re.search(r"\d|<", h):
                 offenders.append(f"{p.parent.name}: {h}")
     assert not offenders, offenders
+
+
+def test_rule_3a_puts_detail_in_the_option_preview():
+    text = (PLUGIN / "shared" / "question-cards.md").read_text()
+    assert "## 3a. Detail goes in an option's preview, not the question" in text

@@ -112,7 +112,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 **Rule 1 guard.** A metric with an empty `Definition` can't be approved as it stands: on its card, ask for the definition in "Other" and apply it as an edit first.
 
-**One by one.** Up to 4 items per card, one question each. `header` is `Metric 3/9`, `Entity 3/9` or `Join 3/9` (at most 12 characters; drop the word when the numbers are long). The question is the item's name, its one-line meaning and the SQL it maps to, *"revenue: sum of paid order totals, refunds excluded. SQL: `SUM(amount) FILTER (WHERE status = 'paid')` on orders"* (the SQL cut as in the table). Options:
+**One by one.** Up to 4 items per card, one question each. `header` is `Metric 3/9`, `Entity 3/9` or `Join 3/9` (at most 12 characters; drop the word when the numbers are long). The question is short: the item's name and one plain sentence, with a real value when there is one, *"Approve revenue? Sum of paid order totals, refunds excluded."* **The SQL goes in the `Approve` option's `preview`**, the monospace pane a card shows beside a focused option, laid out over lines with a short comment on each filter (`AND status = 'paid'  -- paid orders`), the table it reads, and, for an item that changed since its approval, what changed. Never put the SQL in the question: a card question is plain text and a long formula there is unreadable. Options:
 
 - **Approve**: sign it off as written.
 - **Reject**: drop it from the model (`{"op":"reject",…}`).

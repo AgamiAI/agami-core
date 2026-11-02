@@ -48,6 +48,14 @@ sentences that matter. The card then asks what to do about it.
 Showing 2 of 2 tables.      (or: "Showing 15 of 42 tables; 27 more.")
 ```
 
+## 3a. Detail goes in an option's preview, not the question
+
+A card's question is plain text: keep it to one short sentence a person can answer. Anything
+longer that they need to see to decide (a SQL formula, a sample of rows, what changed) goes in the
+`preview` of the option it belongs to, which the card shows in a monospace pane while that option
+is focused. Lay SQL out over lines with a short comment on each filter. A live run showed a
+formula in the question as an unreadable wall of text.
+
 ## 4. Lists longer than a card holds are summarised
 
 Group them (by schema, name pattern, subject area, status) and ask about the groups; "Other" takes
