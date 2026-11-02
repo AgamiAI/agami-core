@@ -418,6 +418,8 @@ def model_tree(org: Datasource) -> dict[str, Any]:
                 "table": t.name, "schema": t.schema_name,
                 "description": t.description, "review_state": t.review_state,
                 "grain": t.grain,
+                # Measured at introspection (None when it wasn't): lets the build say a table is empty.
+                "rows": t.performance_hints.estimated_row_count if t.performance_hints else None,
                 "columns": [{"name": c.name, "type": c.type, "description": c.description,
                              "sensitive": c.sensitive, "review_state": c.review_state}
                             for c in t.columns],

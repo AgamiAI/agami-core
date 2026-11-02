@@ -635,3 +635,9 @@ def test_the_onboarding_steps_are_shown_in_plain_words():
     for jargon in ("ntrospect", "nrich", "NL→SQL", "Preflight"):
         assert not any(jargon in s for s in steps), jargon
     assert "never add your own working steps" in section
+
+
+def test_an_empty_database_is_said_before_the_build_goes_on():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "**Empty tables — say so before going on.**" in text
+    assert "header `Empty`: **Connect a different database (Recommended)**" in text

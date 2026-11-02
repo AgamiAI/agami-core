@@ -90,6 +90,18 @@ def test_model_tree_shows_columns_and_state(tmp_path):
     assert orders["review_state"] == "approved"
     ssn = next(c for c in orders["columns"] if c["name"] == "ssn")
     assert ssn["sensitive"] is True
+    # rows: what introspection measured, or None, so the build can say a database is empty
+    assert "rows" in orders
+
+
+def test_model_tree_reports_a_measured_row_count(tmp_path):
+    _write_model(tmp_path, git=False)
+    org = loader.load_datasource(tmp_path, include_rejected=True)
+    from semantic_model.models import PerformanceHints
+
+    org.subject_areas[0].tables_defined[0].performance_hints = PerformanceHints(estimated_row_count=0)
+    tree = curate.model_tree(org)
+    assert tree["subject_areas"][0]["tables"][0]["rows"] == 0
 
 
 def test_exclude_table_hides_from_runtime(tmp_path):
