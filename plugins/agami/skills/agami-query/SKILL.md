@@ -723,7 +723,7 @@ Notes the script handles for you: a time-bucket `label_col` is formatted from it
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" text_chart.py --sections-file "<artifacts_dir>/local/tmp/agami-sections-<ts>.json"
 ```
 
-Post its output as it is: per section a bold title and a fenced `text` block of horizontal bars, the bar lengths from the section's raw numbers and the values from its formatted `table_rows`, so the bars, the table and the full view agree. It draws at most 15 rows and says how many more there are; with several value columns it bars the first and says so; negative values get one line pointing at the table instead. A line or time trend is drawn the same way, one bar per period in the order the rows came. Keep the sections file until the turn ends: the full view (4e.iv) reads it.
+**Post it in the turn's final message**, the last thing the turn says: the Desktop app folds a message written between tool calls into the collapsed steps, and a live run showed the chart there, behind a click. Post its output as it is: per section a bold title and a fenced `text` block of horizontal bars, the bar lengths from the section's raw numbers and the values from its formatted `table_rows`, so the bars, the table and the full view agree. It draws at most 15 rows and says how many more there are; with several value columns it bars the first and says so; negative values get one line pointing at the table instead. A line or time trend is drawn the same way, one bar per period in the order the rows came. Keep the sections file until the turn ends: the full view (4e.iv) reads it.
 
 #### 4e.iv — render via `render_chart.py` (do NOT inline-substitute through the Write tool)
 

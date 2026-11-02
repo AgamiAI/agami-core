@@ -77,3 +77,8 @@ def test_the_query_skill_draws_the_chart_in_the_chat():
     skill = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-query" / "SKILL.md").read_text()
     assert "text_chart.py --sections-file" in skill
     assert "a bar chart drawn here in the chat" in skill
+
+
+def test_the_chart_is_posted_in_the_final_message():
+    skill = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-query" / "SKILL.md").read_text()
+    assert "**Post it in the turn's final message**" in skill
