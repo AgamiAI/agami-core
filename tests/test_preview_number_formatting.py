@@ -799,3 +799,22 @@ def test_duckdbs_date_part_is_a_year(tmp_path, fn):
 ])
 def test_a_year_label_loses_a_doubles_zero_and_nothing_else_does(cell, shown):
     assert units.format_rows(["sold"], [[cell]], {}, {"#0"}) == [[shown]]
+
+
+def test_preview_formats_without_hints_when_the_trace_fails(tmp_path, monkeypatch):
+    _model(tmp_path)
+
+    def boom(*_a, **_k):
+        raise ValueError("untraceable")
+
+    monkeypatch.setattr(RT, "resolve_result_units", boom)
+    item = _seed_validate(tmp_path, monkeypatch, "SELECT revenue FROM stores", "revenue\n1500\n")
+    assert item["row_preview"] == [["1,500"]]
+
+
+def test_a_source_with_no_select_has_no_column_to_take_a_unit_from(tmp_path):
+    _model(tmp_path)
+    org = load_datasource(tmp_path)
+    lateral = "FROM orders CROSS JOIN LATERAL (VALUES (1)) v(x)"
+    assert RT.resolve_result_units(org, f"SELECT amount {lateral}")["#0"] == "USD"
+    assert RT.resolve_result_units(org, f"SELECT x {lateral}") == {}
