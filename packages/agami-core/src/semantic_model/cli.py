@@ -616,14 +616,68 @@ def cmd_approve_queue(args) -> int:
     return 0 if res.validated else 1
 
 
+def _metric_test_runs(root: str, profile: str, items: list) -> dict[str, dict]:
+    """Each metric's binding for this database, run once over zero rows: name → {ok} or {error}.
+
+    A live run signed off two metrics whose SQL named a column the table doesn't have and compared
+    a text code to a number; neither was caught, because nothing ran the SQL before the sign-off.
+    `WHERE 1 = 0` reads no rows and still makes the database resolve every column and operator.
+    A metric over several tables needs their join to run, so it is reported `not_test_run`.
+    """
+    from . import dialects as D
+    from . import introspect as INTRO
+    org = L.load_datasource(root)
+    if not org.storage_connections:
+        return {}
+    storage_type = org.storage_connections[0].storage_type
+    dialect = D.get_dialect(storage_type)
+    tables = {t.name.lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+    runner = INTRO.make_execute_sql_runner(profile, building_the_model=True)
+    out: dict[str, dict] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = it.get("name")
+        binding = (it.get("bindings") or {}).get(storage_type)
+        sources = it.get("source_tables") or []
+        if not binding:
+            out[name] = {"not_test_run": f"no binding for {storage_type}"}
+            continue
+        if len(sources) != 1 or str(sources[0]).split(".")[-1].lower() not in tables:
+            out[name] = {"not_test_run": "reads more than one table, or a table the model doesn't have"}
+            continue
+        t = tables[str(sources[0]).split(".")[-1].lower()]
+        src = dialect.qualified(t.schema_name, t.name)
+        try:
+            runner(f"SELECT {binding} AS v FROM {src} WHERE 1 = 0")
+            out[name] = {"ok": True}
+        except Exception as e:  # noqa: BLE001 — a failed binding is reported per metric, not raised
+            out[name] = {"error": str(e).splitlines()[0][:300]}
+    return out
+
+
 def cmd_add(args) -> int:
     from . import curate
     items = _read_json_file(args.file)
     if isinstance(items, dict):
         items = items.get(args.kind + "s", items.get("items", []))
+    test_runs = None
+    if args.kind == "metric" and getattr(args, "profile", None):
+        test_runs = _metric_test_runs(args.root, args.profile, items)
+        failed = {n for n, r in test_runs.items() if "error" in r}
+        if failed:
+            # Nothing is written while a binding fails: a metric whose SQL doesn't run would
+            # otherwise reach sign-off looking like any other.
+            _print_json({"applied": [], "validated": False, "test_run": test_runs,
+                         "errors": [f"metric {n}: its SQL failed on the database; fix the binding and add again"
+                                    for n in sorted(failed)]})
+            return 1
     res = curate.write_items(args.root, args.area, args.kind, items,
                              signer=args.signer, role=args.role)
-    _print_json(res.as_dict())
+    out = res.as_dict()
+    if test_runs is not None:
+        out["test_run"] = test_runs
+    _print_json(out)
     return 0 if res.validated else 1
 
 
@@ -2012,6 +2066,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", required=True, help="JSON: a list of items (or {metrics:[…]}/{entities:[…]})")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
+    sp.add_argument("--profile", default=None,
+                    help="run each metric's SQL over zero rows on this database first; nothing is "
+                         "written if one fails (a metric over several tables is reported not_test_run)")
     sp.set_defaults(func=cmd_add)
 
     sp = sub.add_parser("add-example", help="append/replace NL→SQL examples (prompt_examples/<area>/examples.yaml)")
