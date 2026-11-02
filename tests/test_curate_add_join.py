@@ -359,6 +359,23 @@ def test_sm_curate_applies_an_add_op_file(model, tmp_path, capsys):
     assert cli.main(["curate", str(model), "--ops-file", str(ops), "--candidate", "x"]) == 2
 
 
+def test_sm_curate_takes_a_candidates_file_as_the_positional_ops_file(model, tmp_path, capsys):
+    cands = tmp_path / "join_candidates.json"
+    cands.write_text(json.dumps({"candidates": [{"id": "c1", "op": _CUST_REF}], "low_overlap": []}))
+    assert cli.main(["curate", str(model), str(cands), "--candidate", "c1"]) == 0
+    assert json.loads(capsys.readouterr().out)["applied"] == ["add relationship sales/orders->customers"]
+
+
+def test_an_added_join_is_tracked_like_any_entry_for_stale_reporting(model):
+    join = {"kind": "relationship", "name": "orders->customers", "from_column": "cust_ref", "to_column": "id"}
+    approve = {"op": "approve", **join, "at": "2026-01-01T00:00:00Z"}
+    edit = {"op": "edit", **join, "field": "relationship", "value": "one_to_one"}
+    res = curate.apply(model, [_CUST_REF, approve, edit], signer="you@example.com", role="admin")
+    assert not res.errors and not res.skipped and len(res.stale) == 1
+    res = curate.apply(model, [approve], signer="you@example.com", role="admin")
+    assert not res.errors and not res.skipped and res.stale == []
+
+
 def test_the_parser_keeps_an_add_before_a_move_and_flags_an_incomplete_one():
     move = {"op": "move", "kind": "table", "area": "sales", "name": "customers", "to_area": "catalog"}
     data, anomalies, _ = F.parse(f"profile: demo\ncurate-ops: {json.dumps([move, _CUST_REF])}\ndone\n")
