@@ -5,8 +5,8 @@
 # (it opens the Store and runs nothing) or absent. Resolution is `sm`'s, from _python.sh. UTF-8 mode
 # (-X utf8) so a non-ASCII path, password or result reads and prints the same everywhere.
 #
-# Usage:  bash "$AGAMI_PLUGIN_ROOT/scripts/py" connect_resolve.py --db-type postgres
-#         bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import yaml'
+# Usage:  bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" connect_resolve.py --db-type postgres
+#         bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import yaml'
 # A bare `<name>.py` is the plugin's own script of that name; any other argument passes through.
 set -euo pipefail
 

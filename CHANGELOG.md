@@ -121,6 +121,16 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Skill commands now use the plugin root Claude Code fills in, not an `AGAMI_PLUGIN_ROOT` nothing
+  sets.** Every skill ran `bash "$AGAMI_PLUGIN_ROOT/scripts/py" …`, but a Claude Code session (CLI or
+  the Desktop Code tab) has no such variable in its Bash environment, so the first command of each
+  skill failed or Claude had to improvise a path. Skills now write `${CLAUDE_PLUGIN_ROOT}`, which
+  Claude Code replaces with the plugin's absolute path when the skill loads. The shared docs, which
+  Claude reads without that substitution, say `<plugin_root>` and tell Claude to write the real path
+  its skill showed. The `py` and `sm` launchers still export `AGAMI_PLUGIN_ROOT` for the scripts they
+  start, and `check_statement.py`'s "agami-core is missing" message now names the real path of `sm`. `tests/test_skill_plugin_root.py` fails if a skill goes back to the unset variable or names a
+  path under the plugin root that does not exist.
+
 - **One rule decides whether a metric binding nests aggregates, in `sm add`, the validator and at
   query time (#519).** `sm add` accepted `AVG(SUM(amount))`, which the database then refused on
   every query that used it, while the check for derived metrics refused a legal aggregate over a

@@ -100,7 +100,7 @@ def test_phase_1_5_runs_the_statement_the_way_agami_runs_its_own():
     assert ("**The person's statement runs through the guard agami's own SQL runs through, and never on a "
             "command-line tier.**") in PHASE_1_5
     # ACE-155: one call per row, and every execution inside it goes through the chokepoint.
-    assert '"$PY" "$AGAMI_PLUGIN_ROOT/scripts/check_statement.py" --profile <profile> --area <area>' in PHASE_1_5
+    assert '"$PY" "${CLAUDE_PLUGIN_ROOT}/scripts/check_statement.py" --profile <profile> --area <area>' in PHASE_1_5
     assert "`execute_sql`'s guarded chokepoint with the built-in executor, never with `--no-safety`" in PHASE_1_5
     assert "psql, mysql, snowsql, sqlite3 and DuckDB are never used here" in PHASE_1_5
     assert "**Never run the statement or a probe yourself.**" in PHASE_1_5

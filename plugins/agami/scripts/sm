@@ -5,7 +5,7 @@
 # agami uses for execution (psql tier, or the python-driver tier) may not have
 # them, and bare `python3` on PATH often won't either. This wrapper is the ONE
 # place that resolves a usable interpreter, ensures the deps are present, and runs
-# the CLI — so every skill just calls `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" <cmd>`
+# the CLI — so every skill just calls `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <cmd>`
 # and never has to think about interpreters or sys.path.
 #
 # Interpreter resolution order:

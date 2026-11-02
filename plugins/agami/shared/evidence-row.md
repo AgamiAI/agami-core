@@ -1,5 +1,7 @@
 # The evidence row
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 Shared by `agami-reconcile` (which reads every input through it) and `agami-save-correction` (which
 reads a pasted statement the same way). Read this before writing code or prose that consumes what a
 person hands over: a screenshot, a spreadsheet, a query they trust, a list of questions, or a mix.
@@ -33,7 +35,7 @@ Run it once per input, with every file the person gave:
 
 ```bash
 mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" reconcile.py intake --file <path> [--file <path> ...] \
+bash "<plugin_root>/scripts/py" reconcile.py intake --file <path> [--file <path> ...] \
   [--source "<the person's own words for where this came from>"] > "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json"
 ```
 

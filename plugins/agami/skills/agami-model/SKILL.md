@@ -36,7 +36,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`).
   - **A pasted feedback block names its own target.** When applying a block from the dashboard's "Generate feedback for Claude", its first line is `profile: <name>` — that dashboard was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one dashboard's approvals to whatever happens to be the active profile (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named profile, target it directly — don't fall back to `active_profile` or hunt with `find`.
 - **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model to explore yet.
-- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
+- **Verify Python + PyYAML are importable** (the renderer + applier both depend on PyYAML): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
 
 **Scope / initial tab.** Look at `$ARGUMENTS`:
 - `review`, `preseed`, or `rule1` → the user wants the sign-off queue: render with `--initial-tab review` so the dashboard opens on the Review tab. (`preseed`/`rule1` come from `/agami-connect`'s Phase 4 gate — the Review tab already groups Rule 1 metrics under "Needs your eyes", so no separate scope filter is needed; the user signs those off there.)
@@ -60,14 +60,14 @@ ts=$(date -u +%Y%m%d-%H%M%S)
 # Per-profile subdir so multi-profile users can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
 out="<artifacts_dir>/local/model/$profile/$ts.html"
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
   ${initial_tab:+--initial-tab "$initial_tab"} \
   --out "$out"
 ```
 
-Set `initial_tab=review` when `$ARGUMENTS` was `review`/`preseed`/`rule1` (Phase 0) to force the sign-off queue. **Leave it empty for a plain `/agami-model`** — the renderer then uses its **smart `auto` default**: it opens on **Review** when anything needs sign-off (unreviewed metrics/entities/joins, or columns agami couldn't read), and on **Tables** when the model is all clean (so the user never lands on an empty Review tab). `$AGAMI_PLUGIN_ROOT` is the plugin dir under `~/.claude/plugins/cache/<marketplace>/agami/`. If the env var isn't set, fall back to the conventional install paths described in [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md).
+Set `initial_tab=review` when `$ARGUMENTS` was `review`/`preseed`/`rule1` (Phase 0) to force the sign-off queue. **Leave it empty for a plain `/agami-model`** — the renderer then uses its **smart `auto` default**: it opens on **Review** when anything needs sign-off (unreviewed metrics/entities/joins, or columns agami couldn't read), and on **Tables** when the model is all clean (so the user never lands on an empty Review tab). `${CLAUDE_PLUGIN_ROOT}` is the plugin's directory (under `~/.claude/plugins/cache/<marketplace>/agami/` for an installed plugin); Claude Code fills in its absolute path when this skill loads, so the commands here already carry it.
 
 **Surface in chat (single block, no padding):**
 
@@ -96,7 +96,7 @@ You can also type commands directly:
 **Auto-open it** (macOS, Linux and Windows alike; on failure it prints the path to open by hand):
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/open_in_browser" "$out"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/open_in_browser" "$out"
 ```
 
 End the turn. Wait for the user.
@@ -108,7 +108,7 @@ End the turn. Wait for the user.
 The user pastes the dashboard's "Generate feedback" block. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_model_feedback.py --block-file <pasted>
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file <pasted>
 ```
 
 It prints `{data, anomalies, needs_judgment}`:
@@ -152,7 +152,7 @@ A `move` (the explorer's **Move to area**) gives the table a new owning area, cr
 (Column exclusions use `kind: table` + a `column` field — the engine flips the column inside that table's YAML.) **Write the ops array to the file with the Write tool — never a heredoc, a shell variable (`printf "$OPS"`), or `python3 -c` (JSON quotes/`null` break those).** Then apply the whole batch atomically — the engine flips `review_state` / stamps sign-off, **validates the model, logs to `curation_log.jsonl`, commits (when the profile folder is its own git repository), and reverts everything on validation failure**:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" curate "$ROOT" \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" \
   --ops-file "<artifacts_dir>/local/tmp/agami-model-ops.json" \
   --signer "${reviewer_email}" --role "${reviewer_role}"
 ```
@@ -181,7 +181,7 @@ Every successful apply produces a new explorer file at a new timestamp.
 ```bash
 new_ts=$(date -u +%Y%m%d-%H%M%S)
 new_out="<artifacts_dir>/local/model/$profile/$new_ts.html"
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_model_explorer.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
   --profile "$profile" --artifacts-dir "$artifacts_dir" --out "$new_out"
 ```
 
@@ -234,7 +234,7 @@ This dashboard is HTML — it assumes a browser. On a **headless machine** (no b
 
 ```bash
 ROOT="<artifacts_dir>/<profile>"
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" approve-queue "$ROOT" --signer you@example.com --role owner
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" approve-queue "$ROOT" --signer you@example.com --role owner
 # --kind metric|entity|relationship  → narrow to one type (repeatable)
 # --dry-run                          → print the approve ops without applying
 ```
