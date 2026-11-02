@@ -214,6 +214,27 @@ def show(inventory: dict, name: str) -> tuple[dict, bool]:
             "more": max(0, len(cols) - MAX_SHOW_ROWS)}, True
 
 
+def used_schemas(inventory: dict, text: str) -> list[dict]:
+    """The inventory's schemas that shared SQL or questions name as `schema.table`, most used first.
+
+    A live run grouped 16 schemas alphabetically on the pick card; the person picked "asset to
+    cmdb" and lost the schemas 64 of their 69 example questions read. Reading which schemas their
+    own SQL names lets the card lead with those.
+    """
+    tables = inventory.get("tables") or []
+    known = {}
+    for tb in tables:
+        s = tb.get("schema") or ""
+        if s:
+            known.setdefault(s.lower(), [s, set()])[1].add(tb["table"].lower())
+    counts: dict[str, int] = {}
+    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b", text):
+        entry = known.get(m.group(1).lower())
+        if entry and m.group(2).lower() in entry[1]:
+            counts[entry[0]] = counts.get(entry[0], 0) + 1
+    return [{"schema": s, "mentions": n} for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 def check_columns(inventory: dict, names: list[str]) -> tuple[list[str], list[str]]:
     """→ (the names as the inventory spells them, the names that are not a column)."""
     known = {}
@@ -236,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tables-out", help="where --keep writes the kept schema.table list")
     ap.add_argument("--show", help="a schema (its tables) or a table (its columns), for the chat")
     ap.add_argument("--check-columns", help="file of schema.table.column names to leave out")
+    ap.add_argument("--used-by", action="append", default=[],
+                    help="a file of shared SQL or questions; adds the schemas it names as `used_schemas`")
     args = ap.parse_args(argv)
 
     inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
@@ -248,7 +271,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"unmatched": unmatched} if unmatched else {"exclude_columns": found}))
         return 1 if unmatched else 0
     if not args.keep:
-        print(json.dumps(summarise(inventory), indent=2))
+        summary = summarise(inventory)
+        if args.used_by:
+            text = "\n".join(Path(f).expanduser().read_text(encoding="utf-8", errors="replace") for f in args.used_by)
+            summary["used_schemas"] = used_schemas(inventory, text)
+        print(json.dumps(summary, indent=2))
         return 0
     if not args.tables_out:
         print(json.dumps({"error": "--keep needs --tables-out"}))

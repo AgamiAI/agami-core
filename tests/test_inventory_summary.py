@@ -265,3 +265,24 @@ def test_check_columns_cli(tmp_path, capsys):
     names.write_text("sales.orders.ssn\n")
     assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 1
     assert main(["--inventory", str(inv), "--show", "nope"]) == 1
+
+
+def test_used_schemas_counts_the_schemas_shared_sql_names():
+    # A live run's alphabetical groups hid the schemas 64 of 69 shared questions read.
+    from inventory_summary import used_schemas
+
+    sql = "SELECT * FROM sales.orders o JOIN sales.customers c ON 1=1; SELECT 1 FROM billing.orders; FROM nope.x; sales.unknown"
+    assert used_schemas(_INV, sql) == [{"schema": "sales", "mentions": 2}, {"schema": "billing", "mentions": 1}]
+
+
+def test_used_by_adds_used_schemas_to_the_summary(tmp_path, capsys):
+    import json
+
+    from inventory_summary import main
+
+    inv = tmp_path / "inv.json"
+    inv.write_text(json.dumps(_INV))
+    shared = tmp_path / "q.sql"
+    shared.write_text("select count(*) from billing.orders")
+    assert main(["--inventory", str(inv), "--used-by", str(shared)]) == 0
+    assert json.loads(capsys.readouterr().out)["used_schemas"] == [{"schema": "billing", "mentions": 1}]
