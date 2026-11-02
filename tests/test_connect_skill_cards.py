@@ -655,3 +655,11 @@ def test_finished_steps_carry_their_numbers():
     section = text[text.index("## Progress tracking"):text.index("## Phase −1")]
     assert "**When a step finishes, add its numbers to its label**" in section
     assert "never an estimate" in section
+
+
+def test_sign_off_titles_are_the_decision_in_plain_words():
+    # Live-run feedback: "Approve ela_proficiency_rate? 48.8% of ..." mixed an identifier and a result into the title.
+    for skill in ("agami-connect", "agami-model"):
+        text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
+        assert "The question is only the decision, with the item's plain name" in text, skill
+        assert "kept apart from the title" in text, skill

@@ -50,7 +50,7 @@ Showing 2 of 2 tables.      (or: "Showing 15 of 42 tables; 27 more.")
 
 ## 3a. Detail goes in an option's preview, not the question
 
-A card's question is plain text: keep it to one short sentence a person can answer. Anything
+A card's question is plain text: keep it to the decision alone, in plain words ("Sign off ELA proficiency rate?", not an identifier like `ela_proficiency_rate`), with no result in it. A value that helps decide goes in the option's description. Anything
 longer that they need to see to decide (a SQL formula, a sample of rows, what changed) goes in the
 `preview` of the option it belongs to, which the card shows in a monospace pane while that option
 is focused. Lay SQL out over lines with a short comment on each filter. A live run showed a
