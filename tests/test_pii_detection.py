@@ -545,3 +545,20 @@ def test_names_that_may_be_a_person_stay_suspected(column, table):
 
 def test_without_a_table_the_rule_is_unchanged():
     assert suspected_pii("name")
+
+
+@pytest.mark.parametrize("table", ["cmdb_model", "products", "schools"])
+def test_full_name_on_a_table_of_things_is_not_personal(table):
+    # A live run flagged cmdb_model.full_name, a product model's long name.
+    assert not pii.detect_sensitive(table, "full_name")
+
+
+@pytest.mark.parametrize(("table", "column"), [("customers", "full_name"), ("schools", "admin_first_name"),
+                                               ("schools", "admin_last_name"), ("projects", "owner_full_name")])
+def test_a_persons_name_is_still_personal(table, column):
+    assert pii.detect_sensitive(table, column)
+
+
+@pytest.mark.parametrize("table", ["cmdb_ci", "cmdb_model", "schools", "service_offering"])
+def test_a_bare_name_on_these_tables_of_things_is_not_suspected(table):
+    assert not suspected_pii("name", table)

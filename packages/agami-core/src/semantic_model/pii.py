@@ -169,6 +169,11 @@ def strong_pii_name(name: str) -> bool:
 
 def detect_sensitive(table_name: str, column_name: str) -> bool:
     """Sensitive by name: the strong rules anywhere; a bare `name` only inside a PII-ish table."""
+    # `full_name` on a table of things is the thing's long name (a product model's), not a person's:
+    # a live run flagged cmdb_model.full_name. Only the unqualified spelling: `admin_full_name` on a
+    # schools table still names a person.
+    if tokens(column_name) in (["full", "name"], ["fullname"]) and _thing_table(table_name):
+        return False
     if strong_pii_name(column_name):
         return True
     table_pii = table_name.upper() == "PII" or bool(STRONG_PII_RE.search(table_name)) \
@@ -183,6 +188,8 @@ THING_TABLE_WORDS = frozenset({
     "brand", "collection", "department", "region", "country", "city", "currency", "channel",
     "campaign", "feature", "file", "folder", "project", "service", "team", "warehouse", "store",
     "metric", "event", "report", "dashboard", "setting", "role", "permission",
+    "model", "ci", "offering", "catalog", "consumable", "hardware", "school", "district", "county",
+    "course", "subject",
 })
 
 
