@@ -871,6 +871,35 @@ def test_unicode_controls_are_replaced_everywhere(served):
     assert entry["kind"] == entry["name"] == "a" + " " * len(_UNICODE_CONTROLS) + "b"
 
 
+def test_the_refusal_echo_strips_what_the_audit_row_strips():
+    from semantic_model import runtime
+
+    assert runtime._ECHO_CONTROL.pattern == tools._AUDIT_CONTROL.pattern
+
+
+def test_self_reported_questions_are_cut_at_the_cap(served):
+    cap = tools.SELF_REPORT_TEXT_MAX_CHARS
+    _record("acme_tool", {"user_question": "q" * (cap + 50), "raw_query": "r" * (cap + 50)})
+
+    row = _one(served)
+    assert row["user_question"] == "q" * cap
+    assert row["agent_query"] == "r" * cap
+
+
+def test_an_embedder_user_question_is_cut_at_the_cap(served):
+    cap = tools.SELF_REPORT_TEXT_MAX_CHARS
+    _record("acme_tool", {}, user_question="q" * (cap + 1))
+
+    assert _one(served)["user_question"] == "q" * cap
+
+
+def test_a_non_string_or_empty_question_is_stored_as_null(served):
+    _record("acme_tool", {"user_question": 7, "raw_query": ""})
+
+    row = _one(served)
+    assert row["user_question"] is None and row["agent_query"] is None
+
+
 def test_a_malformed_missed_entry_is_stored_rather_than_raised(served):
     _record(
         "acme_tool",

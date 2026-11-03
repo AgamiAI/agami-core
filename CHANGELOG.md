@@ -188,6 +188,13 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **A refusal's echo drops Unicode control characters, and a self-reported question is capped
+  (#415).** The expression a receipt echoes back stripped only ASCII controls, so C1 controls, the
+  Unicode line and paragraph separators, text-direction characters and lone surrogates reached the
+  calling model intact. It now strips the same set the activity log does. `user_question` and
+  `agent_query` on a tool-call row were stored at any length; each is now cut at 4,000 characters,
+  and a value that is not a string, or is empty, is stored as NULL.
+
 - **A description edit without `source` keeps whose words the description is (#549).** A `sm curate`
   edit to a table or column description that passed no `source` stamped it `description_source:
   human`, so fixing a typo in a description from the customer's data dictionary silently dropped

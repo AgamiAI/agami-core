@@ -4165,6 +4165,19 @@ def _bounded_client_model(raw: Any) -> str | None:
     return raw[:CLIENT_MODEL_MAX_CHARS] or None
 
 
+#: How much of a self-reported `user_question` or `agent_query` is stored (#415). A pasted question
+#: can run long, so the cap sits well clear of that.
+SELF_REPORT_TEXT_MAX_CHARS = 4_000
+
+
+def _bounded_self_report(raw: Any) -> str | None:
+    """A self-reported question as stored: cut at `SELF_REPORT_TEXT_MAX_CHARS`, None when not a
+    string or empty, for `_bounded_client_model`'s reason."""
+    if not isinstance(raw, str):
+        return None
+    return raw[:SELF_REPORT_TEXT_MAX_CHARS] or None
+
+
 #: The bounds on what a call was sent and what missed. Both are caller-chosen text on the
 #: audit row, so both are bounded here rather than trusted to arrive small: a string value is cut at
 #: 1,000 characters, a list or object at 50 items, nesting at depth 4, and the whole serialized value
@@ -4195,7 +4208,7 @@ _OWN_COLUMN_ARGUMENTS = frozenset(
 #: A control character or line break in stored caller text could forge a line of a log or a report
 #: that reads it, so each is replaced with a space: the C0 and C1 controls, the Unicode line and
 #: paragraph separators, the bidi controls that reorder how a line displays, and a lone surrogate,
-#: which is not text at all. Wider than `runtime._ECHO_CONTROL`, which covers C0 and DEL only.
+#: which is not text at all. The same set as `runtime._ECHO_CONTROL`.
 _AUDIT_CONTROL = re.compile(
     r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
 )
@@ -5154,10 +5167,11 @@ def record_tool_call(
         "error_kind": derived_error_kind,
         "refusal_detail": derived_refusal_detail,
         "refusal_remediation": derived_refusal_remediation,
-        "user_question": user_question if user_question is not None else args.get("user_question"),
-        "agent_query": args.get(
-            "raw_query"
-        ),  # the existing arg is the agent's framing of the query
+        "user_question": _bounded_self_report(
+            user_question if user_question is not None else args.get("user_question")
+        ),
+        # the existing arg is the agent's framing of the query
+        "agent_query": _bounded_self_report(args.get("raw_query")),
         # The choices behind the query, bounded here rather than by the caller — a bound the caller
         # applies is not a bound. Joins the two self-reported columns above: same provenance, same
         # trust.

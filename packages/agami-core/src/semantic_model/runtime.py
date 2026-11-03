@@ -1705,8 +1705,11 @@ def _echo_name(name: str) -> str:
 # parentheses, commas and operators, all of which an aggregate legitimately contains: run it over
 # `SUM(o.total * 1.2)` and every structural character becomes `?`. So the character filter here is
 # the narrow one — control characters and line breaks, which is what carries a prompt-injection
-# payload out of a quoted identifier — and the length bound does the rest of the work.
-_ECHO_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+# payload out of a quoted identifier — and the length bound does the rest of the work. The same set
+# as `tools._AUDIT_CONTROL`: C0/C1 controls, line/paragraph separators, bidi controls, lone surrogates.
+_ECHO_CONTROL = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+)
 # Wider than an identifier because an expression legitimately holds several, and still far below
 # what a statement could inflate a receipt with: a CASE expression a person writes fits, and a
 # generated one that does not is truncated with the ellipsis saying so.
