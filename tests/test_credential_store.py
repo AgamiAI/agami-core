@@ -20,8 +20,17 @@ import credential_store  # noqa: E402
 import execute_sql  # noqa: E402
 
 
+def _backend_cls(module: str, name: str) -> type:
+    """A class that looks like keyring's backend `module.name`, which is all the OS-store check reads."""
+    return type(name, (), {"__module__": module, "__qualname__": name})
+
+
+_Keychain = _backend_cls("keyring.backends.macOS", "Keyring")
+_WinVault = _backend_cls("keyring.backends.Windows", "WinVaultKeyring")
+
+
 class _FakeBackend:
-    """The three calls the module makes, backed by a dict."""
+    """The calls the module makes, backed by a dict, with the macOS Keychain as keyring's active backend."""
 
     def __init__(self) -> None:
         self.data: dict[tuple[str, str], str] = {}
@@ -34,6 +43,9 @@ class _FakeBackend:
 
     def delete_password(self, service: str, username: str) -> None:
         del self.data[(service, username)]
+
+    def get_keyring(self) -> object:
+        return _Keychain()
 
 
 @pytest.fixture(autouse=True)
@@ -113,7 +125,7 @@ def test_put_without_keyring_raises_with_fix(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_put_backend_error_raises_with_fix(monkeypatch: pytest.MonkeyPatch) -> None:
-    class Broken:
+    class Broken(_FakeBackend):
         def set_password(self, service: str, username: str, secret: str) -> None:
             raise OSError("denied")
 
@@ -122,13 +134,61 @@ def test_put_backend_error_raises_with_fix(monkeypatch: pytest.MonkeyPatch) -> N
         credential_store.put("demo", "x")
 
 
-@pytest.mark.parametrize("system,expected", [("Darwin", True), ("Windows", True), ("Linux", False)])
-def test_supported_platforms(monkeypatch: pytest.MonkeyPatch, system: str, expected: bool) -> None:
-    class Good:
-        pass
+def _module_with(active: object) -> object:
+    """A stand-in for the keyring module whose get_keyring() is `active`."""
+    return type("M", (), {"get_keyring": staticmethod(lambda: active)})
 
+
+@pytest.mark.parametrize(
+    "system,active,expected",
+    [("Darwin", _Keychain, True), ("Windows", _WinVault, True), ("Darwin", _WinVault, False), ("Linux", _Keychain, False)],
+)
+def test_supported_only_for_this_platforms_os_store(
+    monkeypatch: pytest.MonkeyPatch, system: str, active: type, expected: bool
+) -> None:
     monkeypatch.setattr(credential_store.platform, "system", lambda: system)
-    monkeypatch.setattr(credential_store, "_backend", lambda: Good())
+    monkeypatch.setattr(credential_store, "_backend", lambda: _module_with(active()))
+    assert credential_store.supported() is expected
+
+
+_NOT_THE_OS_STORE = [
+    _backend_cls("keyrings.alt.file", "PlaintextKeyring"),  # the password, base64, in a file
+    _backend_cls("keyring.backends.null", "Keyring"),
+    _backend_cls("keyrings.acme.vault", "Keyring"),  # any third-party backend
+]
+
+
+@pytest.mark.parametrize("active", _NOT_THE_OS_STORE)
+def test_a_backend_that_is_not_the_os_store_is_refused(monkeypatch: pytest.MonkeyPatch, active: type) -> None:
+    written: list[str] = []
+    module = type("M", (), {
+        "get_keyring": staticmethod(lambda: active()),
+        "set_password": staticmethod(lambda s, u, p: written.append(p)),
+    })
+    monkeypatch.setattr(credential_store, "_backend", lambda: module)
+    assert credential_store.supported() is False
+    with pytest.raises(credential_store.CredentialStoreError, match="other than the OS credential store") as exc:
+        credential_store.put("demo", "not-a-real-password")
+    assert written == [] and "\n" not in str(exc.value)
+
+
+def _chainer(*backends: type) -> object:
+    cls = _backend_cls("keyring.backends.chainer", "ChainerBackend")
+    chainer = cls()
+    chainer.backends = [b() for b in backends]  # highest priority first, as keyring sorts them
+    return chainer
+
+
+@pytest.mark.parametrize(
+    "chain,expected",
+    [
+        ((_Keychain, _NOT_THE_OS_STORE[0]), True),
+        ((_NOT_THE_OS_STORE[0], _Keychain), False),  # the plain-text file would get the write
+        ((), False),
+    ],
+)
+def test_a_chainer_counts_by_its_first_backend(monkeypatch: pytest.MonkeyPatch, chain: tuple, expected: bool) -> None:
+    monkeypatch.setattr(credential_store, "_backend", lambda: _module_with(_chainer(*chain)))
     assert credential_store.supported() is expected
 
 

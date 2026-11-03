@@ -38,6 +38,11 @@ SECRET = "not-a-real-password"
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,}$")
 
 
+# What the OS-store check reads off keyring's active backend: its module and class name.
+_Keychain = type("Keyring", (), {"__module__": "keyring.backends.macOS"})
+_WinVault = type("WinVaultKeyring", (), {"__module__": "keyring.backends.Windows"})
+
+
 class _FakeBackend:
     """The calls credential_store makes, backed by a dict. `gate` holds set_password until released."""
 
@@ -58,8 +63,8 @@ class _FakeBackend:
     def delete_password(self, service: str, username: str) -> None:
         del self.data[(service, username)]
 
-    def get_keyring(self) -> _FakeBackend:
-        return self
+    def get_keyring(self) -> object:
+        return (_WinVault if credential_store.platform.system() == "Windows" else _Keychain)()
 
 
 class _Lines(io.TextIOBase):
@@ -868,7 +873,7 @@ class FileBackend:
     def delete_password(self, s, u):
         d = self._load(); d.pop(u); store.write_text(json.dumps(d))
     def get_keyring(self):
-        return self
+        return type("Keyring", (), {{"__module__": "keyring.backends.macOS"}})()
 
 credential_store.platform.system = lambda: "Darwin"
 credential_store._backend = lambda: FileBackend()
