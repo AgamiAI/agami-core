@@ -4165,9 +4165,9 @@ def _bounded_client_model(raw: Any) -> str | None:
     return raw[:CLIENT_MODEL_MAX_CHARS] or None
 
 
-#: How much of a self-reported `user_question` or `agent_query` is stored (#415). A pasted question
-#: can run long, so the cap sits well clear of that.
-SELF_REPORT_TEXT_MAX_CHARS = 4_000
+#: How much of a self-reported `user_question` or `agent_query` is stored (#415). Matches the longest
+#: question agami-hosted's chat accepts, so a question it took is never cut here.
+SELF_REPORT_TEXT_MAX_CHARS = 8_000
 
 
 def _bounded_self_report(raw: Any) -> str | None:
