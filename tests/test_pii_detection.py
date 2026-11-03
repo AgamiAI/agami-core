@@ -547,10 +547,30 @@ def test_without_a_table_the_rule_is_unchanged():
     assert suspected_pii("name")
 
 
-@pytest.mark.parametrize("table", ["cmdb_model", "products", "schools"])
-def test_full_name_on_a_table_of_things_is_not_personal(table):
-    # A live run flagged cmdb_model.full_name, a product model's long name.
-    assert not pii.detect_sensitive(table, "full_name")
+@pytest.mark.parametrize("table", ["event_attendees", "course_enrollments", "district_staff", "campaign_leads",
+                                   "service_requests", "store_orders", "products", "schools"])
+@pytest.mark.parametrize("column", ["full_name", "first_name", "lastName"])
+def test_an_explicit_persons_name_is_personal_on_any_table(table, column):
+    # A thing word in the table name (`event`, `course`, `store`) must not hide a person's name.
+    assert pii.detect_sensitive(table, column)
+
+
+@pytest.mark.parametrize("table", ["event_attendees", "course_enrollments", "district_staff", "campaign_leads",
+                                   "service_requests", "StoreCustomers"])
+def test_a_people_word_anywhere_keeps_a_bare_name_suspected(table):
+    assert suspected_pii("name", table)
+
+
+@pytest.mark.parametrize(("table", "things"), [("order_status", True), ("order_statuses", True), ("classes", True),
+                                               ("business_units", False), ("addresses", False)])
+def test_words_ending_in_s_are_singularized_properly(table, things):
+    # `status` used to be cut to `statu` and never matched; `classes` is a list of classes.
+    assert pii._thing_table(table) is things
+
+
+def test_order_status_name_is_not_suspected():
+    assert not suspected_pii("name", "order_status")
+    assert not suspected_pii("name", "classes")
 
 
 @pytest.mark.parametrize(("table", "column"), [("customers", "full_name"), ("schools", "admin_first_name"),

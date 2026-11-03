@@ -168,17 +168,15 @@ def strong_pii_name(name: str) -> bool:
 
 
 def detect_sensitive(table_name: str, column_name: str) -> bool:
-    """Sensitive by name: the strong rules anywhere; a bare `name` only inside a PII-ish table."""
-    # `full_name` on a table of things is the thing's long name (a product model's), not a person's:
-    # a live run flagged cmdb_model.full_name. Only the unqualified spelling: `admin_full_name` on a
-    # schools table still names a person.
-    if tokens(column_name) in (["full", "name"], ["fullname"]) and _thing_table(table_name):
-        return False
+    """Sensitive by name: the strong rules anywhere; a bare `name` only inside a PII-ish table.
+
+    An explicit person-name column (`full_name`, `first_name`) is sensitive on every table: on
+    `event_attendees` or `store_orders` it names a person, and missing one leaks it."""
     if strong_pii_name(column_name):
         return True
     table_pii = table_name.upper() == "PII" or bool(STRONG_PII_RE.search(table_name)) \
         or bool(WEAK_PII_RE.search(table_name)) \
-        or any(w.rstrip("s") in PERSON_WORDS or w in ("people", "pii") for w in tokens(table_name))
+        or any(_in_words(w, PERSON_WORDS) or w in ("people", "pii") for w in tokens(table_name))
     return bool(WEAK_PII_RE.search(column_name)) and table_pii
 
 
@@ -189,13 +187,38 @@ THING_TABLE_WORDS = frozenset({
     "campaign", "feature", "file", "folder", "project", "service", "team", "warehouse", "store",
     "metric", "event", "report", "dashboard", "setting", "role", "permission",
     "model", "ci", "offering", "catalog", "consumable", "hardware", "school", "district", "county",
-    "course", "subject",
+    "course", "subject", "class",
 })
 
 
+# Words that make a table a list of people, whatever thing it is also about: `event_attendees`,
+# `course_enrollments`, `campaign_leads`. Such a table never counts as a table of things.
+PEOPLE_TABLE_WORDS = PERSON_WORDS | frozenset({
+    "people", "attendee", "enrollment", "enrolment", "staff", "lead", "student", "employee",
+    "registration", "registrant", "request", "requester", "applicant", "guest", "participant",
+    "subscriber", "teacher", "parent", "guardian", "volunteer", "donor", "recipient", "visitor",
+    "membership", "signup", "candidate", "worker", "faculty", "personnel", "resident", "tenant",
+    "buyer", "driver", "rider", "passenger", "traveler", "traveller", "pii",
+})
+
+
+def _in_words(word: str, vocab: frozenset) -> bool:
+    """`word` or its singular is in `vocab`. A trailing `s`/`es` is stripped only when what is left
+    is a listed word, so `status`, `class` and `address` are not cut to `statu`, `cla`, `addre`."""
+    if word in vocab:
+        return True
+    if word.endswith("ies") and word[:-3] + "y" in vocab:
+        return True
+    if word.endswith("es") and word[:-2] in vocab:
+        return True
+    return word.endswith("s") and not word.endswith("ss") and word[:-1] in vocab
+
+
 def _thing_table(table_name: str) -> bool:
-    words = {w[:-3] + "y" if w.endswith("ies") else w.rstrip("s") for w in tokens(table_name)}
-    return bool(words & THING_TABLE_WORDS) and not words & PERSON_WORDS
+    words = tokens(table_name)
+    if any(_in_words(w, PEOPLE_TABLE_WORDS) for w in words):
+        return False
+    return any(_in_words(w, THING_TABLE_WORDS) for w in words)
 
 
 def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
