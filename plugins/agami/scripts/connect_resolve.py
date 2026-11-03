@@ -79,6 +79,22 @@ _DRIVER_MOD = {
 # the "driver missing" branch installs them up front. duckdb needs pytz to materialize
 # TIMESTAMP WITH TIME ZONE values into Python — without it a timestamptz query fails at runtime.
 _DRIVER_EXTRA = {"duckdb": ["pytz"]}
+# The pip package that provides each module above (agami-connect 0a.5's table).
+_DRIVER_PIP = {
+    "psycopg2": "psycopg2-binary", "pymysql": "pymysql", "snowflake.connector": "snowflake-connector-python",
+    "google.cloud.bigquery": "google-cloud-bigquery", "pymssql": "pymssql", "oracledb": "oracledb",
+    "databricks.sql": "databricks-sql-connector", "trino": "trino", "duckdb": "duckdb", "pytz": "pytz",
+}
+
+
+def driver_packages(db_type: str | None) -> dict[str, str]:
+    """Every module a `db_type` connection imports, mapped to the pip package that provides it; {} when the
+    stdlib is enough (sqlite) or the type is not one agami knows."""
+    db_key = (db_type or "").lower()
+    driver = _DRIVER_MOD.get(db_key)
+    if not driver:
+        return {}
+    return {m: _DRIVER_PIP[m] for m in (driver, *_DRIVER_EXTRA.get(db_key, []))}
 _MODEL_DEPS = ("pydantic", "sqlglot", "yaml")
 
 # The output lands in the agent's transcript, so a secret's VALUE never goes in it: the skill only

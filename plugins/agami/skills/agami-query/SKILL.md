@@ -148,6 +148,10 @@ Look up the cached connection method from `<artifacts_dir>/local/.config`. **Do 
 | `duckdb` (any) | `duckdb -init "$init_file" -c 'SELECT 1' --csv` (see `build_duckdb_attach.py` for `$init_file`) |
 | `python` (all DBs) | `AGAMI_PROFILE="<profile>" "$PY" -m execute_sql --sql 'SELECT 1'` |
 
+A profile whose `password` is a `keyring:` reference always runs on the `python` tier (`python -m execute_sql`), never psql / mysql / snowsql: `setup_pgauth.py` writes no auth file for it, because those files are plain text.
+
+When such a profile's password has changed, or the error says to reconnect with `--replace`, change the saved password with `bash "$AGAMI_PLUGIN_ROOT/scripts/py" connect_helper.py --spec <spec.json> --replace`: the spec is `{"profile", "db_type", "fields"}` taken from the profile's current section (every key except `type` and `password`), and the user types the new password on the page the helper's first JSON line points to, never in chat. If the new password does not connect, the helper puts the old one back.
+
 The Python tier's CLI is **`--sql <string>`** or **`--sql-file <path>`** — those are the only two ways to pass SQL. Optional flag: `--profile <profile>` (overrides `AGAMI_PROFILE` env). **Output is RFC-4180 CSV on stdout**, always — no `--format` flag exists. If you need JSON, post-process the CSV.
 
 Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md). Common cases:
