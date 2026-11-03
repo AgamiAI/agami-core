@@ -14,6 +14,9 @@ from typing import Any
 REF_PREFIX = "keyring:"
 SERVICE = "agami"
 _PLATFORMS = ("Darwin", "Windows")  # elsewhere the backends are headless/unreliable, so plain file only
+# The keyring backend that is each platform's OS store, as (module, class). Anything else keyring may
+# pick (keyrings.alt's plain-text file, the null backend, a third-party plugin) is not, so it gets no secret.
+_OS_BACKENDS = {"Darwin": ("keyring.backends.macOS", "Keyring"), "Windows": ("keyring.backends.Windows", "WinVaultKeyring")}
 
 
 class CredentialStoreError(Exception):
@@ -31,24 +34,52 @@ def _backend() -> Any:
     return keyring
 
 
+def _is_os_store(active: Any) -> bool:
+    """True when `active`, the backend keyring would use, is this platform's OS store.
+
+    A chainer writes through its highest-priority backend (its `backends` are sorted that way), so
+    that one is what must be the OS store."""
+    if type(active).__module__ == "keyring.backends.chainer":
+        chained = list(getattr(active, "backends", None) or [])
+        if not chained:
+            return False
+        active = chained[0]
+    cls = type(active)
+    return (cls.__module__, cls.__qualname__) == _OS_BACKENDS.get(platform.system())
+
+
+def _active(backend: Any) -> Any:
+    return backend.get_keyring() if hasattr(backend, "get_keyring") else backend
+
+
 def supported() -> bool:
-    """True on macOS/Windows when `keyring` is installed and has a working (non-fail) backend."""
+    """True on macOS/Windows when `keyring` is installed and would use the OS store itself."""
     if platform.system() not in _PLATFORMS:
         return False
     try:
-        backend = _backend()
-        active = backend.get_keyring() if hasattr(backend, "get_keyring") else backend
+        return _is_os_store(_active(_backend()))
     except Exception:
         return False
-    return not type(active).__module__.startswith("keyring.backends.fail")
 
 
 def put(profile: str, secret: str) -> str:
     """Store `secret` for `profile` and return the reference to write into the credentials file."""
     try:
-        _backend().set_password(SERVICE, profile, secret)
+        backend = _backend()
+        os_store = _is_os_store(_active(backend))
     except CredentialStoreError:
         raise
+    except Exception:
+        os_store = False
+    # Checked here too, not only by callers of `supported`: a password must never land in a plain-text file.
+    if not os_store:
+        raise CredentialStoreError(
+            f"Did not save the password for [{profile}]: keyring is set to a store other than the OS credential "
+            "store; remove that setting (PYTHON_KEYRING_BACKEND, keyringrc.cfg or keyrings.alt), "
+            "or keep the password in the credentials file instead."
+        )
+    try:
+        backend.set_password(SERVICE, profile, secret)
     except Exception as e:
         raise CredentialStoreError(
             f"Could not save the password for [{profile}] in the OS credential store; "
@@ -118,11 +149,11 @@ def resolve(value: str, *, profile: str) -> str:
     except Exception as e:
         raise CredentialStoreError(
             f"Could not read [{value}] from the OS credential store for profile [{profile}]; "
-            "unlock it and retry, or reconnect to store the password again."
+            "unlock it and retry, or reconnect with connect_helper.py --replace to store the password again."
         ) from e
     if secret is None:
         raise CredentialStoreError(
             f"No password found in the OS credential store for [{username}] (profile [{profile}]); "
-            "reconnect to store it again."
+            "reconnect with connect_helper.py --replace to store it again."
         )
     return secret

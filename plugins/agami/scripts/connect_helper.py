@@ -8,9 +8,12 @@ command line, the pane, or a plain-text file. On submit the helper stores it wit
 section to `<artifacts_dir>/local/credentials` with `password = keyring:agami/<profile>`, runs
 `SELECT 1` through `execute_sql`, and exits.
 
-    connect_helper.py --spec <path.json>
+    connect_helper.py --spec <path.json> [--replace]
     spec: {"profile": "demo", "db_type": "postgres", "fields": {"host": ..., "port": ..., ...},
            "auth": "sso"  (optional: a browser or cloud sign-in; no page, no secret)}
+    --replace: change the saved password of an existing profile whose section already reads
+               `password = keyring:agami/<profile>`; the section is rewritten from the spec. If the
+               new password does not connect, the old section and password are put back.
 
 Stdout is JSON lines, nothing else:
     {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}       once listening
@@ -20,7 +23,7 @@ Stdout is JSON lines, nothing else:
     {"status": "expired"}                                                 no submit in 300 s; nothing written
 Exit code is 0 for every outcome; the status (and a refusal's `reason`) says what happened, and `detail` is
 the line to show a person. A run that ends without a final line (an unexpected error, SIGTERM) removes the
-section and the stored password it wrote.
+section and the stored password it wrote (under --replace, puts the old ones back).
 
 The server binds 127.0.0.1 only, on a random port, behind a token of 43 URL-safe characters. Any
 other path, a wrong token, or a second submit gets 404. Stdlib only, apart from agami-core's own
@@ -32,6 +35,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import contextlib
+import functools
 import html
 import http.server
 import importlib
@@ -45,7 +49,7 @@ import signal
 import sys
 import threading
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any, TextIO
@@ -87,8 +91,10 @@ _STORE_CLEAR = {
 # Every `reason` a refusal can carry; the pane branches on these and shows `detail`.
 REASONS = (
     "bad_spec", "bad_name", "bad_field", "name_taken", "unreadable_credentials", "stale_install",
-    "unsupported_os", "no_store", "saved_password_exists", "store_error", "write_failed",
+    "unsupported_os", "no_store", "saved_password_exists", "store_error", "write_failed", "not_replaceable",
 )
+_UNREADABLE = "The credentials file could not be read. Fix or move it, then try again."
+_HEADER_RE = re.compile(r"\s*\[(.+?)\]\s*$")
 
 
 def _emit(out: TextIO, obj: dict[str, Any]) -> None:
@@ -179,7 +185,45 @@ def _missing_driver(db_type: str) -> tuple[str, str] | None:
 
 
 def _existing_profiles(creds: Path) -> list[str]:
+    """Raises configparser.Error, or UnicodeDecodeError for a file that is not UTF-8."""
     return _sections(creds) if creds.exists() else []
+
+
+def _name_problem(creds: Path, profile: str) -> tuple[str, str] | None:
+    """(reason, detail) when a new profile cannot take this name because the file already has it."""
+    if profile in _existing_profiles(creds):
+        return "name_taken", f"A profile named {profile} already exists. Pick another name, or use --replace to change its password."
+    return None
+
+
+def _replace_problem(creds: Path, profile: str) -> tuple[str, str] | None:
+    """(reason, detail) when `--replace` cannot change `profile`'s saved password, else None.
+
+    Only a section that already points at the OS store qualifies: anything else either does not
+    exist or keeps its password somewhere `--replace` would silently stop using."""
+    import credential_store
+
+    if profile not in _existing_profiles(creds):
+        return "not_replaceable", (
+            f"There is no profile named {profile} to replace. Leave out --replace to connect it as a new profile."
+        )
+    cfg = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), strict=False, interpolation=None)
+    cfg.read(creds, encoding="utf-8-sig")
+    if cfg.get(profile, "password", fallback="") != f"{credential_store.REF_PREFIX}{credential_store.SERVICE}/{profile}":
+        return "not_replaceable", (
+            f"The profile {profile} does not keep its password in the OS credential store, so --replace "
+            "cannot change it. Edit its password in the credentials file instead."
+        )
+    return None
+
+
+def _previous_secret(profile: str) -> str | None:
+    """The password `--replace` is about to overwrite, kept in memory only to put it back on failure."""
+    import credential_store
+
+    if not credential_store.has(profile):
+        return None
+    return credential_store.resolve(f"{credential_store.REF_PREFIX}{credential_store.SERVICE}/{profile}", profile=profile)
 
 
 def _section_text(spec: dict[str, Any], password_ref: str | None) -> str:
@@ -218,11 +262,40 @@ def _remove_section(creds: Path, added: str) -> None:
     if not rest:
         creds.unlink()
         return
+    _write_whole(creds, rest)
+
+
+def _write_whole(creds: Path, text: str) -> None:
+    """Replace the file's contents in one step (a temp file at 0600, then a rename)."""
     tmp = creds.with_name(creds.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-        fh.write(rest)
+        fh.write(text)
     os.replace(tmp, creds)
+
+
+def _replace_section(creds: Path, profile: str, section: str) -> tuple[str, str]:
+    """Swap the `[profile]` block (its header through the line before the next header) for `section`.
+    Returns the file's text before and after, so `_restore_file` can undo it."""
+    before = creds.read_bytes().decode("utf-8")
+    lines = before.splitlines(keepends=True)
+
+    def header(line: str) -> str | None:
+        m = _HEADER_RE.match(line.lstrip("\ufeff"))
+        return m.group(1).strip() if m else None
+
+    start = next(i for i, line in enumerate(lines) if header(line) == profile)
+    end = next((i for i in range(start + 1, len(lines)) if header(lines[i]) is not None), len(lines))
+    bom = "\ufeff" if start == 0 and lines[0].startswith("\ufeff") else ""
+    after = "".join(lines[:start]) + bom + section + ("\n" if end < len(lines) else "") + "".join(lines[end:])
+    _write_whole(creds, after)
+    return before, after
+
+
+def _restore_file(creds: Path, before: str, after: str) -> None:
+    """Undo `_replace_section`, only when the file is still what it wrote; a later edit is someone else's."""
+    if creds.read_bytes().decode("utf-8") == after:
+        _write_whole(creds, before)
 
 
 @contextlib.contextmanager
@@ -327,6 +400,7 @@ class _Server(http.server.ThreadingHTTPServer):
         self.path_ok = f"/{secrets.token_urlsafe(32)}/"
         self.secret = ""
         self.submitted = threading.Event()
+        self.closed = False  # set under `lock` when the wait expires; no submit is taken after it
         self.lock = threading.Lock()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -345,7 +419,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if self.headers.get("Host") != self.server.origin[len("http://"):]:
             return False
         path = self.path.encode("utf-8", "surrogateescape")
-        return secrets.compare_digest(path, self.server.path_ok.encode()) and not self.server.submitted.is_set()
+        ok = secrets.compare_digest(path, self.server.path_ok.encode())
+        return ok and not self.server.submitted.is_set() and not self.server.closed
 
     def _send(self, code: int, body: str = "") -> None:
         data = body.encode("utf-8")
@@ -387,34 +462,55 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not password:
             return self._send(400, render_page(self.server.profile, "empty", self.server.fields))
         with self.server.lock:
-            if self.server.submitted.is_set():  # a second submit that raced the first
+            # A second submit that raced the first, or one that raced the expiry.
+            if self.server.submitted.is_set() or self.server.closed:
                 return self._send(404)
             self.server.secret = password
             self.server.submitted.set()
         self._send(200, render_page(self.server.profile, "done"))
 
 
-def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
+def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO, *, replace: bool = False) -> int:
     import credential_store
 
     profile = spec["profile"]
     creds = agami_paths.credentials_path()
-    ref = None
+    # Checked again: the file or the store may have changed while the page was open.
     try:
-        # Checked again: another profile with this name may have been added while the page was open.
-        if profile in _existing_profiles(creds):
-            return _refuse(out, "name_taken", profile, f"A profile named {profile} already exists. Pick another name.")
-        if secret:
-            saved = _saved_elsewhere(profile)  # checked again, as the section is above
+        problem = _replace_problem(creds, profile) if replace else _name_problem(creds, profile)
+    except (configparser.Error, UnicodeDecodeError):
+        return _refuse(out, "unreadable_credentials", profile, _UNREADABLE)
+    if problem:
+        return _refuse(out, problem[0], profile, problem[1])
+    previous = None
+    try:
+        if replace:
+            previous = _previous_secret(profile)
+        elif secret:
+            saved = _saved_elsewhere(profile)
             if saved:
                 return _refuse(out, saved[0], profile, saved[1])
+    except credential_store.CredentialStoreError as e:
+        return _refuse(out, "store_error", profile, str(e))
+    ref = None
+    try:
         ref = credential_store.put(profile, secret) if secret else None
-        added = _write_section(creds, _section_text(spec, ref))
+        section = _section_text(spec, ref)
+        undo: Callable[[], None]
+        if replace:
+            undo = functools.partial(_restore_file, creds, *_replace_section(creds, profile, section))
+        else:
+            undo = functools.partial(_remove_section, creds, _write_section(creds, section))
     except credential_store.CredentialStoreError as e:
         return _refuse(out, "store_error", profile, str(e), secret)
-    except (OSError, configparser.Error):
+    except Exception:
         detail = "Could not write the credentials file under <artifacts_dir>/local."
-        return _refuse(out, "write_failed", profile, detail + _forget(profile, ref), secret)
+        return _refuse(out, "write_failed", profile, detail + _forget(profile, ref, previous), secret)
+    except BaseException:
+        # A SIGTERM or Ctrl-C after the store took the password but before the file names it: nothing
+        # would reference that password, and the next try would be refused as saved_password_exists.
+        _forget(profile, ref, previous)
+        raise
     # From here a section and (for a password) a stored secret exist. Any way out that is not
     # `connected` takes both back, including an error nobody planned for and a SIGTERM (`main` turns
     # that into SystemExit), so a half-made profile never blocks the same name next time.
@@ -423,31 +519,34 @@ def _store_and_connect(spec: dict[str, Any], secret: str, out: TextIO) -> int:
         missing = _missing_driver(spec["db_type"])
         if missing:
             package, detail = missing
-            detail += _rollback(creds, added, profile, ref)
+            detail += _rollback(undo, profile, ref, previous, replace)
             return _final(out, "missing_driver", profile, detail, secret, package=package)
         status, detail = _connection_test(profile, spec.get("fields") or {})
         connected = status == "connected"
         if not connected:
-            detail += _rollback(creds, added, profile, ref)
+            detail += _rollback(undo, profile, ref, previous, replace)
         return _final(out, status, profile, detail, secret)
     except Exception:
         detail = "Something went wrong while testing the connection, so nothing was saved. Try again."
-        detail += _rollback(creds, added, profile, ref)
+        detail += _rollback(undo, profile, ref, previous, replace)
         return _final(out, "connect_failed", profile, detail, secret)
     except BaseException:
         if not connected:
-            _rollback(creds, added, profile, ref)
+            _rollback(undo, profile, ref, previous, replace)
         raise
 
 
-def _rollback(creds: Path, added: str, profile: str, ref: str | None) -> str:
-    """Remove the section this run added and the secret it stored; '' or the sentences saying what to remove by hand."""
+def _rollback(undo: Callable[[], None], profile: str, ref: str | None, previous: str | None, replace: bool) -> str:
+    """Take back the section this run wrote and the secret it stored; '' or the sentences saying what is left."""
     note = ""
     try:
-        _remove_section(creds, added)
+        undo()
     except (OSError, UnicodeDecodeError):
-        note = f" Remove [{profile}] from the credentials file before trying again."
-    return note + _forget(profile, ref)
+        if replace:
+            note = f" The credentials file still has the new [{profile}] section; check its fields before trying again."
+        else:
+            note = f" Remove [{profile}] from the credentials file before trying again."
+    return note + _forget(profile, ref, previous)
 
 
 def _saved_elsewhere(profile: str) -> tuple[str, str] | None:
@@ -470,20 +569,29 @@ def _saved_elsewhere(profile: str) -> tuple[str, str] | None:
     return None
 
 
-def _forget(profile: str, ref: str | None) -> str:
-    """Delete the stored secret this run put in the OS store; '' or a sentence saying it could not."""
+def _forget(profile: str, ref: str | None, previous: str | None = None) -> str:
+    """Take back the secret this run stored: delete it, or put `previous` back when `--replace` overwrote one.
+    '' or a sentence saying what the store holds now."""
     import credential_store
 
     if not ref:
         return ""
     try:
-        credential_store.delete(profile)
+        if previous is None:
+            credential_store.delete(profile)
+        else:
+            credential_store.put(profile, previous)
     except credential_store.CredentialStoreError as e:
+        if previous is not None:
+            return (
+                f" The old password could not be put back, so the OS credential store now holds the new one "
+                f"for {profile}; run the replace again with the right password."
+            )
         return " " + str(e)
     return ""
 
 
-def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
+def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN, replace: bool = False) -> int:
     """Refuse, or serve the page once and act on the submit. Every outcome is one final JSON line."""
     profile = spec.get("profile", "") if isinstance(spec, dict) else ""
     profile = profile if isinstance(profile, str) else ""
@@ -495,15 +603,15 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
     problem = _spec_error(spec)
     if problem:
         return _refuse(out, problem[0], profile, problem[1])
+    if replace and sso:
+        return _refuse(out, "not_replaceable", profile, "An SSO profile has no saved password for --replace to change.")
+    creds = agami_paths.credentials_path()
     try:
-        taken = profile in _existing_profiles(agami_paths.credentials_path())
-    except configparser.Error:
-        return _refuse(
-            out, "unreadable_credentials", profile,
-            "The credentials file could not be read. Fix or move it, then try again.",
-        )
+        taken = _replace_problem(creds, profile) if replace else _name_problem(creds, profile)
+    except (configparser.Error, UnicodeDecodeError):
+        return _refuse(out, "unreadable_credentials", profile, _UNREADABLE)
     if taken:
-        return _refuse(out, "name_taken", profile, f"A profile named {profile} already exists. Pick another name.")
+        return _refuse(out, taken[0], profile, taken[1])
     # Before the page, so nobody types a password for a connection this Python cannot make.
     missing = _missing_driver(spec["db_type"])
     if missing:
@@ -526,7 +634,8 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
             "No OS credential store is available here, so use the manual setup: put the password in "
             "credentials.example and run promote_credentials.py.",
         )
-    saved = _saved_elsewhere(profile)
+    # Under --replace the saved password is this profile's own, the one being changed.
+    saved = None if replace else _saved_elsewhere(profile)
     if saved:
         return _refuse(out, saved[0], profile, saved[1])
     server = _Server(profile, spec.get("fields"))
@@ -535,10 +644,15 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
     try:
         _emit(out, {"url": f"http://{HOST}:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in)})
         if not server.submitted.wait(expires_in):
-            _emit(out, {"status": "expired"})
-            return 0
+            # Closed under the lock, so a submit either landed first (and is used) or gets 404 from now
+            # on: never a "received" page for a password that is then dropped.
+            with server.lock:
+                server.closed = not server.submitted.is_set()
+            if server.closed:
+                _emit(out, {"status": "expired"})
+                return 0
         # The server keeps answering until the work is done, so a second submit meanwhile gets 404.
-        return _store_and_connect(spec, server.secret, out)
+        return _store_and_connect(spec, server.secret, out, replace=replace)
     finally:
         server.secret = ""
         server.shutdown()
@@ -548,6 +662,9 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="One-time loopback page that saves a password in the OS store.")
     p.add_argument("--spec", required=True, help="Path to the connection spec JSON (no secrets in it).")
+    p.add_argument(
+        "--replace", action="store_true", help="Change the saved password of an existing keyring profile."
+    )
     args = p.parse_args(argv)
     agami_paths.bootstrap()
     try:
@@ -557,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     # The pane stops the helper with SIGTERM (Cancel, or the pane closing). As an exception it unwinds
     # through `_store_and_connect`, which takes back what this run stored; the default action would not.
     signal.signal(signal.SIGTERM, _terminated)
-    return run(spec, sys.stdout)
+    return run(spec, sys.stdout, replace=args.replace)
 
 
 def _terminated(signum: int, frame: Any) -> None:
