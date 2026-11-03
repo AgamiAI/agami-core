@@ -27,13 +27,13 @@ top=$(duckdb -csv -noheader <<SQL | tr -d '[:space:]'
 INSTALL postgres_scanner;
 LOAD postgres_scanner;
 ATTACH '$DSN' AS pg (TYPE POSTGRES, READ_ONLY);
-SELECT name FROM pg.public.customers WHERE id = 3;
+SELECT name FROM pg.public.customers WHERE id = 2;
 SQL
 )
-if [ "$top" = "CarolChen" ]; then
-  green "  ✓ DuckDB → Postgres scan returns Carol Chen"
+if [ "$top" = "BobBrown" ]; then
+  green "  ✓ DuckDB → Postgres scan returns Bob Brown"
 else
-  red   "  ✗ Expected 'CarolChen', got '$top'"
+  red   "  ✗ Expected 'BobBrown', got '$top'"
   exit 1
 fi
 
@@ -45,11 +45,11 @@ ATTACH '$DSN' AS pg (TYPE POSTGRES, READ_ONLY);
 SELECT ROUND(SUM(quantity * unit_price), 2)
 FROM pg.public.order_items i
 JOIN pg.public.orders o ON o.id = i.order_id
-WHERE o.customer_id = 3;
+WHERE o.customer_id = 2;
 SQL
 )
 if [ "$spend" = "148.95" ]; then
-  green "  ✓ Carol Chen total spend = 148.95"
+  green "  ✓ Bob Brown total spend = 148.95"
 else
   red   "  ✗ Expected 148.95, got $spend"
   exit 1
