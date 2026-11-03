@@ -1,6 +1,6 @@
 ---
 name: agami-save-golden
-description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, one sheet of an Excel .xlsx workbook, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies the changes queued on the golden-dataset explorer page, which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
+description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, one sheet of an Excel .xlsx workbook, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies changes to a dataset decided on cards in the chat (or a block from an older, editable explorer page), which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
 when_to_use: "Use when the user says 'save this as a golden question', 'add this to the golden dataset', 'import my question bank', 'turn this spreadsheet into a golden dataset', 'this answer is correct — remember it as ground truth', 'show me the golden datasets', 'what does this dataset not test', 'apply my queued changes', or '/agami-save-golden <dataset>' — any ask to record a question, or a bank of questions, that the model should be scored against later. Also use when the user replies with a back-channel block from a previously-rendered golden-dataset explorer page (first line `profile: <name>`, then `golden-ops:` and a JSON array, ending `done`) — paste it and nothing else is needed. Requires agami-connect to have been run first (needs a profile with a semantic model). To RUN a dataset and see the verdicts, use `/agami-eval` instead: that skill reads and scores, this one writes and never runs or scores."
 argument-hint: "[dataset-name]"
 ---
@@ -27,7 +27,7 @@ Spec for the deterministic half: [`scripts/golden_author.py`](../../scripts/gold
 - **One question per turn.** This is a tool, not a tutorial. At most two sentences of prose between phases.
 - **Show before you write.** Nothing reaches disk that the user has not seen rendered first — parsed rows as a table, a replacement as a before and an after.
 - **Never volunteer SQL for a question that has none.** See the rule above; it is the reason this skill exists in the shape it does.
-- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). What was parsed is a markdown table in the chat (at most 15 rows, saying how many more); every decision is a card. The golden-datasets page is the optional **Show the full view**, served from localhost, and its pasted block is still accepted.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). What was parsed is a markdown table in the chat (at most 15 rows, saying how many more); every decision is a card. The golden-datasets page is the optional, read-only **Show the full view**, served from localhost; changes are decided on cards, and a block pasted from an older, editable page is still accepted.
 
 ---
 
@@ -192,11 +192,14 @@ The explorer page shows a profile's datasets and lets the reader queue changes a
 
 **When the person asks to see the datasets** ("show me the golden datasets"), the default is the chat. Read the counts with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py --profile <profile> --list` (it reads the files and runs nothing) and show them as a table, `Dataset | Questions | Confirmed | Unconfirmed`, at most 15 rows, saying how many more. Then a card, header `Datasets`, *"What next?"*:
 
-- **Show the full view**: the explorer page, where tags, `match`, a question or a removal can be queued (below).
+- **Change an item**: a tag, `match`, a question, a removal or a withdrawn confirmation, decided on cards (below).
+- **Show the full view**: the explorer page, a read-only view of every item (below).
 - **Import questions**: the import door (Phase 2).
 - **Done**: end here.
 
-**Show the full view (optional, only when asked).** Render the page:
+**Change an item, on cards.** Show the dataset's items as a table, `Id | Question | Tags | Match | Confirmed`, at most 15 rows, saying how many more, then a card, header `Change`, *"What should change?"*: **Add or remove a tag** / **Set match** / **Edit a question** / **Remove an item**. "Other" takes the change in the person's own words (*"withdraw confirmation on orders-by-month"*, *"tag 3 and 5 smoke"*). Ask for the item and the value the change needs on the next card, one question each; a value the person must type (a tag, a reworded question) is typed in "Other". Words that name an item the dataset does not have, or a change you cannot place on one of the six actions below, are said back in one line and the same card asked again: re-asked, never guessed. A question typed in "Other" is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). The answers become the block the page would have written: write it with the Write tool to `<artifacts_dir>/local/tmp/agami-golden-block-<ts>.txt` (`profile: <profile>`, `golden-ops:`, one JSON array of `{"op", "dataset", "id", "value"}`, `done`) and apply it through the same parse and apply calls as a pasted block (below).
+
+**Show the full view (optional, only when asked).** A read-only view of every dataset and item ([`shared/question-cards.md`](../../shared/question-cards.md) rule 6): it has no controls that queue a change. Render the page:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
@@ -212,9 +215,9 @@ Serve it from localhost and give the person the URL, never a local file path:
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html" --minutes 30
 ```
 
-Run it with `run_in_background` and read its first line, `{"url": …}`. Say that queued changes come back as one block to paste here, and end the turn.
+Run it with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every item: `<url>`. Make changes on the card here."* and ask the `Datasets` card again in the same turn; nothing waits for a pasted block.
 
-**When the person pastes the full view's block back**, parse it before you read it:
+**Applying a block** (the one the `Change` cards wrote, or one pasted from an older, editable page, which is still accepted), parse it before you read it:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_golden_feedback.py \

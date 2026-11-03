@@ -220,8 +220,8 @@ def test_the_summary_gains_a_second_line_and_the_statements_get_their_own_table(
 def test_reconcile_takes_input_the_way_connect_does():
     """Nothing given: an options prompt with the four shapes, the rarer inputs named in the prompt. A CSV
     with nothing to hand: a template file written and a hand-off that ends the turn. Rows read: an
-    intake card shown before anything runs (the page is its full view), its answers applied by the
-    page's parser and never by hand."""
+    intake card shown before anything runs (the read-only page is its full view), its answers applied
+    by the intake parser and never by hand."""
     preflight = SKILL.split("## Phase 0: Preflight", 1)[1].split("## Phase 1: Extract", 1)[0]
     assert "**AskUserQuestion**, the four shapes as options" in preflight
     for label in ("`A screenshot of the dashboard`", "`A CSV or an export`", "`The SQL you trust`", "`A list of questions`"):
@@ -232,7 +232,9 @@ def test_reconcile_takes_input_the_way_connect_does():
     assert "render_reconcile_intake.py" in intake and "--intake-file" in intake
     assert "**Looks right, run it**" in intake and "serve_page.py" in intake
     assert "parse_reconcile_intake.py" in intake and "--rows-file" in intake
-    assert "**end the turn**" in intake and "never hand-edit the rows" in intake
+    # The intake page is read-only: the card is asked again in the same turn, never a wait for a block.
+    assert "**end the turn**" not in intake and "nothing waits for a pasted block" in intake
+    assert "never hand-edit the rows" in intake.lower()
     assert "inbox" in preflight.split("**If they gave nothing**")[0] and "local/reconcile/inbox/" in intake
     assert 'A per-row "is this the question?" in chat is never asked' in intake
     assert "only for a statement that came alone" in PHASE_1_5

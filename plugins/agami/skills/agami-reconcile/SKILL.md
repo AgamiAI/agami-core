@@ -145,7 +145,7 @@ Then call AskUserQuestion, one question, header `What I read`, *"Run these `<N>`
 
 A per-row "is this the question?" in chat is never asked.
 
-**Show the full view (optional, only when asked).** The intake page lists every row: the question we will ask agami (read from a label, and editable), the number expected, whether SQL came with it, and which file and line it came from. Render it and serve it from localhost, giving the person the URL, never a local file path, which the built-in browser can show as a frozen snapshot:
+**Show the full view (optional, only when asked).** The intake page lists every row: the question we will ask agami (read from a label), the number expected, whether SQL came with it, and which file and line it came from. Render it and serve it from localhost, giving the person the URL, never a local file path, which the built-in browser can show as a frozen snapshot:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_reconcile_intake.py --title "What we read · <profile>" \
@@ -154,16 +154,16 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_reconcile_intake.py --title "What
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/intake.html" --minutes 30
 ```
 
-Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`. Say: *"The page: `<url>`. Fix any question I read wrong or untick a row, generate the block and paste it back; then I run."* and **end the turn**. The person may still answer in chat instead ("looks right, go ahead"): run with the rows as read.
+Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every row: `<url>`. Fix a number, reword a question or drop rows on the card here."* and ask the `What I read` card again in the same turn; nothing waits for a pasted block. The page is read-only ([`shared/question-cards.md`](../../shared/question-cards.md) rule 6); decisions stay on the card. A block pasted from an older, editable page (`profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`) is still accepted and applied the way the card's block is, below.
 
-**On re-entry** (the block arrives, `profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`), never hand-edit the rows: pipe the block to the parser, which applies it to the rows file and says what it did. The card's own block goes through the same call:
+**Applying the intake block.** Never hand-edit the rows: pipe the block to the parser, which applies it to the rows file and says what it did:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_reconcile_intake.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-intake-<ts>.txt" \
   --rows-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" --run <ts> --out "<artifacts_dir>/local/reconcile/<ts>/intake.json"
 ```
 
-`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `<artifacts_dir>/local/tmp/` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: for a pasted block, ask for the block again; for the card's block, say what it names and ask the intake card again.
+`intake.json` in the run directory is the run's own copy of what runs: Phase 2 reads the next rows from it, a resume on a later day reads it, and nothing under `<artifacts_dir>/local/tmp/` is needed again. `ok: true` with `kept`, `dropped` and `edited` counts means it holds exactly what runs; an edited question carries `provenance.question_from`, so it is never mistaken for one we read. A `needs_judgment` (another run's block, a row the file does not have, a question that is not text, a missing section) applies nothing: say what it names in one line and ask the intake card again.
 
 ---
 
@@ -477,7 +477,7 @@ A `needs_judgment` means the block did not parse, came from another run, or carr
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/report.html" --minutes 30
 ```
 
-Run it with `run_in_background` and read its first line, `{"url": …}`. The page's **Generate decisions** button gives the person the same block the cards write; when they paste it (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`), write it to the decisions file above and read it back with the same `parse_reconcile_report.py` call. A pasted block's `needs_judgment` is answered by asking for the block again. Rows the person already decided on cards and decides again on the page take the page's answer, which arrives later.
+Run it with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every row and its checks: `<url>`. Decide each row on the cards here."* and carry on with the row cards in the same turn; nothing waits for a pasted block. The page is read-only ([`shared/question-cards.md`](../../shared/question-cards.md) rule 6): it has no decision controls, and decisions stay on the cards. A decisions block pasted from an older, editable page (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`) is still accepted: write it to the decisions file above and read it back with the same `parse_reconcile_report.py` call; a `needs_judgment` there is said back in one line and the affected rows' cards asked again.
 
 ### 3b — Mismatches table (lead with what didn't match)
 

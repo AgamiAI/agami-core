@@ -61,3 +61,35 @@ def test_no_two_questions_in_a_skill_share_a_header():
 def test_rule_3a_puts_detail_in_the_option_preview():
     text = (PLUGIN / "shared" / "question-cards.md").read_text()
     assert "## 3a. Detail goes in an option's preview, not the question" in text
+
+
+# A page rendered `--read-only` has no Generate button and no paste-back dialog (rule 6), so the
+# passage that renders it must not tell the person to generate a block, paste it, or wait for one.
+_PASTE_BACK = re.compile(
+    r"end the turn|paste (?:it|them) back|generate the block|block to paste here|button gives the person",
+    re.IGNORECASE,
+)
+
+
+def _read_only_passages(text: str) -> list[str]:
+    """From each `--read-only` render to the next heading: the passage that offers that page."""
+    passages = []
+    for m in re.finditer(r"--read-only\b", text):
+        nxt = re.search(r"^#{1,4} ", text[m.end():], re.MULTILINE)
+        passages.append(text[m.end(): m.end() + nxt.start()] if nxt else text[m.end():])
+    return passages
+
+
+def test_no_read_only_page_asks_for_a_pasted_block() -> None:
+    offenders = [
+        f"{p.parent.name}: {hit.group(0)!r}"
+        for p in _skills()
+        for passage in _read_only_passages(p.read_text())
+        for hit in _PASTE_BACK.finditer(passage)
+    ]
+    assert not offenders, offenders
+
+
+def test_the_paste_back_guard_catches_the_old_wording() -> None:
+    old = "--read-only --out x.html\n```\nSay: generate the block and paste it back; then **end the turn**.\n"
+    assert _PASTE_BACK.search(_read_only_passages(old)[0])
