@@ -40,12 +40,21 @@ def _runner(overlap, cols=None, pk=None):
         if "information_schema.schemata" in s:
             return [{"schema_name": "public"}]
         if "information_schema.tables" in s and "table_type" in s:
-            return [{"schema_name": "public", "table_name": t, "table_type": "BASE TABLE"} for t in cols]
+            return [
+                {"schema_name": "public", "table_name": t, "table_type": "BASE TABLE"} for t in cols
+            ]
         if "information_schema.columns" in s:
             table = next(t for t in cols if f"'{t}'" in s)
-            return [{"column_name": c, "data_type": "text", "is_nullable": "YES",
-                     "ordinal_position": str(i), "numeric_scale": ""}
-                    for i, c in enumerate(cols[table], 1)]
+            return [
+                {
+                    "column_name": c,
+                    "data_type": "text",
+                    "is_nullable": "YES",
+                    "ordinal_position": str(i),
+                    "numeric_scale": "",
+                }
+                for i, c in enumerate(cols[table], 1)
+            ]
         if "PRIMARY KEY" in s:
             table = next((t for t in cols if f"'{t}'" in s), None)
             return [{"column_name": pk[table]}] if table in pk else []
@@ -54,20 +63,35 @@ def _runner(overlap, cols=None, pk=None):
         if "matched" in s:
             if isinstance(overlap, dict):
                 target = s.rsplit("FROM", 1)[-1]
-                hit = next((n for t, n in sorted(overlap.items(), key=lambda kv: -len(kv[0]))
-                            if f'"{t}"' in target), 0)
+                hit = next(
+                    (
+                        n
+                        for t, n in sorted(overlap.items(), key=lambda kv: -len(kv[0]))
+                        if f'"{t}"' in target
+                    ),
+                    0,
+                )
                 return [{"matched": str(hit)}]
             return [{"matched": "50" if overlap else "0"}]
         return []
+
     return run
 
 
-def _joins(overlap, tmp_path: Path, cols=None, pk=None, report=None) -> set[tuple[str, str, str, str]]:
-    org, rep = I.introspect("edu", "postgres", runner=_runner(overlap, cols, pk), artifacts_dir=tmp_path, dry_run=True)
+def _joins(
+    overlap, tmp_path: Path, cols=None, pk=None, report=None
+) -> set[tuple[str, str, str, str]]:
+    org, rep = I.introspect(
+        "edu", "postgres", runner=_runner(overlap, cols, pk), artifacts_dir=tmp_path, dry_run=True
+    )
     assert V.validate(org).ok
     if report is not None:
         report.extend(rep.notes)
-    return {(r.from_table, r.from_column, r.to_table, r.to_column) for sa in org.subject_areas for r in sa.relationships}
+    return {
+        (r.from_table, r.from_column, r.to_table, r.to_column)
+        for sa in org.subject_areas
+        for r in sa.relationships
+    }
 
 
 def test_a_column_named_like_another_tables_key_is_proposed_as_a_join(tmp_path):
@@ -88,7 +112,11 @@ def test_no_join_without_overlapping_values(tmp_path):
 
 def test_an_extension_listed_first_does_not_take_the_join(tmp_path):
     # Catalog order used to decide: school_profile sorts before schools, and won the join.
-    cols = {"school_profile": ["cds_code", "notes"], "schools": ["cds_code", "name"], "scores": ["cds_code", "score"]}
+    cols = {
+        "school_profile": ["cds_code", "notes"],
+        "schools": ["cds_code", "name"],
+        "scores": ["cds_code", "score"],
+    }
     pk = {"school_profile": "cds_code", "schools": "cds_code"}
     joins = _joins(True, tmp_path, cols, pk)
     assert ("scores", "cds_code", "schools", "cds_code") in joins
@@ -96,8 +124,11 @@ def test_an_extension_listed_first_does_not_take_the_join(tmp_path):
 
 
 def test_a_table_named_like_the_stem_wins(tmp_path):
-    cols = {"regions": ["region_code", "label"], "warehouses": ["region_code", "city"],
-            "sales": ["region_code", "amount"]}
+    cols = {
+        "regions": ["region_code", "label"],
+        "warehouses": ["region_code", "city"],
+        "sales": ["region_code", "amount"],
+    }
     pk = {"regions": "region_code", "warehouses": "region_code"}
     joins = _joins(True, tmp_path, cols, pk)
     assert ("sales", "region_code", "regions", "region_code") in joins
@@ -105,7 +136,11 @@ def test_a_table_named_like_the_stem_wins(tmp_path):
 
 
 def test_two_equally_good_targets_propose_nothing(tmp_path):
-    cols = {"districts": ["cds_code", "label"], "schools": ["cds_code", "name"], "scores": ["cds_code", "score"]}
+    cols = {
+        "districts": ["cds_code", "label"],
+        "schools": ["cds_code", "name"],
+        "scores": ["cds_code", "score"],
+    }
     pk = {"districts": "cds_code", "schools": "cds_code"}
     notes: list[str] = []
     joins = _joins(True, tmp_path, cols, pk, notes)
@@ -114,7 +149,11 @@ def test_two_equally_good_targets_propose_nothing(tmp_path):
 
 
 def test_the_target_sharing_more_values_wins(tmp_path):
-    cols = {"districts": ["cds_code", "label"], "schools": ["cds_code", "name"], "scores": ["cds_code", "score"]}
+    cols = {
+        "districts": ["cds_code", "label"],
+        "schools": ["cds_code", "name"],
+        "scores": ["cds_code", "score"],
+    }
     pk = {"districts": "cds_code", "schools": "cds_code"}
     joins = _joins({"schools": 48, "districts": 3}, tmp_path, cols, pk)
     assert ("scores", "cds_code", "schools", "cds_code") in joins

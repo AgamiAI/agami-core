@@ -37,8 +37,18 @@ def test_change_controls_are_listed_not_every_button() -> None:
     # A blanket rule on every button hid the filter chips and "Show all" / "Clear filters" too.
     style = make_read_only("<html><head></head><body></body></html>")
     assert "button:not(" not in style
-    for hidden in (".sticky-footer", ".feedback-bar", ".modal-backdrop", ".signoff-card", ".card-actions",
-                   ".field-actions", ".table-actions", ".actions-row", ".grade.opts", ".map-actions"):
+    for hidden in (
+        ".sticky-footer",
+        ".feedback-bar",
+        ".modal-backdrop",
+        ".signoff-card",
+        ".card-actions",
+        ".field-actions",
+        ".table-actions",
+        ".actions-row",
+        ".grade.opts",
+        ".map-actions",
+    ):
         assert f"body.agami-read-only {hidden}" in style, hidden
 
 
@@ -72,8 +82,11 @@ def _matches(simple: str, node: tuple[str, dict]) -> bool:
     assert m, simple
     classes = set(attrs.get("class", "").split())
     want = [c for c in m.group(2).split(".") if c]
-    return ((not m.group(1) or m.group(1) == tag) and set(want) <= classes
-            and (not m.group(3) or attrs.get(m.group(3)) == m.group(4)))
+    return (
+        (not m.group(1) or m.group(1) == tag)
+        and set(want) <= classes
+        and (not m.group(3) or attrs.get(m.group(3)) == m.group(4))
+    )
 
 
 def _hidden(chain: list[tuple[str, dict]]) -> list[str]:
@@ -82,8 +95,11 @@ def _hidden(chain: list[tuple[str, dict]]) -> list[str]:
         if "+" in sel:
             continue  # sibling rules hide one named element, never a filter
         parts = sel.split()
-        if _matches(parts[-1], chain[-1]) if len(parts) == 1 else (
-            _matches(parts[-1], chain[-1]) and any(_matches(parts[0], a) for a in chain[:-1])):
+        if (
+            _matches(parts[-1], chain[-1])
+            if len(parts) == 1
+            else (_matches(parts[-1], chain[-1]) and any(_matches(parts[0], a) for a in chain[:-1]))
+        ):
             hits.append(sel)
         elif len(parts) == 1 and any(_matches(sel, a) for a in chain[:-1]):
             hits.append(sel)
@@ -95,14 +111,24 @@ def test_filter_controls_stay_visible(path: Path) -> None:
     tree = _Tree()
     tree.feed(path.read_text())
     filters = [
-        chain for chain in tree.elements
+        chain
+        for chain in tree.elements
         if chain[-1][0] in ("button", "input")
         and ("data-filter" in chain[-1][1] or chain[-1][1].get("id") in ("clear", "q", "search"))
     ]
     offenders = [f"{chain[-1][1]}: {_hidden(chain)}" for chain in filters if _hidden(chain)]
     assert not offenders, offenders
     # Chips, pills and filter buttons the page builds in script are never on the hide-list.
-    for cls in ("chip", "pill", "filter", "filter-chips", "tab-bar", "subtab-bar", "btn-prev", "btn-next"):
+    for cls in (
+        "chip",
+        "pill",
+        "filter",
+        "filter-chips",
+        "tab-bar",
+        "subtab-bar",
+        "btn-prev",
+        "btn-next",
+    ):
         assert not any(re.search(rf"\.{cls}(?![\w-])", sel) for sel in CHANGE_CONTROLS), cls
 
 
@@ -129,13 +155,24 @@ def test_render_chart_writes_a_read_only_page(tmp_path: Path, monkeypatch) -> No
     receipt = tmp_path / "receipt.json"
     receipt.write_text(
         '{"model_version": null'
-        + "".join(f', "{s}": {{"items": [], "undetermined": null}}' for s in ("columns", "tables", "joins", "aggregates", "assumptions"))
+        + "".join(
+            f', "{s}": {{"items": [], "undetermined": null}}'
+            for s in ("columns", "tables", "joins", "aggregates", "assumptions")
+        )
         + "}"
     )
     out = tmp_path / "chart.html"
     import render_chart
 
-    args = ["render_chart.py", "--title", "Orders", "--sections-file", str(sections), "--receipt-file", str(receipt)]
+    args = [
+        "render_chart.py",
+        "--title",
+        "Orders",
+        "--sections-file",
+        str(sections),
+        "--receipt-file",
+        str(receipt),
+    ]
     monkeypatch.setattr(sys, "argv", [*args, "--out", str(out), "--read-only"])
     assert render_chart.main() == 0
     assert BANNER_TEXT in out.read_text()

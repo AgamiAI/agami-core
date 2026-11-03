@@ -56,19 +56,27 @@ def test_negative_and_empty_sections_say_why_there_are_no_bars():
 def test_labels_with_no_data_say_there_is_nothing_to_chart():
     # Used to crash with "max() iterable argument is empty".
     assert "nothing to chart" in draw_section(_section(["a", "b"], []))
-    assert "nothing to chart" in draw_section({"title": "T", "labels": ["a"], "datasets": [{"label": "x"}]})
+    assert "nothing to chart" in draw_section(
+        {"title": "T", "labels": ["a"], "datasets": [{"label": "x"}]}
+    )
     assert "nothing to chart" in draw_section(_section(["a"], [None], [""]))
 
 
 def test_nan_and_null_values_are_missing_not_a_crash():
-    rows = _bars(draw_section(_section(["a", "b", "c"], [10.0, float("nan"), None], ["10", "nan", ""])))
+    rows = _bars(
+        draw_section(_section(["a", "b", "c"], [10.0, float("nan"), None], ["10", "nan", ""]))
+    )
     assert rows[0].count("█") == WIDTH
     for row in rows[1:]:
         assert "█" not in row and row.rstrip().endswith("—")
 
 
 def test_missing_values_without_table_rows_show_a_dash():
-    s = {"title": "T", "labels": ["a", "b"], "datasets": [{"label": "x", "data": [4, float("inf")]}]}
+    s = {
+        "title": "T",
+        "labels": ["a", "b"],
+        "datasets": [{"label": "x", "data": [4, float("inf")]}],
+    }
     rows = _bars(draw_section(s))
     assert rows[0].rstrip().endswith("4") and rows[1].rstrip().endswith("—")
 
@@ -81,7 +89,9 @@ def test_several_value_columns_bar_the_first_and_say_so():
 
 def test_cli_prints_every_section(tmp_path, capsys):
     f = tmp_path / "sections.json"
-    f.write_text(json.dumps([_section(["a"], [1.0]), {**_section(["b"], [2.0]), "title": "Second"}]))
+    f.write_text(
+        json.dumps([_section(["a"], [1.0]), {**_section(["b"], [2.0]), "title": "Second"}])
+    )
     assert main(["--sections-file", str(f)]) == 0
     out = capsys.readouterr().out
     assert "**Revenue by category**" in out and "**Second**" in out

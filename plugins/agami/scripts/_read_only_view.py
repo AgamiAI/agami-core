@@ -18,19 +18,47 @@ from __future__ import annotations
 # filters too. A control added to a template that changes something must be listed here.
 CHANGE_CONTROLS = (
     # shared: the queue, the generate footer and the copy-and-paste dialog
-    ".tab-queued", ".sticky-footer", ".feedback-bar", ".footer", ".modal", ".modal-backdrop",
-    ".signoff-card", ".reviewer-form", ".global-note-panel", ".intro",
+    ".tab-queued",
+    ".sticky-footer",
+    ".feedback-bar",
+    ".footer",
+    ".modal",
+    ".modal-backdrop",
+    ".signoff-card",
+    ".reviewer-form",
+    ".global-note-panel",
+    ".intro",
     # chart: metric approve/change, the send button, the SQL editor
-    ".map-actions", ".map-edit", ".map-send", ".sql-edit-btn", ".sql-edit-bar", ".sql-edit-area",
+    ".map-actions",
+    ".map-edit",
+    ".map-send",
+    ".sql-edit-btn",
+    ".sql-edit-bar",
+    ".sql-edit-area",
     # model explorer and examples validation: approve / reject / exclude / edit / PII / add forms
-    ".card-actions", ".field-actions", ".table-actions", ".edit-form", ".add-form",
-    ".inline-edit-bar", ".inline-edit-ta", ".btn-pii", ".btn-propagate", ".btn-edit-prominent",
-    ".bulk-approve", ".bulk-reject", ".add-metric-open", ".add-metric-go", ".rt-toolbar",
+    ".card-actions",
+    ".field-actions",
+    ".table-actions",
+    ".edit-form",
+    ".add-form",
+    ".inline-edit-bar",
+    ".inline-edit-ta",
+    ".btn-pii",
+    ".btn-propagate",
+    ".btn-edit-prominent",
+    ".bulk-approve",
+    ".bulk-reject",
+    ".add-metric-open",
+    ".add-metric-go",
+    ".rt-toolbar",
     ".sql-editor",
     # golden datasets: tag, match, question, remove and withdraw controls, and the queue's Undo
-    ".actions-row", ".queue-row .chip-btn",
+    ".actions-row",
+    ".queue-row .chip-btn",
     # reconcile: the intake's keep box, the report's decision radios and words
-    'input[data-field="keep"]', ".grade.opts", ".grade.opts + .more",
+    'input[data-field="keep"]',
+    ".grade.opts",
+    ".grade.opts + .more",
 )
 # Fields that show text the page reads but must not take edits.
 _FROZEN = (".inline-editable", 'textarea[data-field="question"]', ".code-editable", ".rt-editor")

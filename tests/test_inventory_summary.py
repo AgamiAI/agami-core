@@ -94,16 +94,22 @@ def test_a_leading_test_or_temp_is_noise_only_beside_the_table_it_copies():
 
 
 def test_flagged_tables_name_what_they_copy(tmp_path):
-    code, out = _run(tmp_path, _inventory({"sales": ["orders", "orders_bak", "test_orders", "test_results"]}))
+    code, out = _run(
+        tmp_path, _inventory({"sales": ["orders", "orders_bak", "test_orders", "test_results"]})
+    )
     assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
-        "sales.orders_bak": "sales.orders", "sales.test_orders": "sales.orders"}
+        "sales.orders_bak": "sales.orders",
+        "sales.test_orders": "sales.orders",
+    }
     assert out["noise_all_copies"] is True
 
 
 def test_noise_without_a_counterpart_is_not_all_copies(tmp_path):
     code, out = _run(tmp_path, _inventory({"sales": ["orders", "orders_bak", "stg_events"]}))
     assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
-        "sales.orders_bak": "sales.orders", "sales.stg_events": None}
+        "sales.orders_bak": "sales.orders",
+        "sales.stg_events": None,
+    }
     assert out["noise_all_copies"] is False
     code, out = _run(tmp_path, _inventory({"sales": ["orders"]}))
     assert out["noise_all_copies"] is False
@@ -257,7 +263,11 @@ from inventory_summary import check_columns, show  # noqa: E402
 
 _INV = {
     "tables": [
-        {"schema": "sales", "table": "orders", "columns": [{"name": "id", "type": "int"}, {"name": "Notes", "type": "text"}]},
+        {
+            "schema": "sales",
+            "table": "orders",
+            "columns": [{"name": "id", "type": "int"}, {"name": "Notes", "type": "text"}],
+        },
         {"schema": "sales", "table": "customers", "columns": [{"name": "email", "type": "text"}]},
         {"schema": "billing", "table": "orders", "columns": [{"name": "id", "type": "int"}]},
     ]
@@ -266,12 +276,20 @@ _INV = {
 
 def test_show_a_schema_lists_its_tables_with_column_counts():
     result, ok = show(_INV, "Sales")
-    assert ok and result == {"schema": "sales", "tables": [{"table": "orders", "columns": 2}, {"table": "customers", "columns": 1}], "more": 0}
+    assert ok and result == {
+        "schema": "sales",
+        "tables": [{"table": "orders", "columns": 2}, {"table": "customers", "columns": 1}],
+        "more": 0,
+    }
 
 
 def test_show_a_table_lists_its_columns():
     result, ok = show(_INV, "sales.orders")
-    assert ok and result["table"] == "sales.orders" and [c["name"] for c in result["columns"]] == ["id", "Notes"]
+    assert (
+        ok
+        and result["table"] == "sales.orders"
+        and [c["name"] for c in result["columns"]] == ["id", "Notes"]
+    )
     result, ok = show(_INV, "customers")
     assert ok and result["table"] == "sales.customers"
 
@@ -283,12 +301,18 @@ def test_show_caps_the_list_and_counts_the_rest():
 
 
 def test_show_says_what_did_not_match():
-    assert show(_INV, "orders") == ({"ambiguous": {"orders": ["sales.orders", "billing.orders"]}}, False)
+    assert show(_INV, "orders") == (
+        {"ambiguous": {"orders": ["sales.orders", "billing.orders"]}},
+        False,
+    )
     assert show(_INV, "nope") == ({"unmatched": ["nope"]}, False)
 
 
 def test_check_columns_spells_names_as_the_inventory_does():
-    assert check_columns(_INV, ["sales.orders.notes", "SALES.CUSTOMERS.EMAIL"]) == (["sales.orders.Notes", "sales.customers.email"], [])
+    assert check_columns(_INV, ["sales.orders.notes", "SALES.CUSTOMERS.EMAIL"]) == (
+        ["sales.orders.Notes", "sales.customers.email"],
+        [],
+    )
     assert check_columns(_INV, ["sales.orders.ssn"]) == ([], ["sales.orders.ssn"])
 
 
@@ -313,7 +337,10 @@ def test_used_schemas_counts_the_schemas_shared_sql_names():
     from inventory_summary import used_schemas
 
     sql = "SELECT * FROM sales.orders o JOIN sales.customers c ON 1=1; SELECT 1 FROM billing.orders; FROM nope.x; sales.unknown"
-    assert used_schemas(_INV, sql) == [{"schema": "sales", "mentions": 2}, {"schema": "billing", "mentions": 1}]
+    assert used_schemas(_INV, sql) == [
+        {"schema": "sales", "mentions": 2},
+        {"schema": "billing", "mentions": 1},
+    ]
 
 
 def test_used_by_adds_used_schemas_to_the_summary(tmp_path, capsys):
@@ -326,7 +353,9 @@ def test_used_by_adds_used_schemas_to_the_summary(tmp_path, capsys):
     shared = tmp_path / "q.sql"
     shared.write_text("select count(*) from billing.orders")
     assert main(["--inventory", str(inv), "--used-by", str(shared)]) == 0
-    assert json.loads(capsys.readouterr().out)["used_schemas"] == [{"schema": "billing", "mentions": 1}]
+    assert json.loads(capsys.readouterr().out)["used_schemas"] == [
+        {"schema": "billing", "mentions": 1}
+    ]
 
 
 @pytest.mark.parametrize(
@@ -353,4 +382,6 @@ def test_used_schemas_counts_each_dotted_name_once():
     from inventory_summary import used_schemas
 
     assert used_schemas(_INV, "FROM db.sales.orders JOIN billing.orders") == [
-        {"schema": "billing", "mentions": 1}, {"schema": "sales", "mentions": 1}]
+        {"schema": "billing", "mentions": 1},
+        {"schema": "sales", "mentions": 1},
+    ]

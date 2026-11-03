@@ -18,7 +18,9 @@ SKILLS_DIR = PLUGIN / "skills"
 
 _TYPE_IN_OTHER_OPTION = re.compile(r"\*\*Type [^*\n]{0,40}? in Other\*\*")
 _FALLBACK = re.compile(r"re-asked, never guessed|can't place")
-_RULE_5A = "question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again"
+_RULE_5A = (
+    "question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again"
+)
 
 
 def _skills() -> list[Path]:
@@ -27,12 +29,16 @@ def _skills() -> list[Path]:
 
 def test_rule_5a_is_in_the_shared_doc() -> None:
     text = (PLUGIN / "shared" / "question-cards.md").read_text()
-    assert "### 5a. A question typed in \"Other\" is answered, then the same card is asked again" in text
+    assert (
+        '### 5a. A question typed in "Other" is answered, then the same card is asked again' in text
+    )
 
 
 def test_no_option_asks_the_person_to_type_in_other() -> None:
     offenders = [
-        f"{p.parent.name}: {m.group(0)}" for p in _skills() for m in _TYPE_IN_OTHER_OPTION.finditer(p.read_text())
+        f"{p.parent.name}: {m.group(0)}"
+        for p in _skills()
+        for m in _TYPE_IN_OTHER_OPTION.finditer(p.read_text())
     ]
     assert not offenders, offenders
 
@@ -75,8 +81,8 @@ def _read_only_passages(text: str) -> list[str]:
     """From each `--read-only` render to the next heading: the passage that offers that page."""
     passages = []
     for m in re.finditer(r"--read-only\b", text):
-        nxt = re.search(r"^#{1,4} ", text[m.end():], re.MULTILINE)
-        passages.append(text[m.end(): m.end() + nxt.start()] if nxt else text[m.end():])
+        nxt = re.search(r"^#{1,4} ", text[m.end() :], re.MULTILINE)
+        passages.append(text[m.end() : m.end() + nxt.start()] if nxt else text[m.end() :])
     return passages
 
 

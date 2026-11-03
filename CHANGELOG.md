@@ -154,7 +154,25 @@ below corresponds to one such version.
   joins. An empty database is said before the build goes on. `sm add --profile` runs each metric's
   SQL over zero rows and writes nothing if one fails. A metric wrapped in `ROUND(…)` still matches
   its definition on the receipt. A connection failure names what to check (the user, the host,
-  the database). `full_name` and bare `name` on a table of things are not flagged as personal.
+  the database). A bare `name` on a table of things is not flagged as personal.
+
+- **Review fixes to the question-card onboarding.** A person's `full_name`, `first_name` or
+  `last_name` is personal data on every table again (`event_attendees`, `store_orders`), and a
+  table with a people word in its name never counts as a table of things; `order_status.name` is
+  no longer listed, as plural words such as `status` are singularized properly. The reconcile
+  intake, the reconcile report and the golden-datasets page no longer ask for a pasted block from
+  a read-only page; decisions stay on the cards, and golden datasets gain a `Change` card. A
+  read-only page keeps its filter chips, "Show all" / "Clear filters", pagination and SQL copy
+  button, hiding only the controls that change something. A same-named key joins the table it
+  names, not the first in catalog order (`scores.cds_code` → `schools`, not `school_profile`); a
+  tie proposes nothing, generic names such as `code` are not matched, and one shared value is not
+  enough. The chat chart no longer crashes on empty data or a NaN value. The table-pick card reads
+  `db.schema.table` and quoted names in shared SQL, no longer flags `test_results` or
+  `temp_readings` as staging, and recommends dropping staging and backups only when every flagged
+  table copies another. `sm add --profile` reports an unreachable database as one connection
+  error, not as every metric's SQL failing, keeps a trailing `--` comment from swallowing the
+  `FROM`, and resolves a metric's source table by schema. Columns typed in "Other" on the table
+  card are left out whatever the table answer.
 
 - **The model explorer no longer says an unsigned metric is refused.** It is answered with a
   warning until signed off, as the runtime does. The page fills "Sign off as" from the identity

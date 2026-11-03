@@ -89,7 +89,11 @@ def _norm(words: list[str]) -> str:
 def _split_date(words: list[str]) -> tuple[list[str], bool]:
     """→ (the words before a trailing date or year, whether there was one). A version or quarter
     token after the date (v2, q1) goes with it."""
-    rest = words[:-2] if len(words) > 2 and words[-2].lower() in ("v", "q") and words[-1].isdigit() else words
+    rest = (
+        words[:-2]
+        if len(words) > 2 and words[-2].lower() in ("v", "q") and words[-1].isdigit()
+        else words
+    )
     tail: list[str] = []
     for word in reversed(rest):
         if not word.isdigit():
@@ -129,7 +133,12 @@ def noise_reason(table: str, schema: str = "", names: set[str] | None = None) ->
         return f"name has the word '{words[-1].lower()}'"
     if len(words) > 1 and words[0].lower() in LEADING_NOISE:
         return f"name has the word '{words[0].lower()}'"
-    if len(words) > 1 and words[0].lower() in LEADING_IF_COPY and names and _norm(words[1:]) in names:
+    if (
+        len(words) > 1
+        and words[0].lower() in LEADING_IF_COPY
+        and names
+        and _norm(words[1:]) in names
+    ):
         return f"name has the word '{words[0].lower()}' before another table's name"
     return None
 
@@ -213,7 +222,9 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
     if choice == "drop_noise":
         names = {_norm(_words(t["table"])) for t in tables}
         return [
-            _qualified(t) for t in tables if not noise_reason(t["table"], t.get("schema") or "", names)
+            _qualified(t)
+            for t in tables
+            if not noise_reason(t["table"], t.get("schema") or "", names)
         ], None
     if choice.startswith("schemas:"):
         wanted = [s.strip() for s in choice[len("schemas:") :].split(",") if s.strip()]
@@ -259,16 +270,24 @@ def show(inventory: dict, name: str) -> tuple[dict, bool]:
     in_schema = [t for t in tables if (t.get("schema") or "").lower() == key]
     if in_schema:
         rows = [{"table": t["table"], "columns": len(t.get("columns") or [])} for t in in_schema]
-        return {"schema": in_schema[0].get("schema"), "tables": rows[:MAX_SHOW_ROWS],
-                "more": max(0, len(rows) - MAX_SHOW_ROWS)}, True
-    hits = [t for t in tables if _qualified(t).lower() == key] or [t for t in tables if t["table"].lower() == key]
+        return {
+            "schema": in_schema[0].get("schema"),
+            "tables": rows[:MAX_SHOW_ROWS],
+            "more": max(0, len(rows) - MAX_SHOW_ROWS),
+        }, True
+    hits = [t for t in tables if _qualified(t).lower() == key] or [
+        t for t in tables if t["table"].lower() == key
+    ]
     if len(hits) > 1:
         return {"ambiguous": {name: [_qualified(t) for t in hits]}}, False
     if not hits:
         return {"unmatched": [name]}, False
     cols = [{"name": c.get("name"), "type": c.get("type")} for c in hits[0].get("columns") or []]
-    return {"table": _qualified(hits[0]), "columns": cols[:MAX_SHOW_ROWS],
-            "more": max(0, len(cols) - MAX_SHOW_ROWS)}, True
+    return {
+        "table": _qualified(hits[0]),
+        "columns": cols[:MAX_SHOW_ROWS],
+        "more": max(0, len(cols) - MAX_SHOW_ROWS),
+    }, True
 
 
 # One part of a dotted name: plain, or quoted with "", `` or [] (a quoted part may hold spaces).
@@ -284,13 +303,13 @@ def _dotted_names(text: str) -> list[list[str]]:
     for m in _DOTTED.finditer(text):
         parts: list[str] = []
         for p in _PART_RE.findall(m.group(0)):
-            if p[0] in "\"`[":
+            if p[0] in '"`[':
                 parts.extend(p[1:-1].split(".") if p[0] == "`" else [p[1:-1]])
             else:
                 parts.append(p)
         names.append(parts)
     for m in re.finditer(r"`([^`\n.]+(?:\.[^`\n.]+)+)`", text):
-        if not re.search(r"`\s*\.", text[m.end():m.end() + 2]):
+        if not re.search(r"`\s*\.", text[m.end() : m.end() + 2]):
             names.append(m.group(1).split("."))
     return names
 
@@ -318,7 +337,10 @@ def used_schemas(inventory: dict, text: str) -> list[dict]:
             if entry and second.lower() in entry[1]:
                 counts[entry[0]] = counts.get(entry[0], 0) + 1
                 break
-    return [{"schema": s, "mentions": n} for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return [
+        {"schema": s, "mentions": n}
+        for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
 
 
 def check_columns(inventory: dict, names: list[str]) -> tuple[list[str], list[str]]:
@@ -343,8 +365,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tables-out", help="where --keep writes the kept schema.table list")
     ap.add_argument("--show", help="a schema (its tables) or a table (its columns), for the chat")
     ap.add_argument("--check-columns", help="file of schema.table.column names to leave out")
-    ap.add_argument("--used-by", action="append", default=[],
-                    help="a file of shared SQL or questions; adds the schemas it names as `used_schemas`")
+    ap.add_argument(
+        "--used-by",
+        action="append",
+        default=[],
+        help="a file of shared SQL or questions; adds the schemas it names as `used_schemas`",
+    )
     args = ap.parse_args(argv)
 
     inventory = json.loads(Path(args.inventory).expanduser().read_text(encoding="utf-8"))
@@ -359,7 +385,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.keep:
         summary = summarise(inventory)
         if args.used_by:
-            text = "\n".join(Path(f).expanduser().read_text(encoding="utf-8", errors="replace") for f in args.used_by)
+            text = "\n".join(
+                Path(f).expanduser().read_text(encoding="utf-8", errors="replace")
+                for f in args.used_by
+            )
             summary["used_schemas"] = used_schemas(inventory, text)
         print(json.dumps(summary, indent=2))
         return 0

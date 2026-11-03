@@ -51,7 +51,7 @@ def test_1_6_has_no_page_and_shows_tables_in_the_chat():
     s = _section_16()
     for gone in ("render_prune.py", "parse_prune_block.py", "prune_html", "serve_page.py", "--out"):
         assert gone not in s, gone
-    assert "inventory_summary.py --inventory \"<inventory_path>\" --show" in s
+    assert 'inventory_summary.py --inventory "<inventory_path>" --show' in s
     assert "--check-columns" in s and "--exclude-columns" in s
 
 
@@ -65,7 +65,7 @@ def test_1_6_recommends_dropping_noise_only_when_every_flagged_table_is_a_copy()
     # `test_results` and `temp_readings` are real tables; recommending their drop lost data.
     s = _section_16()
     assert "noise_all_copies" in s and "copy_of" in s
-    assert "without \"(Recommended)\"" in s
+    assert 'without "(Recommended)"' in s
 
 
 def test_1_6_columns_in_other_go_to_exclude_columns_whatever_the_table_answer():
@@ -105,7 +105,9 @@ def _helper_constant(name: str) -> object:
 
     tree = ast.parse(HELPER.read_text(encoding="utf-8"))
     for node in tree.body:
-        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == name for t in node.targets):
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == name for t in node.targets
+        ):
             return ast.literal_eval(node.value)
     raise AssertionError(f"{name} not found in connect_helper.py")
 
@@ -169,7 +171,10 @@ def test_password_page_says_how_long_the_link_lasts():
 
 
 def test_password_page_posts_the_link_with_the_spec_sentence():
-    assert "Enter the password on this page; it goes to your keychain, not the chat" in _password_page()
+    assert (
+        "Enter the password on this page; it goes to your keychain, not the chat"
+        in _password_page()
+    )
 
 
 def test_password_page_maps_every_status_and_reason():
@@ -384,7 +389,9 @@ def test_4b_is_the_only_place_after_review_is_passed():
     phase_5 = _phase("## Phase 5:", "## Phase 6:")
     assert "columns_unenriched" in phase_5 and "preseed_review_pending" in phase_5
     assert "open `/agami-model preseed`, end the turn" not in phase_5
-    assert text.count("--after-review") == four_b.count("--after-review") + phase_5.count("--after-review")
+    assert text.count("--after-review") == four_b.count("--after-review") + phase_5.count(
+        "--after-review"
+    )
 
 
 def test_6_shows_a_table_of_seeds_then_the_four_option_card():
@@ -439,7 +446,7 @@ def test_an_other_that_asks_to_stop_goes_to_the_continue_or_pause_card():
     s = _phase_4()
     assert "asks to stop is a stop, not a change" in s
     assert "stop, pause or finish later" in _between("**4b ", "## Phase 5:")
-    assert "Any other \"Other\" you can't act on is re-asked, never guessed" in s
+    assert 'Any other "Other" you can\'t act on is re-asked, never guessed' in s
 
 
 def test_review_summary_mentions_guessed_joins_without_a_card():
@@ -547,7 +554,12 @@ def test_1_5_context_card_asks_for_definitions_questions_and_reports():
     s = _between("### 1.5 ", "### 1.6 ")
     assert "header `Context`" in s and "multiSelect" in s
     labels = _card_labels(s)
-    assert labels == ["Definitions or a semantic layer", "Questions people ask", "Report SQL or dashboards", "Nothing to share"]
+    assert labels == [
+        "Definitions or a semantic layer",
+        "Questions people ask",
+        "Report SQL or dashboards",
+        "Nothing to share",
+    ]
     assert "spec workbook" in s and "dbt / LookML / Cube" in s
     assert "agami-asked-questions.txt" in s and "reconcile/inbox" in s
 
@@ -559,17 +571,16 @@ def test_1_4_asks_the_company_and_the_database_on_cards():
     assert "**Generate one for me (Recommended)** / **Skip**" in s
     # typed values go in the question text, never as an option (question-cards rule 5)
     assert "Write it now (Other field)" not in s
-    assert "sm\" set-org" in s and "set-description" in s
+    assert 'sm" set-org' in s and "set-description" in s
 
 
 def test_asked_questions_and_reports_are_used_after_the_build():
     text = SKILL.read_text(encoding="utf-8")
-    phase5 = text[text.index("## Phase 5"):text.index("## Phase 6")]
+    phase5 = text[text.index("## Phase 5") : text.index("## Phase 6")]
     assert "agami-asked-questions.txt" in phase5 and "*(yours)*" in phase5
-    six_b = text[text.index("### 6b "):text.index("## Phase 7")]
+    six_b = text[text.index("### 6b ") : text.index("## Phase 7")]
     assert "header `Reports`" in six_b and "**Check them now (Recommended)** / **Later**" in six_b
     assert "agami-reconcile" in six_b
-
 
 
 def test_6a_asks_its_fix_on_a_card():
@@ -608,7 +619,7 @@ def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
     # A live run of the sample path ended in a numbered list to type a number back to.
     text = SKILL.read_text(encoding="utf-8")
     start = text.index("7. **Wrap up")
-    wrap_up = text[start : text.index("8. **The \"where to go deeper\"", start)]
+    wrap_up = text[start : text.index('8. **The "where to go deeper"', start)]
     assert "header `Ask`" in wrap_up
     assert "A numbered list of ~6 starter questions" not in wrap_up
     options = [line for line in wrap_up.splitlines() if line.strip().startswith("| `")]
@@ -618,7 +629,11 @@ def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
 def test_the_name_card_follows_the_fields_and_offers_the_database_name():
     # A live run asked "what should I call this database?" and then "database name": the same question twice.
     text = SKILL.read_text(encoding="utf-8")
-    order = next(line for line in text.splitlines() if line.startswith("- **macOS and Windows: the password page.**"))
+    order = next(
+        line
+        for line in text.splitlines()
+        if line.startswith("- **macOS and Windows: the password page.**")
+    )
     assert order.index("0a.4c") < order.index("0a.3")
     s = _between("### 0a.3 ", "### 0a.4c ")
     assert "What should agami call this connection?" in s and "`<database> (Recommended)`" in s
@@ -627,7 +642,7 @@ def test_the_name_card_follows_the_fields_and_offers_the_database_name():
 def test_the_password_link_comes_with_a_card():
     # A live run showed the link in a line of chat being missed.
     text = SKILL.read_text(encoding="utf-8")
-    step = text[text.index("**3. Post the link**"):text.index("**4. Read the final line**")]
+    step = text[text.index("**3. Post the link**") : text.index("**4. Read the final line**")]
     assert "header `Password`" in step
     assert "**I've saved it** / **New link** / **Use a file instead (manual)**" in step
     assert "no card, nothing to paste" not in step
@@ -645,8 +660,10 @@ def test_sign_off_shows_the_sql_each_definition_maps_to():
 def test_the_onboarding_steps_are_shown_in_plain_words():
     # Live-run feedback: show where the person is in onboarding, the same way every time.
     text = SKILL.read_text(encoding="utf-8")
-    section = text[text.index("## Progress tracking"):text.index("## Phase −1")]
-    steps = [line.split(". ", 1)[1] for line in section.splitlines() if line[:2].rstrip(".").isdigit()]
+    section = text[text.index("## Progress tracking") : text.index("## Phase −1")]
+    steps = [
+        line.split(". ", 1)[1] for line in section.splitlines() if line[:2].rstrip(".").isdigit()
+    ]
     assert steps[0] == "Connect your database" and steps[-1] == "Summary and first question"
     for jargon in ("ntrospect", "nrich", "NL→SQL", "Preflight"):
         assert not any(jargon in s for s in steps), jargon
@@ -667,7 +684,7 @@ def test_the_start_card_does_not_recommend_asking_an_empty_database():
 def test_finished_steps_carry_their_numbers():
     # Live-run feedback: the step list should fill in counts as they're learned.
     text = SKILL.read_text(encoding="utf-8")
-    section = text[text.index("## Progress tracking"):text.index("## Phase −1")]
+    section = text[text.index("## Progress tracking") : text.index("## Phase −1")]
     assert "**When a step finishes, add its numbers to its label**" in section
     assert "never an estimate" in section
 

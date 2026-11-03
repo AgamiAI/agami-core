@@ -75,8 +75,10 @@ def draw_section(section: dict) -> str:
     if any(v is not None and v < 0 for v in data[:n]):
         return f"**{title}**: some values are negative, which a text bar chart can't show; see the table."
     top = max((v for v in data[:n] if v is not None), default=0)
-    shown = [MISSING if v is None and s.strip().lower() in _BLANK_CELLS else s
-             for v, s in zip(data, _shown_values(section, first.get("label", ""), n))]
+    shown = [
+        MISSING if v is None and s.strip().lower() in _BLANK_CELLS else s
+        for v, s in zip(data, _shown_values(section, first.get("label", ""), n))
+    ]
     label_w = max(len(_label(lab)) for lab in labels[:n])
     value_w = max(len(s) for s in shown)
     lines = [
@@ -85,9 +87,13 @@ def draw_section(section: dict) -> str:
     ]
     notes = []
     if len(labels) > MAX_ROWS:
-        notes.append(f"Showing {MAX_ROWS} of {len(labels)}; {len(labels) - MAX_ROWS} more in the table.")
+        notes.append(
+            f"Showing {MAX_ROWS} of {len(labels)}; {len(labels) - MAX_ROWS} more in the table."
+        )
     if len(datasets) > 1:
-        notes.append(f"Bars show {first.get('label') or 'the first value'}; the table has the other columns.")
+        notes.append(
+            f"Bars show {first.get('label') or 'the first value'}; the table has the other columns."
+        )
     out = [f"**{title}**", "", "```text", *lines, "```"]
     return "\n".join(out + ([""] + notes if notes else []))
 
