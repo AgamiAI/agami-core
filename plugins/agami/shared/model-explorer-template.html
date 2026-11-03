@@ -1912,7 +1912,7 @@
       const allRejectable = all.filter(isRejectable);
       if (allApprovable.length || allRejectable.length) {
         const bar = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
-        if (allApprovable.length) bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+        if (allApprovable.length) bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary bulk-approve',
           onclick: () => bulkApprove(all) }, `✓ Approve all ${allApprovable.length} proposed`));
         bar.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
           onclick: () => bulkReject(all) }, `✕ Reject all ${allRejectable.length} proposed`));
@@ -2016,7 +2016,7 @@
       if (bulk) {
         const approvable = items.filter(isApprovable);
         const rejectable = items.filter(isRejectable);
-        if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm',
+        if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-approve',
           style: 'margin-left:auto;', onclick: () => bulkApprove(items) }, `✓ Approve ${approvable.length}`));
         if (rejectable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
           style: approvable.length ? '' : 'margin-left:auto;', onclick: () => bulkReject(items) }, `✕ Reject ${rejectable.length}`));

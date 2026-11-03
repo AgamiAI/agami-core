@@ -1259,7 +1259,7 @@
 
           // Read-mode toolbar: Copy + Edit (top-right).
           const copyBtn = el('button', { class: 'sql-btn', text: 'Copy', type: 'button' });
-          const editBtn = el('button', { class: 'sql-btn', text: '✎ Edit', type: 'button' });
+          const editBtn = el('button', { class: 'sql-btn sql-edit-btn', text: '✎ Edit', type: 'button' });
           const toolbar = el('div', { class: 'sql-toolbar' }, copyBtn, editBtn);
 
           // Edit-mode: textarea + Save / Cancel (hidden until Edit).
