@@ -616,8 +616,31 @@ def cmd_approve_queue(args) -> int:
     return 0 if res.validated else 1
 
 
-def _metric_test_runs(root: str, profile: str, items: list) -> dict[str, dict]:
+# Failure kinds (execute_sql's exit-code table) that say the database could not be reached as
+# configured: every metric would fail the same way, so none of them is the binding's fault.
+_CONNECTION_KINDS = frozenset({"auth", "dsn", "network", "driver_missing", "sign_in_required"})
+# Kinds that say the statement itself is wrong: the binding's fault, never a connection check.
+_STATEMENT_KINDS = frozenset({"syntax", "column_not_found", "table_not_found", "permission"})
+
+
+def _connection_failed(runner, exc: Exception) -> bool:
+    """Whether a failed test run means the database could not be reached, not that the SQL is
+    wrong: the failure kind says so, or, when it says nothing, a trivial `SELECT 1` fails too."""
+    kind = getattr(exc, "kind", None)
+    if kind in _CONNECTION_KINDS:
+        return True
+    if kind in _STATEMENT_KINDS:
+        return False
+    try:
+        runner("SELECT 1")
+    except Exception:  # noqa: BLE001 — any failure of SELECT 1 is the connection's
+        return True
+    return False
+
+
+def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, dict], Optional[str]]:
     """Each metric's binding for this database, run once over zero rows: name → {ok} or {error}.
+    The second value is the reason the database could not be reached, which stops the batch.
 
     A live run signed off two metrics whose SQL named a column the table doesn't have and compared
     a text code to a number; neither was caught, because nothing ran the SQL before the sign-off.
@@ -626,12 +649,15 @@ def _metric_test_runs(root: str, profile: str, items: list) -> dict[str, dict]:
     """
     from . import dialects as D
     from . import introspect as INTRO
+    from .models import table_key
+    from .validator import _tables_named
     org = L.load_datasource(root)
     if not org.storage_connections:
-        return {}
+        return {}, None
     storage_type = org.storage_connections[0].storage_type
     dialect = D.get_dialect(storage_type)
-    tables = {t.name.lower(): t for sa in org.subject_areas for t in sa.tables_defined}
+    # Keyed by (schema, name): two same-named tables in different schemas stay apart.
+    defs = list({table_key(t.name, t.schema_name): t for sa in org.subject_areas for t in sa.tables_defined}.items())
     runner = INTRO.make_execute_sql_runner(profile, building_the_model=True)
     out: dict[str, dict] = {}
     for it in items:
@@ -643,17 +669,25 @@ def _metric_test_runs(root: str, profile: str, items: list) -> dict[str, dict]:
         if not binding:
             out[name] = {"not_test_run": f"no binding for {storage_type}"}
             continue
-        if len(sources) != 1 or str(sources[0]).split(".")[-1].lower() not in tables:
+        hits = _tables_named(defs, str(sources[0])) if len(sources) == 1 else []
+        if len(sources) != 1 or not hits:
             out[name] = {"not_test_run": "reads more than one table, or a table the model doesn't have"}
             continue
-        t = tables[str(sources[0]).split(".")[-1].lower()]
-        src = dialect.qualified(t.schema_name, t.name)
+        if len(hits) > 1:
+            out[name] = {"not_test_run": f"{sources[0]} names a table in several schemas; qualify it with its schema"}
+            continue
+        src = dialect.qualified(hits[0].schema_name, hits[0].name)
+        # The binding on lines of its own, so a trailing `-- comment` in it can't swallow the FROM.
+        sql = f"SELECT\n{binding}\nAS v\nFROM {src}\nWHERE 1 = 0"
         try:
-            runner(f"SELECT {binding} AS v FROM {src} WHERE 1 = 0")
+            runner(sql)
             out[name] = {"ok": True}
         except Exception as e:  # noqa: BLE001 — a failed binding is reported per metric, not raised
-            out[name] = {"error": str(e).splitlines()[0][:300]}
-    return out
+            reason = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
+            if _connection_failed(runner, e):
+                return {"connection": {"error": reason}}, reason
+            out[name] = {"error": reason}
+    return out, None
 
 
 def cmd_add(args) -> int:
@@ -663,7 +697,14 @@ def cmd_add(args) -> int:
         items = items.get(args.kind + "s", items.get("items", []))
     test_runs = None
     if args.kind == "metric" and getattr(args, "profile", None):
-        test_runs = _metric_test_runs(args.root, args.profile, items)
+        test_runs, unreachable = _metric_test_runs(args.root, args.profile, items)
+        if unreachable:
+            # Not the metrics' fault: say the database could not be reached, and write nothing,
+            # since none of the bindings was actually tested.
+            _print_json({"applied": [], "validated": False, "test_run": test_runs,
+                         "errors": [f"could not reach the database to test the metrics' SQL ({unreachable}); "
+                                    "nothing was written. Check the connection and add again"]})
+            return 1
         failed = {n for n, r in test_runs.items() if "error" in r}
         if failed:
             # Nothing is written while a binding fails: a metric whose SQL doesn't run would

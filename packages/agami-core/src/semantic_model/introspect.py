@@ -197,6 +197,20 @@ class IntrospectReport:
 # ---------------------------------------------------------------------------
 
 
+class ExecuteSqlFailure(RuntimeError):
+    """A statement `execute_sql.py` failed, with the failure kind its exit code names (`auth`,
+    `network`, `syntax`, `column_not_found`, ...), or None when the code is not one it documents."""
+
+    def __init__(self, message: str, returncode: int) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        try:
+            from execute_sql import EXIT_TO_FAILURE_KIND
+        except ImportError:  # the stdlib-only mirror without the executor module: kind unknown
+            EXIT_TO_FAILURE_KIND = {}
+        self.kind: Optional[str] = EXIT_TO_FAILURE_KIND.get(returncode)
+
+
 def make_execute_sql_runner(
     profile: str, python: Optional[str] = None, *, building_the_model: bool = False
 ) -> Runner:
@@ -218,7 +232,7 @@ def make_execute_sql_runner(
             capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
         if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or f"execute_sql exit {proc.returncode}")
+            raise ExecuteSqlFailure(proc.stderr.strip() or f"execute_sql exit {proc.returncode}", proc.returncode)
         return [_Row(r) for r in csv.DictReader(io.StringIO(proc.stdout))]
 
     return run
