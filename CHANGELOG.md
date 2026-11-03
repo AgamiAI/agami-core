@@ -22,6 +22,10 @@ below corresponds to one such version.
   carry a machine-readable `reason`, a missing database driver is reported as `missing_driver` with the
   package to install, and a run that fails or is stopped removes what it stored. `setup_pgauth.py`
   never writes such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
+  The password goes only to Keychain or Credential Manager themselves, never to another keyring
+  backend such as `keyrings.alt`'s plain-text file. `connect_helper.py --replace` changes a saved
+  password and puts the old one back if the new one does not connect; a non-UTF-8 credentials file
+  is refused as `unreadable_credentials`, and a submit after the page expired gets a 404.
 
 ### Changed
 

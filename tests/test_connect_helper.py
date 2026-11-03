@@ -737,6 +737,26 @@ def test_an_unreadable_credentials_file_has_a_reason(tmp_path: Path, art: Path, 
     assert _only_line(_spec(tmp_path))["reason"] == "unreadable_credentials"
 
 
+def test_a_credentials_file_that_is_not_utf8_has_a_reason(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_bytes(b"[acme]\ntype = sqlite\nhost = caf\xe9\n")  # Latin-1, not UTF-8
+    line = _only_line(_spec(tmp_path))
+    assert line["status"] == "refused" and line["reason"] == "unreadable_credentials"
+
+
+def test_a_file_made_unreadable_while_the_page_was_open_has_a_reason(
+    tmp_path: Path, art: Path, backend: _FakeBackend
+) -> None:
+    t, out = _start(_spec(tmp_path))
+    url = out.wait(1)[0]["url"]
+    _creds(art).parent.mkdir(parents=True)
+    _creds(art).write_bytes(b"[acme]\nhost = caf\xe9\n")
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["reason"] == "unreadable_credentials"
+    assert backend.data == {}
+
+
 def test_linux_is_unsupported_os(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch) -> None:
     monkeypatch.setattr(credential_store.platform, "system", lambda: "Linux")
     line = _only_line(_spec(tmp_path))
@@ -853,6 +873,169 @@ def test_an_unexpected_error_rolls_back(tmp_path: Path, art: Path, backend: _Fak
     final = out.wait(2)[1]
     assert final["status"] == "connect_failed" and final["detail"]
     assert not _creds(art).exists() and backend.data == {}
+
+
+@pytest.mark.parametrize("stop", [SystemExit(143), KeyboardInterrupt()])
+def test_a_stop_between_storing_and_writing_forgets_the_password(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch, stop: BaseException
+) -> None:
+    def stopped(creds: Path, section: str) -> str:
+        assert backend.data == {("agami", "demo"): SECRET}  # stored, and nothing names it yet
+        raise stop
+
+    monkeypatch.setattr(connect_helper, "_write_section", stopped)
+    with pytest.raises(type(stop)):
+        connect_helper._store_and_connect(_spec(tmp_path), SECRET, _Lines())
+    assert backend.data == {} and not _creds(art).exists()
+
+
+def test_an_unexpected_write_error_forgets_the_password(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch
+) -> None:
+    def broken(creds: Path, section: str) -> str:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(connect_helper, "_write_section", broken)
+    out = _Lines()
+    connect_helper._store_and_connect(_spec(tmp_path), SECRET, out)
+    assert json.loads(out.lines[0])["reason"] == "write_failed"
+    assert backend.data == {}
+
+
+def test_a_submit_after_expiry_is_refused_not_received(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch
+) -> None:
+    # Hold the server open after `expired` is printed, the window a late submit could land in.
+    release = threading.Event()
+    shutdown = connect_helper._Server.shutdown
+
+    def held(self: connect_helper._Server) -> None:
+        release.wait(10)
+        shutdown(self)
+
+    monkeypatch.setattr(connect_helper._Server, "shutdown", held)
+    t, out = _start(_spec(tmp_path), expires_in=0.3)
+    url = out.wait(1)[0]["url"]
+    assert out.wait(2)[1] == {"status": "expired"}
+    try:
+        assert _post(url, SECRET) == 404
+        assert _get(url)[0] == 404
+    finally:
+        release.set()
+    t.join(10)
+    assert len(out.lines) == 2 and backend.data == {} and not _creds(art).exists()
+
+
+# --- --replace: a changed password for a profile already in the OS store. ---
+
+
+def _keyring_profile(art: Path, tmp_path: Path, backend: _FakeBackend) -> str:
+    """An existing `[demo]` that points at the store, between two other sections."""
+    _creds(art).parent.mkdir(parents=True)
+    text = (
+        "[acme]\ntype = sqlite\npath = /tmp/acme.db\n\n"
+        f"[demo]\ntype = sqlite\npath = {tmp_path / 'old.db'}\npassword = keyring:agami/demo\n\n"
+        "[other]\ntype = sqlite\npath = /tmp/other.db\n"
+    )
+    _creds(art).write_text(text, encoding="utf-8")
+    _creds(art).chmod(0o600)
+    backend.data[("agami", "demo")] = "not-a-real-old-password"
+    return text
+
+
+def test_replace_changes_the_saved_password(tmp_path: Path, art: Path, backend: _FakeBackend) -> None:
+    _keyring_profile(art, tmp_path, backend)
+    out = _Lines()
+    t = threading.Thread(
+        target=connect_helper.run, args=(_spec(tmp_path), out), kwargs={"replace": True}, daemon=True
+    )
+    t.start()
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connected"
+    assert backend.data == {("agami", "demo"): SECRET}
+    text = _creds(art).read_text(encoding="utf-8")
+    assert text.count("[demo]") == 1 and "old.db" not in text and str(tmp_path / "demo.db") in text
+    assert "[acme]" in text and "[other]" in text and "password = keyring:agami/demo" in text
+    if os.name == "posix":
+        assert _creds(art).stat().st_mode & 0o777 == 0o600
+    assert _secret_on_disk(tmp_path) == []
+
+
+def test_replace_that_does_not_connect_puts_the_old_one_back(
+    tmp_path: Path, art: Path, backend: _FakeBackend
+) -> None:
+    before = _keyring_profile(art, tmp_path, backend)
+    spec = _spec(tmp_path, fields={"path": str(tmp_path / "missing-dir" / "demo.db")})
+    out = _Lines()
+    t = threading.Thread(target=connect_helper.run, args=(spec, out), kwargs={"replace": True}, daemon=True)
+    t.start()
+    assert _post(out.wait(1)[0]["url"], SECRET) == 200
+    t.join(10)
+    assert out.wait(2)[1]["status"] == "connect_failed"
+    assert backend.data == {("agami", "demo"): "not-a-real-old-password"}
+    assert _creds(art).read_text(encoding="utf-8") == before
+
+
+def test_replace_whose_old_password_cannot_be_put_back_says_so(
+    tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch
+) -> None:
+    _keyring_profile(art, tmp_path, backend)
+    monkeypatch.setattr(connect_helper, "_connection_test", lambda profile: ("connect_failed", "Refused."))
+    out = _Lines()
+    t = threading.Thread(
+        target=connect_helper.run, args=(_spec(tmp_path), out), kwargs={"replace": True}, daemon=True
+    )
+    t.start()
+    url = out.wait(1)[0]["url"]
+    put = credential_store.put
+
+    def locked(profile: str, secret: str) -> str:
+        raise credential_store.CredentialStoreError("locked")
+
+    def put_once(profile: str, secret: str) -> str:
+        monkeypatch.setattr(credential_store, "put", locked)  # the store locks after the new password
+        return put(profile, secret)
+
+    monkeypatch.setattr(credential_store, "put", put_once)
+    assert _post(url, SECRET) == 200
+    t.join(10)
+    final = out.wait(2)[1]
+    assert final["status"] == "connect_failed" and "now holds the new one" in final["detail"]
+    assert "not-a-real-old-password" not in json.dumps(final) and SECRET not in json.dumps(final)
+
+
+@pytest.mark.parametrize(
+    "creds_text,auth",
+    [
+        (None, "password"),  # no such profile
+        ("[demo]\ntype = sqlite\npath = /tmp/demo.db\npassword = not-a-real-password\n", "password"),
+        ("[demo]\ntype = sqlite\npath = /tmp/demo.db\n", "password"),
+        ("[demo]\ntype = sqlite\npassword = keyring:agami/demo\n", "sso"),
+    ],
+)
+def test_replace_refuses_a_profile_it_cannot_change(
+    tmp_path: Path, art: Path, backend: _FakeBackend, creds_text: str | None, auth: str
+) -> None:
+    if creds_text is not None:
+        _creds(art).parent.mkdir(parents=True)
+        _creds(art).write_text(creds_text, encoding="utf-8")
+    out = _Lines()
+    connect_helper.run(_spec(tmp_path, auth=auth), out, expires_in=1, replace=True)
+    assert len(out.lines) == 1
+    line = json.loads(out.lines[0])
+    assert line["status"] == "refused" and line["reason"] == "not_replaceable" and line["detail"]
+    assert backend.data == {}
+    if creds_text is not None:
+        assert _creds(art).read_text(encoding="utf-8") == creds_text
+
+
+def test_replace_is_a_command_line_flag(tmp_path: Path, art: Path, backend: _FakeBackend, monkeypatch, capsys) -> None:
+    spec = tmp_path / "spec.json"
+    spec.write_text(json.dumps(_spec(tmp_path)), encoding="utf-8")
+    monkeypatch.setattr(connect_helper.signal, "signal", lambda *a: None)
+    assert connect_helper.main(["--spec", str(spec), "--replace"]) == 0
+    assert json.loads(capsys.readouterr().out)["reason"] == "not_replaceable"
 
 
 _SIGTERM_RUNNER = r"""

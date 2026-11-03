@@ -149,11 +149,11 @@ def resolve(value: str, *, profile: str) -> str:
     except Exception as e:
         raise CredentialStoreError(
             f"Could not read [{value}] from the OS credential store for profile [{profile}]; "
-            "unlock it and retry, or reconnect to store the password again."
+            "unlock it and retry, or reconnect with connect_helper.py --replace to store the password again."
         ) from e
     if secret is None:
         raise CredentialStoreError(
             f"No password found in the OS credential store for [{username}] (profile [{profile}]); "
-            "reconnect to store it again."
+            "reconnect with connect_helper.py --replace to store it again."
         )
     return secret
