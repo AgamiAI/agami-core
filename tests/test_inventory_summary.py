@@ -55,8 +55,9 @@ def _run(tmp_path: Path, inv: dict, *args: str) -> tuple[int, dict]:
         "orders_20230115",
         "orders_2023_01",
         "orders_old",
-        "test_orders",
-        "temp_x",
+        "orders_temp",
+        "orders_copy",
+        "tmp",
     ],
 )
 def test_noise_names_are_flagged(name):
@@ -74,10 +75,50 @@ def test_noise_names_are_flagged(name):
         "tempest",
         "order_items_v2",
         "h3_cells",
+        "test_results",
+        "test_scores",
+        "temp_readings",
+        "test_orders",  # no `orders` to copy
+        "order_test_runs",
     ],
 )
 def test_ordinary_names_are_not_flagged(name):
     assert inventory_summary.noise_reason(name) is None
+
+
+def test_a_leading_test_or_temp_is_noise_only_beside_the_table_it_copies():
+    names = {"orders", "test_orders", "temp_customers", "customers", "test_scores"}
+    assert inventory_summary.noise_reason("test_orders", "sales", names)
+    assert inventory_summary.noise_reason("TempCustomers", "sales", names)
+    assert inventory_summary.noise_reason("test_scores", "sales", names) is None
+
+
+def test_flagged_tables_name_what_they_copy(tmp_path):
+    code, out = _run(tmp_path, _inventory({"sales": ["orders", "orders_bak", "test_orders", "test_results"]}))
+    assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
+        "sales.orders_bak": "sales.orders", "sales.test_orders": "sales.orders"}
+    assert out["noise_all_copies"] is True
+
+
+def test_noise_without_a_counterpart_is_not_all_copies(tmp_path):
+    code, out = _run(tmp_path, _inventory({"sales": ["orders", "orders_bak", "stg_events"]}))
+    assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
+        "sales.orders_bak": "sales.orders", "sales.stg_events": None}
+    assert out["noise_all_copies"] is False
+    code, out = _run(tmp_path, _inventory({"sales": ["orders"]}))
+    assert out["noise_all_copies"] is False
+
+
+def test_a_noise_schema_copies_the_same_named_table_elsewhere(tmp_path):
+    code, out = _run(tmp_path, _inventory({"staging": ["orders"], "sales": ["orders"]}))
+    assert out["likely_noise"][0]["copy_of"] == "sales.orders"
+
+
+def test_drop_noise_keeps_real_test_tables(tmp_path):
+    inv = _inventory({"lab": ["test_results", "temp_readings", "orders", "test_orders"]})
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", "drop_noise", "--tables-out", str(out_file))
+    assert out_file.read_text().split() == ["lab.test_results", "lab.temp_readings", "lab.orders"]
 
 
 def test_summary_shape(tmp_path):
@@ -286,3 +327,30 @@ def test_used_by_adds_used_schemas_to_the_summary(tmp_path, capsys):
     shared.write_text("select count(*) from billing.orders")
     assert main(["--inventory", str(inv), "--used-by", str(shared)]) == 0
     assert json.loads(capsys.readouterr().out)["used_schemas"] == [{"schema": "billing", "mentions": 1}]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM warehouse.sales.orders",  # three-part: db.schema.table
+        'SELECT * FROM "sales"."orders"',
+        "SELECT * FROM `sales`.`orders`",
+        "SELECT * FROM `proj.sales.orders`",  # one backtick-quoted three-part name
+        "SELECT * FROM [sales].[orders]",
+        "SELECT * FROM [warehouse].[SALES].[Orders]",
+        "SELECT sales.orders.amount FROM sales.orders",  # a column reference counts once per name
+    ],
+)
+def test_used_schemas_reads_quoted_and_three_part_names(sql):
+    from inventory_summary import used_schemas
+
+    got = used_schemas(_INV, sql)
+    assert got and got[0]["schema"] == "sales", got
+    assert "billing" not in [g["schema"] for g in got]
+
+
+def test_used_schemas_counts_each_dotted_name_once():
+    from inventory_summary import used_schemas
+
+    assert used_schemas(_INV, "FROM db.sales.orders JOIN billing.orders") == [
+        {"schema": "billing", "mentions": 1}, {"schema": "sales", "mentions": 1}]

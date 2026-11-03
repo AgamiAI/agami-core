@@ -61,6 +61,21 @@ def test_1_6_handles_all_noise_and_the_empty_result():
     assert "covers every table" in s
 
 
+def test_1_6_recommends_dropping_noise_only_when_every_flagged_table_is_a_copy():
+    # `test_results` and `temp_readings` are real tables; recommending their drop lost data.
+    s = _section_16()
+    assert "noise_all_copies" in s and "copy_of" in s
+    assert "without \"(Recommended)\"" in s
+
+
+def test_1_6_columns_in_other_go_to_exclude_columns_whatever_the_table_answer():
+    s = _section_16()
+    assert "neither `--tables-file` nor `--exclude-columns`" not in s
+    keep_row = next(line for line in s.splitlines() if line.startswith("| Keep everything |"))
+    assert "--exclude-columns" in keep_row and "still" in keep_row
+    assert "whatever the table answer" in s
+
+
 def test_1_6_follow_up_card_stays_within_four_options():
     s = _section_16()
     assert "fewer than 4" in s

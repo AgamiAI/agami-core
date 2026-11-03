@@ -12,13 +12,16 @@ Summary (default):
     -> {"tables": n,
         "schemas": [{"name", "tables"}, ...],          # the 15 largest schemas at most
         "schemas_more": {"schemas": k, "tables": m} | null,   # what the 15 rows leave out
-        "likely_noise": [{"table": "schema.table", "why": "..."}],
+        "likely_noise": [{"table": "schema.table", "why": "...", "copy_of": "schema.table" | null}],
+        "noise_all_copies": bool,     # every flagged table has a same-named counterpart
         "groups": {"noise_by_pattern": {"<word>": count},
                    "schema_groups": [{"label", "schemas", "schema_count", "tables"}]}}   # [] unless > 4 schemas
 
-`likely_noise` matches whole words of the table name (split on `_`, `-`, `.` and case or digit
-boundaries): stg, staging, tmp, temp, bak, backup, old, archive, test, or a trailing date or year.
-`testimonials` is one word and matches nothing; `customers` is never flagged.
+`likely_noise` matches whole words at the start or end of the table name (split on `_`, `-`, `.`
+and case or digit boundaries): a leading stg, staging or tmp; a trailing stg, staging, tmp, temp,
+bak, backup, old, copy or archive; a trailing date or year; a leading test or temp only when the
+rest of the name is another table's (`test_orders` beside `orders`). `testimonials`, `test_scores`
+and `temp_readings` are not flagged. `copy_of` names the table a flagged one copies, if any.
 
 Keep (writes the file, one `schema.table` per line, in inventory order):
 
@@ -54,7 +57,16 @@ import re
 import sys
 from pathlib import Path
 
-NOISE_WORDS = {"stg", "staging", "tmp", "temp", "bak", "backup", "old", "archive", "test"}
+# Words that mark a table as a copy, scratch or staging only at the start or the end of its name
+# (`stg_orders`, `orders_bak`). A word in the middle, or `temp` / `test` leading a real fact table
+# (`temp_readings`, `test_scores`), is not noise.
+LEADING_NOISE = {"stg", "staging", "tmp"}
+TRAILING_NOISE = {"stg", "staging", "tmp", "temp", "bak", "backup", "old", "copy", "archive"}
+# Leading `test` / `temp` marks a copy only when the rest of the name is another table's
+# (`test_orders` beside `orders`).
+LEADING_IF_COPY = {"test", "temp"}
+# A table named only one of these words is scratch.
+ALONE_NOISE = {"stg", "staging", "tmp", "temp", "bak", "backup", "scratch"}
 # A schema with one of these names is a whole area of scratch or copies, so all its tables are noise.
 NOISE_SCHEMA_WORDS = {"staging", "stg", "tmp", "temp", "scratch", "backup", "archive", "test"}
 MAX_SCHEMA_ROWS = 15
@@ -70,31 +82,72 @@ def _words(name: str) -> list[str]:
     return [w for w in _SPLIT.split(name) if w]
 
 
-def noise_reason(table: str, schema: str = "") -> str | None:
-    """Why a table looks like staging, a backup or a dated copy; None if it does not."""
-    if schema.lower() in NOISE_SCHEMA_WORDS:
-        return f"schema is named '{schema.lower()}'"
-    words = _words(table)
-    for word in words:
-        if word.lower() in NOISE_WORDS:
-            return f"name has the word '{word.lower()}'"
-    # A trailing run of digit words (2023, 2023_01, 20230115) that reads as a date, optionally
-    # followed by a version or quarter token (v2, q1).
-    if len(words) > 2 and words[-2].lower() in ("v", "q") and words[-1].isdigit():
-        words = words[:-2]
+def _norm(words: list[str]) -> str:
+    return "_".join(w.lower() for w in words)
+
+
+def _split_date(words: list[str]) -> tuple[list[str], bool]:
+    """→ (the words before a trailing date or year, whether there was one). A version or quarter
+    token after the date (v2, q1) goes with it."""
+    rest = words[:-2] if len(words) > 2 and words[-2].lower() in ("v", "q") and words[-1].isdigit() else words
     tail: list[str] = []
-    for word in reversed(words):
+    for word in reversed(rest):
         if not word.isdigit():
             break
         tail.insert(0, word)
-    if (
-        tail
-        and len(tail) < len(words)
-        and _DATE.match("".join(tail))
-        and len("".join(tail)) in (4, 6, 8)
-    ):
+    joined = "".join(tail)
+    if tail and len(tail) < len(rest) and _DATE.match(joined) and len(joined) in (4, 6, 8):
+        return rest[: len(rest) - len(tail)], True
+    return words, False
+
+
+def _base(table: str) -> list[str] | None:
+    """The name with its copy markers taken off (`stg_orders_2023` -> orders); None when it has none."""
+    words, dated = _split_date(_words(table))
+    marked = dated
+    if len(words) > 1 and words[-1].lower() in TRAILING_NOISE:
+        words, marked = words[:-1], True
+    if len(words) > 1 and words[0].lower() in LEADING_NOISE | LEADING_IF_COPY:
+        words, marked = words[1:], True
+    return words if marked else None
+
+
+def noise_reason(table: str, schema: str = "", names: set[str] | None = None) -> str | None:
+    """Why a table looks like staging, a backup or a dated copy; None if it does not.
+
+    `names` is every table name in the inventory, normalised (`_norm` of its words): with it, a
+    leading `test` / `temp` is noise when the rest of the name is another table's."""
+    if schema.lower() in NOISE_SCHEMA_WORDS:
+        return f"schema is named '{schema.lower()}'"
+    all_words = _words(table)
+    if len(all_words) == 1 and all_words[0].lower() in ALONE_NOISE:
+        return f"name has the word '{all_words[0].lower()}'"
+    words, dated = _split_date(all_words)
+    if dated:
         return "name ends in a date or year"
+    if len(words) > 1 and words[-1].lower() in TRAILING_NOISE:
+        return f"name has the word '{words[-1].lower()}'"
+    if len(words) > 1 and words[0].lower() in LEADING_NOISE:
+        return f"name has the word '{words[0].lower()}'"
+    if len(words) > 1 and words[0].lower() in LEADING_IF_COPY and names and _norm(words[1:]) in names:
+        return f"name has the word '{words[0].lower()}' before another table's name"
     return None
+
+
+def copy_of(t: dict, tables: list[dict]) -> str | None:
+    """The table a flagged table copies (`orders_bak` -> `sales.orders`), same schema first; None
+    when no other table has its name without the markers. A table in a noise-named schema copies
+    the same-named table in another schema."""
+    schema = t.get("schema") or ""
+    base = _base(t["table"])
+    if base is None:
+        if schema.lower() not in NOISE_SCHEMA_WORDS:
+            return None
+        base = _words(t["table"])
+    key = _norm(base)
+    hits = [o for o in tables if o is not t and _norm(_words(o["table"])) == key]
+    hits.sort(key=lambda o: (o.get("schema") or "") != schema)
+    return _qualified(hits[0]) if hits else None
 
 
 def _qualified(t: dict) -> str:
@@ -128,11 +181,12 @@ def summarise(inventory: dict) -> dict:
         counts[t.get("schema") or ""] = counts.get(t.get("schema") or "", 0) + 1
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     shown, rest = ranked[:MAX_SCHEMA_ROWS], ranked[MAX_SCHEMA_ROWS:]
+    names = {_norm(_words(t["table"])) for t in tables}
     noise, by_pattern = [], {}
     for t in tables:
-        why = noise_reason(t["table"], t.get("schema") or "")
+        why = noise_reason(t["table"], t.get("schema") or "", names)
         if why:
-            noise.append({"table": _qualified(t), "why": why})
+            noise.append({"table": _qualified(t), "why": why, "copy_of": copy_of(t, tables)})
             key = why.split("'")[1] if "'" in why else "date or year"
             by_pattern[key] = by_pattern.get(key, 0) + 1
     return {
@@ -140,6 +194,8 @@ def summarise(inventory: dict) -> dict:
         "schemas": [{"name": n, "tables": c} for n, c in shown],
         "schemas_more": {"schemas": len(rest), "tables": sum(c for _, c in rest)} if rest else None,
         "likely_noise": noise,
+        # Every flagged table has a same-named counterpart, so dropping them loses no data.
+        "noise_all_copies": bool(noise) and all(n["copy_of"] for n in noise),
         "groups": {"noise_by_pattern": by_pattern, "schema_groups": _schema_groups(counts)},
     }
 
@@ -155,8 +211,9 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
     if choice == "all":
         return [_qualified(t) for t in tables], None
     if choice == "drop_noise":
+        names = {_norm(_words(t["table"])) for t in tables}
         return [
-            _qualified(t) for t in tables if not noise_reason(t["table"], t.get("schema") or "")
+            _qualified(t) for t in tables if not noise_reason(t["table"], t.get("schema") or "", names)
         ], None
     if choice.startswith("schemas:"):
         wanted = [s.strip() for s in choice[len("schemas:") :].split(",") if s.strip()]
@@ -214,8 +271,33 @@ def show(inventory: dict, name: str) -> tuple[dict, bool]:
             "more": max(0, len(cols) - MAX_SHOW_ROWS)}, True
 
 
+# One part of a dotted name: plain, or quoted with "", `` or [] (a quoted part may hold spaces).
+_PART = r'(?:"[^"\n]+"|`[^`\n]+`|\[[^\]\n]+\]|[A-Za-z_][A-Za-z0-9_$]*)'
+_DOTTED = re.compile(rf"(?<![\w$\"`\].]){_PART}(?:\.{_PART})+")
+_PART_RE = re.compile(_PART)
+
+
+def _dotted_names(text: str) -> list[list[str]]:
+    """Every dotted name in `text`, as its unquoted parts: `db.schema.table`, `"sales"."orders"`,
+    `[dbo].[orders]`. A whole name quoted as one part (`` `proj.sales.orders` ``) is split on its dots."""
+    names = []
+    for m in _DOTTED.finditer(text):
+        parts: list[str] = []
+        for p in _PART_RE.findall(m.group(0)):
+            if p[0] in "\"`[":
+                parts.extend(p[1:-1].split(".") if p[0] == "`" else [p[1:-1]])
+            else:
+                parts.append(p)
+        names.append(parts)
+    for m in re.finditer(r"`([^`\n.]+(?:\.[^`\n.]+)+)`", text):
+        if not re.search(r"`\s*\.", text[m.end():m.end() + 2]):
+            names.append(m.group(1).split("."))
+    return names
+
+
 def used_schemas(inventory: dict, text: str) -> list[dict]:
     """The inventory's schemas that shared SQL or questions name as `schema.table`, most used first.
+    Two- and three-part names count, quoted with `"`, a backtick or `[]`, matched without case.
 
     A live run grouped 16 schemas alphabetically on the pick card; the person picked "asset to
     cmdb" and lost the schemas 64 of their 69 example questions read. Reading which schemas their
@@ -228,10 +310,14 @@ def used_schemas(inventory: dict, text: str) -> list[dict]:
         if s:
             known.setdefault(s.lower(), [s, set()])[1].add(tb["table"].lower())
     counts: dict[str, int] = {}
-    for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z_][A-Za-z0-9_]*)\b", text):
-        entry = known.get(m.group(1).lower())
-        if entry and m.group(2).lower() in entry[1]:
-            counts[entry[0]] = counts.get(entry[0], 0) + 1
+    for parts in _dotted_names(text):
+        # `schema.table`, `db.schema.table` or `schema.table.column`: the first adjacent pair that is
+        # a known schema and one of its tables names the schema.
+        for first, second in zip(parts, parts[1:]):
+            entry = known.get(first.lower())
+            if entry and second.lower() in entry[1]:
+                counts[entry[0]] = counts.get(entry[0], 0) + 1
+                break
     return [{"schema": s, "mentions": n} for s, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 

@@ -705,16 +705,16 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
 ```
 
-It prints `{tables, schemas, schemas_more, likely_noise, groups}`. Show:
+It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Show:
 
 1. One sentence: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty).
 2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
-3. The first 5 names in `likely_noise` with their `why`, then "and N more", so the person sees what "Drop staging and backups" would remove (a real table such as `test_results` shows up here before they press it). If they ask for the whole list, show up to 15 rows and "and N more".
+3. The first 5 names in `likely_noise` with their `why` and, when it has one, the table it copies (`copy_of`), then "and N more", so the person sees what "Drop staging and backups" would remove (a real table that only looks like a copy shows up here before they press it). If they ask for the whole list, show up to 15 rows and "and N more".
 
 Then call AskUserQuestion, one question (header `Tables`):
 
 - **Keep everything**: model all `<N>` tables.
-- **Drop staging and backups**: skip the `<M>` likely-noise tables. Mark it **(Recommended)** and put it first only when `likely_noise` is not empty and does not cover every table. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
+- **Drop staging and backups**: skip the `<M>` likely-noise tables. Offer it only when `likely_noise` is not empty and does not cover every table. Mark it **(Recommended)** and put it first only when `noise_all_copies` is true (every flagged table has a same-named counterpart, so dropping them loses no data); otherwise list it after **Keep everything** without "(Recommended)", since a flagged table with no counterpart may be real data. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
 - **Only some schemas**: pick which schemas to model. Leave it out when there is a single schema.
 - **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
 
@@ -724,7 +724,7 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 
 | Answer | Do |
 |---|---|
-| Keep everything | Skip the file. Run 1.7 with neither `--tables-file` nor `--exclude-columns`. |
+| Keep everything | Skip the file. Run 1.7 without `--tables-file`; columns typed in "Other" still go to `--exclude-columns` (below). |
 | Drop staging and backups | `inventory_summary.py --inventory "<inventory_path>" --keep drop_noise --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` |
 | Only some schemas | **When the person shared questions or report SQL in 1.5, lead with the schemas they use**: run the summary again with `--used-by <each shared file>` (`agami-asked-questions.txt`, the files in `local/reconcile/inbox/`, a semantic-layer folder's SQL), and when `used_schemas` is not empty make the first option `The <k> schemas your SQL uses (Recommended)`, naming them in its description; tell the person in one line before the card how much of their material a pick would leave out when it drops one of those schemas. Then ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Name each group option's `schema_count` and `tables`. Add a "None of these" option only when that leaves fewer than 4 options; at 4, "Other" is the way out (a card holds 2 to 4 options). Then `--keep schemas:<a,b,c>`. |
 | Let me name them | Write the names (one per line, `schema.table` or a bare table name) with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`, then `--keep names:<artifacts_dir>/local/tmp/agami-names.txt`. |
@@ -741,7 +741,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inven
 
 A schema prints its tables with their column counts; a table prints its columns with their types. Show them as a markdown table (`Table | Columns` or `Column | Type`), at most 15 rows, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (exit 1): say which name didn't match, or list the tables it could mean, and ask the same card again.
 
-**Columns to leave out, typed in "Other".** Names of the form `schema.table.column` (alongside a table answer or on their own) are columns to exclude from the build. Write them one per line with the Write tool to `<artifacts_dir>/local/tmp/agami-drop-columns.txt` and check them:
+**Columns to leave out, typed in "Other".** Names of the form `schema.table.column` are columns to exclude from the build, whatever the table answer (Keep everything included) or on their own. Write them one per line with the Write tool to `<artifacts_dir>/local/tmp/agami-drop-columns.txt` and check them:
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --check-columns "<artifacts_dir>/local/tmp/agami-drop-columns.txt"
