@@ -1953,21 +1953,27 @@ def _probe_relationships(
         for c in t.columns:
             low = c.name.lower()
             # A table's own single-column key is never a reference (every ServiceNow table has
-            # `sys_id`), and a bare `id` names too many keys to mean one of them.
+            # `sys_id`), and a generic name (`id`, `code`) names too many keys to mean one of them.
             own_key = len(t.grain) == 1 and t.grain[0].lower() == low
-            if low != "id" and not own_key and low in key_targets:
-                matched = False
-                for tgt_name in key_targets[low]:
+            if low not in _GENERIC_KEY_NAMES and not own_key and low in key_targets:
+                cands = []
+                for tgt_name in sorted(set(key_targets[low])):
                     if tgt_name == t.name:
                         continue
                     tgt = _pick_target(tables_by_name.get(tgt_name, []), prefer=t.schema_name)
                     if tgt is None or len(tgt.grain) != 1 or tgt.grain[0].lower() != low:
                         continue
-                    if _overlaps(dialect, runner, t, c.name, tgt, tgt.grain[0]):
-                        _add(t, c, tgt_name, tgt, "same-name key match")
-                        matched = True
-                        break
-                if matched:
+                    shared = _overlap_count(dialect, runner, t, c.name, tgt, tgt.grain[0])
+                    if shared >= _MIN_SHARED_KEY_VALUES:
+                        cands.append((tgt_name, tgt, shared))
+                chosen = _choose_key_target(low, cands)
+                if chosen is not None:
+                    _add(t, c, chosen[0], chosen[1], "same-name key match")
+                    continue
+                if len(cands) > 1:
+                    report.notes.append(
+                        f"no join proposed for {t.name}.{c.name}: its values match the key of "
+                        + ", ".join(n for n, _, _ in cands) + " equally well; add the right one by hand")
                     continue
             if not low.endswith("_id") and low != "id":
                 continue
@@ -1985,6 +1991,54 @@ def _probe_relationships(
                         _add(t, c, tgt_name, tgt, "name+type match")
                         break
     return rels
+
+
+# Key names too common to say which table they point at: `code` on a fact table could be any code.
+_GENERIC_KEY_NAMES = frozenset({
+    "id", "code", "name", "key", "type", "value", "status", "kind", "category", "label", "number",
+    "num", "no", "uuid", "guid", "sk", "pk", "date", "year", "month", "day", "level", "version",
+    "description", "title", "flag", "state",
+})
+# A same-name key match needs more than one shared value: one shared value (a `0`, a `1`, an `N/A`)
+# is chance, and it bound fact tables to whichever table happened to hold it.
+_MIN_SHARED_KEY_VALUES = 2
+_KEY_SUFFIXES = ("_code", "_id", "_key", "_no", "_number", "_num", "_cd")
+
+
+def _singular(word: str) -> str:
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith(("ses", "xes", "ches", "shes")):
+        return word[:-2]
+    return word[:-1] if word.endswith("s") and not word.endswith("ss") else word
+
+
+def _choose_key_target(column: str, cands: list[tuple[str, Table, int]]) -> Optional[tuple[str, Table, int]]:
+    """The one table a same-named key column points at, or None when the choice is a guess.
+
+    In order: a table named like the column's stem (`region_code` -> `regions`); then, dropping
+    extensions (`school_profile`, keyed on the same column as `schools` and named after it), the
+    one left; then the one sharing the most sampled values. Catalog order never decides: it bound
+    `scores.cds_code` to `school_profile`, which sorts before `schools`."""
+    if len(cands) <= 1:
+        return cands[0] if cands else None
+    stem = column
+    for suffix in _KEY_SUFFIXES:
+        if stem.endswith(suffix) and len(stem) > len(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    named = [x for x in cands if _singular(x[0].lower()) == _singular(stem)]
+    if len(named) == 1:
+        return named[0]
+    bases = {_singular(n.lower()) for n, _, _ in cands}
+    roots = [x for x in cands
+             if not any(x[0].lower().startswith(b + "_") for b in bases)]
+    if len(roots) == 1:
+        return roots[0]
+    pool = roots or cands
+    best = max(x[2] for x in pool)
+    top = [x for x in pool if x[2] == best]
+    return top[0] if len(top) == 1 else None
 
 
 def _too_big_to_probe(t: Table) -> bool:
@@ -2044,15 +2098,21 @@ def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc:
     )
 
 
-def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> bool:
-    """Sample from-column values and check they exist in the target key."""
+def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table,
+                   tc: str | list[str]) -> int:
+    """How many of the sampled from-column values exist in the target key (0 when the probe fails)."""
     res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
     if not res:
-        return False
+        return 0
     try:
-        return int(float(res[0].get("matched", 0))) > 0
+        return int(float(res[0].get("matched", 0)))
     except (ValueError, TypeError):
-        return False
+        return 0
+
+
+def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> bool:
+    """Sample from-column values and check they exist in the target key."""
+    return _overlap_count(dialect, runner, ft, fc, tt, tc) > 0
 
 
 # ---------------------------------------------------------------------------
