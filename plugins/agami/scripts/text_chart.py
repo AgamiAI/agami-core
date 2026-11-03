@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -25,11 +26,20 @@ WIDTH = 30  # bar cells at the longest value: fits beside a label in a narrow ch
 MAX_ROWS = 15  # the chat's table limit (question-cards rule 3); the rest is counted, not drawn
 LABEL_MAX = 24
 FULL, PARTIALS = "█", " ▏▎▍▌▋▊▉"
+MISSING = "—"
+_BLANK_CELLS = ("", "nan", "none", "null", "inf", "-inf")
 
 
-def _bar(value: float, top: float) -> str:
-    """A bar of eighth-cell precision, so close values still look different."""
-    if top <= 0 or value <= 0:
+def _number(v: object) -> float | None:
+    """A drawable value, or None for a missing one (null, NaN, infinity, text)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def _bar(value: float | None, top: float) -> str:
+    """A bar of eighth-cell precision, so close values still look different. No bar for a missing value."""
+    if value is None or top <= 0 or value <= 0:
         return ""
     eighths = round(value / top * WIDTH * 8)
     return FULL * (eighths // 8) + (PARTIALS[eighths % 8] if eighths % 8 else "")
@@ -47,7 +57,7 @@ def _shown_values(section: dict, dataset_label: str, n: int) -> list[str]:
     if dataset_label in headers and len(rows) >= n:
         col = headers.index(dataset_label)
         return [str(r[col]) if col < len(r) else "" for r in rows[:n]]
-    return [f"{v:,}" if isinstance(v, (int, float)) else str(v) for v in section["datasets"][0]["data"][:n]]
+    return [f"{v:,}" if _number(v) is not None else "" for v in section["datasets"][0]["data"][:n]]
 
 
 def draw_section(section: dict) -> str:
@@ -58,12 +68,15 @@ def draw_section(section: dict) -> str:
     if not labels or not datasets:
         return f"**{title}**: nothing to chart (no rows)."
     first = datasets[0]
-    data = [v if isinstance(v, (int, float)) else 0 for v in first.get("data", [])]
+    data = [_number(v) for v in first.get("data") or []]
     n = min(len(labels), len(data), MAX_ROWS)
-    if any(v < 0 for v in data[:n]):
+    if n == 0 or all(v is None for v in data[:n]):
+        return f"**{title}**: nothing to chart (no rows)."
+    if any(v is not None and v < 0 for v in data[:n]):
         return f"**{title}**: some values are negative, which a text bar chart can't show; see the table."
-    top = max(data[:n], default=0)
-    shown = _shown_values(section, first.get("label", ""), n)
+    top = max((v for v in data[:n] if v is not None), default=0)
+    shown = [MISSING if v is None and s.strip().lower() in _BLANK_CELLS else s
+             for v, s in zip(data, _shown_values(section, first.get("label", ""), n))]
     label_w = max(len(_label(lab)) for lab in labels[:n])
     value_w = max(len(s) for s in shown)
     lines = [
