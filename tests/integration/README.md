@@ -54,7 +54,7 @@ The fixture is a small "shop" model with FK relationships:
 - `orders` (6 rows) → `customers`
 - `order_items` (8 rows) → `orders`, `products`
 
-Top spender across both fixtures is **Carol Chen** at $148.95 — that's the assertion baked into every tier's test.
+Top spender across all three fixtures is **Bob Brown** at $148.95 — that's the assertion baked into every tier's test.
 
 ## Adding a tier or DB
 

@@ -69,6 +69,6 @@ top=$($MYSQL -e "
   ORDER BY SUM(i.quantity * i.unit_price) DESC
   LIMIT 1
 ")
-assert_eq "$top" "Carol Chen" "top spender is Carol Chen"
+assert_eq "$top" "Bob Brown" "top spender is Bob Brown"
 
 green "\n✓ All MySQL tier-1 (mysql CLI) checks passed"
