@@ -67,7 +67,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
   --out "$out"
 ```
 
-Set `initial_tab=review` when `$ARGUMENTS` was `review`/`preseed`/`rule1` (Phase 0) to force the sign-off queue. **Leave it empty for a plain `/agami-model`** — the renderer then uses its **smart `auto` default**: it opens on **Review** when anything needs sign-off (unreviewed metrics/entities/joins, or columns agami couldn't read), and on **Tables** when the model is all clean (so the user never lands on an empty Review tab). `${CLAUDE_PLUGIN_ROOT}` is the plugin's directory (under `~/.claude/plugins/cache/<marketplace>/agami/` for an installed plugin); Claude Code fills in its absolute path when this skill loads, so the commands here already carry it.
+Set `initial_tab=review` when `$ARGUMENTS` was `review`/`preseed`/`rule1` (Phase 0) to force the sign-off queue. **Leave it empty for a plain `/agami-model`** — the renderer then uses its **smart `auto` default**: it opens on **Review** when anything needs sign-off (unreviewed metrics/entities/joins, or columns agami couldn't read), and on **Tables** when the model is all clean (so the user never lands on an empty Review tab). `${CLAUDE_PLUGIN_ROOT}` is the plugin's directory (under `~/.claude/plugins/cache/<marketplace>/agami-core/<version>/` for an installed plugin); Claude Code fills in its absolute path when this skill loads, so the commands here already carry it.
 
 **Surface in chat (single block, no padding):**
 

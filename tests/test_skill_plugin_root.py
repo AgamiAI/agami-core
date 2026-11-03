@@ -96,3 +96,18 @@ def test_runtime_messages_name_a_real_launcher_not_the_unset_variable():
     assert "AGAMI_PLUGIN_ROOT" not in message
     named = re.search(r'bash "([^"]+)" install', message)
     assert named and Path(named.group(1)).is_file() and Path(named.group(1)).name == "sm"
+
+
+def test_version_check_reads_the_plugins_own_plugin_json():
+    # The repo-level marketplace.json isn't copied into a marketplace install's cache, so the probe
+    # must read the version from the plugin's own manifest, relative to the plugin root.
+    text = (PLUGIN / "shared" / "version-check.md").read_text(encoding="utf-8")
+    assert '"<plugin_root>/.claude-plugin/plugin.json"' in text
+    assert "../../.claude-plugin/marketplace.json" not in text
+
+
+def test_plugin_manifest_has_a_version():
+    import json
+
+    manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert manifest.get("version")

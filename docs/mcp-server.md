@@ -91,7 +91,7 @@ python3 "<plugin dir>/scripts/setup_desktop_mcp.py"             # apply it
 ```
 
 `<plugin dir>` is the folder you installed the agami plugin into (for a marketplace install, under
-`~/.claude/plugins/cache/<marketplace>/agami/`; for a checkout, `plugins/agami/` in the repo).
+`~/.claude/plugins/cache/<marketplace>/agami-core/<version>/`; for a checkout, `plugins/agami/` in the repo).
 
 It removes all three sharp edges of hand-editing:
 

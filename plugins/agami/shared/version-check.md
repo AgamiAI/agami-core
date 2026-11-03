@@ -19,10 +19,12 @@ Claude Code plugins don't auto-update — users have to run `/plugin marketplace
 From any skill, with `<plugin_root>` set to the absolute plugin path (see [`invocation-conventions.md`](invocation-conventions.md)):
 
 ```bash
-# Read the local plugin version from the marketplace.json that ships with the
-# installed plugin. The path is relative to the plugin root.
+# Read the installed plugin's own version from its plugin.json. That file sits at
+# <plugin_root>/.claude-plugin/ in both a repo checkout and a marketplace install
+# (cache/<marketplace>/agami-core/<version>/); the repo-level marketplace.json is not
+# shipped into the cache, so it can't be the source.
 local_v=$(
-  grep -m1 '"version"' "<plugin_root>/../../.claude-plugin/marketplace.json" 2>/dev/null \
+  grep -m1 '"version"' "<plugin_root>/.claude-plugin/plugin.json" 2>/dev/null \
     | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
 )
 
@@ -50,7 +52,7 @@ fi
 
 - The user pinned a branch via `#trust-layer` etc. — they explicitly opted into not-main, don't nag them about main being newer. Detect by checking whether `<plugin_root>` is under a marketplace dir that includes a branch suffix (rare; safe to skip the optimization for v1).
 - `AGAMI_NO_UPDATE_CHECK=1` is set in the environment — power-user opt-out.
-- The local marketplace.json file isn't found (e.g., when running from a `--plugin-dir` local-development install) — there's no canonical version to compare against.
+- The local `.claude-plugin/plugin.json` isn't found (e.g., when running from a `--plugin-dir` local-development install) — there's no canonical version to compare against.
 
 ## Failure modes
 
