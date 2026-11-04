@@ -653,6 +653,8 @@ def test_extending_core_s_schema_in_place_does_not_make_a_property_declared(serv
     _http([("execute_sql", {**sent, _CONSUMER_PROPERTY: "kept by the consumer"})])
     _record("execute_sql", {**sent, _CONSUMER_PROPERTY: "kept by the consumer"})
 
+    # Both rows, so the HTTP path can't pass by going missing.
+    assert len(_rows(served)) == 2
     for row in _rows(served):
         assert json.loads(row["arguments"])["values"] == {"model_version": "v1"}
 

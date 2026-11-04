@@ -5202,8 +5202,8 @@ def record_tool_call(
         # an identity, so a stated value cannot contradict a derived one the way an outcome can.
         "audit_id": audit_id if audit_id is not None else derived_audit_id,
         # What the call was sent, less what has its own column and, on a core tool, less what core
-        # does not declare; and what missed. Bounded
-        # here, like `basis`: a bound the caller applies is not a bound.
+        # does not declare; and what missed. Bounded here, like `basis`: a bound the caller applies
+        # is not a bound.
         "arguments": _bounded_arguments(name, args),
         "missed": _bounded_missed(missed),
         # The true total, even when `missed` had to be cut.
