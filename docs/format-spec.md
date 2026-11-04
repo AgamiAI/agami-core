@@ -86,6 +86,19 @@ The Pydantic models in [`packages/agami-core/src/semantic_model/models.py`](../p
 
 A column's or metric's `unit` is free text with one grammar the formatter reads: `<ISO currency code>[_<scale>][/<period>]`. The scale says the stored values are in `thousands`, `millions`, `billions`, `lakhs` or `crores` (singular accepted), so `USD_millions` shows 12.5 as `$12.5M`; the period makes it a rate (`hour`, `day`, `week`, `month`, `quarter`, `year`), so `USD/day` shows 120 as `$120.00/day`; the two combine (`USD_millions/year`). Any other text (`kg`, `days`, an unknown code) is shown after the number as a plain label, which is also how releases before this grammar read every one of these strings.
 
+A column's `placeholders` (#445) lists stored values that stand in for something else, such as an Unknown dimension row keyed `-99999` and dated `2099-12-31`, a `9999-12-31` valid-to on the current version of a row, or `'-'` filler text. Introspection proposes each one it finds by shape on small and dimension tables (`review_state: unreviewed`, with the `reason` and, when counted, the `rows`); a person then says what it means through a `kind: placeholder` curate op, signed off by them. `meaning` is `unknown` (leave it out of breakdowns, date ranges and latest/earliest, keep it in totals), `current` (an open-ended row that "as of now" questions want) or `not_set` (treat it like NULL); a `rejected` entry is a value the person said is real data, kept so a refresh doesn't ask again. Approving also writes the meaning as a caveat on the column. Only approved entries are served (`value`, `meaning`, and `how` to write the SQL), and nothing filters a query. The key is left out of the file when a column has none, so a model without placeholders still loads on a release older than the one that added it; a model **with** them needs the newer release on every server that reads it.
+
+```yaml
+- name: date_key
+  type: integer
+  primary_key: true
+  caveats: ["'-99999' stands for an unknown member: leave its rows out of breakdowns (GROUP BY), date ranges and latest/earliest (MAX/MIN), and keep them in totals"]
+  placeholders:
+    - { value: "-99999", meaning: unknown, reason: a negative key among positive ones, rows: 1,
+        confidence: confirmed, review_state: approved,
+        signed_off_by: you@example.com, signed_off_at: "2026-10-01T00:00:00Z", signed_off_role: owner }
+```
+
 Every write is gated by the validator at [`packages/agami-core/src/semantic_model/validator.py`](../packages/agami-core/src/semantic_model/validator.py) (driven via `python3 -m semantic_model.cli validate <root>`). **No model that fails validation is ever persisted.**
 
 ### Worked example — a minimal model on disk
@@ -172,6 +185,7 @@ The validator combines Pydantic structural validation (required fields, enums, r
 5. **default_filters** reference only existing columns; **value_transform** / **on:** parse with sqlglot, in the datasource's dialect (or the generic grammar) (an `on:` naming a column its table doesn't define is a warning); **caveats** non-empty; **choice_field** keys match the column type.
 6. **Cross-area entity name-collision** → warning + a suggested cross-cutting unification. Two areas mapping the same table don't collide.
 7. **Entity mappings** — a mapping to a column the area's own table lacks is an error; a mapping to a table no area defines, or to a missing column on another area's table (cross-area entities included), is a warning.
+8. **Placeholders** — a `meaning` is set exactly when the entry is `approved`, an approved entry carries `signed_off_by` / `signed_off_at` / `signed_off_role`, and a column lists each value once.
 
 The verdict is **binding**: `cli validate` exits 0 → ok, 1 → errors. `cli curate` and the introspection engine refuse / revert on a non-zero verdict.
 

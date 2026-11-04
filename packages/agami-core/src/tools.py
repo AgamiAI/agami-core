@@ -644,6 +644,18 @@ def _resolve_units(profile: str, sql: str) -> dict[str, str]:
         return {}
 
 
+def _resolve_labels(profile: str, sql: str) -> set[str]:
+    """Best-effort set of result columns that hold a year, a code or an id (shown as written, not
+    grouped), read from the model like `_resolve_units`. Empty without the model deps."""
+    try:
+        org = get_cached_org(profile)
+        from semantic_model import runtime as RT
+
+        return RT.resolve_result_labels(org, sql)
+    except Exception:
+        return set()
+
+
 # What ONE tool call may resolve more than once and must not resolve more than once: the model
 # version pin. Keyed inside by profile, and scoped to a request rather than to the process, for two
 # different reasons that both matter.
@@ -1654,7 +1666,7 @@ def _cross_area_map(org, scope) -> dict[str, list[str]]:
 # Column-detail keys that make a column worth sending in full even when its group wasn't asked for:
 # a caveat, a cleaning rule or a date encoding changes how the column must be written, and a
 # sensitive flag changes whether it may be projected.
-_ALWAYS_FULL_KEYS = ("caveats", "value_transform", "sensitive", "date_format", "timezone")
+_ALWAYS_FULL_KEYS = ("caveats", "placeholders", "value_transform", "sensitive", "date_format", "timezone")
 
 
 def _group_wide_columns(result: dict[str, Any], org, requested: list[str]) -> None:
@@ -3701,7 +3713,7 @@ def _finalize_execution(
     try:
         from semantic_model import units  # stdlib-only; safe even without model deps
 
-        markdown = units.format_table(columns, data_rows, unit_map)
+        markdown = units.format_table(columns, data_rows, unit_map, _resolve_labels(profile, sql))
     except Exception:
         markdown = None
 
@@ -4153,6 +4165,19 @@ def _bounded_client_model(raw: Any) -> str | None:
     return raw[:CLIENT_MODEL_MAX_CHARS] or None
 
 
+#: How much of a self-reported `user_question` or `agent_query` is stored (#415). Matches the longest
+#: question agami-hosted's chat accepts, so a question it took is never cut here.
+SELF_REPORT_TEXT_MAX_CHARS = 8_000
+
+
+def _bounded_self_report(raw: Any) -> str | None:
+    """A self-reported question as stored: cut at `SELF_REPORT_TEXT_MAX_CHARS`, None when not a
+    string or empty, for `_bounded_client_model`'s reason."""
+    if not isinstance(raw, str):
+        return None
+    return raw[:SELF_REPORT_TEXT_MAX_CHARS] or None
+
+
 #: The bounds on what a call was sent and what missed. Both are caller-chosen text on the
 #: audit row, so both are bounded here rather than trusted to arrive small: a string value is cut at
 #: 1,000 characters, a list or object at 50 items, nesting at depth 4, and the whole serialized value
@@ -4183,7 +4208,7 @@ _OWN_COLUMN_ARGUMENTS = frozenset(
 #: A control character or line break in stored caller text could forge a line of a log or a report
 #: that reads it, so each is replaced with a space: the C0 and C1 controls, the Unicode line and
 #: paragraph separators, the bidi controls that reorder how a line displays, and a lone surrogate,
-#: which is not text at all. Wider than `runtime._ECHO_CONTROL`, which covers C0 and DEL only.
+#: which is not text at all. The same set as `runtime._ECHO_CONTROL`.
 _AUDIT_CONTROL = re.compile(
     r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
 )
@@ -4521,10 +4546,18 @@ def _pass_child_env() -> dict[str, str]:
     Spelled as the canonical `true`/`false` rather than passing the operator's own text through, so
     the child parses a value this process has already resolved rather than repeating the resolution.
     """
-    from execute_sql import _model_pass_disabled, _resolve_row_cap, _resolve_timeout_s
+    from execute_sql import (
+        SERVED_CHILD_ENV,
+        _model_pass_disabled,
+        _resolve_row_cap,
+        _resolve_timeout_s,
+    )
 
     return {
         **os.environ,
+        # The child's stderr is relayed to the caller, so it keeps the fixed failure sentence and
+        # refuses the build-time profile (#523).
+        SERVED_CHILD_ENV: "1",
         # UTF-8 from the first byte the child writes, including a traceback raised before its `main`
         # can switch its streams: the parent decodes both streams as UTF-8. PYTHONIOENCODING too,
         # because an inherited one takes precedence over UTF-8 mode for the standard streams.
@@ -5134,10 +5167,11 @@ def record_tool_call(
         "error_kind": derived_error_kind,
         "refusal_detail": derived_refusal_detail,
         "refusal_remediation": derived_refusal_remediation,
-        "user_question": user_question if user_question is not None else args.get("user_question"),
-        "agent_query": args.get(
-            "raw_query"
-        ),  # the existing arg is the agent's framing of the query
+        "user_question": _bounded_self_report(
+            user_question if user_question is not None else args.get("user_question")
+        ),
+        # the existing arg is the agent's framing of the query
+        "agent_query": _bounded_self_report(args.get("raw_query")),
         # The choices behind the query, bounded here rather than by the caller — a bound the caller
         # applies is not a bound. Joins the two self-reported columns above: same provenance, same
         # trust.
@@ -5589,7 +5623,10 @@ TOOLS: dict[str, dict[str, Any]] = {
             "`caveats` and `value_transforms`. An entry in `default_filters` is the org's own "
             "definition of what that table means and is NOT applied to your SQL — read them HERE, "
             "while you are writing the statement, rather than meeting them on the receipt "
-            "afterwards. When the datasource has stored examples the response also carries "
+            "afterwards. A column's `placeholders` lists stored values a person said stand for "
+            "something else (`meaning` unknown / current / not_set), each with `how` to write the "
+            "SQL for it; follow it, as nothing filters them for you. "
+            "When the datasource has stored examples the response also carries "
             "`prompt_examples`: how many are `stored`, and a reminder to fetch them with "
             "get_prompt_examples, which ranks them — no example is sent here. The response names "
             "the engine under `dialect` and points at list_datasources for its `dialect_rules` "

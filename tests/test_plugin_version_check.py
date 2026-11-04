@@ -179,7 +179,8 @@ def _tools_without_python(tmp_path: Path) -> Path:
     for d in (Path("/usr/bin"), Path("/bin")):
         for exe in d.iterdir():
             link = tools / exe.name
-            if not exe.name.startswith("python") and not link.exists():
+            # lexists: a dangling symlink in both folders reads as absent to exists().
+            if not exe.name.startswith("python") and not os.path.lexists(link):
                 link.symlink_to(exe)
     return tools
 

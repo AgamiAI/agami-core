@@ -929,6 +929,12 @@ def _column_detail(col: Column, include: list[str]) -> dict[str, Any]:
         d["denormalized_from"] = col.denormalized_from.model_dump(exclude_none=True)
     if "caveats" in include and col.caveats:
         d["caveats"] = col.caveats
+    served = col.served_placeholders() if "caveats" in include else []
+    if served:
+        # What a person said each placeholder value means, and how to write SQL for it (#445).
+        from .placeholders import MEANINGS
+        d["placeholders"] = [{"value": p.value, "meaning": p.meaning, "how": MEANINGS[p.meaning]}
+                             for p in served]
     return d
 
 

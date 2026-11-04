@@ -202,7 +202,8 @@ def test_one_sample_per_table_even_without_date_or_choice_columns(tmp_path):
     seen: list[str] = []
 
     def sample(sql):
-        if "DISTINCT" not in sql:  # the value-list reads are separate, per column
+        # the value-list reads and the placeholder scan (#445) are separate, per column
+        if "DISTINCT" not in sql and "CROSS JOIN" not in sql:
             seen.append(sql)
         return [{"id": "1", "contact": "you@example.com"}]
 
@@ -345,7 +346,7 @@ def test_probe_mode_reads_one_sample_per_table(tmp_path):
             for i in range(12)]
 
     def sample(sql):
-        if "DISTINCT" not in sql:
+        if "DISTINCT" not in sql and "CROSS JOIN" not in sql:  # per-column reads, not samples
             seen.append(sql)
         return [dict(r) for r in rows]
 

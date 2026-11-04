@@ -293,6 +293,8 @@ def cmd_prepare(args) -> int:
         # {output_column: unit}, traced through the caller's own statement — feed straight to
         # `format-table --units` so summed/aliased currency formats correctly.
         "units": RT.resolve_result_units(org, sql),
+        # the output columns holding a year, a code or an id — `format-table --labels`
+        "labels": sorted(RT.resolve_result_labels(org, sql)),
     })
     return 0
 
@@ -562,6 +564,11 @@ def _commit_note(res) -> dict:
     return {"commit_note": res.commit_note} if res.commit_note else {}
 
 
+def _provenance_note(res) -> dict:
+    """`provenance_changed` only when an op replaced a description's provenance (#549)."""
+    return {"provenance_changed": res.provenance_changed} if res.provenance_changed else {}
+
+
 def cmd_set_description(args) -> int:
     """Write the datasource's one-line description onto datasource.yaml — the line an agent routes a
     question by (#327). Onboarding calls this with the user's line or one generated from the enriched
@@ -573,9 +580,30 @@ def cmd_set_description(args) -> int:
     return 0 if res.validated else 1
 
 
+def _candidate_ops(doc: dict, wanted: list[str]) -> list[dict]:
+    """The `add` ops of the named join candidates in a join_candidates.json (#512), or a JSON error."""
+    listed = {c.get("id"): c.get("op") for key in ("candidates", "low_overlap")
+              for c in doc.get(key) or [] if isinstance(c, dict)}
+    if not wanted:
+        _print_json({"error": "this is a join_candidates file; name the joins to add with --candidate <id>",
+                     "candidates": [c.get("id") for c in doc.get("candidates") or []]})
+        raise SystemExit(2)
+    missing = [w for w in wanted if w not in listed]
+    if missing:
+        _print_json({"error": f"no join candidate {', '.join(missing)} in the file",
+                     "candidates": sorted(i for i in listed if i)})
+        raise SystemExit(2)
+    return [listed[w] for w in wanted]
+
+
 def cmd_curate(args) -> int:
     from . import curate
     ops = _read_json_file(args.ops_file or args.ops)
+    if isinstance(ops, dict) and ("candidates" in ops or "low_overlap" in ops):
+        ops = _candidate_ops(ops, args.candidate or [])
+    elif args.candidate:
+        _print_json({"error": "--candidate picks from a join_candidates.json; this file holds ops"})
+        return 2
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
     _stamp_approve_ops(ops)
@@ -589,10 +617,19 @@ def cmd_approve_queue(args) -> int:
     path (the HTML explorer's CLI equivalent). Reads the same queue `review-queue` builds
     (Rule 1 metrics/named-filters + Rule 2 joins/entities), turns each item into a
     self-stamped `approve` op, and applies via curate.apply. `--kind` narrows to one item
-    type; `--dry-run` prints the ops without touching the model."""
+    type; `--dry-run` prints the ops without touching the model.
+
+    Placeholder values are never approved here: what one means is a person's choice, so they are
+    listed under `placeholders_awaiting_choice` for the person to answer (#445)."""
     from . import curate
     org = L.load_datasource(args.root)
     queue = curate.review_queue(org, root=args.root)
+    waiting = queue.get("placeholders", [])
+    held = ({"placeholders_awaiting_choice": [it["question"] for it in waiting],
+             "placeholder_note": "not approved: ask what each value means and record it with a "
+                                 "curate op {op: approve, kind: placeholder, name, column, value, "
+                                 "meaning: unknown|current|not_set}, or reject it as real data"}
+            if waiting else {})
     kinds = set(args.kind) if args.kind else None
     items = [it for bucket in ("rule_1", "rule_2") for it in queue.get(bucket, [])
              if kinds is None or it["kind"] in kinds]
@@ -609,10 +646,10 @@ def cmd_approve_queue(args) -> int:
                for it in items if it.get("changes_since_approval")]
     shown = {"changed_since_approval": changed} if changed else {}
     if args.dry_run:
-        _print_json({"dry_run": True, "count": len(ops), "ops": ops, **shown})
+        _print_json({"dry_run": True, "count": len(ops), "ops": ops, **shown, **held})
         return 0
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
-    _print_json({"approved": len(ops), **shown, **res.as_dict()})
+    _print_json({"approved": len(ops), **shown, **res.as_dict(), **held})
     return 0 if res.validated else 1
 
 
@@ -1196,7 +1233,7 @@ def cmd_describe_file(args) -> int:
     # `skipped` carries why an edit didn't land — e.g. a person's or a dictionary's description kept
     # over a generated one — so the skill can say so instead of counting it as described.
     _print_json({"described": len(res.applied), **report, "skipped": res.skipped,
-                 "errors": res.errors})
+                 **_provenance_note(res), "errors": res.errors})
     return 0 if res.validated else 1
 
 
@@ -1214,7 +1251,8 @@ def cmd_format_table(args) -> int:
         return 0
     headers, rows = reader[0], reader[1:]
     unit_map = json.loads(args.units) if args.units else {}
-    print(units.format_table(headers, rows, unit_map))
+    labels = json.loads(args.labels) if args.labels else []
+    print(units.format_table(headers, rows, unit_map, labels))
     return 0
 
 
@@ -1379,15 +1417,17 @@ def cmd_seed_validate(args) -> int:
                 data = rows[1:]
                 # trace each output column → unit through the seed's SQL, then format every
                 # cell exactly like the query path (units.format_table): a unit'd column gets
-                # its symbol/grouping, a bare number gets grouping; non-numbers pass through.
-                unit_map = {}
+                # its symbol/grouping, a year or a code is shown as written, a bare number gets
+                # grouping; non-numbers pass through.
+                unit_map, labels = {}, set()
                 if fmt_org is not None:
                     try:
                         unit_map = RT.resolve_result_units(fmt_org, sql)
+                        labels = RT.resolve_result_labels(fmt_org, sql)
                     except Exception:
-                        unit_map = {}
+                        unit_map, labels = {}, set()
                 if data:
-                    data = units.format_rows(headers, data, unit_map)
+                    data = units.format_rows(headers, data, unit_map, labels)
                 item["row_headers"] = headers
                 item["row_count"] = len(data)
                 item["row_preview"] = data[:cap]
@@ -1698,10 +1738,12 @@ def cmd_enrich_metadata(args) -> int:
     # 1) descriptions + choice_field — one validated curate batch
     cols_applied = 0
     errors: list[str] = []
+    provenance: dict = {}
     if ops:
         res = curate.apply(root, ops)
         cols_applied = len(res.applied)
         errors += res.errors
+        provenance = _provenance_note(res)
 
     # 2) reference/FK edges from the dictionary — the join-graph half. The table/area structure
     # the curate batch above touched only descriptions/choices, so the loaded `org` is still
@@ -1737,7 +1779,7 @@ def cmd_enrich_metadata(args) -> int:
                  "relationships_added_unverified": refs_unverified,
                  "reference_fields_known": refs_declared,
                  "relationships_skipped_target_not_modelled": refs_skipped_target,
-                 "errors": errors})
+                 **provenance, "errors": errors})
     return 0 if not errors else 1
 
 
@@ -2056,10 +2098,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
     sp.set_defaults(func=cmd_set_description)
 
-    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move ops (validated)")
+    sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move/add ops (validated)")
     sp.add_argument("root")
-    sp.add_argument("ops", nargs="?", metavar="OPS_FILE", help="JSON file: a list of op objects (or {ops:[...]}); relative to the current folder")
+    sp.add_argument("ops", nargs="?", metavar="OPS_FILE",
+                    help="JSON file: a list of op objects (or {ops:[...]}), or a join_candidates.json; "
+                         "relative to the current folder")
     sp.add_argument("--ops-file", help="the same file, named by flag (give this or OPS_FILE, not both)")
+    sp.add_argument("--candidate", action="append", default=None, metavar="ID",
+                    help="with a join_candidates.json: add the join candidate with this id (repeatable)")
     sp.add_argument("--signer", default=None,
                     help="who made the changes: recorded in the curation log on every op; an approve also "
                          "stamps it on the item as its sign-off (an approve needs it), while an edit to what an "
@@ -2185,6 +2231,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("format-table", help="format a result CSV into a deterministic markdown table (exact numbers)")
     sp.add_argument("--csv-file", default=None, help="result CSV (header row + rows); omit to read stdin")
     sp.add_argument("--units", default=None, help='JSON header->unit map, e.g. {"outstanding":"INR"}')
+    sp.add_argument("--labels", default=None,
+                    help='JSON list of label columns shown as written (a year, a code), e.g. ["ship_year"]')
     sp.set_defaults(func=cmd_format_table)
 
     sp = sub.add_parser("seed-examples", help="validate candidate seeds against the live DB + write the passing ones")

@@ -378,6 +378,23 @@ class Dialect:
         return self.limited(
             f"SELECT DISTINCT {c} AS v FROM {self.qualified(schema, table)} WHERE {c} IS NOT NULL", n)
 
+    def placeholder_value_expr(self, column: str, ctype: str) -> str:
+        """How the placeholder scan reads a column (quoted `column`, its ColumnType)."""
+        return column
+
+    def placeholder_scan_sql(self, schema: Optional[str], table: str, column: str, ctype: str,
+                             n: int) -> str:
+        """One read per column for the placeholder scan (#445): its `n` most frequent non-null
+        values (`v`, `n`), with its MIN (`lo`), MAX (`hi`) and row count (`total`) on every row."""
+        c = self.quote_ident(column)
+        v = self.placeholder_value_expr(c, ctype)
+        q = self.qualified(schema, table)
+        return self.limited(
+            f"SELECT g.v AS v, g.n AS n, m.lo AS lo, m.hi AS hi, m.total AS total FROM "
+            f"(SELECT {v} AS v, COUNT(*) AS n FROM {q} WHERE {c} IS NOT NULL GROUP BY {v}) g "
+            f"CROSS JOIN (SELECT MIN({v}) AS lo, MAX({v}) AS hi, COUNT(*) AS total FROM {q}) m "
+            f"ORDER BY g.n DESC, g.v", n)
+
     # --- type mapping ---
 
     def map_type(self, raw: str, numeric_scale: Optional[int] = None) -> ColumnType:
@@ -462,6 +479,20 @@ class PostgreSQL(Dialect):
             "WHERE con.contype = 'f' "
             f"AND fn.nspname = {self.quote_lit(schema)} "
             "ORDER BY c.relname, con.conname, k.ord"
+        )
+
+    def sql_constraint_definitions(self, schema: str) -> str:
+        """Every constraint in `schema` with its definition as Postgres prints it. Any role can read
+        this, unlike the information_schema views, and only a `--build-profile` run lets it past the
+        recon gate (see `catalog_function_queries`)."""
+        return (
+            "SELECT c.relname AS table_name, con.conname AS constraint_name, "
+            "con.contype AS constraint_type, pg_get_constraintdef(con.oid) AS definition "
+            "FROM pg_catalog.pg_constraint con "
+            "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid "
+            "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+            f"WHERE n.nspname = {self.quote_lit(schema)} "
+            "ORDER BY c.relname, con.conname"
         )
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
@@ -594,6 +625,10 @@ class MySQL(Dialect):
         "show", "signal", "spatial", "sql", "system", "trigger", "undo", "unlock", "unsigned",
         "usage", "use", "varying", "virtual", "while", "write", "xor", "year_month", "zerofill",
     })
+
+    def placeholder_value_expr(self, column: str, ctype: str) -> str:
+        # Some drivers crash fetching a zero date (0000-00-00); as text it reads safely.
+        return f"CAST({column} AS CHAR)" if ctype in ("date", "timestamp") else column
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound
@@ -1215,6 +1250,19 @@ _REGISTRY: dict[str, Callable[[], Dialect]] = {
 }
 
 
+# Agami's own catalog queries that call a catalog function the recon gate refuses (#523). Each is
+# rendered with a stand-in literal: `execute_sql` compares fingerprints, which ignore literal values,
+# so the same query for any schema matches while any other statement does not.
+_CATALOG_FUNCTION_QUERIES: tuple[Callable[[], str], ...] = (
+    lambda: PostgreSQL().sql_constraint_definitions("schema"),
+)
+
+
+def catalog_function_queries() -> list[str]:
+    """The built-in catalog queries a `--build-profile` run may send past the recon gate."""
+    return [render() for render in _CATALOG_FUNCTION_QUERIES]
+
+
 def get_dialect(db_type: str) -> Dialect:
     """Resolve a credential db_type (or storage_type) to a Dialect instance."""
     key = (db_type or "").strip().lower().replace(" ", "")
@@ -1234,5 +1282,5 @@ __all__ = [
     "Dialect",
     "PostgreSQL", "Supabase", "Redshift", "MySQL", "Snowflake", "DuckDB",
     "Databricks", "Trino", "SQLServer", "BigQuery", "SQLite", "Oracle",
-    "get_dialect", "supported_db_types", "normalize_type",
+    "get_dialect", "supported_db_types", "normalize_type", "catalog_function_queries",
 ]

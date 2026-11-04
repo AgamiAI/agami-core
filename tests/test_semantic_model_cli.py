@@ -296,6 +296,20 @@ def test_describe_file_metadata_keeps_a_description_a_person_wrote(tmp_path):
     assert cols["id"]["description_source"] == "metadata"
 
 
+def test_describe_file_reports_a_description_whose_provenance_it_replaced(tmp_path):
+    """#549: the dictionary's text over agami's own guess changes whose words it is, and says so."""
+    _model(tmp_path)
+    from semantic_model import curate
+    curate.apply(tmp_path, [{"op": "edit", "kind": "table", "name": "orders", "column": "total",
+                             "field": "description", "value": "Order total", "source": "ai"}])
+    js = tmp_path / "dict.json"
+    js.write_text(json.dumps({"orders.total": "Order value", "orders.id": "Order key"}))
+    rc, out = _run(["describe-file", str(tmp_path), "--source", "metadata", "--file", str(js)])
+    d = json.loads(out)
+    assert rc == 0 and d["provenance_changed"] == [
+        {"item": "table s/orders.total", "from": "ai_unvalidated", "to": "metadata"}], d
+
+
 def test_describe_file_json_list_and_format_override(tmp_path):
     _model(tmp_path)
     js = tmp_path / "dict.txt"     # extension says TSV; --format says JSON

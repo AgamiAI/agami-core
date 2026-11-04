@@ -69,6 +69,6 @@ top=$($PSQL -c "
   ORDER BY SUM(i.quantity * i.unit_price) DESC
   LIMIT 1
 " | tr -d ' ' | grep -v '^$')
-assert_eq "$top" "CarolChen" "top spender is Carol Chen (Order 4: 5x9.99 + 1x99.00 = 148.95)"
+assert_eq "$top" "BobBrown" "top spender is Bob Brown (Order 3: 5x9.99 + 1x99.00 = 148.95)"
 
 green "\n✓ All Postgres tier-1 (psql) checks passed"

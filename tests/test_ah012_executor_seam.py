@@ -584,6 +584,8 @@ def test_an_executor_error_becomes_the_failed_envelope_main_renders(tmp_path, mo
 
     monkeypatch.setattr(execute_sql, "BUILTIN_EXECUTOR", _Boom())
     monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", "acme", "--sql", "SELECT 1"])
+    # As the MCP tool forks it (#523); a person's own command line also gets the database's line.
+    monkeypatch.setenv(execute_sql.SERVED_CHILD_ENV, "1")
 
     rc = execute_sql.main()
 

@@ -111,6 +111,61 @@ below corresponds to one such version.
 
 ### Added
 
+- **Introspection finds placeholder values and asks what each one means (#445).** Warehouses carry
+  values that look like data: an Unknown dimension row keyed `-99999` and dated `2099-12-31`, a
+  `9999-12-31` valid-to on the current version of a row, `'-'` filler text. Answers counted them as
+  real, so a "by fiscal year" breakdown grew a year-2099 bar and a "latest date" came back as
+  2099-12-31. Introspection now reads one bounded query per key, date, year and code column of each
+  small table, and of each dimension (the one side of a join, or the referenced side of a one-to-one
+  join) under a million rows, on the existing
+  value-read budget, and flags a date before 1901 or more than 50 years ahead, a negative key among
+  positive ones, a `999999`-style value and filler text on a large share of rows. A big fact table
+  is not read, nor is a table whose sample could not be read and whose row count is unknown, nor
+  a column flagged sensitive or whose values look personal (on a refresh, by this run's reading
+  too). Each finding is
+  listed in the introspection report and in the `/agami-model` Review tab (and `sm review-queue`
+  under `placeholders`); agami-connect asks about each in plain words. The person's answer is
+  stored on the column (`placeholders`: `unknown`, `current` or `not_set`, signed off by them) with
+  a caveat in words, through a `kind: placeholder` curate op; `reject` says the value is real data.
+  `get_datasource_schema` and the table context serve each answered value with its meaning and how
+  to write the SQL for it, and the query rules say how to use each. Nothing filters a query, and
+  `sm approve-queue` never answers one. A refresh keeps every answer and doesn't ask again, and its
+  report lists a value found or no longer found under `changed <table>: placeholders`.
+
+  **Reading a model:** a column that sets `placeholders` (a finding waiting for an answer, or an
+  answer) is refused by a release older than this one, which does not know the key. Columns with
+  none stay readable, because the key is left out of the file when the list is empty, so a model
+  where nothing was found is written exactly as before. Upgrade every server that reads the model
+  (including deploy images) before building or refreshing one with this release.
+
+- **A join can be added through `sm curate` and the model explorer, and introspection reports the
+  joins it tested but didn't write (#512).** The curate op `{"op":"add","kind":"relationship",
+  "from_table","from_column","to_table","to_column","relationship"}` (or an `on` condition instead
+  of the columns, for a key over several columns or a filtered join; `from_schema`, `to_schema`,
+  `join_type` and `description` optional) writes the join `unreviewed`, in its tables' area or in
+  the cross-area joins when they are in two areas. It is validated, logged in the curation history
+  and listed in the review queue; an add never approves. The same join already in the model is
+  skipped with a reason (an `on` that differs only in a quoted value's case, `'Y'` against `'y'`, is
+  another join, with the engine's own string forms read as quoted values too, such as PostgreSQL's
+  `$$Y$$`, `E'..'` and `N'..'` and MySQL's backslash escapes, and a quoted name keeping its case
+  where the engine compares names by case; a refresh, a model spec and approve, reject, edit,
+  exclude and move compare `on` conditions the same way, so each such join is curated on its own),
+  and a table or column the model doesn't serve fails the batch and undoes it, including every column
+  an `on` names (beside an explicit column, filters and casts too), each matched to its end by schema
+  and name. The join is placed by the areas that serve its tables, never by an excluded or stale copy,
+  and keeps the model's spelling of its tables. A moved table's joins are placed the same way. The explorer's Joins tab
+  has a **+ Add a join** form that queues the op. Introspection now tests each column no join covers
+  against the other tables' one-column keys when the name or the type matches (`orders.cust_ref`
+  against `customers.id`; a column with a value list, or one column of a key over several, when its
+  name points at the table), skipping excluded or stale columns and keys, also beside declared
+  foreign keys, and lists what it found in the report with each match rate, and in
+  `.introspect/join_candidates.json` as a ready `add` op; `sm curate <model> --ops-file <that file>
+  --candidate <id>` adds one. These candidates are never written to the model, so a refresh writes
+  the same model as before. Each test is a read-only query over at most 1,000 sampled values, at
+  most 300 per run, skipping tables over 3,000,000 rows; the report says when the cap stopped the
+  scan. A column flagged sensitive, or whose sampled values look personal, is never tested at either
+  end, and the report and the file carry only names and counts, never a sampled value.
+
 - **An example can be tagged with several metrics, and is found under each (#546).** A prompt
   example's tag held one metric name (`metric: revenue`), so an example computing two metrics could
   be linked to only one of them. It is now a list, `metrics: [revenue, order count]`; a single
@@ -144,6 +199,46 @@ below corresponds to one such version.
   twice, is refused), and shows each card's area. An area the model doesn't have is refused with the list of valid ones, where one
   `--area` used to run against an empty area (and `seed-examples` created its folder).
 
+- **`execute_sql --build-profile` for profiling while you build a model (#523).** Builders turned the
+  safety check off (`--no-safety`) to read `information_schema` or expand a JSON column. The new flag
+  keeps every check and allows only those: reads of `information_schema`'s structure views on the
+  engines that have one (not Oracle or SQLite), plus `pg_catalog`'s structure tables and SQLite's
+  `sqlite_master`, each matched as the engine resolves the name (a quoted `"INFORMATION_SCHEMA"` on
+  Postgres is an ordinary schema), and table functions such as
+  `jsonb_each`, `json_each` or `unnest` over a declared column. Catalog views that hold values or
+  query text (MySQL's `COLUMN_STATISTICS` and `PROCESSLIST`, BigQuery's `JOBS`) stay refused. A
+  column the model leaves out is still refused, `SELECT *` is still refused, a `USING` or `NATURAL`
+  join is refused under the flag (write an explicit `ON`), and the 50,000-character cap is
+  unchanged. Beside a table function over a model table every column is qualified, except a name the table function returns,
+  such as BigQuery's `UNNEST(o.tags) AS tag` value or `WITH OFFSET AS i` position, or on Postgres the
+  function's own outputs (`key` and `value` for `jsonb_each`) and its alias column list. A bare alias
+  over `jsonb_each` names the row, not a column, and a column inside a table function's argument is
+  always read from the tables before it, so it must be qualified. A column qualified by an alias two
+  sources share apart from case (`c` and `"C"`) is refused unless every one of them declares it, with
+  or without the flag, and so is one whose alias an inner SELECT spells differently in case
+  (`"O"` inside, `o` outside), since the engine may read the outer table. Under the flag a statement
+  cannot read a catalog view and a model table together: SQLite, MySQL and DuckDB read a column the view
+  lacks from an enclosing table of that alias (`(SELECT o.x FROM sqlite_master o) … FROM orders o`). Also
+  under the flag, beside a model table a dotted name no source of the query supplies (`info.x`, `o.info.x`)
+  and DuckDB's `COLUMNS()` are refused. Agami's own catalog query that calls `pg_get_constraintdef` runs under it too, matched by its exact shape, so a statement an
+  agent writes cannot use that function. The flag is refused on a hosted server and the MCP tool
+  cannot set it, so apart from those alias rules what the tool accepts and refuses is unchanged.
+
+- **`execute_sql` shows the database's error on your own machine, and `--batch` always writes its
+  manifest (#523).** A failing statement told a builder only a fixed sentence, often "an unexpected
+  error" (exit 6). Run from your own command line, that sentence is now followed by
+  `Database error: <the database's first line>` (and the SQLSTATE where the driver gives one), with
+  credentials (any `password`, `secret`, `token` or key field, escaped or quoted, and the login named in
+  `for user 'sa'` however short), hosts and IPv4/IPv6 addresses redacted and HINT, DETAIL and
+  CONTEXT lines dropped; only the line's first 1,200 characters are read, so a very long line
+  costs no more. Exit codes are unchanged. A hosted server and the MCP tool still return the fixed sentence alone. In
+  `--batch`, a malformed item is recorded as failed and the rest still run, an item whose output
+  cannot be written stays in the manifest with its error, its CSV is emptied so no earlier rows are
+  left behind, run files and the manifest are written whole or not at all, and the manifest is
+  written even when the run stops part way. A plan that is JSON `null` is refused like any other
+  plan that is not a list. agami-connect's sampling step no longer says
+  `SELECT * … LIMIT 5`, which was refused: it names the columns and runs with `--build-profile`.
+
 ### Removed
 
 - **The table-picker page.** `sm discover` writes only the inventory (`--out` is accepted and
@@ -152,6 +247,53 @@ below corresponds to one such version.
   `prune-template.html` and `parse_prune_block.py` are gone.
 
 ### Fixed
+
+- **A refusal's echo drops Unicode control characters, and a self-reported question is capped
+  (#415).** The expression a receipt echoes back stripped only ASCII controls, so C1 controls, the
+  Unicode line and paragraph separators, text-direction characters and lone surrogates reached the
+  calling model intact. It now strips the same set the activity log does. `user_question` and
+  `agent_query` on a tool-call row were stored at any length; each is now cut at 8,000 characters,
+  and a value that is not a string, or is empty, is stored as NULL.
+
+- **A description edit without `source` keeps whose words the description is (#549).** A `sm curate`
+  edit to a table or column description that passed no `source` stamped it `description_source:
+  human`, so fixing a typo in a description from the customer's data dictionary silently dropped
+  its `metadata` origin. Such an edit now keeps the provenance it finds: `metadata` stays
+  `metadata`, and a description agami wrote stays `ai_unvalidated` and still comes up for a check.
+  A first description, or one written for a column agami couldn't read (`ai_unknown`), is `human`
+  as before. Changing provenance takes an explicit `source` (`human`, `metadata` or `ai`; any other
+  value is skipped), and `sm curate`, `sm describe-file` and `sm enrich-metadata` report each
+  change as `provenance_changed: [{item, from, to}]`. The curation log records
+  `description_source_before` and `description_source_after` on every description edit. A
+  correction saved through agami-save-correction now passes `source: human`.
+
+
+- **Numbers in the examples preview and in query answers are formatted by their column's type and
+  unit (#547).** A year shows as `2011`, not `2,011`; a ZIP code read as text keeps its leading
+  zero (`07094`); `-719` no longer shows as `-,719`; a NUMERIC value drops its trailing zeros
+  (`0.12500000000000000000` shows `0.125`), while a money column keeps its symbol, grouping and
+  two decimals. A column the model types as text, a key, a `dimension` or a choice field, and a
+  year taken out of a date, is shown as written; without the model, a column named like a year or
+  a postal code is shown as written only when every value has that shape. A column now gets a unit
+  only when that column has one: a CASE takes it from the values it returns, not from a money
+  column in its condition, a bare column is read from its own table (and schema), and the
+  difference of two dates is not a date, so a duration in days no longer shows as dollars. A `0`
+  or `NULL` branch, a window's `PARTITION BY` and a `FILTER`'s condition take no unit away, and
+  `GREATEST`, `LEAST`, `COALESCE` and `NULLIF` keep the unit, date encoding or label of what they
+  return, whatever constant or `NULL` sits beside it. A table inside `WHERE EXISTS (…)` lends no
+  column to the outer SELECT, and a quoted column name matches as the engine matches it. A CTE's
+  or derived table's column (`t.amount`) is whatever its body computed under that name, a scalar
+  subquery in the select list is its own projection read in its own FROM (a correlated column is
+  the outer row's), and a UNION's column has a unit only when every arm gives it the same one.
+  `ARG_MAX`, `FIRST(… ORDER BY …)`, `LAG`, `NVL2`, `DECODE` and the like keep the unit of the value
+  they return, whatever other column they take.
+  Two output columns of one name each keep their own unit and label, by position, and an `EXCEPT`
+  takes its column's unit from its left arm. A constant branch of a CASE (`ELSE 100`, `ELSE 'n/a'`)
+  takes no unit away. A text value with a huge exponent (`12e345678901`) is shown as written rather
+  than expanded, and a statement too deep to trace loses its units instead of failing `sm prepare`.
+  `sm prepare` returns these label columns as `labels`, and `sm format-table --labels` takes them.
+  Big integers are no longer rounded through a float. Reports built by `csv_to_sections.py` follow
+  the same rules.
 
 - **Things found in live onboardings of real databases.** Joins on same-named natural keys
   (`cds_code` → `schools.cds_code`) are inferred, so a warehouse keyed on codes no longer gets 0
