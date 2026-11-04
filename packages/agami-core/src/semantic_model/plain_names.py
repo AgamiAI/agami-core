@@ -9,6 +9,7 @@ fields, for the op that acts on the answer.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 # Words a name spells in lower case that read wrong unless upper case. Kept short on purpose: a
 # word missing here reads as an ordinary word ("Ela score"), which is still plain.
@@ -25,7 +26,8 @@ def plain_words(identifier: str) -> str:
 
     A schema- or table-qualified name keeps only its last part: `sales.orders` -> "Orders".
     """
-    bare = str(identifier or "").strip().strip('"`[]').rsplit(".", 1)[-1]
+    # Split before unquoting: `"sales"."Order Items"` stripped first leaves a quote on its last part.
+    bare = str(identifier or "").strip().rsplit(".", 1)[-1].strip('"`[] ')
     words: list[str] = []
     for chunk in _SPLIT.split(bare):
         words += [w for w in _CAMEL.split(chunk) if w]
@@ -48,6 +50,21 @@ def column_label(table: str, column: str) -> str:
     return f"{plain_words(column)} on {plain_words(table)}"
 
 
-def join_label(from_table: str, to_table: str) -> str:
-    """`orders`, `customers` -> "Orders to Customers"."""
-    return f"{plain_words(from_table)} to {plain_words(to_table)}"
+def join_label(from_table: str, to_table: str, via: str | None = None) -> str:
+    """`orders`, `customers` -> "Orders to Customers"; with the joining column, `billing_customer_id`
+    -> "Orders to Customers by Billing customer ID", since two joins between one pair of tables
+    would otherwise read the same on their sign-off cards."""
+    label = f"{plain_words(from_table)} to {plain_words(to_table)}"
+    return f"{label} by {plain_words(via)}" if via else label
+
+
+def distinct_labels(items: list[dict], key: str = "label") -> list[dict]:
+    """Add the subject area to any `key` that more than one item shares, in place.
+
+    A label drops the schema and area, so one table name in two areas reads the same twice, and a
+    card would offer two identical options that act on different columns."""
+    seen = Counter(it.get(key) for it in items)
+    for it in items:
+        if seen[it.get(key)] > 1 and it.get("area"):
+            it[key] = f"{it[key]} ({plain_words(it['area'])})"
+    return items

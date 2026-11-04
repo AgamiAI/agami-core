@@ -38,7 +38,7 @@ from typing import Any, Optional
 from . import loader as L
 from . import runtime as RT
 from . import validator as V
-from .plain_names import column_label
+from .plain_names import column_label, distinct_labels
 
 
 def _print_json(obj) -> None:
@@ -827,7 +827,7 @@ def cmd_suggest_units(args) -> int:
                     money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
                                   "label": column_label(t.name, c.name),
                                   "suggested_unit": B.suggest_unit(c.name)})
-    _print_json({"money_columns": money})
+    _print_json({"money_columns": distinct_labels(money)})
     return 0
 
 
@@ -863,6 +863,7 @@ def cmd_set_units(args) -> int:
                     col_unit = B.suggest_unit(c.name) or unit
                 plan.append({"area": sa.name, "table": t.name, "column": c.name,
                              "label": column_label(t.name, c.name), "unit": col_unit})
+    distinct_labels(plan)
     if not plan:
         _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
         return 0

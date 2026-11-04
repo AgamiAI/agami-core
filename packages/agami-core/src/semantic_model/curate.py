@@ -46,7 +46,7 @@ from .models import (
     example_metrics,
     metric_tag_key,
 )
-from .plain_names import column_label, join_label, plain_words
+from .plain_names import column_label, distinct_labels, join_label, plain_words
 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
@@ -110,6 +110,7 @@ def review_queue(org: Datasource, *, root: Optional[str | Path] = None) -> dict[
             rule2.append(item)
             objs2.append(rel)
     _annotate_stale(rule1 + rule2, objs1 + objs2, root)
+    distinct_labels(rule1 + rule2, "plain_name")
     held = placeholder_queue(org)
 
     return {
@@ -202,6 +203,7 @@ def all_items(org: Datasource, *, scope: str = "all", root: Optional[str | Path]
         items.append(it)
         objs.append(rel)
     _annotate_stale(items, objs, root)
+    distinct_labels(items, "plain_name")
     if scope == "rule1":
         items = [it for it in items if it["rule"] == 1 and it["tab"] == "review"]
     elif scope == "rule2":
@@ -361,7 +363,7 @@ def sensitive_columns(org: Datasource) -> dict:
                 if c.sensitive and getattr(c, "review_state", "approved") != "rejected":
                     cols.append({"area": sa.name, "table": t.name, "column": c.name,
                                  "label": column_label(t.name, c.name)})
-    return {"count": len(cols), "columns": cols}
+    return {"count": len(cols), "columns": distinct_labels(cols)}
 
 
 def suspected_sensitive_columns(org: Datasource) -> dict:
@@ -383,7 +385,7 @@ def suspected_sensitive_columns(org: Datasource) -> dict:
                 if reason:
                     cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
                                  "label": column_label(t.name, c.name), "reason": reason})
-    return {"count": len(cols), "columns": cols}
+    return {"count": len(cols), "columns": distinct_labels(cols)}
 
 
 def _trust(obj) -> dict:
@@ -420,7 +422,7 @@ def _rel_item(area: Optional[str], rel) -> dict:
     origin = "fk" if getattr(rel, "signed_off_role", None) == "system" else "introspect_heuristic"
     return {"kind": "relationship", "entity_type": "join", "rule": 2, "rule_1": False,
             "area": area, "name": f"{rel.from_table}->{rel.to_table}", "title": join,
-            "plain_name": join_label(rel.from_table, rel.to_table),
+            "plain_name": join_label(rel.from_table, rel.to_table, rel.from_column),
             # which join between these two tables: a curate op carries these to name it exactly
             "from_column": rel.from_column, "to_column": rel.to_column, "on": rel.on,
             "from_schema": rel.from_schema, "to_schema": rel.to_schema,

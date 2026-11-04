@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = REPO_ROOT / "plugins" / "agami"
 SKILLS_DIR = PLUGIN / "skills"
@@ -102,7 +104,8 @@ def test_the_paste_back_guard_catches_the_old_wording() -> None:
 
 
 # A card read "What currency is `widgets.price` in?" (tester feedback on the question-cards branch).
-_IDENTIFIER_IN_QUESTION = re.compile(r'\*"[^"\n]*`[A-Za-z_]+\.[A-Za-z_]+`[^"\n]*\?"\*')
+# Digits and more than one dot count too: `orders.total_2024`, `sales.orders.total`.
+_IDENTIFIER_IN_QUESTION = re.compile(r'\*"[^"\n]*`[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+`[^"\n]*\?"\*')
 # The one quoted question that is about how to write an identifier, so it has to show one.
 _ABOUT_THE_SPELLING = "Tables need a subject-area prefix"
 
@@ -124,6 +127,15 @@ def test_no_quoted_card_question_names_a_table_column_identifier() -> None:
                 if _ABOUT_THE_SPELLING not in m.group(0):
                     hits.append(f"{path.parent.name}: {m.group(0)[:100]}")
     assert not hits, hits
+
+
+@pytest.mark.parametrize("line", [
+    '*"What currency is `widgets.price` in?"*',
+    '*"Is `orders.total_2024` in USD?"*',
+    '*"Hide `sales.customers.email`?"*',
+])
+def test_the_identifier_guard_catches_each_form(line: str) -> None:
+    assert _IDENTIFIER_IN_QUESTION.search(line)
 
 
 def test_the_full_view_is_a_card_option_in_rule_6() -> None:

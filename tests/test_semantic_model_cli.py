@@ -1282,7 +1282,7 @@ def test_card_text_fields_name_things_in_plain_words(tmp_path):
     items = json.loads(_run(["review-items", str(tmp_path), "--scope", "all"])[1])
     plain = {it["kind"]: it["plain_name"] for it in items}
     assert plain["metric"] == "Order count"
-    assert plain["relationship"] == "Order items to Orders"
+    assert plain["relationship"] == "Order items to Orders by Order ID"
     assert {it["name"] for it in items} >= {"order_count"}      # the identifier is still there
 
     plan = json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["planned"]
