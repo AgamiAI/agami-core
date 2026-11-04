@@ -46,6 +46,7 @@ from .models import (
     example_metrics,
     metric_tag_key,
 )
+from .plain_names import column_label, join_label, plain_words
 
 # Process-lived incremental-validation cache (ACE-046). Every curation write re-validates the whole
 # model; keyed by (area content + table registry) so an enrichment run — which edits one area at a
@@ -141,7 +142,10 @@ def placeholder_queue(org: Datasource) -> list[dict]:
                         "kind": "placeholder", "area": sa.name, "name": t.name,
                         "schema": t.schema_name, "column": c.name, "value": p.value,
                         "reason": p.reason, "rows": p.rows,
-                        "question": (f"{t.name}.{c.name} holds '{p.value}'{rows} ({p.reason}). "
+                        "label": column_label(t.name, c.name),
+                        # the card's question, so in plain words: the identifier is in `name`/`column`
+                        "question": (f"The {plain_words(c.name)} column on {plain_words(t.name)} "
+                                     f"holds '{p.value}'{rows} ({p.reason}). "
                                      "Is it Unknown, still-current, or not-set — or real data?"),
                         "meanings": dict(MEANINGS),
                     })
@@ -355,7 +359,8 @@ def sensitive_columns(org: Datasource) -> dict:
                 continue
             for c in t.columns:
                 if c.sensitive and getattr(c, "review_state", "approved") != "rejected":
-                    cols.append({"area": sa.name, "table": t.name, "column": c.name})
+                    cols.append({"area": sa.name, "table": t.name, "column": c.name,
+                                 "label": column_label(t.name, c.name)})
     return {"count": len(cols), "columns": cols}
 
 
@@ -377,7 +382,7 @@ def suspected_sensitive_columns(org: Datasource) -> dict:
                 reason = B.suspected_reason(c.name, c.caveats, t.name)
                 if reason:
                     cols.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
-                                 "reason": reason})
+                                 "label": column_label(t.name, c.name), "reason": reason})
     return {"count": len(cols), "columns": cols}
 
 
@@ -398,7 +403,7 @@ def _metric_item(area: Optional[str], mm) -> dict:
     binding_lines = [{"label": d, "text": sql} for d, sql in (mm.bindings or {}).items()]
     primary_sql = next(iter((mm.bindings or {}).values()), "")
     return {"kind": "metric", "entity_type": "metric", "rule": 1, "rule_1": True,
-            "area": area, "name": mm.name, "title": mm.name,
+            "area": area, "name": mm.name, "title": mm.name, "plain_name": plain_words(mm.name),
             "subtitle": f"metric · {area}" if area else "metric",
             "source_signal": mm.calculation,
             "signals": [{"ok": True, "text": mm.calculation}],
@@ -415,6 +420,7 @@ def _rel_item(area: Optional[str], rel) -> dict:
     origin = "fk" if getattr(rel, "signed_off_role", None) == "system" else "introspect_heuristic"
     return {"kind": "relationship", "entity_type": "join", "rule": 2, "rule_1": False,
             "area": area, "name": f"{rel.from_table}->{rel.to_table}", "title": join,
+            "plain_name": join_label(rel.from_table, rel.to_table),
             # which join between these two tables: a curate op carries these to name it exactly
             "from_column": rel.from_column, "to_column": rel.to_column, "on": rel.on,
             "from_schema": rel.from_schema, "to_schema": rel.to_schema,
@@ -429,7 +435,8 @@ def _entity_item(area: Optional[str], ent) -> dict:
     maps = [f"{m.table}.{m.column}" for m in ent.maps_to]
     why = ent.description or (("maps to " + ", ".join(maps)) if maps else "entity")
     return {"kind": "entity", "entity_type": "entity", "rule": 2, "rule_1": False,
-            "area": area, "name": ent.name, "title": ent.name, "subtitle": "entity",
+            "area": area, "name": ent.name, "title": ent.name, "plain_name": plain_words(ent.name),
+            "subtitle": "entity",
             "source_signal": ent.description or "",
             "signals": [{"ok": True, "text": why}],
             "inferred": ", ".join(maps), "origin": "llm_suggested",

@@ -104,20 +104,23 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 - **Approve all**: sign off every item as listed. Mark it **(Recommended)** and put it first only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`. Otherwise put **Review one by one** first and mark that one (Recommended).
 - **Review one by one**: up to 4 items per card (below).
 - **Skip for now**: nothing is signed; they still work, and answers that use one carry a warning until it is signed off.
+- **Show the full view**: the model explorer page with every definition and its SQL, served from localhost (Phase 5); then this card again.
 
 | Answer | Do |
 |---|---|
 | Approve all | The identity card first if needed (Phase 0), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric or join), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Back to the overview card. |
+| Show the full view | Phase 5, then this card again. |
 
 **Rule 1 guard.** A metric with an empty `Definition` can't be approved as it stands: on its card, ask for the definition in "Other" and apply it as an edit first.
 
-**One by one.** Up to 4 items per card, one question each. `header` is `Metric 3/9`, `Entity 3/9` or `Join 3/9` (at most 12 characters; drop the word when the numbers are long). The question is only the decision, with the item's plain name: *"Sign off Revenue?"* (the identifier turned into words, `ela_proficiency_rate` → *ELA proficiency rate*; the identifier itself goes in the preview). The meaning and any real value go in the `Approve` option's description, kept apart from the title: *"Sum of paid order totals, refunds excluded. 2024-25: $4.2M"*. **The SQL goes in the `Approve` option's `preview`**, the monospace pane a card shows beside a focused option, laid out over lines with a short comment on each filter (`AND status = 'paid'  -- paid orders`), the table it reads, and, for an item that changed since its approval, what changed. Never put the SQL in the question: a card question is plain text and a long formula there is unreadable. Options:
+**One by one.** Up to 4 items per card, one question each. `header` is `Metric 3/9`, `Entity 3/9` or `Join 3/9` (at most 12 characters; drop the word when the numbers are long). The question is only the decision, with the item's `plain_name` from `review-items`: *"Sign off Revenue?"*, *"Sign off Orders to Customers?"* (never the identifier, `ela_proficiency_rate`, which goes in the preview; [question-cards rule 3b](../../shared/question-cards.md#3b-things-are-named-in-plain-words)). The meaning and any real value go in the `Approve` option's description, kept apart from the title: *"Sum of paid order totals, refunds excluded. 2024-25: $4.2M"*. **The SQL goes in the `Approve` option's `preview`**, the monospace pane a card shows beside a focused option, laid out over lines with a short comment on each filter (`AND status = 'paid'  -- paid orders`), the table it reads, and, for an item that changed since its approval, what changed. Never put the SQL in the question: a card question is plain text and a long formula there is unreadable. Options:
 
 - **Approve**: sign it off as written.
 - **Reject**: drop it from the model (`{"op":"reject",…}`).
 - **Approve all remaining**: sign off this item and every item not yet shown. Every card carries it, so a long queue finishes in one press. Answers given on the same card to the other questions still stand.
+- **Show the full view**: the model explorer page, served from localhost (Phase 5); nothing about this item is decided, and the same card is asked again after the URL. On a card with several questions, offer it on the first question only.
 
 After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
 
@@ -127,12 +130,12 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 **Any other "Other" you can't act on is re-asked, never guessed.** A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
 
-**Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)`; at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
+**Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column, label}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
 Flagged and suspected columns are picked the same way:
 
-- 3 columns or fewer in all: one option per column, `customers.email`, or `customers.ip_address (suspected)`.
-- More: grouped by table, one option per table with its count, `customers (3: email, phone, ip_address (suspected))`; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns** and the 2 tables with the most listed columns.
+- 3 columns or fewer in all: one option per column, named by its `label`, **Email on Customers**, or **IP address on Customers (suspected)**; the identifier (`customers.email`) goes in the option's description.
+- More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns** and the 2 tables with the most listed columns.
 - Always last: **Keep them all queryable**.
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
@@ -161,7 +164,7 @@ Show a table of the groups, `Group | Count | First few`, the first 5 names in ea
 
 "Other" takes names in the person's words: `<area>.<table>` or `<area>.<table>.<column>`, comma-separated, to hide along with the picked groups; `keep <name>` keeps one member of a picked group out of it.
 
-**Pick by subject area.** One multiSelect question (header `Area`), *"Which subject area's tables do you want to choose from?"*: the 3 subject areas with the most visible tables, one option each with its count; "Other" takes any other area's name. Then, per picked area, one multiSelect question (header `Tables`, at most 4 questions on a card), *"Which tables in <area> should queries never read?"*: with 3 tables or fewer, one option per table; with more, grouped by the name's first word (the part before the first `_`), the 3 largest groups as options with their counts, `orders (5: orders, orders_items, …)`; always last, **None of these**. "Other" takes table names in that area.
+**Pick by subject area.** One multiSelect question (header `Area`), *"Which subject area's tables do you want to choose from?"*: the 3 subject areas with the most visible tables, one option each with its count; "Other" takes any other area's name. Then, per picked area, one multiSelect question (header `Tables`, at most 4 questions on a card), *"Which tables in <area> should queries never read?"*: with 3 tables or fewer, one option per table, named in words (**Order items**) with the identifier in its description; with more, grouped by the name's first word (the part before the first `_`), the 3 largest groups as options with their counts, **Orders (5: Orders, Order items, …)**; always last, **None of these**. "Other" takes table names in that area.
 
 Build one ops batch from every pick: `{"op":"exclude","kind":"table","area":"<area>","name":"<table>"}` per table, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, written with the Write tool and applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"` (Phase 6). Say how many tables and columns are now hidden, from its `applied`, and list any `skipped[]`. A name in "Other" that isn't in the model, or **Nothing for now** / **None of these** picked together with something to hide, is said back and the same card asked again; never guess which table or column was meant.
 
@@ -171,7 +174,7 @@ To bring something back, the person says so ("show sales.stg_leads again"): one 
 
 ## Phase 4: Look up a table or metric
 
-Call AskUserQuestion, one question (header `Look up`), *"Which table or metric? Type its name in Other."*: up to 3 likely names as options (the metrics waiting for sign-off first, then the tables of the largest subject area), at least 2. A name already given (in the overview card's "Other", or in the request) skips this card.
+Call AskUserQuestion, one question (header `Look up`), *"Which table or metric? Type its name in Other."*: up to 3 likely names as options (the metrics waiting for sign-off first, by `plain_name`, then the tables of the largest subject area, in words), at least 2; each option's description carries the identifier, which is also what "Other" takes. A name already given (in the overview card's "Other", or in the request) skips this card.
 
 Match the name, case-insensitive, against the `model-tree` tables (`<table>` or `<area>.<table>`) and the `review-items` metrics and entities (`name`):
 
@@ -223,7 +226,7 @@ A read-only view of every table, metric, entity and join. Make changes on the ca
 approve, hide, or type an edit in Other ("add a metric …", "describe orders.status as …").
 ```
 
-Then go back to the overview card. The page is read-only; a block pasted from an older, editable page is still applied (5b).
+Then ask again the card it was picked on: the Sign-off or item card when picked there (Phase 2), the overview card otherwise. The page is read-only; a block pasted from an older, editable page is still applied (5b).
 
 ### 5b — The pasted block
 

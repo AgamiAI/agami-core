@@ -54,7 +54,25 @@ A card's question is plain text: keep it to the decision alone, in plain words (
 longer that they need to see to decide (a SQL formula, a sample of rows, what changed) goes in the
 `preview` of the option it belongs to, which the card shows in a monospace pane while that option
 is focused. Lay SQL out over lines with a short comment on each filter. A live run showed a
-formula in the question as an unreadable wall of text.
+formula in the question as an unreadable wall of text. Anything the person signs off that runs SQL
+shows that SQL this way: a metric's binding, and an example question's statement too, on the
+option that keeps it, so checking it never takes typing "show me the SQL".
+
+## 3b. Things are named in plain words
+
+A table, column, metric or join on a card is named in words, never by its identifier: *"What
+currency is the Price column on Widgets in?"*, not *"What currency is `widgets.price` in?"*; an
+option **In stock on Widgets**, not `widgets.in_stock`. This holds for the question, the option
+labels and the option descriptions. The identifier goes in the option's `preview` when the person
+may need it (to type it in "Other", or to find it in the database), never in place of the name.
+
+Take the words from the command's output rather than making them up, so every card says the same
+thing: a column's `label` (`sm suggest-units`, `sm set-units`, `sm sensitive`, a placeholder from
+`sm review-queue`, whose `question` is already worded), `flag_rates.labels` from
+`sm suggest-metrics`, and an item's `plain_name` from `sm review-items`. Where a command gives no
+words, turn the identifier into words the same way: the last part of a qualified name, underscores
+to spaces, sentence case (`order_items` → *Order items*, `ela_proficiency_rate` → *ELA proficiency
+rate*), and a column as *<column> on <table>*.
 
 ## 4. Lists longer than a card holds are summarised
 
@@ -64,9 +82,10 @@ card, one question each, and put "Approve all remaining" (or its equivalent) on 
 queue can be finished in one press.
 
 ```json
-{"header": "Metric 1/9", "question": "Approve the metric \"revenue\" (SUM of orders.amount)?",
+{"header": "Metric 1/9", "question": "Sign off Revenue?",
  "multiSelect": false,
- "options": [{"label": "Approve", "description": "Sign it off as written"},
+ "options": [{"label": "Approve", "description": "Total of the order amounts",
+              "preview": "-- revenue\nSUM(orders.amount)"},
              {"label": "Approve all remaining", "description": "Sign off the other 8 as well"},
              {"label": "Reject", "description": "Drop it from the model"}]}
 ```
@@ -97,7 +116,10 @@ Answers given to the card's other questions stand: apply them before asking agai
 
 ## 6. No page opens by default, and nothing is pasted back
 
-The HTML renderers stay as an optional "Show the full view" option. When one is shown, serve it
+The HTML renderers stay as an optional **Show the full view** option, and it is an option: every
+review or sign-off card that has a page behind it offers **Show the full view** while it has room
+(a card holds 4 options), so nobody has to know to type it in "Other". After the page is served,
+give the URL and ask the same card again: the decision still happens on the card. When one is shown, serve it
 from `localhost`, never as a `file://` page: the Code tab's built-in browser shows a local file
 outside the project folder as a frozen snapshot. Run `serve_page.py` with `run_in_background`: it
 keeps serving until its time is up, so in the foreground it would hold the turn and the URL would

@@ -14,6 +14,14 @@ below corresponds to one such version.
 
 ### Added
 
+- **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
+  "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
+  suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
+  `label`, `sm suggest-metrics` gives `flag_rates.labels`, and `sm review-items` gives each item a
+  `plain_name`, so every card uses the same words (question-cards rule 3b). An example's sign-off
+  card shows its SQL in the preview, as a metric's does. The sign-off, examples and summary cards
+  offer **Show the full view**, which had to be typed in "Other" before.
+
 - **Onboarding asks for context on cards.** Right after connecting, three cards: the company
   (once per deployment, or drafted from the database), what the person can share (definitions or a
   semantic layer, the questions people ask, report SQL or dashboards), and the database's one line.

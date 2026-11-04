@@ -99,3 +99,36 @@ def test_no_read_only_page_asks_for_a_pasted_block() -> None:
 def test_the_paste_back_guard_catches_the_old_wording() -> None:
     old = "--read-only --out x.html\n```\nSay: generate the block and paste it back; then **end the turn**.\n"
     assert _PASTE_BACK.search(_read_only_passages(old)[0])
+
+
+# A card read "What currency is `widgets.price` in?" (tester feedback on the question-cards branch).
+_IDENTIFIER_IN_QUESTION = re.compile(r'\*"[^"\n]*`[A-Za-z_]+\.[A-Za-z_]+`[^"\n]*\?"\*')
+# The one quoted question that is about how to write an identifier, so it has to show one.
+_ABOUT_THE_SPELLING = "Tables need a subject-area prefix"
+
+
+def test_rule_3b_names_things_in_plain_words() -> None:
+    doc = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    assert "## 3b. Things are named in plain words" in doc
+    for field in ("`label`", "`plain_name`", "flag_rates.labels"):
+        assert field in doc, field
+    # the doc's own example card no longer puts an identifier in the question
+    assert "SUM of orders.amount)?" not in doc
+
+
+def test_no_quoted_card_question_names_a_table_column_identifier() -> None:
+    hits = []
+    for path in _skills():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            for m in _IDENTIFIER_IN_QUESTION.finditer(line):
+                if _ABOUT_THE_SPELLING not in m.group(0):
+                    hits.append(f"{path.parent.name}: {m.group(0)[:100]}")
+    assert not hits, hits
+
+
+def test_the_full_view_is_a_card_option_in_rule_6() -> None:
+    doc = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    six = doc[doc.index("## 6."):doc.index("## 7.")]
+    assert "every\nreview or sign-off card that has a page behind it offers **Show the full view**" in six
+    three_a = doc[doc.index("## 3a."):doc.index("## 3b.")]
+    assert "an example question's statement too" in three_a

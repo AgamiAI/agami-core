@@ -213,3 +213,18 @@ def test_the_numbered_list_fallback_is_stated():
 
 def test_a_review_started_from_connect_returns_to_its_starter_questions():
     assert "agami-connect" in _review() and "Phase 8" in _review()
+
+
+def test_review_cards_offer_the_full_view_and_come_back_to_the_card() -> None:
+    # Tester feedback: the explorer opened only when "show the full view" was typed in Other.
+    review = _review()
+    assert review.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
+    assert "| Show the full view | Phase 5, then this card again. |" in review
+    assert "Then ask again the card it was picked on" in _full_view()
+
+
+def test_cards_name_tables_and_columns_in_words() -> None:
+    text = _text()
+    assert "**Email on Customers**" in text and "`customers.email`, or" not in text
+    assert "item's `plain_name`" in text
+    assert "**Orders (5: Orders, Order items, …)**" in _hide()

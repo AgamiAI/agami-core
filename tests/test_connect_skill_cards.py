@@ -378,7 +378,7 @@ def test_4a_keeps_the_explorer_as_the_full_view():
     s = _phase_4()
     assert "Show the full view" in s
     assert "serve_page.py" in s
-    assert "/agami-model preseed" in s.split("**Show the full view")[1]
+    assert "/agami-model preseed" in s.split("**Show the full view** (an option")[1]
 
 
 def test_4b_is_the_only_place_after_review_is_passed():
@@ -400,11 +400,12 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
     assert "15 rows" in s
     for label in (
         "Keep all that ran (Recommended)",
-        "Review the failing ones",
+        "Review one by one",
         "Drop the failing ones",
-        "Review all one by one",
+        "Show the full view",
     ):
-        assert label in s, label
+        assert f"- **{label}**" in s, label
+    assert "Review the failing ones" not in s and "Review all one by one" not in s
 
 
 def test_6_keep_signs_with_add_example_and_drop_uses_remove_example():
@@ -427,7 +428,7 @@ def test_6_default_path_renders_no_dashboard_and_waits_for_no_reply_grammar():
 
 
 def test_6_keeps_the_examples_page_as_the_full_view():
-    full = _phase_6().split("**Show the full view")[1]
+    full = _phase_6().split("**Show the full view** (an option")[1]
     assert "render_examples_validation.py" in full and "serve_page.py" in full
     assert "validate N" in full  # its pasted block is still accepted
 
@@ -693,5 +694,35 @@ def test_sign_off_titles_are_the_decision_in_plain_words():
     # Live-run feedback: "Approve ela_proficiency_rate? 48.8% of ..." mixed an identifier and a result into the title.
     for skill in ("agami-connect", "agami-model"):
         text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
-        assert "The question is only the decision, with the item's plain name" in text, skill
+        assert "The question is only the decision, with the item's `plain_name`" in text, skill
         assert "kept apart from the title" in text, skill
+
+
+# --- tester feedback on the question-cards branch ----------------------------------------------
+
+
+def test_example_cards_show_the_sql_in_the_keep_preview():
+    # Checking an example took typing "show me the SQL"; a metric card already shows its SQL.
+    s = _phase_6()
+    one_by_one = s[s.index("**One by one.**"):]
+    assert "**The SQL goes in the `Keep` option's `preview`**" in one_by_one
+    assert "`sql`" in one_by_one and "row_preview" in one_by_one
+
+
+def test_review_cards_offer_the_full_view_as_an_option():
+    # "show the full view" worked only typed in Other, and no card said it existed.
+    four, six = _phase_4(), _phase_6()
+    assert four.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
+    assert six.count("- **Show the full view**") == 1        # the Examples card
+    assert "and **Show the full view** (the page below" in six  # the example item cards
+    assert "| Show the full view |" in four and "| Show the full view |" in six
+    phase_7 = _phase("## Phase 7", "## Phase 8")
+    assert "`Show the full view`" in phase_7
+
+
+def test_currency_and_flag_rate_asks_name_columns_in_words():
+    text = SKILL.read_text(encoding="utf-8")
+    assert "What currency is the Price column on Widgets in?" in text
+    assert "naming each by its `label`, never as `table.column`" in text
+    assert "`flag_rates.labels`" in text
+    assert "share-of-true rate — say if" not in text
