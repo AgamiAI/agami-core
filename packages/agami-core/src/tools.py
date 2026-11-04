@@ -38,6 +38,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextvars import ContextVar, Token
 from dataclasses import asdict
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, NamedTuple
 
 # ---------------------------------------------------------------------------
@@ -4281,13 +4282,20 @@ def _fitting(entries: list[Any], budget: int) -> list[Any]:
 
 
 def _bounded_arguments(name: str, raw: dict[str, Any]) -> str | None:
-    """Every parameter a call was sent, bounded, except those with a column of their own.
+    """The parameters a call was sent, bounded, except those with a column of their own.
 
-    None when nothing is left, so a call sent only those, or nothing, stores NULL. No per-tool list
-    of keys: a tool added later, or one a consumer registers, is covered as it stands.
+    For one of core's own tools, only the parameters core's own schema declares for it (#625): a
+    property a consumer adds to that tool is the consumer's, and core cannot know what it holds or
+    apply the consumer's rules to it. A tool a consumer registers itself is recorded as it was sent,
+    so one added later is covered without a per-tool list of keys.
+
+    None when nothing is left, so a call sent only those, or nothing, stores NULL.
     """
     own = _OWN_COLUMN_ARGUMENTS | ({"example"} if name == "execute_sql" else set())
-    values, truncated = _audit_value({k: v for k, v in raw.items() if k not in own})
+    declared = _CORE_DECLARED_ARGUMENTS.get(name)
+    values, truncated = _audit_value(
+        {k: v for k, v in raw.items() if k not in own and (declared is None or k in declared)}
+    )
     if not values:
         return None
     # A parameter that does not fit what is left of the column cap is dropped, and a drop sets the
@@ -5193,7 +5201,8 @@ def record_tool_call(
         # The statement, where one ran. A plain override rather than one of the coherent trio: it is
         # an identity, so a stated value cannot contradict a derived one the way an outcome can.
         "audit_id": audit_id if audit_id is not None else derived_audit_id,
-        # What the call was sent, less what has its own column, and what missed. Bounded
+        # What the call was sent, less what has its own column and, on a core tool, less what core
+        # does not declare; and what missed. Bounded
         # here, like `basis`: a bound the caller applies is not a bound.
         "arguments": _bounded_arguments(name, args),
         "missed": _bounded_missed(missed),
@@ -5995,6 +6004,18 @@ TOOLS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+#: The parameters each of core's own tools declares, as core defines them (#625): what
+#: `_bounded_arguments` records for that tool. Taken here, at import, because `TOOLS` is the shared
+#: registry a consumer extends: the schema dicts are the same objects a consumer may add a property
+#: to later, and reading them at record time would count that addition as core's. Names only, and
+#: frozen, so nothing done to `TOOLS` afterwards can widen it.
+_CORE_DECLARED_ARGUMENTS: Mapping[str, frozenset[str]] = MappingProxyType(
+    {
+        name: frozenset(meta["inputSchema"].get("properties") or ())
+        for name, meta in TOOLS.items()
+    }
+)
 
 
 def register(
