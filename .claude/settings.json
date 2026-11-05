@@ -31,14 +31,28 @@
   },
   "extraKnownMarketplaces": {
     "astral": {
-      "source": { "source": "github", "repo": "astral-sh/claude-code-plugins" }
+      "source": {
+        "source": "github",
+        "repo": "astral-sh/claude-code-plugins"
+      }
     },
     "claude-plugins-official": {
-      "source": { "source": "github", "repo": "anthropics/claude-code" }
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-code"
+      }
+    },
+    "agami": {
+      "source": {
+        "source": "github",
+        "repo": "AgamiAI/agami-core",
+        "ref": "desktop-onboarding"
+      }
     }
   },
   "enabledPlugins": {
     "astral@astral": true,
-    "code-review@claude-plugins-official": true
+    "code-review@claude-plugins-official": true,
+    "agami-core@agami": true
   }
 }
