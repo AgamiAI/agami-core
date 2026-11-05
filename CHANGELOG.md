@@ -79,8 +79,10 @@ below corresponds to one such version.
   `agami-doc-reader` subagent, started in the background the moment its path is given; the findings
   come back with their sources, and two documents that disagree become a card. A model with 2 or
   more subject areas and more than 30 tables is described by one `agami-enricher` subagent per area,
-  4 at a time. Subagents only read: the main chat writes, and `sm curate --allow <fields> --area
-  <area>` refuses a batch that does anything but edit those fields in that area.
+  4 at a time. Subagents only read the model: each enricher writes its findings to a file, and the
+  new `sm apply-enrichment` applies that file for its area in one call, refusing it whole if any
+  change goes beyond descriptions, the couldn't-tell flag, coded values' labels and column groups in
+  that area (`sm curate --allow <fields> --area <area>` gives the same check to any batch).
 - **An overview card.** Where the host can draw a visual in the chat, agami-connect's summary and
   agami-model's overview show one tile per subject area (tables, % described, metrics and joins
   waiting, examples) and one for what needs sign-off; a click carries on in the chat. The numbers

@@ -647,6 +647,67 @@ def _ops_outside(ops: Any, fields: set[str], area: Optional[str]) -> list[str]:
     return out
 
 
+# What an agami-enricher subagent may change: descriptions, the "looked, couldn't tell" flag, coded
+# values' labels, and a wide table's column groups. Never a sign-off, a hide, an add or a move.
+ENRICH_FIELDS = frozenset({"description", "description_source", "choice_field", "column_groups",
+                           "column_group_descriptions"})
+
+
+def cmd_apply_enrichment(args) -> int:
+    """Apply one agami-enricher subagent's result file for one subject area, in one tested call.
+
+    Everything is checked before anything is written: the file is for `--area`, every edit (its
+    `curate_ops`, and the edits its `column_descriptions` TSV becomes) changes only ENRICH_FIELDS in
+    that area, and `entities` is a list. Then descriptions, edits and entities are applied in that
+    order, each validated; a failed step stops the rest. What the main chat decides on later
+    (`metric_ideas`, `terms`, `questions`, `cross_area`, `notes`) is passed back untouched, so no
+    glue script ever splits the file."""
+    from . import curate
+    from . import dictionary as DD
+    result = _read_json_file(args.file)
+    if not isinstance(result, dict) or result.get("area") != args.area:
+        _print_json({"applied": False, "error": f"not an enricher result for area {args.area!r}"})
+        return 2
+    root = Path(args.root).expanduser()
+    tsv = result.get("column_descriptions") or ""
+    try:
+        rows = DD.parse(tsv, "tsv") if tsv.strip() else []
+    except ValueError as exc:
+        _print_json({"applied": False, "error": f"column_descriptions is not a TSV: {exc}"})
+        return 2
+    described = DD.match(root, rows, source="ai") if rows else {"ops": [], "unmatched": []}
+    ops = result.get("curate_ops") or []
+    entities = result.get("entities") or []
+    refused = (_ops_outside(described["ops"], ENRICH_FIELDS, args.area)
+               + _ops_outside(ops, ENRICH_FIELDS, args.area))
+    if not isinstance(entities, list):
+        refused.append("entities: not a list")
+    if refused:
+        _print_json({"applied": False, "refused": refused,
+                     "error": "nothing applied: an enricher may only edit "
+                              + ", ".join(sorted(ENRICH_FIELDS)) + f" in area {args.area}"})
+        return 1
+    out: dict[str, Any] = {"area": args.area, "unmatched": described["unmatched"]}
+    steps = (("described", described["ops"], lambda o: curate.apply(root, o)),
+             ("edited", ops, lambda o: curate.apply(root, o)),
+             ("entities", entities, lambda o: curate.write_items(root, args.area, "entity", o)))
+    for name, items, apply in steps:
+        if not items:
+            out[name] = 0
+            continue
+        res = apply(items)
+        out[name] = len(res.applied)
+        if not res.validated:
+            out.update({"applied": False, "failed_step": name, "errors": res.errors})
+            _print_json(out)
+            return 1
+    out["applied"] = True
+    out["pass_on"] = {k: result.get(k) for k in ("metric_ideas", "terms", "questions",
+                                                 "cross_area", "notes") if result.get(k)}
+    _print_json(out)
+    return 0
+
+
 def cmd_approve_queue(args) -> int:
     """Sign off the whole pending review queue in one call — the first-class no-browser
     path (the HTML explorer's CLI equivalent). Reads the same queue `review-queue` builds
@@ -2119,6 +2180,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("apply-enrichment", help="apply one agami-enricher subagent's result file for one area: descriptions, allowed edits and entities, checked before anything is written")
+    sp.add_argument("root")
+    sp.add_argument("--file", required=True, help="the enricher's result JSON")
+    sp.add_argument("--area", required=True, help="the subject area the enricher described")
+    sp.set_defaults(func=cmd_apply_enrichment)
 
     sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
     sp.add_argument("root")
