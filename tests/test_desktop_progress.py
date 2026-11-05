@@ -89,11 +89,11 @@ def test_the_build_runs_in_the_background_with_a_bar_from_the_log():
     build = (REFS / "build.md").read_text(encoding="utf-8")
     assert "on every server database (anything but SQLite and DuckDB" in build
     assert "`run_in_background: true`, and a `description` the person can read" in build
-    assert ".introspect/progress.log" in build
-    assert "Never draw a bar from an estimate." in build
-    # rounded down: a live run showed round() fill the bar at 33/34, which reads as done
-    assert "rounded down, so the bar is full only when n = total" in build
-    assert "Never end your turn while it runs" in build
+    assert 'scripts/sm" progress "<artifacts_dir>/<profile>" --wait 20' in build
+    # a turn that ends loses the skill's pre-approvals (live run), so it loops on a pre-approved call
+    assert "Use this, not `tail` or a watcher of your own: it is pre-approved" in build
+    # a live run ended its turn mid-build twice: the app wakes it, but the turn must say so
+    assert "If you do end your turn while it runs, say so in that message" in build
     # the old fallback stays for hosts without background commands
     assert "**Where background commands aren't available, a batched build**" in build
 
@@ -125,4 +125,67 @@ def test_the_skill_pre_approves_its_own_scripts(skill):
     assert 'Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' in rules
     # an allow rule doesn't match past an env assignment Claude Code doesn't know is safe
     assert 'Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' in rules
-    assert all(r.startswith("Bash(") and "${CLAUDE_PLUGIN_ROOT}/scripts/" in r for r in rules)
+    # a live run dropped the quotes, ran the script without `bash`, and read phase files: each form
+    # that missed a rule stopped for permission
+    assert 'Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)' in rules
+    assert 'Bash("${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)' in rules
+    assert "Read(/${CLAUDE_PLUGIN_ROOT}/**)" in rules
+    assert all("${CLAUDE_PLUGIN_ROOT}/" in r for r in rules)  # nothing outside the plugin
+
+
+def test_no_skill_runs_execute_sql_through_the_bare_interpreter():
+    """The interpreter's path differs per machine, so no allowed-tools rule can name it: a live run
+    stopped for permission on every sample query until the reads went through agami's own launcher."""
+    from skill_docs import skill_docs
+    offenders = [str(p) for p in [*skill_docs(), *(PLUGIN / "shared").glob("*.md"),
+                                  *(PLUGIN / "agents").glob("*.md")]
+                 if '"$PY" -m execute_sql' in p.read_text(encoding="utf-8")
+                 or '"<py>" -m execute_sql' in p.read_text(encoding="utf-8")]
+    assert not offenders, offenders
+
+
+def test_progress_turns_the_engines_log_into_a_persons_line_with_a_rounded_down_bar():
+    line = cli._progress_line
+    # rounded down: a live run showed round() fill the bar at 33/34, which reads as done
+    assert line("columns+grain 33/34")["line"] == "Reading columns ▰▰▰▰▰▰▰▱ 33/34 tables"
+    assert line("columns+grain 34/34")["line"] == "Reading columns ▰▰▰▰▰▰▰▰ 34/34 tables"
+    assert line("columns+grain 3/34")["line"] == "Reading columns ▱▱▱▱▱▱▱▱ 3/34 tables"
+    assert line("relationships: declared FK 80/187")["line"].startswith("Checking joins ▰▰▰")
+    assert line("done: 34 tables, 7 relationships") == {"line": "Done: 34 tables, 7 joins", "done": True}
+    assert "▰" not in line("building relationships (34 tables; FK + value-overlap probes)…")["line"]
+
+
+def test_progress_waits_for_the_log_to_move_on(tmp_path, capsys):
+    import threading
+    log = tmp_path / "acme" / ".introspect" / "progress.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("columns+grain 3/34\n")
+    threading.Timer(0.6, lambda: log.write_text("columns+grain 3/34\ncolumns+grain 6/34\n")).start()
+    out = _run(["progress", str(tmp_path / "acme"), "--wait", "5"], capsys)
+    assert out["changed"] is True and out["n"] == 6
+    missing = _run(["progress", str(tmp_path / "missing")], capsys)
+    assert missing == {"line": "", "done": False, "started": False}
+
+
+def test_enrich_input_samples_only_what_queries_may_read(model, tmp_path, capsys, monkeypatch):
+    from semantic_model import introspect
+    sent: list = []
+
+    def runner(profile, python=None, *, building_the_model=False, artifacts_dir=None):
+        return lambda sql: sent.append(sql) or [{"id": "1"}]
+
+    monkeypatch.setattr(introspect, "make_execute_sql_runner", runner)
+    table = next((model / "subject_areas").glob("*/tables/customers.yaml"))
+    t = yaml.safe_load(table.read_text())
+    hidden = t["columns"][1]["name"]
+    t["columns"][1]["sensitive"] = True
+    table.write_text(yaml.safe_dump(t))
+    out_file = tmp_path / "in.json"
+    out = _run(["enrich-input", str(model), "--area", "agami-example", "--profile", "acme",
+                "--out", str(out_file)], capsys)
+    assert out["tables"] == out["sampled"] > 0 and not out["errors"]
+    assert sent and all("*" not in q and "LIMIT 5" in q for q in sent)
+    assert not any(hidden in q for q in sent if "customers" in q)  # never read a sensitive column
+    assert set(json.loads(out_file.read_text())) == {"area", "bundle", "tables"}
+    assert cli.main(["enrich-input", str(model), "--area", "nope", "--profile", "acme",
+                     "--out", str(out_file)]) == 2

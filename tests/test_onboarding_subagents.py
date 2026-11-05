@@ -39,7 +39,12 @@ def test_each_agent_is_read_only_and_never_asks(name):
     meta, body = _agent(name)
     assert meta["name"] == name
     tools = {t.strip() for t in meta["tools"].split(",")}
-    assert not tools & {"Write", "Edit", "NotebookEdit", "AskUserQuestion", "Agent"}, tools
+    assert not tools & {"Edit", "NotebookEdit", "AskUserQuestion", "Agent"}, tools
+    # the reader writes nothing; the enricher writes only its result file (Write, not a heredoc,
+    # which a live run showed is easy to get wrong), and never the model
+    assert ("Write" in tools) == (name == "agami-enricher")
+    # neither runs commands: a subagent's commands each stop for permission (live run, Manual mode)
+    assert "Bash" not in tools
     assert "never asks the person anything" in meta["description"]
     assert "**Never ask the person anything.**" in body
     # the reader returns its JSON; the enricher writes it to a file the engine applies whole
@@ -57,11 +62,10 @@ def test_the_doc_reader_cannot_run_commands_and_leaves_parsed_files_alone():
 
 def test_the_enricher_never_writes_and_reads_the_shared_rules():
     _, body = _agent("agami-enricher")
-    assert "1. **Never write to the model.**" in body
-    assert "The only files you write are your sample SQL files and `result_path`." in body
+    assert "2. **Write only `result_path`.** Never the model, never anything else." in body
+    assert "You run no commands" in body and "input_path" in body
     assert "skills/agami-connect/references/enrich.md" in body  # one set of rules, not a copy
-    assert "never run two queries at once" in body
-    assert "--build-profile" in body
+
 
 
 def test_1_5_gives_each_document_its_own_reader_in_the_background():
@@ -77,6 +81,8 @@ def test_2a_uses_enrichers_only_on_a_larger_model_and_applies_with_allow():
     text = (REFS / "enrich.md").read_text(encoding="utf-8")
     assert "**2 or more subject areas and more than 30 tables**" in text
     assert 'scripts/sm" apply-enrichment "$ROOT" --area <area>' in text
+    assert 'scripts/sm" enrich-input "$ROOT" --area <area> --profile <profile>' in text
+    assert "**Launch the enrichers in one message, in the foreground**" in text
     assert "never split the file yourself" in text  # no glue script between agent and engine
     assert "never two writes at once" in text
     assert "<plugin_root>/agents/agami-enricher.md" in text
