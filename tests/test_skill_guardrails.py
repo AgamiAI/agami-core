@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from skill_docs import skill_docs, skill_text  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 QUERY = (REPO / "plugins" / "agami" / "skills" / "agami-query" / "SKILL.md").read_text(encoding="utf-8")
 
@@ -33,8 +35,7 @@ _STAR_INSTRUCTION = re.compile(
 def test_no_skill_or_shared_doc_tells_the_reader_to_select_star():
     """execute_sql refuses a projected star, so an instruction to write one only produces refusals
     (#523: agami-connect's sampling step said `SELECT * FROM <t> LIMIT 5`)."""
-    docs = [*(REPO / "plugins" / "agami" / "skills").glob("*/SKILL.md"),
-            *(REPO / "plugins" / "agami" / "shared").glob("*.md")]
+    docs = [*skill_docs(), *(REPO / "plugins" / "agami" / "shared").glob("*.md")]
     assert docs
     offenders = [f"{p.relative_to(REPO)}:{n}" for p in docs
                  for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
@@ -51,13 +52,13 @@ def test_the_star_check_reads_the_shapes_it_is_for():
 
 
 def test_connect_profiles_with_the_build_profile_not_no_safety():
-    connect = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(encoding="utf-8")
+    connect = skill_text("agami-connect")
     assert "--build-profile" in connect
     assert "SELECT c1, c2, … FROM <t> LIMIT 5" in connect
 
 
 def test_connect_profiles_under_the_resolved_interpreter():
     # A bare `python` can be a different interpreter from Phase 0a.5's `$PY`, one without the package or driver.
-    connect = (REPO / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(encoding="utf-8")
+    connect = skill_text("agami-connect")
     commands = [c for c in re.findall(r"`([^`\n]*-m execute_sql[^`\n]*)`", connect) if "--build-profile" in c]
     assert commands and all(c.startswith('"$PY" -m execute_sql') for c in commands), commands

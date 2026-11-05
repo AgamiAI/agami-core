@@ -163,7 +163,7 @@ Route any error through [`shared/db_error_classifier.md`](../../shared/db_error_
 - `sign_in_required` → the person's own sign-in expired; relay the message (sign in again, new conversation).
 - `driver_missing` → fall through to the next available method.
 
-If the cached method doesn't work, re-run tool detection per [`agami-connect/SKILL.md → Phase 0a.5`](../agami-connect/SKILL.md#0a5--tool-detection).
+If the cached method doesn't work, re-run tool detection per [`agami-connect` Phase 0a.5](../agami-connect/references/credentials.md#0a5--resolve-the-agami-interpreter--detect-tools).
 
 ---
 

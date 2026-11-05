@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import skill_text  # noqa: E402
+
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
 
@@ -112,8 +114,7 @@ def test_a_now_label_in_a_filter_is_not_the_present():
     assert len(msgs) == 1 and "fixed date '2025-02-19'" in msgs[0]
 
 
-SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
-    encoding="utf-8")
+SKILL = skill_text("agami-connect")
 
 
 def test_the_skill_keeps_data_freshness_out_of_model_text():

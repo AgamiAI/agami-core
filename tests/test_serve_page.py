@@ -264,7 +264,7 @@ def test_every_skill_that_serves_a_page_opens_it():
     """Each page a skill serves opens in the person's browser, not only the model's full view."""
     plugin = SCRIPT.parent.parent
     missing = []
-    for doc in [*plugin.glob("skills/*/SKILL.md"), *plugin.glob("shared/*.md")]:
+    for doc in [*plugin.glob("skills/*/SKILL.md"), *plugin.glob("skills/*/references/*.md"), *plugin.glob("shared/*.md")]:
         for line in doc.read_text(encoding="utf-8").splitlines():
             if re.search(r"serve_page\.py\s+\S+\s+--minutes", line) and "--open" not in line:
                 missing.append(f"{doc.parent.name}/{doc.name}: {line.strip()[:90]}")

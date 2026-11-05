@@ -16,9 +16,11 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import skill_docs  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = REPO_ROOT / "plugins" / "agami"
-DOCS = sorted([*PLUGIN.glob("skills/*/SKILL.md"), *PLUGIN.glob("shared/*.md")])
+DOCS = sorted([*skill_docs(), *PLUGIN.glob("shared/*.md")])
 
 # Telling Claude to RUN python3: a plugin script, `-c`, or `-m`. Prose that forbids `python3 -c`, and
 # the `tool_paths.python3` setting name, are not commands.

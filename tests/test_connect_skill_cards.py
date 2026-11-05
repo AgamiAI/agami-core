@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from skill_docs import skill_text  # noqa: E402
+
 SKILL = (
     Path(__file__).resolve().parent.parent
     / "plugins"
@@ -16,14 +18,14 @@ SKILL = (
 
 
 def _section_16() -> str:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     start = text.index("### 1.6 ")
     end = text.index("### 1.6s ")
     return text[start:end]
 
 
 def test_skill_links_the_card_conventions():
-    assert "shared/question-cards.md" in SKILL.read_text(encoding="utf-8")
+    assert "shared/question-cards.md" in skill_text("agami-connect")
 
 
 def test_1_6_uses_the_summary_and_the_four_options():
@@ -94,7 +96,7 @@ HELPER = SKILL.parent.parent.parent / "scripts" / "connect_helper.py"
 
 
 def _between(start: str, end: str) -> str:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     i = text.index(start)
     return text[i : text.index(end, i + len(start))]
 
@@ -269,7 +271,7 @@ def test_connect_another_database_passes_through_1_1a():
 
 
 def test_ready_branch_matches_the_start_card():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     line = next(ln for ln in text.splitlines() if ln.startswith("1. **Resolve the environment**"))
     assert "a reload or re-introspect request skips the card" in line
 
@@ -382,7 +384,7 @@ def test_4a_keeps_the_explorer_as_the_full_view():
 
 
 def test_4b_is_the_only_place_after_review_is_passed():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     four_b = _between("**4b ", "## Phase 5:")
     assert "--after-review" in four_b
     assert "Skip for now" in four_b
@@ -472,7 +474,7 @@ def _card_headers(text: str) -> list[str]:
 
 
 def test_every_card_header_in_the_skill_fits_twelve_characters():
-    headers = _card_headers(SKILL.read_text(encoding="utf-8"))
+    headers = _card_headers(skill_text("agami-connect"))
     assert len(headers) >= 10  # the pattern still finds the skill's headers
     too_long = [h for h in headers if len(h) > 12]
     assert not too_long, too_long
@@ -497,7 +499,7 @@ def _option_lists(text: str) -> list[list[str]]:
 
 
 def test_no_card_example_in_the_skill_lists_more_than_four_options():
-    lists = _option_lists(SKILL.read_text(encoding="utf-8"))
+    lists = _option_lists(skill_text("agami-connect"))
     assert lists  # the scan still finds the skill's cards
     too_many = [opts for opts in lists if len(opts) > 4]
     assert not too_many, too_many
@@ -525,7 +527,7 @@ def test_the_helper_wait_uses_monitor_never_a_foreground_sleep():
     assert "Monitor tool" in s
     assert "first line" in s and "exit" in s
     assert "fallback" in s.lower()
-    assert not re.search(r"\bsleep \d", SKILL.read_text(encoding="utf-8"))
+    assert not re.search(r"\bsleep \d", skill_text("agami-connect"))
 
 
 def test_the_final_line_is_also_waited_for_with_monitor():
@@ -576,7 +578,7 @@ def test_1_4_asks_the_company_and_the_database_on_cards():
 
 
 def test_asked_questions_and_reports_are_used_after_the_build():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     phase5 = text[text.index("## Phase 5") : text.index("## Phase 6")]
     assert "agami-asked-questions.txt" in phase5 and "*(yours)*" in phase5
     six_b = text[text.index("### 6b ") : text.index("## Phase 7")]
@@ -599,13 +601,13 @@ def test_review_from_phase_7_returns_to_the_starter_questions():
 
 
 def test_phase_2c_points_at_the_phase_4_cards_not_the_explorer():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     assert "in bulk in the explorer" not in text
     assert "on the Phase 4 cards" in _between("### 2c ", "### 2d ")
 
 
 def test_the_numbered_list_fallback_is_stated():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     assert "Where AskUserQuestion is unavailable, ask the same as a short numbered list" in text
     style = _between("## Conversation style", "## Progress tracking")
     assert "never inline-bullet options" not in style or "unavailable" in style
@@ -618,7 +620,7 @@ def test_8_5_link_candidates_card_stays_within_four_options():
 
 def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
     # A live run of the sample path ended in a numbered list to type a number back to.
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     start = text.index("7. **Wrap up")
     wrap_up = text[start : text.index('8. **The "where to go deeper"', start)]
     assert "header `Ask`" in wrap_up
@@ -629,7 +631,7 @@ def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
 
 def test_the_name_card_follows_the_fields_and_offers_the_database_name():
     # A live run asked "what should I call this database?" and then "database name": the same question twice.
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     order = next(
         line
         for line in text.splitlines()
@@ -642,7 +644,7 @@ def test_the_name_card_follows_the_fields_and_offers_the_database_name():
 
 def test_the_password_link_comes_with_a_card():
     # A live run showed the link in a line of chat being missed.
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     step = text[text.index("**3. Post the link**") : text.index("**4. Read the final line**")]
     assert "header `Password`" in step
     assert "**I've saved it** / **New link** / **Use a file instead (manual)**" in step
@@ -652,7 +654,7 @@ def test_the_password_link_comes_with_a_card():
 def test_sign_off_shows_the_sql_each_definition_maps_to():
     # Live-run feedback: a definition was signed off from its words alone.
     for skill in ("agami-connect", "agami-model"):
-        text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
+        text = skill_text(skill)
         assert "`Kind | Name | What it means | SQL`" in text, skill
         assert "**The SQL goes in the `Approve` option's `preview`**" in text, skill
         assert "Never put the SQL in the question" in text, skill
@@ -660,7 +662,7 @@ def test_sign_off_shows_the_sql_each_definition_maps_to():
 
 def test_the_onboarding_steps_are_shown_in_plain_words():
     # Live-run feedback: show where the person is in onboarding, the same way every time.
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     section = text[text.index("## Progress tracking") : text.index("## Phase −1")]
     steps = [
         line.split(". ", 1)[1] for line in section.splitlines() if line[:2].rstrip(".").isdigit()
@@ -672,19 +674,19 @@ def test_the_onboarding_steps_are_shown_in_plain_words():
 
 
 def test_an_empty_database_is_said_before_the_build_goes_on():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     assert "**Empty tables — say so before going on.**" in text
     assert "header `Empty`: **Connect a different database (Recommended)**" in text
 
 
 def test_the_start_card_does_not_recommend_asking_an_empty_database():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     assert "**An empty database gets no recommendation to ask it.**" in text
 
 
 def test_finished_steps_carry_their_numbers():
     # Live-run feedback: the step list should fill in counts as they're learned.
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     section = text[text.index("## Progress tracking") : text.index("## Phase −1")]
     assert "**When a step finishes, add its numbers to its label**" in section
     assert "never an estimate" in section
@@ -693,7 +695,7 @@ def test_finished_steps_carry_their_numbers():
 def test_sign_off_titles_are_the_decision_in_plain_words():
     # Live-run feedback: "Approve ela_proficiency_rate? 48.8% of ..." mixed an identifier and a result into the title.
     for skill in ("agami-connect", "agami-model"):
-        text = (SKILL.parent.parent / skill / "SKILL.md").read_text(encoding="utf-8")
+        text = skill_text(skill)
         assert "The question is only the decision, with the item's `plain_name`" in text, skill
         assert "kept apart from the title" in text, skill
 
@@ -721,7 +723,7 @@ def test_review_cards_offer_the_full_view_as_an_option():
 
 
 def test_currency_and_flag_rate_asks_name_columns_in_words():
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     assert "What currency is the Price column on Widgets in?" in text
     assert "naming each by its `label`, never as `table.column`" in text
     assert "`flag_rates.labels`" in text

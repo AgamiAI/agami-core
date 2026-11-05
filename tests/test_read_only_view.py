@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import label, skill_docs  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = REPO_ROOT / "plugins" / "agami"
 SCRIPTS = PLUGIN / "scripts"
@@ -180,9 +182,9 @@ def test_render_chart_writes_a_read_only_page(tmp_path: Path, monkeypatch) -> No
 
 def test_every_renderer_a_skill_calls_is_given_read_only() -> None:
     offenders = []
-    for skill in sorted((PLUGIN / "skills").glob("*/SKILL.md")):
+    for skill in skill_docs():
         for block in re.findall(r"```bash\n(.*?)```", skill.read_text(), re.S):
             for call in re.findall(r"render_[a-z_]+\.py.*?--out", block, re.S):
                 if "--read-only" not in call:
-                    offenders.append(f"{skill.parent.name}: {call.splitlines()[0]}")
+                    offenders.append(f"{label(skill)}: {call.splitlines()[0]}")
     assert not offenders, offenders

@@ -9,7 +9,7 @@ argument-hint: "[review | preseed | rule1] — go straight to the sign-off revie
 
 You are running the **model + trust** surface: see the live semantic model, curate it (hide / edit / add), and sign off the trust layer (approve / reject metrics, entities, joins). The chat is the surface: a short overview, then question cards. The model explorer page is the optional full view.
 
-Conventions for every card here: [`shared/question-cards.md`](../../shared/question-cards.md). The review uses the same pattern and wording as [`agami-connect` Phase 4](../agami-connect/SKILL.md#phase-4-curate-before-examples--exclude--sign-off-what-seeds-depend-on), so the two reviews read as one product.
+Conventions for every card here: [`shared/question-cards.md`](../../shared/question-cards.md). The review uses the same pattern and wording as [`agami-connect` Phase 4](../agami-connect/references/review.md#phase-4-curate-before-examples--exclude--sign-off-what-seeds-depend-on), so the two reviews read as one product.
 
 The flow:
 
@@ -359,7 +359,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" approve-queue "$ROOT" --signer you@examp
 
 ## What the runtime does with `rejected` entries
 
-The trust spine has always read `agami.review_state`. The model loader in [`plugins/agami/skills/agami-query/SKILL.md → Phase 1c`](../agami-query/SKILL.md#1c--index-the-model-for-fast-access) filters entries with `review_state: rejected` out of `datasets_by_name`, `datasets_by_qname`, `fields_by_qname`, and `relationships_by_endpoints`. Rejected entries:
+The trust spine has always read `agami.review_state`. The model loader in [`plugins/agami/skills/agami-query/SKILL.md → Phase 1c`](../agami-query/SKILL.md#1c--what-the-model-gives-you) filters entries with `review_state: rejected` out of `datasets_by_name`, `datasets_by_qname`, `fields_by_qname`, and `relationships_by_endpoints`. Rejected entries:
 
 - **Never appear in the schema context** the SQL generator sees (Phase 2b).
 - **Are not joinable** — the join-path picker skips relationships whose endpoints reference a rejected dataset.

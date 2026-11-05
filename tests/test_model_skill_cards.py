@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from skill_docs import skill_text  # noqa: E402
+
 SKILLS = Path(__file__).resolve().parent.parent / "plugins" / "agami" / "skills"
 SKILL = SKILLS / "agami-model" / "SKILL.md"
 CONNECT = SKILLS / "agami-connect" / "SKILL.md"
@@ -90,7 +92,7 @@ def test_review_reuses_the_connect_review_pattern():
     assert "up to 4" in s
     assert "Approve" in s and "Reject" in s
     # The same wording as agami-connect Phase 4, so the two reviews read as one product.
-    connect = CONNECT.read_text(encoding="utf-8")
+    connect = skill_text("agami-connect")
     for phrase in (
         "asks to stop is a stop, not a change",
         "Any other \"Other\" you can't act on is re-asked, never guessed",

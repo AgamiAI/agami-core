@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import skill_text  # noqa: E402
+
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
 
@@ -126,8 +128,7 @@ def test_a_metric_that_fills_without_naming_a_source_still_warns(calculation):
     assert len(_warnings(_org("AVG(COALESCE(staff_count, 0))", calculation=calculation))) == 1
 
 
-SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
-    encoding="utf-8")
+SKILL = skill_text("agami-connect")
 
 
 def test_the_skill_tells_a_missing_value_from_no_related_rows():

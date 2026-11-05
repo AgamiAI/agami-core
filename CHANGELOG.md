@@ -75,6 +75,15 @@ below corresponds to one such version.
 
 ### Changed
 
+- **agami-connect reads each phase when it starts.** Its SKILL.md was 1,460 lines, all loaded on
+  every run; it is now a 145-line main file (the hard rules, the progress list and a phase index)
+  and eight phase files under `skills/agami-connect/references/`, moved word for word. The phase
+  files write the plugin root as `<plugin_root>`, since Claude Code fills `${CLAUDE_PLUGIN_ROOT}`
+  in only in the SKILL.md it loads. A new test fails on a link to a heading that does not exist.
+- **Pages a skill serves open in your own browser.** `serve_page.py --open` opens the full view, a
+  chart or a report in the system's default browser rather than the Desktop app's built-in pane,
+  and says so; on a machine with no browser the link is given as before.
+
 - **Every agami decision is a question card in the chat; no page opens on its own and nothing is
   pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and
   agami-eval used to open an HTML page and wait for a block the person generated there and pasted
