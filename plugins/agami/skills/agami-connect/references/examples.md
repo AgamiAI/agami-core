@@ -40,7 +40,9 @@ bash "<plugin_root>/scripts/sm" seed-validate "$ROOT" --profile <profile> > "<ar
 
 Without `--area` it runs every area's seeds (each through `execute_sql` scoped to its own area, with the same per-statement limits) and prints one object: `areas` (`{area, examples, errored}` each), `items` (the items above, each labelled `area`) and `totals` (`areas`, `examples`, `errored`). Repeat `--area` to run only those areas. One `--area` prints the bare items array, as before. An area the model doesn't have is refused with `error: unknown_area` and the `valid_areas`.
 
-(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected, and run it in the background if it's slow.)
+(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected.)
+
+**On a server database, run it in the background**, as the build is (1.7): Bash with `run_in_background: true` and a `description` in the person's words, *"Run the example questions (11)"*, and don't end your turn while it runs. It prints nothing until it is done, so post no bar; one line when it starts (*"Running the 11 example questions against your database…"*) and the result when it exits. SQLite and DuckDB run in the foreground.
 
 **Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
 

@@ -36,7 +36,7 @@ import yaml
 
 from . import validator as V
 from .loader import _read_yaml as _load
-from .loader import load_datasource
+from .loader import list_prompt_examples, load_datasource
 from .models import (
     CrossSubjectAreaRelationship,
     Datasource,
@@ -443,6 +443,47 @@ def _entity_item(area: Optional[str], ent) -> dict:
             "signals": [{"ok": True, "text": why}],
             "inferred": ", ".join(maps), "origin": "llm_suggested",
             "maps_to": maps, **_trust(ent)}
+
+
+def _live(objs: list) -> list:
+    return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
+
+
+def overview(org: Datasource, root: str | Path) -> dict[str, Any]:
+    """The numbers an overview card shows, per subject area and in total, so a card relays them
+    rather than adding them up from three commands' output (where a wrong total creeps in).
+
+    Hidden (rejected) tables, columns, metrics and joins are left out, as the runtime leaves them
+    out. `needs_signoff` is the metrics and named filters still unsigned (Rule 1: an answer using
+    one carries a warning); `can_wait` is the joins and entities that self-approve as queried."""
+    described: dict[str, list[int]] = {}
+    for t in column_coverage(org)["tables"]:
+        cols = described.setdefault(t["area"], [0, 0])
+        cols[0] += t["described"]
+        cols[1] += t["columns"]
+    areas = []
+    for sa in org.subject_areas:
+        done, total = described.get(sa.name, [0, 0])
+        metrics, joins = _live(sa.metrics), _live(sa.relationships)
+        areas.append({
+            "area": sa.name, "plain_name": plain_words(sa.name),
+            "tables": len(_live(sa.tables_defined)), "columns": total,
+            "described_pct": round(100 * done / total) if total else 0,
+            "metrics": len(metrics), "metrics_waiting": sum(_needs_review(m) for m in metrics),
+            "joins": len(joins), "joins_waiting": sum(_needs_review(r) for r in joins),
+            "examples": len(list_prompt_examples(root, sa.name)),
+        })
+    counts = review_queue(org)["counts"]
+    totals = {k: sum(a[k] for a in areas)
+              for k in ("tables", "columns", "metrics", "joins", "examples")}
+    totals["metrics"] += len(_live(org.cross_subject_area_metrics))
+    totals["joins"] += len(_live(org.cross_subject_area_relationships))
+    all_cols = sum(a["columns"] for a in areas)
+    totals["described_pct"] = (round(100 * sum(d for d, _ in described.values()) / all_cols)
+                               if all_cols else 0)
+    totals["needs_signoff"] = counts["rule_1"]
+    totals["can_wait"] = counts["rule_2"]
+    return {"areas": distinct_labels(areas, "plain_name"), "totals": totals}
 
 
 def model_tree(org: Datasource) -> dict[str, Any]:

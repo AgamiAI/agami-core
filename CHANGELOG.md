@@ -80,6 +80,16 @@ below corresponds to one such version.
   and eight phase files under `skills/agami-connect/references/`, moved word for word. The phase
   files write the plugin root as `<plugin_root>`, since Claude Code fills `${CLAUDE_PLUGIN_ROOT}`
   in only in the SKILL.md it loads. A new test fails on a link to a heading that does not exist.
+- **Onboarding shows its progress while it waits.** On a server database, reading the tables and
+  running the example questions happen in the background (named in words in the Desktop app's
+  Background tasks pane), with a progress line drawn from the engine's own counts
+  (`Reading columns ▰▰▰▰▰▱▱▱ 30/52 tables`) and the onboarding step list counting live. agami-connect,
+  agami-model and agami-query pre-approve their own `sm` and `py` calls
+  (`allowed-tools`), so a permission prompt no longer lands between two cards.
+- **An overview card.** Where the host can draw a visual in the chat, agami-connect's summary and
+  agami-model's overview show one tile per subject area (tables, % described, metrics and joins
+  waiting, examples) and one for what needs sign-off; a click carries on in the chat. The numbers
+  come from the new `sm overview`, never added up by hand. Elsewhere the tables are shown as before.
 - **Pages a skill serves open in your own browser.** `serve_page.py --open` opens the full view, a
   chart or a report in the system's default browser rather than the Desktop app's built-in pane,
   and says so; on a machine with no browser the link is given as before.
