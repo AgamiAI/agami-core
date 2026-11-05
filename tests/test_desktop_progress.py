@@ -91,6 +91,8 @@ def test_the_build_runs_in_the_background_with_a_bar_from_the_log():
     assert "`run_in_background: true`, and a `description` the person can read" in build
     assert ".introspect/progress.log" in build
     assert "Never draw a bar from an estimate." in build
+    # rounded down: a live run showed round() fill the bar at 33/34, which reads as done
+    assert "rounded down, so the bar is full only when n = total" in build
     assert "Never end your turn while it runs" in build
     # the old fallback stays for hosts without background commands
     assert "**Where background commands aren't available, a batched build**" in build
