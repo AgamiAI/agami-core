@@ -144,3 +144,11 @@ def test_the_full_view_is_a_card_option_in_rule_6() -> None:
     assert "every\nreview or sign-off card that has a page behind it offers **Show the full view**" in six
     three_a = doc[doc.index("## 3a."):doc.index("## 3b.")]
     assert "an example question's statement too" in three_a
+
+
+def test_rule_4_group_options_show_their_items() -> None:
+    """A live run's join card offered "add all 16" and "only 1-8" without the joins themselves."""
+    text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    rule_4 = text[text.index("## 4. "):text.index("## 5. ")]
+    assert "A group option's `preview` lists every item the option" in rule_4
+    assert "chat table above" in rule_4

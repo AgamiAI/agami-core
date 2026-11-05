@@ -77,7 +77,10 @@ rate*), and a column as *<column> on <table>*.
 ## 4. Lists longer than a card holds are summarised
 
 Group them (by schema, name pattern, subject area, status) and ask about the groups; "Other" takes
-the names of anything to treat differently. When items must be decided one by one, ask up to 4 per
+the names of anything to treat differently. **A group option's `preview` lists every item the option
+covers**, one per line (up to 15, then "and N more"), and the same items are in a chat table above
+the card: an option such as "Add all 16" or "Only 1–8" with nothing to show which items those are
+leaves the person nothing to decide by. When items must be decided one by one, ask up to 4 per
 card, one question each, and put "Approve all remaining" (or its equivalent) on every card so a long
 queue can be finished in one press.
 

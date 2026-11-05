@@ -726,3 +726,23 @@ def test_currency_and_flag_rate_asks_name_columns_in_words():
     assert "naming each by its `label`, never as `table.column`" in text
     assert "`flag_rates.labels`" in text
     assert "share-of-true rate — say if" not in text
+
+
+def _join_candidates() -> str:
+    text = SKILL.read_text(encoding="utf-8")
+    start = text.index("**Join candidates (tested, not written).**")
+    return text[start:text.index("Never accept them all unasked")]
+
+
+def test_join_candidates_are_listed_in_the_chat_before_the_card():
+    s = _join_candidates()
+    assert "Show every join before asking about any of them" in s
+    assert "| # | Join" in s and "leads.converted_contact_id → contacts.id" in s
+    assert "evidence.match_rate" in s and "low_overlap" in s
+
+
+def test_join_candidate_group_options_preview_the_joins_they_add():
+    s = _join_candidates()
+    assert "each option's `preview` lists every join that option adds" in s
+    assert "Never offer a numbered range" in s
+    assert "Add all remaining" in s and "Add none" in s
