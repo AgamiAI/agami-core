@@ -5,8 +5,15 @@ when_to_use: "Use for BOTH model curation and trust review. Curation: 'open the 
 argument-hint: "[review | preseed | rule1] — go straight to the sign-off review; no arg shows the overview"
 allowed-tools:
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
   - Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(AGAMI_SQL_MAX_ROWS=* bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/py *)
+  - Bash(AGAMI_PROFILE=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  - Read(/${CLAUDE_PLUGIN_ROOT}/**)
 ---
 
 # agami model

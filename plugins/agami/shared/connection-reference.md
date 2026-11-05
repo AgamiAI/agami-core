@@ -40,15 +40,15 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 | `cli` postgres | `PGPASSFILE="<artifacts_dir>/local/.pgpass" psql -h <host> -U <user> -d <db> -c 'SELECT 1' --csv` |
 | `cli` mysql | `mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix="_<profile>" -e 'SELECT 1' --batch` |
 | `cli` snowflake | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
-| `python` bigquery | `AGAMI_PROFILE="<profile>" "$PY" -m execute_sql --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
+| `python` bigquery | `AGAMI_PROFILE="<profile>" bash "<plugin_root>/scripts/py" -m execute_sql --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
 | `cli` sqlite | `sqlite3 -header -csv "<path>" 'SELECT 1'` — **always pass `-header`** so result CSVs carry column names (without it `format-table` treats row 1 as the header). |
 | `duckdb` | `duckdb -init "$init_file" -c 'SELECT 1' --csv` |
-| `python` | `AGAMI_PROFILE="<profile>" "$PY" -m execute_sql --sql 'SELECT 1'` |
+| `python` | `AGAMI_PROFILE="<profile>" bash "<plugin_root>/scripts/py" -m execute_sql --sql 'SELECT 1'` |
 
 **`python -m execute_sql` CLI surface** — exhaustive, read before invoking:
 
 ```
-"$PY" -m execute_sql [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE | --batch PLAN) [--manifest PATH] [--area AREA] [--build-profile]
+bash "<plugin_root>/scripts/py" -m execute_sql [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE | --batch PLAN) [--manifest PATH] [--area AREA] [--build-profile]
 ```
 
 - **`--batch PLAN`** runs a JSON list of `{id, sql | sql_file, out, area?}` in one process: the semantic model is resolved once and the connection is kept open across the items (Postgres, Redshift, Supabase and SQLite; the other engines still connect per item), while every item goes through the same guard on its own. Each item's CSV goes to `out` (empty when refused or failed; a relative `out` or `sql_file` resolves from the **current directory**, not the plan's folder, and the manifest records each `out` as an absolute path), its outcome to `<out>.run.json` in `run.json`'s shape (`status`, `exit`, `kind`, `rule`, `detail`, and `database_error` for a failed item), and the manifest (`<plan>.manifest.json`, or `--manifest`) lists them all; stdout carries the manifest. A malformed item is recorded as failed (exit `2`) and the rest still run, and the manifest is written however the run ends. Exit `0` when every item ran, else the first non-ok item's single-statement exit code. Reconcile's statement check uses it for a row's probes.
@@ -209,7 +209,7 @@ PY="$(bash "<plugin_root>/scripts/py" -c 'import sys; print(sys.executable)' | t
 (`py` resolves it the way the `sm` wrapper does — `$AGAMI_PYTHON`, then `.config`'s `tool_paths.python3`, then `python3`/`python` on PATH, never the Windows Store stub — with no Python needed to find it. Same interpreter the introspection engine uses. Keeping them identical means the driver is present wherever a DB connection is opened.)
 
 ```bash
-"$PY" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
 ```
 
 `execute_sql.py` reads `<artifacts_dir>/local/credentials` itself, opens a connection via `psycopg2` / `pymysql` / `sqlite3` based on the profile's `type` field, runs the SQL, emits RFC 4180 CSV on stdout. Exit codes communicate the failure category (config, driver missing, connect error, execution error). See [`plugins/agami/scripts/README.md`](../scripts/README.md) for full usage.
@@ -306,7 +306,7 @@ Install snowsql: see <https://docs.snowflake.com/en/user-guide/snowsql-install-c
 
 ```bash
 pip install snowflake-connector-python
-"$PY" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
 ```
 
 `execute_sql.py` handles Snowflake natively when `type=snowflake`. Connection params: `account`, `user`, `password` (or `authenticator` for SSO), `warehouse`, `database`, `schema`, `role`. All optional except `account` and `user`; either `password` or `authenticator` is required.
@@ -333,7 +333,7 @@ pip install google-cloud-bigquery
 
 # Run a query — execute_sql.py loads the service-account JSON itself and
 # never puts credentials on the Bash command line.
-"$PY" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
 ```
 
 `execute_sql.py` handles BigQuery natively when `type=bigquery`. Connection params (read from the credentials profile):
@@ -402,10 +402,10 @@ When CLI tools are not available, use the bundled runtime helper:
 
 ```bash
 # Single-line SQL via --sql
-"$PY" -m execute_sql --sql "SELECT COUNT(*) FROM orders"
+bash "<plugin_root>/scripts/py" -m execute_sql --sql "SELECT COUNT(*) FROM orders"
 
 # Multi-line / quote-heavy SQL via --sql-file (preferred)
-"$PY" -m execute_sql --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
 ```
 
 `execute_sql.py` reads `<artifacts_dir>/local/credentials` itself (with chmod check) and connects via `psycopg2` / `pymysql` / `sqlite3`. The visible Bash command contains no credentials. SQL is passed via `--sql-file` (preferred for non-trivial queries) so single quotes, backticks, `$`, and `\` in the SQL don't get mangled by the shell.
@@ -468,7 +468,7 @@ When introspecting databases, exclude system schemas:
 - **NEVER** put passwords in any visible Bash command — not in `export PGPASSWORD='...'`, not in `mysql -p<password>`, not in stdin heredocs that interpolate the password. Hosts render Bash tool calls in their UI; the password leaks into the chat. Use the auth files generated by `scripts/setup_pgauth.py`:
   - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
   - mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
-  - Python driver: `"$PY" -m execute_sql --sql-file ...` (reads creds internally; never echoes them)
+  - Python driver: `bash "<plugin_root>/scripts/py" -m execute_sql --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing
 - **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `<artifacts_dir>/local/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.
 - **NEVER** generate DDL or DML statements (`DROP`, `DELETE`, `INSERT`, `UPDATE`, `ALTER`, etc.)

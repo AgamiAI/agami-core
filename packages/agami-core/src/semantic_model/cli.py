@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -156,6 +157,53 @@ def cmd_context(args) -> int:
 def cmd_bundle(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(L.get_subject_area_bundle(org, args.area))
+    return 0
+
+
+def _live_items(objs) -> list:
+    return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
+
+
+def cmd_enrich_input(args) -> int:
+    """Everything an agami-enricher subagent needs for one subject area, in one file: the area's
+    bundle and up to 5 sample rows per table (only declared columns that are neither hidden nor
+    flagged sensitive, never a star).
+
+    The main chat runs this, a pre-approved `sm` call, so the enricher needs no commands of its own:
+    a subagent doesn't get the skill's pre-approvals, and a live run showed every one of an
+    enricher's own `sm` and sample-query calls stopping for permission in Manual mode."""
+    from . import dialects as D
+    from . import introspect as INTRO
+    org = L.load_datasource(args.root)
+    area = next((a for a in org.subject_areas if a.name == args.area), None)
+    if area is None:
+        _print_json({"error": "unknown_area", "area": args.area,
+                      "valid_areas": [a.name for a in org.subject_areas]})
+        return 2
+    dialect = D.get_dialect(org.storage_connections[0].storage_type)
+    runner = INTRO.make_execute_sql_runner(args.profile)
+    tables, errors = [], []
+    for t in _live_items(area.tables_defined):
+        cols = _live_items(t.columns)
+        readable = [c.name for c in cols if not c.sensitive]
+        entry = {"table": t.name, "schema": t.schema_name, "description": t.description or "",
+                 "columns": [{"name": c.name, "type": c.type, "description": c.description or "",
+                              "sensitive": bool(c.sensitive)} for c in cols],
+                 "sample": []}
+        if readable:
+            select = (f"SELECT {', '.join(dialect.quote_ident(c) for c in readable)} "
+                      f"FROM {dialect.qualified(t.schema_name, t.name)}")
+            try:
+                entry["sample"] = [dict(r) for r in runner(dialect.limited(select, args.rows))]
+            except Exception as exc:  # noqa: BLE001 — one unreadable table is noted, not fatal
+                errors.append({"table": t.name, "error": str(exc)[:300]})
+        tables.append(entry)
+    out = Path(args.out).expanduser()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"area": area.name, "bundle": L.get_subject_area_bundle(org, area.name),
+                               "tables": tables}, default=str, indent=1), encoding="utf-8")
+    _print_json({"area": area.name, "tables": len(tables),
+                 "sampled": sum(1 for t in tables if t["sample"]), "errors": errors, "out": str(out)})
     return 0
 
 
@@ -507,6 +555,65 @@ def cmd_model_tree(args) -> int:
     from . import curate
     org = L.load_datasource(args.root, include_rejected=True)
     _print_json(curate.model_tree(org))
+    return 0
+
+
+# Each progress-log line, in the person's words: (pattern, phrase, unit). The engine's own wording
+# (`columns+grain 30/52`) is for the engine; a person reads "Reading columns … 30/52 tables".
+_PROGRESS_PHRASES = (
+    (re.compile(r"^discovered (\d+) tables"), "Found {0} tables", None),
+    (re.compile(r"^columns\+grain (\d+)/(\d+)"), "Reading columns", "tables"),
+    (re.compile(r"^relationships: declared FK (\d+)/(\d+)"), "Checking joins", "keys"),
+    (re.compile(r"^building relationships"), "Working out the joins", None),
+    (re.compile(r"^join candidates"), "Testing possible joins", None),
+    (re.compile(r"^done: (\d+) tables, (\d+) relationships"), "Done: {0} tables, {1} joins", None),
+)
+
+
+def _progress_line(raw: str) -> dict:
+    """One progress-log line as a person's line, with an 8-cell bar drawn from its own counts,
+    rounded down so the bar is full only at the end. Never an estimate: no count, no bar."""
+    for pattern, phrase, unit in _PROGRESS_PHRASES:
+        m = pattern.match(raw)
+        if not m:
+            continue
+        if unit:
+            n, total = int(m.group(1)), int(m.group(2))
+            filled = (8 * n) // total if total else 0
+            bar = "▰" * filled + "▱" * (8 - filled)
+            return {"line": f"{phrase} {bar} {n}/{total} {unit}", "n": n, "total": total,
+                    "done": False}
+        return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:")}
+    return {"line": raw, "done": False}
+
+
+def cmd_progress(args) -> int:
+    """The build's latest progress line, ready to post, from <root>/.introspect/progress.log.
+
+    With --wait N it returns as soon as the log moves on, or after N seconds. A skill loops on it
+    while the build runs in the background: each call is a pre-approved `sm` command that keeps the
+    turn open, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later
+    command would stop for permission."""
+    log = Path(args.root).expanduser() / ".introspect" / "progress.log"
+
+    def last() -> str:
+        try:
+            lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        except OSError:
+            return ""
+        return lines[-1] if lines else ""
+
+    start = last()
+    deadline = time.monotonic() + max(0.0, args.wait)
+    current = start
+    while args.wait and current == start and not current.startswith("done:") \
+            and time.monotonic() < deadline:
+        time.sleep(0.5)
+        current = last()
+    if not current:
+        _print_json({"line": "", "done": False, "started": False})
+        return 0
+    _print_json({**_progress_line(current), "started": True, "changed": current != start})
     return 0
 
 
@@ -2186,6 +2293,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", required=True, help="the enricher's result JSON")
     sp.add_argument("--area", required=True, help="the subject area the enricher described")
     sp.set_defaults(func=cmd_apply_enrichment)
+
+    sp = sub.add_parser("enrich-input", help="one area's bundle and 5-row samples (no sensitive columns) in one file, for an agami-enricher subagent")
+    sp.add_argument("root")
+    sp.add_argument("--area", required=True)
+    sp.add_argument("--profile", required=True)
+    sp.add_argument("--out", required=True, help="where to write it (under <artifacts_dir>/local/tmp/)")
+    sp.add_argument("--rows", type=int, default=5)
+    sp.set_defaults(func=cmd_enrich_input)
+
+    sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.add_argument("--wait", type=float, default=0.0,
+                    help="wait up to this many seconds for the next line (default 0: answer now)")
+    sp.set_defaults(func=cmd_progress)
 
     sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
     sp.add_argument("root")

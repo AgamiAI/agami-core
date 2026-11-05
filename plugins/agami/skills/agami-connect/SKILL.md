@@ -5,8 +5,15 @@ when_to_use: "Run when the user installs the plugin for the first time, asks 'ho
 argument-hint: "[sample | reintrospect | profile NAME]"
 allowed-tools:
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
+  - Bash("${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
   - Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(AGAMI_SQL_MAX_ROWS=* bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/py *)
+  - Bash(AGAMI_PROFILE=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
+  - Read(/${CLAUDE_PLUGIN_ROOT}/**)
 ---
 
 # agami connect
