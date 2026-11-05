@@ -12,6 +12,8 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+## [0.9.22] — 2026-11-05
+
 ### Changed
 
 - **The activity log records only the arguments core declares on its own tools (#625).** For
