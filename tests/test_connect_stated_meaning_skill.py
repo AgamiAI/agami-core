@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from skill_docs import skill_text  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
-    encoding="utf-8")
+SKILL = skill_text("agami-connect")
 ENRICH = SKILL.split("### 2d — Caveats")[1].split("### 2e")[0]
 
 

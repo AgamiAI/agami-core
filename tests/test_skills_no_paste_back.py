@@ -21,6 +21,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from skill_docs import skill_of  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "plugins" / "agami" / "skills"
 
@@ -99,12 +101,12 @@ def violations_in(text: str) -> list[tuple[int, str]]:
 def find_violations(skills_dir: Path) -> list[str]:
     """`<skill>/SKILL.md:<line>: <text>` for every violation under `skills_dir`, allow-list applied."""
     found = []
-    for skill_md in sorted(skills_dir.glob("*/SKILL.md")):
-        skill = skill_md.parent.name
+    for skill_md in sorted([*skills_dir.glob("*/SKILL.md"), *skills_dir.glob("*/references/*.md")]):
+        skill = skill_of(skill_md)
         for number, line in violations_in(skill_md.read_text(encoding="utf-8")):
             if any(skill == s and needle in line for s, needle in _ALLOWED):
                 continue
-            found.append(f"{skill}/SKILL.md:{number}: {line[:160]}")
+            found.append(f"{skill_md.relative_to(skills_dir)}:{number}: {line[:160]}")
     return found
 
 

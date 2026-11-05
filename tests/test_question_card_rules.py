@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import skill_docs, skill_of  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGIN = REPO_ROOT / "plugins" / "agami"
 SKILLS_DIR = PLUGIN / "skills"
@@ -26,7 +28,7 @@ _RULE_5A = (
 
 
 def _skills() -> list[Path]:
-    return sorted(SKILLS_DIR.glob("*/SKILL.md"))
+    return skill_docs()
 
 
 def test_rule_5a_is_in_the_shared_doc() -> None:
@@ -38,7 +40,7 @@ def test_rule_5a_is_in_the_shared_doc() -> None:
 
 def test_no_option_asks_the_person_to_type_in_other() -> None:
     offenders = [
-        f"{p.parent.name}: {m.group(0)}"
+        f"{skill_of(p)}: {m.group(0)}"
         for p in _skills()
         for m in _TYPE_IN_OTHER_OPTION.finditer(p.read_text())
     ]
@@ -50,7 +52,7 @@ def test_every_other_fallback_answers_questions_first() -> None:
     for p in _skills():
         for paragraph in re.split(r"\n\s*\n", p.read_text()):
             if _FALLBACK.search(paragraph) and _RULE_5A not in paragraph:
-                offenders.append(f"{p.parent.name}: {paragraph[:80]!r}")
+                offenders.append(f"{skill_of(p)}: {paragraph[:80]!r}")
     assert not offenders, offenders
 
 
@@ -61,8 +63,8 @@ def test_no_two_questions_in_a_skill_share_a_header():
     for p in _skills():
         headers = re.findall(r"header `([^`]+)`", p.read_text())
         for h in sorted({h for h in headers if headers.count(h) > 1}):
-            if (p.parent.name, h) not in allowed and not re.search(r"\d|<", h):
-                offenders.append(f"{p.parent.name}: {h}")
+            if (skill_of(p), h) not in allowed and not re.search(r"\d|<", h):
+                offenders.append(f"{skill_of(p)}: {h}")
     assert not offenders, offenders
 
 
@@ -90,7 +92,7 @@ def _read_only_passages(text: str) -> list[str]:
 
 def test_no_read_only_page_asks_for_a_pasted_block() -> None:
     offenders = [
-        f"{p.parent.name}: {hit.group(0)!r}"
+        f"{skill_of(p)}: {hit.group(0)!r}"
         for p in _skills()
         for passage in _read_only_passages(p.read_text())
         for hit in _PASTE_BACK.finditer(passage)
@@ -125,7 +127,7 @@ def test_no_quoted_card_question_names_a_table_column_identifier() -> None:
         for line in path.read_text(encoding="utf-8").splitlines():
             for m in _IDENTIFIER_IN_QUESTION.finditer(line):
                 if _ABOUT_THE_SPELLING not in m.group(0):
-                    hits.append(f"{path.parent.name}: {m.group(0)[:100]}")
+                    hits.append(f"{skill_of(path)}: {m.group(0)[:100]}")
     assert not hits, hits
 
 

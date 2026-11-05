@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import skill_text  # noqa: E402
+
 REPO = Path(__file__).resolve().parent.parent
 SM = REPO / "plugins" / "agami" / "scripts" / "sm"
 SCRIPTS = REPO / "plugins" / "agami" / "scripts"
@@ -137,7 +139,7 @@ def test_dev_checkout_uses_editable(tmp_path):
 
 
 def test_skill_delegates_install_to_sm():
-    txt = SKILL.read_text()
+    txt = skill_text("agami-connect")
     assert "packages/agami-core[model]" not in txt  # no hardcoded dev-path install command
     assert 'scripts/sm" install' in txt
 

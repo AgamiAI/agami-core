@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from skill_docs import skill_text  # noqa: E402
+
 pytest.importorskip("pydantic")
 pytest.importorskip("sqlglot")
 
@@ -106,8 +108,7 @@ def test_a_binding_for_an_engine_with_no_dialect_never_warns():
     assert _codes(org) == []
 
 
-SKILL = (REPO_ROOT / "plugins" / "agami" / "skills" / "agami-connect" / "SKILL.md").read_text(
-    encoding="utf-8")
+SKILL = skill_text("agami-connect")
 
 
 def test_the_skill_binds_a_share_as_a_ratio_of_totals_even_from_a_one_row_formula():
