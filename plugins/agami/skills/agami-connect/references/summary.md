@@ -26,6 +26,8 @@ agami-connect just ran. Here's what we found:
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
 
+**Then, where the host can draw a visual in the chat, the overview card** ([`shared/overview-card.md`](../../../shared/overview-card.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. It comes after the block above (which stays: it is the record in the transcript), and a click on a tile carries on in the chat. Where the host can't draw one, the block alone is the summary.
+
 When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
 Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards; when that review ends, come back here to Phase 8, the starter questions, rather than agami-model's overview card, so onboarding still ends on a first question) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Show the full view` (→ `/agami-model`'s Phase 5: the model explorer page served from localhost; give the URL, then this card again) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.

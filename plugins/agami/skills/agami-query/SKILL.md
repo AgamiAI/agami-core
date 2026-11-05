@@ -3,6 +3,10 @@ name: agami-query
 description: "Answers natural-language questions about the user's database. Loads the agami semantic model (subject areas, tables, columns, relationships with join cardinality, entities, metrics) and few-shot examples from <artifacts_dir>/<profile>/, generates SQL via the examples-first traversal (pick subject area → match examples → resolve entities/metrics → compound table context), executes it locally via the user's chosen tool (psql / mysql / snowsql / sqlite3 native CLI, DuckDB binary, or the Python driver `execute_sql.py` — which runs the scope gates and reports fan-trap/chasm-trap and aggregation findings on the receipt), returns results as a markdown table with optional CSV export, and renders Chart.js HTML charts on request. All execution is local — no data leaves the machine."
 when_to_use: "Use when the user asks 'how many', 'show me', 'top N', 'trend over time', 'compare', 'breakdown by', 'group by', 'average', or any other data question against their configured database. Also use for CSV export ('export this'), chart rendering ('make that a bar chart'), or to follow up on a previous result ('drill into the EU region')."
 argument-hint: "[question] [--csv] [--chart bar|line|pie|doughnut|scatter]"
+allowed-tools:
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
 ---
 
 # agami query-database

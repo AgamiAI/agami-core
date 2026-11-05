@@ -3,6 +3,10 @@ name: agami-model
 description: "The semantic model in the chat: what needs sign-off and the subject areas with their tables, then a card — review what needs sign-off (approve / reject the AI-proposed metrics, entities and guessed joins; Rule 1 — a query using an unsigned metric still answers but carries a warning until it's approved), hide tables or columns from queries, look up a table or metric, or show the full view (the model explorer page: browse with live search, edit descriptions/metrics/entities/joins, add metrics, edit datasource.md). Every change is applied through the curation engine and gated by the validator before it touches the YAML. (This skill absorbed the former `/agami-review`.)"
 when_to_use: "Use for BOTH model curation and trust review. Curation: 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'I don't want PII columns', 'add a metric', 'edit datasource.md', '/agami-model'. Review / sign-off: 'open the review dashboard', 'review my model', 'what needs review', 'sign off the metrics', 'approve the metrics', 'walk the review queue', '/agami-review' (now folded in here) — or after agami-connect's Phase 4 sign-off gate or Phase 7 summary prompts to review or inspect the model. Also use when the user replies to a previously-served full view with its back-channel block (exclude tables: … / curate-ops: … / new-metrics: … / done)."
 argument-hint: "[review | preseed | rule1] — go straight to the sign-off review; no arg shows the overview"
+allowed-tools:
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(AGAMI_SQL_MAX_ROWS=* bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
+  - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" *)
 ---
 
 # agami model
@@ -73,7 +77,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 Post the overview, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
-2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more.
+2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more. **Where the host can draw a visual in the chat, show the overview card in place of this table** ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here); keep the table where it can't.
 3. When `count` or `suspected_count` > 0, one line: *"<n> columns look like personal data and are still queryable."*
 
 Then call AskUserQuestion, one question (header `Model`), *"What would you like to do with the model?"*:

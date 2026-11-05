@@ -20,9 +20,17 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
 
 `--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
-**On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung.** Two ways to keep it legible, in order of preference:
+**On a server database the build takes from seconds to many minutes, and the command prints nothing until it returns, which reads as hung.** So on every server database (anything but SQLite and DuckDB, which return in seconds) run it **in the background and show progress from its log**:
 
-1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+1. **One background call.** Bash with `run_in_background: true`, and a `description` the person can read in the app's Background tasks pane, in their words: *"Read the tables (Snowflake, 84 tables)"*. Never end your turn while it runs: the app tells the person when a turn ends, and that should mean their input is needed or the work is done.
+2. **Say once where to watch**, the first time a background step starts in a run: *"Reading your tables in the background. In the Desktop app, ⋮ → Background tasks shows it live."* (Leave out the second sentence outside the Desktop app.)
+3. **Post progress from the log**, `<artifacts_dir>/<profile>/.introspect/progress.log` (flushed, about every 10% of each phase: `discovered 52 tables …`, `columns+grain 30/52`, `relationships: declared FK 80/187`, `done`). Watch it with the Monitor tool where the host has it, otherwise `tail -n 1` it every 15–20 seconds. Post a line when the log's last line changes, at most one every 20 seconds, in words, with a bar drawn from the log's own counts (8 cells, filled = round(8 × n / total)): *"Reading columns ▰▰▰▰▰▱▱▱ 30/52 tables"*, *"Checking joins ▰▰▰▱▱▱▱▱ 80/187"*. A line with no count gets no bar. Never draw a bar from an estimate.
+4. **Update the onboarding step's label** with the same count while it runs (*"Read the tables and joins — 30 of 52 tables"*), and with the final numbers when it ends.
+5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.
+
+**Where background commands aren't available, a batched build** keeps it legible instead:
+
+1. **Batched build (30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
    ```bash
    split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
    for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
@@ -32,9 +40,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
    done
    ```
    (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
-2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `relationships: declared FK 80/187`, `done`.
-
-(For a small DB introspect returns in seconds — no batching or backgrounding needed.)
+(`--progress <file>` moves the log elsewhere. SQLite and DuckDB run in the foreground: they return in seconds.)
 
 It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, other unique keys→`unique_keys`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`, one-to-one when the join is on a whole key on both sides; a join only the data shows is unique keeps its label and lands `unreviewed` with a "looks one-to-one, confirm" note), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII (by whole-word column name, email-valued columns, and personal keys inside JSON values, named in a column caveat), cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 

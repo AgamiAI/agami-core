@@ -510,6 +510,16 @@ def cmd_model_tree(args) -> int:
     return 0
 
 
+def cmd_overview(args) -> int:
+    """The numbers an overview card shows: per subject area its tables, columns described, metrics
+    and joins (and how many await sign-off) and examples, plus totals. One call, so a card never
+    adds up model-tree, coverage and review-items itself."""
+    from . import curate
+    org = L.load_datasource(args.root, include_rejected=True)
+    _print_json(curate.overview(org, args.root))
+    return 0
+
+
 def cmd_coverage(args) -> int:
     """Per-table column-description coverage + the enrichment-completeness verdict.
     The skill runs this at the end of Phase 2 (and reports it in the Phase 7 summary):
@@ -2085,6 +2095,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_model_tree)
+
+    sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
+    sp.add_argument("root")
+    sp.set_defaults(func=cmd_overview)
 
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
