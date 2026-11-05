@@ -202,7 +202,7 @@ If the user's intent is to re-display the most recent chart:
 
 1. Read `<artifacts_dir>/local/query_log.jsonl` (each line is a JSON object) and take the last non-empty line **whose `status` is `"ok"` or absent** — the log also records refused and failed executions, and neither of those rendered a chart. Entries written before the log carried a `status` field have none; treat those as `ok`.
 2. Look at the `chart_path` field. Possible cases:
-   - **`chart_path` set AND the file exists on disk** → serve it from localhost, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<path>" --minutes 30` with `run_in_background`, and read its first line, `{"url": …}`. Surface a one-liner in chat:
+   - **`chart_path` set AND the file exists on disk** → serve it from localhost, `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<path>" --minutes 30 --open` with `run_in_background`, and read its first line, `{"url": …}`. Surface a one-liner in chat:
      ```
      Reopened: http://localhost:<port>/<name> (open for 30 minutes)
      ```
@@ -772,7 +772,7 @@ If the user pinned a chart type via `--chart bar` (etc.), the LLM still chooses 
 Never open the file by its path or as a `file://` page: the Code tab's built-in browser shows a local file outside the project folder as a frozen snapshot. Serve it:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/charts/$profile/<ts>.html" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/charts/$profile/<ts>.html" --minutes 30 --open
 ```
 
 Run it with `run_in_background` and read its first line, `{"url": "http://localhost:<port>/<name>"}`. Post the link as plain text:

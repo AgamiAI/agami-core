@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Serve one HTML page, and the files beside it, from localhost for a short while.
 
-    serve_page.py <file.html> [--minutes 30]
+    serve_page.py <file.html> [--minutes 30] [--open]
 
 Prints one JSON line, {"url": "http://localhost:<port>/<name>"}, then answers requests until the
 time is up and exits 0. This is the optional "full view" behind a question card: a page is never
 opened as file://, because the Code tab's built-in browser shows a local file outside the project
 folder as a frozen snapshot.
+
+With --open the page also opens in the system's default browser, and the line carries
+"opened": true or false. A link clicked in the Desktop app's chat opens in its narrow built-in
+pane; a whole-model page reads better in a full browser window. False (a headless machine, a
+remote session) is not an error: the person still has the link.
 
 The server binds 127.0.0.1 only, on a random port. It serves the page and, beside it, regular
 files with a web-asset extension (html css js svg png jpg json) and nothing else, and it refuses
@@ -22,6 +27,7 @@ import json
 import mimetypes
 import sys
 import threading
+import webbrowser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -103,11 +109,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     do_POST = do_PUT = do_DELETE = do_PATCH = _refuse
 
 
+def _open_in_browser(url: str) -> bool:
+    """Open `url` in the default browser; False when none can be started, never an exception."""
+    try:
+        return bool(webbrowser.open(url, new=2))
+    except webbrowser.Error:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Serve one page from localhost for a short while.")
     p.add_argument("page", help="The HTML file to serve; files beside it are served too.")
     p.add_argument(
         "--minutes", type=float, default=30.0, help="How long to keep serving (default 30)."
+    )
+    p.add_argument(
+        "--open", action="store_true", help="Also open the page in the default browser."
     )
     args = p.parse_args(argv)
     page = Path(args.page).expanduser().resolve()
@@ -118,7 +135,12 @@ def main(argv: list[str] | None = None) -> int:
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        print(json.dumps({"url": f"http://localhost:{server.port}/{quote(page.name)}"}), flush=True)
+        url = f"http://localhost:{server.port}/{quote(page.name)}"
+        line: dict[str, Any] = {"url": url}
+        if args.open:
+            # The socket is already listening, so the browser's first request is answered.
+            line["opened"] = _open_in_browser(url)
+        print(json.dumps(line), flush=True)
         worker.join(max(args.minutes, 0) * 60)
     except KeyboardInterrupt:
         pass

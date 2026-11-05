@@ -198,3 +198,74 @@ def test_the_printed_link_reaches_a_page_whose_name_needs_escaping(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+def _serve_once(tmp_path, monkeypatch, opener) -> dict:
+    """Run main() in process with --open and a stand-in for the browser; return its first line."""
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    monkeypatch.setattr(serve_page.webbrowser, "open", opener)
+    page = tmp_path / "p.html"
+    page.write_text("<b>x</b>", encoding="utf-8")
+    out: list[str] = []
+
+    class _Capture:
+        def write(self, s: str) -> None:
+            out.append(s)
+
+        def flush(self) -> None:
+            pass
+
+    monkeypatch.setattr(sys, "stdout", _Capture())
+    t = threading.Thread(target=lambda: serve_page.main([str(page), "--minutes", "0.01", "--open"]))
+    t.start()
+    t.join(timeout=10)
+    return json.loads("".join(out).splitlines()[0])
+
+
+def test_open_opens_the_page_in_the_default_browser(tmp_path, monkeypatch):
+    """A link clicked in the Desktop chat lands in its narrow built-in pane; --open uses the
+    person's own browser, and the line says it did."""
+    seen: list[str] = []
+    line = _serve_once(tmp_path, monkeypatch, lambda url, new=0: seen.append(url) or True)
+    assert seen == [line["url"]]
+    assert line["opened"] is True
+
+
+def test_open_without_a_browser_still_gives_the_link(tmp_path, monkeypatch):
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    def no_browser(url, new=0):
+        raise serve_page.webbrowser.Error("no runnable browser")
+
+    line = _serve_once(tmp_path, monkeypatch, no_browser)
+    assert line["opened"] is False
+    assert line["url"].startswith("http://localhost:")
+
+
+def test_without_open_no_browser_is_started(tmp_path, monkeypatch):
+    """The default stays quiet: tests and scripts that serve a page never pop a window."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    monkeypatch.setattr(
+        serve_page.webbrowser, "open", lambda *a, **k: pytest.fail("browser opened")
+    )
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    assert serve_page.main([str(page), "--minutes", "0"]) == 0
+
+
+def test_every_skill_that_serves_a_page_opens_it():
+    """Each page a skill serves opens in the person's browser, not only the model's full view."""
+    plugin = SCRIPT.parent.parent
+    missing = []
+    for doc in [*plugin.glob("skills/*/SKILL.md"), *plugin.glob("shared/*.md")]:
+        for line in doc.read_text(encoding="utf-8").splitlines():
+            if re.search(r"serve_page\.py\s+\S+\s+--minutes", line) and "--open" not in line:
+                missing.append(f"{doc.parent.name}/{doc.name}: {line.strip()[:90]}")
+    assert not missing, missing

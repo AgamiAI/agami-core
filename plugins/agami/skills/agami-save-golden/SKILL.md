@@ -212,7 +212,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
 Serve it from localhost and give the person the URL, never a local file path:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html" --minutes 30 --open
 ```
 
 Run it with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every item: `<url>`. Make changes on the card here."* and ask the `Datasets` card again in the same turn; nothing waits for a pasted block.

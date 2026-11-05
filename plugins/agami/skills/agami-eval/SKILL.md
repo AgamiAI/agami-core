@@ -176,7 +176,7 @@ No `(Recommended)`: what to do about a failure is the person's call. Where AskUs
 
 | Answer | Do |
 |---|---|
-| Look at the failures | Serve `report` (the `.html` the run just rendered) from localhost with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<report>" --minutes 30`, run with `run_in_background`, and give the person the `url` from its first line, never a local file path. If `report` is empty the render did not land: say so and name `artifact`, the same run as JSON. Then the card again, without this option. |
+| Look at the failures | Serve `report` (the `.html` the run just rendered) from localhost with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<report>" --minutes 30 --open`, run with `run_in_background`, and give the person the `url` from its first line, never a local file path. If `report` is empty the render did not land: say so and name `artifact`, the same run as JSON. Then the card again, without this option. |
 | Fix one | A card with two questions. Header `Case`, *"Which case?"*: the first failures in the order the run emitted them, up to 4 (`item_key` and its `reason` in a few words); "Other" takes any other `item_key`. Header `Which side`, *"What is wrong?"*: **agami's answer** (the semantic model or the prompt examples need a fix) / **The answer key** (the case itself is wrong). |
 | Done | End the turn. |
 
