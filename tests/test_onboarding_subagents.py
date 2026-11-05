@@ -42,7 +42,9 @@ def test_each_agent_is_read_only_and_never_asks(name):
     assert not tools & {"Write", "Edit", "NotebookEdit", "AskUserQuestion", "Agent"}, tools
     assert "never asks the person anything" in meta["description"]
     assert "**Never ask the person anything.**" in body
-    assert "One JSON object, nothing else after it" in body
+    # the reader returns its JSON; the enricher writes it to a file the engine applies whole
+    assert ("One JSON object, nothing else after it" in body if name == "agami-doc-reader"
+            else "Write one JSON object to `result_path`" in body)
 
 
 def test_the_doc_reader_cannot_run_commands_and_leaves_parsed_files_alone():
@@ -55,7 +57,8 @@ def test_the_doc_reader_cannot_run_commands_and_leaves_parsed_files_alone():
 
 def test_the_enricher_never_writes_and_reads_the_shared_rules():
     _, body = _agent("agami-enricher")
-    assert "1. **Never write.**" in body
+    assert "1. **Never write to the model.**" in body
+    assert "The only files you write are your sample SQL files and `result_path`." in body
     assert "skills/agami-connect/references/enrich.md" in body  # one set of rules, not a copy
     assert "never run two queries at once" in body
     assert "--build-profile" in body
@@ -73,7 +76,8 @@ def test_1_5_gives_each_document_its_own_reader_in_the_background():
 def test_2a_uses_enrichers_only_on_a_larger_model_and_applies_with_allow():
     text = (REFS / "enrich.md").read_text(encoding="utf-8")
     assert "**2 or more subject areas and more than 30 tables**" in text
-    assert f"--allow {ENRICH_FIELDS} --area <area>" in text
+    assert 'scripts/sm" apply-enrichment "$ROOT" --area <area>' in text
+    assert "never split the file yourself" in text  # no glue script between agent and engine
     assert "never two writes at once" in text
     assert "<plugin_root>/agents/agami-enricher.md" in text
 
@@ -122,3 +126,56 @@ def test_allow_still_takes_the_ops_file_as_a_positional(model, tmp_path, capsys)
     f.write_text(json.dumps([_edit("agami-example")]))
     rc = cli.main(["curate", str(model), "--allow", ENRICH_FIELDS, str(f)])
     assert rc == 0, capsys.readouterr().out
+
+
+def _result(area: str, **over) -> dict:
+    base = {
+        "area": area,
+        "column_descriptions": f"{area}.orders.status\tOrder status: 0 pending, 1 paid (handbook).\n",
+        "curate_ops": [_edit(area)],
+        "entities": [{"name": "buyer", "plural": "buyers", "other_names": [],
+                      "maps_to": [{"table": "customers", "column": "id", "primary": True}],
+                      "confidence": "inferred", "review_state": "unreviewed"}],
+        "metric_ideas": [{"name": "refund rate", "definition": "refunded ÷ paid"}],
+        "questions": ["What does status 3 mean?"],
+    }
+    return {**base, **over}
+
+
+def _apply(model: Path, tmp_path: Path, result: dict, area: str, capsys) -> tuple[int, dict]:
+    f = tmp_path / "result.json"
+    f.write_text(json.dumps(result))
+    rc = cli.main(["apply-enrichment", str(model), "--file", str(f), "--area", area])
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def test_apply_enrichment_applies_one_area_and_passes_the_rest_back(model, tmp_path, capsys):
+    rc, out = _apply(model, tmp_path, _result("agami-example"), "agami-example", capsys)
+    assert rc == 0 and out["applied"] is True, out
+    assert (out["described"], out["edited"], out["entities"]) == (1, 1, 1)
+    assert out["pass_on"]["questions"] == ["What does status 3 mean?"]
+    assert out["pass_on"]["metric_ideas"][0]["name"] == "refund rate"
+
+
+@pytest.mark.parametrize("bad", [
+    {"curate_ops": [_edit("agami-example"),
+                    {"op": "approve", "kind": "metric", "area": "agami-example", "name": "revenue"}]},
+    {"curate_ops": [_edit("agami-example", field="review_state")]},
+    {"entities": {"name": "not a list"}},
+])
+def test_apply_enrichment_checks_everything_before_writing(model, tmp_path, capsys, bad):
+    before = sorted(p.read_text() for p in model.rglob("*.yaml"))
+    rc, out = _apply(model, tmp_path, _result("agami-example", **bad), "agami-example", capsys)
+    assert rc != 0 and out["applied"] is False
+    assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
+
+
+def test_apply_enrichment_refuses_a_file_for_another_area(model, tmp_path, capsys):
+    rc, out = _apply(model, tmp_path, _result("support"), "agami-example", capsys)
+    assert rc == 2 and "not an enricher result for area" in out["error"]
+
+
+def test_a_description_for_an_unknown_area_is_reported_not_written(model, tmp_path, capsys):
+    result = _result("agami-example", column_descriptions="another-area.orders.status\tsomething\n")
+    rc, out = _apply(model, tmp_path, result, "agami-example", capsys)
+    assert rc == 0 and out["described"] == 0 and out["unmatched"]

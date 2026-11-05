@@ -19,12 +19,13 @@ The prompt names:
 - `plugin_root`: the plugin's absolute path. Write it into commands, quoted.
 - `docs`: what the person's documents say about this area (the doc readers' findings), or "none".
 - `datasource_md`: the path of the database's narrative, if there is one.
+- `result_path`: where to write what you found (under `<artifacts_dir>/local/tmp/`).
 
 ## Rules
 
-1. **Never write.** Never run `sm curate`, `sm add`, `sm describe-file`, `sm set-*`, `sm seed-*`,
-   `sm introspect`, or anything that changes the model or `local/`. Never edit a file. Your output is
-   the only thing that leaves.
+1. **Never write to the model.** Never run `sm curate`, `sm add`, `sm describe-file`,
+   `sm apply-enrichment`, `sm set-*`, `sm seed-*`, `sm introspect`, or anything that changes the model.
+   The only files you write are your sample SQL files and `result_path`.
 2. **Read the model only through `sm`:** `bash "<plugin_root>/scripts/sm" bundle "<root>" --area <area>`
    and `bash "<plugin_root>/scripts/sm" context "<root>" --tables <t1> <t2> …`. Never read the YAML.
 3. **Sample with the build profile, one query at a time**, at most 5 rows per table and only the
@@ -45,7 +46,9 @@ The prompt names:
 
 ## What you return
 
-One JSON object, nothing else after it:
+Write one JSON object to `result_path` (a single `cat > "<result_path>" <<'JSON'` … `JSON` heredoc),
+then reply with only the path and one line: *"sales: 18 tables described, 2 metric ideas, 5
+questions"*. The main chat applies the file with one tested command, so it must be exactly this shape:
 
 ```json
 {
