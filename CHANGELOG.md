@@ -86,6 +86,13 @@ below corresponds to one such version.
   (`Reading columns ▰▰▰▰▰▱▱▱ 30/52 tables`) and the onboarding step list counting live. agami-connect,
   agami-model and agami-query pre-approve their own `sm` and `py` calls
   (`allowed-tools`), so a permission prompt no longer lands between two cards.
+- **Your documents are read while the database is.** Each document shared in onboarding (a
+  dictionary, metrics list, spec, report SQL, or a dbt / LookML / Cube project) gets its own
+  `agami-doc-reader` subagent, started in the background the moment its path is given; the findings
+  come back with their sources, and two documents that disagree become a card. A model with 2 or
+  more subject areas and more than 30 tables is described by one `agami-enricher` subagent per area,
+  4 at a time. Subagents only read: the main chat writes, and `sm curate --allow <fields> --area
+  <area>` refuses a batch that does anything but edit those fields in that area.
 - **An overview card.** Where the host can draw a visual in the chat, agami-connect's summary and
   agami-model's overview show one tile per subject area (tables, % described, metrics and joins
   waiting, examples) and one for what needs sign-off; a click carries on in the chat. The numbers

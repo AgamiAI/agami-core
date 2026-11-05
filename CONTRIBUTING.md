@@ -170,6 +170,17 @@ a CLI flag that does not exist, because a summary written weeks later describes 
 remembers building rather than what shipped. You are the only person who will ever have the context
 to write your entry correctly, and that moment is the PR.
 
+## Skills, phase files and subagents
+
+- **A skill longer than about 500 lines keeps its phases in `references/`** and reads each one when
+  the phase starts (agami-connect does). In a phase file write the plugin root as `<plugin_root>`:
+  Claude Code fills `${CLAUDE_PLUGIN_ROOT}` in only in the SKILL.md it loads. Tests read a skill
+  through `tests/skill_docs.py`, so a check still finds its text after a move.
+- **Subagents live in `plugins/agami/agents/`** (`agami-doc-reader`, `agami-enricher`). A subagent
+  can't show question cards, so it only reads and returns data: every decision and every model write
+  stays in the main chat, and an enricher's edits go through `sm curate --allow`, which refuses a
+  batch that does more than edit the allowed fields.
+
 ## A community Discord will land soon
 
 Once it's live, the link will appear here and in [`agami-connect/SKILL.md`](plugins/agami/skills/agami-connect/SKILL.md).

@@ -617,10 +617,34 @@ def cmd_curate(args) -> int:
         return 2
     if isinstance(ops, dict):
         ops = ops.get("ops", [])
+    if args.allow:
+        refused = _ops_outside(ops, {f.strip() for f in args.allow.split(",") if f.strip()}, args.area)
+        if refused:
+            _print_json({"applied": 0, "validated": False, "refused": refused,
+                         "error": "nothing applied: every op must be an edit of an allowed field"
+                                  + (f" in area {args.area}" if args.area else "")})
+            return 1
     _stamp_approve_ops(ops)
     res = curate.apply(args.root, ops, signer=args.signer, role=args.role)
     _print_json(res.as_dict())
     return 0 if res.validated else 1
+
+
+def _ops_outside(ops: Any, fields: set[str], area: Optional[str]) -> list[str]:
+    """The ops in a batch that do more than edit one of `fields` (in `area`, when given).
+
+    A subagent's proposals (agami-enricher) are applied with `--allow`, so a batch that would
+    approve, hide, add or touch another area is refused whole, by the engine rather than by the
+    reader's eye."""
+    if not isinstance(ops, list):
+        return ["the ops file is not a list of ops"]
+    out = []
+    for i, op in enumerate(ops):
+        if not isinstance(op, dict) or op.get("op") != "edit" or op.get("field") not in fields:
+            out.append(f"op {i}: {json.dumps(op)[:120]}")
+        elif area is not None and op.get("area") != area:
+            out.append(f"op {i}: area {op.get('area')!r}, not {area!r}")
+    return out
 
 
 def cmd_approve_queue(args) -> int:
@@ -2136,6 +2160,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "stamps it on the item as its sign-off (an approve needs it), while an edit to what an "
                          "approved item computes or connects sends it back to review as stale")
     sp.add_argument("--role", default=None, help="the signer's role, recorded and stamped with --signer")
+    sp.add_argument("--allow", default=None, metavar="FIELD,FIELD",
+                    help="comma-separated: refuse the whole batch unless every op is an edit of one "
+                         "of these fields (for proposals a subagent returned)")
+    sp.add_argument("--area", default=None,
+                    help="with --allow: refuse the batch unless every op is in this subject area")
     sp.set_defaults(func=cmd_curate, after_parse=lambda a, extra, sp=sp: _one_ops_file(sp, a, extra))
 
     sp = sub.add_parser("history", help="the model's curation log, newest first (what changed, when, by whom, the prior value)")
