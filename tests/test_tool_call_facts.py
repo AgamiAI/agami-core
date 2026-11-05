@@ -608,6 +608,69 @@ def _record(name: str, arguments, **kw):
     )
 
 
+#: A property a consumer adds to one of core's tools, and the schema entry it adds for it.
+_CONSUMER_PROPERTY = "acme_note"
+_CONSUMER_SCHEMA = {"type": "string", "description": "A consumer's own field."}
+
+
+def _execute_sql_extended() -> dict:
+    """`execute_sql` as a consumer serves it through `extra_tools`: core's schema with one property
+    appended, and a handler that strips it before core's runs, so core never sees it as input."""
+    core = tools.TOOLS["execute_sql"]
+    schema = core["inputSchema"]
+    return {
+        **core,
+        "handler": lambda args: core["handler"](
+            {k: v for k, v in args.items() if k != _CONSUMER_PROPERTY}
+        ),
+        "inputSchema": {
+            **schema,
+            "properties": {**schema["properties"], _CONSUMER_PROPERTY: _CONSUMER_SCHEMA},
+        },
+    }
+
+
+def test_a_property_a_consumer_adds_to_a_core_tool_is_not_recorded(served):
+    sent = {"sql": "DELETE FROM orders", "datasource": PROFILE, "area": "sales"}
+    _http(
+        [("execute_sql", {**sent, _CONSUMER_PROPERTY: "kept by the consumer"})],
+        extra_tools={"execute_sql": _execute_sql_extended()},
+    )
+    _record("execute_sql", {**sent, _CONSUMER_PROPERTY: "kept by the consumer"})
+
+    on_transport, direct = _rows(served)
+    for row in (on_transport, direct):
+        assert json.loads(row["arguments"]) == {"values": {"area": "sales"}, "truncated": False}
+
+
+def test_extending_core_s_schema_in_place_does_not_make_a_property_declared(served, monkeypatch):
+    # The shared registry's own schema object, edited after import: the declared set must be the one
+    # core defined, not whatever the schema holds by the time a call is recorded.
+    properties = tools.TOOLS["execute_sql"]["inputSchema"]["properties"]
+    monkeypatch.setitem(properties, _CONSUMER_PROPERTY, _CONSUMER_SCHEMA)
+    sent = {"sql": "DELETE FROM orders", "datasource": PROFILE, "model_version": "v1"}
+    # Over HTTP the SDK now accepts the property, since the served schema declares it.
+    _http([("execute_sql", {**sent, _CONSUMER_PROPERTY: "kept by the consumer"})])
+    _record("execute_sql", {**sent, _CONSUMER_PROPERTY: "kept by the consumer"})
+
+    # Both rows, so the HTTP path can't pass by going missing.
+    assert len(_rows(served)) == 2
+    for row in _rows(served):
+        assert json.loads(row["arguments"])["values"] == {"model_version": "v1"}
+
+
+def test_a_tool_a_consumer_registers_records_every_property_it_was_sent(served):
+    probe = {
+        "handler": lambda args: "{}",
+        "description": "probe",
+        "inputSchema": {"type": "object", "properties": {"top_k": {"type": "integer"}}},
+    }
+    # Undeclared as well as declared: a consumer's tool is recorded as it was sent, as before.
+    _http([("probe", {"top_k": 3, _CONSUMER_PROPERTY: "x"})], extra_tools={"probe": probe})
+
+    assert json.loads(_one(served)["arguments"])["values"] == {"top_k": 3, _CONSUMER_PROPERTY: "x"}
+
+
 def test_example_is_its_own_column_only_on_execute_sql(served):
     example = {"id": "abc123", "use": "followed"}
     _record("execute_sql", {"sql": "SELECT 1", "example": example})

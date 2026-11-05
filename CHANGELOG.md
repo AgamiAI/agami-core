@@ -14,6 +14,16 @@ below corresponds to one such version.
 
 ### Changed
 
+- **The activity log records only the arguments core declares on its own tools (#625).** For
+  `list_datasources`, `get_datasource_schema`, `get_prompt_examples` and `execute_sql`,
+  `tool_calls.arguments` now holds only the properties core's own input schema declares for that
+  tool, less those with a column of their own as before. A property a consumer adds to one of these
+  tools, whether by serving an extended copy through `extra_tools` or by editing the shared `TOOLS`
+  schema, is no longer recorded there: core doesn't know what it holds or which of the consumer's
+  rules apply to it, so recording it is the consumer's job. The declared names are taken when `tools`
+  is imported, before a consumer can extend the schema. The HTTP transport and a direct
+  `record_tool_call` behave the same, and a tool a consumer registers itself is recorded as it was
+  sent, as before.
 - **Editing an approved metric, entity or join sends it back to review (#537).** An edit through
   `sm curate` or the explorer that changed an approved item's binding, calculation, unit, source
   tables, an entity's mappings, or a join's columns, `on:` or cardinality kept `review_state:
