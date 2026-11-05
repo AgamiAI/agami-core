@@ -213,20 +213,20 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
   --artifacts-dir "$artifacts_dir" \
   ${initial_tab:+--initial-tab "$initial_tab"} \
   --read-only --out "$out"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" --minutes 30 --open
 ```
 
-Run `serve_page.py` with `run_in_background` and read its first line, `{"url": "http://localhost:<port>/<name>"}`. Set `initial_tab=review` when the person came from the review (or `$ARGUMENTS` was `review`/`preseed`/`rule1`); leave it empty otherwise, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Tables** when the model is clean.
+Run `serve_page.py` with `run_in_background` and read its first line, `{"url": "http://localhost:<port>/<name>", "opened": true}`: `--open` opens the page in the person's own browser rather than the Desktop app's built-in pane. Set `initial_tab=review` when the person came from the review (or `$ARGUMENTS` was `review`/`preseed`/`rule1`); leave it empty otherwise, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Tables** when the model is clean.
 
 Post the link and what the page does, in a few lines:
 
 ```
-Full view: http://localhost:<port>/<name> (open for 30 minutes)
+Full view, opened in your browser: http://localhost:<port>/<name> (open for 30 minutes)
 A read-only view of every table, metric, entity and join. Make changes on the card here:
 approve, hide, or type an edit in Other ("add a metric …", "describe orders.status as …").
 ```
 
-Then ask again the card it was picked on: the Sign-off or item card when picked there (Phase 2), the overview card otherwise. The page is read-only; a block pasted from an older, editable page is still applied (5b).
+With `"opened": false`, the first line reads *"Full view (open this in your browser): <url> …"* instead. Then ask again the card it was picked on: the Sign-off or item card when picked there (Phase 2), the overview card otherwise. The page is read-only; a block pasted from an older, editable page is still applied (5b).
 
 ### 5b — The pasted block
 

@@ -151,7 +151,7 @@ A per-row "is this the question?" in chat is never asked.
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_reconcile_intake.py --title "What we read · <profile>" \
   --profile <profile> --run <ts> --intake-file "<artifacts_dir>/local/tmp/agami-reconcile-rows-<ts>.json" \
   --read-only --out "<artifacts_dir>/local/reconcile/<ts>/intake.html"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/intake.html" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/intake.html" --minutes 30 --open
 ```
 
 Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every row: `<url>`. Fix a number, reword a question or drop rows on the card here."* and ask the `What I read` card again in the same turn; nothing waits for a pasted block. The page is read-only ([`shared/question-cards.md`](../../shared/question-cards.md) rule 6); decisions stay on the card. A block pasted from an older, editable page (`profile:` / `reconcile-run:` / `intake:` / one JSON array / `done`) is still accepted and applied the way the card's block is, below.
@@ -474,7 +474,7 @@ A `needs_judgment` means the block did not parse, came from another run, or carr
 **Show the full view (optional, only when asked).** The report page rendered in step 2, with every row's four beats and its checks. Serve it from localhost and give the person the URL, never a local file path:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/report.html" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/reconcile/<ts>/report.html" --minutes 30 --open
 ```
 
 Run it with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every row and its checks: `<url>`. Decide each row on the cards here."* and carry on with the row cards in the same turn; nothing waits for a pasted block. The page is read-only ([`shared/question-cards.md`](../../shared/question-cards.md) rule 6): it has no decision controls, and decisions stay on the cards. A decisions block pasted from an older, editable page (`profile:`, `reconcile-run:`, `decisions:` and one JSON array, `done`) is still accepted: write it to the decisions file above and read it back with the same `parse_reconcile_report.py` call; a `needs_judgment` there is said back in one line and the affected rows' cards asked again.

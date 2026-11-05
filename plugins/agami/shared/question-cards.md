@@ -125,9 +125,14 @@ outside the project folder as a frozen snapshot. Run `serve_page.py` with `run_i
 keeps serving until its time is up, so in the foreground it would hold the turn and the URL would
 never reach the person.
 
+Always pass `--open`, so the page opens in the person's own browser (Chrome, Safari, Edge…), not in
+the Desktop app's narrow built-in pane, where a clicked link would land. Give the URL either way: with
+`"opened": true` say it opened in their browser (*"Opened in your browser: <url>"*); with `false` (a
+headless or remote machine) say to open the link (*"Open this in your browser: <url>"*).
+
 ```
-bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30
-# run_in_background; its first line is {"url": "http://localhost:<port>/<name>"}, and it exits when the time is up
+bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30 --open
+# run_in_background; its first line is {"url": "http://localhost:<port>/<name>", "opened": true}, and it exits when the time is up
 ```
 
 Read that first line from the background task's output and give the person the URL. Render the page with `--read-only`: it hides the page's change controls and its copy-and-paste dialog and says to decide on the cards. Choices come back through a card, not a pasted block.

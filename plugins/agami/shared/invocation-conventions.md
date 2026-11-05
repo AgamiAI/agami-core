@@ -90,9 +90,11 @@ command working there too:
 - **Strip `\r` from Python output you capture into a variable:** `x="$(… py … | tr -d '\r')"`. Windows
   Python ends its lines with `\r\n`; `$(…)` drops only the `\n`, and a path ending in `\r` names no file.
 - **Show an agami page only as the full view, served from localhost:**
-  `bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30`, run with
+  `bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30 --open`, run with
   `run_in_background` (it serves until its time is up), then read its first line and give the person the
-  URL it prints (rule 6 of [`question-cards.md`](question-cards.md)). Never open a page file as `file://`. `open_in_browser`
+  URL it prints, saying whether it opened in their browser (`opened`; rule 6 of
+  [`question-cards.md`](question-cards.md)). `--open` opens the system's default browser, not the
+  Desktop app's built-in pane. Never open a page file as `file://`. `open_in_browser`
   (`bash "<plugin_root>/scripts/open_in_browser" "<URL>"`) is only for a web address the person chose
   to open on a card, such as the GitHub page; never `open` / `xdg-open` / `start` directly.
 

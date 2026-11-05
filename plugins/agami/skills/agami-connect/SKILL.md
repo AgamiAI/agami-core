@@ -1200,7 +1200,7 @@ Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","na
 **Show the full view** (an option on the Sign-off and item cards, or asked for in words). The model explorer, with every metric, entity, join and column: render it the way `/agami-model preseed` does (`render_model_explorer.py … --initial-tab review --read-only`) and serve it from localhost, giving the person the URL:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<explorer.html>" --minutes 30 --open
 ```
 
 Run it with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
@@ -1292,7 +1292,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_examples_validation.py \
   --title "Seed examples · <profile>" --profile <profile> \
   --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" \
   --read-only --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30 --open
 ```
 
 Run `serve_page.py` with `run_in_background` and read its first line, `{"url": …}`, for the URL to give the person.
