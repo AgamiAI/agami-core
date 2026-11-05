@@ -22,6 +22,11 @@ authors = [{ name = "Agami AI", email = "skills@agami.ai" }]
 # Python-driver tier stays lean; `sm` / the server install [model].
 dependencies = []
 
+# The stdio MCP server as a command, for MCP registries (registry.modelcontextprotocol.io,
+# Smithery) that launch a server from its package. `python -m mcp_harness` keeps working.
+[project.scripts]
+agami-core = "mcp_harness:main"
+
 [project.urls]
 Homepage = "https://agami.ai"
 Repository = "https://github.com/AgamiAI/agami-core"

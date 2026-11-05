@@ -1,0 +1,39 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "ai.agami/agami-core",
+  "title": "Agami",
+  "description": "Governed semantic model for AI-to-database access. Read-only SQL with a receipt. Runs locally.",
+  "version": "0.9.23",
+  "websiteUrl": "https://agami.ai",
+  "repository": {
+    "url": "https://github.com/AgamiAI/agami-core",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "agami-core",
+      "version": "0.9.23",
+      "runtimeHint": "uvx",
+      "runtimeArguments": [
+        { "type": "named", "name": "--from", "value": "agami-core[model]==0.9.23" }
+      ],
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "AGAMI_PROFILE",
+          "description": "Which semantic-model profile to serve. Defaults to the one /agami-connect created.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "AGAMI_ARTIFACTS_DIR",
+          "description": "Where the semantic model and credentials live. Defaults to the agami artifacts directory.",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
