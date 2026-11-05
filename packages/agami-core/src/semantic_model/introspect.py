@@ -59,6 +59,7 @@ _GRAIN_PROBE_MAX_ROWS = 5_000_000
 from . import build, pii
 from . import dialects as D
 from . import placeholders as P
+from .failure_kinds import CONNECTION_KINDS
 from .models import (
     Column,
     Datasource,
@@ -251,8 +252,45 @@ class ExecuteSqlFailure(RuntimeError):
         self.kind: Optional[str] = EXIT_TO_FAILURE_KIND.get(returncode)
 
 
+
+
+class ConnectionUnusable(RuntimeError):
+    """The database could not be used at all, so introspection stopped before reading anything."""
+
+
+class _ConnectionWatch:
+    """A runner that remembers the first failure about the connection.
+
+    Each table's reads catch their own failures and treat them as "this table has nothing to read",
+    which is right for a missing table and wrong for a missing password: a live run read all 34
+    tables, got nothing, and blamed the --tables list. `check()` turns a remembered connection
+    failure into an error with the database's own message."""
+
+    def __init__(self, runner: Runner) -> None:
+        self._runner = runner
+        self.failure: Optional[ExecuteSqlFailure] = None
+
+    def __call__(self, sql: str) -> list:
+        if self.failure is not None:
+            # every later statement would fail the same way, and on a network failure each would
+            # first wait out its own timeout: fail it at once, as the database would
+            raise self.failure
+        try:
+            return self._runner(sql)
+        except ExecuteSqlFailure as exc:
+            if self.failure is None and exc.kind in CONNECTION_KINDS:
+                self.failure = exc
+            raise
+
+    def check(self) -> None:
+        if self.failure is not None:
+            raise ConnectionUnusable(
+                f"the database connection could not be used, so nothing was read: {self.failure}")
+
+
 def make_execute_sql_runner(
-    profile: str, python: Optional[str] = None, *, building_the_model: bool = False
+    profile: str, python: Optional[str] = None, *, building_the_model: bool = False,
+    artifacts_dir: Optional[str | Path] = None,
 ) -> Runner:
     """A runner that sends each statement through `execute_sql.py`, and returns its rows.
 
@@ -267,16 +305,24 @@ def make_execute_sql_runner(
     does not declare yet, probe mode samples with `SELECT *`, and catalogs such as Redshift's `svv_*`,
     SQLite's `pragma_*` functions and Oracle's `ALL_*` views are not in the build profile.
     `--build-profile` is added beside it, off a hosted server, so agami's own catalog queries that
-    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate."""
+    call a catalog function (`dialects.catalog_function_queries`) pass the recon gate.
+
+    `artifacts_dir`, when given, is where execute_sql reads the credentials: it otherwise finds the
+    folder through AGAMI_ARTIFACTS_DIR or the pointer file, which can name a different folder than the
+    one the command was told to build in."""
     exe = python or sys.executable
     script = str(SCRIPT_DIR / "execute_sql.py")
     hosted = bool(os.environ.get("AGAMI_DB_URL") or os.environ.get("APP_DATABASE_URL"))
     unscoped = (["--no-safety"] + ([] if hosted else ["--build-profile"])) if building_the_model else []
 
+    env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
+    if artifacts_dir is not None:
+        env["AGAMI_ARTIFACTS_DIR"] = str(Path(artifacts_dir).expanduser())
+
     def run(sql: str) -> list[dict]:
         proc = subprocess.run(
             [exe, script, "--profile", profile, "--sql", sql, *unscoped],
-            capture_output=True, text=True, encoding="utf-8", env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
+            capture_output=True, text=True, encoding="utf-8", env=env,
         )
         if proc.returncode != 0:
             raise ExecuteSqlFailure(proc.stderr.strip() or f"execute_sql exit {proc.returncode}", proc.returncode)
@@ -319,6 +365,7 @@ def introspect(
     out = Path(out_dir) if out_dir else (artifacts_dir / profile)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
+    runner = watch = _ConnectionWatch(runner)
 
     pp = Path(progress_path) if progress_path else None
     if pp is not None:
@@ -330,6 +377,7 @@ def introspect(
 
     # 1. discover (schema, table) pairs
     pairs = _discover_tables(dialect, runner, tables, report)
+    watch.check()
     if not pairs:
         raise RuntimeError(
             "no tables discovered. If the catalog is locked down, pass an explicit "
@@ -347,6 +395,7 @@ def introspect(
     for i, (schema, table) in enumerate(pairs, 1):
         t = _build_table(dialect, runner, schema, table, conn_name, report, budget, reads,
                          keys_unread, samples)
+        watch.check()   # a connection failure fails every table alike: stop at the first
         built.append(t)
         if i % _step == 0 or i == len(pairs):
             _progress(pp, f"columns+grain {i}/{len(pairs)}")
