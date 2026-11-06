@@ -12,6 +12,13 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
+  Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
+  reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those
+  keys are now carried over verbatim, so the newer core that wrote them can still read them.
+
 ## [0.9.22] — 2026-11-05
 
 ### Changed
