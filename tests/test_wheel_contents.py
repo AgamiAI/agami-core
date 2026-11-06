@@ -140,3 +140,19 @@ def test_the_flat_modules_are_not_nested_under_a_package(wheel_names) -> None:
     """
     assert "store.py" in wheel_names
     assert "mcp_http.py" in wheel_names
+
+
+def test_every_flat_module_on_disk_is_in_the_wheel(wheel_names) -> None:
+    """Every top-level `src/*.py`, because `py-modules` is a hand-kept list.
+
+    A module added to `src/` but not to that list imports fine in every editable checkout and is
+    simply absent from the wheel, so the first `import` of it fails only for a user. That shipped
+    once: `credential_store` was missing, and the installed `execute_sql`, which imports it, failed
+    to load at all.
+    """
+    on_disk = {p.name for p in (PACKAGE_DIR / "src").glob("*.py")}
+    assert on_disk, "no modules found on disk — this test is looking in the wrong place"
+    missing = sorted(on_disk - wheel_names)
+    assert not missing, (
+        f"{missing} never reached the wheel; add them to `py-modules` in packages/agami-core/pyproject.toml"
+    )

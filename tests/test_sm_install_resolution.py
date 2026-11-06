@@ -16,6 +16,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 SM = REPO / "plugins" / "agami" / "scripts" / "sm"
 SCRIPTS = REPO / "plugins" / "agami" / "scripts"
@@ -95,6 +97,9 @@ def _run_install(sm_path: Path, tmp_path: Path, shim_src: str = _SHIM):
     log = tmp_path / "pip.log"
     env = {
         **os.environ,
+        # These cases are about the install SOURCE, so pin an OS without the keyring extra; the extra
+        # has its own tests below.
+        "PATH": _fake_uname(tmp_path, "Linux"),
         "AGAMI_PYTHON": str(shim),
         "SM_SHIM_LOG": str(log),
         "SM_SHIM_INSTALLED": str(tmp_path / "installed.marker"),
@@ -192,3 +197,112 @@ def test_readiness_probes_cli_entrypoint_and_isolates_cwd():
     txt = SM.read_text()
     assert "import semantic_model.cli" in txt, "readiness probe must check the .cli entrypoint"
     assert "cd /" in txt, "the CLI/probe must run from a neutral cwd (path isolation)"
+
+
+# The keyring extra: the import probe for `keyring` passes only once a requirement carrying that extra
+# has been installed; the model probe passes once any install has landed (or from the start when
+# SM_SHIM_MODEL_PRESENT is set, i.e. an existing [model]-only install).
+_SHIM_KEYRING = """#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open(os.environ["SM_SHIM_LOG"], "a") as f:
+    f.write(" ".join(args) + "\\n")
+marker = os.environ["SM_SHIM_INSTALLED"]
+kr = marker + ".keyring"
+if args[:1] == ["-c"]:
+    if "import keyring" in args[1]:
+        sys.exit(0 if os.path.exists(kr) else 1)
+    sys.exit(0 if os.path.exists(marker) else 1)
+if "pip" in args and "install" in args:
+    open(marker, "w").close()
+    if any(",keyring]" in a for a in args):
+        open(kr, "w").close()
+    sys.exit(0)
+sys.exit(0)
+"""
+
+
+def _fake_uname(tmp_path: Path, system: str) -> str:
+    """A PATH entry whose `uname -s` answers `system`, so the OS branch is chosen without that OS."""
+    d = tmp_path / "bin"
+    d.mkdir(exist_ok=True)
+    u = d / "uname"
+    u.write_text(f"#!/bin/sh\necho {system}\n")
+    u.chmod(0o755)
+    return f"{d}{os.pathsep}{os.environ['PATH']}"
+
+
+def _run_install_on(system: str, tmp_path: Path, *, model_present: bool = False, cmd: str = "install"):
+    shim = tmp_path / "pyshim"
+    shim.write_text(_SHIM_KEYRING)
+    shim.chmod(0o755)
+    log = tmp_path / "pip.log"
+    marker = tmp_path / "installed.marker"
+    if model_present:
+        marker.write_text("")
+    env = {
+        **os.environ,
+        "PATH": _fake_uname(tmp_path, system),
+        "AGAMI_PYTHON": str(shim),
+        "SM_SHIM_LOG": str(log),
+        "SM_SHIM_INSTALLED": str(marker),
+        "AGAMI_ARTIFACTS_DIR": str(tmp_path / "art"),
+    }
+    r = subprocess.run(["bash", str(SM), cmd], env=env, capture_output=True, text=True)
+    lines = log.read_text().splitlines() if log.exists() else []
+    return r, [ln for ln in lines if "pip" in ln and "install" in ln]
+
+
+@pytest.mark.parametrize("system", ["Darwin", "MINGW64_NT-10.0-26100", "MSYS_NT-10.0", "CYGWIN_NT-10.0"])
+def test_install_adds_the_keyring_extra_on_macos_and_windows(tmp_path, system):
+    # `keyring:` password references need the OS store's library; without it the helper refuses with no_store.
+    r, installs = _run_install_on(system, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert installs and all("[model,keyring]" in ln for ln in installs), installs
+
+
+def test_install_keeps_the_model_extra_only_elsewhere(tmp_path):
+    r, installs = _run_install_on("Linux", tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert installs and all("[model]" in ln and ",keyring]" not in ln for ln in installs), installs
+
+
+def test_install_adds_keyring_to_an_existing_model_only_install(tmp_path):
+    # The upgrade path: agami-core[model] is already current, so the model probe passes; only keyring is missing.
+    r, installs = _run_install_on("Darwin", tmp_path, model_present=True)
+    assert r.returncode == 0, r.stderr
+    assert len(installs) == 1 and "[model,keyring]" in installs[0], installs
+    assert "keyring" in r.stderr  # it says what it is installing, as every other install does
+
+
+def test_install_with_keyring_present_installs_nothing(tmp_path):
+    (tmp_path / "installed.marker.keyring").write_text("")
+    r, installs = _run_install_on("Darwin", tmp_path, model_present=True)
+    assert r.returncode == 0, r.stderr
+    assert installs == [], installs
+
+
+def test_other_commands_do_not_require_keyring(tmp_path):
+    # Only `sm install` (which the skills and the pane run after the person agrees) adds keyring; a model
+    # command on a current [model] install runs as before, with no install the person did not ask for.
+    r, installs = _run_install_on("Darwin", tmp_path, model_present=True, cmd="--help")
+    assert installs == [], installs
+
+
+def test_no_pip_with_only_keyring_missing_says_so(tmp_path):
+    shim_src = _SHIM_KEYRING.replace('if "pip" in args and "install" in args:', 'if "pip" in args:\n    sys.exit(1)\nif False:')
+    shim = tmp_path / "pyshim"
+    shim.write_text(shim_src)
+    shim.chmod(0o755)
+    (tmp_path / "installed.marker").write_text("")
+    env = {
+        **os.environ,
+        "PATH": _fake_uname(tmp_path, "Darwin"),
+        "AGAMI_PYTHON": str(shim),
+        "SM_SHIM_LOG": str(tmp_path / "pip.log"),
+        "SM_SHIM_INSTALLED": str(tmp_path / "installed.marker"),
+        "AGAMI_ARTIFACTS_DIR": str(tmp_path / "art"),
+    }
+    r = subprocess.run(["bash", str(SM), "install"], env=env, capture_output=True, text=True)
+    assert r.returncode == 3
+    assert "keyring (the OS credential store library) can't be installed" in r.stderr, r.stderr

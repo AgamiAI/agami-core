@@ -76,7 +76,7 @@ On first run, the skill sees there are no credentials, walks you through the DB-
 
 ## 6. Set up credentials
 
-`/agami-connect` writes a template at `<artifacts_dir>/local/credentials.example` the first time you connect. Fill in your connection details, save it (leave the filename as-is), then say *"introspect my database"* — agami moves it into place and locks it down (`chmod 600`) for you; you don't move or `chmod` anything by hand. Full format and per-database fields: [docs/credentials.md](../credentials.md).
+On macOS and Windows, `/agami-connect` asks for the connection details on a question card and takes the password on a one-time `localhost` page that stores it in the OS keychain. On Linux, it writes a template at `<artifacts_dir>/local/credentials.example` the first time you connect: fill in your connection details, save it (leave the filename as-is), then press **I've filled it in** on the card — agami moves it into place and locks it down (`chmod 600`) for you; you don't move or `chmod` anything by hand. Full format and per-database fields: [docs/credentials.md](../credentials.md).
 
 ## Updating
 

@@ -15,7 +15,7 @@ This skill orchestrates:
 2. **Choose** one — the only one, the one named, or the one the user picks.
 3. **Run** it via `scripts/run_golden_eval.py`, which generates, executes and scores every case.
 4. **Present** the verdicts in the order the script emitted them, failures first.
-5. **Point** at the run's report — and the JSON beside it — for the drill-down the terminal deliberately withholds.
+5. **Ask** what next on one card: look at the failures (the run's report, served from localhost), fix one, or done.
 
 Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/run_golden_eval.py) (dataset choice + schema rendering + the printed payload). The scoring itself is agami-core's.
 
@@ -24,6 +24,7 @@ Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/ru
 - **A run with failures is a SUCCESSFUL run** — the failures are the whole value. A 9/12 run is the run that just told this team three things about their model. Lead with what did not pass; never soften it, never bury it under the passes.
 - **Tight loops.** This skill is a tool, not a tutorial. One question per turn, at most two sentences of prose between phases.
 - **Don't paste SQL in chat.** The script prints none, and neither do you. Same hard rule as agami-query.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). The score and the failing questions are markdown tables in the chat (at most 15 rows, saying how many more); every decision is a card. The run's report page opens only when the person asks to look at the failures, served from localhost.
 
 ---
 
@@ -31,7 +32,7 @@ Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/ru
 
 1. **Plan-mode check** per [`shared/plan-mode-check.md`](../../shared/plan-mode-check.md). This skill needs Bash + Read + Write — refuse if locked in plan mode. **DO NOT write a plan file. DO NOT call `ExitPlanMode`.** Refusal text: *"I can't run an eval in plan mode — every case executes live SQL and the run writes a report. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the dataset name."*
 2. **Credentials present** — read `<artifacts_dir>/local/credentials` for the active profile. If missing, invoke `/agami-connect` to set up first; this skill needs a working DB connection.
-3. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`. This skill needs an introspected model: the run hands the generator the model's own tables and columns.
+3. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`, unless `AGAMI_PROFILE` names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): then say so and stop. This skill needs an introspected model: the run hands the generator the model's own tables and columns.
 4. **See what exists** — run `--list` (Phase 1) before anything else. It reads no credentials and runs no query, so it is the cheap way to find out there is nothing to run.
 
 ---
@@ -39,7 +40,7 @@ Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/ru
 ## Phase 1: Choose the dataset
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" run_golden_eval.py --profile <profile> --list
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py --profile <profile> --list
 ```
 
 The JSON names each dataset with its `total`, `confirmed` and `unconfirmed` counts, plus `datasets_dir` — the directory a dataset would live in — and any `findings` the reader raised while reading them. Three outcomes:
@@ -48,7 +49,7 @@ The JSON names each dataset with its `total`, `confirmed` and `unconfirmed` coun
 - **Exactly one.** Use it. No question — a bare invocation needs no argument, and the script picks it too.
 - **Several.** Ask with `AskUserQuestion`, one option per dataset, each labeled with its confirmed / unconfirmed counts (`orders — 14 confirmed, 2 unconfirmed`) so the choice is informed by what can actually gate. If the user already named one in `$ARGUMENTS`, skip the question.
 
-**A dataset with zero confirmed items gets one line before you run it:** *"`<name>` has no confirmed cases, so this run reports scores but its verdict rests on nothing. See [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md) for confirming an answer key."* Run it anyway if they want — a report with no gate is still a report.
+**A dataset with zero confirmed items gets one line before you run it:** *"`<name>` has no confirmed cases, so this run reports scores but its verdict rests on nothing. See [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md) for confirming an answer key."* Then a card, header `Run it?`, *"Run `<name>` anyway?"*: **Run it anyway** (a report with no gate is still a report) / **Don't run**. Skip the card when the person already asked for this dataset by name and knows.
 
 If `findings` is non-empty, keep it: those are dataset-level breakages and they belong in Phase 3c.
 
@@ -57,7 +58,7 @@ If `findings` is non-empty, keep it: those are dataset-level breakages and they 
 ## Phase 2: Run
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" run_golden_eval.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py \
   --profile <profile> --dataset <dataset> \
   > "<artifacts_dir>/local/tmp/agami-eval-<ts>.json"
 ```
@@ -101,7 +102,7 @@ Each placeholder names its own key under `summary.sections`; `completed` is `sum
 | orders-refunded-count | Right rows, but the statement never filtered on `status` | must_filter: status |
 ```
 
-`Item` is `item_key`. `What went wrong` is `reason`, with `accuracy` and the two row counts where they add something. `Gate` is the entry from `gates` that fired, or `—` when the item simply disagreed with its answer key.
+Show at most 15 rows; when there are more, say *"Showing 15 of <N> failures; <N−15> more in the report."* `Item` is `item_key`. `What went wrong` is `reason`, with `accuracy` and the two row counts where they add something. `Gate` is the entry from `gates` that fired, or `—` when the item simply disagreed with its answer key.
 
 Under the table, one line of interpretation per failure — the same job the receipt does in reconcile:
 
@@ -163,19 +164,25 @@ Most of them were also scored, but not all: an unconfirmed item can come back `u
 12 cases reproduced their answer key: orders-count, customers-active, revenue-by-month, …
 ```
 
-One compact line — the passes build the case, the failures drive the conversation. Then:
+One compact line — the passes build the case, the failures drive the conversation.
 
-```
-Report (both statements per case, side by side): <report>
-Raw run: <artifact>
-Re-run one dataset after a fix, or open the report to see what the model wrote.
-```
+Then, when anything did not pass (a failure, an error or an unscored case), call AskUserQuestion, one question, header `Next step`, *"What next?"*:
 
-`<report>` is `report` from the payload — the `.html` file the run just rendered, and the thing to hand over: it opens in a browser, needs no network, shows every case's question, its verdict, the table-set delta and the two statements side by side, and carries no result rows. `<artifact>` is `artifact` from the payload, the same run as JSON for anyone who wants to grep it.
+- **Look at the failures**: the run's report, every case's question, its verdict, the table-set delta and the two statements side by side, served from localhost.
+- **Fix one**: pick a failing case and say which side is wrong.
+- **Done**: end here.
 
-Both files are where the answer key and the generated statement live. Handing over a path is the drill-down; reading either file aloud is not. If `report` is empty the render did not land — say so and point at the JSON, exactly as you would the other way round.
+No `(Recommended)`: what to do about a failure is the person's call. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7). When everything passed there is nothing to decide: say one line, *"Say 'show the report' to see every case side by side."*, and end the turn.
 
-End the turn.
+| Answer | Do |
+|---|---|
+| Look at the failures | Serve `report` (the `.html` the run just rendered) from localhost with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<report>" --minutes 30`, run with `run_in_background`, and give the person the `url` from its first line, never a local file path. If `report` is empty the render did not land: say so and name `artifact`, the same run as JSON. Then the card again, without this option. |
+| Fix one | A card with two questions. Header `Case`, *"Which case?"*: the first failures in the order the run emitted them, up to 4 (`item_key` and its `reason` in a few words); "Other" takes any other `item_key`. Header `Which side`, *"What is wrong?"*: **agami's answer** (the semantic model or the prompt examples need a fix) / **The answer key** (the case itself is wrong). |
+| Done | End the turn. |
+
+**Fix one** hands over and never writes from here. **agami's answer**: hand **`/agami-save-correction`** the case's question and its `reason`, and the generated statement read from `artifact` (handed over, never shown in chat); it finds the definition or the example to change and asks before any shared-model edit. **The answer key**: hand **`/agami-save-golden`** the case's question; its save door replaces the item only after showing the before and the after. Afterwards say *"Run `<dataset>` again with only the failures to check the fix."* and, on a yes, run Phase 2 with `--rerun-failures`. An `item_key` in "Other" that is not in this run, or words you cannot place, is said back in one line and the card asked again: never guessed.
+
+`<artifact>` is `artifact` from the payload, the run as JSON for anyone who wants to grep it. Both files are where the answer key and the generated statement live. Handing over the page is the drill-down; reading either file aloud is not.
 
 ---
 
@@ -191,7 +198,7 @@ And a golden dataset is not a random sample. It is the questions somebody would 
 
 ## Hard rules
 
-1. **Never paste SQL in chat.** The script prints no statement, and the artifact is a path you hand over, not a source to quote — **do not read it out of the artifact** to show the user what the model wrote. They open the file.
+1. **Never paste SQL in chat.** The script prints no statement, and the artifact is a path you hand over, not a source to quote — **do not read it out of the artifact** to show the user what the model wrote. They open the report from its localhost link.
 2. **Never write or edit a dataset.** Not to fix a rotted case, not to confirm an answer key, not to add the question a failure suggests. This skill reads and scores. Authoring is a separate job with its own reference ([`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md)); route the user there.
 3. **Never re-judge a verdict.** The score is deterministic and it came from agami-core. Report it, interpret it, and do not argue with it — no "this is arguably right", no re-reading rows to overturn a failure. If the score looks wrong, the case or the model is what changes, not the report.
 4. **A run with failures is a completed run, not an error.** Report it as a result. Conversely a run of nothing but errors is **not** green: a verdict reads `completed`, `gating_failures` and `errored` together, never `gating_failures` alone.

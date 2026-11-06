@@ -60,6 +60,9 @@ from execute_sql import ExecutorError, _parse_dsn  # reuse DSN parsing logic  # 
 # tests. The one-shot legacy migration runs only from main() (and the other entry points).
 AGAMI_HOME = agami_paths.local_dir()  # <artifacts_dir>/local — materialized auth files live here
 CREDENTIALS_PATH = AGAMI_HOME / "credentials"
+# Mirrors credential_store.REF_PREFIX. Not imported: an older pip-installed agami-core wins over the
+# bundled lib/ (see _agami_lib) and has no credential_store, so the import would break this script.
+KEYRING_REF_PREFIX = "keyring:"
 CONFIG_PATH = AGAMI_HOME / ".config"
 PGPASS_PATH = AGAMI_HOME / ".pgpass"
 MYSQL_CNF_PATH = AGAMI_HOME / ".mysql.cnf"
@@ -269,6 +272,11 @@ def materialize(profiles: list[str]) -> int:
 
     for profile in profiles:
         creds = _load_section(profile)
+        # These files are plain text. A keyring-backed profile runs through the Python driver, which
+        # resolves the reference at query time, so its password must never be copied here.
+        if creds.get("password", "").startswith(KEYRING_REF_PREFIX):
+            print(f"skipped {profile}: password is in the OS credential store")
+            continue
         db_type = creds.get("type", "").lower()
         if db_type in ("postgres", "redshift"):
             pg_lines[profile] = _build_pgpass_line(creds)

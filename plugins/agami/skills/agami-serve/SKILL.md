@@ -33,7 +33,7 @@ Run the detection + ask logic from [`shared/plan-mode-check.md`](../../shared/pl
 ## Phase 0: Preflight
 
 1. **Credentials present** — `<artifacts_dir>/local/credentials` must exist for the active profile. If missing, invoke `/agami-connect` first; the server needs a connection to execute against.
-2. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist (so the server has a semantic model to serve). If not, invoke `/agami-connect`.
+2. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist (so the server has a semantic model to serve). If not, invoke `/agami-connect`, unless `AGAMI_PROFILE` names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): then say so and stop.
 3. **Profile** — default to the active profile. If `$ARGUMENTS` names a profile, pass it through as `--profile <name>`.
 
 ## Phase 1: Run the setup helper
@@ -42,10 +42,10 @@ Show the plan first with `--dry-run`, then do it for real:
 
 ```bash
 # 1. Preview (writes nothing)
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_desktop_mcp.py --dry-run
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" setup_desktop_mcp.py --dry-run
 
 # 2. Apply
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_desktop_mcp.py
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" setup_desktop_mcp.py
 ```
 
 Pass `--profile <name>` if the user named one. (Installation goes through `sm install`,
@@ -55,7 +55,7 @@ which does an editable install automatically when run from a dev checkout — no
 
 - **Driver missing (exit code 3).** The helper couldn't find a Python that can
   import the DB driver. Relay its suggested `pip install ...` line, offer to run
-  it, then re-run the helper. Example: `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -m pip install psycopg2-binary`.
+  it, then re-run the helper. Example: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -m pip install psycopg2-binary`.
 - **Wrote successfully.** Relay the helper's closing `Next:` lines, in one or two lines of your
   own. They are written for the user's platform (how to fully quit the app, which differs between
   macOS and Windows, and where this server's log is), so pass them on rather than restating them:

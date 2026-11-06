@@ -28,6 +28,8 @@ import re
 import sys
 from pathlib import Path
 
+from _read_only_view import make_read_only
+
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "examples-validation-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
@@ -171,6 +173,8 @@ def main() -> int:
                         "object for several areas (repeatable; files render in the order given). "
                         "With several files, label a single area's array as AREA=PATH")
     p.add_argument("--out", required=True)
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args()
 
     try:
@@ -182,11 +186,12 @@ def main() -> int:
 
     out_path = Path(os.path.expanduser(args.out))
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(
+    html = render(
         title=args.title,
         profile=args.profile,
         items=items,
-    ), encoding="utf-8")
+    )
+    out_path.write_text(make_read_only(html) if args.read_only else html, encoding="utf-8")
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a

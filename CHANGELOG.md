@@ -12,6 +12,135 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
+  "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
+  suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
+  `label`, `sm suggest-metrics` gives `flag_rates.labels`, and `sm review-items` gives each item a
+  `plain_name`, so every card uses the same words (question-cards rule 3b). An example's sign-off
+  card shows its SQL in the preview, as a metric's does. The sign-off, examples and summary cards
+  offer **Show the full view**, which had to be typed in "Other" before.
+
+- **Onboarding asks for context on cards.** Right after connecting, three cards: the company
+  (once per deployment, or drafted from the database), what the person can share (definitions or a
+  semantic layer, the questions people ask, report SQL or dashboards), and the database's one line.
+  The questions become examples checked with the rest; the reports go to agami-reconcile after the
+  build.
+
+- **Charts drawn in the chat.** "Show as a chart" on the answer card now draws horizontal bars as
+  text in the chat (`scripts/text_chart.py`), from the same sections file the HTML chart reads, so
+  the bars, the table and the page agree. The HTML report is the full view, served only when asked.
+
+- **Read-only full views.** Every page renderer takes `--read-only`, and the skills pass it: the
+  page's change controls and its copy-and-paste dialog are hidden and a banner says to decide on
+  the cards. The password page lists the host, port, database and user it is for.
+
+- **Cards answer questions.** A question typed in "Other" ("show me the SQL", "why?") is answered
+  and the same card asked again (question-cards rule 5a); a value to type, such as the sign-off
+  email, is asked for in the question rather than offered as an option.
+
+- **`scripts/serve_page.py`: an agami page served from localhost for a short while.** It serves
+  one HTML file and the web assets beside it on `127.0.0.1` at a random port, prints
+  `{"url": "http://localhost:<port>/<name>"}`, and exits when its time is up (`--minutes`, 30 by
+  default). It refuses a request whose Host is not its own address. Every skill's optional full view
+  (the model explorer, the table picker, the reconcile pages, the chart) is now served this way
+  instead of opened as a `file://` page, which the Desktop Code tab's built-in browser shows as a
+  frozen snapshot when the file sits outside the project folder.
+
+- **Database passwords in the OS credential store on macOS and Windows.** A credentials-file
+  profile can hold `password = keyring:agami/<profile>`, which agami resolves from Keychain or
+  Credential Manager when it connects (`sm install` adds the `agami-core[keyring]` extra on those two
+  systems). A new one-time local page, `scripts/connect_helper.py`, takes the password on `127.0.0.1`
+  and stores it there, so it never reaches the chat, a command line or a plain-text file. Its refusals
+  carry a machine-readable `reason`, a missing database driver is reported as `missing_driver` with the
+  package to install, and a run that fails or is stopped removes what it stored. `setup_pgauth.py`
+  never writes such a profile's password to `.pgpass` / `.mysql.cnf`. Plain-text profiles work as before.
+  The password goes only to Keychain or Credential Manager themselves, never to another keyring
+  backend such as `keyrings.alt`'s plain-text file. `connect_helper.py --replace` changes a saved
+  password and puts the old one back if the new one does not connect; a non-UTF-8 credentials file
+  is refused as `unreadable_credentials`, and a submit after the page expired gets a 404.
+
+### Changed
+
+- **Every agami decision is a question card in the chat; no page opens on its own and nothing is
+  pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and
+  agami-eval used to open an HTML page and wait for a block the person generated there and pasted
+  into the chat. Each now shows the result as a short table in the chat and asks with Claude's own
+  question cards (AskUserQuestion): picking tables, the connection fields, signing off definitions
+  one by one or all at once, hiding personal-data columns, keeping the seed examples, the answer
+  card after a query, the reconcile intake, mismatches and keep offer, a golden import. The rules
+  are in `shared/question-cards.md`. The pages stay as an optional "Show the full view", served
+  from localhost, and a block pasted from one is still accepted. Where the card tool is missing
+  (`claude -p`), the same question is asked as a numbered list. `tests/test_skills_no_paste_back.py`
+  fails if a skill's default path opens a page or waits for a paste again.
+
+### Removed
+
+- **The table-picker page.** `sm discover` writes only the inventory (`--out` is accepted and
+  ignored); tables, a schema's list, a table's columns and columns to leave out are all handled in
+  the chat (`inventory_summary.py --show` and `--check-columns`). `render_prune.py`,
+  `prune-template.html` and `parse_prune_block.py` are gone.
+
+### Fixed
+
+- **Things found in live onboardings of real databases.** Joins on same-named natural keys
+  (`cds_code` → `schools.cds_code`) are inferred, so a warehouse keyed on codes no longer gets 0
+  joins. An empty database is said before the build goes on. `sm add --profile` runs each metric's
+  SQL over zero rows and writes nothing if one fails. A metric wrapped in `ROUND(…)` still matches
+  its definition on the receipt. A connection failure names what to check (the user, the host,
+  the database). A bare `name` on a table of things is not flagged as personal.
+
+- **Review fixes to the question-card onboarding.** A person's `full_name`, `first_name` or
+  `last_name` is personal data on every table again (`event_attendees`, `store_orders`), and a
+  table with a people word in its name never counts as a table of things; `order_status.name` is
+  no longer listed, as plural words such as `status` are singularized properly. The reconcile
+  intake, the reconcile report and the golden-datasets page no longer ask for a pasted block from
+  a read-only page; decisions stay on the cards, and golden datasets gain a `Change` card. A
+  read-only page keeps its filter chips, "Show all" / "Clear filters", pagination and SQL copy
+  button, hiding only the controls that change something. A same-named key joins the table it
+  names, not the first in catalog order (`scores.cds_code` → `schools`, not `school_profile`); a
+  tie proposes nothing, generic names such as `code` are not matched, and one shared value is not
+  enough. The chat chart no longer crashes on empty data or a NaN value. The table-pick card reads
+  `db.schema.table` and quoted names in shared SQL, no longer flags `test_results` or
+  `temp_readings` as staging, and recommends dropping staging and backups only when every flagged
+  table copies another. `sm add --profile` reports an unreachable database as one connection
+  error, not as every metric's SQL failing, keeps a trailing `--` comment from swallowing the
+  `FROM`, and resolves a metric's source table by schema. Columns typed in "Other" on the table
+  card are left out whatever the table answer.
+
+- **The model explorer no longer says an unsigned metric is refused.** It is answered with a
+  warning until signed off, as the runtime does. The page fills "Sign off as" from the identity
+  saved in `local/.config`, and opens Review on the sub-tab that has items.
+
+- **Product, plan and category names are no longer listed as possible personal data.** A bare
+  `name` on a table of things is left out of the suspected tier when the table is known; names that
+  may be a person's still are.
+
+- **The chart page loads nothing from the network.** `chart-template.html` loaded Chart.js from
+  `cdn.jsdelivr.net`, which broke the no-egress rule and drew no chart offline. The library now
+  ships in `shared/vendor/` and `render_chart.py` inlines it, so a chart is one self-contained file.
+
+- **A stale `AGAMI_PROFILE` is named, not read as "no model yet".** The variable wins over
+  `.config`'s active database, so one left set to a database with no model (say `main`) pointed
+  every skill at nothing, and the skills offered to connect a database again. `connect_resolve.py`
+  now reports an `env_profile_has_no_model` anomaly naming the variable, the database and the
+  databases that have a model, when at least one does, and the skills say that in one line and stop.
+
+- **Skill commands now use the plugin root Claude Code fills in, not an `AGAMI_PLUGIN_ROOT` nothing
+  sets.** Every skill ran `bash "$AGAMI_PLUGIN_ROOT/scripts/py" …`, but a Claude Code session (CLI or
+  the Desktop Code tab) has no such variable in its Bash environment, so the first command of each
+  skill failed or Claude had to improvise a path. Skills now write `${CLAUDE_PLUGIN_ROOT}`, which
+  Claude Code replaces with the plugin's absolute path when the skill loads. The shared docs, which
+  Claude reads without that substitution, say `<plugin_root>` and tell Claude to write the real path
+  its skill showed. The `py` and `sm` launchers still export `AGAMI_PLUGIN_ROOT` for the scripts they
+  start, and `check_statement.py`'s "agami-core is missing" message now names the real path of `sm`. `tests/test_skill_plugin_root.py` fails if a skill goes back to the unset variable or names a
+  path under the plugin root that does not exist.
+
+- **The built wheel ships `credential_store`.** It was missing from `py-modules`, so an installed
+  (non-editable) agami-core could not import `execute_sql`. A test now checks every top-level module
+  reaches the wheel.
+
 ## [0.9.22] — 2026-11-05
 
 ### Changed

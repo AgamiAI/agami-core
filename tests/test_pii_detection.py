@@ -517,3 +517,69 @@ def test_a_declared_list_of_digit_phones_is_dropped_without_a_sample(tmp_path, k
     assert t.get_column("status").choice_field == {"open": "", "closed": ""}
     written = "".join(p.read_text() for p in (tmp_path / "shop").rglob("*") if p.is_file())
     assert written.count("5550100") == len(phones)  # only customerId's list
+
+
+# A live run listed products.name, plans.name and categories.name as possible personal data.
+from semantic_model.pii import suspected_pii, suspected_reason  # noqa: E402
+
+
+@pytest.mark.parametrize("table", ["products", "categories", "plans", "product_tags", "Campaigns"])
+def test_a_bare_name_on_a_table_of_things_is_not_suspected(table):
+    assert not suspected_pii("name", table)
+    assert suspected_reason("name", [], table) is None
+
+
+@pytest.mark.parametrize(
+    ("column", "table"),
+    [
+        ("name", "customers"),  # a person table: still listed
+        ("name", "leads"),  # neither a person word nor a thing: still listed for review
+        ("name", "customer_products"),  # a person word wins over a thing word
+        ("full_name", "products"),  # a person's name on any table
+        ("owner_name", "projects"),
+        ("email", "products"),
+    ],
+)
+def test_names_that_may_be_a_person_stay_suspected(column, table):
+    assert suspected_pii(column, table)
+
+
+def test_without_a_table_the_rule_is_unchanged():
+    assert suspected_pii("name")
+
+
+@pytest.mark.parametrize("table", ["event_attendees", "course_enrollments", "district_staff", "campaign_leads",
+                                   "service_requests", "store_orders", "products", "schools"])
+@pytest.mark.parametrize("column", ["full_name", "first_name", "lastName"])
+def test_an_explicit_persons_name_is_personal_on_any_table(table, column):
+    # A thing word in the table name (`event`, `course`, `store`) must not hide a person's name.
+    assert pii.detect_sensitive(table, column)
+
+
+@pytest.mark.parametrize("table", ["event_attendees", "course_enrollments", "district_staff", "campaign_leads",
+                                   "service_requests", "StoreCustomers"])
+def test_a_people_word_anywhere_keeps_a_bare_name_suspected(table):
+    assert suspected_pii("name", table)
+
+
+@pytest.mark.parametrize(("table", "things"), [("order_status", True), ("order_statuses", True), ("classes", True),
+                                               ("business_units", False), ("addresses", False)])
+def test_words_ending_in_s_are_singularized_properly(table, things):
+    # `status` used to be cut to `statu` and never matched; `classes` is a list of classes.
+    assert pii._thing_table(table) is things
+
+
+def test_order_status_name_is_not_suspected():
+    assert not suspected_pii("name", "order_status")
+    assert not suspected_pii("name", "classes")
+
+
+@pytest.mark.parametrize(("table", "column"), [("customers", "full_name"), ("schools", "admin_first_name"),
+                                               ("schools", "admin_last_name"), ("projects", "owner_full_name")])
+def test_a_persons_name_is_still_personal(table, column):
+    assert pii.detect_sensitive(table, column)
+
+
+@pytest.mark.parametrize("table", ["cmdb_ci", "cmdb_model", "schools", "service_offering"])
+def test_a_bare_name_on_these_tables_of_things_is_not_suspected(table):
+    assert not suspected_pii("name", table)

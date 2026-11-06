@@ -991,3 +991,17 @@ def test_a_windowed_function_is_not_an_aggregate_for_the_metric_reader(tmp_path)
     flags = {oc.key: bool(oc.expr is not None and any(agg.find_ancestor(exp.Window) is None for agg in oc.expr.find_all(exp.AggFunc))) for oc in cols}
     assert flags == {"id": False, "prev": False, "run": False, "total": True}
 
+
+
+@pytest.mark.parametrize("projection", ["ROUND(SUM(amount), 1)", "ROUND(SUM(amount))"])
+def test_a_rounded_metric_is_still_the_metric(org, projection):
+    # Rounding is presentation; a live run showed ROUND(<rate>, 1) reported as not the agreed definition.
+    sql = f"SELECT {projection} AS total FROM orders o"
+    out = [i for i in _sections(org, sql)["columns"]["items"] if i.get("kind") == "output"]
+    assert out[0]["status"] == "matched" and out[0]["name"] == "revenue"
+
+
+def test_rounding_something_else_is_not_the_metric(org):
+    sql = "SELECT ROUND(AVG(amount), 1) AS total FROM orders o"
+    out = [i for i in _sections(org, sql)["columns"]["items"] if i.get("kind") == "output"]
+    assert out[0]["status"] != "matched"

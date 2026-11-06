@@ -1,6 +1,6 @@
 ---
 name: agami-save-golden
-description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, one sheet of an Excel .xlsx workbook, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies the changes queued on the golden-dataset explorer page, which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
+description: "Writes golden-dataset items for a profile through two doors. The import door turns a question bank — a CSV, one sheet of an Excel .xlsx workbook, or a table pasted into chat — into items after the parsed rows have been shown and agreed to: a row that already carries a statement is written confirmed, a bare question is written unconfirmed. The save door writes one question, the statement that answered it and the result the person accepted, as a confirmed item. The curation door applies changes to a dataset decided on cards in the chat (or a block from an older, editable explorer page), which may weaken a claim and may never grant one. Every write goes through agami-core's writer, is re-read by the runner's own reader before it is kept, and is append-only: a write that would change an item that already exists stops and shows the before and the after. This skill writes only; it never runs or scores a dataset."
 when_to_use: "Use when the user says 'save this as a golden question', 'add this to the golden dataset', 'import my question bank', 'turn this spreadsheet into a golden dataset', 'this answer is correct — remember it as ground truth', 'show me the golden datasets', 'what does this dataset not test', 'apply my queued changes', or '/agami-save-golden <dataset>' — any ask to record a question, or a bank of questions, that the model should be scored against later. Also use when the user replies with a back-channel block from a previously-rendered golden-dataset explorer page (first line `profile: <name>`, then `golden-ops:` and a JSON array, ending `done`) — paste it and nothing else is needed. Requires agami-connect to have been run first (needs a profile with a semantic model). To RUN a dataset and see the verdicts, use `/agami-eval` instead: that skill reads and scores, this one writes and never runs or scores."
 argument-hint: "[dataset-name]"
 ---
@@ -27,6 +27,7 @@ Spec for the deterministic half: [`scripts/golden_author.py`](../../scripts/gold
 - **One question per turn.** This is a tool, not a tutorial. At most two sentences of prose between phases.
 - **Show before you write.** Nothing reaches disk that the user has not seen rendered first — parsed rows as a table, a replacement as a before and an after.
 - **Never volunteer SQL for a question that has none.** See the rule above; it is the reason this skill exists in the shape it does.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). What was parsed is a markdown table in the chat (at most 15 rows, saying how many more); every decision is a card. The golden-datasets page is the optional, read-only **Show the full view**, served from localhost; changes are decided on cards, and a block pasted from an older, editable page is still accepted.
 
 ---
 
@@ -45,10 +46,10 @@ If plan mode is not active, skip this phase silently and go to Phase 0.
 ## Phase 0: Preflight
 
 1. **Plan-mode check** — Phase −1 above. Do it first; a refusal halfway through a parse is a confusing partial state.
-2. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`. A dataset belongs to a profile, and a profile with no model has nothing to be scored against.
+2. **Model present** — `<artifacts_dir>/<profile>/datasource.yaml` must exist. If not, invoke `/agami-connect`, unless `AGAMI_PROFILE` names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): then say so and stop. A dataset belongs to a profile, and a profile with no model has nothing to be scored against.
    Then, before any door below, create the scratch folder every later step writes to: `mkdir -p "<artifacts_dir>/local/tmp"` (Claude's Write tool and a `>` redirect both need it to exist).
 3. **See what exists** — `ls <artifacts_dir>/<profile>/golden_datasets/`. It writes nothing, and it is how you find out whether this is a new dataset or an existing one you are appending to. A missing directory is ordinary: the first write creates it.
-4. **Which dataset** — the one named in `$ARGUMENTS`, the only one that exists, or ask with `AskUserQuestion` listing what is there plus "a new one". The name is the **filename stem** (`orders` → `orders.yaml`); the file never declares its own name and the writer never puts one in. A stem is **one plain name** — letters, digits, dots, dashes and underscores, nothing else. `--profile` is held to the same rule. Both are joined straight into the path the writer truncates and rewrites, so anything with a separator or a `..` in it is refused with exit `2` before a single byte is read; never "helpfully" pass a path where a name is asked for.
+4. **Which dataset** — the one named in `$ARGUMENTS`, the only one that exists, or ask with `AskUserQuestion`, header `Dataset`, listing what is there (up to three) plus "a new one". **With no dataset yet**, the card still has two options: **Create one named <suggested>** (a plain name drawn from the question's subject, e.g. `orders`) and **Name it myself**, whose name is typed in "Other"; **Name it myself** picked with nothing typed is asked again. The name is the **filename stem** (`orders` → `orders.yaml`); the file never declares its own name and the writer never puts one in. A stem is **one plain name** — letters, digits, dots, dashes and underscores, nothing else. `--profile` is held to the same rule. Both are joined straight into the path the writer truncates and rewrites, so anything with a separator or a `..` in it is refused with exit `2` before a single byte is read; never "helpfully" pass a path where a name is asked for.
 
 **Never glob for a dataset outside this profile.** [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md) is the authority on every field and it carries the hard rule verbatim: **never read another profile** to learn the file shape. A golden dataset is the business definitions and the answer key in one file, so a glob across `<artifacts_dir>` returns another customer's questions together with the SQL that correctly answers them — a tenant-data leak in a hosted deployment and a lift of somebody's business definitions even locally. The reference has every field; a sibling profile never is the reference.
 
@@ -71,7 +72,7 @@ Route on what the user brought, and say which door you are opening:
 The parse reads the question bank straight from the file, and there is still **one parser**: a workbook is read into rows and then parsed exactly as a CSV is, so there is one place a column can be misread.
 
 - **A `.csv` path** — use it as given.
-- **A `.xlsx` path** — use it as given. Do not open it with the Read tool (it cannot read a workbook) and do not guess at its contents; the parse reads it. A workbook often holds several sheets — a cover page, a schema reference, the questions — and **which sheet holds the questions is the user's call, not yours**. Run the parse without `--sheet` first: a workbook with more than one sheet stops with exit `2` and lists every sheet. Show the list, suggest the one whose name reads like the question bank, and re-run with `--sheet "<name>"` once they confirm.
+- **A `.xlsx` path** — use it as given. Do not open it with the Read tool (it cannot read a workbook) and do not guess at its contents; the parse reads it. A workbook often holds several sheets — a cover page, a schema reference, the questions — and **which sheet holds the questions is the user's call, not yours**. Run the parse without `--sheet` first: a workbook with more than one sheet stops with exit `2` and lists every sheet. Ask on a card, header `Sheet`, *"Which sheet holds the questions?"*: one option per sheet, up to 4, the one whose name reads like the question bank first (no `(Recommended)`: it is a fact about their file); "Other" takes any other sheet's name. Re-run with `--sheet "<name>"` on the answer. A name typed in "Other" that is no sheet in the workbook stops the parse with *"this workbook has no sheet named …"* and the list of sheets: say that in one line and ask the same card again, never guess the nearest name.
 - **A `.xls` path** (Excel's older binary format) — it cannot be read. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke.
 - **A table pasted into chat** — write it out as a CSV with the **Write tool** and then parse that file. One parser, one code path, and the file is also the thing the user can fix and re-run. Per [`shared/invocation-conventions.md`](../../shared/invocation-conventions.md): **never a heredoc, never `python3 -c`, never a shell variable** — quoting mangles the commas and quotes that are the whole point of a CSV. Write it to `<artifacts_dir>/local/tmp/agami-golden-pasted-<ts>.csv` and tell the user where it went.
 
@@ -81,7 +82,7 @@ The table needs a header row with a **question column** — `question`, `query`,
 
 ```bash
 mkdir -p "<artifacts_dir>/local/tmp"   # a first command: its `>` opens the file before py runs
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py parse \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py parse \
   --file <path-to-csv-or-xlsx> [--sheet "<sheet name>"] [--column <field>="<header>"] \
   > "<artifacts_dir>/local/tmp/agami-golden-parse-<ts>.json"
 ```
@@ -94,9 +95,9 @@ The payload carries `columns` (the header as found), `header_row` (the sheet's o
 
 **Say what was read, before the rows.** For a workbook, name the sheet and the header row (*"Read the **Questions** sheet, header on row 4."*) and quote every `above_header` row, so the user can see nothing they meant as a question sat above the header. A right-looking table from the wrong tab is the one mistake the rows alone won't show.
 
-**Ask about every `unrecognized` column, before anything else.** Each is a column the parse did not read whose header looks like a field the sheet hasn't supplied — `{"column": "Warehouse SQL", "could_be": "sql"}`. Ask about each by its header: *"The sheet has a column **Warehouse SQL** that wasn't read. Is that the SQL for each question? If so, rows that have it will import as confirmed."* On a yes, re-run the parse with `--column sql="Warehouse SQL"` (one `--column` per field) and show the new payload instead; on a no, carry on without it. Wait for the answer and never map a column on your own, even when the header plainly says SQL, because a statement column the person didn't mean becomes an answer key every future run is scored against.
+**Ask about every `unrecognized` column, before anything else.** Each is a column the parse did not read whose header looks like a field the sheet hasn't supplied — `{"column": "Warehouse SQL", "could_be": "sql"}`. Ask about each by its header, on one card, one question per column (up to 4; more go on a second card), header `Column`: *"The sheet has a column **Warehouse SQL** that wasn't read. Is that the SQL for each question? If so, rows that have it will import as confirmed."*, options **Read it as the SQL** (the field from `could_be`) / **Leave it out**. On **Read it as …**, re-run the parse with `--column sql="Warehouse SQL"` (one `--column` per field) and show the new payload instead; on **Leave it out**, carry on without it. Wait for the answer and never map a column on your own, even when the header plainly says SQL, because a statement column the person didn't mean becomes an answer key every future run is scored against.
 
-**Show the rows as a markdown table.** Not a count, not a summary — the rows:
+**Show the rows as a markdown table.** Not a count, not a summary — the rows, at most 15 rows, then *"Showing 15 of <N> rows; <N−15> more."* when there are more (the skipped rows and the counts on the card still cover all of them):
 
 ```markdown
 | id | Question | Expected | SQL in the sheet? | Tags |
@@ -109,16 +110,21 @@ Ids are derived from the question when the sheet has none, so they are stable ac
 
 If `skipped` is non-empty, list every skipped row with its number and reason **before** asking. A question missing from a dataset is one nobody notices is missing.
 
-Derived ids are unique by construction, but a sheet with its **own `id` column** can repeat one. The import refuses the whole batch and names the id, because an id is the key a result is stored under and the second row would otherwise overwrite the first inside one write. The table you just rendered is where to spot it — ask the user which row keeps the id.
+Derived ids are unique by construction, but a sheet with its **own `id` column** can repeat one. The import refuses the whole batch and names the id, because an id is the key a result is stored under and the second row would otherwise overwrite the first inside one write. The table you just rendered is where to spot it — ask on a card, header `Id`, which row keeps the id: one option per row carrying it (its question); "Other" takes a new id for the other row.
 
-Then ask, plainly, naming both counts when they differ: *"Import these `<N>` questions into `<dataset>`? `<K>` of them already carry an answer in the sheet and will be written confirmed, able to gate a run immediately; the rest have no answer yet and stay unconfirmed until someone saves one."* **Wait for an explicit yes.** Never skip this and never infer it from the user having handed you the file.
+Then ask on a card (AskUserQuestion), header `Import`, naming both counts when they differ: *"Import these `<N>` questions into `<dataset>`? `<K>` of them already carry an answer in the sheet and will be written confirmed, able to gate a run immediately; the rest have no answer yet and stay unconfirmed until someone saves one."*
+
+- **Import them**: run the import (2d).
+- **Don't import**: nothing is written; say so.
+
+No `(Recommended)`: whether these rows belong in the answer key is the person's call. "Other" takes a change ("leave out row 7", "the dataset is called orders"): make it on the CSV or the flags, parse again, show the table again and ask the same card; words you cannot place are said back and the card asked again, never guessed. **Wait for an explicit yes**, which is **Import them**. Never skip this and never infer it from the user having handed you the file.
 
 ### 2d — Import
 
 Pass the **same parse payload** to `--rows` — the file you just showed them, not a re-derivation of it:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py import \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py import \
   --profile <profile> --dataset <dataset> \
   --rows "<artifacts_dir>/local/tmp/agami-golden-parse-<ts>.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-import-<ts>.json"
@@ -160,7 +166,7 @@ Write the item with the **Write tool** as JSON — the same rule as any JSON fil
 `match`, `bounds` and `must_filter` all reach the written item exactly as sent — which is why a replacement has to repeat whatever the existing item carried (Phase 4).
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
   --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
@@ -172,32 +178,49 @@ The payload carries the nearest example's question and statement, and the claims
 
 > Your examples for this kind of question filter on `created`; this one uses `opened`. Save it anyway?
 
-**It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On an explicit yes, re-run the same command with `--confirm-convention` appended. On a no, nothing was written, and the fix is usually to the statement rather than to the dataset.
+Ask it on a card, header `Convention`: **Save anyway** / **Don't save**. **It is a question and never a refusal.** A golden item may legitimately depart from convention — that is sometimes exactly why one is written. On **Save anyway**, re-run the same command with `--confirm-convention` appended. On **Don't save**, nothing was written, and the fix is usually to the statement rather than to the dataset.
 
 Only three claims can stop a save this way — the tables read, the filters written, and the resolved date window — because those are the ones that change *which rows are counted*. Two statements answering one question differ in ordering and limit all the time, and stopping for those would make this a prompt people learn to click through.
 
-**A relative question over a frozen answer key is refused here**, with exit `2`: *"how many orders in the last 7 days?"* names a window that slides forward and SQL pinned to a fixed date does not. Either anchor the statement to the current date (`CURRENT_DATE - INTERVAL '7 days'`, the dialect's spelling) or rewrite the question to name the window it means (`…in Q1 2024?`), then re-invoke. Do not save it and plan to fix it later — the whole point of refusing at save time is that the one person who can still fix it is here.
+**A relative question over a frozen answer key is refused here**, with exit `2`: *"how many orders in the last 7 days?"* names a window that slides forward and SQL pinned to a fixed date does not. Rewrite the question to name the window it means (`…in Q1 2024?`), with the person's answer on agami-reconcile's window card (header `Window`: **Name the window: <dates>** / **Don't save**), then re-invoke with the SQL exactly as it ran. **Never re-anchor the statement to the current date**: the answer key was recorded for one window, so a statement that slides would ask about different days next month and fail against a band nobody moved. Do not save it and plan to fix it later — the whole point of refusing at save time is that the one person who can still fix it is here.
 
 ---
 
 ## Phase 3b: The curation door — the explorer page's queued actions
 
-The explorer page (`/agami-eval`, or rendered directly) shows a profile's datasets and lets the reader queue changes against them. It writes nothing itself; it hands back one block. This is the door that applies it.
+The explorer page shows a profile's datasets and lets the reader queue changes against them. It writes nothing itself; it hands back one block. This is the door that applies it.
 
-**Render the page:**
+**When the person asks to see the datasets** ("show me the golden datasets"), the default is the chat. Read the counts with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" run_golden_eval.py --profile <profile> --list` (it reads the files and runs nothing) and show them as a table, `Dataset | Questions | Confirmed | Unconfirmed`, at most 15 rows, saying how many more. Then a card, header `Datasets`, *"What next?"*:
+
+- **Change an item**: a tag, `match`, a question, a removal or a withdrawn confirmation, decided on cards (below).
+- **Show the full view**: the explorer page, a read-only view of every item (below).
+- **Import questions**: the import door (Phase 2).
+- **Done**: end here.
+
+**Change an item, on cards.** Show the dataset's items as a table, `Id | Question | Tags | Match | Confirmed`, at most 15 rows, saying how many more, then a card, header `Change`, *"What should change?"*: **Add or remove a tag** / **Set match** / **Edit a question** / **Remove an item**. "Other" takes the change in the person's own words (*"withdraw confirmation on orders-by-month"*, *"tag 3 and 5 smoke"*). Ask for the item and the value the change needs on the next card, one question each; a value the person must type (a tag, a reworded question) is typed in "Other". Words that name an item the dataset does not have, or a change you cannot place on one of the six actions below, are said back in one line and the same card asked again: re-asked, never guessed. A question typed in "Other" is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). The answers become the block the page would have written: write it with the Write tool to `<artifacts_dir>/local/tmp/agami-golden-block-<ts>.txt` (`profile: <profile>`, `golden-ops:`, one JSON array of `{"op", "dataset", "id", "value"}`, `done`) and apply it through the same parse and apply calls as a pasted block (below).
+
+**Show the full view (optional, only when asked).** A read-only view of every dataset and item ([`shared/question-cards.md`](../../shared/question-cards.md) rule 6): it has no controls that queue a change. Render the page:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" render_golden_datasets.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_golden_datasets.py \
   --profile <profile> \
-  --out "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html"
+  --read-only --out "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html"
 ```
 
 `--out` must land under `local/`, the gitignored half — the page carries every confirmed answer key in full, and that is only safe where it is not committed. The script refuses any other destination.
 
-**When the user pastes the block back**, parse it before you read it:
+Serve it from localhost and give the person the URL, never a local file path:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_golden_feedback.py \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/eval/<profile>/datasets-<ts>.html" --minutes 30
+```
+
+Run it with `run_in_background` and read its first line, `{"url": …}`. Say: *"A read-only view of every item: `<url>`. Make changes on the card here."* and ask the `Datasets` card again in the same turn; nothing waits for a pasted block.
+
+**Applying a block** (the one the `Change` cards wrote, or one pasted from an older, editable page, which is still accepted), parse it before you read it:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_golden_feedback.py \
   --block-file "<artifacts_dir>/local/tmp/agami-golden-block-<ts>.txt" \
   > "<artifacts_dir>/local/tmp/agami-golden-ops-<ts>.json"
 ```
@@ -207,7 +230,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" parse_golden_feedback.py \
 **Then apply, one dataset at a time.** The block's `profile:` line names its target — use that, not the active profile, or a page rendered for one model applies to another:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py apply \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py apply \
   --profile <the block's own profile> --dataset <stem> \
   --ops "<artifacts_dir>/local/tmp/agami-golden-ops-<ts>.json" \
   > "<artifacts_dir>/local/tmp/agami-golden-apply-<ts>.json"
@@ -241,16 +264,16 @@ On a `needs_confirmation` payload — a list of `{id, before, after}` — **rend
 
 **A replacement is wholesale** — the item that is written is the item you sent, so anything the existing one carries and yours does not (its `tags`, a `must_filter`, a `match`) is gone. Read the `before` and carry forward what still applies before you ask; that is also what the user is agreeing to when they look at the two sides.
 
-Then ask, and only after an explicit yes re-run the **same command with `--confirm-replace` appended**:
+Then ask on a card, header `Replace`, *"Replace the existing item?"*: **Replace it** / **Keep the existing one** (for removals, **Remove them** / **Keep them**). Only after **Replace it** (or **Remove them**) re-run the **same command with `--confirm-replace` appended**:
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" golden_author.py save \
   --profile <profile> --dataset <dataset> \
   --item "<artifacts_dir>/local/tmp/agami-golden-item-<ts>.json" --confirm-replace \
   > "<artifacts_dir>/local/tmp/agami-golden-save-<ts>.json"
 ```
 
-**Never pass `--confirm-replace` pre-emptively.** Not on the first attempt, not because a re-import "is probably the same sheet", not to save a round trip. The flag means one thing — a person saw the before and the after and said yes — and passing it before that has happened makes the stop decorative. If the user says no, say the file is untouched and stop; it is byte-identical, not merely equivalent.
+**Never pass `--confirm-replace` pre-emptively.** Not on the first attempt, not because a re-import "is probably the same sheet", not to save a round trip. The flag means one thing — a person saw the before and the after and said yes — and passing it before that has happened makes the stop decorative. If the user picks **Keep the existing one**, say the file is untouched and stop; it is byte-identical, not merely equivalent.
 
 ---
 
@@ -277,7 +300,7 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
 | `agami-save-golden: this file is empty` / `no column here holds the question` / `this file has no header row` | The sheet's question column can't be identified. The refusal lists every header it read — quote it back, ask which column holds the question, and have them rename it (or add a header row) and re-invoke. Never guess at column 0: a bank of ids imported as questions fails every future run in a way that looks exactly like a model regression. |
 | `agami-save-golden: N row(s) were skipped` on a successful parse | A warning, not a stop. List every entry in `skipped` with its row number and reason before asking for the import — a question silently missing from a dataset is the failure this line exists to prevent. |
 | `agami-save-golden: this workbook has N sheets, so which one holds the questions has to be named with --sheet` | Not a fault — the workbook has more than one tab. List the sheets the message names, suggest the one that reads like the question bank, and on the user's word re-run with `--sheet "<name>"`. Never pick one yourself. |
-| `agami-save-golden: this workbook has no sheet named '<name>'` | The name matched no tab (case and surrounding spaces are already forgiven). Show the sheets the message lists and re-run with the one the user means. |
+| `agami-save-golden: this workbook has no sheet named '<name>'` | The name matched no tab (case and surrounding spaces are already forgiven). Say so in one line and ask the `Sheet` card (2a) again with the sheets the message lists; re-run with the one the person picks. |
 | `agami-save-golden: this is Excel's older binary .xls format` / `this file is not a readable .xlsx workbook` | The file can't be read as a workbook. Ask the user to save it as `.xlsx` (or CSV) from Excel and re-invoke. Do not open it with the Read tool, and do not reconstruct its contents from memory. |
 | `agami-save-golden: more than one sheet matches '<name>' once case and spaces are ignored` | Two tabs differ only in case or a trailing space. Show the matching sheets the message lists and re-run with `--sheet` spelled exactly as the tab the user means. |
 | `agami-save-golden: this workbook contains XML this reader will not parse` / `… has a damaged part` / `… is missing a part` / `a part of this workbook is too large` / `… has a row …` / `… has a cell …` / `this sheet has data on row …` / `this sheet is too large` | The workbook can't be read as a question bank as it stands — damaged, not written by Excel, or far larger than a question bank runs. Nothing was read. Ask the user to re-save it from Excel as `.xlsx`, or to copy just the question table into a fresh workbook or a CSV, and re-invoke. Never try to open it another way. |
@@ -289,5 +312,5 @@ bash "$AGAMI_PLUGIN_ROOT/scripts/py" golden_author.py save \
 | `agami-save-golden: this does not fit a golden case — …` | The item JSON is a shape the dataset reader refuses — most often `match: bounded` with no `bounds` block, or a `sql: null` on a save. The sentence names the field and the reason (never the value). Fix the item JSON and re-run. |
 | `agami-save-golden: <path> does not exist` / `this file is not readable JSON` | The `--file` / `--rows` / `--item` path is wrong or the file you wrote is truncated. Re-write it with the Write tool and re-run; nothing was written. |
 | `agami-save-golden: <name>.yaml cannot be read as it stands` | The existing dataset has a fault that costs it a case, so nothing may be merged into it — a merge into a file the reader can't fully read would drop whatever it couldn't parse. Report the finding, point at [`shared/golden-dataset-shape.md`](../../shared/golden-dataset-shape.md), and let the user fix the named case first. (A dataset that merely *reports* a relative question over a frozen answer key is not this: that finding drops nothing, and writing to the dataset still works.) |
-| A relative question refused at save time | The window slides and the SQL doesn't. Anchor the statement to the current date, or rewrite the question to name its window, then re-invoke. Don't save it "for now". |
+| A relative question refused at save time | The window slides and the SQL doesn't. Rewrite the question to name its window (the `Window` card), never re-anchor the statement, then re-invoke. Don't save it "for now". |
 | `golden_author's write doors need agami-core and its model extra` | The plugin's interpreter is missing `agami-core[model]`. Route to `/agami-connect`, which sets the environment up; nothing was written. |

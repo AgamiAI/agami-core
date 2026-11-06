@@ -297,7 +297,7 @@ Fields per line:
 | `tier`           | enum             | Connection method that ran the query: `cli` (native CLI), `duckdb`, `python` (Python driver). Field name is `tier` for backward-compatibility with v1.0 logs.                   |
 | `risk`           | enum             | `LOW` / `MEDIUM` / `HIGH` (large-table risk classifier)                                                                                                                         |
 | `error_kind`     | enum or null     | Set when execution failed; one of the 9 classifier kinds                                                                                                                        |
-| `chart_path`     | string or null   | Absolute path of the HTML report from Phase 4e, or null if the query returned a 1×1 scalar that didn't get a report. Read by `query-database`'s reopen-intent flow (Phase 2a.1) |
+| `chart_path`     | string or null   | Absolute path of the chart page from Phase 4e, set only when the person picked "Show as a chart" or asked for a chart; null otherwise (no page is rendered by default). Read by `query-database`'s reopen-intent flow (Phase 2a.1) |
 | `tables_used`    | array of strings | Qualified `<schema>.<table>` names the SQL FROMs/JOINs. For two-pass retrieval (Phase 2b large mode), this is what Pass 1 picked; for small mode, parsed from the SQL.          |
 | `retrieval_mode` | enum             | `small` or `large` — which Phase 2b branch ran. Useful for tuning the 50-table threshold.                                                                                       |
 

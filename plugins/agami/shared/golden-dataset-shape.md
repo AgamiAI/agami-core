@@ -154,10 +154,10 @@ the top of a file.
 **A relative question over a frozen answer key is reported as a dataset error.**
 A question like *"how many orders last quarter?"* names a window that slides
 forward on its own; SQL pinned to `placed_at >= '2024-01-01'` does not. The two
-agree today and drift apart on their own. Either anchor the SQL to the current
-date (`CURRENT_DATE - INTERVAL '90 days'`, `NOW()`, the dialect's spelling) or
-rewrite the question to name the window it means, as
-`orders-paid-by-channel-2024` above does. The item is still read — the case is
+agree today and drift apart on their own. Rewrite the question to name the
+window it means, as `orders-paid-by-channel-2024` above does, and keep the SQL
+as it ran. Never re-anchor the SQL to the current date: the answer key was
+recorded for one window, and a statement that slides fails against it next month. The item is still read — the case is
 broken, not the model, and a runner that scored it as a failure would blame the
 wrong thing.
 

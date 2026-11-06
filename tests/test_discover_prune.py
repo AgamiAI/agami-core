@@ -2,7 +2,7 @@
 
 `introspect.discover_inventory` must be CHEAP — it lists tables + columns and
 nothing else (no grain count-distincts, no FK-overlap probes, no row-count
-scans). `render_prune` turns that inventory into the standalone prune HTML.
+scans). `sm discover` writes that inventory and no page: tables are picked on a card.
 """
 
 from __future__ import annotations
@@ -19,11 +19,8 @@ pytest.importorskip("sqlglot")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
-import render_prune  # noqa: E402
 from semantic_model import cli  # noqa: E402
 from semantic_model import introspect as I  # noqa: E402
-
-PLUGIN_DIR = REPO_ROOT / "plugins" / "agami"
 
 # --- canned runners ---------------------------------------------------------
 
@@ -122,78 +119,28 @@ def test_discover_raises_when_no_tables():
         I.discover_inventory("main", "postgres", runner=lambda sql: [])
 
 
-# --- render_prune -----------------------------------------------------------
+# --- cmd_discover writes the inventory and no page ---------------------------
 
 
 def _inventory():
     return {
-        "profile": "main", "db_type": "postgres", "schemas": ["public", "billing"],
-        "table_count": 3, "column_mode": "catalog-bulk",
-        "tables": [
-            {"schema": "public", "table": "customers",
-             "columns": [{"name": "id", "type": "integer"}, {"name": "email", "type": "text"}]},
-            {"schema": "billing", "table": "invoices",
-             "columns": [{"name": "id", "type": "integer"}]},
-            {"schema": "public", "table": "orders",
-             "columns": [{"name": "id", "type": "integer"}, {"name": "total", "type": "decimal"}]},
-        ],
+        "profile": "main", "db_type": "postgres", "schemas": ["public"], "table_count": 1,
+        "column_mode": "catalog-bulk",
+        "tables": [{"schema": "public", "table": "orders", "columns": [{"name": "id", "type": "integer"}]}],
     }
 
 
-def test_build_manifest_groups_by_schema():
-    man = render_prune.build_manifest(_inventory())
-    names = [s["name"] for s in man["schemas"]]
-    assert names == ["public", "billing"]   # engine schema order preserved
-    public = next(s for s in man["schemas"] if s["name"] == "public")
-    assert [t["table"] for t in public["tables"]] == ["customers", "orders"]
-    assert man["totals"] == {"tables": 3, "columns": 5}
-
-
-def test_render_writes_prunable_html(tmp_path):
-    inv_path = tmp_path / "inventory.json"
-    inv_path.write_text(json.dumps(_inventory()))
-    out = tmp_path / "prune.html"
-    rc = render_prune.main(["--inventory", str(inv_path), "--out", str(out)])
-    assert rc == 0
-    html = out.read_text()
-    # the manifest is embedded and the table names are present
-    assert "const MANIFEST =" in html
-    assert "customers" in html and "invoices" in html
-    # it's the prune page — title + the prune call-to-action are present
-    assert "Prune tables" in html
-    assert "Generate for Claude" in html
-    assert "Uncheck any table you don't need" in html
-    # shares the explorer's chrome: logo + theme tokens are injected
-    assert "dashboard-header" in html and "--accent" in html
-    # {{...}} tokens all substituted
-    assert "{{" not in html
-
-
-# --- _load_render_prune: the AGAMI_PLUGIN_ROOT locator --------------------------
-# render_prune lives in the plugin, not the installed package. The production caller (`sm discover` →
-# `python -m semantic_model.cli`) can only find it via AGAMI_PLUGIN_ROOT — a package-relative import
-# ModuleNotFound'd on every real install. These drive that locator (the DB-driven cmd_discover doesn't).
-
-
-def _force_relocate(monkeypatch):
-    """Undo this module's top-level `render_prune` preload so `_load_render_prune` must genuinely locate
-    + insert + import it — otherwise the test would pass even if the locator no-op'd (it wouldn't need to
-    do anything, since `render_prune` is already importable)."""
-    monkeypatch.delitem(sys.modules, "render_prune", raising=False)
-    scripts = str(PLUGIN_DIR / "scripts")
-    monkeypatch.setattr(sys, "path", [p for p in sys.path if p != scripts])
-
-
-def test_load_render_prune_via_plugin_root(monkeypatch):
-    _force_relocate(monkeypatch)
-    monkeypatch.setenv("AGAMI_PLUGIN_ROOT", str(PLUGIN_DIR))
-    mod = cli._load_render_prune()
-    assert hasattr(mod, "build_manifest") and hasattr(mod, "render")
-
-
-def test_load_render_prune_raises_without_plugin_root(monkeypatch):
-    # No AGAMI_PLUGIN_ROOT → a clear, named error (not a bare ImportError).
-    _force_relocate(monkeypatch)
-    monkeypatch.delenv("AGAMI_PLUGIN_ROOT", raising=False)
-    with pytest.raises(RuntimeError, match="AGAMI_PLUGIN_ROOT"):
-        cli._load_render_prune()
+@pytest.mark.parametrize("out", [None, "prune.html"])
+def test_discover_writes_the_inventory_and_no_page(tmp_path, monkeypatch, capsys, out):
+    monkeypatch.setattr(I, "make_execute_sql_runner", lambda *a, **k: None)
+    monkeypatch.setattr(I, "discover_inventory", lambda *a, **k: _inventory())
+    argv = ["discover", "--profile", "main", "--db-type", "postgres", "--artifacts", str(tmp_path)]
+    if out:
+        argv += ["--out", str(tmp_path / out)]
+    args = cli.build_parser().parse_args(argv)
+    assert args.func(args) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["prune_html"] is None
+    assert json.loads((tmp_path / "main" / ".introspect" / "inventory.json").read_text())["table_count"] == 1
+    assert not list(tmp_path.rglob("*.html"))
+    assert ("note" in printed) == bool(out)

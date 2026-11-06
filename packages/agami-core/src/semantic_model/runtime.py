@@ -8421,7 +8421,12 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         # `__eq__` — both derive from the node's structure — so the equality this comparison is
         # defined as is exactly what the lookup performs, and 50 output columns against a model
         # declaring hundreds of metrics costs 50 hashes rather than their product.
-        cands = by_binding.get(_reduced_projection(oc.expr, dialect))
+        reduced = _reduced_projection(oc.expr, dialect)
+        cands = by_binding.get(reduced)
+        # Rounding is presentation: `ROUND(<metric>, 1)` is still the metric, and a live run showed
+        # a rounded rate reported as "not the agreed definition" beside the signed-off one it was.
+        if not cands and isinstance(reduced, exp.Round):
+            cands = by_binding.get(reduced.this)
         if cands:
             if len(cands) == 1:
                 return MATCHED, cands[0]

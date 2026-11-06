@@ -3,10 +3,15 @@
 `agami` reads database connection details from `<artifacts_dir>/local/credentials`.
 Same pattern as `~/.aws/credentials`, `~/.dbt/profiles.yml`, `~/.pgpass`.
 
-The first time you connect, `/agami-connect` writes a template at
-`<artifacts_dir>/local/credentials.example`. Fill in your connection details, save it
-(leave the filename as-is), then say *"introspect my database"* — agami moves it to
-`<artifacts_dir>/local/credentials` and locks it down for you. You don't rename or
+On macOS and Windows, `/agami-connect` asks for the host, port, database and user on a question
+card and takes the password on a one-time `localhost` page, which stores it in the OS keychain
+(Keychain or Credential Manager); the credentials file then holds `password = keyring:agami/<name>`
+instead of the password.
+
+On Linux, and for Databricks anywhere, `/agami-connect` writes a template at
+`<artifacts_dir>/local/credentials.example` the first time you connect. Fill in your connection
+details, save it (leave the filename as-is), then press **I've filled it in** on the card — agami
+moves it to `<artifacts_dir>/local/credentials` and locks it down for you. You don't rename or
 `chmod` anything by hand. A filled-in file looks like this:
 
 ```ini

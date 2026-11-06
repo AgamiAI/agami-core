@@ -5,7 +5,7 @@
 # agami uses for execution (psql tier, or the python-driver tier) may not have
 # them, and bare `python3` on PATH often won't either. This wrapper is the ONE
 # place that resolves a usable interpreter, ensures the deps are present, and runs
-# the CLI — so every skill just calls `bash "$AGAMI_PLUGIN_ROOT/scripts/sm" <cmd>`
+# the CLI — so every skill just calls `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <cmd>`
 # and never has to think about interpreters or sys.path.
 #
 # Interpreter resolution order:
@@ -36,10 +36,9 @@ fi
 VER="$(basename "$(cd "$SCRIPT_DIR/.." && pwd)")"
 GIT_BASE="git+https://github.com/AgamiAI/agami-core"
 
-# Guarantee AGAMI_PLUGIN_ROOT for the CLI subprocess: `semantic_model.cli discover` locates the plugin's
-# render_prune renderer via it (it lives in the plugin, not the installed package). Every skill sets it,
-# but derive it from our own location (the plugin root = the scripts dir's parent) if a direct caller
-# didn't — so `sm discover` never depends on the caller remembering to export it.
+# Guarantee AGAMI_PLUGIN_ROOT for the CLI subprocess, for the commands that read plugin files. Every
+# skill sets it, but derive it from our own location (the plugin root = the scripts dir's parent) if a
+# direct caller didn't, so no command depends on the caller remembering to export it.
 export AGAMI_PLUGIN_ROOT="${AGAMI_PLUGIN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 . "$SCRIPT_DIR/_python.sh"   # usable_python / path_python / config_python / resolve_python
@@ -82,6 +81,21 @@ _pip_try() {
 # so a `semantic_model` in the caller's cwd can't shadow the installed package (`python -c` puts cwd on
 # sys.path[0]).
 _imports_ok() { ( cd / && "$PY" -c 'import semantic_model.cli, pydantic, sqlglot, yaml' ) 2>/dev/null; }
+
+# The pip extras to install. On macOS and Windows that includes `keyring`, the library behind the OS
+# credential store (Keychain / Credential Manager) that a `keyring:agami/<profile>` password reference
+# reads; without it the connect helper has nowhere to put a password. Elsewhere there is no supported
+# store, so the library would only be dead weight.
+case "$(uname -s 2>/dev/null || true)" in
+  Darwin|MINGW*|MSYS*|CYGWIN*|Windows_NT) EXTRAS="model,keyring" ;;
+  *) EXTRAS="model" ;;
+esac
+# Only `sm install` insists on keyring being importable: the skills and the pane run it after the person
+# has agreed to an install. Every other command keeps its old readiness rule, so a current [model]-only
+# install never triggers an install nobody asked for.
+NEED_KEYRING=""
+if [ "${1:-}" = "install" ] && [ "$EXTRAS" != "model" ]; then NEED_KEYRING=1; fi
+_keyring_ok() { [ -z "$NEED_KEYRING" ] || ( cd / && "$PY" -c 'import keyring' ) 2>/dev/null; }
 
 # A dev checkout: packages/ beside the plugin, in a folder that isn't a versioned cache.
 _dev_layout() {
@@ -136,11 +150,13 @@ PY
 }
 
 ensure_pkg() {
-  _imports_ok && _version_ok && return 0
+  _imports_ok && _version_ok && _keyring_ok && return 0
   # Every route below is a pip install, and with stderr hidden a Python without pip would only end in
   # "couldn't install", which doesn't say what is wrong or how to fix it.
   if ! ( cd / && "$PY" -m pip --version ) >/dev/null 2>&1; then
-    if _imports_ok; then
+    if _imports_ok && _version_ok; then
+      echo "agami: $PY has no pip, so keyring (the OS credential store library) can't be installed into it." >&2
+    elif _imports_ok; then
       local have
       have="$( cd / && "$PY" -c 'from importlib.metadata import version; print(version("agami-core"))' 2>/dev/null | tr -d '\r' || true)"
       echo "agami: $PY has no pip, so its agami-core${have:+ $have} can't be upgraded to this plugin's${PLUGIN_VER:+ $PLUGIN_VER}." >&2
@@ -155,7 +171,10 @@ ensure_pkg() {
   # distribution as satisfying a bare requirement, so the stale case would no-op without `--upgrade`
   # and leave the user exactly where they started — with the failure still ahead of them.
   local up=""
-  if _imports_ok; then
+  if _imports_ok && _version_ok; then
+    # Current, and only keyring is missing: the extra is added with no upgrade of what is there.
+    echo "agami: installing keyring (the OS credential store library) into $PY …" >&2
+  elif _imports_ok; then
     up="--upgrade"
     if _dev_layout; then
       echo "agami: agami-core in $PY isn't this checkout; installing it from $DEV_PKG_DIR …" >&2
@@ -169,12 +188,12 @@ ensure_pkg() {
   # "already satisfied" into the wrong site) must fall through to the next source, not falsely succeed.
   # The version is re-checked too, so a source that resolves to a too-old build (an index that hasn't
   # published this release yet) falls through to git rather than passing as done.
-  { [ -n "$DEV_PKG_DIR" ] && _pip_try ${up:+"$up"} -e "$DEV_PKG_DIR[model]"; } && _imports_ok && _version_ok && return 0
-  _pip_try ${up:+"$up"} "agami-core[model]" && _imports_ok && _version_ok && return 0
-  _pip_try ${up:+"$up"} "agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core" && _imports_ok && _version_ok && return 0
-  _pip_try ${up:+"$up"} "agami-core[model] @ ${GIT_BASE}@main#subdirectory=packages/agami-core" && _imports_ok && _version_ok && return 0
+  { [ -n "$DEV_PKG_DIR" ] && _pip_try ${up:+"$up"} -e "$DEV_PKG_DIR[$EXTRAS]"; } && _imports_ok && _version_ok && _keyring_ok && return 0
+  _pip_try ${up:+"$up"} "agami-core[$EXTRAS]" && _imports_ok && _version_ok && _keyring_ok && return 0
+  _pip_try ${up:+"$up"} "agami-core[$EXTRAS] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core" && _imports_ok && _version_ok && _keyring_ok && return 0
+  _pip_try ${up:+"$up"} "agami-core[$EXTRAS] @ ${GIT_BASE}@main#subdirectory=packages/agami-core" && _imports_ok && _version_ok && _keyring_ok && return 0
   echo "agami: couldn't install a current agami-core into $PY." >&2
-  echo "       Try:  $PY -m pip install --user --upgrade \"agami-core[model] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core\"" >&2
+  echo "       Try:  $PY -m pip install --user --upgrade \"agami-core[$EXTRAS] @ ${GIT_BASE}@${GIT_REF}#subdirectory=packages/agami-core\"" >&2
   echo "       Or point agami at a Python that has it:  export AGAMI_PYTHON=/path/to/python" >&2
   exit 3
 }

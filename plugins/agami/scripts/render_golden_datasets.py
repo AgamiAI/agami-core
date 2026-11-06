@@ -65,6 +65,7 @@ import _interp  # noqa: E402,F401
 # the model holds — and the two answers would drift until this page and the explorer disagreed
 # about which tables exist.
 import render_model_explorer  # noqa: E402
+from _read_only_view import make_read_only  # noqa: E402
 
 try:
     import agami_paths
@@ -371,6 +372,8 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--title", help="Page title (default: 'Golden datasets · <profile>')")
     # The caller owns the output path, as it does for every other rendered surface here.
     p.add_argument("--out", required=True, help="Output HTML path")
+    p.add_argument("--read-only", action="store_true",
+                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
     args = p.parse_args(argv)
 
     art = Path(os.path.expanduser(args.artifacts_dir)).resolve() if args.artifacts_dir else None
@@ -398,14 +401,12 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 2
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
-        render(
-            title=args.title or f"Golden datasets · {args.profile}",
-            profile=args.profile,
-            payload=payload,
-        ),
-        encoding="utf-8",
+    html = render(
+        title=args.title or f"Golden datasets · {args.profile}",
+        profile=args.profile,
+        payload=payload,
     )
+    out_path.write_text(make_read_only(html) if args.read_only else html, encoding="utf-8")
     totals = payload["totals"]
     print(
         f"Wrote {out_path} ({totals['datasets']} dataset"

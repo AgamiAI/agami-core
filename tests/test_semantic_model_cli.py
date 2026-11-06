@@ -1247,6 +1247,8 @@ def test_suggest_units_finds_money_columns(tmp_path):
     assert ("orders", "total") in names            # numeric + money-named
     assert ("order_items", "qty") not in names      # a count, not money
     assert all(c["column"] != "id" for c in cols)   # ids excluded
+    # the currency card names the column in words, not as `orders.total`
+    assert next(c for c in cols if c["column"] == "total")["label"] == "Total on Orders"
 
 
 def test_suggest_units_suggests_the_unit_a_name_states(tmp_path):
@@ -1271,6 +1273,27 @@ def _model_with_pending(root: Path) -> None:
         "relationships": [{"from_table": "order_items", "from_column": "order_id",
                            "to_table": "orders", "to_column": "id", "relationship": "many_to_one",
                            "confidence": "inferred", "review_state": "unreviewed"}]}))
+
+
+def test_card_text_fields_name_things_in_plain_words(tmp_path):
+    """A card read "What currency is `widgets.price` in?". The commands whose output becomes
+    card text carry each thing's name in words, next to the identifier the op needs."""
+    _model_with_pending(tmp_path)
+    items = json.loads(_run(["review-items", str(tmp_path), "--scope", "all"])[1])
+    plain = {it["kind"]: it["plain_name"] for it in items}
+    assert plain["metric"] == "Order count"
+    assert plain["relationship"] == "Order items to Orders by Order ID"
+    assert {it["name"] for it in items} >= {"order_count"}      # the identifier is still there
+
+    plan = json.loads(_run(["set-units", str(tmp_path), "--currency", "USD"])[1])["planned"]
+    assert {p["label"] for p in plan} >= {"Total on Orders"}
+
+    path = tmp_path / "subject_areas" / "s" / "tables" / "orders.yaml"
+    t = yaml.safe_load(path.read_text())
+    t["columns"].append({"name": "contact_email", "type": "string", "sensitive": True})
+    path.write_text(yaml.safe_dump(t))
+    sens = json.loads(_run(["sensitive", str(tmp_path)])[1])
+    assert [c["label"] for c in sens["columns"]] == ["Contact email on Orders"]
 
 
 def test_approve_queue_signs_off_all_pending(tmp_path):

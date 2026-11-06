@@ -138,7 +138,10 @@ def test_a_finding_is_only_a_question_until_a_person_answers(shop):
     assert c.caveats == [] and c.served_placeholders() == []
     q = curate.review_queue(org)
     assert q["counts"]["placeholders"] == 5
-    assert any(it["question"].startswith("date_dim.date_key holds '-99999' on 1 row") for it in q["placeholders"])
+    # the card's question names the column in plain words; the identifier stays in name/column
+    item = next(it for it in q["placeholders"] if it["column"] == "date_key")
+    assert item["question"].startswith("The Date key column on Date dim holds '-99999' on 1 row")
+    assert "date_dim" not in item["question"] and item["label"] == "Date key on Date dim"
     served = get_table_context(org, ["date_dim"], include=["caveats"])["tables"]["date_dim"]["columns"]
     assert not any("placeholders" in col for col in served)
 

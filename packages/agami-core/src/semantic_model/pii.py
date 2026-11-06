@@ -168,21 +168,72 @@ def strong_pii_name(name: str) -> bool:
 
 
 def detect_sensitive(table_name: str, column_name: str) -> bool:
-    """Sensitive by name: the strong rules anywhere; a bare `name` only inside a PII-ish table."""
+    """Sensitive by name: the strong rules anywhere; a bare `name` only inside a PII-ish table.
+
+    An explicit person-name column (`full_name`, `first_name`) is sensitive on every table: on
+    `event_attendees` or `store_orders` it names a person, and missing one leaks it."""
     if strong_pii_name(column_name):
         return True
     table_pii = table_name.upper() == "PII" or bool(STRONG_PII_RE.search(table_name)) \
         or bool(WEAK_PII_RE.search(table_name)) \
-        or any(w.rstrip("s") in PERSON_WORDS or w in ("people", "pii") for w in tokens(table_name))
+        or any(_in_words(w, PERSON_WORDS) or w in ("people", "pii") for w in tokens(table_name))
     return bool(WEAK_PII_RE.search(column_name)) and table_pii
 
 
-def suspected_pii(column_name: str) -> bool:
+# Tables that name things, not people: a bare `name` there is a product's or a plan's name.
+THING_TABLE_WORDS = frozenset({
+    "product", "category", "plan", "tier", "item", "sku", "tag", "label", "status", "type", "kind",
+    "brand", "collection", "department", "region", "country", "city", "currency", "channel",
+    "campaign", "feature", "file", "folder", "project", "service", "team", "warehouse", "store",
+    "metric", "event", "report", "dashboard", "setting", "role", "permission",
+    "model", "ci", "offering", "catalog", "consumable", "hardware", "school", "district", "county",
+    "course", "subject", "class",
+})
+
+
+# Words that make a table a list of people, whatever thing it is also about: `event_attendees`,
+# `course_enrollments`, `campaign_leads`. Such a table never counts as a table of things.
+PEOPLE_TABLE_WORDS = PERSON_WORDS | frozenset({
+    "people", "attendee", "enrollment", "enrolment", "staff", "lead", "student", "employee",
+    "registration", "registrant", "request", "requester", "applicant", "guest", "participant",
+    "subscriber", "teacher", "parent", "guardian", "volunteer", "donor", "recipient", "visitor",
+    "membership", "signup", "candidate", "worker", "faculty", "personnel", "resident", "tenant",
+    "buyer", "driver", "rider", "passenger", "traveler", "traveller", "pii",
+})
+
+
+def _in_words(word: str, vocab: frozenset) -> bool:
+    """`word` or its singular is in `vocab`. A trailing `s`/`es` is stripped only when what is left
+    is a listed word, so `status`, `class` and `address` are not cut to `statu`, `cla`, `addre`."""
+    if word in vocab:
+        return True
+    if word.endswith("ies") and word[:-3] + "y" in vocab:
+        return True
+    if word.endswith("es") and word[:-2] in vocab:
+        return True
+    return word.endswith("s") and not word.endswith("ss") and word[:-1] in vocab
+
+
+def _thing_table(table_name: str) -> bool:
+    words = tokens(table_name)
+    if any(_in_words(w, PEOPLE_TABLE_WORDS) for w in words):
+        return False
+    return any(_in_words(w, THING_TABLE_WORDS) for w in words)
+
+
+def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
     """A BROADER 'might be PII' name rule than `detect_sensitive`, for the review tier: it also
     keeps every older substring hit (`mobile_sessions`, `ip_address`), so a column the strict
-    rule stopped flagging is still listed for a person to confirm. Never auto-marks."""
-    return bool(strong_pii_name(column_name) or STRONG_PII_RE.search(column_name)
-                or WEAK_PII_RE.search(column_name) or _EXTRA_PII_RE.search(column_name))
+    rule stopped flagging is still listed for a person to confirm. Never auto-marks.
+
+    A bare `name` on a table of things (`products.name`, `plans.name`) is left out when the table
+    is given: listing it made people wade through product names to find the personal data."""
+    if strong_pii_name(column_name) or STRONG_PII_RE.search(column_name) or _EXTRA_PII_RE.search(column_name):
+        return True
+    if not WEAK_PII_RE.search(column_name):
+        return False
+    bare_name = tokens(column_name)[-1:] == ["name"] and not person_name(column_name)
+    return not (bare_name and table_name is not None and _thing_table(table_name))
 
 
 # --- values ------------------------------------------------------------------
@@ -379,13 +430,13 @@ def json_pii_caveat(paths: list[str]) -> str:
     return JSON_PII_CAVEAT_PREFIX + ", ".join(paths)
 
 
-def suspected_reason(name: str, caveats: Iterable[str]) -> Optional[str]:
+def suspected_reason(name: str, caveats: Iterable[str], table_name: str | None = None) -> Optional[str]:
     """Why an unflagged column is in the suspected tier: its name, or a value caveat the
     sample left on it. None when it isn't."""
     for c in caveats:
         if c in VALUE_SUSPECT_CAVEATS:
             return VALUE_SUSPECT_CAVEATS[c]
-    return "name" if suspected_pii(name) else None
+    return "name" if suspected_pii(name, table_name) else None
 
 
 __all__ = [
