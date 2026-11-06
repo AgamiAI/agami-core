@@ -40,6 +40,7 @@ from typing import Any, Iterable, Optional
 
 import yaml
 
+from . import model_format
 from .models import (
     Column,
     CrossSubjectAreaRelationship,
@@ -83,7 +84,7 @@ def _read_yaml(path: Path) -> Any:
 # field it declared without a word, and a deploy fed by that load stored a model without it (#575).
 # Reported by the callers a person reads (`sm validate`, the deploy), never from the load itself: the
 # executor loads the model in a child process whose stderr is its output contract.
-_DATASOURCE_KEYS = frozenset(Datasource.model_fields)
+_DATASOURCE_KEYS = frozenset(Datasource.model_fields) | model_format.STAMP_KEYS
 
 
 def unknown_datasource_keys(root: str | Path) -> list[str]:

@@ -426,7 +426,7 @@ def apply_spec(
     role: Optional[str] = None,
     dry_run: bool = False,
 ) -> SpecResult:
-    from . import build, curate, loader, snapshot, validator
+    from . import build, curate, loader, model_format, snapshot, validator
 
     root = Path(root)
     res = SpecResult(dry_run=dry_run)
@@ -617,6 +617,10 @@ def apply_spec(
             f"({approved} signed off): " + ", ".join(mm.name for mm in metrics_dropped)
         )
     if res.errors or dry_run:
+        return res
+    refusal = model_format.rewrite_refusal(root)
+    if refusal:
+        res.errors.append(refusal)
         return res
 
     # Everything write_tree replaces, plus the cross-area joins file add_relationships keeps beside

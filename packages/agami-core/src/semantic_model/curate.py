@@ -34,6 +34,7 @@ from typing import Any, Iterator, Optional
 
 import yaml
 
+from . import model_format
 from . import validator as V
 from .loader import _read_yaml as _load
 from .loader import load_datasource
@@ -495,6 +496,13 @@ def _dump(path: Path, obj: Any) -> None:
                     encoding="utf-8")
 
 
+def _refused(root: Path, res: "ApplyResult") -> bool:
+    refusal = model_format.rewrite_refusal(root)
+    if refusal:
+        res.errors.append(refusal)
+    return bool(refusal)
+
+
 def _snapshot(backups: "dict[Path, Optional[str]]", path: Path) -> None:
     """Record a file's prior content before the first write to it (None if new), so the
     batch can be rolled back without git — apply()'s revert used to depend on a git repo
@@ -516,6 +524,8 @@ def set_key_terminology(root: str | Path, terms: dict, *, merge: bool = True) ->
     dsp = root / "datasource.yaml"
     if not dsp.exists():
         res.errors.append(f"no datasource.yaml at {dsp}")
+        return res
+    if _refused(root, res):
         return res
     prior = dsp.read_text(encoding="utf-8")
     odoc = _load(dsp) or {}
@@ -561,6 +571,8 @@ def set_datasource_description(root: str | Path, description: str) -> "ApplyResu
     dsp = root / "datasource.yaml"
     if not dsp.exists():
         res.errors.append(f"no datasource.yaml at {dsp}")
+        return res
+    if _refused(root, res):
         return res
     line = (description or "").strip().splitlines()[0].strip() if (description or "").strip() else ""
     if not line:
@@ -613,6 +625,8 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
     [reason]} — a reject's `reason` is not stored on the model, only in curation_log.jsonl."""
     root = Path(root)
     res = ApplyResult()
+    if _refused(root, res):
+        return res
     backups: dict[Path, Optional[str]] = {}  # path -> prior text (None if newly created)
     logged: list[dict] = []  # the ops that took, each with the value it replaced
 
