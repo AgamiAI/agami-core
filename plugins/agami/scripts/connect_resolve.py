@@ -24,6 +24,7 @@ Output (the standard refactor contract):
                       "plugin_version": "0.9.18"|null, "agami_core": "0.9.18"|null,
                       "candidates_scored": [{..., "has_pip", "agami_core", "skipped", "reason"?}]},
       "tools": {"psql": "/path"|null, "sqlite3": ...},
+      "org_datasources": ["sales", ...] | null,  # organization.yaml's list, refreshed from disk
       "next": "ready" | "promote" | "bootstrap"
     },
     "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current
@@ -245,6 +246,19 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
             "candidates_scored": scored, "warnings": warnings}
 
 
+def _refresh_org_files(art: Path) -> list[str] | None:
+    """Bring organization.yaml's datasource list and organization.md's section up to date with the
+    datasource folders on disk. Skipped (None) when the agami-core package or its deps aren't installed
+    yet, as on a first-time setup; this script must never fail on that."""
+    try:
+        from semantic_model import org_record
+
+        record = org_record.refresh_datasources(art)
+    except Exception:
+        return None
+    return list(record.datasources) if record is not None else None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Resolve agami env state + next-phase decision.")
     ap.add_argument("--db-type", default=None, help="bind the interpreter probe to this dialect's driver")
@@ -325,6 +339,7 @@ def main(argv=None) -> int:
         "config": config,
         "interpreter": interpreter,
         "tools": tools,
+        "org_datasources": _refresh_org_files(art),
         "next": nxt,
     }
     print(json.dumps({"ok": True, "data": data, "anomalies": anomalies, "needs_judgment": None}, indent=2))

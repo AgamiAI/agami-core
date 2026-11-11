@@ -295,3 +295,34 @@ def test_later_pythons_on_path_are_candidates_too(monkeypatch, tmp_path):
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     got = CR._candidate_interpreters()
     assert got.index(str(first / "python3")) < got.index(str(second / "python3"))
+
+
+def test_resolve_refreshes_the_organization_files(tmp_path, monkeypatch):
+    pytest.importorskip("pydantic")
+    pytest.importorskip("yaml")
+    (tmp_path / "organization.md").write_text("# About this company\n", encoding="utf-8")
+    for name in ("sales", "support"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "datasource.yaml").write_text(f"datasource: {name}\n", encoding="utf-8")
+
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["org_datasources"] == ["sales", "support"]
+    assert "datasources:\n- sales\n- support" in (tmp_path / "organization.yaml").read_text(encoding="utf-8")
+    assert "- **support**" in (tmp_path / "organization.md").read_text(encoding="utf-8")
+
+
+def test_resolve_skips_the_refresh_when_agami_core_cannot_be_imported(tmp_path, monkeypatch):
+    # First-time setup can run before agami-core's deps are installed; the resolver must still answer.
+    monkeypatch.setitem(sys.modules, "semantic_model", None)  # makes the import raise ImportError
+    (tmp_path / "sales").mkdir()
+    (tmp_path / "sales" / "datasource.yaml").write_text("datasource: sales\n", encoding="utf-8")
+
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["org_datasources"] is None
+    assert not (tmp_path / "organization.yaml").exists()
+
+
+def test_resolve_writes_nothing_into_an_empty_artifacts_dir(tmp_path, monkeypatch):
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["org_datasources"] is None
+    assert list(tmp_path.iterdir()) == []
