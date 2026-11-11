@@ -2084,6 +2084,8 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     files would be written, validated against a model that doesn't contain them, and never served."""
     root = Path(root)
     res = ApplyResult()
+    if _refused(root, res):
+        return res
     if kind not in _KINDS:
         res.errors.append(f"unknown kind {kind!r} (expected metric|entity)")
         return res
@@ -2207,6 +2209,8 @@ def add_relationships(root: str | Path, *, intra: Optional[dict[str, list[dict]]
     any failure. Callers pre-route by area and pre-resolve to_column/cardinality."""
     root = Path(root)
     res = ApplyResult()
+    if _refused(root, res):
+        return res
     intra, cross = intra or {}, cross or []
     backups: list[tuple[Path, Optional[str]]] = []
 

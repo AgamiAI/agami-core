@@ -305,6 +305,11 @@ def introspect(
     out = Path(out_dir) if out_dir else (artifacts_dir / profile)
 
     report = IntrospectReport(profile=profile, db_type=db_type, out_dir=str(out), dry_run=dry_run)
+    # Checked before the progress log, which lives inside the model folder by default.
+    refusal = None if dry_run else model_format.rewrite_refusal(out)
+    if refusal:
+        dry_run = report.dry_run = True
+        progress_path = None
 
     pp = Path(progress_path) if progress_path else None
     if pp is not None:
@@ -572,11 +577,8 @@ def introspect(
         _regroup_columns_with_references([t for t in built if (t.schema_name, t.name) in fresh_keys], rels, sg)
         org = _refresh_existing(prev, built, rels[len(prev_rels):], fresh_keys, profile, report, per_area)
 
-    refusal = None if dry_run else model_format.rewrite_refusal(out)
     if refusal:
         report.notes.insert(0, "NOT WRITTEN: " + refusal)
-        dry_run = True
-        report.dry_run = True
     # 5. write (backing up any legacy model at the profile root). An append onto an existing model is
     # validated first: writing an invalid merge would replace a curated model with a broken one.
     if prev is not None and not dry_run:

@@ -71,10 +71,11 @@ def newer(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("version,expected", [
-    ("0.9.22", {"written_by": "agami-core 0.9.22", "rewrite_needs": "agami-core 0.9.16"}),
-    ("0.9.16", {"written_by": "agami-core 0.9.16", "rewrite_needs": "agami-core 0.9.16"}),
+    ("0.9.22", {"written_by": "agami-core 0.9.22", "rewrite_needs": "agami-core 0.9.21"}),
+    ("0.9.21", {"written_by": "agami-core 0.9.21", "rewrite_needs": "agami-core 0.9.21"}),
+    ("0.9.20", {"written_by": "agami-core 0.9.20", "rewrite_needs": "agami-core 0.9.16"}),
     ("0.9.10", {"written_by": "agami-core 0.9.10"}),
-    ("0.9.23.dev1", {"written_by": "agami-core 0.9.23.dev1", "rewrite_needs": "agami-core 0.9.16"}),
+    ("0.9.23.dev1", {"written_by": "agami-core 0.9.23.dev1", "rewrite_needs": "agami-core 0.9.21"}),
     (None, {}),
 ])
 def test_the_stamp_names_the_writer_and_the_newest_breaking_format(monkeypatch, version, expected):
@@ -89,7 +90,7 @@ def test_formats_are_listed_oldest_first():
 
 def test_a_write_stamps_datasource_yaml_and_the_keys_are_known(newer):
     assert _doc(newer)["written_by"] == "agami-core 0.9.22"
-    assert _doc(newer)["rewrite_needs"] == "agami-core 0.9.16"
+    assert _doc(newer)["rewrite_needs"] == "agami-core 0.9.21"
     assert loader.unknown_datasource_keys(newer) == []
 
 
@@ -98,7 +99,7 @@ def test_write_tree_refuses_and_writes_nothing(newer):
     with pytest.raises(model_format.ModelTooNew) as exc:
         build.write_tree(_org("sales", "returns"), newer)
     msg = str(exc.value)
-    assert "agami-core 0.9.22" in msg and "(0.9.10)" in msg and "0.9.16 or later" in msg
+    assert "agami-core 0.9.22" in msg and "(0.9.10)" in msg and "0.9.21 or later" in msg
     assert _files(newer) == before
 
 
@@ -121,10 +122,12 @@ def test_re_introspection_is_refused_and_writes_nothing(tmp_path, monkeypatch):
     root = tmp_path / "shop"
     before = _files(root)
     _on(monkeypatch, "0.9.10")
-    _, report = I.introspect("shop", "postgres", runner=_runner, artifacts_dir=tmp_path)
+    progress = root / ".introspect" / "progress.log"
+    _, report = I.introspect("shop", "postgres", runner=_runner, artifacts_dir=tmp_path,
+                             progress_path=progress)
     assert report.dry_run and report.notes[0].startswith("NOT WRITTEN: ")
-    assert "Upgrade agami-core to 0.9.16" in report.notes[0]
-    assert _files(root) == before
+    assert "Upgrade agami-core to 0.9.21" in report.notes[0]
+    assert _files(root) == before and not progress.exists()
 
 
 def test_applying_a_spec_is_refused_and_writes_nothing(tmp_path, monkeypatch):
@@ -141,19 +144,28 @@ def test_applying_a_spec_is_refused_and_writes_nothing(tmp_path, monkeypatch):
     lambda root: curate.apply(root, [{"op": "approve", "kind": "metric", "area": "sales", "name": "x"}]),
     lambda root: curate.set_key_terminology(root, {"order": "a purchase"}),
     lambda root: curate.set_datasource_description(root, "a shop"),
+    lambda root: curate.write_items(root, "sales", "metric", [{"name": "x"}]),
+    lambda root: curate.write_items(root, curate.CROSS_AREA, "metric", [{"name": "x"}]),
+    lambda root: curate.add_relationships(root, intra={"sales": [{"from_table": "a"}]}),
 ])
 def test_curation_is_refused_and_writes_nothing(newer, write):
     before = _files(newer)
     res = write(newer)
-    assert not res.applied and "0.9.16 or later" in res.errors[0]
+    assert not res.applied and "0.9.21 or later" in res.errors[0]
     assert _files(newer) == before
 
 
-def test_a_core_at_or_above_rewrite_needs_rebuilds_and_restamps(newer, monkeypatch):
+def test_a_core_older_than_the_choice_field_change_is_refused(newer, monkeypatch):
+    # 0.9.20 trims choice_field keys on load, merging 'Open' and 'Open ' (0.9.21).
     _on(monkeypatch, "0.9.20")
+    assert "0.9.21 or later" in model_format.rewrite_refusal(newer)
+
+
+def test_a_core_at_or_above_rewrite_needs_rebuilds_and_restamps(newer, monkeypatch):
+    _on(monkeypatch, "0.9.21")
     build.write_tree(_org("sales", "returns"), newer)
     assert (newer / "subject_areas" / "returns" / "subject_area.yaml").is_file()
-    assert _doc(newer)["written_by"] == "agami-core 0.9.20"
+    assert _doc(newer)["written_by"] == "agami-core 0.9.21"
 
 
 @pytest.mark.parametrize("change", [
@@ -170,6 +182,11 @@ def test_a_missing_or_unreadable_stamp_never_refuses(newer, change):
     (newer / "datasource.yaml").write_text(yaml.safe_dump(doc))
     assert model_format.rewrite_refusal(newer) is None
     build.write_tree(_org("sales", "returns"), newer)
+
+
+def test_a_datasource_yaml_that_is_not_utf8_never_refuses(newer):
+    (newer / "datasource.yaml").write_bytes(b"rewrite_needs: agami-core 9.9.9\n\xff\xfe\n")
+    assert model_format.rewrite_refusal(newer) is None
 
 
 def test_an_unknown_running_version_never_refuses(newer, monkeypatch):

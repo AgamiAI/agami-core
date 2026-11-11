@@ -25,6 +25,7 @@ _PREFIX = "agami-core "
 # mark it breaking when an older core rewriting the model would lose or corrupt what the release added.
 FORMATS: tuple[tuple[str, bool, str], ...] = (
     ("0.9.16", True, "adds `ambiguities:`"),
+    ("0.9.21", True, "keeps `choice_field` keys untrimmed; older cores merge 'Open' and 'Open '"),
 )
 
 
@@ -69,7 +70,7 @@ def rewrite_refusal(root: str | Path) -> Optional[str]:
         return None
     try:
         doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except yaml.YAMLError:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return None
     if not isinstance(doc, dict):
         return None
