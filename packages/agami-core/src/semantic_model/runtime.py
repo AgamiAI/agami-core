@@ -2144,7 +2144,8 @@ def check_no_select_star(sql: str,
                          # standalone call would read a backtick-quoted projection generically and
                          # miss the star it is looking for.
                          dialect: "str | None" = None) -> "guardrail.Refusal | None":
-    """Refuse a query whose projection list contains `*` or `t.*`.
+    """Refuse a query whose projection list contains `*` or `t.*`, or that uses `COLUMNS()` or a `*`
+    argument to any call but COUNT anywhere in the statement (#615).
 
     **The ban is unconditional, and that is a decision rather than a limitation** (#387). A
     projected star returns columns the statement never names, so nothing downstream can check them
@@ -2206,6 +2207,31 @@ def check_no_select_star(sql: str,
                     remediation="List the columns explicitly instead of '*', including over a CTE "
                                 "or subquery that already names them.",
                 )
+    return _star_expansion_refusal(tree)
+
+
+def _star_expansion_refusal(tree: "exp.Expression") -> "guardrail.Refusal | None":
+    """Refuse the star's other spellings anywhere in the tree: DuckDB's `COLUMNS()`, and a `*` passed
+    to any call but COUNT (Snowflake `OBJECT_CONSTRUCT(*)`, Oracle `JSON_OBJECT(*)`, Databricks
+    `struct(*)`). Each returns columns the statement never names (#615)."""
+    if tree.find(exp.Columns) is not None:
+        return guardrail.refuse(
+            guardrail.RULE_SELECT_STAR,
+            detail="query uses COLUMNS() — it returns columns the statement never names, so they "
+                   "cannot be checked against the semantic model.",
+            remediation="List the columns explicitly instead of COLUMNS(), naming each one.",
+        )
+    for star in tree.find_all(exp.Star):
+        arg = star.parent if isinstance(star.parent, exp.Column) else star
+        # Only COUNT is exempt: another aggregate (OBJECT_AGG, ARRAY_AGG) can return the values.
+        if isinstance(arg.parent, exp.Count):
+            continue
+        return guardrail.refuse(
+            guardrail.RULE_SELECT_STAR,
+            detail="query uses * inside an expression — the star expands to columns the statement "
+                   "never names, so they cannot be checked against the semantic model.",
+            remediation="List the columns explicitly instead of '*'; only COUNT(*) takes a star.",
+        )
     return None
 
 
