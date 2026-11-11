@@ -19,6 +19,11 @@ the code stopped doing is worse than one that never promised it. What the scan
 still holds, and what the product still promises, is that there is no in-process
 network CLIENT — nothing agami ships opens a socket itself.
 
+The same holds for `scripts/update_check.py`: once a day it runs the person's own pip
+(`pip index versions agami-core`) as a child process to learn the newest published
+version. That is a request to PyPI, stated as such in docs/privacy.md; it carries
+the package name and nothing about the person's data, model or queries.
+
 What's allowed and why:
   - `urllib.parse` — pure string parsing of DSNs (execute_sql.py). NOT network.
   - DB drivers (psycopg2 / pymysql / snowflake.connector / google.cloud.bigquery)

@@ -12,6 +12,17 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **`/agami-connect` says when a newer agami is published, at most once a day (#633).** The old
+  check fetched the plugin manifest from GitHub `main` with `curl` on every run, so it could announce
+  a version that wasn't released yet, and the privacy docs didn't mention it. It is replaced by
+  `scripts/update_check.py`, which asks PyPI for the newest agami-core through the person's own pip
+  (`pip index versions`), at most once a day. When that release is newer than the plugin, it shows
+  both versions, a link to that release's CHANGELOG and `/plugin update agami-core@agami`; otherwise
+  it says nothing, and it never blocks. `docs/privacy.md` now names the check. The
+  `AGAMI_NO_UPDATE_CHECK` variable the old check read is no longer used.
+
 ## [0.9.22] — 2026-11-05
 
 ### Changed
