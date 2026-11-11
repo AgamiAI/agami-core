@@ -171,6 +171,103 @@ def test_build_write_tree_auto_maintains_the_datasource_list(tmp_path):
     assert rec.datasources == ["sales", "support"]  # the build keeps the record's list in sync
 
 
+def _add_datasource(art: Path, name: str, description: str = "") -> None:
+    (art / name).mkdir()
+    doc = {"datasource": name, **({"description": description} if description else {})}
+    (art / name / "datasource.yaml").write_text(yaml.safe_dump(doc), encoding="utf-8")
+
+
+_ORG_MD = "# About this company\n\nAcme sells widgets.\n"
+
+
+def test_refresh_adds_a_connected_databases_section_to_organization_md(tmp_path):
+    OR.narrative_path(tmp_path).write_text(_ORG_MD, encoding="utf-8")
+    _add_datasource(tmp_path, "sales", "Orders, customers and revenue; use for sales questions.")
+    _add_datasource(tmp_path, "support")  # no description -> listed by name
+
+    OR.refresh_datasources(tmp_path)
+    assert OR.narrative_path(tmp_path).read_text(encoding="utf-8") == (
+        _ORG_MD + "\n<!-- agami:datasources -->\n## Connected databases\n\n"
+        "- **sales**: Orders, customers and revenue; use for sales questions.\n"
+        "- **support**\n<!-- /agami:datasources -->\n"
+    )
+
+
+def test_refresh_leaves_an_up_to_date_organization_md_byte_for_byte(tmp_path):
+    OR.narrative_path(tmp_path).write_text(_ORG_MD, encoding="utf-8")
+    _add_datasource(tmp_path, "sales", "Orders.")
+    OR.refresh_datasources(tmp_path)
+    md, yml = OR.narrative_path(tmp_path), OR.record_path(tmp_path)
+    before = (md.read_bytes(), yml.read_bytes(), md.stat().st_mtime_ns, yml.stat().st_mtime_ns)
+
+    OR.refresh_datasources(tmp_path)
+    assert (md.read_bytes(), yml.read_bytes(), md.stat().st_mtime_ns, yml.stat().st_mtime_ns) == before
+
+
+def test_refresh_replaces_a_stale_section_and_keeps_text_outside_the_markers(tmp_path):
+    _add_datasource(tmp_path, "sales", "Orders.")
+    _add_datasource(tmp_path, "support", "Tickets and SLAs.")
+    OR.write_org_record(tmp_path, OrgRecord(org_id="x", datasources=["sales"]))  # stale list
+    OR.narrative_path(tmp_path).write_text(
+        "# About this company\n\nIntro.\n\n<!-- agami:datasources -->\n## Connected databases\n\n"
+        "- **sales**: Old text.\n<!-- /agami:datasources -->\n\n## Notes\n\nHand-written.\n",
+        encoding="utf-8",
+    )
+
+    assert OR.refresh_datasources(tmp_path).datasources == ["sales", "support"]
+    assert OR.narrative_path(tmp_path).read_text(encoding="utf-8") == (
+        "# About this company\n\nIntro.\n\n<!-- agami:datasources -->\n## Connected databases\n\n"
+        "- **sales**: Orders.\n- **support**: Tickets and SLAs.\n<!-- /agami:datasources -->\n\n"
+        "## Notes\n\nHand-written.\n"
+    )
+
+
+def test_removing_a_datasource_drops_it_from_both_files(tmp_path):
+    import shutil
+
+    OR.narrative_path(tmp_path).write_text(_ORG_MD, encoding="utf-8")
+    _add_datasource(tmp_path, "sales", "Orders.")
+    _add_datasource(tmp_path, "support", "Tickets.")
+    OR.refresh_datasources(tmp_path)
+    assert "- **support**: Tickets." in OR.narrative_path(tmp_path).read_text(encoding="utf-8")
+
+    shutil.rmtree(tmp_path / "support")
+    assert OR.refresh_datasources(tmp_path).datasources == ["sales"]
+    assert "support" not in OR.narrative_path(tmp_path).read_text(encoding="utf-8")
+
+    shutil.rmtree(tmp_path / "sales")  # the last one gone -> the section goes, the narrative stays
+    assert OR.refresh_datasources(tmp_path).datasources == []
+    assert OR.narrative_path(tmp_path).read_text(encoding="utf-8") == _ORG_MD
+
+
+def test_refresh_never_creates_organization_md(tmp_path):
+    # The connect skill reads the file's presence as "company context already authored".
+    _add_datasource(tmp_path, "sales", "Orders.")
+    OR.refresh_datasources(tmp_path)
+    assert not OR.narrative_path(tmp_path).exists()
+
+
+def test_refresh_writes_nothing_without_a_record_or_datasources(tmp_path):
+    OR.narrative_path(tmp_path).write_text(_ORG_MD, encoding="utf-8")
+    assert OR.refresh_datasources(tmp_path) is None
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["organization.md"]
+    assert OR.narrative_path(tmp_path).read_text(encoding="utf-8") == _ORG_MD
+
+
+def test_connected_databases_section_reaches_the_company_context(tmp_path):
+    from semantic_model import org_draft
+
+    OR.set_org_fields(tmp_path, name="Acme")
+    OR.narrative_path(tmp_path).write_text(_ORG_MD, encoding="utf-8")
+    _add_datasource(tmp_path, "sales", "Orders.")
+    record = OR.refresh_datasources(tmp_path)
+    ctx = org_draft.compose_org_context(
+        record, [], company_narrative=OR.narrative_path(tmp_path).read_text(encoding="utf-8")
+    )
+    assert "## Connected databases\n\n- **sales**: Orders." in ctx
+    assert "agami:datasources" not in ctx  # the markers are comments, stripped for the reader
+
+
 def test_set_org_cli_writes_name_and_description(tmp_path):
     from semantic_model import cli
 

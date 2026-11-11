@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Changed
+
+- **The organization files keep up when another datasource joins (#431).** Every agami-connect
+  session now refreshes `organization.yaml`'s datasource list from the folders on disk, not only a
+  model write or a deploy, and "refresh datasources" just does that instead of re-introspecting the
+  active profile. `organization.md` gains a marked `Connected databases` section, rebuilt from each
+  datasource's own description whenever the list is refreshed; text outside the markers is never
+  touched, and the file is never created by the refresh.
+
 ### Fixed
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**

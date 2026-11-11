@@ -49,6 +49,10 @@ LEGACY_BRIDGES_PATH = ("local", "cross_profile_relationships.yaml")
 # anonymous, so it dedups by endpoint instead).
 METRICS_FILENAME = "cross_datasource_metrics.yaml"
 
+# The script-owned "Connected databases" block in organization.md (#431); text outside it is the human's.
+_DATASOURCES_START = "<!-- agami:datasources -->"
+_DATASOURCES_END = "<!-- /agami:datasources -->"
+
 
 def record_path(artifacts_dir: str | Path) -> Path:
     return Path(artifacts_dir) / RECORD_FILENAME
@@ -284,7 +288,8 @@ def refresh_datasources(artifacts_dir: str | Path) -> Optional[OrgRecord]:
     """Rebuild the record's ``datasources`` list from the profile directories actually present on disk
     (each immediate subdir holding an ``datasource.yaml``), so the list is auto-maintained and can never drift.
     Returns ``None`` (and writes nothing) when there is neither a record nor any profile yet; otherwise
-    mints the record if needed, updates the list, persists, and returns it."""
+    mints the record if needed, updates the list, persists, and returns it. The "Connected databases"
+    section of ``organization.md`` is refreshed alongside it."""
     art = Path(artifacts_dir)
     names = (
         sorted(p.name for p in art.iterdir() if p.is_dir() and (p / "datasource.yaml").exists())
@@ -298,7 +303,60 @@ def refresh_datasources(artifacts_dir: str | Path) -> Optional[OrgRecord]:
     if record.datasources != names:
         record = record.model_copy(update={"datasources": names})
         write_org_record(artifacts_dir, record)
+    refresh_narrative_datasources(artifacts_dir, names)
     return record
+
+
+def refresh_narrative_datasources(artifacts_dir: str | Path, names: list[str]) -> bool:
+    """Rebuild the marked "Connected databases" section of ``organization.md`` from each datasource's
+    own ``description``; text outside the markers is never touched. Returns whether the file changed.
+
+    Only an existing file is refreshed: the connect skill treats the file's presence as "company context
+    already authored", so creating it here would stop the skill asking for the company description."""
+    path = narrative_path(artifacts_dir)
+    if not path.exists():
+        return False
+    prior = path.read_text(encoding="utf-8")
+    new = _replace_datasources_block(prior, _datasources_block(artifacts_dir, names))
+    if new == prior:
+        return False
+    path.write_text(new, encoding="utf-8")
+    return True
+
+
+def _datasources_block(artifacts_dir: str | Path, names: list[str]) -> str:
+    """The marked section for ``names`` (empty when there are none, which removes the section)."""
+    if not names:
+        return ""
+    lines = [_DATASOURCES_START, "## Connected databases", ""]
+    for name in names:
+        desc = _datasource_description(Path(artifacts_dir) / name / "datasource.yaml")
+        lines.append(f"- **{name}**: {desc}" if desc else f"- **{name}**")
+    return "\n".join([*lines, _DATASOURCES_END])
+
+
+def _datasource_description(path: Path) -> str:
+    """The datasource's one-line ``description``, or "" when it has none or the file is unreadable."""
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return ""
+    desc = doc.get("description") if isinstance(doc, dict) else None
+    return " ".join(desc.split()) if isinstance(desc, str) else ""
+
+
+def _replace_datasources_block(text: str, block: str) -> str:
+    """Put ``block`` between the markers in ``text`` (appending it when absent); an empty block removes
+    the section. Mirrors ``model_spec._write_rules``."""
+    if _DATASOURCES_START in text and _DATASOURCES_END in text:
+        head, rest = text.split(_DATASOURCES_START, 1)
+        tail = rest.split(_DATASOURCES_END, 1)[1]
+        if block:
+            return head + block + tail
+        return (head.rstrip() + "\n" if head.strip() else "") + tail.lstrip("\n")
+    if not block:
+        return text
+    return (text.rstrip() + "\n\n" if text.strip() else "") + block + "\n"
 
 
 def _lifted_or_minted_org_id(artifacts_dir: str | Path) -> str:
