@@ -811,6 +811,8 @@ _CARRIED_DATASOURCE_KEYS = ("key_terminology", "ambiguities", "cross_subject_are
 def _carried_datasource_fields(org: Datasource, out: Path) -> dict:
     prev = _previous_doc(out)
     carried = {k: prev[k] for k in _CARRIED_DATASOURCE_KEYS if prev.get(k)}
+    # Keys a newer agami-core wrote: this core can't read them, but that core still can (#589).
+    carried.update({k: v for k, v in prev.items() if k not in Datasource.model_fields})
     if org.key_terminology:
         carried["key_terminology"] = dict(org.key_terminology)
     if org.ambiguities:
