@@ -209,7 +209,9 @@ review_state: unreviewed
 
 An entity is written `unreviewed`, which is also the default when `review_state` is left out. It
 waits in the review queue until a person approves it in `/agami-model` (or `sm approve-queue`),
-which records who signed it off and when.
+which records who signed it off and when. `sm add` ignores `review_state` and `signed_off_*` in
+the file: a new item is written unreviewed, and one that replaces an approved item with a changed
+definition goes `stale` until it is approved again.
 
 ## How to write them
 

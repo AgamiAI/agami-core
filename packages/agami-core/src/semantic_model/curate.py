@@ -1911,17 +1911,16 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         doc[fld] = val
         return before
     before = doc.get("review_state")
+    if new_state == "approved" and not (signer and role):
+        # Without one, an approve would keep whatever stamp the entry holds (another person's, or
+        # none after an include earlier in the batch); refusing the batch matches what a join gets (#616).
+        raise BatchError("an approve needs a signer and role (--signer / --role)")
     if new_state:
         doc["review_state"] = new_state
     if new_state == "approved":
-        if signer:
-            doc["signed_off_by"] = signer
-            doc["signed_off_role"] = role
-            doc["signed_off_at"] = op.get("at")  # caller stamps (Date.now unavailable here)
-        elif before == "stale":
-            # The stamp left on a stale entry is the approval its edit took away; keeping it would sign
-            # the new definition in someone else's name.
-            raise ValueError("re-approving a changed entry needs a signer (--signer / --role)")
+        doc["signed_off_by"] = signer
+        doc["signed_off_role"] = role
+        doc["signed_off_at"] = op.get("at")  # caller stamps (Date.now unavailable here)
     if new_state in ("unreviewed", "rejected"):
         # clear stale sign-off on un-approve
         for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
@@ -2055,6 +2054,49 @@ def _writable_items(root: Path, kind: str, items: list[dict], res: ApplyResult) 
     return out
 
 
+# What an approve op stamps: `sm add` never takes these from the caller's file (#616).
+_SIGN_OFF_FIELDS = ("review_state", "signed_off_by", "signed_off_at", "signed_off_role")
+
+
+def _drop_caller_sign_off(items: list[dict]) -> tuple[list[dict], set[str]]:
+    """`items` without their sign-off fields, and the names of those that claimed more than unreviewed."""
+    clean, ignored = [], set()
+    for item in items:
+        if not isinstance(item, dict):
+            clean.append(item)
+            continue
+        if item.get("review_state") not in (None, "unreviewed") or any(
+                item.get(k) for k in _SIGN_OFF_FIELDS[1:]):
+            ignored.add(str(item.get("name")))
+        clean.append({k: v for k, v in item.items() if k not in _SIGN_OFF_FIELDS})
+    return clean, ignored
+
+
+def _keep_sign_off(kind: str, existing: Any, dumped: dict) -> bool:
+    """Carry the sign-off of the entry `dumped` replaces; say whether it sent an approved one back to review.
+
+    An unchanged definition keeps its approval; a changed one goes `stale` with the old stamp, as an
+    edit leaves it (`_stale_on_edit`)."""
+    if not isinstance(existing, dict) or existing.get("review_state") not in ("approved", "stale"):
+        return False
+    stamps = {k: existing[k] for k in _SIGN_OFF_FIELDS[1:] if existing.get(k)}
+    if existing["review_state"] == "approved" and _definition(kind, existing) == _definition(kind, dumped):
+        kept = {k: existing[k] for k in ("confidence",) if existing.get(k)}
+        dumped.update({"review_state": "approved", **stamps, **kept})
+        return False
+    dumped.update({"review_state": "stale", **stamps})
+    return existing["review_state"] == "approved"
+
+
+def _sign_off_notes(res: ApplyResult, label: str, name: str, ignored: set[str], staled: bool) -> None:
+    if staled:
+        res.stale.append(label)
+    if name in ignored:
+        state = "stale (it replaces an approved one)" if staled else "without the file's sign-off"
+        res.notes.append(f"{label}: ignored review_state / signed_off_* from the file; written {state}. "
+                         "Sign it off with an approve op (--signer / --role)")
+
+
 def write_items(root: str | Path, area: str, kind: str, items: list[dict],
                 *, signer: Optional[str] = None, role: Optional[str] = None) -> ApplyResult:
     """Create metric/entity YAML files from structured dicts — one validated,
@@ -2086,12 +2128,16 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
     dest = _area_dir(root, area) / subdir
     backups: list[tuple[Path, Optional[str]]] = []  # (path, prior text or None if new)
 
+    items, ignored = _drop_caller_sign_off(items)
     for obj in _writable_items(root, kind, items, res):
         path = dest / f"{_slug(obj.name)}.yaml"
         backups.append((path, path.read_text(encoding="utf-8") if path.exists() else None))
+        dumped = obj.model_dump(mode="json", exclude_none=True)
+        staled = _keep_sign_off(kind, _load(path) if path.exists() else None, dumped)
         dest.mkdir(parents=True, exist_ok=True)
-        _dump(path, obj.model_dump(mode="json", exclude_none=True))
+        _dump(path, dumped)
         res.applied.append(f"{kind} {area}/{obj.name}")
+        _sign_off_notes(res, res.applied[-1], obj.name, ignored, staled)
 
     if not res.applied:
         return res  # nothing valid to write
@@ -2103,12 +2149,12 @@ def write_items(root: str | Path, area: str, kind: str, items: list[dict],
         if not vres.ok:
             res.errors = vres.errors
             _restore(backups)
-            res.applied = []
+            res.applied, res.stale, res.notes = [], [], []
             return res
     except Exception as e:
         res.errors.append(f"validation failed to run: {e}")
         _restore(backups)
-        res.applied = []
+        res.applied, res.stale, res.notes = [], [], []
         return res
 
     res.committed, res.commit_note = _record(
@@ -2134,9 +2180,13 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
     def has(place: list, slug: str) -> bool:
         return any(_slug(str((c or {}).get("name") or "")) == slug for c in place[3])
 
+    items, ignored = _drop_caller_sign_off(items)
     for obj in _writable_items(root, kind, items, res):
         slug, dumped = _slug(obj.name), obj.model_dump(mode="json", exclude_none=True)
         home = inline if has(inline, slug) else side
+        existing = next((c for p in (home, *places) for c in p[3]
+                         if _slug(str((c or {}).get("name") or "")) == slug), None)
+        staled = _keep_sign_off(kind, existing, dumped)
         for i, place in enumerate(places):
             if not has(place, slug):
                 continue
@@ -2149,6 +2199,7 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
             home[3].append(dumped)
             changed.add(places.index(home))
         res.applied.append(f"{kind} {CROSS_AREA}/{obj.name}")
+        _sign_off_notes(res, res.applied[-1], obj.name, ignored, staled)
     if not res.applied:
         return res
     backups: list[tuple[Path, Optional[str]]] = []
@@ -2165,7 +2216,7 @@ def _write_cross_items(root: Path, kind: str, items: list[dict], signer, role) -
         res.errors.append(f"validation failed to run: {e}")
     if res.errors:
         _restore(backups)
-        res.applied, res.validated = [], False
+        res.applied, res.validated, res.stale, res.notes = [], False, [], []
         return res
     res.committed, res.commit_note = _record(
         root, f"enrich: +{len(res.applied)} cross-area {kind}(s)",

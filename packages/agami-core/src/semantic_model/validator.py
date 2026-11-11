@@ -344,6 +344,7 @@ def validate(org: Datasource, *, cache: "ValidationCache | None" = None) -> Vali
     _check_metric_backend_neutrality(org, res)
     _check_metric_current_date(org, res)
     _check_metric_descriptions(org, res)
+    _check_sign_off(org, res)
     _check_measured_figures(org, res)
     _check_derived_metrics(org, res)
     _check_metric_nested_aggregates(org, res)
@@ -1250,6 +1251,27 @@ def _check_metric_descriptions(org: Datasource, res: ValidationResult) -> None:
             f"{len(missing)} metric(s) have no description, or one that only restates the name, "
             f"so they are left out of metric_index: {shown}{more}. Write a one-line description "
             "of what each is for.",
+        )
+
+
+def _check_sign_off(org: Datasource, res: ValidationResult) -> None:
+    """Trust-block parity for metrics and entities: approved means signed off (#616). A warning, unlike
+    a join's error, because models written before #616 hold approved entries with no stamp, and an
+    error would refuse every edit to them."""
+    items = [("metric", m) for m in org.cross_subject_area_metrics]
+    items += [("entity", e) for e in org.cross_subject_area_entities]
+    for sa in org.subject_areas:
+        items += [("metric", m) for m in sa.metrics] + [("entity", e) for e in sa.entities]
+    unsigned = [f"{kind} {it.name!r}" for kind, it in items if it.review_state == "approved"
+                and not all(getattr(it, n) for n in ("signed_off_by", "signed_off_at", "signed_off_role"))]
+    if unsigned:
+        shown = ", ".join(unsigned[:5])
+        more = f" and {len(unsigned) - 5} more" if len(unsigned) > 5 else ""
+        res.warn(
+            "trust_block_incomplete",
+            f"{len(unsigned)} approved metric(s)/entity(ies) carry no complete sign-off "
+            f"(signed_off_by / _at / _role): {shown}{more}. Re-approve each with an approve op "
+            "and --signer / --role.",
         )
 
 
