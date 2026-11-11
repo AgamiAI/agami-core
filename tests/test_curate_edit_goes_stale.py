@@ -235,7 +235,7 @@ def test_re_approving_a_stale_item_records_the_new_signer_and_time(root):
 def test_an_approve_with_no_signer_cannot_reuse_the_lost_approval(root):
     assert curate.apply(root, [BINDING]).validated
     res = curate.apply(root, [_approve("metric", "revenue")])
-    assert not res.applied and "needs a signer" in res.skipped[0]["reason"]
+    assert not res.applied and "needs a signer" in res.errors[0]
     mm = _state(root, "metric")
     assert (mm.review_state, mm.signed_off_by) == ("stale", "you@example.com")
 

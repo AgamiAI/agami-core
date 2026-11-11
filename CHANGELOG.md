@@ -18,6 +18,16 @@ below corresponds to one such version.
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those
   keys are now carried over verbatim, so the newer core that wrote them can still read them.
+- **An approved metric or entity always carries a person's sign-off (#616).** An approve after an
+  include or reject in the same `sm curate` batch, with no `--signer`, left a metric or entity
+  approved with `signed_off_by: null`, and `sm add` (and the explorer's new metrics) wrote whatever
+  `review_state` and `signed_off_*` the caller's file held. Every approve op now needs `--signer`
+  and `--role`, or the whole batch is refused, as a join's already was. `sm add` ignores those
+  fields in the file and says so in `notes`: a new item is written unreviewed, and one that
+  replaces an approved item with a changed definition is written `stale`. The validator now warns
+  (`trust_block_incomplete`) on an approved metric or entity with no complete sign-off. It is a
+  warning, so a model that loaded before still loads and takes edits; re-approve each item it
+  names with `--signer` / `--role`. The bundled sample model's entities are now signed off.
 
 ## [0.9.22] — 2026-11-05
 

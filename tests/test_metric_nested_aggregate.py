@@ -177,7 +177,7 @@ def test_an_existing_nested_metric_still_lets_curate_write_other_edits(tmp_path)
         {"op": "edit", "kind": "table", "area": AREA, "name": "orders",
          "field": "description", "value": "Every order placed."},
         {"op": "approve", "kind": "metric", "area": AREA, "name": "avg_order_total"},
-    ])
+    ], signer="you@example.com", role="owner")
     assert res.validated and len(res.applied) == 2 and not res.errors
     org = loader.load_datasource(tmp_path)
     assert org.subject_areas[0].defined_table("orders").description == "Every order placed."
