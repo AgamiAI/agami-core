@@ -600,6 +600,7 @@ _VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move", "add"}
 # move == {op:move, kind:table, name, area, to_area}: the table changes owning area (see _move_table)
 # add == {op:add, kind:relationship, from_table, to_table, from_column + to_column | on, relationship}:
 #        a new join, written unreviewed where its two tables' areas say (see _add_join)
+# reject example == {op:reject, kind:example, area, question}: as remove_examples (see _reject_example)
 
 # The `area` that names the datasource-level lists (cross_subject_area_metrics / _entities) rather
 # than a subject area. Introspection never names an area like this (`build._area_key` strips "_").
@@ -622,6 +623,8 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
             if op.get("op") == "move" and not op.get("area"):
                 # Resolved now, so the log records the area the table left as well as the one it joined.
                 op = {**op, "area": _resolve_area(root, op)}
+            if op.get("kind") == "example" and not op.get("name"):
+                op = {**op, "name": (op.get("question") or "").strip() or "?"}   # for the label and the log
             if op.get("op") == "add" and not op.get("name"):
                 op = {**op, "name": f"{op.get('from_table') or '?'}->{op.get('to_table') or '?'}"}
             keys, before, staled, resolved = _apply_one(root, op, signer, role, backups, res.notes)
@@ -742,6 +745,8 @@ def _apply_one(root: Path, op: dict, signer, role,
     if action not in _VALID_OPS:
         raise ValueError(f"unknown op {action!r}")
     kind = op.get("kind")
+    if kind == "example":
+        return _reject_example(root, op, backups)
     name = op.get("name")
     if not kind or not name:
         raise ValueError("op needs kind + name")
@@ -2365,12 +2370,8 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
     if not wanted:
         return res
     present = {(e.get("question") or "").strip() for e in existing}
-    for e in existing:
-        q = (e or {}).get("question", "")
-        if q.strip() in wanted and e.get("status") != "rejected":
-            e["status"] = "rejected"
-            # the whole question: two that open alike must stay tellable apart (#550)
-            res.applied.append(f"example (rejected) {area}/{q}")
+    # the whole question: two that open alike must stay tellable apart (#550)
+    res.applied += [f"example (rejected) {area}/{q}" for q in _mark_examples_rejected(existing, wanted)]
     for missing in sorted(wanted - present):
         res.skipped.append({"item": missing, "reason": "no example with that question"})
     if not res.applied:
@@ -2383,6 +2384,44 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
         [{"op": "reject", "kind": "example", "area": area, "name": a.split("/", 1)[-1]} for a in res.applied],
         signer, role)
     return res
+
+
+def _mark_examples_rejected(examples: list[dict], wanted: set[str]) -> list[str]:
+    """Set `status: rejected` on each example whose trimmed question is in `wanted` and isn't rejected
+    yet, in place; return the questions it changed."""
+    changed = []
+    for e in examples:
+        q = (e or {}).get("question", "")
+        if q.strip() in wanted and e.get("status") != "rejected":
+            e["status"] = "rejected"
+            changed.append(q)
+    return changed
+
+
+def _reject_example(root: Path, op: dict, backups: "dict[Path, Optional[str]]") -> tuple[list, Any, bool, dict]:
+    """An example op in a curate batch: `reject` marks it rejected as `remove_examples` does, with its
+    file in the batch's backups so a failed batch undoes it too."""
+    from .loader import list_prompt_examples
+    # No `include`: a reject overwrites the example's prior status, so there is nothing to restore.
+    if op.get("op") != "reject":
+        raise ValueError(f"an example takes only op 'reject', not {op.get('op')!r}")
+    area, question = op.get("area"), (op.get("question") or "").strip()
+    if not area or not question:
+        raise ValueError("an example op needs area + question")
+    path = root / "prompt_examples" / area / "examples.yaml"
+    if not path.exists():
+        raise ValueError(f"no examples for area {area!r}")
+    existing = list(list_prompt_examples(root, area, include_rejected=True))
+    hit = next((e for e in existing if ((e or {}).get("question") or "").strip() == question), None)
+    if hit is None:
+        raise ValueError("no example with that question")
+    before = hit.get("status")
+    if not _mark_examples_rejected(existing, {question}):
+        raise ValueError("already rejected")
+    _snapshot(backups, path)
+    _dump(path, existing)
+    key = ("example", area, question)
+    return [(key, key, None)], before, False, {}
 
 
 def validate_seeds(candidates: list[dict], runner) -> tuple[list[dict], list[dict]]:

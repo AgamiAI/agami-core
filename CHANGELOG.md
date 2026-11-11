@@ -12,6 +12,15 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **`sm curate` can reject prompt examples in the same ops file as model edits (#608).**
+  `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` rejects that
+  example as `sm remove-example` does (kept for audit, dropped from the runtime ranker) and is part
+  of the batch: a batch that fails validation or errors undoes the example change too. An unknown
+  area or a question that matches nothing is skipped with a reason; any other op on an example is
+  refused.
+
 ### Fixed
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
