@@ -84,6 +84,11 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
+  Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
+  reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those
+  keys are now carried over verbatim, so the newer core that wrote them can still read them.
+
 - **Things found in live onboardings of real databases.** Joins on same-named natural keys
   (`cds_code` → `schools.cds_code`) are inferred, so a warehouse keyed on codes no longer gets 0
   joins. An empty database is said before the build goes on. `sm add --profile` runs each metric's

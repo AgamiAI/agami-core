@@ -174,3 +174,12 @@ def test_deploy_says_the_field_is_not_deployed(root, tmp_path, monkeypatch, caps
         store.close()
     err = capsys.readouterr().err
     assert "future_rules" in err and "'shop'" in err and "newer agami-core" in err
+
+
+def test_a_rewrite_keeps_unknown_keys_verbatim(root):
+    # A newer core can still read what it wrote, so an older core's rewrite must not delete it (#589).
+    _add(root, future_rules=["x", {"y": 1}], another={"a": 1})
+    build.write_tree(loader.load_datasource(root), root)
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    assert doc["future_rules"] == ["x", {"y": 1}] and doc["another"] == {"a": 1}
+    assert loader.unknown_datasource_keys(root) == ["another", "future_rules"]

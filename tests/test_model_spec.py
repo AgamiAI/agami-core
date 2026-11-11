@@ -227,6 +227,16 @@ def test_reapplying_replaces_rules_without_duplicating(tmp_path):
     assert md.count("## Rules") == 1 and "day numbers" in md and "Key -1" not in md
 
 
+def test_applying_a_spec_keeps_unknown_datasource_keys(tmp_path):
+    _introspected(tmp_path)
+    doc = yaml.safe_load((tmp_path / "datasource.yaml").read_text())
+    doc["future_rules"] = ["x"]
+    (tmp_path / "datasource.yaml").write_text(yaml.safe_dump(doc))
+    res = model_spec.apply_spec(tmp_path, _spec(), signer="you@example.com")
+    assert res.applied, res.errors
+    assert yaml.safe_load((tmp_path / "datasource.yaml").read_text())["future_rules"] == ["x"]
+
+
 def test_dry_run_writes_nothing(tmp_path):
     _introspected(tmp_path)
     before = sorted(p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*"))
