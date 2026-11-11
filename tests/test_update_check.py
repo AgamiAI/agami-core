@@ -57,6 +57,13 @@ def test_a_newer_release_prints_the_versions_the_changelog_and_the_update(art, m
     assert calls[0][:6] == [sys.executable, "-m", "pip", "index", "versions", "agami-core"]
 
 
+def test_verbose_pip_output_still_finds_the_version(art, monkeypatch, capsys):
+    _pip(monkeypatch, "Created temporary directory: /x\nLooking in indexes: https://pypi.org/simple\n"
+         + _listing("0.9.25"))
+    UC.main(DAY)
+    assert "agami 0.9.25 is available" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("newest", ["0.9.22", "0.9.21", "0.9.22rc1"])
 def test_the_same_or_an_older_release_prints_nothing(art, monkeypatch, capsys, newest):
     _pip(monkeypatch, _listing(newest))

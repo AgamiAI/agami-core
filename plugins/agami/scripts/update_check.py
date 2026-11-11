@@ -65,7 +65,8 @@ def newest_published() -> Optional[str]:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    m = re.match(r"\s*agami-core \(([^)\s]+)\)", out.stdout or "")
+    # pip's verbose mode puts diagnostic lines ahead of the result.
+    m = re.search(r"^agami-core \(([^)\s]+)\)", out.stdout or "", re.MULTILINE)
     return m.group(1) if out.returncode == 0 and m else None
 
 
