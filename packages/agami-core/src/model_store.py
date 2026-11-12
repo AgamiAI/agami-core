@@ -412,7 +412,12 @@ def write_organization_record(store: Store, record: OrgRecord, org_id: str = DEF
     # the module's own stated contract. org_id/name/description are their own columns; the rest rides
     # the JSON blob. (The prior hand-listed dict silently dropped new buckets on deploy — ACE-072's
     # bridge among them.)
-    doc = json.dumps(record.model_dump(mode="json", exclude={"org_id", "name", "description"}))
+    doc = record.model_dump(mode="json", exclude={"org_id", "name", "description"})
+    # Unset stamps (#635) stay out, so a record without them stores the same doc as before.
+    for key in ("written_by", "rewrite_needs"):
+        if doc.get(key) is None:
+            doc.pop(key, None)
+    doc = json.dumps(doc)
     store.execute(
         "INSERT INTO organization (org_id, org_name, description, doc) VALUES (?, ?, ?, ?) "
         "ON CONFLICT (org_id) DO UPDATE SET "

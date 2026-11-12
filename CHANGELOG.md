@@ -12,6 +12,14 @@ below corresponds to one such version.
 
 ## [Unreleased]
 
+### Added
+
+- **`organization.yaml` may carry `written_by` and `rewrite_needs` (#635).** These keys record
+  which agami-core wrote the file and the oldest one allowed to rewrite it. agami-core 0.9.22 and
+  older refuse to load an `organization.yaml` with keys they do not know, so a core that wrote them
+  would break every older one. This release accepts the keys and keeps them on a rewrite, but does
+  not write them yet; a later release will, once no supported core predates this one.
+
 ### Fixed
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
