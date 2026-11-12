@@ -232,14 +232,15 @@ def test_a_two_column_key_is_one_join_with_both_pairs(key):
         assert rel.review_state == "approved" and rel.signed_off_by == "agami_introspect"
 
 
-def test_an_unenforced_composite_key_is_confirmed_with_a_probe_on_every_column():
+def test_an_unenforced_composite_key_is_checked_on_every_column():
+    """Confirmed by the run's check of every join (#448), which groups both sides on the whole key."""
     dialect = D.get_dialect("redshift")
     tables = {t.name: t for t in _tables()}
-    sql = I.overlap_sql(dialect, tables["shipments"], ["order_id", "line_no"], tables["order_lines"],
-                        ["order_id", "line_no"])
-    assert 't."order_id" = src.v0 AND t."line_no" = src.v1' in sql
+    sql, _, _ = I.PF.check_sql(dialect, I.PF.JoinCheck(tables["shipments"], ["order_id", "line_no"],
+                                                       tables["order_lines"], ["order_id", "line_no"]), 0)
+    assert 'GROUP BY "order_id", "line_no"' in sql
     assert '"order_id" IS NOT NULL AND "line_no" IS NOT NULL' in sql
-    # a single column keeps the probe it always had
+    # the reconcile skill's single-column probe is unchanged
     assert "AS v FROM" in I.overlap_sql(dialect, tables["shipments"], "order_id", tables["order_lines"], "order_id")
 
 

@@ -105,7 +105,8 @@ def test_an_undeclared_matching_column_is_a_candidate_and_is_not_written(tmp_pat
                           "from_schema": "main", "to_schema": "main",
                           "description": "found by introspection: its values match customers.id"}
     assert cand["evidence"]["found_by"] == "type"
-    assert (cand["evidence"]["matched"], cand["evidence"]["sampled"], cand["evidence"]["match_rate"]) == (3, 3, 1.0)
+    assert (cand["evidence"]["matched"], cand["evidence"]["sampled"], cand["evidence"]["match_rate"]) == (4, 4, 1.0)
+    assert cand["evidence"]["values"] == 3
     text = report.render()
     assert "## join candidates" in text
     # Says whether it was every value (#448): all of them here, the whole table read.
@@ -122,8 +123,8 @@ def test_a_low_overlap_pair_is_reported_as_rejected_not_offered(tmp_path):
     rejected = "main.orders.product_code->main.products.sku"
     assert rejected in low and rejected not in {c["id"] for c in doc["candidates"]}
     assert low[rejected]["evidence"]["match_rate"] == 0.25
-    assert (f"- {rejected} (low overlap, not offered): 1 of 4 values of orders.product_code are found in "
-            "products.sku (25%)") in report.render()
+    assert (f"- {rejected} (low overlap, not offered): 1 of 4 orders rows find their product_code in "
+            "products.sku (25%") in report.render()
 
 
 def test_the_name_guessed_join_is_written_as_before_and_not_listed(tmp_path):

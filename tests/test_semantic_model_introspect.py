@@ -897,10 +897,9 @@ def test_unenforced_fk_without_overlap_stays_unreviewed(tmp_path):
 
 def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
     """A schema that declares MANY FKs on an unenforced dialect must not fire one sequential
-    overlap COUNT per FK without bound. Past FK_OVERLAP_PROBE_CAP we stop probing and leave the
+    overlap COUNT per FK without bound. Past profile.JOIN_CHECK_CAP we stop checking and leave the
     rest unreviewed — the run stays bounded on inheritance-heavy Redshift/ServiceNow schemas."""
-    # The cap is on checks across the run: confirming a declared key and checking every join share it.
-    monkeypatch.setattr(I, "FK_OVERLAP_PROBE_CAP", 3)
+    # One cap on checks across the run (#448): declared keys are confirmed by the check of every join.
     monkeypatch.setattr(I.PF, "JOIN_CHECK_CAP", 3)
     N = 8
     probes = {"n": 0}

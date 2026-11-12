@@ -333,11 +333,12 @@ Standard RFC 4180 CSV. UTF-8, no BOM.
 ## 8. Build profile (`<artifacts_dir>/<profile>/.introspect/profile.json`)
 
 What `sm introspect` read from the data (#448), for the steps after it: enrichment's descriptions,
-plain-English review questions, ambiguity candidates. Written on every build that isn't a dry run;
-a batched build (`--append`) merges its tables into the file, so it ends with every table read. Read
-it with `sm profile <root> [--table <t> …]`, which narrows it to those tables and the joins that touch
-them. It is evidence, never model content: none of its figures goes into a description, rule or
-caveat, because they change with every load.
+plain-English review questions, ambiguity candidates. Written on every build that isn't a dry run. A
+full build replaces the file; a batched build or refresh (`--append`) merges its tables into it, so it
+ends with every table read. Every write, and every `sm profile <root> [--table <t> …]` read, is cut to
+what the model serves now: a table or column taken out of the model is dropped, and a column the
+model marks personal loses its values. It is evidence, never model content: none of its figures goes
+into a description, rule or caveat, because they change with every load.
 
 ```jsonc
 {
@@ -355,7 +356,7 @@ caveat, because they change with every load.
           "filled": 0.98,                   // share of rows read that are not NULL
           "blank_text": 0.01,               // text columns: share that is '' or spaces
           "distinct": 4,
-          "top": [{"value": "paid", "share": 0.81}],   // coded columns (≤50 values that repeat): the 10 most frequent
+          "top": [{"value": "paid", "share": 0.81}],   // coded columns only (below): the 10 most frequent
           "stand_ins": [{"value": "-1", "reason": "a negative key among positive ones"}]
         },
         "placed_at": {"type": "timestamp", "filled": 1.0, "distinct": 3900,
@@ -369,28 +370,40 @@ caveat, because they change with every load.
   "joins": [
     {"join": "orders.customer_id -> customers.id", "from_table": "orders", "to_table": "customers",
      "relationship": "many_to_one", "declared": true, "read": "whole",
+     "target_read": "whole",                // whole | lookup (only the keys read were looked up)
      "rows_read": 4100, "rows_keyed": 4000, "rows_matched": 3990,   // rows of the starting table
      "values": 1200, "values_matched": 1195,                         // its distinct keys
-     "to_keys": 1500, "to_rows": 1500,                               // the table it points at
-     "match_rate": 0.9958,                  // of values on a whole read, of rows on a sample
-     "summary": "1,195 of 1,200 values of orders.customer_id are found in customers.id (100%) (whole table checked); 110 of 4,100 orders rows have no match (100 blank): an inner join drops them; 305 of 1,500 customers keys have no orders row"}
+     "to_keys": 1500, "to_rows": 1500,      // the table it points at (on a lookup: the keys found)
+     "match_rate": 0.9975,                  // rows_matched / rows_keyed, on every kind of read
+     "summary": "3,990 of 4,000 orders rows find their customer_id in customers.id (99%; whole table checked, 1,195 of 1,200 values); 110 of 4,100 orders rows have no match (100 blank): an inner join drops them; 305 of 1,500 customers keys have no orders row"}
   ]
 }
 ```
 
-- **How much is read.** A table under 500,000 rows (the catalog's estimate) is read whole; above
-  it, 10,000 rows for the profile and 5,000 for a join check, spread across the table where the
-  engine has a sample clause (Postgres, Snowflake, BigQuery, Databricks, SQL Server, Trino, Oracle,
-  DuckDB) and the first rows elsewhere. A join to a table over 3,000,000 rows is not checked. At most
-  200 tables and 300 joins per run; two statements per table, up to eight join checks per statement.
-- **Personal columns** (flagged sensitive, or whose values look personal) carry counts only: no
-  `top`, no `min`/`max`. Frequent values are listed only for coded columns: at most 50 distinct
-  values, each on two rows or more on average, so a column of one-off values (names, reference
-  numbers) on a small table isn't listed.
+- **How much is read.** A table known to be under 500,000 rows (the catalog's estimate) is read
+  whole; otherwise 10,000 rows for the profile and 5,000 for a join check, spread across the table
+  where the engine samples whole pages or blocks (Postgres, Snowflake, BigQuery, SQL Server, Trino,
+  Oracle, DuckDB) and the first rows elsewhere (Redshift, MySQL, SQLite, Databricks, and an engine
+  whose sample clause an object refuses). The table a join points at is read whole (its keys,
+  grouped once) when it is known to be under 3,000,000 rows; otherwise only the keys read are looked
+  up in it, which an index serves. On MySQL and BigQuery, where a bounded read of an object of
+  unknown size can still scan all of it, such an object is neither profiled nor checked. At most 200
+  tables and 300 joins per run; two statements per table, up to eight join checks per statement.
+- **Connections.** Up to 4 statements run at once, so a build holds up to 4 database connections
+  beside its own; a profile that signs in through a browser (Snowflake's `externalbrowser`) runs one.
+- **Failures.** A refused statement is retried check by check, and a refused sample clause falls back
+  to the first rows; a statement stopped by the time limit is not retried, and its checks read
+  `not_run`.
+- **Personal columns** (flagged sensitive, whose values look personal, or named like a person's or
+  party's name, a contact, tax or licence number) carry counts only: no `top`, no `min`/`max`. Pay to a
+  person (salary, pay rate, bonus) has no range. Frequent values are listed only for coded columns, by
+  the test a value list written into the model passes: at most 25 distinct values, each on two rows or
+  more on average, none of them an email, a phone number or a GUID.
 - **Finding kinds:** `empty`, `mostly_blank` (blank on 90% or more), `constant` (one value on every
   row), `date_range` (dates after today on a column named for something that already happened),
   `date_order` (one date before another on 90% or more of the rows that have both, the reverse of
   the order their names usually come in), `mixed_formats` (a text column with two date shapes, or
   numbers beside dates).
 - **A sample's figures are a sample's.** Distinct counts and shares on a `sample` or `first_rows`
-  read describe the rows read, not the table; the frequent values come from their own read.
+  read describe the rows read, not the table; the frequent values come from their own read. Values
+  are read as text cut at 255 characters.

@@ -531,6 +531,12 @@ def cmd_profile(args) -> int:
     except (OSError, ValueError):
         _print_json({"error": f"no profile at {path}: run introspect first"})
         return 1
+    # The file may predate a flag set since: cut it to what the model serves now before anyone reads it.
+    from . import profile as PF
+    from .introspect import _never_read
+    org = L.load_datasource(args.root, include_rejected=True)
+    model = [t for sa in org.subject_areas for t in sa.tables_defined]
+    doc["tables"] = PF.scrub(doc.get("tables", {}), model, lambda t, c: _never_read(c))
     if args.table:
         wanted = {t.lower() for t in args.table}
         doc["tables"] = {k: v for k, v in doc.get("tables", {}).items()
@@ -1651,6 +1657,20 @@ def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
     return out or None
 
 
+def _signs_in_with_a_browser(profile: str) -> bool:
+    """The profile signs in through a browser window (Snowflake's `externalbrowser`). Reads only the
+    `authenticator` setting, never a secret; False when the credentials file can't be read."""
+    import configparser
+
+    from agami_paths import credentials_path
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(credentials_path(), encoding="utf-8")
+        return cp.get(profile, "authenticator", fallback="").strip().lower() == "externalbrowser"
+    except (configparser.Error, OSError):
+        return False
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -1665,6 +1685,9 @@ def cmd_introspect(args) -> int:
         tables = (tables or []) + _normalize_table_list(from_file)
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    # Each statement is its own connection: several at once would open as many sign-in windows.
+    from . import profile as PF
+    PF.WORKERS = 1 if _signs_in_with_a_browser(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(

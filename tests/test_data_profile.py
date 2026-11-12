@@ -16,6 +16,7 @@ import pytest
 
 pytest.importorskip("pydantic")
 sqlglot = pytest.importorskip("sqlglot")
+yaml = pytest.importorskip("yaml")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
@@ -84,9 +85,11 @@ def test_a_small_table_is_checked_on_the_whole_key_with_both_directions(db):
     assert c.read == "whole"
     assert (c.rows_read, c.rows_keyed, c.rows_matched) == (5, 4, 3)
     assert (c.values, c.values_matched, c.to_keys, c.to_rows) == (3, 2, 3, 3)
-    assert c.rate == pytest.approx(2 / 3) and not c.borne_out and not c.fans_out
+    # The rate is of rows with a key (#448 review): 3 of the 4 find a customer.
+    assert c.rate == pytest.approx(3 / 4) and not c.borne_out and not c.fans_out
+    assert c.target_read == "whole"
     assert c.summary() == (
-        "2 of 3 values of orders.customer_id are found in customers.id (67%) (whole table checked); "
+        "3 of 4 orders rows find their customer_id in customers.id (75%; whole table checked, 2 of 3 values); "
         "2 of 5 orders rows have no match (1 blank): an inner join drops them; "
         "1 of 3 customers keys have no orders row")
 
@@ -94,7 +97,7 @@ def test_a_small_table_is_checked_on_the_whole_key_with_both_directions(db):
 def test_every_value_matching_says_all_and_that_the_whole_table_was_read(db):
     c = PF.JoinCheck(ORDERS, ["id"], CUSTOMERS, ["id"])   # 1..5 against 1..3
     PF.run_checks(SQLITE, _runner(db), [c])
-    assert c.summary().startswith("3 of 5 values of orders.id")
+    assert c.summary().startswith("3 of 5 orders rows find their id in customers.id (60%; whole table checked")
     ok = PF.JoinCheck(_t("customers", ["id"], 3), ["id"], _t("orders", ["id"], 5), ["id"])
     PF.run_checks(SQLITE, _runner(db), [ok])
     assert ok.borne_out and ok.summary().startswith("all 3 values of customers.id are found in orders.id "
@@ -116,7 +119,7 @@ def test_a_large_table_is_read_as_a_bounded_sample_and_says_so(db, monkeypatch):
     PF.run_checks(SQLITE, _runner(db, seen), [c])
     assert "LIMIT 4" in seen[0]
     assert c.read == "first_rows" and c.rows_read == 4
-    assert "sampled orders rows are found in customers.id" in c.summary()
+    assert "3 of 3 sampled orders rows find their customer_id in customers.id (100%" in c.summary()
     assert "the first rows read, 4 rows" in c.summary()
     assert "inner join drops" not in c.summary()   # a sample says nothing about the other rows
 
@@ -125,7 +128,7 @@ def test_several_checks_share_one_statement_and_a_failing_one_costs_only_itself(
     seen: list[str] = []
     checks = [PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"]) for _ in range(3)]
     PF.run_checks(SQLITE, _runner(db, seen), checks)
-    assert len(seen) == 1 and seen[0].count("UNION ALL") == 2
+    assert len(seen) == 1 and seen[0].count("AS probe") == 3
     assert all(c.rows_matched == 3 for c in checks)
 
     seen.clear()
@@ -153,12 +156,14 @@ def test_a_composite_key_is_matched_on_all_its_columns(tmp_path):
     c = PF.JoinCheck(_t("ships", ["o", "n"], 2), ["o", "n"], _t("lines", ["o", "n"], 2), ["o", "n"])
     PF.run_checks(SQLITE, _runner(path), [c])
     assert (c.values, c.values_matched) == (2, 1)
-    assert c.summary().startswith("1 of 2 values of ships(o, n) are found in lines(o, n)")
+    assert c.summary().startswith("1 of 2 ships rows find their o, n in lines(o, n) (50%; whole table checked")
 
 
 def test_a_join_to_a_table_too_large_to_read_is_not_checked():
-    assert PF.checkable(CUSTOMERS)
-    assert not PF.checkable(_t("huge", ["id"], PF.JOIN_TARGET_MAX_ROWS + 1))
+    assert PF.checkable(SQLITE, ORDERS, CUSTOMERS, ["customer_id"]) is None
+    huge = _t("huge", ["a", "b"], PF.JOIN_TARGET_MAX_ROWS + 1)
+    assert PF.checkable(SQLITE, ORDERS, huge, ["customer_id"]) is None   # looked up, not skipped
+    assert "several columns" in PF.checkable(SQLITE, ORDERS, huge, ["a", "b"])
 
 
 # --- one spread-out sample clause per engine that has one -------------------------------------
@@ -169,10 +174,9 @@ _CLAUSES = {
     "duckdb": "TABLESAMPLE 2%",
     "snowflake": "SAMPLE SYSTEM (2)",
     "bigquery": "TABLESAMPLE SYSTEM (2 PERCENT)",
-    "databricks": "TABLESAMPLE (2 PERCENT)",
     "sqlserver": "TABLESAMPLE (2 PERCENT)",
-    "trino": "TABLESAMPLE BERNOULLI (2)",
-    "oracle": "SAMPLE (2)",
+    "trino": "TABLESAMPLE SYSTEM (2)",
+    "oracle": "SAMPLE BLOCK (2)",
 }
 
 
@@ -183,7 +187,7 @@ def test_an_engine_with_a_sample_clause_spreads_the_sample(key):
     assert how == "sample" and _CLAUSES[key] in sql and "5000" in sql
 
 
-@pytest.mark.parametrize("key", ["redshift", "mysql", "sqlite"])
+@pytest.mark.parametrize("key", ["redshift", "mysql", "sqlite", "databricks"])
 def test_an_engine_without_one_reads_the_first_rows_bounded(key):
     sql, how = D.get_dialect(key).sampled_rows("SELECT a FROM t", 5_000, 500_000)
     assert how == "first_rows" and sql == "SELECT a FROM t LIMIT 5000"
@@ -194,7 +198,7 @@ def test_an_unknown_size_or_a_small_table_is_not_sampled_by_share():
     assert pg.sampled_rows("SELECT a FROM t", 5_000, None) == ("SELECT a FROM t LIMIT 5000", "first_rows")
     assert pg.sampled_rows("SELECT a FROM t", 5_000, 4_000)[1] == "first_rows"
     assert "TABLESAMPLE SYSTEM (0.0001)" in pg.sampled_rows("SELECT a FROM t", 1, 10**12)[0]
-    assert "SAMPLE (99)" in D.get_dialect("oracle").sampled_rows("SELECT a FROM t", 9, 10)[0]
+    assert "SAMPLE BLOCK (99)" in D.get_dialect("oracle").sampled_rows("SELECT a FROM t", 9, 10)[0]
 
 
 _SQLGLOT = {"postgres": "postgres", "duckdb": "duckdb", "snowflake": "snowflake", "bigquery": "bigquery",
@@ -206,7 +210,7 @@ _SQLGLOT = {"postgres": "postgres", "duckdb": "duckdb", "snowflake": "snowflake"
 def test_a_sampled_check_parses_in_its_engine(key):
     d = D.get_dialect(key)
     big = _t("orders", ["customer_id"], 10_000_000)
-    sql, _ = PF.check_sql(d, PF.JoinCheck(big, ["customer_id"], CUSTOMERS, ["id"]), 0)
+    sql, _, _ = PF.check_sql(d, PF.JoinCheck(big, ["customer_id"], CUSTOMERS, ["id"]), 0)
     sqlglot.parse_one(sql, read=_SQLGLOT[key])
 
 
@@ -249,7 +253,7 @@ def test_every_join_of_a_build_is_checked_and_reported(tmp_path):
     text = report.render()
     assert ("## joins checked on the data (1 of 1: 1 on the whole table, 0 on a sample; 0 with no values to "
             "compare; 1 worth a look)") in text
-    assert "! orders.customer_id -> customers.id: 1 of 3 values of orders.customer_id" in text
+    assert "! orders.customer_id -> customers.id: 1 of 3 orders rows find their customer_id" in text
 
 
 def test_an_unenforced_declared_key_needs_a_match_rate_not_one_hit(tmp_path, monkeypatch):
@@ -324,7 +328,7 @@ def _profile(tmp_path, **kw):
     seen: list[str] = []
     t = _claims_table(kw.pop("rows", 30))
     sample = _runner(db)("SELECT * FROM claims")
-    prof = PF.profile_table(SQLITE, _runner(db, seen), t, lambda c: c.sensitive, sample, today="2026-01-01")
+    prof = PF.profile_table(SQLITE, _runner(db, seen), t, lambda t, c: c.sensitive, sample, today="2026-01-01")
     return prof, seen
 
 
@@ -377,7 +381,7 @@ def test_a_clean_table_has_no_findings(tmp_path):
     t = _t("orders", ["id", "placed", "closed", "status"], 30)
     for c, ty in zip(t.columns, ["integer", "date", "date", "string"]):
         c.type = ty
-    prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False, _runner(path)("SELECT * FROM orders"))
+    prof = PF.profile_table(SQLITE, _runner(path), t, lambda t, c: False, _runner(path)("SELECT * FROM orders"))
     assert "findings" not in prof
     assert prof["date_order"] == [{"earlier": "placed", "later": "closed", "share": 1.0, "rows": 30}]
 
@@ -393,8 +397,8 @@ def test_a_large_table_is_profiled_on_a_bounded_sample(tmp_path, monkeypatch):
 def test_a_table_that_cannot_be_read_has_no_profile_and_a_failed_value_read_keeps_the_counts(tmp_path):
     db = _claims_db(tmp_path)
     t = _claims_table()
-    assert PF.profile_table(SQLITE, _runner(db, fail_on="COUNT(*) AS n"), t, lambda c: False) is None
-    prof = PF.profile_table(SQLITE, _runner(db, fail_on="UNION ALL"), t, lambda c: False)
+    assert PF.profile_table(SQLITE, _runner(db, fail_on="COUNT(*) AS n"), t, lambda t, c: False) is None
+    prof = PF.profile_table(SQLITE, _runner(db, fail_on="UNION ALL"), t, lambda t, c: False)
     assert prof["columns"]["status"]["distinct"] == 2 and "top" not in prof["columns"]["status"]
 
 
@@ -479,7 +483,7 @@ def test_text_holding_iso_dates_is_profiled_as_dates(tmp_path):
     con.close()
     t = _t("orders", ["id", "placed_at", "shipped_at"], 25)
     t.columns[1].date_format = t.columns[2].date_format = "iso8601"
-    prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False)
+    prof = PF.profile_table(SQLITE, _runner(path), t, lambda t, c: False)
     assert prof["columns"]["placed_at"]["max"] == "2024-01-25 10:00:00"
     assert prof["date_order"] == [{"earlier": "placed_at", "later": "shipped_at", "share": 1.0, "rows": 25}]
 
@@ -508,3 +512,257 @@ def test_the_report_lists_common_findings_one_line_per_table(tmp_path):
     text = rep.render()
     assert "## column profile (1 tables read; 3 finding(s)" in text
     assert "  - main.t: empty on every row read: a, b" in text and "  ! main.t: d has dates after today" in text
+
+
+# --- review of #448: personal data, bounds, retries ---------------------------------------------
+
+def _coded_db(tmp_path: Path, values: list[str]) -> Path:
+    path = tmp_path / "log.db"
+    con = sqlite3.connect(path)
+    con.execute("DROP TABLE IF EXISTS visits")
+    con.execute("CREATE TABLE visits(id INTEGER PRIMARY KEY, ref TEXT)")
+    con.executemany("INSERT INTO visits VALUES (?, ?)", [(i, values[i % len(values)]) for i in range(40)])
+    con.commit()
+    con.close()
+    return path
+
+
+def _profile_doc(out: Path) -> dict:
+    import json
+    return json.loads((out / ".introspect" / "profile.json").read_text())
+
+
+def test_a_column_that_turns_personal_on_a_refresh_loses_its_values(tmp_path):
+    """Item 1: a merged column keeps its stored flags, so this run's reading must count too."""
+    out = tmp_path / "demo"
+    path = _coded_db(tmp_path, ["a", "b", "c"])
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out)
+    assert "top" in _profile_doc(out)["tables"]["main.visits"]["columns"]["ref"]
+    _coded_db(tmp_path, ["+1 415 555 0101", "+1 415 555 0102", "+1 415 555 0103"])
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, append=True)
+    ref = _profile_doc(out)["tables"]["main.visits"]["columns"]["ref"]
+    assert ref["personal"] and not {"top", "min", "max"} & set(ref)
+    assert "555" not in (out / ".introspect" / "profile.json").read_text()
+
+
+def _small(tmp_path: Path, column: str, values: list, ctype: str = "string") -> dict:
+    path = tmp_path / f"{column}.db"
+    con = sqlite3.connect(path)
+    con.execute(f"CREATE TABLE parties(id INTEGER PRIMARY KEY, {column} TEXT)")
+    con.executemany("INSERT INTO parties VALUES (?, ?)", [(i, values[i % len(values)]) for i in range(40)])
+    con.commit()
+    con.close()
+    t = _t("parties", ["id", column], 40)
+    t.columns[1].type = ctype
+    return PF.profile_table(SQLITE, _runner(path), t, lambda t, c: False)["columns"][column]
+
+
+@pytest.mark.parametrize("column", ["vendor_name", "party_name", "tax_id", "national_id", "contact_no",
+                                    "license_no", "buyer_pan"])
+def test_a_column_named_like_personal_data_gets_counts_only(tmp_path, column):
+    """Item 2: a small table's name or number column repeats enough to look coded."""
+    col = _small(tmp_path, column, ["X1", "X2", "X3"])
+    assert col["personal"] and col["distinct"] == 3 and "top" not in col
+
+
+def test_values_that_look_personal_or_like_guids_withhold_the_whole_column(tmp_path):
+    assert "top" not in _small(tmp_path, "ref", ["you@example.com", "x", "y"])
+    assert "top" not in _small(tmp_path, "kind", ["0f8fad5b-d9cb-469f-a165-70867728950e", "a", "b"])
+    assert "top" in _small(tmp_path, "status", ["open", "paid", "void"])
+
+
+def test_the_frequent_value_line_is_the_value_list_line(tmp_path):
+    assert "top" not in _small(tmp_path, "status", [f"s{i}" for i in range(PF.PROFILE_TOP_MAX_DISTINCT + 1)])
+    assert PF.PROFILE_TOP_MAX_DISTINCT == I.ENUM_MAX_DISTINCT
+
+
+def test_pay_to_a_person_keeps_its_counts_and_loses_its_range(tmp_path):
+    col = _small(tmp_path, "pay_rate", ["10", "20", "30"], ctype="integer")
+    assert col["distinct"] == 3 and "min" not in col and "max" not in col
+
+
+def test_a_full_build_rewrites_the_file_and_drops_what_the_model_no_longer_serves(tmp_path):
+    """Item 3: only a batched build merges; every write is cut to what the model serves now."""
+    import json
+    out = tmp_path / "demo"
+    path = _coded_db(tmp_path, ["a", "b", "c"])
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out)
+    f = out / ".introspect" / "profile.json"
+    doc = json.loads(f.read_text())
+    doc["tables"]["main.gone"] = {"columns": {"x": {"top": [{"value": "secret", "share": 1.0}]}}}
+    f.write_text(json.dumps(doc))
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out)
+    assert set(_profile_doc(out)["tables"]) == {"main.visits"}
+    f.write_text(json.dumps(doc))
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, append=True)
+    assert "main.gone" not in _profile_doc(out)["tables"]   # merged, then cut to the model
+
+
+def test_a_column_flagged_after_the_build_is_scrubbed_when_the_profile_is_read(tmp_path, capsys):
+    import json
+
+    from semantic_model import cli
+    out = tmp_path / "demo"
+    path = _coded_db(tmp_path, ["a", "b", "c"])
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out)
+    [table_file] = list(out.rglob("tables/visits.yaml"))
+    doc = yaml.safe_load(table_file.read_text())
+    for c in doc["columns"]:
+        if c["name"] == "ref":
+            c["sensitive"] = True
+    table_file.write_text(yaml.safe_dump(doc, sort_keys=False))
+    assert cli.main(["profile", str(out)]) == 0
+    ref = json.loads(capsys.readouterr().out)["tables"]["main.visits"]["columns"]["ref"]
+    assert ref["personal"] and "top" not in ref
+
+
+def test_an_unsized_object_is_not_read_where_a_bounded_read_can_still_scan_it(db):
+    """Item 4: MySQL views and BigQuery tables whose size the catalog doesn't give."""
+    mysql, bq = D.get_dialect("mysql"), D.get_dialect("bigquery")
+    unsized = _t("v_orders", ["customer_id"], None)
+    for d in (mysql, bq):
+        assert not d.scans_unsized and "unknown size" in PF.checkable(d, unsized, CUSTOMERS, ["customer_id"])
+        assert "unknown size" in PF.checkable(d, ORDERS, _t("v_c", ["id"], None), ["customer_id"])
+        assert PF.profile_table(d, _runner(db), unsized, lambda t, c: False) is None
+    assert PF.checkable(D.get_dialect("postgres"), unsized, CUSTOMERS, ["customer_id"]) is None
+
+
+def test_a_key_into_a_table_too_large_to_read_is_looked_up_not_skipped(db, tmp_path, monkeypatch):
+    """Item 5: only the keys the starting rows hold are read from the big table (an IN list)."""
+    big = _t("customers", ["id"], PF.JOIN_TARGET_MAX_ROWS + 1)
+    seen: list[str] = []
+    c = PF.JoinCheck(ORDERS, ["customer_id"], big, ["id"])
+    PF.run_checks(SQLITE, _runner(db, seen), [c])
+    assert c.target_read == "lookup" and (c.rows_keyed, c.rows_matched) == (4, 3)
+    assert '"id" IN (SELECT s2.v0 FROM' in seen[0]
+    assert "keys have no" not in c.summary()   # the other side wasn't read whole
+    unsized = PF.JoinCheck(ORDERS, ["customer_id"], _t("customers", ["id"], None), ["id"])
+    assert "IN (SELECT" in PF.check_sql(SQLITE, unsized, 0)[0]   # an unknown size is not read whole
+    # a declared key into a big table on an unenforcing engine is still confirmed
+    monkeypatch.setattr(D.SQLite, "fk_enforced", False)
+    monkeypatch.setattr(PF, "JOIN_TARGET_MAX_ROWS", 1)
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 1, 1.0);")
+    org, _ = _build(tmp_path, path)
+    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
+    assert r.confidence == "confirmed" and r.review_state == "approved"
+
+
+@pytest.mark.parametrize("key,clause", [("trino", "TABLESAMPLE SYSTEM ("), ("oracle", "SAMPLE BLOCK (")])
+def test_engines_that_sample_rows_sample_blocks_instead(key, clause):
+    """Item 6: a row-level sample reads every row; a block sample reads only its share."""
+    assert clause in D.get_dialect(key).sampled_rows("SELECT a FROM t", 5_000, 10**8)[0]
+    assert D.get_dialect("databricks").sampled_rows("SELECT a FROM t", 5_000, 10**8)[1] == "first_rows"
+
+
+class _Slow(RuntimeError):
+    kind = "resource_limit"
+
+
+def test_a_batch_that_runs_out_of_time_is_not_retried(db):
+    """Item 7: retried check by check, each would run to the same limit."""
+    seen: list[str] = []
+
+    def slow(sql):
+        seen.append(sql)
+        raise _Slow("refused: resource_limit")
+    checks = [PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"]) for _ in range(3)]
+    PF.run_checks(SQLITE, slow, checks)
+    assert len(seen) == 1 and all(c.failed for c in checks)
+
+
+def test_a_lone_sample_that_runs_out_of_time_stops_and_a_refused_one_reads_the_first_rows(db, monkeypatch):
+    monkeypatch.setattr(PF, "JOIN_WHOLE_MAX_ROWS", 2)
+    monkeypatch.setattr(D.SQLite, "tablesample", lambda self, pct: "TABLESAMPLE SYSTEM (1)", raising=False)
+    stale = _t("orders", ["customer_id"], 10**9)
+    seen: list[str] = []
+
+    def slow_sample(sql):
+        seen.append(sql)
+        if "TABLESAMPLE" in sql:
+            raise _Slow("timed out")
+        return _runner(db)(sql)
+    c = PF.JoinCheck(stale, ["customer_id"], CUSTOMERS, ["id"])
+    PF._one(SQLITE, slow_sample, c)
+    assert c.failed and len(seen) == 1
+    c = PF.JoinCheck(stale, ["customer_id"], CUSTOMERS, ["id"])
+    PF._one(SQLITE, _runner(db, fail_on="TABLESAMPLE"), c)
+    assert c.read == "first_rows" and c.rows_read == 5
+
+
+def test_a_lone_check_whose_sample_comes_back_empty_reads_the_first_rows(db, monkeypatch):
+    monkeypatch.setattr(PF, "JOIN_WHOLE_MAX_ROWS", 2)
+    monkeypatch.setattr(D.SQLite, "tablesample", lambda self, pct: "WHERE 1 = 0", raising=False)
+    c = PF.JoinCheck(_t("orders", ["customer_id"], 10**9), ["customer_id"], CUSTOMERS, ["id"])
+    PF._one(SQLITE, _runner(db), c)
+    assert c.read == "first_rows" and c.rows_read == 5
+
+
+def test_one_column_of_an_odd_type_costs_its_detail_not_the_table(tmp_path):
+    """Item 8: an enum or interval refusing TRIM or COUNT(DISTINCT) falls back to fill counts."""
+    db = _claims_db(tmp_path)
+    prof = PF.profile_table(SQLITE, _runner(db, fail_on="TRIM("), _claims_table(), lambda t, c: False)
+    assert prof["rows_read"] == 30 and prof["columns"]["unused"]["filled"] == 0.0
+    assert "distinct" not in prof["columns"]["status"]
+    assert "CAST(" in PF.stats_sql(SQLITE, "SELECT 1", [PF._ColStat("s", "string", False)], [])
+
+
+def test_a_repeating_key_is_a_fan_out_only_where_the_join_says_one_partner(db):
+    """Item 9: on a one-to-many join the far side is meant to repeat."""
+    regions = _t("regions", ["code"], 3)
+    visits = _t("visits", ["region_code"], 2)
+    one = PF.JoinCheck(visits, ["region_code"], regions, ["code"])
+    many = PF.JoinCheck(visits, ["region_code"], regions, ["code"], target_is_one=False)
+    PF.run_checks(SQLITE, _runner(db), [one, many])
+    assert one.fans_out and not many.fans_out and "repeats" not in many.summary()
+
+
+def test_a_shown_percent_never_rounds_up_past_the_rule():
+    """Item 10: 94.96% must not show as the 95% a declared key needs."""
+    assert (PF.percent(0.9496), PF.percent(0.9958), PF.percent(1.0), PF.percent(0.95)) == ("94%", "99%", "100%", "95%")
+    c = _checked(rows_read=10_000, rows_keyed=10_000, rows_matched=9_496, values=10, values_matched=9,
+                 to_keys=10, to_rows=10)
+    assert not c.borne_out and "(94%;" in c.summary()
+
+
+def test_the_match_rate_is_of_rows_on_a_whole_read_and_a_sample_alike():
+    """Item 11: one value that holds most rows decides an inner join, not the count of values."""
+    whole = _checked(rows_read=100, rows_keyed=100, rows_matched=99, values=2, values_matched=1, to_keys=1, to_rows=1)
+    assert whole.rate == 0.99 and whole.borne_out
+    sample = _checked(read="sample", rows_read=100, rows_keyed=100, rows_matched=99, values=2, values_matched=1)
+    assert sample.rate == whole.rate
+
+
+def test_past_the_cap_a_declared_key_stays_for_review_and_the_note_says_so(tmp_path, monkeypatch):
+    """Item 12: one cap; declared keys are confirmed from the run's check of every join."""
+    monkeypatch.setattr(D.SQLite, "fk_enforced", False)
+    monkeypatch.setattr(PF, "JOIN_CHECK_CAP", 0)
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 1, 1.0);")
+    org, report = _build(tmp_path, path)
+    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
+    assert r.review_state == "unreviewed"
+    assert any("capped at 0 checks per run" in n for n in report.notes)
+
+
+def test_a_check_reads_the_table_it_points_at_once(db):
+    """Item 13: one grouping of its keys gives the distinct count and the row count."""
+    sql, _, _ = PF.check_sql(SQLITE, PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"]), 0)
+    assert sql.count('FROM "customers"') == 1
+
+
+def test_one_value_and_a_composite_key_left_blank_read_naturally():
+    one = _checked(rows_read=3, rows_keyed=3, rows_matched=3, values=1, values_matched=1, to_keys=1, to_rows=1)
+    assert one.summary().startswith("the one value of orders.customer_id is found")
+    two = PF.JoinCheck(ORDERS, ["a", "b"], CUSTOMERS, ["a", "b"], read="whole", rows_read=4, rows_keyed=1,
+                       rows_matched=1, values=1, values_matched=1, to_keys=1, to_rows=1)
+    assert "3 of 4 orders rows leave a, b blank" in two.summary()
+
+
+def test_a_browser_sign_in_is_detected_without_reading_a_secret(tmp_path, monkeypatch):
+    """A build holds up to `WORKERS` connections; a browser sign-in would open that many windows."""
+    from semantic_model import cli
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    assert not cli._signs_in_with_a_browser("demo")   # no credentials file
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / "credentials").write_text(
+        "[demo]\ntype = snowflake\nauthenticator = externalbrowser\n[acme]\ntype = postgres\npassword = %x\n")
+    assert cli._signs_in_with_a_browser("demo") and not cli._signs_in_with_a_browser("acme")

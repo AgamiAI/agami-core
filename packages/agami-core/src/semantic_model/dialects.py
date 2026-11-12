@@ -214,8 +214,14 @@ class Dialect:
         return f"{select} LIMIT {n}"
 
     def text_cast(self, expr: str) -> str:
-        """`expr` as text, so values of different types can share a column."""
+        """`expr` as text, so values of different types can share a column. Truncated at 255
+        characters, which a value read for the profile never needs past."""
         return f"CAST({expr} AS VARCHAR(255))"
+
+    # False where a bounded read (a LIMIT) of an object of unknown size can still scan all of it:
+    # a view the engine materialises first, or an engine that bills every byte a column holds.
+    # There, an object whose size the catalog doesn't give isn't read for the profile or a join check.
+    scans_unsized: bool = True
 
     def tablesample(self, percent: str) -> Optional[str]:
         """The clause after a table name that reads about `percent` of its rows spread across it, or
@@ -638,6 +644,7 @@ class Redshift(PostgreSQL):
 
 class MySQL(Dialect):
     name = "MySQL"
+    scans_unsized = False   # a view is materialised before its LIMIT applies
     backslash_escapes = True
     duration_rounds = True
     reserved_extra = frozenset({
@@ -807,7 +814,7 @@ class Databricks(Dialect):
     duration_rounds = True
 
     def tablesample(self, percent: str) -> Optional[str]:
-        return f"TABLESAMPLE ({percent} PERCENT)"
+        return None   # TABLESAMPLE here samples rows, reading every one: a bounded read takes the first rows
 
     def text_cast(self, expr: str) -> str:
         return f"CAST({expr} AS STRING)"
@@ -829,7 +836,8 @@ class Trino(Dialect):
     duration_rounds = True
 
     def tablesample(self, percent: str) -> Optional[str]:
-        return f"TABLESAMPLE BERNOULLI ({percent})"   # SYSTEM depends on the connector
+        # SYSTEM skips whole splits, so the scan is bounded; BERNOULLI would read every row.
+        return f"TABLESAMPLE SYSTEM ({percent})"
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
@@ -946,6 +954,7 @@ class SQLServer(Dialect):
 
 class BigQuery(Dialect):
     name = "BigQuery"
+    scans_unsized = False   # a LIMIT bills every byte of the columns it reads
     backslash_escapes = True
 
     def tablesample(self, percent: str) -> Optional[str]:
@@ -1183,7 +1192,7 @@ class Oracle(Dialect):
     })
 
     def tablesample(self, percent: str) -> Optional[str]:
-        return f"SAMPLE ({percent})"
+        return f"SAMPLE BLOCK ({percent})"   # whole blocks: `SAMPLE (p)` alone would read every row
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:

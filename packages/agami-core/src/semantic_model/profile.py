@@ -5,17 +5,21 @@ join that drops or multiplies rows, a column that is mostly blank or one stand-i
 column whose values don't fit its name. This module reads them, bounded, and the result goes to the
 person reviewing the build and to the steps that describe the model, never into rule or caveat text.
 
-**Joins.** A join is checked on the whole key when the table it starts from is under
-`JOIN_WHOLE_MAX_ROWS`, and on a sample of `JOIN_SAMPLE_ROWS` rows above it: spread across the table
-where the engine can sample (`Dialect.tablesample`), the first rows read where it can't, and the
-evidence says which. One check gives both directions (rows that find no partner, which an inner join
-drops, and keys on the other side no row points at) and whether the referenced key repeats (a join
-that multiplies rows). A table it would join to above `JOIN_TARGET_MAX_ROWS` is not read at all.
+**Joins.** A join is checked on every row of the table it starts from when that table is known to be
+under `JOIN_WHOLE_MAX_ROWS`, and on a bounded read of `JOIN_SAMPLE_ROWS` rows otherwise: spread across
+the table where the engine samples whole pages or blocks (`Dialect.tablesample`), the first rows read
+where it can't. The table it points at is read whole (its keys, grouped once) when it is known to be
+under `JOIN_TARGET_MAX_ROWS`; otherwise only the keys the starting rows hold are looked up in it, which
+an index serves. One read of each side gives the match rate (of rows: the rows an inner join keeps),
+rows with no partner, keys on the other side no row points at (whole reads only), and whether the
+referenced key repeats. Where a bounded read can still scan a whole object (`Dialect.scans_unsized`),
+an object of unknown size isn't read at all.
 
 **Batched.** Over a pooled cloud connection each statement costs a round trip, and checking joins
-one at a time was most of a build. Up to `CHECKS_PER_STATEMENT` checks go in one statement (a
-UNION ALL of one-row aggregates), and up to `WORKERS` statements run at once. A statement that fails
-is retried check by check, so one bad pair costs only itself.
+one at a time was most of a build. Up to `CHECKS_PER_STATEMENT` checks go in one statement (a UNION
+ALL of one-row aggregates), and up to `WORKERS` statements run at once, so a build holds up to that
+many connections beside its own. A refused statement is retried check by check; a statement that ran
+out of time is not, and its checks are reported as not run.
 """
 
 from __future__ import annotations
@@ -25,19 +29,19 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from . import dialects as D
-from .models import Table
+from .models import Column, Table
 
 Runner = Callable[[str], list[dict]]
 
 # Under this many rows (the catalog's estimate) the table a join starts from is read whole.
 JOIN_WHOLE_MAX_ROWS = 500_000
-# Above it, this many rows are read.
+# Otherwise, this many of its rows are read.
 JOIN_SAMPLE_ROWS = 5_000
-# A table a join points at is read whole (its distinct keys); past this size the join is not checked.
+# Under this many rows the table a join points at is read whole; above it, only the keys looked up.
 JOIN_TARGET_MAX_ROWS = 3_000_000
-# Joins checked per run, across every pass that checks them.
+# Joins checked per run, declared and inferred alike.
 JOIN_CHECK_CAP = 300
-# A join whose values are found on the other side at this rate or above is borne out by the data.
+# A join whose rows find their partner at this rate or above is borne out by the data.
 JOIN_MIN_MATCH = 0.95
 CHECKS_PER_STATEMENT = 8
 WORKERS = 4
@@ -56,23 +60,38 @@ def _num(row: dict, key: str) -> int:
         return 0
 
 
+def percent(rate: float) -> str:
+    """A share as a whole percent, rounded DOWN: 94.96% shows as 94%, never as the 95% a rule needs."""
+    return f"{int(rate * 100 + 1e-9)}%"
+
+
+def too_slow(exc: BaseException) -> bool:
+    """A statement stopped by a time or size bound, rather than refused for what it says."""
+    text = str(exc).lower()
+    return (getattr(exc, "kind", None) in ("timeout", "resource_limit") or "resource_limit" in text
+            or "timed out" in text or "timeout" in text)
+
+
 @dataclass
 class JoinCheck:
-    """One join, checked on the data: `ft.fc` (its rows) against `tt.tc` (the key it points at)."""
+    """One join, checked on the data: `ft.fc` (its rows) against `tt.tc` (the key it points at).
+    `target_is_one`: the join says each row has at most one partner, so a repeating key is a fan-out."""
 
     ft: Table
     fc: list[str]
     tt: Table
     tc: list[str]
+    target_is_one: bool = True
     read: str = ""            # "whole", "sample" (spread out), "first_rows", or "" when not run
+    target_read: str = ""     # "whole", or "lookup" (only the keys the rows hold)
     failed: bool = False
     rows_read: int = 0        # rows of ft read
     rows_keyed: int = 0       # of those, rows whose key is filled in
     rows_matched: int = 0     # of those, rows whose key is found in tt
     values: int = 0           # distinct keys among the rows read
     values_matched: int = 0   # of those, found in tt
-    to_keys: int = 0          # distinct keys in tt
-    to_rows: int = 0          # rows of tt with the key filled in
+    to_keys: int = 0          # distinct keys in tt (the matched ones, on a lookup)
+    to_rows: int = 0          # rows of tt holding them
 
     @property
     def ran(self) -> bool:
@@ -80,13 +99,10 @@ class JoinCheck:
 
     @property
     def rate(self) -> Optional[float]:
-        """Share of distinct values found (whole key), or of sampled rows (a sample): None when nothing
-        was compared."""
-        if not self.ran:
+        """Share of the rows read with a key filled in whose key is found: None when none had one."""
+        if not self.ran or not self.rows_keyed:
             return None
-        if self.read == "whole":
-            return self.values_matched / self.values if self.values else None
-        return self.rows_matched / self.rows_keyed if self.rows_keyed else None
+        return self.rows_matched / self.rows_keyed
 
     @property
     def borne_out(self) -> bool:
@@ -94,37 +110,41 @@ class JoinCheck:
 
     @property
     def fans_out(self) -> bool:
-        """The referenced key repeats, so each row joins to several."""
-        return self.ran and self.to_rows > self.to_keys > 0
+        """The join says one partner, and the referenced key repeats, so a row joins to several."""
+        return self.ran and self.target_is_one and self.to_rows > self.to_keys > 0
 
     def _name(self, t: Table, cols: list[str]) -> str:
         return f"{t.name}.{cols[0]}" if len(cols) == 1 else f"{t.name}({', '.join(cols)})"
 
     def summary(self) -> str:
         f, t = self._name(self.ft, self.fc), self._name(self.tt, self.tc)
+        cols = self.fc[0] if len(self.fc) == 1 else ", ".join(self.fc)
         if not self.ran:
             return "the check could not compare the two columns"
         if not self.rows_read:
             return f"{self.ft.name} has no rows" if self.read == "whole" else f"no {self.ft.name} rows were read"
-        if not self.values:
+        if not self.rows_keyed:
             return f"{f} is blank on every row read"
-        if self.read == "whole":
-            head = (f"all {self.values:,} values of {f} are found in {t}" if self.values_matched == self.values
-                    else f"{self.values_matched:,} of {self.values:,} values of {f} are found in {t} "
-                         f"({self.rate:.0%})")
+        whole = self.read == "whole"
+        if whole and self.rows_matched == self.rows_keyed:
+            head = (f"the one value of {f} is found in {t}" if self.values == 1
+                    else f"all {self.values:,} values of {f} are found in {t}")
             parts = [head + " (whole table checked)"]
+        elif whole:
+            parts = [f"{self.rows_matched:,} of {self.rows_keyed:,} {self.ft.name} rows find their {cols} in {t} "
+                     f"({percent(self.rate)}; whole table checked, {self.values_matched:,} of {self.values:,} values)"]
         else:
             how = "a spread-out sample" if self.read == "sample" else "the first rows read"
-            parts = [f"{self.rows_matched:,} of {self.rows_keyed:,} sampled {self.ft.name} rows are found in {t} "
-                     f"({self.rate:.0%}; {how}, {self.rows_read:,} rows)"]
+            parts = [f"{self.rows_matched:,} of {self.rows_keyed:,} sampled {self.ft.name} rows find their {cols} "
+                     f"in {t} ({percent(self.rate)}; {how}, {self.rows_read:,} rows)"]
         lost = self.rows_read - self.rows_matched
-        if lost and self.read == "whole":
+        if lost and whole:
             blank = self.rows_read - self.rows_keyed
-            what = (f"leave {self._name(self.ft, self.fc).split('.', 1)[-1]} blank" if blank == lost
+            what = (f"leave {cols} blank" if blank == lost
                     else "have no match" + (f" ({blank:,} blank)" if blank else ""))
             parts.append(f"{lost:,} of {self.rows_read:,} {self.ft.name} rows {what}: an inner join drops them")
         unused = self.to_keys - self.values_matched
-        if self.read == "whole" and unused > 0:
+        if whole and self.target_read == "whole" and unused > 0:
             parts.append(f"{unused:,} of {self.to_keys:,} {self.tt.name} keys have no {self.ft.name} row")
         if self.fans_out:
             parts.append(f"{t} repeats ({self.to_rows:,} rows for {self.to_keys:,} values): "
@@ -134,18 +154,28 @@ class JoinCheck:
     def evidence(self) -> dict:
         out: dict = {"read": self.read or "not_run", "summary": self.summary()}
         if self.ran:
-            out.update(rows_read=self.rows_read, rows_keyed=self.rows_keyed, rows_matched=self.rows_matched,
-                       values=self.values, values_matched=self.values_matched,
+            out.update(target_read=self.target_read, rows_read=self.rows_read, rows_keyed=self.rows_keyed,
+                       rows_matched=self.rows_matched, values=self.values, values_matched=self.values_matched,
                        to_keys=self.to_keys, to_rows=self.to_rows)
             if self.rate is not None:
                 out["match_rate"] = round(self.rate, 4)
         return out
 
 
-def checkable(tt: Table) -> bool:
-    """A join can be checked unless the table it points at is too large to read its keys."""
+def checkable(dialect: D.Dialect, ft: Table, tt: Table, fc: list[str]) -> Optional[str]:
+    """Why a join can't be checked, or None when it can. An object of unknown size is read only where
+    a bounded read stays bounded; a key into a table too big to read whole is looked up, which needs
+    a one-column key."""
+    if not dialect.scans_unsized and (_rows(ft) is None or _rows(tt) is None):
+        return "a table it joins is of unknown size, and a bounded read of it here can still scan all of it"
+    if _target_whole(tt) is None and len(fc) > 1:
+        return "a key over several columns into a table too large to read whole"
+    return None
+
+
+def _target_whole(tt: Table) -> Optional[bool]:
     rows = _rows(tt)
-    return rows is None or rows <= JOIN_TARGET_MAX_ROWS
+    return True if rows is not None and rows <= JOIN_TARGET_MAX_ROWS else None
 
 
 def _from_rows(dialect: D.Dialect, c: JoinCheck, spread: bool) -> tuple[str, str]:
@@ -158,54 +188,63 @@ def _from_rows(dialect: D.Dialect, c: JoinCheck, spread: bool) -> tuple[str, str
     return dialect.sampled_rows(f"SELECT {picked} FROM {q}", JOIN_SAMPLE_ROWS, rows if spread else None)
 
 
-def check_sql(dialect: D.Dialect, c: JoinCheck, label: int, *, spread: bool = True) -> tuple[str, str]:
-    """One check as a one-row aggregate, labelled so several can share a statement.
+def check_sql(dialect: D.Dialect, c: JoinCheck, label: int, *, spread: bool = True) -> tuple[str, str, str]:
+    """One check as a one-row aggregate, labelled so several can share a statement; with how each side
+    was read.
 
-    The starting rows are grouped by key once (`g`, each key with its row count) and left-joined to
-    the distinct keys of the other table: one pass over each side, so a sample is drawn once and
-    every count comes from the same rows. No correlated subquery, which some engines refuse inside
-    an aggregate."""
-    src, how = _from_rows(dialect, c, spread)
+    Each side is grouped by key once and the two are stacked (UNION ALL) and grouped again, so every
+    count comes from one read of each side and a sample is drawn once. No join and no correlated
+    subquery, which some engines refuse inside an aggregate. On a lookup the other side is narrowed
+    to the keys the starting rows hold (an IN list an index serves), so it is never read whole."""
+    target = "whole" if _target_whole(c.tt) else "lookup"
+    # A lookup reads the starting rows twice (once for the keys to look up), so they must be the same
+    # rows both times: the first rows, never a random share.
+    src, how = _from_rows(dialect, c, spread and target == "whole")
     vs = [f"v{i}" for i in range(len(c.fc))]
     ks = [dialect.quote_ident(k) for k in c.tc]
     fq_to = dialect.qualified(c.tt.schema_name, c.tt.name)
     keyed = " AND ".join(f"g.{v} IS NOT NULL" for v in vs)
-    to_filled = " AND ".join(f"{k} IS NOT NULL" for k in ks)
-    on = " AND ".join(f"t.k{i} = g.{v}" for i, v in enumerate(vs))
-    to_keys = ", ".join(f"{k} AS k{i}" for i, k in enumerate(ks))
-    hit = "t.k0 IS NOT NULL"
+    filled = " AND ".join(f"{k} IS NOT NULL" for k in ks)
+    if target == "lookup":   # one-column keys only (`checkable`)
+        filled += f" AND {ks[0]} IN (SELECT s2.v0 FROM ({src}) s2 WHERE s2.v0 IS NOT NULL)"
+    to_cols = ", ".join(f"{k} AS v{i}" for i, k in enumerate(ks))
+    stacked = (f"SELECT {', '.join(vs)}, COUNT(*) AS f, 0 AS t FROM ({src}) s GROUP BY {', '.join(vs)} "
+               f"UNION ALL SELECT {to_cols}, 0 AS f, COUNT(*) AS t FROM {fq_to} WHERE {filled} "
+               f"GROUP BY {', '.join(ks)}")
     sql = (
-        f"SELECT {label} AS probe, SUM(g.n) AS rows_read, "
-        f"SUM(CASE WHEN {keyed} THEN g.n ELSE 0 END) AS rows_keyed, "
-        f"SUM(CASE WHEN {hit} THEN g.n ELSE 0 END) AS rows_matched, "
-        f"SUM(CASE WHEN {keyed} THEN 1 ELSE 0 END) AS vals, "
-        f"SUM(CASE WHEN {hit} THEN 1 ELSE 0 END) AS vals_matched, "
-        f"(SELECT COUNT(*) FROM (SELECT DISTINCT {', '.join(ks)} FROM {fq_to} WHERE {to_filled}) u) AS to_keys, "
-        f"(SELECT COUNT(*) FROM {fq_to} WHERE {to_filled}) AS to_rows "
-        f"FROM (SELECT {', '.join(vs)}, COUNT(*) AS n FROM ({src}) s GROUP BY {', '.join(vs)}) g "
-        f"LEFT JOIN (SELECT DISTINCT {to_keys} FROM {fq_to} WHERE {to_filled}) t ON {on}"
+        f"SELECT {label} AS probe, SUM(g.f) AS rows_read, "
+        f"SUM(CASE WHEN {keyed} THEN g.f ELSE 0 END) AS rows_keyed, "
+        f"SUM(CASE WHEN g.t > 0 THEN g.f ELSE 0 END) AS rows_matched, "
+        f"SUM(CASE WHEN {keyed} AND g.f > 0 THEN 1 ELSE 0 END) AS vals, "
+        f"SUM(CASE WHEN g.f > 0 AND g.t > 0 THEN 1 ELSE 0 END) AS vals_matched, "
+        f"SUM(CASE WHEN g.t > 0 THEN 1 ELSE 0 END) AS to_keys, SUM(g.t) AS to_rows "
+        f"FROM (SELECT {', '.join(vs)}, SUM(f) AS f, SUM(t) AS t FROM ({stacked}) u GROUP BY {', '.join(vs)}) g"
     )
-    return sql, how
+    return sql, how, target
 
 
-def _apply(c: JoinCheck, row: dict, how: str) -> None:
-    c.read = how
+def _apply(c: JoinCheck, row: dict, how: str, target: str) -> None:
+    c.read, c.target_read = how, target
     c.rows_read, c.rows_keyed, c.rows_matched = _num(row, "rows_read"), _num(row, "rows_keyed"), _num(row, "rows_matched")
     c.values, c.values_matched = _num(row, "vals"), _num(row, "vals_matched")
     c.to_keys, c.to_rows = _num(row, "to_keys"), _num(row, "to_rows")
 
 
 def _one(dialect: D.Dialect, runner: Runner, c: JoinCheck, spread_first: bool = True) -> None:
-    # A sample clause the engine refuses on this object (a view, say) falls back to the first rows.
+    """One check alone. A sample clause the engine refuses on this object (a view, say), or a share that
+    came back empty, falls back to the first rows; a check that ran out of time is not tried again."""
     for spread in (True, False) if spread_first else (False,):
-        sql, how = check_sql(dialect, c, 0, spread=spread)
+        sql, how, target = check_sql(dialect, c, 0, spread=spread)
         try:
             rows = runner(sql)
-        except Exception:
+        except Exception as exc:
+            if too_slow(exc):
+                break
             rows = None
         if rows:
-            _apply(c, rows[0], how)
-            return
+            _apply(c, rows[0], how, target)
+            if how != "sample" or c.rows_read:
+                return
         if how != "sample":
             break
     c.read, c.failed = how, True
@@ -213,17 +252,23 @@ def _one(dialect: D.Dialect, runner: Runner, c: JoinCheck, spread_first: bool = 
 
 def _batch(dialect: D.Dialect, runner: Runner, batch: list[JoinCheck]) -> None:
     built = [check_sql(dialect, c, i) for i, c in enumerate(batch)]
-    try:
-        rows = runner(" UNION ALL ".join(sql for sql, _ in built)) if len(batch) > 1 else None
-    except Exception:
-        rows = None
+    rows = None
+    if len(batch) > 1:
+        try:
+            rows = runner(" UNION ALL ".join(sql for sql, _, _ in built))
+        except Exception as exc:
+            if too_slow(exc):
+                # Retried one by one, each would run to the same limit: report them as not run.
+                for c in batch:
+                    c.read, c.failed = built[0][1], True
+                return
     by_label = {_num(r, "probe"): r for r in rows or []}
     if rows is None or len(by_label) != len(batch):
         for c in batch:   # one failing pair (a type mismatch, say) costs only itself
             _one(dialect, runner, c)
         return
     for i, c in enumerate(batch):
-        _apply(c, by_label[i], built[i][1])
+        _apply(c, by_label[i], built[i][1], built[i][2])
         if c.read == "sample" and not c.rows_read:
             # A share of a table whose estimate was stale can come back empty: read the first rows.
             _one(dialect, runner, c, spread_first=False)
@@ -250,9 +295,17 @@ PROFILE_SAMPLE_ROWS = 10_000
 PROFILE_TABLE_CAP = 200
 # Columns read per table, in catalog order: one statement holds them all.
 PROFILE_MAX_COLUMNS = 80
-# A column with at most this many distinct values gets its most frequent values, with their shares.
-PROFILE_TOP_MAX_DISTINCT = 50
+# A coded column gets its most frequent values with their shares: at most this many distinct values,
+# the same line (and the same per-value checks) as a value list written into the model.
+PROFILE_TOP_MAX_DISTINCT = 25
 PROFILE_TOP = 10
+# Names whose values stay out of the profile even when they look coded: a person's or a party's
+# name, a contact or tax number, a licence. Checked beside `pii.suspected_pii`, which these escape.
+_WITHHELD_WORDS = frozenset({"name", "names", "contact", "phone", "mobile", "email", "pan", "gstin", "vat",
+                             "tax", "taxid", "tin", "ssn", "licence", "license", "passport", "national"})
+# Pay to a person: its range is withheld (what one person earns), its counts kept.
+_PAY_WORDS = frozenset({"salary", "salaries", "wage", "wages", "pay", "payrate", "compensation", "bonus",
+                        "commission", "stipend", "income", "earnings"})
 _DATE_TYPES = ("date", "timestamp")
 # Not float: some warehouses refuse to group or count distinct floating-point values.
 _DISTINCT_TYPES = ("string", "integer", "decimal", "boolean", "date", "timestamp", "uuid")
@@ -280,8 +333,9 @@ _MOSTLY_BLANK = 0.9
 class _ColStat:
     name: str
     type: str
-    personal: bool
+    personal: bool            # no values at all: no frequent values, no range
     is_date: bool = False     # a date or timestamp, or text holding ISO dates (which sort as dates)
+    no_range: bool = False    # pay to a person: no range either
     filled: int = 0
     blank: int = 0
     distinct: Optional[int] = None
@@ -299,6 +353,12 @@ def _stage(name: str) -> Optional[int]:
     return next((i for i, words in enumerate(_LIFECYCLE) if w & set(words)), None)
 
 
+def withheld(table: str, c: Column, personal: bool) -> bool:
+    """No values of this column go into the profile: it is personal, or named like personal data."""
+    from . import pii
+    return personal or pii.suspected_pii(c.name, table) or bool(_words(c.name) & _WITHHELD_WORDS)
+
+
 def _table_rows(dialect: D.Dialect, t: Table, cols: list[str]) -> tuple[str, str]:
     picked = ", ".join(dialect.quote_ident(c) for c in cols)
     q = dialect.qualified(t.schema_name, t.name)
@@ -308,20 +368,24 @@ def _table_rows(dialect: D.Dialect, t: Table, cols: list[str]) -> tuple[str, str
     return dialect.sampled_rows(f"SELECT {picked} FROM {q}", PROFILE_SAMPLE_ROWS, rows)
 
 
-def stats_sql(dialect: D.Dialect, src: str, stats: list[_ColStat], dates: list[tuple[int, int]]) -> str:
+def stats_sql(dialect: D.Dialect, src: str, stats: list[_ColStat], dates: list[tuple[int, int]],
+              *, fill_only: bool = False) -> str:
     """One pass over the rows read: per column its filled and blank counts, distinct count and range,
-    and for each pair of same-typed dates how often one comes before the other."""
+    and for each pair of same-typed dates how often one comes before the other. `fill_only` keeps
+    just the counts every type supports, for a table where one odd column refused the rest."""
     parts = ["COUNT(*) AS n"]
     for i, c in enumerate(stats):
         q = dialect.quote_ident(c.name)
         parts.append(f"COUNT({q}) AS f{i}")
-        if c.type == "string":
-            parts.append(f"SUM(CASE WHEN TRIM({q}) = '' THEN 1 ELSE 0 END) AS b{i}")
+        if fill_only:
+            continue
+        if c.type == "string":   # through text: an enum or other user type "string" may refuse TRIM
+            parts.append(f"SUM(CASE WHEN TRIM({dialect.text_cast(q)}) = '' THEN 1 ELSE 0 END) AS b{i}")
         if c.type in _DISTINCT_TYPES:
             parts.append(f"COUNT(DISTINCT {q}) AS d{i}")
-        if (c.type in _RANGE_TYPES or c.is_date) and not c.personal:
+        if (c.type in _RANGE_TYPES or c.is_date) and not (c.personal or c.no_range):
             parts += [f"MIN({q}) AS lo{i}", f"MAX({q}) AS hi{i}"]
-    for a, b in dates:
+    for a, b in [] if fill_only else dates:
         qa, qb = dialect.quote_ident(stats[a].name), dialect.quote_ident(stats[b].name)
         parts += [f"SUM(CASE WHEN {qa} < {qb} THEN 1 ELSE 0 END) AS lt{a}_{b}",
                   f"SUM(CASE WHEN {qa} > {qb} THEN 1 ELSE 0 END) AS gt{a}_{b}"]
@@ -344,25 +408,30 @@ def _share(n: int, total: int) -> float:
     return round(n / total, 3) if total else 0.0
 
 
-def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callable,
+def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callable[[Table, Column], bool],
                   sample: Optional[list] = None, today: Optional[str] = None) -> Optional[dict]:
     """The profile of one table, or None when it couldn't be read. Two statements: the counts, then
-    the frequent values of the low-cardinality columns. A personal column gets counts only: none of
-    its values, not even a range, is read into the profile."""
+    the frequent values of the coded columns. A personal column, or one named like personal data,
+    gets counts only: none of its values, not even a range, is read into the profile."""
     from datetime import date
 
     live = [c for c in t.columns if c.review_state not in ("rejected", "stale")][:PROFILE_MAX_COLUMNS]
-    if not live:
+    if not live or (not dialect.scans_unsized and _rows(t) is None):
         return None
-    stats = [_ColStat(c.name, c.type, personal(c), c.type in _DATE_TYPES or c.date_format == "iso8601")
+    stats = [_ColStat(c.name, c.type, withheld(t.name, c, personal(t, c)),
+                      c.type in _DATE_TYPES or c.date_format == "iso8601", bool(_words(c.name) & _PAY_WORDS))
              for c in live]
     src, how = _table_rows(dialect, t, [c.name for c in live])
     di = [i for i, c in enumerate(stats) if c.is_date and not c.personal][:_MAX_DATE_PAIRS_COLS]
     dates = [(a, b) for k, a in enumerate(di) for b in di[k + 1:] if stats[a].type == stats[b].type]
-    try:
-        rows = runner(stats_sql(dialect, src, stats, dates))
-    except Exception:
-        rows = None
+    rows = None
+    for fill_only in (False, True):   # one column of an odd type must not cost the whole table
+        try:
+            rows = runner(stats_sql(dialect, src, stats, dates, fill_only=fill_only))
+            break
+        except Exception as exc:
+            if too_slow(exc):
+                break
     if not rows:
         return None
     r = rows[0]
@@ -371,10 +440,11 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
         c.filled, c.blank = _num(r, f"f{i}"), _num(r, f"b{i}")
         c.distinct = _num(r, f"d{i}") if f"d{i}" in r else None
         c.lo, c.hi = _text(r.get(f"lo{i}")), _text(r.get(f"hi{i}"))
-    # A coded column only: few values, each on two rows or more on average. A column of mostly
-    # one-off values (names, reference numbers) on a small table also has few, and isn't listed.
+    # A coded column only, by the test a value list written into the model passes: a few values,
+    # each on two rows or more on average. A column of one-off values (names, reference numbers) on
+    # a small table also has few, and isn't listed.
     listed = [(i, c) for i, c in enumerate(stats) if not c.personal and c.distinct is not None
-              and 0 < c.distinct <= PROFILE_TOP_MAX_DISTINCT and 2 * c.distinct <= c.filled]
+              and 1 < c.distinct <= PROFILE_TOP_MAX_DISTINCT and c.filled >= max(10, 2 * c.distinct)]
     top: dict[int, list[tuple[str, int]]] = {}
     if listed:
         try:
@@ -397,7 +467,7 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
         if c.lo is not None:
             entry["min"], entry["max"] = c.lo, c.hi
         values = top.get(i)
-        if values:
+        if values and _coded([v for v, _ in values], c.filled):
             total = sum(k for _, k in values)
             entry["top"] = [{"value": v, "share": _share(k, total)}
                             for v, k in sorted(values, key=lambda x: (-x[1], x[0] or ""))[:PROFILE_TOP] if v is not None]
@@ -430,6 +500,43 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
         out["date_order"] = order
     if findings:
         out["findings"] = findings
+    return out
+
+
+def _coded(values: list, rows: int) -> bool:
+    """The values pass the per-value checks a value list written into the model passes: none looks
+    like an email or a phone number, none is a GUID. One that fails withholds the whole column."""
+    # introspect imports this module, so this import waits until it is called
+    from .introspect import _maybe_choice
+    return _maybe_choice([v for v in values if v is not None], rows=rows) is not None
+
+
+def scrub(tables: dict, model: list[Table], withhold: Callable[[Table, Column], bool]) -> dict:
+    """`tables` (a profile's `tables`) cut to what the model serves now, before it is written or read:
+    a table or column the model doesn't serve is dropped, and a column it now marks personal, or
+    named like personal data, loses every value (`top`, `min`, `max`, `stand_ins`)."""
+    served = {(f"{t.schema_name}.{t.name}" if t.schema_name else t.name): t
+              for t in model if t.review_state not in ("rejected", "stale")}
+    out: dict = {}
+    for key, prof in tables.items():
+        t = served.get(key)
+        if t is None:
+            continue
+        cols = {c.name: c for c in t.columns if c.review_state not in ("rejected", "stale")}
+        kept = {}
+        for name, entry in prof.get("columns", {}).items():
+            c = cols.get(name)
+            if c is None:
+                continue
+            if withheld(t.name, c, withhold(t, c)):
+                entry = {k: v for k, v in entry.items() if k not in ("top", "min", "max", "stand_ins")}
+                entry["personal"] = True
+            elif _words(name) & _PAY_WORDS:
+                entry = {k: v for k, v in entry.items() if k not in ("min", "max")}
+            kept[name] = entry
+        out[key] = {**prof, "columns": kept,
+                    **({"findings": [f for f in prof["findings"] if f.get("column") in kept]}
+                       if "findings" in prof else {})}
     return out
 
 
@@ -478,7 +585,8 @@ def _mixed_formats(values: list) -> Optional[str]:
     return None
 
 
-def profile_tables(dialect: D.Dialect, runner: Runner, tables: list[Table], personal: Callable,
+def profile_tables(dialect: D.Dialect, runner: Runner, tables: list[Table],
+                   personal: Callable[[Table, Column], bool],
                    samples: Optional[dict] = None, done: Optional[Callable[[int], None]] = None) -> dict:
     """The profile of each table (at most PROFILE_TABLE_CAP), keyed `schema.table`, a few at once."""
     picked = tables[:PROFILE_TABLE_CAP]
