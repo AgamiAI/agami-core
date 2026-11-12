@@ -533,10 +533,16 @@ def cmd_profile(args) -> int:
         return 1
     # The file may predate a flag set since: cut it to what the model serves now before anyone reads it.
     from . import profile as PF
-    from .introspect import _never_read
+    from .introspect import _check_key, _never_read, served_join_keys
     org = L.load_datasource(args.root, include_rejected=True)
     model = [t for sa in org.subject_areas for t in sa.tables_defined]
     doc["tables"] = PF.scrub(doc.get("tables", {}), model, lambda t, c: _never_read(c))
+    # A join's evidence only while the model serves that join, both its tables and its key columns;
+    # an entry without its key columns (an older file) can't be matched, so it is left out.
+    served = served_join_keys(org)
+    doc["joins"] = [j for j in doc.get("joins", []) if j.get("from_columns") and _check_key(
+        j.get("from_schema"), j["from_table"], j["from_columns"], j.get("to_schema"), j["to_table"],
+        j["to_columns"]) in served]
     if args.table:
         wanted = {t.lower() for t in args.table}
         doc["tables"] = {k: v for k, v in doc.get("tables", {}).items()

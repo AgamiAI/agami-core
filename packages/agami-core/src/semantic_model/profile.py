@@ -92,6 +92,7 @@ class JoinCheck:
     values_matched: int = 0   # of those, found in tt
     to_keys: int = 0          # distinct keys in tt (the matched ones, on a lookup)
     to_rows: int = 0          # rows of tt holding them
+    to_rows_matched: int = 0  # rows of tt holding a key the rows read hold (values_matched keys)
 
     @property
     def ran(self) -> bool:
@@ -110,8 +111,9 @@ class JoinCheck:
 
     @property
     def fans_out(self) -> bool:
-        """The join says one partner, and the referenced key repeats, so a row joins to several."""
-        return self.ran and self.target_is_one and self.to_rows > self.to_keys > 0
+        """The join says one partner, and a key the rows read hold repeats on the other side, so those
+        rows join to several. A key nothing points at may repeat without multiplying anything."""
+        return self.ran and self.target_is_one and self.to_rows_matched > self.values_matched > 0
 
     def _name(self, t: Table, cols: list[str]) -> str:
         return f"{t.name}.{cols[0]}" if len(cols) == 1 else f"{t.name}({', '.join(cols)})"
@@ -147,7 +149,7 @@ class JoinCheck:
         if whole and self.target_read == "whole" and unused > 0:
             parts.append(f"{unused:,} of {self.to_keys:,} {self.tt.name} keys have no {self.ft.name} row")
         if self.fans_out:
-            parts.append(f"{t} repeats ({self.to_rows:,} rows for {self.to_keys:,} values): "
+            parts.append(f"{t} repeats ({self.to_rows_matched:,} rows for {self.values_matched:,} values): "
                          "each row joins to several, which multiplies totals")
         return "; ".join(parts)
 
@@ -156,7 +158,8 @@ class JoinCheck:
         if self.ran:
             out.update(target_read=self.target_read, rows_read=self.rows_read, rows_keyed=self.rows_keyed,
                        rows_matched=self.rows_matched, values=self.values, values_matched=self.values_matched,
-                       to_keys=self.to_keys, to_rows=self.to_rows)
+                       to_keys=self.to_keys, to_rows=self.to_rows, to_rows_matched=self.to_rows_matched,
+                       fans_out=self.fans_out)
             if self.rate is not None:
                 out["match_rate"] = round(self.rate, 4)
         return out
@@ -217,7 +220,8 @@ def check_sql(dialect: D.Dialect, c: JoinCheck, label: int, *, spread: bool = Tr
         f"SUM(CASE WHEN g.t > 0 THEN g.f ELSE 0 END) AS rows_matched, "
         f"SUM(CASE WHEN {keyed} AND g.f > 0 THEN 1 ELSE 0 END) AS vals, "
         f"SUM(CASE WHEN g.f > 0 AND g.t > 0 THEN 1 ELSE 0 END) AS vals_matched, "
-        f"SUM(CASE WHEN g.t > 0 THEN 1 ELSE 0 END) AS to_keys, SUM(g.t) AS to_rows "
+        f"SUM(CASE WHEN g.t > 0 THEN 1 ELSE 0 END) AS to_keys, SUM(g.t) AS to_rows, "
+        f"SUM(CASE WHEN g.f > 0 THEN g.t ELSE 0 END) AS to_rows_matched "
         f"FROM (SELECT {', '.join(vs)}, SUM(f) AS f, SUM(t) AS t FROM ({stacked}) u GROUP BY {', '.join(vs)}) g"
     )
     return sql, how, target
@@ -228,6 +232,7 @@ def _apply(c: JoinCheck, row: dict, how: str, target: str) -> None:
     c.rows_read, c.rows_keyed, c.rows_matched = _num(row, "rows_read"), _num(row, "rows_keyed"), _num(row, "rows_matched")
     c.values, c.values_matched = _num(row, "vals"), _num(row, "vals_matched")
     c.to_keys, c.to_rows = _num(row, "to_keys"), _num(row, "to_rows")
+    c.to_rows_matched = _num(row, "to_rows_matched")
 
 
 def _one(dialect: D.Dialect, runner: Runner, c: JoinCheck, spread_first: bool = True) -> None:
@@ -344,8 +349,9 @@ class _ColStat:
 
 
 def _words(name: str) -> set[str]:
-    import re
-    return {w for w in re.split(r"[_\W]+|(?<=[a-z])(?=[A-Z])", name.lower()) if w}
+    """The words of a name, camelCase and acronyms split (`vendorName` is vendor + name)."""
+    from . import pii
+    return {w.lower() for w in pii.tokens(name)}
 
 
 def _stage(name: str) -> Optional[int]:
@@ -359,13 +365,36 @@ def withheld(table: str, c: Column, personal: bool) -> bool:
     return personal or pii.suspected_pii(c.name, table) or bool(_words(c.name) & _WITHHELD_WORDS)
 
 
-def _table_rows(dialect: D.Dialect, t: Table, cols: list[str]) -> tuple[str, str]:
+def _table_rows(dialect: D.Dialect, t: Table, cols: list[str], spread: bool = True) -> tuple[str, str]:
     picked = ", ".join(dialect.quote_ident(c) for c in cols)
     q = dialect.qualified(t.schema_name, t.name)
     rows = _rows(t)
     if rows is not None and rows <= PROFILE_WHOLE_MAX_ROWS:
         return f"SELECT {picked} FROM {q}", "whole"
-    return dialect.sampled_rows(f"SELECT {picked} FROM {q}", PROFILE_SAMPLE_ROWS, rows)
+    return dialect.sampled_rows(f"SELECT {picked} FROM {q}", PROFILE_SAMPLE_ROWS, rows if spread else None)
+
+
+def _read_stats(dialect: D.Dialect, runner: Runner, t: Table, stats: list[_ColStat],
+                dates: list[tuple[int, int]]) -> tuple[Optional[dict], bool]:
+    """The counts statement's row, and whether it was read spread out. A refused statement is tried
+    with fill counts only (one column of an odd type must not cost the table); a sample clause the
+    object refuses, or a share that came back empty, falls back to the first rows, as a join check
+    does. A statement stopped by the time limit is not tried again."""
+    for spread in (True, False):
+        src, how = _table_rows(dialect, t, [c.name for c in stats], spread)
+        for fill_only in (False, True):
+            try:
+                rows = runner(stats_sql(dialect, src, stats, dates, fill_only=fill_only))
+            except Exception as exc:
+                if too_slow(exc):
+                    return None, False
+                continue
+            if rows and (how != "sample" or _num(rows[0], "n")):
+                return {**rows[0], "_read": how}, spread
+            break   # an empty share: read the first rows instead
+        if how != "sample":
+            break
+    return None, False
 
 
 def stats_sql(dialect: D.Dialect, src: str, stats: list[_ColStat], dates: list[tuple[int, int]],
@@ -388,7 +417,8 @@ def stats_sql(dialect: D.Dialect, src: str, stats: list[_ColStat], dates: list[t
     for a, b in [] if fill_only else dates:
         qa, qb = dialect.quote_ident(stats[a].name), dialect.quote_ident(stats[b].name)
         parts += [f"SUM(CASE WHEN {qa} < {qb} THEN 1 ELSE 0 END) AS lt{a}_{b}",
-                  f"SUM(CASE WHEN {qa} > {qb} THEN 1 ELSE 0 END) AS gt{a}_{b}"]
+                  f"SUM(CASE WHEN {qa} > {qb} THEN 1 ELSE 0 END) AS gt{a}_{b}",
+                  f"SUM(CASE WHEN {qa} IS NOT NULL AND {qb} IS NOT NULL THEN 1 ELSE 0 END) AS bo{a}_{b}"]
     return f"SELECT {', '.join(parts)} FROM ({src}) s"
 
 
@@ -421,21 +451,12 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
     stats = [_ColStat(c.name, c.type, withheld(t.name, c, personal(t, c)),
                       c.type in _DATE_TYPES or c.date_format == "iso8601", bool(_words(c.name) & _PAY_WORDS))
              for c in live]
-    src, how = _table_rows(dialect, t, [c.name for c in live])
     di = [i for i, c in enumerate(stats) if c.is_date and not c.personal][:_MAX_DATE_PAIRS_COLS]
     dates = [(a, b) for k, a in enumerate(di) for b in di[k + 1:] if stats[a].type == stats[b].type]
-    rows = None
-    for fill_only in (False, True):   # one column of an odd type must not cost the whole table
-        try:
-            rows = runner(stats_sql(dialect, src, stats, dates, fill_only=fill_only))
-            break
-        except Exception as exc:
-            if too_slow(exc):
-                break
-    if not rows:
+    r, spread = _read_stats(dialect, runner, t, stats, dates)
+    if r is None:
         return None
-    r = rows[0]
-    n = _num(r, "n")
+    how, n = r["_read"], _num(r, "n")
     for i, c in enumerate(stats):
         c.filled, c.blank = _num(r, f"f{i}"), _num(r, f"b{i}")
         c.distinct = _num(r, f"d{i}") if f"d{i}" in r else None
@@ -449,7 +470,7 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
     if listed:
         try:
             # Read from the listed columns only, so no other column's values are selected at all.
-            only, _ = _table_rows(dialect, t, [c.name for _, c in listed])
+            only, _ = _table_rows(dialect, t, [c.name for _, c in listed], spread)
             for row in runner(top_sql(dialect, only, listed)):
                 top.setdefault(_num(row, "c"), []).append((_text(row.get("v")), _num(row, "n")))
         except Exception:
@@ -480,12 +501,14 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
         findings += _column_findings(c, n, now, sample)
     order = []
     for a, b in dates:
-        lt, gt = _num(r, f"lt{a}_{b}"), _num(r, f"gt{a}_{b}")
-        if lt + gt < _ORDER_MIN_ROWS:
+        # Of every row with both dates, the same day included: 980 same-day rows and 20 backwards
+        # ones is 2% backwards, not "the reverse on every row".
+        lt, gt, both = _num(r, f"lt{a}_{b}"), _num(r, f"gt{a}_{b}"), _num(r, f"bo{a}_{b}")
+        if both < _ORDER_MIN_ROWS or not (lt or gt):
             continue
         first, then, k = (stats[a].name, stats[b].name, lt) if lt >= gt else (stats[b].name, stats[a].name, gt)
-        share = _share(k, lt + gt)
-        order.append({"earlier": first, "later": then, "share": share, "rows": lt + gt})
+        share = _share(k, both)
+        order.append({"earlier": first, "later": then, "share": share, "rows": both})
         sf, st = _stage(first), _stage(then)
         if share >= _ORDER_DOMINANT and sf is not None and st is not None and sf > st:
             findings.append({"column": first, "kind": "date_order",
@@ -511,24 +534,33 @@ def _coded(values: list, rows: int) -> bool:
     return _maybe_choice([v for v in values if v is not None], rows=rows) is not None
 
 
+def _key(t: Table) -> str:
+    return f"{t.schema_name}.{t.name}" if t.schema_name else t.name
+
+
 def scrub(tables: dict, model: list[Table], withhold: Callable[[Table, Column], bool]) -> dict:
-    """`tables` (a profile's `tables`) cut to what the model serves now, before it is written or read:
-    a table or column the model doesn't serve is dropped, and a column it now marks personal, or
-    named like personal data, loses every value (`top`, `min`, `max`, `stand_ins`)."""
-    served = {(f"{t.schema_name}.{t.name}" if t.schema_name else t.name): t
-              for t in model if t.review_state not in ("rejected", "stale")}
+    """`tables` (a profile's `tables`) cut to what the model serves now, before it is written or read.
+
+    Two subject areas may each define the same table, so its copies are taken together, the way the
+    placeholder scan does: a column stays while any copy serves it, and loses every value (`top`,
+    `min`, `max`, `stand_ins`) when any copy marks it personal or it is named like personal data. A
+    table or column no copy serves is dropped."""
+    copies: dict[str, list[Table]] = {}
+    for t in model:
+        if t.review_state not in ("rejected", "stale"):
+            copies.setdefault(_key(t), []).append(t)
     out: dict = {}
     for key, prof in tables.items():
-        t = served.get(key)
-        if t is None:
+        ts = copies.get(key)
+        if not ts:
             continue
-        cols = {c.name: c for c in t.columns if c.review_state not in ("rejected", "stale")}
+        served = {c.name for t in ts for c in t.columns if c.review_state not in ("rejected", "stale")}
+        hidden = {c.name for t in ts for c in t.columns if withheld(t.name, c, withhold(t, c))}
         kept = {}
         for name, entry in prof.get("columns", {}).items():
-            c = cols.get(name)
-            if c is None:
+            if name not in served:
                 continue
-            if withheld(t.name, c, withhold(t, c)):
+            if name in hidden:
                 entry = {k: v for k, v in entry.items() if k not in ("top", "min", "max", "stand_ins")}
                 entry["personal"] = True
             elif _words(name) & _PAY_WORDS:

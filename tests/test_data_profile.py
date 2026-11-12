@@ -766,3 +766,178 @@ def test_a_browser_sign_in_is_detected_without_reading_a_secret(tmp_path, monkey
     (tmp_path / "local" / "credentials").write_text(
         "[demo]\ntype = snowflake\nauthenticator = externalbrowser\n[acme]\ntype = postgres\npassword = %x\n")
     assert cli._signs_in_with_a_browser("demo") and not cli._signs_in_with_a_browser("acme")
+
+
+# --- review of PR #650 ----------------------------------------------------------------------------
+
+@pytest.mark.parametrize("column", ["vendorName", "partyName", "taxId"])
+def test_a_camel_case_name_is_read_word_by_word_for_personal_data(tmp_path, column):
+    """`vendorName` lower-cased whole is `vendorname`, which no word rule matched."""
+    col = _small(tmp_path, column, ["X1", "X2", "X3"])
+    assert col["personal"] and "top" not in col
+
+
+def test_a_camel_case_pay_name_loses_its_range(tmp_path):
+    col = _small(tmp_path, "bonusAmount", ["10", "20", "30"], ctype="integer")
+    assert "min" not in col and "max" not in col
+
+
+def _copy(area_cols: dict, **flags) -> Table:
+    t = _t("visits", list(area_cols), 40)
+    for c in t.columns:
+        for k, v in area_cols[c.name].items():
+            setattr(c, k, v)
+    return t
+
+
+def test_scrub_merges_every_area_copy_of_a_table(tmp_path):
+    """A column personal in ANY copy loses its values; one served by ANY copy stays."""
+    saved = {"visits": {"columns": {"ref": {"top": [{"value": "a", "share": 1.0}], "distinct": 1},
+                                    "note": {"top": [{"value": "x", "share": 1.0}], "distinct": 1}}}}
+    flagged = _copy({"ref": {"sensitive": True}, "note": {}})
+    plain = _copy({"ref": {}, "note": {"review_state": "rejected"}})
+    out = PF.scrub(saved, [flagged, plain], lambda t, c: c.sensitive)["visits"]["columns"]
+    assert out["ref"]["personal"] and "top" not in out["ref"]
+    assert "top" in out["note"]   # rejected in one copy, still served by the other
+    out = PF.scrub(saved, [plain, flagged], lambda t, c: c.sensitive)["visits"]["columns"]
+    assert out["ref"]["personal"] and "top" not in out["ref"]
+
+
+def _set_join_state(out: Path, state: str) -> None:
+    [rel_file] = list(out.rglob("relationships.yaml"))
+    doc = yaml.safe_load(rel_file.read_text())
+    for r in doc["relationships"]:
+        r["review_state"] = state
+    rel_file.write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+def test_sm_profile_drops_join_evidence_for_a_join_the_model_no_longer_serves(tmp_path, capsys):
+    import json
+
+    from semantic_model import cli
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0);")
+    _build(tmp_path, path)
+    out = tmp_path / "demo"
+    assert cli.main(["profile", str(out)]) == 0
+    assert len(json.loads(capsys.readouterr().out)["joins"]) == 1
+    _set_join_state(out, "rejected")
+    assert cli.main(["profile", str(out)]) == 0
+    assert json.loads(capsys.readouterr().out)["joins"] == []
+
+
+def test_a_one_to_many_join_whose_far_side_repeats_is_not_worth_a_look(tmp_path):
+    rep = I.IntrospectReport(profile="p", db_type="sqlite", out_dir=str(tmp_path), dry_run=True)
+    many = PF.JoinCheck(_t("visits", ["region_code"], 2), ["region_code"], _t("regions", ["code"], 3), ["code"],
+                        target_is_one=False, read="whole", target_read="whole", rows_read=2, rows_keyed=2,
+                        rows_matched=2, values=2, values_matched=2, to_keys=2, to_rows=3, to_rows_matched=3)
+    rep.join_checks = [{"join": "visits.region_code -> regions.code", **many.evidence()}]
+    assert "0 worth a look" in rep.render()
+
+
+def test_fan_out_counts_only_the_keys_the_starting_rows_match(tmp_path):
+    """Customer 2 repeating says nothing about orders that only ever point at customer 1."""
+    path = tmp_path / "f.db"
+    con = sqlite3.connect(path)
+    con.executescript("CREATE TABLE customers(id INTEGER); CREATE TABLE orders(id INTEGER, customer_id INTEGER);"
+                      "INSERT INTO customers VALUES (1), (2), (2); INSERT INTO orders VALUES (1, 1), (2, 1);")
+    con.close()
+    cust = _t("customers", ["id"], 3)
+    c = PF.JoinCheck(_t("orders", ["customer_id"], 2), ["customer_id"], cust, ["id"])
+    PF.run_checks(SQLITE, _runner(path), [c])
+    assert not c.fans_out and "repeats" not in c.summary() and not c.evidence()["fans_out"]
+    con = sqlite3.connect(path)
+    con.execute("INSERT INTO customers VALUES (1)")
+    con.commit()
+    con.close()
+    c = PF.JoinCheck(_t("orders", ["customer_id"], 2), ["customer_id"], cust, ["id"])
+    PF.run_checks(SQLITE, _runner(path), [c])
+    assert c.fans_out and "customers.id repeats (2 rows for 1 values" in c.summary()
+
+
+def test_a_refresh_confirms_the_declared_key_it_keeps_not_the_copy_it_drops(tmp_path, monkeypatch):
+    """A declared key left for review on the first build is approved once the data bears it out."""
+    monkeypatch.setattr(D.SQLite, "fk_enforced", False)
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 7, 1.0), (3, 7, 1.0);")
+    out = tmp_path / "demo"
+    org, _ = _build(tmp_path, path)
+    assert _orders_join(org).review_state == "unreviewed"
+    con = sqlite3.connect(path)
+    con.execute("UPDATE orders SET customer_id = 1")
+    con.commit()
+    con.close()
+    org, _ = I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, append=True)
+    assert _orders_join(org).review_state == "approved"
+
+
+def test_a_refresh_leaves_a_declared_key_a_person_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(D.SQLite, "fk_enforced", False)
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 1, 1.0);")
+    out = tmp_path / "demo"
+    _build(tmp_path, path)
+    _set_join_state(out, "rejected")
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, append=True)
+    from semantic_model.loader import load_datasource
+    assert _orders_join(load_datasource(out, include_rejected=True)).review_state == "rejected"
+
+
+def _orders_join(org):
+    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
+    return r
+
+
+def test_a_join_with_a_condition_beyond_its_keys_is_reported_unchecked(db, tmp_path):
+    from semantic_model.models import Relationship
+    rel = Relationship(from_table="visits", to_table="regions", relationship="many_to_one",
+                       on="visits.region_code = regions.code AND regions.loaded_on = '2024-01-01'")
+    rep = I.IntrospectReport(profile="p", db_type="sqlite", out_dir=str(tmp_path), dry_run=True)
+    tables = [_t("visits", ["id", "region_code"], 2), _t("regions", ["code", "loaded_on"], 3)]
+    seen: list[str] = []
+    todo = I._check_joins(SQLITE, _runner(db, seen), [rel], tables, rep, "sqlite", {})
+    assert todo == [] and seen == []
+    assert any("a condition beyond its key columns" in n for n in rep.notes)
+
+
+def test_a_profile_whose_sample_clause_is_refused_reads_the_first_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(PF, "PROFILE_WHOLE_MAX_ROWS", 10)
+    monkeypatch.setattr(D.SQLite, "tablesample", lambda self, pct: "TABLESAMPLE SYSTEM (1)", raising=False)
+    db = _claims_db(tmp_path)
+    t = _claims_table(10**6)
+    prof = PF.profile_table(SQLITE, _runner(db, fail_on="TABLESAMPLE"), t, lambda t, c: False)
+    assert prof["read"] == "first_rows" and prof["rows_read"] == 30 and "top" in prof["columns"]["status"]
+
+
+def test_a_profile_whose_sample_comes_back_empty_reads_the_first_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(PF, "PROFILE_WHOLE_MAX_ROWS", 10)
+    monkeypatch.setattr(D.SQLite, "tablesample", lambda self, pct: "WHERE 1 = 0", raising=False)
+    prof = PF.profile_table(SQLITE, _runner(_claims_db(tmp_path)), _claims_table(10**6), lambda t, c: False)
+    assert prof["read"] == "first_rows" and prof["rows_read"] == 30
+
+
+def test_a_profile_that_runs_out_of_time_is_not_tried_again(tmp_path, monkeypatch):
+    monkeypatch.setattr(PF, "PROFILE_WHOLE_MAX_ROWS", 10)
+    seen: list[str] = []
+
+    def slow(sql):
+        seen.append(sql)
+        raise _Slow("timed out")
+    assert PF.profile_table(SQLITE, slow, _claims_table(10**6), lambda t, c: False) is None
+    assert len(seen) == 1
+
+
+def test_the_reverse_date_share_counts_rows_where_both_dates_are_equal(tmp_path):
+    """25 same-day pairs and 2 backwards ones: not 'the reverse on 100% of rows'."""
+    path = tmp_path / "eq.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE claims(id INTEGER, submitted_date DATE, payment_date DATE)")
+    rows = [(i, "2024-01-05", "2024-01-05") for i in range(25)] + [(90, "2024-01-05", "2024-01-01"),
+                                                                    (91, "2024-01-06", "2024-01-02")]
+    con.executemany("INSERT INTO claims VALUES (?,?,?)", rows)
+    con.commit()
+    con.close()
+    t = _t("claims", ["id", "submitted_date", "payment_date"], 27)
+    for c, ty in zip(t.columns, ["integer", "date", "date"]):
+        c.type = ty
+    prof = PF.profile_table(SQLITE, _runner(path), t, lambda t, c: False)
+    assert "findings" not in prof
+    [order] = prof["date_order"]
+    assert order["rows"] == 27 and order["share"] == pytest.approx(round(2 / 27, 3))
