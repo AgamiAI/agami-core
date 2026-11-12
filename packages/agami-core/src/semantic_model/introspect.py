@@ -136,6 +136,8 @@ JOIN_CANDIDATE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
 # On a warehouse each of those probes is a round trip, so the scan runs this many at a time. A file
 # database (SQLite, DuckDB) stays one at a time: its probes are local reads with no round trip to
 # hide, and a second reader of the same file only contends for it. `AGAMI_PROBE_WORKERS` (1..8) wins.
+# Kept small because a warehouse that limits concurrent sessions turns the probes over its limit
+# into "could not compare"; `AGAMI_PROBE_WORKERS=1` restores the one-at-a-time scan.
 PROBE_WORKERS = 4
 _PROBE_WORKERS_MAX = 8
 _SERIAL_PROBE_DIALECTS = frozenset({"SQLite", "DuckDB"})
@@ -2352,10 +2354,14 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
 _T = TypeVar("_T")
 
 
-def _run_probes(jobs: Sequence[Callable[[], _T]], workers: int) -> list[_T | BaseException]:
+def _run_probes(jobs: Sequence[Callable[[], _T]], workers: int, *,
+                pool: Optional[ThreadPoolExecutor] = None) -> list[_T | BaseException]:
     """Run `jobs` up to `workers` at a time and return their results in the jobs' order, whatever
     order they finish in. A job that raises leaves its exception in its slot, so one failed probe
-    doesn't lose the others; an interrupt (KeyboardInterrupt, SystemExit) still stops the run."""
+    doesn't lose the others; an interrupt (KeyboardInterrupt, SystemExit) still stops the run.
+
+    `pool` lends an executor of the caller's (sized to `workers`), so a scan that runs many rounds
+    starts its threads once; it is left running. Without one, a pool is made and shut down here."""
     if workers <= 1 or len(jobs) <= 1:
         out: list[_T | BaseException] = []
         for job in jobs:
@@ -2364,9 +2370,11 @@ def _run_probes(jobs: Sequence[Callable[[], _T]], workers: int) -> list[_T | Bas
             except Exception as e:
                 out.append(e)
         return out
-    pool = ThreadPoolExecutor(max_workers=min(workers, len(jobs)))
+    own = pool is None
+    executor = ThreadPoolExecutor(max_workers=min(workers, len(jobs))) if own else pool
+    futures = []
     try:
-        futures = [pool.submit(job) for job in jobs]
+        futures = [executor.submit(job) for job in jobs]
         results: list[_T | BaseException] = []
         for f in futures:
             try:
@@ -2375,10 +2383,21 @@ def _run_probes(jobs: Sequence[Callable[[], _T]], workers: int) -> list[_T | Bas
                 results.append(e)
     except BaseException:
         # Interrupted: don't start the probes still queued, and don't wait for the running ones.
-        pool.shutdown(wait=False, cancel_futures=True)
+        for f in futures:
+            f.cancel()
+        if own:
+            _abandon(executor)
         raise
-    pool.shutdown(wait=True)
+    if own:
+        executor.shutdown(wait=True)
     return results
+
+
+def _abandon(executor: ThreadPoolExecutor) -> None:
+    """Drop the queued probes and stop waiting for the running ones. Their threads still end only
+    when their query does: we don't track or kill the `execute_sql` children, because each is bounded
+    by its statement timeout, and a Ctrl-C at the terminal reaches the children's process group too."""
+    executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _probe_workers(dialect: D.Dialect) -> int:
@@ -2408,6 +2427,13 @@ class _ProbeProgress:
         with self._lock:
             if self.done % _PROBE_PROGRESS_EVERY:
                 _progress(self.path, f"join candidates: {self.done} probed")
+
+    def silence(self) -> None:
+        """No more lines, from any thread: the scan is leaving on an exception, and the build's
+        `failed:` line must stay the log's last (a probe still running would otherwise land after
+        it, and `sm steps` would read a dead build as one still going)."""
+        with self._lock:
+            self.path = None
 
 
 def _offered(hit: Optional[tuple[int, int]]) -> bool:
@@ -2446,68 +2472,78 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
     probed: list[tuple] = []   # (seq, pair, hit)
     exhausted = stopped = False
     tally = _ProbeProgress(progress)
-    while not stopped and (waiting or not exhausted):
-        batch: list[tuple] = []
-        unresolved_cols: set[tuple] = set()   # columns of earlier pairs whose outcome isn't known yet
-        unresolved_pairs: set[tuple] = set()   # their (column, key) pairs
-        doubtful = 0   # earlier pairs not settled yet: each may still be a probe
-        still: list[tuple] = []
-        pos = 0
-        while True:
-            if pos < len(waiting):
-                item = waiting[pos]
-            elif exhausted or (item := next(pairs, None)) is None:
-                exhausted = True
-                break
-            else:
-                waiting.append(item)
-            pos += 1
-            seq, (prio, t, c, u, k) = item
-            col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
-            before = bisect.bisect_left(issued, seq)   # probes issued for earlier pairs
-            if doubtful and before + doubtful >= cap:
-                # The doubtful pairs could still reach the cap, so neither this pair nor any after it
-                # can be settled this round.
-                pos -= 1
-                break
-            if col in unresolved_cols or (key, col) in unresolved_pairs:
-                still.append(item)
+    # One pool for every round, so its threads start once; none when the probes run one at a time.
+    pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    try:
+        while not stopped and (waiting or not exhausted):
+            batch: list[tuple] = []
+            unresolved_cols: set[tuple] = set()   # columns of earlier pairs whose outcome isn't known yet
+            unresolved_pairs: set[tuple] = set()   # their (column, key) pairs
+            doubtful = 0   # earlier pairs not settled yet: each may still be a probe
+            still: list[tuple] = []
+            pos = 0
+            while True:
+                if pos < len(waiting):
+                    item = waiting[pos]
+                elif exhausted or (item := next(pairs, None)) is None:
+                    exhausted = True
+                    break
+                else:
+                    waiting.append(item)
+                pos += 1
+                seq, (prio, t, c, u, k) = item
+                col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
+                before = bisect.bisect_left(issued, seq)   # probes issued for earlier pairs
+                if doubtful and before + doubtful >= cap:
+                    # The doubtful pairs could still reach the cap, so neither this pair nor any after it
+                    # can be settled this round.
+                    pos -= 1
+                    break
+                if col in unresolved_cols or (key, col) in unresolved_pairs:
+                    still.append(item)
+                    unresolved_cols.add(col)
+                    unresolved_pairs.add((col, key))
+                    doubtful += 1
+                    continue
+                if col in found or (key, col) in offered:
+                    continue
+                if _too_big_to_probe(t):
+                    too_big.add(_qualified(t))
+                    continue
+                if before >= cap:   # only reached with nothing doubtful before it: the serial stop
+                    report.join_candidate_cap_hit = True
+                    report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
+                                        "columns past the cap were not tested")
+                    stopped = True
+                    break
+                bisect.insort(issued, seq)
+                report.join_candidate_probes += 1
+                batch.append(item)
                 unresolved_cols.add(col)
                 unresolved_pairs.add((col, key))
-                doubtful += 1
-                continue
-            if col in found or (key, col) in offered:
-                continue
-            if _too_big_to_probe(t):
-                too_big.add(_qualified(t))
-                continue
-            if before >= cap:   # only reached with nothing doubtful before it: the serial stop
-                report.join_candidate_cap_hit = True
-                report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
-                                    "columns past the cap were not tested")
-                stopped = True
-                break
-            bisect.insort(issued, seq)
-            report.join_candidate_probes += 1
-            batch.append(item)
-            unresolved_cols.add(col)
-            unresolved_pairs.add((col, key))
-        waiting = still + waiting[pos:]
+            waiting = still + waiting[pos:]
 
-        def probe(t: Table, c: Column, u: Table, k: str) -> Optional[tuple[int, int]]:
-            try:
-                return _overlap_rate(dialect, runner, t, c.name, u, k)
-            finally:
-                tally.tick()
-        jobs = [functools.partial(probe, t, c, u, k) for _, (_, t, c, u, k) in batch]
-        for (seq, pair), hit in zip(batch, _run_probes(jobs, workers)):
-            if isinstance(hit, BaseException):
-                raise hit   # not a failed query (`_try` absorbs those) but a fault, as when run alone
-            probed.append((seq, pair, hit))
-            _, t, c, u, k = pair
-            if _offered(hit):
-                found.add((t.schema_name, t.name, c.name))
-                offered.add(((t.schema_name, t.name, c.name), (u.schema_name, u.name, k)))
+            def probe(t: Table, c: Column, u: Table, k: str) -> Optional[tuple[int, int]]:
+                try:
+                    return _overlap_rate(dialect, runner, t, c.name, u, k)
+                finally:
+                    tally.tick()
+            jobs = [functools.partial(probe, t, c, u, k) for _, (_, t, c, u, k) in batch]
+            for (seq, pair), hit in zip(batch, _run_probes(jobs, workers, pool=pool)):
+                if isinstance(hit, BaseException):
+                    raise hit   # not a failed query (`_try` absorbs those) but a fault, as when run alone
+                probed.append((seq, pair, hit))
+                _, t, c, u, k = pair
+                if _offered(hit):
+                    found.add((t.schema_name, t.name, c.name))
+                    offered.add(((t.schema_name, t.name, c.name), (u.schema_name, u.name, k)))
+    except BaseException:
+        tally.silence()
+        if pool is not None:
+            _abandon(pool)
+        raise
+    if pool is not None:
+        pool.shutdown(wait=True)
     tally.finish()
     for _, (prio, t, c, u, k), hit in sorted(probed, key=lambda p: p[0]):
         cand = _candidate(t, c, u, k, hit, "name" if prio == 0 else "type")

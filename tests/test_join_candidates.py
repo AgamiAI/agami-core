@@ -432,11 +432,14 @@ def _counting_runner(reply: dict):
     return run, calls
 
 
-def _scan(tables, runner, workers: int, monkeypatch, rels=(), progress=None):
+def _scan(tables, runner, workers, monkeypatch, rels=(), progress=None, db_type="postgres"):
     from semantic_model import dialects as D
-    monkeypatch.setenv("AGAMI_PROBE_WORKERS", str(workers))
+    if workers is None:
+        monkeypatch.delenv("AGAMI_PROBE_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("AGAMI_PROBE_WORKERS", str(workers))
     report = _report()
-    I._scan_join_candidates(D.get_dialect("postgres"), runner, list(rels), tables, report, "postgres",
+    I._scan_join_candidates(D.get_dialect(db_type), runner, list(rels), tables, report, db_type,
                             progress=progress)
     return report
 
@@ -547,3 +550,46 @@ def test_a_fault_in_a_probe_is_raised_as_it_would_be_serially(monkeypatch):
     for workers in (1, 4):
         with pytest.raises(RuntimeError, match="bad sql builder"):
             _scan(_wide(3), runner, workers, monkeypatch)
+
+
+def test_a_sqlite_scan_runs_every_probe_on_the_calling_thread(monkeypatch):
+    threads: list[int] = []
+
+    def run(sql: str) -> list[dict]:
+        threads.append(threading.get_ident())
+        return [{"matched": 0, "sampled": 10}]
+    report = _scan(_wide(30), run, None, monkeypatch, db_type="sqlite")
+    assert report.join_candidate_probes == 30 and set(threads) == {threading.get_ident()}
+
+
+def test_a_scan_with_nothing_to_probe_logs_nothing(tmp_path, monkeypatch):
+    log = tmp_path / "progress.log"
+    runner, calls = _counting_runner({"matched": 0, "sampled": 10})
+    report = _scan(_wide(0), runner, 4, monkeypatch, progress=log)
+    assert report.join_candidate_probes == 0 and not calls
+    assert not log.exists() or log.read_text() == ""
+
+
+def test_no_progress_line_follows_an_interrupted_scan(tmp_path, monkeypatch):
+    # `ref_000`'s probe is interrupted while `ref_001`'s is still running; when that one ends, after
+    # the scan has gone, it must not log: the build's `failed:` line has to stay the log's last.
+    monkeypatch.setattr(I, "_PROBE_PROGRESS_EVERY", 1)
+    log = tmp_path / "progress.log"
+    gate, started = threading.Event(), threading.Event()
+
+    def run(sql: str) -> list[dict]:
+        if '"ref_000"' in sql:
+            assert started.wait(2)
+            raise KeyboardInterrupt
+        started.set()
+        gate.wait(2)
+        return [{"matched": 0, "sampled": 10}]
+    pool_threads = lambda: {t for t in threading.enumerate() if t.name.startswith("ThreadPoolExecutor")}  # noqa: E731
+    before = pool_threads()
+    with pytest.raises(KeyboardInterrupt):
+        _scan(_wide(2), run, 4, monkeypatch, progress=log)
+    at_interrupt = log.read_text() if log.exists() else ""
+    gate.set()
+    for t in pool_threads() - before:
+        t.join(2)
+    assert (log.read_text() if log.exists() else "") == at_interrupt
