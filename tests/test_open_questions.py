@@ -201,6 +201,22 @@ def test_a_look_alike_table_is_asked_which_is_current(store):
     assert [t["rows"] for t in q["tables"]] == [200, 50]
 
 
+def test_answering_a_look_alike_writes_a_caveat_on_the_copy_and_is_not_asked_again(store):
+    root, db = store
+    q = next(q for q in _ask(root, db)["questions"] if q["kind"] == "look_alike")
+    current = next(t for t in q["tables"] if t["table"] == "orders")
+    res = curate.apply(root, current["ops"], signer="you@example.com", role="Analyst")
+    assert res.validated and res.applied
+    old = next(
+        t
+        for sa in L.load_datasource(root).subject_areas
+        for t in sa.tables_defined
+        if t.name == "orders_old"
+    )
+    assert old.caveats == ["Looks like a copy of Orders; the current data is in Orders."]
+    assert not [q for q in _ask(root, db)["questions"] if q["kind"] == "look_alike"]
+
+
 def test_a_fiscal_year_that_does_not_start_in_january(store):
     root, db = store
     assert _dropped(_ask(root, db), "fiscal", None) == []  # January: nothing to ask
@@ -227,6 +243,25 @@ def test_only_codes_are_asked_about_never_words_or_counts(store):
     )
 
 
+def test_the_meanings_a_person_types_fill_the_code_list_under_their_name(store):
+    root, db = store
+    (q,) = [q for q in _ask(root, db)["questions"] if q["kind"] == "coded_values"]
+    op = {**q["op"], "value": {**q["op"]["value"], "P1": "Urgent", "P2": "Normal"}}
+    res = curate.apply(root, [op], signer="you@example.com", role="Analyst")
+    assert res.validated
+    col = next(
+        c
+        for sa in L.load_datasource(root).subject_areas
+        for t in sa.tables_defined
+        if t.name == "tickets"
+        for c in t.columns
+        if c.name == "priority"
+    )
+    assert col.choice_field == {"P1": "Urgent", "P2": "Normal", "P3": ""}
+    log = json.loads((root / curate.CURATION_LOG).read_text().splitlines()[-1])
+    assert (log["field"], log["signer"]) == ("choice_field", "you@example.com")
+
+
 def test_an_unreadable_column_is_asked_about(store):
     root, db = store
     curate.apply(
@@ -247,6 +282,23 @@ def test_an_unreadable_column_is_asked_about(store):
     assert (
         q["question"] == "What does Event date on Events hold? Type a short description in Other."
     )
+    res = curate.apply(
+        root,
+        [{**q["op"], "value": "The day the event takes place."}],
+        signer="you@example.com",
+        role="Analyst",
+    )
+    assert res.validated
+    col = next(
+        c
+        for sa in L.load_datasource(root).subject_areas
+        for t in sa.tables_defined
+        if t.name == "events"
+        for c in t.columns
+        if c.name == "event_date"
+    )
+    assert (col.description, col.description_source) == ("The day the event takes place.", "human")
+    assert not [q for q in _ask(root, db)["questions"] if q["kind"] == "unknown_column"]
 
 
 def test_ambiguities_come_first_ordered_by_how_far_the_readings_differ_and_are_capped(

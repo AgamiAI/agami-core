@@ -760,19 +760,34 @@ def _history_candidate(base: _Probe, other: _Probe) -> tuple[Optional[dict], Opt
     )
 
 
+# The caveat a look-alike answer writes, and how a later run knows the pair was answered.
+_COPY_NOTE = "Looks like a copy of"
+
+
+def _table_op(t: Table, area: str, **edit: Any) -> dict:
+    op = {"op": "edit", "kind": "table", "area": area, "name": t.name, **edit}
+    return {**op, "schema": t.schema_name} if t.schema_name else op
+
+
 def _look_alike(base: tuple, other: tuple, probes: dict) -> dict:
-    (bt, bl, ba), (ot, ol, oa) = base, other
-    counts = {
-        label: probes[label].n() if label in probes and probes[label].row else None
-        for label in (bl, ol)
-    }
-    names = [plain_words(bt.name), plain_words(ot.name)]
+    """Which of two look-alike tables holds the current data: each choice carries the caveat it
+    writes on the other table, appended to the caveats it already has."""
+    tables = []
+    for (t, label, area), (u, _, u_area) in ((base, other), (other, base)):
+        p = probes.get(label)
+        note = f"{_COPY_NOTE} {plain_words(t.name)}; the current data is in {plain_words(t.name)}."
+        tables.append(
+            {
+                "table": label,
+                "label": plain_words(t.name),
+                "rows": p.n() if p is not None and p.row else None,
+                "ops": [_table_op(u, u_area, field="caveats", value=[*u.caveats, note])],
+            }
+        )
+    names = [x["label"] for x in tables]
     return {
         "kind": "look_alike",
-        "tables": [
-            {"table": bl, "area": ba, "label": names[0], "rows": counts[bl]},
-            {"table": ol, "area": oa, "label": names[1], "rows": counts[ol]},
-        ],
+        "tables": tables,
         "question": f"{names[0]} and {names[1]} look alike. Which one holds the current data?",
     }
 
@@ -866,7 +881,7 @@ def _unread_columns(org: Datasource, labels: dict) -> tuple[list[dict], list[dic
                 blank = [v for v, lbl in (c.choice_field or {}).items() if not (lbl or "").strip()]
                 if (c.type != "string" and not _CODE_NAME.search(c.name)) or not _codes(blank):
                     blank = []  # a count of 1 to 5 is a number, and "east" or "enterprise" says itself
-                where = {"area": sa.name, "table": labels[id(t)], "column": c.name}
+                where = {"table": labels[id(t)], "column": c.name}
                 if blank:
                     shown = ", ".join(f"{v} = …" for v in blank[:2])
                     coded.append(
@@ -874,6 +889,14 @@ def _unread_columns(org: Datasource, labels: dict) -> tuple[list[dict], list[dic
                             "kind": "coded_values",
                             **where,
                             "values": blank,
+                            # the labels the person gives are filled into this map's blanks
+                            "op": _table_op(
+                                t,
+                                sa.name,
+                                column=c.name,
+                                field="choice_field",
+                                value=dict(c.choice_field or {}),
+                            ),
                             "question": f"What do the values of {plain_words(c.name)} on "
                             f"{plain_words(t.name)} mean? Type them in Other, e.g. {shown}",
                         }
@@ -885,6 +908,15 @@ def _unread_columns(org: Datasource, labels: dict) -> tuple[list[dict], list[dic
                             **where,
                             "question": f"What does {plain_words(c.name)} on {plain_words(t.name)} "
                             "hold? Type a short description in Other.",
+                            # the person's words go in `value`; `source: human` says whose they are
+                            "op": _table_op(
+                                t,
+                                sa.name,
+                                column=c.name,
+                                field="description",
+                                source="human",
+                                value="",
+                            ),
                         }
                     )
     return coded, unknown
@@ -990,7 +1022,9 @@ def open_questions(
                 candidates.append(cand)
             elif why:
                 dropped.append({"table": base[1], "pattern": "current", "reason": why})
-        elif kind == "look_alike":
+        elif kind == "look_alike" and not any(
+            c.startswith(_COPY_NOTE) for t in (base[0], other[0]) for c in t.caveats
+        ):
             look_alikes.append(_look_alike(base, other, probes))
 
     if org.fiscal_year_start_month != 1 and "fiscal_year" not in declared:
