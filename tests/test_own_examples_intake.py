@@ -56,6 +56,15 @@ def test_a_comment_above_a_statement_names_it_and_is_not_part_of_it():
         ("DELETE FROM orders", "not a SELECT or WITH statement")]
 
 
+def test_a_comment_that_asks_a_question_is_the_rows_question(tmp_path):
+    f = tmp_path / "q.sql"
+    f.write_text("-- How many paid orders are there?\nSELECT COUNT(*) FROM orders WHERE status = 'paid';\n"
+                 "-- Paid orders\nSELECT COUNT(*) FROM orders WHERE status = 'paid'")
+    first, second = intake([f])["rows"]
+    assert (first["question"], first["label"]) == ("How many paid orders are there?", None)
+    assert (second["question"], second["label"]) == (None, "Paid orders")
+
+
 def test_a_semicolon_in_a_comment_or_a_doubled_quote_does_not_split(tmp_path):
     f = tmp_path / "q.sql"
     f.write_text("-- one; still the comment\nSELECT 'it''s; fine' AS x;\nSELECT 2 /* a ; b */ AS y")

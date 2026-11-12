@@ -110,6 +110,9 @@ def test_an_open_question_has_the_shape_of_a_declared_ambiguity(tmp_path):
     assert definition["options"] == [{"label": "as your query has it", "how": DEFINITION["statement"]},
                                      {"label": "as agami answered", "how": DEFINITION["sql"]}]
     assert definition["applies_to"] == ["arrivals"] and asks[6]["differs_in"] == ["filters"]
+    # what the card names: the checks where the two sides part, both sides given
+    checks = {d["check"]: d for d in asks[6]["differences"]}
+    assert "filters" in checks and checks["filters"]["yours"] != checks["filters"]["agami"]
     default = asks[7]["candidate"]["options"]
     assert default[1] == {"label": "as the semantic model declares", "how": "apply the declared filter orders.status != 'cancelled'"}
     assert all(a["status"] == "open" and a["settled_as"] is None for a in plan["ask"])

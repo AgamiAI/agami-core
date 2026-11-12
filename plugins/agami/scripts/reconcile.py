@@ -558,9 +558,12 @@ def _rows_from_file(path: Path, source: str | None,
         for n, (stmt, comment) in enumerate(_split_sql(text), 1):
             # The same test a CSV cell gets: anything that is not a SELECT or a WITH is context or
             # a mistake, and never reaches the tier as a statement the person supplied. A comment
-            # above a statement is how a .sql file names it, so it becomes the row's label.
+            # above a statement is how a .sql file names it: the row's question when it is one (it
+            # ends in "?"), its label otherwise, which Phase 2a turns into a question.
             if _is_statement(stmt):
-                rows.append(_new_row(file=file, line=n, source=source, statement=stmt, label=comment))
+                asks = bool(comment) and comment.rstrip().endswith("?")
+                rows.append(_new_row(file=file, line=n, source=source, statement=stmt,
+                                     question=comment if asks else None, label=None if asks else comment))
             else:
                 skipped.append({"file": file, "line": n, "text": (comment or stmt).strip()[:80],
                                 "reason": "not a SELECT or WITH statement"})
@@ -3128,7 +3131,12 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
         answer = decided.get(n, {}).get("decision")
         options = _choice_options(item, rec, definitional)
         if len(options) > 1:
+            # The checks where the two sides part, as the report page shows them: what the card's
+            # question names, in place of a sentence that only says how far apart the numbers are.
+            differences = [{"check": d["key"], "yours": d.get("yours"), "agami": d.get("agami"), "note": d.get("note")}
+                           for d in item["diff"] if d.get("state") in ("differs", "defect", "gap")]
             plan["ask"].append({**base, "why": item["sentence"], "differs_in": definitional,
+                                "differences": differences,
                                 "yours": item.get("expected"), "agami": item.get("answer"),
                                 "status": "settled" if answer in _OWN_SETTLED else "open",
                                 "settled_as": _OWN_SETTLED.get(answer),
