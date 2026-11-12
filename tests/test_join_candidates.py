@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -345,3 +347,249 @@ def test_a_refresh_tells_filtered_joins_apart_by_their_literals():
                                     relationship="many_to_one")
     assert not I._same_join(rel(on.format("Y")), rel(on.format("y")))
     assert I._same_join(rel(on.format("Y")), rel("  " + on.format("Y").upper().replace(" AND ", "  and ")))
+
+
+# ---------------------------------------------------------------------------
+# Probes run a few at a time (the scan's outputs don't depend on how many)
+# ---------------------------------------------------------------------------
+
+
+def test_run_probes_returns_results_in_job_order_when_later_jobs_finish_first():
+    def job(i: int, delay: float):
+        def run():
+            time.sleep(delay)
+            return i
+        return run
+    jobs = [job(i, d) for i, d in enumerate((0.2, 0.15, 0.1, 0.05, 0.0))]
+    assert I._run_probes(jobs, 4) == [0, 1, 2, 3, 4]
+
+
+def test_run_probes_puts_an_exception_in_its_slot_and_runs_the_rest():
+    boom = ValueError("probe failed")
+
+    def bad():
+        raise boom
+    for workers in (1, 4):
+        out = I._run_probes([lambda: 1, bad, lambda: 3], workers)
+        assert out[0] == 1 and out[1] is boom and out[2] == 3
+
+
+def test_run_probes_lets_an_interrupt_through():
+    def stop():
+        raise KeyboardInterrupt
+    for workers in (1, 4):
+        with pytest.raises(KeyboardInterrupt):
+            I._run_probes([lambda: 1, stop], workers)
+
+
+def test_one_worker_runs_the_probes_inline_in_order():
+    seen: list[tuple[int, int]] = []
+    jobs = [lambda i=i: seen.append((i, threading.get_ident())) for i in range(5)]
+    I._run_probes(jobs, 1)
+    assert [i for i, _ in seen] == [0, 1, 2, 3, 4]
+    assert {tid for _, tid in seen} == {threading.get_ident()}
+    seen.clear()
+    I._run_probes(jobs[:1], 4)   # one job needs no pool either
+    assert seen == [(0, threading.get_ident())]
+
+
+@pytest.mark.parametrize("db_type", ["sqlite", "duckdb"])
+def test_file_databases_probe_one_at_a_time(db_type, monkeypatch):
+    from semantic_model import dialects as D
+    monkeypatch.delenv("AGAMI_PROBE_WORKERS", raising=False)
+    assert I._probe_workers(D.get_dialect(db_type)) == 1
+    assert I._probe_workers(D.get_dialect("postgres")) == I.PROBE_WORKERS == 4
+
+
+@pytest.mark.parametrize("raw, want", [("2", 2), ("99", 8), ("0", 1), ("-3", 1), (" 3 ", 3),
+                                       ("lots", 4), ("", 4), ("2.5", 4)])
+def test_the_worker_count_can_be_set_in_the_environment(raw, want, monkeypatch):
+    from semantic_model import dialects as D
+    monkeypatch.setenv("AGAMI_PROBE_WORKERS", raw)
+    assert I._probe_workers(D.get_dialect("postgres")) == want
+    if raw.strip().lstrip("-").isdigit():
+        assert I._probe_workers(D.get_dialect("sqlite")) == want   # the override wins for files too
+
+
+def _report():
+    return I.IntrospectReport(profile="demo", db_type="postgres", out_dir="unused", dry_run=True)
+
+
+def _wide(n: int, targets: int = 1) -> list:
+    """`n` integer reference columns on `facts`, each a type match for every target table's id."""
+    cols = [_ID] + [{"name": f"ref_{i:03d}", "type": "integer"} for i in range(n)]
+    return [_t("facts", cols, grain=["id"])] + [_t(f"dim{j}", [_ID], grain=["id"]) for j in range(targets)]
+
+
+def _counting_runner(reply: dict):
+    lock = threading.Lock()
+    calls: list[str] = []
+
+    def run(sql: str) -> list[dict]:
+        with lock:
+            calls.append(sql)
+        return [dict(reply)]
+    return run, calls
+
+
+def _scan(tables, runner, workers, monkeypatch, rels=(), progress=None, db_type="postgres"):
+    from semantic_model import dialects as D
+    if workers is None:
+        monkeypatch.delenv("AGAMI_PROBE_WORKERS", raising=False)
+    else:
+        monkeypatch.setenv("AGAMI_PROBE_WORKERS", str(workers))
+    report = _report()
+    I._scan_join_candidates(D.get_dialect(db_type), runner, list(rels), tables, report, db_type,
+                            progress=progress)
+    return report
+
+
+def _outputs(report) -> tuple:
+    return (report.join_candidates, report.join_candidates_low, report.notes,
+            report.join_candidate_probes, report.join_candidate_cap_hit)
+
+
+def test_the_cap_holds_with_several_workers(monkeypatch):
+    runner, calls = _counting_runner({"matched": 0, "sampled": 10})
+    report = _scan(_wide(320), runner, 4, monkeypatch)
+    assert len(calls) == I.JOIN_CANDIDATE_PROBE_CAP == 300
+    assert report.join_candidate_probes == 300 and report.join_candidate_cap_hit
+    assert any(n.startswith("join candidates: stopped after 300 probes") for n in report.notes)
+
+
+def test_probes_overlap_with_several_workers(monkeypatch):
+    # The first two probes each wait for the other: run one at a time, the barrier would break.
+    barrier = threading.Barrier(2, timeout=5)
+    lock = threading.Lock()
+    calls: list[int] = []
+    broken: list[BaseException] = []
+
+    def run(sql: str) -> list[dict]:
+        with lock:
+            calls.append(1)
+            first_two = len(calls) <= 2
+        if first_two:
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError as e:
+                broken.append(e)
+        return [{"matched": 0, "sampled": 10}]
+    report = _scan(_wide(6), run, 4, monkeypatch)
+    assert not broken and report.join_candidate_probes == 6
+
+
+def _scripted_runner(hits: dict, seed: int):
+    """Match counts per `(from column, target table)`, each probe delayed by a fixed pseudo-random
+    amount so that completion order differs from submission order."""
+    import random
+    import re
+    delays = random.Random(seed)
+    lock = threading.Lock()
+
+    def run(sql: str) -> list[dict]:
+        with lock:
+            pause = delays.random() * 0.004
+        time.sleep(pause)
+        m = re.search(r'DISTINCT "?(\w+)"? AS v FROM .*? "?(\w+)"? t WHERE', sql)
+        return [{"matched": hits.get((m.group(1), m.group(2)), 0), "sampled": 10}]
+    return run
+
+
+@pytest.mark.parametrize("cap", [3, 7, 12, 300])
+def test_the_scan_finds_the_same_with_one_worker_or_four(cap, monkeypatch):
+    # Every column is tested against every dim's id; a hit ends a column's tests (one join per column
+    # is enough), and `dim2.code` matching `facts.ref_001` both ways is offered once. The cap lands
+    # in the middle of columns whose next pair hangs on an earlier probe's result.
+    monkeypatch.setattr(I, "JOIN_CANDIDATE_PROBE_CAP", cap)
+    tables = _wide(8, targets=4)
+    tables[0] = _t("facts", tables[0].model_dump()["columns"], grain=["id"], unique_keys=[["ref_001"]])
+    tables[3] = _t("dim2", [_ID, {"name": "code", "type": "integer"}], grain=["id"], unique_keys=[["code"]])
+    hits = {("ref_000", "dim1"): 10, ("ref_002", "dim0"): 4, ("ref_003", "dim3"): 10,
+            ("ref_005", "dim2"): 10, ("code", "facts"): 10, ("ref_001", "dim2"): 10}
+    serial = _outputs(_scan(tables, _scripted_runner(hits, 1), 1, monkeypatch))
+    assert serial[3] <= cap
+    for seed in range(3):
+        assert _outputs(_scan(tables, _scripted_runner(hits, seed), 4, monkeypatch)) == serial
+
+
+@pytest.mark.parametrize("schema", [_SCHEMA, _FK_SCHEMA, _PERSONAL_SCHEMA])
+def test_an_introspection_reports_the_same_candidates_with_one_worker_or_four(schema, tmp_path, monkeypatch):
+    got = []
+    for workers in (1, 4):
+        monkeypatch.setenv("AGAMI_PROBE_WORKERS", str(workers))
+        _, report, out = _build(tmp_path / str(workers), schema)
+        doc = _candidates(out)
+        doc.pop("how_to_accept")   # names the model's folder, which differs between the two runs
+        got.append((_outputs(report), doc))
+    assert got[0] == got[1]
+
+
+def test_the_scan_logs_its_progress_every_25_probes(tmp_path, monkeypatch):
+    log = tmp_path / "progress.log"
+    runner, _ = _counting_runner({"matched": 0, "sampled": 10})
+    _scan(_wide(60), runner, 4, monkeypatch, progress=log)
+    assert log.read_text().splitlines() == ["join candidates: 25 probed", "join candidates: 50 probed",
+                                            "join candidates: 60 probed"]
+
+
+def test_the_progress_lines_read_as_testing_possible_joins():
+    from semantic_model import steps
+    m, phrase, unit = steps.parse_progress("join candidates: 50 probed")
+    assert phrase.format(*m.groups()) == "Testing possible joins: 50 probed" and unit is None
+    m, phrase, _ = steps.parse_progress("join candidates: testing columns no join covers…")
+    assert phrase.format(*m.groups()) == "Testing possible joins"
+
+
+def test_a_fault_in_a_probe_is_raised_as_it_would_be_serially(monkeypatch):
+    # A failed query is absorbed (`_try`); a fault in the probe's own code is not swallowed.
+    runner, _ = _counting_runner({"matched": 0, "sampled": 10})
+
+    def broken(*a, **k):
+        raise RuntimeError("bad sql builder")
+    monkeypatch.setattr(I, "overlap_rate_sql", broken)
+    for workers in (1, 4):
+        with pytest.raises(RuntimeError, match="bad sql builder"):
+            _scan(_wide(3), runner, workers, monkeypatch)
+
+
+def test_a_sqlite_scan_runs_every_probe_on_the_calling_thread(monkeypatch):
+    threads: list[int] = []
+
+    def run(sql: str) -> list[dict]:
+        threads.append(threading.get_ident())
+        return [{"matched": 0, "sampled": 10}]
+    report = _scan(_wide(30), run, None, monkeypatch, db_type="sqlite")
+    assert report.join_candidate_probes == 30 and set(threads) == {threading.get_ident()}
+
+
+def test_a_scan_with_nothing_to_probe_logs_nothing(tmp_path, monkeypatch):
+    log = tmp_path / "progress.log"
+    runner, calls = _counting_runner({"matched": 0, "sampled": 10})
+    report = _scan(_wide(0), runner, 4, monkeypatch, progress=log)
+    assert report.join_candidate_probes == 0 and not calls
+    assert not log.exists() or log.read_text() == ""
+
+
+def test_no_progress_line_follows_an_interrupted_scan(tmp_path, monkeypatch):
+    # `ref_000`'s probe is interrupted while `ref_001`'s is still running; when that one ends, after
+    # the scan has gone, it must not log: the build's `failed:` line has to stay the log's last.
+    monkeypatch.setattr(I, "_PROBE_PROGRESS_EVERY", 1)
+    log = tmp_path / "progress.log"
+    gate, started = threading.Event(), threading.Event()
+
+    def run(sql: str) -> list[dict]:
+        if '"ref_000"' in sql:
+            assert started.wait(2)
+            raise KeyboardInterrupt
+        started.set()
+        gate.wait(2)
+        return [{"matched": 0, "sampled": 10}]
+    pool_threads = lambda: {t for t in threading.enumerate() if t.name.startswith("ThreadPoolExecutor")}  # noqa: E731
+    before = pool_threads()
+    with pytest.raises(KeyboardInterrupt):
+        _scan(_wide(2), run, 4, monkeypatch, progress=log)
+    at_interrupt = log.read_text() if log.exists() else ""
+    gate.set()
+    for t in pool_threads() - before:
+        t.join(2)
+    assert (log.read_text() if log.exists() else "") == at_interrupt

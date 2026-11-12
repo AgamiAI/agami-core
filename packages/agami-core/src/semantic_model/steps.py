@@ -47,6 +47,8 @@ PROGRESS_PHRASES = (
     (re.compile(r"^columns\+grain (\d+)/(\d+)"), "Reading columns", "tables"),
     (re.compile(r"^relationships: declared FK (\d+)/(\d+)"), "Checking joins", "keys"),
     (re.compile(r"^building relationships"), "Working out the joins", None),
+    # The scan's count has no total to show against: which pairs are tested hangs on what earlier ones found.
+    (re.compile(r"^join candidates: (\d+) probed"), "Testing possible joins: {0} probed", None),
     (re.compile(r"^join candidates"), "Testing possible joins", None),
     (re.compile(r"^done: (\d+) tables, (\d+) relationships"), "Done: {0} tables, {1} joins", None),
 )
