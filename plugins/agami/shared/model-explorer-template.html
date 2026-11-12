@@ -725,7 +725,10 @@
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
     let reviewSubTabChosen = false;   // set once the person picks a sub-tab; until then it follows the items
     let piiSubTab = 'all';       // PII tab sub-view: all | flagged | suspected
-    let reviewKind = 'all';      // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown)
+    // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown). A review
+    // card's "Review on a page" opens on the pile it was asking about (`--section`).
+    let reviewKind = manifest.initial_section || 'all';
+    let sectionPlaced = !manifest.initial_section;   // set once the opening sub-tab has been picked for it
     let joinTypeFilter = 'all';  // Joins tab: all | in | cross
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
 
@@ -736,14 +739,23 @@
       { value: 'engineer', label: 'Engineer' }, { value: 'analyst', label: 'Analyst' }, { value: 'other', label: 'Other…' },
     ];
     let signOff = { email: '', role: 'data_lead', roleOther: '' };
-    // Saved by the cards in local/.config (the renderer passes it in); what this browser remembers wins.
-    if (manifest.signoff && manifest.signoff.email) signOff.email = manifest.signoff.email;
-    if (manifest.signoff && manifest.signoff.role) {
-      const r = manifest.signoff.role, known = ROLE_OPTIONS.find(o => o.value === r || o.label === r);
-      if (known) signOff.role = known.value; else { signOff.role = 'other'; signOff.roleOther = r; }
+    // A page that saves its own decisions (rendered --save-to-helper, served by serve_page.py
+    // --decisions) signs approvals as the identity saved in local/.config, shown and never typed:
+    // nothing typed or remembered in this browser can change who a sign-off is recorded under.
+    const SAVES = typeof window.agamiSave === 'function';
+    const SAVE_SIGNER = SAVES ? ((window.AGAMI_SAVE || {}).signer || null) : null;
+    if (SAVES) {
+      signOff = { email: SAVE_SIGNER ? SAVE_SIGNER.email : '', role: 'other', roleOther: SAVE_SIGNER ? SAVE_SIGNER.role : '' };
+    } else {
+      // Saved by the cards in local/.config (the renderer passes it in); what this browser remembers wins.
+      if (manifest.signoff && manifest.signoff.email) signOff.email = manifest.signoff.email;
+      if (manifest.signoff && manifest.signoff.role) {
+        const r = manifest.signoff.role, known = ROLE_OPTIONS.find(o => o.value === r || o.label === r);
+        if (known) signOff.role = known.value; else { signOff.role = 'other'; signOff.roleOther = r; }
+      }
+      try { const s = JSON.parse(localStorage.getItem('agami_signoff') || '{}'); if (s.email) signOff.email = s.email; if (s.role) signOff.role = s.role; if (s.roleOther) signOff.roleOther = s.roleOther; } catch (e) {}
     }
-    try { const s = JSON.parse(localStorage.getItem('agami_signoff') || '{}'); if (s.email) signOff.email = s.email; if (s.role) signOff.role = s.role; if (s.roleOther) signOff.roleOther = s.roleOther; } catch (e) {}
-    function saveSignOff() { try { localStorage.setItem('agami_signoff', JSON.stringify(signOff)); } catch (e) {} }
+    function saveSignOff() { if (SAVES) return; try { localStorage.setItem('agami_signoff', JSON.stringify(signOff)); } catch (e) {} }
     function signOffRole() { return signOff.role === 'other' ? (signOff.roleOther.trim() || 'other') : signOff.role; }
     function validEmail(s) { return /\S+@\S+\.\S+/.test(s || ''); }
     function hasQueuedApprovals() { return Object.values(ops).some(o => o.op === 'approve'); }
@@ -1582,6 +1594,11 @@
       h.appendChild(nameEl);
       if (r.f.type) h.appendChild(el('div', { class: 'field-type', style: 'margin-left:auto;', text: r.f.type }));
       h.appendChild(piiToggleBtn(r.f, r.ctx));
+      // Hide = exclude the column from every query, the same op as the card's "Hide these from queries".
+      h.appendChild(el('button', { type: 'button', class: 'btn-pii pii-hide' + (pending[r.f.qname] === 'exclude' ? ' queued' : ''),
+        title: 'Queue hiding this column from every query. Nothing applies until you submit.',
+        onclick: (ev) => { ev.stopPropagation(); toggleOp('field', r.f); } },
+        pending[r.f.qname] === 'exclude' ? '✗ Hidden (queued)' : 'Hide'));
       card.appendChild(h);
       return card;
     }
@@ -1621,6 +1638,14 @@
               // Clearing a privacy flag lets raw values be returned, so the count is confirmed first.
               if (window.confirm('Clear the PII flag on ' + fl.length + ' column(s)? Their raw values will be returned in answers once you submit.')) setSensitiveMany(fl, false);
             } }));
+        if (fl.length) {
+          const hideAll = el('div', { class: 'card-actions', style: 'padding:0 0 8px;' });
+          hideAll.appendChild(el('button', { type: 'button', class: 'btn-pii pii-hide-all',
+            title: 'Queue hiding every column listed here (search narrows it) from every query.',
+            onclick: () => { fl.forEach(r => { pending[r.f.qname] = 'exclude'; }); renderAll(); } },
+            'Hide all ' + fl.length + ' shown'));
+          sec.appendChild(hideAll);
+        }
         if (!fl.length) sec.appendChild(el('div', { class: 'empty-state', text: 'Nothing flagged sensitive.' }));
         fl.forEach(r => sec.appendChild(piiRowCard(r)));
       }
@@ -2133,7 +2158,8 @@
       return it.rule === 1 || it.confidence === 'proposed' || effReviewState(it) === 'stale';
     }
     function bulkApprove(items) {
-      items.forEach(it => { if (isApprovable(it)) ops[it.qname] = { op: 'approve', kind: it._kind, area: it.area, name: relName(it) }; });
+      // `bulk` reaches curation_log.jsonl with the op, so a sign-off made many-at-once says so (#651).
+      items.forEach(it => { if (isApprovable(it)) ops[it.qname] = { op: 'approve', kind: it._kind, area: it.area, name: relName(it), bulk: true }; });
       renderAll();
     }
     const KIND_NOUN = { metric: ['metric', 'metrics'], entity: ['entity', 'entities'],
@@ -2165,6 +2191,13 @@
     // via `signOff`. Typing fires only the input listener (no re-render), so focus holds.
     function renderSignOffControl() {
       const wrap = el('div', { class: 'signoff-card' });
+      if (SAVES) {
+        wrap.appendChild(el('span', { class: 'signoff-label', text: 'Sign off as' }));
+        wrap.appendChild(el('span', { class: 'signoff-hint', text: SAVE_SIGNER
+          ? `${SAVE_SIGNER.email} (${SAVE_SIGNER.role}), from your agami settings. Change it in the chat.`
+          : 'No sign-off identity is saved, so approvals can’t be saved from this page. Set it in the chat; hiding, rejecting and edits save without it.' }));
+        return wrap;
+      }
       wrap.appendChild(el('span', { class: 'signoff-label', text: 'Sign off as' }));
       const em = el('input', { type: 'email', id: 'signoff-email', placeholder: 'you@company.com', autocomplete: 'email' });
       em.value = signOff.email;
@@ -2360,7 +2393,7 @@
         '• <span class="conf-chip conf-proposed tip" data-tip="' + CONF_MEANING.proposed + '">proposed</span> a guess → <strong>check these first</strong> &nbsp; ' +
         '• <span class="conf-chip conf-inferred tip" data-tip="' + CONF_MEANING.inferred + '">inferred</span> worked out from strong clues &nbsp; ' +
         '• <span class="conf-chip conf-confirmed tip" data-tip="' + CONF_MEANING.confirmed + '">confirmed</span> the database says so → <strong>usually fine</strong>.<br>' +
-        '<strong>Metrics matter most:</strong> a question that uses a metric you have not approved is still answered, with a warning on the answer, until you approve it. Entities and joins work the same way: agami uses them before you approve and notes it on the answer.' + (READ_ONLY ? ' Approve or reject on the cards in the chat.' : ' Approve, reject, or edit below, then click <strong>Generate feedback for Claude</strong>.') }));
+        '<strong>Metrics matter most:</strong> a question that uses a metric you have not approved is still answered, with a warning on the answer, until you approve it. Entities and joins work the same way: agami uses them before you approve and notes it on the answer.' + (READ_ONLY ? ' Approve or reject on the cards in the chat.' : SAVES ? ' Approve, reject, or edit below, then press <strong>Save decisions</strong>.' : ' Approve, reject, or edit below, then click <strong>Generate feedback for Claude</strong>.') }));
 
       const all = reviewAll().filter(it => !searchQ
         || (relName(it) + ' ' + (it.name || '') + ' ' + (it.calculation || '') + ' ' + (it.description || '')).toLowerCase().includes(searchQ));
@@ -2414,6 +2447,13 @@
       root.appendChild(bar);
 
       const g = groups[reviewSubTab] || groups.eyes;
+      // Opened on a section: start on the first sub-tab that holds that kind of item.
+      if (!sectionPlaced) {
+        sectionPlaced = true;
+        const holds = k => groups[k] && reviewKindGroups(groups[k].items).some(kg => kg.key === reviewKind);
+        const k = ['eyes', 'looks', 'edited'].find(holds);
+        if (k) { reviewSubTab = k; reviewSubTabChosen = true; }
+      }
       const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
 
       // Second-layer KIND pills: within this sub-tab, split the pile by kind (Metrics / Joins /
@@ -2839,7 +2879,7 @@
       card.appendChild(el('div', { class: 'info-banner', html:
         '<strong>Glossary' + (termEdits !== null ? ' (edited — queued)' : '') + '.</strong> ' +
         'Short definitions of terms, acronyms, and codes specific to this database, so agami uses them correctly. ' +
-        'Add or correct them here; changes apply when you paste the block back into Claude.' }));
+        (SAVES ? 'Add or correct them here; changes apply when you save.' : 'Add or correct them here; changes apply when you paste the block back into Claude.') }));
       const terms = curTerms();
       const keys = Object.keys(terms).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
       if (!keys.length) {
@@ -2959,8 +2999,9 @@
       }
       root.appendChild(el('div', { class: 'info-banner', html:
         '<strong>Review before you submit.</strong> Everything you’ve queued is listed below. ' +
-        'Click <strong>Validate</strong> to sanity-check it locally, then <strong>Generate feedback for Claude</strong> ' +
-        'to produce the block to paste back — agami applies it and runs the authoritative validator server-side.' }));
+        'Click <strong>Validate</strong> to sanity-check it locally, then ' + (SAVES
+          ? '<strong>Save decisions</strong>: agami applies them in the chat and runs the authoritative validator.'
+          : '<strong>Generate feedback for Claude</strong> to produce the block to paste back — agami applies it and runs the authoritative validator server-side.') }));
       const vr = el('div', { id: 'queue-validate', class: 'validate-result' });
       root.appendChild(vr);
       groups.forEach(g => root.appendChild(g));
@@ -3117,6 +3158,12 @@
     function generateFeedback() {
       // Approvals must be signed — require a valid email + role before generating.
       if (hasQueuedApprovals() && !validEmail(signOff.email)) {
+        if (SAVES) {
+          const fv = document.getElementById('footer-validate');
+          fv.textContent = '⚠ Approvals need a sign-off identity, set in the chat. Remove the approvals to save the rest.';
+          fv.className = 'footer-validate bad';
+          return;
+        }
         signOff._invalid = true;
         if (activeTab !== 'review') { activeTab = 'review'; renderAll(); }  // the field lives on the Review tab
         const em = document.getElementById('signoff-email');
@@ -3221,6 +3268,9 @@
       if (lines.length) lines.unshift('profile: ' + (manifest.profile || ''));
       if (lines.length) lines.push('done');
 
+      // The same block, sent to the helper instead of a copy-and-paste dialog; the chat parses it with
+      // parse_model_feedback.py and applies it with sm curate, as it would a pasted one.
+      if (SAVES) { window.agamiSave({ page: 'model-explorer', profile: manifest.profile || '', block: lines.join('\n') + '\n' }); return; }
       document.getElementById('modal-text').value = lines.join('\n') + '\n';
       document.getElementById('modal').hidden = false;
       document.getElementById('modal-status').textContent = '';

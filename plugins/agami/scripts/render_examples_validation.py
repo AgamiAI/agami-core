@@ -28,7 +28,7 @@ import re
 import sys
 from pathlib import Path
 
-from _read_only_view import make_read_only
+from _read_only_view import make_read_only, make_saving, saved_signoff
 
 SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "examples-validation-template.html"
@@ -173,9 +173,17 @@ def main() -> int:
                         "object for several areas (repeatable; files render in the order given). "
                         "With several files, label a single area's array as AREA=PATH")
     p.add_argument("--out", required=True)
-    p.add_argument("--read-only", action="store_true",
-                   help="hide the change controls and paste-back dialog (the full view shown from a question card)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--read-only", action="store_true",
+                      help="hide the change controls and paste-back dialog (the view shown from a question card)")
+    mode.add_argument("--save-to-helper", action="store_true",
+                      help="a page whose Save button posts its decisions to the helper serving it "
+                           "(serve_page.py --decisions); needs --artifacts-dir for who signs")
+    p.add_argument("--artifacts-dir",
+                   help="with --save-to-helper: where local/.config holds the saved sign-off identity")
     args = p.parse_args()
+    if args.save_to_helper and not args.artifacts_dir:
+        p.error("--save-to-helper needs --artifacts-dir")
 
     try:
         files = _read_files(args.items_file)
@@ -191,7 +199,11 @@ def main() -> int:
         profile=args.profile,
         items=items,
     )
-    out_path.write_text(make_read_only(html) if args.read_only else html, encoding="utf-8")
+    if args.read_only:
+        html = make_read_only(html)
+    elif args.save_to_helper:
+        html = make_saving(html, saved_signoff(Path(os.path.expanduser(args.artifacts_dir))))
+    out_path.write_text(html, encoding="utf-8")
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard
     # showed — regardless of the per-area numbers the caller wrote. Atomic (temp + os.replace) so a
