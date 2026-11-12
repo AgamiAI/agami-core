@@ -6,10 +6,10 @@ Every agami skill picks the first element in this table that the session offers,
 |---|---|---|
 | A decision | Question card ([question-cards.md](question-cards.md)) | Numbered list (rule 7) |
 | Progress through onboarding | The session's task list, from `sm steps` ([task-list.md](task-list.md)) | Markdown checklist, posted again when a step ends |
-| A wait over 10 seconds | Background task with a description in the person's words, plus one progress line with an 8-cell bar every 30 seconds | The same work in the foreground, with a line per batch |
+| A wait over 10 seconds | Background task with a description in the person's words, with progress lines as the phase file's wait loop says | The same command in the foreground; say what is running before it starts and the result when it ends |
 | A result of up to 15 rows | Markdown table | Same |
-| A summary of 4 to 5 numbers (overview, timing, review groups) | Inline visual with tiles ([overview-card.md](overview-card.md)); a click sends a chat message | Markdown table |
-| Anything longer | "Show the full view": a page in the person's browser | The URL |
+| A summary of 4 to 5 numbers (overview, review groups) | Inline visual with tiles ([overview-card.md](overview-card.md)); a click sends a chat message | Markdown table |
+| Anything longer | "Show the full view": a page in the person's browser | The URL (how the page is served: [question-cards rule 6](question-cards.md#6-no-page-opens-by-default-and-nothing-is-pasted-back)) |
 
 ## What the session offers
 
@@ -24,7 +24,9 @@ apps, to see a card: use the fallback and carry on.
 
 Three rules for any visual drawn in the chat:
 
-1. **Small.** At most 2 actions, 4 to 5 numbers, and no scrolling inside it.
+1. **Small.** Each tile: 4 to 5 numbers at most, and a click on a tile sends one chat message.
+   Besides tile clicks, at most 2 actions. No scrolling inside it. How many tiles a visual has is
+   set by its own file ([overview-card.md](overview-card.md) for the overview).
 2. **Readable in light and dark.** No colour that carries meaning on its own; a state is said in
    words.
 3. **Every number from an `sm` command**, as printed. Never add up, round or estimate one.
@@ -34,10 +36,12 @@ tool can't send one, leave the visual plain: the card that follows offers the sa
 
 ## Waits
 
-Say what is running, in the person's words (*"Reading your tables"*). Show how much is done from
-the engine's own counts (`sm progress`: *"Reading columns ▰▰▰▱▱▱▱▱ 12/34 tables"*), never an
-estimate of time left. Where background tasks aren't available, run the work in smaller foreground pieces and post a
-line after each.
+Say what is running, in the person's words (*"Reading your tables"*), and show how much is done
+from the engine's own counts, never an estimate of time left. How often to check and what each
+progress line says is set by the phase file's wait loop (the build in agami-connect's build.md,
+subagents in [parallel-work.md](parallel-work.md)). Where background tasks aren't available, run
+the same command in the foreground: say what is running before it starts, and the result when it
+ends.
 
 ## What a native element never replaces
 

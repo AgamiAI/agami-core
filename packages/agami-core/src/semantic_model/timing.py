@@ -2,7 +2,8 @@
 
 A wait is easier to bear when you can see what it cost. The onboarding summary shows one line,
 *"Set up in 6 min 40 s"*, from the marks `sm steps --mark` already writes, so the number is the
-engine's own and never an estimate. Restarts are handled by the same replay `sm steps` uses.
+engine's own and never an estimate. Only the current run counts (a reload starts a new one), read
+through the same replay `sm steps` uses.
 """
 
 from __future__ import annotations
@@ -13,36 +14,49 @@ from typing import Any, Optional
 
 from . import steps
 
+# Two marks this far apart mean the person stopped and came back (overnight, after a meeting): the
+# step times still stand, but a "Set up in …" line over a run with a break in it would mislead.
+PAUSE_GAP_SECONDS = 7200
+
 
 def _iso(at: Optional[float]) -> Optional[str]:
     return None if at is None else datetime.fromtimestamp(at, timezone.utc).isoformat()
 
 
 def duration_text(seconds: int) -> str:
-    """`Set up in 6 min 40 s`; `Set up in 45 s` under a minute; `Set up in 3 min` on the minute."""
-    minutes, rest = divmod(max(0, seconds), 60)
+    """`Set up in 45 s`, `Set up in 6 min 40 s` (`3 min` on the minute), `Set up in 1 h 5 min`
+    (`2 h` on the hour); `""` for 0."""
+    if seconds <= 0:
+        return ""
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"Set up in {hours} h {minutes} min" if minutes else f"Set up in {hours} h"
     if not minutes:
-        return f"Set up in {rest} s"
-    if not rest:
-        return f"Set up in {minutes} min"
-    return f"Set up in {minutes} min {rest} s"
+        return f"Set up in {secs} s"
+    return f"Set up in {minutes} min {secs} s" if secs else f"Set up in {minutes} min"
+
+
+def _paused(times: list[float]) -> bool:
+    return any(b - a > PAUSE_GAP_SECONDS for a, b in zip(times, times[1:]))
 
 
 def onboarding_timing(root: Path) -> dict[str, Any]:
-    """Per-step seconds (first `in_progress` to last `done` of the attempt that stands, 0 when
-    either is missing), the total from the earliest counted start to the latest `done`, and the
-    line to show (`""` when nothing is timed)."""
-    spans = steps.step_spans(Path(root).expanduser())
+    """The current run's steps (from the step it restarted at) with their seconds, first
+    `in_progress` to last `done` of the attempt that stands, 0 when either is missing; the total as
+    the sum of those, so the time between steps drops out; and the line to show, `""` when the run
+    has nothing timed or was paused."""
+    run = steps.current_run(Path(root).expanduser())
     result = []
-    for step_id in steps.STEP_IDS:
-        start, end = spans.get(step_id, (None, None))
+    for step_id in steps.STEP_IDS[steps.STEP_IDS.index(run.first_step):]:
+        start, end = run.spans.get(step_id, (None, None))
         seconds = int(max(0.0, end - start)) if start is not None and end is not None else 0
         result.append({"id": step_id, "label": steps.LABELS[step_id], "seconds": seconds})
-    starts = [s for s, _ in spans.values() if s is not None]
-    ends = [e for _, e in spans.values() if e is not None]
-    started_at = min(starts) if starts else None
-    finished_at = max(ends) if ends else None
-    timed = started_at is not None and finished_at is not None
-    total = int(max(0.0, finished_at - started_at)) if timed else 0
-    return {"total_seconds": total, "steps": result, "started_at": _iso(started_at),
-            "finished_at": _iso(finished_at), "text": duration_text(total) if timed else ""}
+    total = sum(s["seconds"] for s in result)
+    starts = [s for s, _ in run.spans.values() if s is not None]
+    ends = [e for _, e in run.spans.values() if e is not None]
+    paused = _paused(run.times)
+    return {"total_seconds": total, "steps": result,
+            "started_at": _iso(min(starts)) if starts else None,
+            "finished_at": _iso(max(ends)) if ends else None,
+            "paused": paused, "text": "" if paused else duration_text(total)}

@@ -6,9 +6,9 @@ A picture of the whole model in one glance: one tile per subject area, and one f
 sign-off. agami-connect shows it in its summary (Phase 7) and agami-model in its overview (Phase 1).
 It is a snapshot in the chat, not a page: the complete browse stays **Show the full view**
 ([question-cards rule 6](question-cards.md#6-no-page-opens-by-default-and-nothing-is-pasted-back)).
-It is the "summary of 4 to 5 numbers" row of [native-elements.md](native-elements.md), and the
-three rules for any inline visual there ([Inline visuals](native-elements.md#inline-visuals))
-apply to it.
+It is the "summary of 4 to 5 numbers" row of [native-elements.md](native-elements.md): the
+rules for any inline visual there ([Inline visuals](native-elements.md#inline-visuals)) apply to
+each tile, and this file sets how many tiles the card has (below).
 
 ## When
 
@@ -37,7 +37,8 @@ that shows a wrong number is worse than no card.
   joins and entities can wait; they approve as you query."*
 - **One tile per area, at most 8**, ordered by `tables` (largest first): the area's `plain_name`,
   then `tables` tables, `described_pct`% described, `metrics` metrics (with *"<metrics_waiting>
-  waiting"* when not 0), `joins` joins, `examples` examples. More than 8 areas: the 7 largest and a
+  waiting"* when not 0) and `joins` joins: at most 5 numbers a tile, so the area's examples are
+  left to the header and the fallback table. More than 8 areas: the 7 largest and a
   tile *"<n> more areas"*.
 - **Names in words** ([question-cards rule 3b](question-cards.md#3b-things-are-named-in-plain-words)):
   the tile title is `plain_name`, never the identifier.

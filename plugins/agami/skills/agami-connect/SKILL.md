@@ -62,7 +62,7 @@ Leave out a step that won't run (8 when no reports were shared in 1.5; 3 with a 
 
 ## What runs at the same time
 
-Subagents read and draft in the background while the person answers cards, so nobody waits on one thing while another could run. How a batch is started, collected and given up on is in [shared/parallel-work.md](../../shared/parallel-work.md); the phase files say when. Subagents only read and return data: you write the model, run every command and ask every question.
+Subagents read and draft in the background while the person answers cards, so nobody waits on one thing while another could run. How a batch is started, collected and given up on is in [shared/parallel-work.md](../../shared/parallel-work.md); the phase files say when. Subagents only read and return data: you write the model, run every command and ask every question. Which element shows each of these (a card, the task list, a background task, the overview card, the full view), and what to use where the session doesn't offer it, is in [shared/native-elements.md](../../shared/native-elements.md).
 
 | While the person is on | These run in the background |
 |---|---|

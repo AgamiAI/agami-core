@@ -22,9 +22,10 @@ below corresponds to one such version.
   shows an overview, serves a page or runs work in the background links it, and the inline visual
   tool is named only there and in `shared/overview-card.md`.
 - **The onboarding summary says how long setup took.** `sm timing <root>` reads the step marks
-  `sm steps --mark` writes and prints each step's seconds, the total and a line such as
-  *"Set up in 6 min 40 s"*; a restarted step counts its last attempt. agami-connect shows the line
-  right under the overview.
+  `sm steps --mark` writes and prints each step's seconds, the total (the sum of the steps, so
+  time between them drops out) and a line such as *"Set up in 6 min 40 s"*. Only the current run
+  counts: a reload starts a new one. A run with a break of more than 2 hours in it is `paused`
+  and shows no line. agami-connect shows the line right under the overview.
 - **Onboarding runs its subagents in the background while the person answers cards.**
   agami-connect's SKILL.md gains a schedule, "What runs at the same time", and
   `shared/parallel-work.md` says how a batch starts, is collected with `sm wait-files` and is given
