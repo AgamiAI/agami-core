@@ -55,7 +55,11 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 
 (Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected.)
 
-**On a server database, run it in the background**, as the build is (1.7): Bash with `run_in_background: true` and a `description` in the person's words, *"Run the example questions (11)"*, and if you end your turn while it runs, say it's still running. It prints nothing until it is done, so post no bar; one line when it starts (*"Running the 11 example questions against your database…"*) and the result when it exits. SQLite and DuckDB run in the foreground.
+**On a server database, run it in the background**, as the build is (1.7): Bash with `run_in_background: true` and a `description` in the person's words, *"Run the example questions (11)"*. It prints nothing until it is done, so post no bar; one line when it starts (*"Running the 11 example questions against your database…"*) and the result when it exits. Keep the turn open by blocking on its output file, repeated until `all_ready` is true:
+```bash
+bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items.json" --wait 60
+```
+The redirect creates the file empty, which counts as waiting; the command writes its JSON in one go at the end. Once the file is ready, read it after the background task's exit notification (a large file can be caught mid-write); if the task exited with an error and the file stays empty, show its error. SQLite and DuckDB run in the foreground.
 
 **Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
 

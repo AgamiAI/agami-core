@@ -49,8 +49,7 @@ def test_the_schedule_names_every_agent_the_plugin_ships():
     assert "[shared/parallel-work.md](../../shared/parallel-work.md)" in section
     assert "| While the person is on | These run in the background |" in section
     # the example run happens before its review card, so the row names the wait, not the card
-    assert ("| The wait for the example run (6) | `sm seed-validate` as a background task; the main "
-            "chat posts its progress |") in section
+    assert "| The wait for the example run (6) | `sm seed-validate` as a background task |" in section
     assert "The example review card" not in section
 
 
@@ -65,13 +64,14 @@ def test_parallel_work_rules():
     assert "Never a subagent that writes the model, runs a command, or asks the person anything" in never
     assert "Never two writes at once" in never
     assert "Never a second batch for the same tables" in never
+    assert "Never a number shown to the person that no `sm` command printed" in never
 
 
 def test_the_give_up_limit_counts_per_subagent():
     text = _flat(_read(PARALLEL))
     give_up = text[text.index("## 4. Give up cleanly"):text.index("## 5.")]
-    assert "counts from each subagent's own start, not the batch's" in give_up
-    assert "10 passes (10 minutes) after that subagent started" in give_up
+    assert "10 minutes of `--wait 60` passes spent waiting on that subagent" in give_up
+    assert "Quick `--wait 0` checks after a card don't count" in give_up
     assert "do that piece yourself, inline" in give_up
 
 
@@ -105,8 +105,10 @@ def test_every_batch_file_name_carries_the_batch_stamp():
 
 def test_a_pause_collects_what_is_ready_and_a_resume_starts_the_writers_again():
     review = _flat(_read(REFS / "review.md"))
-    assert "collect what is ready with one `sm wait-files --wait 0` pass and skip the rest" in review
-    assert "don't draft their examples yourself at a Pause" in review
+    assert "leave them; don't wait for them or draft their examples yourself" in review
+    assert "collect what is ready" not in review
+    parallel = _flat(_read(PARALLEL))
+    assert "The one exception is a Pause the person asks for" in parallel
     assert "**On resume**, the writers are always started again with a new batch stamp" in review
     assert "5a uses the files they wrote" not in review
 
@@ -173,3 +175,18 @@ def test_the_sample_copy_marks_the_build_done():
     text = _read(REFS / "sample.md")
     six_a = _section(text, "**6A (copy", "**6B")
     assert 'steps "$ROOT" --mark build=done' in six_a
+
+
+def test_readers_start_as_each_path_arrives():
+    assert "The one exception is the document readers (1.5): each starts as its document's path arrives" \
+        in _flat(_read(PARALLEL))
+
+
+def test_the_example_run_is_waited_on_without_ending_the_turn():
+    text = _flat(_read(REFS / "examples.md"))
+    phase6 = text[text.index("## Phase 6"):]
+    run = phase6[phase6.index("**On a server database, run it in the background**"):]
+    run = run[:run.index("SQLite and DuckDB run in the foreground")]
+    assert ('scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items.json" '
+            "--wait 60") in run
+    assert "if you end your turn while it runs" not in run

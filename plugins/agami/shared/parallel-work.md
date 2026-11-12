@@ -15,7 +15,8 @@ the person is on which cards) is in agami-connect's SKILL.md, "What runs at the 
 - Prepare every input file, with the pre-approved `sm` call the phase file names: a subagent runs no
   commands of its own. Inputs and results live under `<artifacts_dir>/local/tmp/`.
 - Launch the batch in one message: one Agent call each, with `run_in_background: true`, at most 4
-  running at once. The rest wait in a queue (see 3).
+  running at once. The rest wait in a queue (see 3). The one exception is the document readers
+  (1.5): each starts as its document's path arrives, still at most 4 at once.
 - Each gets its `input_path` (or document) and a `result_path`, and a description in the person's
   words: *"Describe the Sales tables (12)"*.
 - Where the Agent tool doesn't list the agent by name (`agami-core:<agent>`), launch a
@@ -26,7 +27,9 @@ the person is on which cards) is in agami-connect's SKILL.md, "What runs at the 
 
 Go on with the cards and the main-chat work the schedule pairs with the batch. A card keeps the turn
 open. **Do not end the turn while subagents are running**: a turn that ends loses this skill's
-pre-approved commands, and every later command stops to ask for permission.
+pre-approved commands, and every later command stops to ask for permission. The one exception is a
+Pause the person asks for (review.md 4b): the turn ends and the writers are left to finish; nothing
+they write is used, since a resume starts them again with a new stamp.
 
 ## 3. Collect
 
@@ -48,9 +51,10 @@ It prints `{"ready", "waiting", "all_ready"}`. Repeat it until `all_ready` is tr
 
 ## 4. Give up cleanly
 
-The give-up limit counts from each subagent's own start, not the batch's: a result still missing 10
-passes (10 minutes) after that subagent started, or a file that is not what it was asked for (not
-JSON, the wrong shape, another area's), is given up on. Say so in one line and do that piece
+The give-up limit is per subagent: 10 minutes of `--wait 60` passes spent waiting on that subagent,
+counted from the first pass after it started (a reader started long before the first pass gets the
+full 10). Quick `--wait 0` checks after a card don't count. A result still missing after that, or a
+file that is not what it was asked for (not JSON, the wrong shape, another area's), is given up on. Say so in one line and do that piece
 yourself, inline, as the phase file describes it for a run with no subagents. The rest of the batch
 is applied as usual.
 

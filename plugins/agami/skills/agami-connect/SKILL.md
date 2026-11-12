@@ -70,7 +70,7 @@ Subagents read and draft in the background while the person answers cards, so no
 | The build (1.7) | Document readers still running; the build itself is a background task |
 | The join cards after the build (1.7) | `agami-enricher`s: one per chunk of up to 12 tables |
 | The sign-off cards (4) | `agami-example-writer`s: one per subject area, drafting example questions |
-| The wait for the example run (6) | `sm seed-validate` as a background task; the main chat posts its progress |
+| The wait for the example run (6) | `sm seed-validate` as a background task |
 
 With no Agent tool the same work is done inline, in this order.
 

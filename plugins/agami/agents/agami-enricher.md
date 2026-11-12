@@ -45,8 +45,7 @@ The prompt names:
 
 ## What you return
 
-Write one JSON object to `result_path` with the Write tool (the one file you write besides your sample
-SQL), then reply with only the path and one line: *"sales: 18 tables described, 2 metric ideas, 5
+Write one JSON object to `result_path` with the Write tool (the one file you write), then reply with only the path and one line: *"sales: 18 tables described, 2 metric ideas, 5
 questions"*. The main chat applies the file with one tested command, so it must be exactly this shape:
 
 ```json
