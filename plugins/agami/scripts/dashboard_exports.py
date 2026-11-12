@@ -90,10 +90,8 @@ def _zip_member(path: Path, want) -> tuple[str, bytes]:
                 continue
             if info.file_size > _MAX_DOC_BYTES:
                 raise ExportError(f"{info.filename} inside {path.name} is too large to read")
-            with book.open(info) as fh:
-                data = fh.read(_MAX_DOC_BYTES + 1)
-            if len(data) > _MAX_DOC_BYTES:
-                raise ExportError(f"{info.filename} inside {path.name} is too large to read")
+            # The declared size was checked above, and ZipFile reads no further than it.
+            data = book.read(info)
             return info.filename, data
     raise ExportError(f"{path.name} holds nothing this reader can use")
 
