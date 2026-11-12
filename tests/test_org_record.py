@@ -240,6 +240,21 @@ def test_removing_a_datasource_drops_it_from_both_files(tmp_path):
     assert OR.narrative_path(tmp_path).read_text(encoding="utf-8") == _ORG_MD
 
 
+def test_removing_the_section_keeps_the_paragraphs_around_it_apart(tmp_path):
+    import shutil
+
+    _add_datasource(tmp_path, "sales", "Orders.")
+    OR.narrative_path(tmp_path).write_text(
+        "First paragraph.\n\n<!-- agami:datasources -->\n## Connected databases\n\n"
+        "- **sales**: Orders.\n<!-- /agami:datasources -->\n\nSecond paragraph.\n",
+        encoding="utf-8",
+    )
+    OR.refresh_datasources(tmp_path)
+    shutil.rmtree(tmp_path / "sales")
+    OR.refresh_datasources(tmp_path)
+    assert OR.narrative_path(tmp_path).read_text(encoding="utf-8") == "First paragraph.\n\nSecond paragraph.\n"
+
+
 def test_refresh_never_creates_organization_md(tmp_path):
     # The connect skill reads the file's presence as "company context already authored".
     _add_datasource(tmp_path, "sales", "Orders.")

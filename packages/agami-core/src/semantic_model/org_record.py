@@ -353,7 +353,11 @@ def _replace_datasources_block(text: str, block: str) -> str:
         tail = rest.split(_DATASOURCES_END, 1)[1]
         if block:
             return head + block + tail
-        return (head.rstrip() + "\n" if head.strip() else "") + tail.lstrip("\n")
+        head, tail = head.rstrip(), tail.lstrip("\n")
+        # Keep the blank line between the text before and after, or Markdown joins the paragraphs.
+        if head and tail.strip():
+            return head + "\n\n" + tail
+        return head + "\n" if head else tail
     if not block:
         return text
     return (text.rstrip() + "\n\n" if text.strip() else "") + block + "\n"

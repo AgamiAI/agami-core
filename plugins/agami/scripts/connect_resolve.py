@@ -246,10 +246,29 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
             "candidates_scored": scored, "warnings": warnings}
 
 
-def _refresh_org_files(art: Path) -> list[str] | None:
+_REFRESH = (
+    "import json, sys; sys.path.insert(0, sys.argv[1]); "
+    "from _agami_lib import ensure_importable; ensure_importable(); "
+    "from semantic_model import org_record; r = org_record.refresh_datasources(sys.argv[2]); "
+    "print(json.dumps(list(r.datasources) if r is not None else None))"
+)
+
+
+def _refresh_org_files(art: Path, python3: str | None = None) -> list[str] | None:
     """Bring organization.yaml's datasource list and organization.md's section up to date with the
     datasource folders on disk. Skipped (None) when the agami-core package or its deps aren't installed
     yet, as on a first-time setup; this script must never fail on that."""
+    # The chosen interpreter can have the model deps when this one doesn't, so it runs the refresh.
+    if python3 and os.path.realpath(python3) != os.path.realpath(sys.executable):
+        try:
+            # cwd="/" so a module in the caller's folder can't shadow the library.
+            out = subprocess.run([python3, "-X", "utf8", "-c", _REFRESH, str(Path(__file__).resolve().parent),
+                                  str(art)], capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=30, cwd="/")
+            if out.returncode == 0:
+                return json.loads(out.stdout.strip().splitlines()[-1])
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            pass
     try:
         from semantic_model import org_record
 
@@ -339,7 +358,7 @@ def main(argv=None) -> int:
         "config": config,
         "interpreter": interpreter,
         "tools": tools,
-        "org_datasources": _refresh_org_files(art),
+        "org_datasources": _refresh_org_files(art, interpreter.get("python3")),
         "next": nxt,
     }
     print(json.dumps({"ok": True, "data": data, "anomalies": anomalies, "needs_judgment": None}, indent=2))

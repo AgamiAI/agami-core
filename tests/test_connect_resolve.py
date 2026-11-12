@@ -297,7 +297,19 @@ def test_later_pythons_on_path_are_candidates_too(monkeypatch, tmp_path):
     assert got.index(str(first / "python3")) < got.index(str(second / "python3"))
 
 
+def _this_python(monkeypatch, python3=sys.executable):
+    monkeypatch.setattr(CR, "_resolve_interpreter", lambda *a: {
+        "python3": python3, "has_model_deps": True, "has_driver": None, "warnings": []})
+
+
+def _two_datasources(art: Path) -> None:
+    for name in ("sales", "support"):
+        (art / name).mkdir()
+        (art / name / "datasource.yaml").write_text(f"datasource: {name}\n", encoding="utf-8")
+
+
 def test_resolve_refreshes_the_organization_files(tmp_path, monkeypatch):
+    _this_python(monkeypatch)
     pytest.importorskip("pydantic")
     pytest.importorskip("yaml")
     (tmp_path / "organization.md").write_text("# About this company\n", encoding="utf-8")
@@ -313,6 +325,7 @@ def test_resolve_refreshes_the_organization_files(tmp_path, monkeypatch):
 
 def test_resolve_skips_the_refresh_when_agami_core_cannot_be_imported(tmp_path, monkeypatch):
     # First-time setup can run before agami-core's deps are installed; the resolver must still answer.
+    _this_python(monkeypatch)
     monkeypatch.setitem(sys.modules, "semantic_model", None)  # makes the import raise ImportError
     (tmp_path / "sales").mkdir()
     (tmp_path / "sales" / "datasource.yaml").write_text("datasource: sales\n", encoding="utf-8")
@@ -326,3 +339,33 @@ def test_resolve_writes_nothing_into_an_empty_artifacts_dir(tmp_path, monkeypatc
     data, _ = _run(monkeypatch, tmp_path)
     assert data["org_datasources"] is None
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executables")
+def test_the_refresh_runs_in_the_chosen_interpreter(tmp_path, monkeypatch):
+    # The chosen Python can have the model deps when the resolver's own doesn't.
+    pytest.importorskip("pydantic")
+    pytest.importorskip("yaml")
+    chosen = tmp_path / "bin" / "python3"
+    chosen.parent.mkdir()
+    chosen.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    chosen.chmod(0o755)
+    art = tmp_path / "art"
+    art.mkdir()
+    _two_datasources(art)
+    _this_python(monkeypatch, str(chosen))
+    monkeypatch.setitem(sys.modules, "semantic_model", None)  # this Python can't import it
+
+    data, _ = _run(monkeypatch, art)
+    assert data["org_datasources"] == ["sales", "support"]
+    assert "- support" in (art / "organization.yaml").read_text(encoding="utf-8")
+
+
+def test_a_failing_chosen_interpreter_falls_back_to_this_one(tmp_path, monkeypatch):
+    pytest.importorskip("pydantic")
+    pytest.importorskip("yaml")
+    _two_datasources(tmp_path)
+    _this_python(monkeypatch, str(tmp_path / "no-such-python"))
+
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["org_datasources"] == ["sales", "support"]
