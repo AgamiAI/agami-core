@@ -23,6 +23,7 @@ local-only execution path the rest of agami uses; no new egress.
 
 from __future__ import annotations
 
+import bisect
 import csv
 import functools
 import io
@@ -30,11 +31,13 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Callable, Iterator, Optional, Sequence, TypeVar
 
 # Introspection-run timestamp for system sign-offs on auto-approved structure.
 _NOW = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -130,6 +133,14 @@ _DATA_UNIQUE_NOTE = "no constraint declares it — looks one-to-one, confirm"
 # per run, each over a bounded sample of the column's distinct values. Its candidates are only
 # reported, never written to the model.
 JOIN_CANDIDATE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
+# On a warehouse each of those probes is a round trip, so the scan runs this many at a time. A file
+# database (SQLite, DuckDB) stays one at a time: its probes are local reads with no round trip to
+# hide, and a second reader of the same file only contends for it. `AGAMI_PROBE_WORKERS` (1..8) wins.
+PROBE_WORKERS = 4
+_PROBE_WORKERS_MAX = 8
+_SERIAL_PROBE_DIALECTS = frozenset({"SQLite", "DuckDB"})
+# The scan writes a progress line after this many finished probes, so a long scan isn't silent.
+_PROBE_PROGRESS_EVERY = 25
 _CANDIDATE_SAMPLE = 1000
 # A candidate whose sampled values are found in the key at this rate or above is offered as a join.
 _CANDIDATE_MIN_MATCH = 0.95
@@ -556,7 +567,7 @@ def introspect(
                        samples, reads, report, sg, fresh_personal=fresh_personal,
                        prior=set(existing) if refreshing else set())
     _progress(pp, "join candidates: testing columns no join covers…")
-    _scan_join_candidates(dialect, runner, rels, built, report, sg)
+    _scan_join_candidates(dialect, runner, rels, built, report, sg, progress=pp)
     if refreshing:   # counted after the join merge and relabel, which are changes too
         report.notes.append(
             f"append: {len(report.new_tables)} new table(s), {len(report.changes)} changed, "
@@ -2338,38 +2349,169 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
             "evidence": evidence}
 
 
+_T = TypeVar("_T")
+
+
+def _run_probes(jobs: Sequence[Callable[[], _T]], workers: int) -> list[_T | BaseException]:
+    """Run `jobs` up to `workers` at a time and return their results in the jobs' order, whatever
+    order they finish in. A job that raises leaves its exception in its slot, so one failed probe
+    doesn't lose the others; an interrupt (KeyboardInterrupt, SystemExit) still stops the run."""
+    if workers <= 1 or len(jobs) <= 1:
+        out: list[_T | BaseException] = []
+        for job in jobs:
+            try:
+                out.append(job())
+            except Exception as e:
+                out.append(e)
+        return out
+    pool = ThreadPoolExecutor(max_workers=min(workers, len(jobs)))
+    try:
+        futures = [pool.submit(job) for job in jobs]
+        results: list[_T | BaseException] = []
+        for f in futures:
+            try:
+                results.append(f.result())
+            except Exception as e:
+                results.append(e)
+    except BaseException:
+        # Interrupted: don't start the probes still queued, and don't wait for the running ones.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    return results
+
+
+def _probe_workers(dialect: D.Dialect) -> int:
+    """How many join-candidate probes run at once: AGAMI_PROBE_WORKERS (clamped to 1..8) when it is
+    an integer, else one for a file database and PROBE_WORKERS for the rest."""
+    raw = os.environ.get("AGAMI_PROBE_WORKERS", "").strip()
+    try:
+        return max(1, min(_PROBE_WORKERS_MAX, int(raw)))
+    except ValueError:
+        return 1 if dialect.name in _SERIAL_PROBE_DIALECTS else PROBE_WORKERS
+
+
+class _ProbeProgress:
+    """Counts finished probes from the worker threads and logs every `_PROBE_PROGRESS_EVERY`th, under
+    a lock so the lines come out in order and never interleave."""
+
+    def __init__(self, path: Optional[Path]) -> None:
+        self.path, self.done, self._lock = path, 0, threading.Lock()
+
+    def tick(self) -> None:
+        with self._lock:
+            self.done += 1
+            if self.done % _PROBE_PROGRESS_EVERY == 0:
+                _progress(self.path, f"join candidates: {self.done} probed")
+
+    def finish(self) -> None:
+        with self._lock:
+            if self.done % _PROBE_PROGRESS_EVERY:
+                _progress(self.path, f"join candidates: {self.done} probed")
+
+
+def _offered(hit: Optional[tuple[int, int]]) -> bool:
+    """A probe's (matched, sampled) clears the match rate a candidate needs."""
+    return hit is not None and bool(hit[1]) and hit[0] / hit[1] >= _CANDIDATE_MIN_MATCH
+
+
 def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relationship],
                           tables: list[Table], report: IntrospectReport,
-                          sqlglot_dialect: Optional[str] = None) -> None:
+                          sqlglot_dialect: Optional[str] = None, *,
+                          progress: Optional[Path] = None) -> None:
     """Test columns no join covers against other tables' keys and report what the data bears out (#512).
 
     Nothing is written to the model: a candidate is listed in the report and join_candidates.json for
     a person to accept with one `sm curate` call. Every probe is a bounded, read-only sample, at most
-    JOIN_CANDIDATE_PROBE_CAP per run, and a FROM table too large to scan is skipped."""
+    JOIN_CANDIDATE_PROBE_CAP per run, and a FROM table too large to scan is skipped.
+
+    The probes run a few at a time (`_probe_workers`), and what is found is exactly what probing them
+    one after another finds. That takes care, because a pair's fate can hang on earlier pairs'
+    results: a column offered once is not tested again, a pair offered one way is not offered
+    reversed, and the cap counts the probes actually issued before it. So the pairs are walked in
+    their priority order in rounds, and a pair is settled (skipped, too big, probed, or where the cap
+    stops the scan) only once nothing still in doubt before it could change that: no earlier pair
+    left unresolved has its column or is its reverse, and the probes before it stay under the cap
+    even if every doubtful earlier pair turns out to be one. A round's probes run together and their
+    results settle the next round. The lists are built in pair order, so completion order never shows."""
     # Its own count beside the uniqueness probes' `_ProbeBudget`, so neither cap eats into the other.
-    left = JOIN_CANDIDATE_PROBE_CAP
+    cap = JOIN_CANDIDATE_PROBE_CAP
+    workers = _probe_workers(dialect)
     found: set[tuple] = set()   # columns already offered: one join per column is enough to review
     offered: set[tuple] = set()   # (from, to) column pairs, so a pair isn't offered again reversed
     too_big: set[str] = set()
-    for prio, t, c, u, k in _candidate_pairs(rels, tables, sqlglot_dialect):
-        col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
-        if col in found or (key, col) in offered:
-            continue
-        if _too_big_to_probe(t):
-            too_big.add(_qualified(t))
-            continue
-        if left <= 0:
-            report.join_candidate_cap_hit = True
-            report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
-                                "columns past the cap were not tested")
-            break
-        left -= 1
-        report.join_candidate_probes += 1
-        hit = _overlap_rate(dialect, runner, t, c.name, u, k)
+    pairs = enumerate(_candidate_pairs(rels, tables, sqlglot_dialect))
+    waiting: list[tuple] = []   # (seq, pair) pulled from `pairs` and not yet settled, in order
+    issued: list[int] = []   # the seq of every probe issued, sorted: how many came before a pair
+    probed: list[tuple] = []   # (seq, pair, hit)
+    exhausted = stopped = False
+    tally = _ProbeProgress(progress)
+    while not stopped and (waiting or not exhausted):
+        batch: list[tuple] = []
+        unresolved_cols: set[tuple] = set()   # columns of earlier pairs whose outcome isn't known yet
+        unresolved_pairs: set[tuple] = set()   # their (column, key) pairs
+        doubtful = 0   # earlier pairs not settled yet: each may still be a probe
+        still: list[tuple] = []
+        pos = 0
+        while True:
+            if pos < len(waiting):
+                item = waiting[pos]
+            elif exhausted or (item := next(pairs, None)) is None:
+                exhausted = True
+                break
+            else:
+                waiting.append(item)
+            pos += 1
+            seq, (prio, t, c, u, k) = item
+            col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
+            before = bisect.bisect_left(issued, seq)   # probes issued for earlier pairs
+            if doubtful and before + doubtful >= cap:
+                # The doubtful pairs could still reach the cap, so neither this pair nor any after it
+                # can be settled this round.
+                pos -= 1
+                break
+            if col in unresolved_cols or (key, col) in unresolved_pairs:
+                still.append(item)
+                unresolved_cols.add(col)
+                unresolved_pairs.add((col, key))
+                doubtful += 1
+                continue
+            if col in found or (key, col) in offered:
+                continue
+            if _too_big_to_probe(t):
+                too_big.add(_qualified(t))
+                continue
+            if before >= cap:   # only reached with nothing doubtful before it: the serial stop
+                report.join_candidate_cap_hit = True
+                report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
+                                    "columns past the cap were not tested")
+                stopped = True
+                break
+            bisect.insort(issued, seq)
+            report.join_candidate_probes += 1
+            batch.append(item)
+            unresolved_cols.add(col)
+            unresolved_pairs.add((col, key))
+        waiting = still + waiting[pos:]
+
+        def probe(t: Table, c: Column, u: Table, k: str) -> Optional[tuple[int, int]]:
+            try:
+                return _overlap_rate(dialect, runner, t, c.name, u, k)
+            finally:
+                tally.tick()
+        jobs = [functools.partial(probe, t, c, u, k) for _, (_, t, c, u, k) in batch]
+        for (seq, pair), hit in zip(batch, _run_probes(jobs, workers)):
+            if isinstance(hit, BaseException):
+                raise hit   # not a failed query (`_try` absorbs those) but a fault, as when run alone
+            probed.append((seq, pair, hit))
+            _, t, c, u, k = pair
+            if _offered(hit):
+                found.add((t.schema_name, t.name, c.name))
+                offered.add(((t.schema_name, t.name, c.name), (u.schema_name, u.name, k)))
+    tally.finish()
+    for _, (prio, t, c, u, k), hit in sorted(probed, key=lambda p: p[0]):
         cand = _candidate(t, c, u, k, hit, "name" if prio == 0 else "type")
-        if hit is not None and hit[1] and hit[0] / hit[1] >= _CANDIDATE_MIN_MATCH:
-            found.add(col)
-            offered.add((col, key))
+        if _offered(hit):
             report.join_candidates.append(cand)
         elif prio == 0 or (hit is not None and hit[0]):
             # A type-only pair with no value in common is noise, not a near miss.

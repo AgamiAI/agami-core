@@ -88,6 +88,14 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Join candidates are tested four at a time, and the build log says how far the test has got.**
+  On a warehouse each of the up to 300 probes that look for joins no key declares is a round trip,
+  so the scan ran as one long silent wait. It now runs four at a time (one at a time on SQLite and
+  DuckDB; `AGAMI_PROBE_WORKERS`, 1 to 8, overrides) and writes `join candidates: 50 probed` to the
+  progress log every 25 probes, which `sm progress` posts as "Testing possible joins: 50 probed".
+  What it finds is unchanged: the same candidates and near misses in the same order, the same probe
+  count and the same cap.
+
 - **agami-connect reads each phase when it starts.** Its SKILL.md was 1,460 lines, all loaded on
   every run; it is now a 145-line main file (the hard rules, the progress list and a phase index)
   and eight phase files under `skills/agami-connect/references/`, moved word for word. The phase
