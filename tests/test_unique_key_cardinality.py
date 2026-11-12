@@ -513,6 +513,8 @@ def test_a_refresh_spends_one_budget_on_both_passes(db, tmp_path, monkeypatch):
         made.append(real(*a, **kw))
         return made[-1]
     monkeypatch.setattr(I, "_ProbeBudget", tracking)
+    # A join checked on the whole key settles uniqueness with no probe (#448); make both passes probe.
+    monkeypatch.setattr(I, "_unique_from_check", lambda r, checked: False)
     _build(db, art, append=True, dry_run=True)
     assert len(made) == 1 and made[0].left < I._UNIQUE_PROBE_CAP
 

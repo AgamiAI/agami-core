@@ -14,6 +14,27 @@ below corresponds to one such version.
 
 ### Added
 
+- **A build checks every join on the data, and profiles what the columns hold (#448).** A join was
+  confirmed on 50 distinct values with one match enough, and a join card said "100% of 38 sampled
+  values match" without saying whether 38 was every value. Now each join is checked on the whole key
+  when its table is under 500,000 rows and on 5,000 rows otherwise, spread across the table where
+  the database samples whole pages; a key into a table too big to read whole is looked up for the
+  keys read. The card says which: "all 38 values" or "4,812 of 5,000 sampled (96%)". The check also
+  counts rows with no partner, which an inner join drops, and a key that repeats on the side it
+  points at, which multiplies totals. A declared key on a database that doesn't enforce it now needs
+  95% of its rows to find their partner. Each table is also profiled, whole or sampled the same way:
+  how full each column is, its distinct count, range, the most frequent values of a coded column,
+  and findings such as a column that is always empty or one value, a date after today on a column
+  named for something that already happened, two dates in the reverse of their names' order, and a
+  text column mixing date formats. Personal columns, and columns named like a person's name or a tax
+  or contact number, get counts only, and the file is cut to what the model serves on every write
+  and read. The profile and the join checks are written to `.introspect/profile.json` (`sm profile
+  <root> --table <t>` reads it), and enrichment describes columns from it instead of five sample
+  rows. The checks run eight to a statement and four statements at once (one for a browser sign-in),
+  and a join checked on the whole key needs no separate uniqueness probe: on a 42-table Postgres
+  behind a cloud pooler, checking its 73 joins took 2.2 seconds instead of 73 one at a time, and the
+  join-candidate scan 15 seconds instead of 205.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
@@ -74,6 +95,10 @@ below corresponds to one such version.
   refused.
 
 ### Changed
+
+- **Connect no longer guesses how long a build takes.** The per-database time table and every
+  duration claim are gone from the connect skill; it says what the build does and reports progress
+  from the engine's own counts (`joins: checking 78 on the data`, `profiled 20/42 tables`).
 
 - **Every agami decision is a question card in the chat; no page opens on its own and nothing is
   pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and

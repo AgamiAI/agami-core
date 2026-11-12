@@ -1,7 +1,7 @@
 ---
 name: agami-connect
 description: "End-to-end database connection for agami: sets up credentials on first run (DB-type picker → writes <artifacts_dir>/local/credentials.example for the user to fill in), then introspects the live DB directly into the agami semantic model (subject areas, tables, columns, relationships with join cardinality, deep-table column groups, sensitive-column flags) under <artifacts_dir>/<profile>/. The structural model is built deterministically by the agami-core semantic_model package (catalog mode, or a probe-mode fallback when the catalog is locked down); the skill then layers LLM enrichment (descriptions, entities, metrics) and seeds EXPLAIN-validated NL→SQL examples. Every model write is gated by the semantic-model validator — no breaking model is ever persisted."
-when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and lands a queryable model in under a minute."
+when_to_use: "Run when the user installs the plugin for the first time, asks 'how do I set up agami' / 'connect to my database' / 'introspect my database' / 'introspect the schema' / 'reload schema' / 'add a new database', wants to try agami WITHOUT a database ('I don't have a database', 'try the sample', 'use the sample data', 'demo data'), or after the user changes their schema and wants the model refreshed. Also auto-invoked by agami-query the first time it runs (when the semantic model is missing). This skill handles credential setup, introspection, enrichment, and seed-example validation — one entry point for everything before the user can query. The sample-database path (Phase 0s) needs no connection and copies in a ready, queryable model."
 argument-hint: "[sample | reintrospect | profile NAME]"
 ---
 
@@ -29,7 +29,7 @@ For every decision card and result table: [`shared/question-cards.md`](../../sha
 
 ## Progress tracking — the onboarding steps, shown the whole way
 
-This is a multi-phase skill that often takes 5–15 minutes, with cards in between. **The very first action on every invocation is to show the onboarding steps as a task list, and to keep it current**, so the person always knows where they are and what's left. Use the task-list tool the host gives you (`TodoWrite`, `TaskCreate`, or the app's own task list, such as the one shown under your message in the Desktop app); where there is none, a short numbered list in your first message, repeated with the current step marked whenever a step finishes.
+This is a multi-phase skill, with cards in between. **The very first action on every invocation is to show the onboarding steps as a task list, and to keep it current**, so the person always knows where they are and what's left. Use the task-list tool the host gives you (`TodoWrite`, `TaskCreate`, or the app's own task list, such as the one shown under your message in the Desktop app); where there is none, a short numbered list in your first message, repeated with the current step marked whenever a step finishes.
 
 The same steps every run, in the person's words (no "introspect", "enrich" or "NL→SQL"):
 
@@ -418,9 +418,6 @@ introspect → enrich → seed flow.
 
 Tip: agami only runs read-only queries, so a read-only database user is all it needs
 (and safest). Want the exact GRANT SQL for your database? Just ask.
-
-Heads-up: a cold cloud warehouse (Snowflake especially) makes introspect the slow
-step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
 ```
 Then **AskUserQuestion**, one question, header `Credentials`: *"Tell me when the file is filled in and saved."*
 
@@ -480,7 +477,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    ```bash
    "$PY" "${CLAUDE_PLUGIN_ROOT}/samples/store/build_sample.py" --out "<artifacts_dir>/local/samples/store.db"
    ```
-   Uses the `sqlite3` CLI if present, else the stdlib builder. ~seconds; prints the size.
+   Uses the `sqlite3` CLI if present, else the stdlib builder; prints the size.
 4. **Write the `[agami-example]` credential by reusing the deterministic promoter** — don't hand-roll the INI. Write a `credentials.example` whose `[agami-example]` section has the **resolved absolute** path from step 3, then promote it:
    ```ini
    [agami-example]
@@ -498,10 +495,10 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    | option | branch |
    |---|---|
    | `Just let me query it (Recommended)` | **6A — copy** |
-   | `Build the model from scratch so I can see it work` | **6B — rebuild live (~5–10 min)** |
+   | `Build the model from scratch so I can see it work` | **6B — rebuild live** |
 
-   - **6A (copy, < 1 min):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "${CLAUDE_PLUGIN_ROOT}/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **mint the deployment `org_id`** (a *copy* carries no id — introspect mints inline, a copy bypasses it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id "<artifacts_dir>/agami-example"` — idempotent, writes a locally-minted uuid into `datasource.yaml` so the sample deployment has a portable identity like any other. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
-   - **6B (rebuild live — "watch it build"):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. It takes a few minutes (the non-default option). **Don't mention tokens, cost, or billing** — surface time (~5–10 min), not scary money words.
+   - **6A (copy):** `mkdir -p "<artifacts_dir>/agami-example"` then `cp -R "${CLAUDE_PLUGIN_ROOT}/samples/store/model/." "<artifacts_dir>/agami-example/"`. **Validate it loads here**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" validate "<artifacts_dir>/agami-example"`. If it fails, surface the errors and stop — never leave a half-wired profile. Then **mint the deployment `org_id`** (a *copy* carries no id — introspect mints inline, a copy bypasses it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" ensure-org-id "<artifacts_dir>/agami-example"` — idempotent, writes a locally-minted uuid into `datasource.yaml` so the sample deployment has a portable identity like any other. Then **stamp a model_version** (a *copy* doesn't go through introspect/curate, so nothing auto-stamps it): `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" snapshot "<artifacts_dir>/agami-example"` — best-effort, so the answer receipt shows a version rather than `null`. (We stamp at copy time instead of committing a static `.snapshots/` so it always matches the model's actual content; 6B gets one automatically from introspect.)
+   - **6B (rebuild live — "watch it build"):** ignore the committed `model/` and run the **normal Phases 1→2** against the `agami-example` profile (`--db-type sqlite`) — the same introspect → enrich → seed pipeline a real onboarding uses, just pointed at the sample SQLite file. It is the non-default option. **Don't mention tokens, cost, billing or a duration**: report progress from the engine's counts as it goes.
      - **Sample carve-outs — the dataset is small + curated, so DON'T prompt (build silently over ALL tables):** skip the [Phase 1.6](#16--discover--prune-the-table-list-cheap-first-pass) **table** card, skip the **org-description** prompt (Phase 2f / 0a), and skip the **doc/metrics intake** (Phase 1's "do you have a data dictionary / dbt repo?"). These prompts exist for a real unknown DB; for the sample they're noise. Introspect + enrich every sample table without asking.
      - **Clear the pre-seed gate before seeding (the silent build has no human to sign off).** Enrichment lands the sample's metrics/entities `unreviewed`, so `seed-examples` would refuse with `preseed_review_pending`. Because the sample is curated and trusted, **auto-approve the queue as a system signer** right before seeding — the silent path clears its own gate:
        ```bash
@@ -530,20 +527,19 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 
 ## Phase 1: Introspect → semantic model
 
-### 1.0 — Set expectations before kicking off
+### 1.0 — Say what will happen, then report real progress
 
-Introspection can take a while against cloud DBs. Tell the user **before** the first probe. Honest estimates — **don't lowball** (a user told "5 min" who waits 4 thinks "almost there"; one told "1 min" thinks "stuck").
+Tell the user **before** the first probe what the build does, never how long it will take: no time
+estimate in any form, because how long it takes depends on the network, the warehouse and the data,
+and a guess is wrong by ten times as often as it is right. Say the steps instead: *"I'll read each
+table's columns and keys, check every join against the data, and profile what the columns hold."*
+When a step is slow for a known reason, say the reason (*"each statement goes over the network to
+the warehouse"*), not a duration.
 
-| db_type | Typical | Why |
-|---|---|---|
-| sqlite / duckdb | < 5s | local file |
-| postgres / mysql (local) | 5–15s | fast catalog |
-| postgres / mysql (cloud) | 15–60s | network RTT per query + FK overlap checks |
-| **redshift / databricks / trino** | **~30s for ≤20 tables; 10–30+ min for 50+** | unenforced FKs → the relationship phase confirms joins by value-overlap, one scan per candidate over the network, and big fact tables dominate. **Scale your estimate with table count and warn explicitly.** |
-| **snowflake** | **5–15 min** | cold-warehouse spin-up dominates; per-table queries, sample scans, EXPLAIN validation. A 100-table account measured ~12 min. |
-| sqlserver / oracle | 30s–5 min | network + per-table catalog |
-
-**Set a HONEST estimate — understating it is what makes a working run read as "stuck."** For a large schema (50+ tables) on Redshift/Databricks/Trino, say so up front: e.g. *"This is ~50 tables on Redshift — the relationship phase confirms joins by value-overlap, so expect **10–30 minutes**. I'll stream progress and report when it lands."* Then **stream the heartbeat** (background + tail, per 1.7) so the user sees `columns+grain 30/52` and `relationships: declared FK 80/187` rather than silence. For `reintrospect`, prepend "Re-introspecting (about as long as initial setup)."
+Then **report progress from the engine's real counts** as it goes (background + tail, per 1.7):
+`columns+grain 30/52`, `joins: checking 78 on the data`, `profiled 20/42 tables`. Quote the counts the
+progress log printed; never estimate, round up or extrapolate one. For `reintrospect`, say it reads
+every table again.
 
 ### 1.1 — Existing-model check
 
@@ -680,7 +676,7 @@ Stash everything gathered (doc text + repo definitions) as `$DATA_MODEL_DOC_TEXT
 
 ### 1.6 — Discover & prune the table list (cheap first pass)
 
-**Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
+**Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) cuts the work to the tables that matter.
 
 **Run the discover pass** — it lists tables + columns only (no grain, FK, or row-count probes, so it's fast even over a tunnel):
 
@@ -780,9 +776,9 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
 
 `--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
-**On a large schema (50+ tables) over a tunnel this takes minutes and the command prints nothing until it returns — which reads as hung.** Two ways to keep it legible, in order of preference:
+**On a large schema (50+ tables) over a network connection the command prints nothing until it returns, which reads as hung.** Two ways to keep it legible, in order of preference:
 
-1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+1. **Batched build (preferred for 30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a *foreground* command. Every call MERGES into the existing model (prior tables' columns and keys are loaded from disk, not read again; every join of the model is checked on the data again each call), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
    ```bash
    split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
    for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
@@ -792,26 +788,26 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" introspect \
    done
    ```
    (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
-2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `relationships: declared FK 80/187`, `done`.
+2. **Single background call + tail.** If you'd rather one call: run it **in the background** (Bash `run_in_background: true`) and `tail` its progress log every ~15–20s, surfacing the latest line. The engine writes a flushed, **throttled** (~every 10%) per-phase log to `<artifacts_dir>/<profile>/.introspect/progress.log` (override with `--progress`): `discovered 52 tables …`, `columns+grain 30/52`, `joins: checking 78 on the data`, `profiled 20/42 tables`, `done`.
 
-(For a small DB introspect returns in seconds — no batching or backgrounding needed.)
+(For a handful of tables on a local database, one foreground call is enough.)
 
-It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, other unique keys→`unique_keys`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`, one-to-one when the join is on a whole key on both sides; a join only the data shows is unique keeps its label and lands `unreviewed` with a "looks one-to-one, confirm" note), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII (by whole-word column name, email-valued columns, and personal keys inside JSON values, named in a column caveat), cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) and everything from probe mode are confirmed-by-overlap or `unreviewed`. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
+It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: storage connection, **proposed subject areas**, per-table columns + types (catalog or value-inferred), PK→`grain`, other unique keys→`unique_keys`, FK→`relationships` with **inferred cardinality** (`many_to_one`/`one_to_many`/`one_to_one`, one-to-one when the join is on a whole key on both sides; a join only the data shows is unique keeps its label and lands `unreviewed` with a "looks one-to-one, confirm" note), `column_groups` on deep tables (≥30 cols), `sensitive` flags on PII (by whole-word column name, email-valued columns, and personal keys inside JSON values, named in a column caveat), cross-area edges, and a report. Relationships from **unenforced-FK** dialects (Redshift/Databricks/Trino) are confirmed when at least 95% of their values are found on the other side, else `unreviewed`; everything from probe mode is `unreviewed`. Every join is then checked on the data, and the report's `## joins checked on the data` section lists the ones worth a look (values with no partner, or a referenced key that repeats, which multiplies rows): mention those in the Phase 7 summary in plain words. The report prints the **capability mode per step** (catalog vs probe) — surface that to the user so they know what was read vs inferred.
 
-**Join candidates (tested, not written).** After the joins are built, introspection tests every column no join covers against each other table's one-column key (primary or unique) when the column's name matches the key or its type does — `orders.cust_ref` against `customers.id`, say (a column with a value list, or one column of a key over several, needs its name to point at the table) — and also when the database declares some foreign keys, for the columns they don't cover. Each test is one read-only `SELECT` over a sample of at most 1,000 of the column's distinct values; a run makes **at most 300** of them, and a table over 3,000,000 rows is not probed, so a billed warehouse sees a bounded number of small queries. A column flagged sensitive, or whose sampled values look personal, is never tested at either end, and the report and the file carry only names and counts. None of these joins is written to the model. The report's `## join candidates` section lists each with its match rate (`+ orders.cust_ref->customers.id: 100.0% of sampled orders.cust_ref values found in customers.id`), and the near misses with a `-`; it says so when the 300-probe cap stopped the scan. The same list is in `<artifacts_dir>/<profile>/.introspect/join_candidates.json`, each candidate a ready `add` op with its evidence. Show the user the candidates and ask which are real joins; add each one they confirm with one call (written `unreviewed`, for sign-off in `/agami-model`).
+**Join candidates (tested, not written).** After the joins are built, introspection tests every column no join covers against each other table's one-column key (primary or unique) when the column's name matches the key or its type does — `orders.cust_ref` against `customers.id`, say (a column with a value list, or one column of a key over several, needs its name to point at the table) — and also when the database declares some foreign keys, for the columns they don't cover. Each test is a read-only aggregate over the whole column when its table is under 500,000 rows, and over a sample of 5,000 rows otherwise (spread across the table where the engine samples whole pages or blocks, else the first rows read); a key into a table over 3,000,000 rows is looked up for the keys read rather than read whole. Several share one statement, and up to 4 statements run at once, so the build holds up to 4 database connections beside its own (1 when the profile signs in through a browser). A run makes **at most 300** of them, so a billed warehouse sees a bounded number of small queries. A column flagged sensitive, or whose sampled values look personal, is never tested at either end, and the report and the file carry only names and counts. None of these joins is written to the model. The report's `## join candidates` section lists each with its match rate (`+ orders.cust_ref->customers.id: all 3 values of orders.cust_ref are found in customers.id (whole table checked)`), and the near misses with a `-`; it says so when the 300-probe cap stopped the scan. The same list is in `<artifacts_dir>/<profile>/.introspect/join_candidates.json`, each candidate a ready `add` op with its evidence. Show the user the candidates and ask which are real joins; add each one they confirm with one call (written `unreviewed`, for sign-off in `/agami-model`).
 
 **Show every join before asking about any of them.** A card that offered "Add all 16" and "Only 1–8" without the joins themselves left the person nothing to judge by. First a table in the chat, one row per candidate from `candidates`, highest match first, numbered so a range on the card points at rows the person can see ([question-cards rule 3](../../shared/question-cards.md#3-a-result-is-chat-output-before-the-card-that-acts-on-it)); a chat table may show the identifiers:
 
 ```
-| # | Join                                     | Match              |
-|---|------------------------------------------|--------------------|
-| 1 | leads.converted_contact_id → contacts.id | 100% (412 of 412)  |
-| 2 | orders.cust_ref → customers.id           | 97.5% (390 of 400) |
+| # | Join                                     | Match                          |
+|---|------------------------------------------|--------------------------------|
+| 1 | leads.converted_contact_id → contacts.id | all 412 values                 |
+| 2 | orders.cust_ref → customers.id           | 4,812 of 5,000 sampled (96%)   |
 ```
 
-The join is the candidate's `id` without its schemas, `->` drawn as `→`; the match is `evidence.match_rate` with `matched of sampled`. At most 15 rows, then *"and N more"*; say how many near misses (`low_overlap`) were left out, without listing them. Then the card:
+The join is the candidate's `id` without its schemas, `->` drawn as `→`. The match says which check it was, from `evidence.read`, with `matched`, `sampled` and `evidence.match_rate` (a share; show it as a percent). Both count rows: of the rows read that have the key filled in, how many find a partner. On `whole` (every row read) it is *"all <evidence.values> values"* when `matched` equals `sampled`, else *"<matched> of <sampled> rows (<match_rate>)"*. On `sample` or `first_rows` it is *"<matched> of <sampled> sampled (<match_rate>)"*. Show the percent rounded down, as the summary does, so a join short of the 95% rule never reads 95%. Never call a whole-table check a sample, or a sample "all". At most 15 rows, then *"and N more"*; say how many near misses (`low_overlap`) were left out, without listing them. Then the card:
 
-- **Up to 4 candidates:** one question per candidate (header `Join 1/3`), the question in plain words (*"Join Leads to Contacts by Converted contact ID?"*, [rule 3b](../../shared/question-cards.md#3b-things-are-named-in-plain-words)), options **Add it** (description: the match, *"100% of 412 sampled values match"*; preview: the join as in the table, then the `ON` condition, `leads.converted_contact_id = contacts.id`) and **Leave it out**.
+- **Up to 4 candidates:** one question per candidate (header `Join 1/3`), the question in plain words (*"Join Leads to Contacts by Converted contact ID?"*, [rule 3b](../../shared/question-cards.md#3b-things-are-named-in-plain-words)), options **Add it** (description: the match as in the table, *"All 412 values match"* or *"4,812 of 5,000 sampled rows match (96%)"*, then what `evidence.summary` says about rows with no partner, which an inner join drops; preview: the join as in the table, then the `ON` condition, `leads.converted_contact_id = contacts.id`) and **Leave it out**.
 - **More than 4:** one question, with group options, and **each option's `preview` lists every join that option adds**, one per line as in the table, so the person sees exactly what a press adds: **Add the <k> full matches (Recommended)** when some match 100% (the others stay out), **Choose one by one** (cards of up to 4 as above, each with **Add all remaining**), **Add none**. Never offer a numbered range ("1–8") as an option on its own: a range is only a label for joins its preview names.
 
 ```bash
@@ -900,9 +896,9 @@ The format comes from the extension (`--format csv|json|tsv` overrides it). CSV 
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
-For each table fetch up to 5 sample rows for evidence, naming the columns: `SELECT c1, c2, … FROM <t> LIMIT 5` with only the table's declared columns that are neither excluded nor flagged sensitive (Snowflake `SAMPLE` for >10M rows). A star is refused, so never write one. Run profiling reads through `"$PY" -m execute_sql --profile <profile> --build-profile --sql-file <file>` (the interpreter Phase 0a.5 resolved): it keeps every check except that it also allows `information_schema`'s structure views (and `pg_catalog`'s structure tables) and JSON/array functions such as `jsonb_each` or `json_each` over a declared column. Join with an explicit `ON`; `USING` and `NATURAL` joins are refused there. Don't use `--no-safety` for these. The database's first error line comes back under the fixed message, so a typo is visible. **Samples are never written to disk** — context only, then discarded. Also capture MIN/MAX of each time column → record under the table's `performance_hints` so Phase 5 anchors "last 30 days" to the data's real MAX, not `NOW()`.
+**The evidence for each table is the build's profile, not a handful of rows.** Read it with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" profile "$ROOT" --table <t> [<t> …]` (a few tables per call): per column how much of it is filled or blank text, its distinct count, MIN/MAX for numbers and dates, its most frequent values with their shares when it is coded (at most 25 values that repeat, none of them personal; never for a column named like a person's or party's name, a contact, tax or licence number), the stand-in values the build found, and `findings` (a column that is always empty, mostly blank or one constant value; dates after today on a column named for something that already happened; one date before another on nearly every row, the reverse of what their names say; a text column that mixes date formats); and each join's check on the data. The profile was read from the whole table under 500,000 rows and from a sample above it (`read` says which). A personal column carries counts only, and pay to a person (salary, pay rate, bonus) no range. Use a finding in the description in words that stay true after the next load (*"the date the claim was paid, which comes before it was submitted"* is not one; *"holds the invoice date, not the payment date"* is), never its figures. Only when a column's meaning still isn't clear from its name, its profile and the documents, read up to 5 rows of the columns in question, naming them: `SELECT c1, c2, … FROM <t> LIMIT 5` with only declared columns that are neither excluded nor flagged sensitive. A star is refused, so never write one. Run profiling reads through `"$PY" -m execute_sql --profile <profile> --build-profile --sql-file <file>` (the interpreter Phase 0a.5 resolved): it keeps every check except that it also allows `information_schema`'s structure views (and `pg_catalog`'s structure tables) and JSON/array functions such as `jsonb_each` or `json_each` over a declared column. Join with an explicit `ON`; `USING` and `NATURAL` joins are refused there. Don't use `--no-safety` for these. The database's first error line comes back under the fixed message, so a typo is visible. **Rows you read are never written to disk** — context only, then discarded. The profile's MIN/MAX of each date column is what Phase 5 anchors "last 30 days" to (the data's real MAX, not `NOW()`).
 
-Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `datasource.md`, then tables/columns/sample rows. **Always** emit a 1-line table `description`. For **columns**, classify each into one of three — don't default everything to empty:
+Build a per-schema prompt with `$DATA_MODEL_DOC_TEXT` first (dominant prior), then `datasource.md`, then tables/columns/profile. **Always** emit a 1-line table `description`. For **columns**, classify each into one of three — don't default everything to empty:
 
 | Kind | Examples | What to write |
 |---|---|---|
@@ -1234,7 +1230,7 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 ## Phase 5: Seed prompt examples
 
-**Surface a progress warning first** (second-longest phase): "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud / a multi-schema DB). I'll narrate per-example progress."
+**Say what happens first**: "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. I'll report each example as it's checked."
 
 **5a — generate** (your job — the LLM step) candidate examples grounded in the model. Aim for **coverage and a good spread**, not a fixed count:
 
@@ -1270,7 +1266,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" seed-validate "$ROOT" --profile <profile
 
 Without `--area` it runs every area's seeds (each through `execute_sql` scoped to its own area, with the same per-statement limits) and prints one object: `areas` (`{area, examples, errored}` each), `items` (the items above, each labelled `area`) and `totals` (`areas`, `examples`, `errored`). Repeat `--area` to run only those areas. One `--area` prints the bare items array, as before. An area the model doesn't have is refused with `error: unknown_area` and the `valid_areas`.
 
-(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected, and run it in the background if it's slow.)
+(Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that cost warehouse compute. It's a one-time onboarding step; say so in one line, and run it in the background on a large warehouse.)
 
 **Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
 

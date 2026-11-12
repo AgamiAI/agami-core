@@ -59,6 +59,7 @@ _GRAIN_PROBE_MAX_ROWS = 5_000_000
 from . import build, pii
 from . import dialects as D
 from . import placeholders as P
+from . import profile as PF
 from .models import (
     Column,
     Datasource,
@@ -111,10 +112,8 @@ DECLARED_MAX_VALUES = 200
 # can't fire thousands.
 DISTINCT_READ_CAP = 1000
 PROBE_TABLE_CAP = 200  # cap value-overlap probing work
-# Safety valve for confirming DECLARED-but-unenforced catalog FKs (Redshift/Databricks/Trino)
-# by value-overlap: each confirmation is one sequential COUNT probe, so a schema that declares
-# hundreds of FKs could otherwise fire hundreds of round-trips. Past the budget we stop probing
-# and leave the remaining declared FKs inferred/unreviewed (they still surface for sign-off).
+# The per-run budget the uniqueness probes and the join-candidate scan each get. Joins themselves,
+# declared keys an unenforcing engine leaves to the data included, are checked on `profile.JOIN_CHECK_CAP`.
 FK_OVERLAP_PROBE_CAP = 300
 # Above this FROM-table row estimate we SKIP the value-overlap scan and leave the join
 # unverified (inferred/unreviewed) rather than scan millions of rows over the network — the
@@ -125,19 +124,22 @@ _OVERLAP_PROBE_MAX_ROWS = 3_000_000
 # COUNT(DISTINCT) each), on the same budget as the declared-FK overlap confirmation.
 _UNIQUE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
 _DATA_UNIQUE_NOTE = "no constraint declares it — looks one-to-one, confirm"
-# The wider join-candidate scan (#512): one match-rate probe per column/key pair, at most this many
-# per run, each over a bounded sample of the column's distinct values. Its candidates are only
-# reported, never written to the model.
+# The wider join-candidate scan (#512): one match-rate check per column/key pair, at most this many
+# per run, each on the whole column or a bounded sample of it (`profile.JoinCheck`). Its candidates
+# are only reported, never written to the model.
 JOIN_CANDIDATE_PROBE_CAP = FK_OVERLAP_PROBE_CAP
-_CANDIDATE_SAMPLE = 1000
-# A candidate whose sampled values are found in the key at this rate or above is offered as a join.
-_CANDIDATE_MIN_MATCH = 0.95
+# A candidate whose values are found in the key at this rate or above is offered as a join.
+_CANDIDATE_MIN_MATCH = PF.JOIN_MIN_MATCH
 _KEY_TYPES = frozenset({"integer", "string", "uuid"})
 # Names of numbers that aren't references: a small `age` or `year` falls inside any id range.
 _NOT_A_REFERENCE_RE = re.compile(
     r"(^|_)(age|year|yr|month|day|week|hour|minute|qty|quantity|count|cnt|amount|total|price|score|rank|"
     r"level|size|duration|version|position|sort|seq)s?($|_)", re.IGNORECASE)
 JOIN_CANDIDATES_FILE = "join_candidates.json"
+PROFILE_FILE = "profile.json"
+# Profile findings the report lists one line per table rather than one per column.
+_GROUPED_FINDINGS = {"empty": "empty on every row read", "mostly_blank": "blank on 90% or more of rows",
+                     "constant": "one value on every row"}
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -176,6 +178,10 @@ class IntrospectReport:
     join_candidates_low: list[dict] = field(default_factory=list)
     join_candidate_probes: int = 0
     join_candidate_cap_hit: bool = False
+    # Every join of the model as checked on the data: its label, and the evidence (`JoinCheck.evidence`).
+    join_checks: list[dict] = field(default_factory=list)
+    # The column profile of each table this run read, keyed `schema.table` (`profile.profile_table`).
+    profile_tables: dict = field(default_factory=dict)
     # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
     suspected_columns: list[str] = field(default_factory=list)
     # Values that look like placeholders and wait for a person to say what they mean (#445).
@@ -205,6 +211,8 @@ class IntrospectReport:
             *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
+            *self._render_profile(),
+            *self._render_join_checks(),
             *self._render_join_candidates(),
             *([f"suspected personal data (review): {', '.join(self.suspected_columns)}"]
               if self.suspected_columns else []),
@@ -217,6 +225,37 @@ class IntrospectReport:
             *[f"  {f}" for f in self.files_written[:60]],
         ]
         return "\n".join(lines)
+
+    def _render_profile(self) -> list[str]:
+        if not self.profile_tables:
+            return []
+        found = [(t, f) for t, p in self.profile_tables.items() for f in p.get("findings", [])]
+        out = [f"## column profile ({len(self.profile_tables)} tables read; {len(found)} finding(s); "
+               f"in .introspect/{PROFILE_FILE})"]
+        # The common kinds one line per table, the rest one line each: a wide table can have dozens.
+        grouped: dict[tuple, list[str]] = {}
+        for t, f in found:
+            if f["kind"] in _GROUPED_FINDINGS:
+                grouped.setdefault((t, f["kind"]), []).append(f["column"])
+            else:
+                out.append(f"  ! {t}: {f['detail']}")
+        out += [f"  - {t}: {_GROUPED_FINDINGS[k]}: {', '.join(cols)}" for (t, k), cols in grouped.items()]
+        return out
+
+    def _render_join_checks(self) -> list[str]:
+        if not self.join_checks:
+            return []
+        ran = [c for c in self.join_checks if c["read"] != "not_run"]
+        rated = [c for c in ran if "match_rate" in c]
+        whole = sum(1 for c in ran if c["read"] == "whole")
+        # Blank keys are an optional join's normal state; a value with no partner is not, nor a key
+        # the rows read point at repeating where the join promises one row (`JoinCheck.fans_out`).
+        worth = [c for c in rated if c["match_rate"] < 1 or c.get("fans_out")]
+        out = [f"## joins checked on the data ({len(ran)} of {len(self.join_checks)}: {whole} on the whole "
+               f"table, {len(ran) - whole} on a sample; {len(ran) - len(rated)} with no values to compare; "
+               f"{len(worth)} worth a look)"]
+        out += [f"  ! {c['join']}: {c['summary']}" for c in worth]
+        return out
 
     def _render_join_candidates(self) -> list[str]:
         if not (self.join_candidates or self.join_candidates_low or self.join_candidate_cap_hit):
@@ -359,6 +398,7 @@ def introspect(
             f"{reads.skipped} column(s) got no value list: the run's {DISTINCT_READ_CAP} DISTINCT reads were "
             "used up; build those tables in a separate run to list their values")
 
+    read_now = {table_key(t.name, t.schema_name) for t in built}   # profiled below; a refresh adds stored ones
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
     # a garbage table. Drop them with a clear note; if that leaves nothing, raise rather than
@@ -519,25 +559,61 @@ def introspect(
     # just its own batch (covers every schema present).
     _progress(pp, f"building relationships ({len(built)} tables; FK + value-overlap probes)…")
     rel_pairs = [(t.schema_name, t.name) for t in built]
-    rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp)
+    checked: dict = {}   # joins checked on the data this run, by endpoints
+    declared: list[Relationship] = []   # declared keys an unenforcing engine leaves to the data
+    rels = _build_relationships(dialect, runner, rel_pairs, built, report, pp=pp, declared=declared)
     if prev_rels:
         # A database key over several columns replaces the engine's own split joins for it (#510).
         dropped, rels = _merge_split_joins(rels, prev_rels, report, sg)
         if dropped:
             prev = _without_joins(prev, dropped)
             prev_rels = [r for r in prev_rels if id(r) not in dropped]
-        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
-        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg)
         # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = [r for r in rels if not any(_same_join(r, p, sg) for p in prev_rels)]
-    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
+        # A declared key the model already has is kept as stored, so the copy built this run is
+        # dropped: confirm the stored one instead, while it is still the engine's own unreviewed join.
+        declared = [next((p for p in prev_rels if _same_join(d, p, sg)), d) for d in declared]
+        declared = [d for d in declared if any(d is r for r in rels) or _left_for_the_data(d)]
+    # Every join checked on the data first: its counts also settle the uniqueness checks below.
+    join_checks = _check_joins(dialect, runner, [*prev_rels, *rels], built, report, sg, checked, pp, declared)
+    _confirm_declared(declared, checked, sg)
+    if prev_rels:
+        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg, checked)
+    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget, checked)
     if prev_rels:
         rels = list(prev_rels) + rels
+    for r, c in join_checks:   # after the relabelling, so each carries the label it ends with
+        report.join_checks.append({"join": _join_label(r, sg), "from_table": r.from_table, "to_table": r.to_table,
+                                   "from_schema": r.from_schema, "to_schema": r.to_schema,
+                                   "from_columns": c.fc, "to_columns": c.tc, "relationship": r.relationship,
+                                   "declared": r.confidence == "confirmed", **c.evidence()})
     # Placeholder values (#445), on the small and dimension tables this run read: a dimension is the
     # one side of a join, so this waits for the joins.
     _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
                        samples, reads, report, sg, fresh_personal=fresh_personal,
                        prior=set(existing) if refreshing else set())
+    to_profile = [t for t in built if table_key(t.name, t.schema_name) in read_now
+                  and t.review_state not in _UNSERVED]
+    _progress(pp, f"profiling {len(to_profile)} tables…")
+    step = max(1, len(to_profile) // 10)
+
+    def profiled(k: int) -> None:
+        if k % step == 0 or k == len(to_profile):
+            _progress(pp, f"profiled {k}/{len(to_profile)} tables")
+
+    # Personal in any copy of a table (two areas may each define it), or in this run's reading of a
+    # refreshed one: a merged column keeps its stored flags, and one that now holds phone numbers is
+    # personal even before anyone flags it.
+    personal_cols: dict[tuple, set[str]] = {k: set(v) for k, v in fresh_personal.items()}
+    for t in [*built, *(per_area.values() if refreshing else ())]:
+        personal_cols.setdefault((t.schema_name, t.name), set()).update(
+            c.name.lower() for c in t.columns if _never_read(c))
+
+    def personal(t: Table, c: Column) -> bool:
+        return _never_read(c) or c.name.lower() in personal_cols.get((t.schema_name, t.name), set())
+
+    report.profile_tables = PF.profile_tables(dialect, runner, to_profile, personal, samples, done=profiled)
     _progress(pp, "join candidates: testing columns no join covers…")
     _scan_join_candidates(dialect, runner, rels, built, report, sg)
     if refreshing:   # counted after the join merge and relabel, which are changes too
@@ -609,6 +685,8 @@ def introspect(
     report.files_unchanged = len(wr.files_unchanged)
     if not dry_run:
         write_join_candidates(out, report)
+        write_profile(out, report, [t for sa in org.subject_areas for t in sa.tables_defined],
+                      append=prev is not None)
     return org, report
 
 
@@ -1539,15 +1617,21 @@ class _ProbeBudget:
 
 def _suggest_data_unique(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
-    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None, checked: Optional[dict] = None,
 ) -> None:
     """Check each join's many side on the data when no key settles it, and flag a join whose
     values turn out unique for review. The label is left as it is: data that is unique today is not
-    a promise, so a person confirms the join is one-to-one (#511)."""
+    a promise, so a person confirms the join is one-to-one (#511). A join this run checked on the
+    whole key already has the counts, so it costs no statement."""
     budget = budget if budget is not None else _ProbeBudget()
     for r in rels:
         hit = _many_side(r, tables)
         if hit is None:
+            continue
+        known = _unique_from_check(r, checked or {})
+        if known is not False:
+            if known is not None:
+                _flag_one_to_one(r, hit[0], hit[1], known)
             continue
         if budget.left <= 0:
             if not budget.noted:
@@ -1560,6 +1644,22 @@ def _suggest_data_unique(
         rows = _distinct_rows(dialect, runner, table.schema_name, table.name, column)
         if rows is not None:
             _flag_one_to_one(r, table, column, rows)
+
+
+def _unique_from_check(r: Relationship, checked: dict) -> "int | None | bool":
+    """What this run's data check of `r` says about its many side: the filled rows when every value is
+    distinct, None when some repeat, or False when the check didn't read that side whole."""
+    c = checked.get(_check_key(r.from_schema, r.from_table, [r.from_column], r.to_schema, r.to_table,
+                               [r.to_column]))
+    if c is None or not c.ran:
+        return False
+    if r.relationship == "many_to_one":   # the many side is the one the check starts from
+        if c.read != "whole":
+            return False
+        return c.rows_keyed if 0 < c.rows_keyed == c.values else None
+    if c.target_read != "whole":   # only the matched keys were looked up
+        return False
+    return c.to_rows if 0 < c.to_rows == c.to_keys else None
 
 
 def _many_side(r: Relationship, tables: list[Table]) -> Optional[tuple[Table, str]]:
@@ -1603,7 +1703,7 @@ def _key_reason(t: Table, cols: list[str]) -> str:
 def _recheck_engine_joins(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
     report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
-    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None,
+    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None, checked: Optional[dict] = None,
 ) -> None:
     """On a refresh, label each join the engine approved itself from the database's keys as they
     are now, and list every one whose label that changes. A join a person signed off or edited is
@@ -1632,7 +1732,7 @@ def _recheck_engine_joins(
             f"{label}: {r.relationship} → {card} ({why})")
         r.relationship = card
     engine = [r for r in rels if _engine_approved(r)]
-    _suggest_data_unique(dialect, runner, engine, tables, report, budget)
+    _suggest_data_unique(dialect, runner, engine, tables, report, budget, checked)
     for r in engine:
         if not _engine_approved(r):
             ft = _endpoint(tables, r.from_table, r.from_schema)
@@ -1644,8 +1744,10 @@ def _recheck_engine_joins(
 def _build_relationships(
     dialect: D.Dialect, runner: Runner, pairs: list[tuple[Optional[str], str]],
     tables: list[Table], report: IntrospectReport,
-    pp: Optional[Path] = None,
+    pp: Optional[Path] = None, declared: Optional[list] = None,
 ) -> list[Relationship]:
+    """The model's joins. `declared` collects the declared keys an unenforcing engine leaves to be
+    confirmed on the data, once every join has been checked."""
     # catalog FKs per schema
     schemas = {s for s, _ in pairs if s}
     catalog_fks: list[dict] = []
@@ -1679,15 +1781,11 @@ def _build_relationships(
         tables_by_name.setdefault(t.name, []).append(t)
 
     rels: list[Relationship] = []
-    overlap_probes = 0   # budget guard for declared-FK overlap confirmation (see FK_OVERLAP_PROBE_CAP)
     outside_model = 0
     if catalog_ok and catalog_fks:
         report.mode_per_capability["relationships"] = "catalog"
-        fk_keys = _fk_groups(catalog_fks)
-        _fk_step = max(1, len(fk_keys) // 10)   # ~10 heartbeat lines over the (slow) FK pass
-        for _fi, (key_rows, grouped) in enumerate(fk_keys, 1):
-            if _fi % _fk_step == 0 or _fi == len(fk_keys):
-                _progress(pp, f"relationships: declared FK {_fi}/{len(fk_keys)}")
+        ungrouped = False
+        for key_rows, grouped in _fk_groups(catalog_fks):
             fk = key_rows[0]
             ft, tt = fk.get("from_table"), fk.get("to_table")
             fc = [r.get("from_column") for r in key_rows]
@@ -1704,30 +1802,15 @@ def _build_relationships(
             # DBs (Postgres/MySQL); otherwise resolve it from the table list (same-schema first).
             from_schema = fk.get("from_schema") or _schema_of(ft, tables_by_name)
             to_schema = fk.get("to_schema") or _schema_of(tt, tables_by_name, prefer=from_schema, report=report)
-            cross = bool(from_schema and to_schema and from_schema != to_schema)
             fobj = _pick_target(tables_by_name.get(ft, []), prefer=from_schema)
             tobj = _pick_target(tables_by_name.get(tt, []), prefer=to_schema)
+            cross = bool(from_schema and to_schema and from_schema != to_schema)
             card = build.infer_cardinality(fobj, tobj, fc, tc)   # every column of a composite key
-            # declared-but-unenforced FKs (Redshift/Databricks/Trino) -> confirm by overlap.
-            # The catalog's FK is a *declaration*, not a guarantee, so probe the data: if the
-            # child values actually live in the parent key, treat it like an enforced FK
-            # (confirmed + auto-approved) instead of dumping it in the review queue. Only FKs we
-            # can't confirm against the data stay inferred/unreviewed for a human glance. This is
-            # what keeps inheritance-heavy schemas (ServiceNow on Redshift) from flooding review.
             confidence = "confirmed" if dialect.fk_enforced else "inferred"
-            overlap_confirmed = False
-            if not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP:
-                # Skip the scan on huge FROM tables (the slow case on Redshift fact tables) —
-                # leave the declared FK inferred/unreviewed rather than full-scan to confirm it.
-                if fobj is not None and tobj is not None and not _too_big_to_probe(fobj):
-                    overlap_probes += 1
-                    one = len(fc) == 1   # a single column keeps the probe it always had
-                    if _overlaps(dialect, runner, fobj, fc[0] if one else fc, tobj, tc[0] if one else tc):
-                        confidence = "confirmed"
-                        overlap_confirmed = True
             # A key whose rows came without a constraint name can't be told from separate keys,
             # and used alone each column of a composite one repeats rows: never trusted (#510).
-            trusted = (dialect.fk_enforced or overlap_confirmed) and grouped
+            trusted = dialect.fk_enforced and grouped
+            ungrouped = ungrouped or not grouped
             # trusted joins are sound structure -> auto-approve with a system sign-off (don't
             # flood the review queue); unconfirmed ones need a glance.
             # EXCEPTION: a join that spans two schemas is an architectural claim — the model now
@@ -1736,8 +1819,6 @@ def _build_relationships(
             if trusted and not cross:
                 kw: dict = {"review_state": "approved", "signed_off_by": "agami_introspect",
                             "signed_off_role": "system", "signed_off_at": _NOW}
-                if overlap_confirmed:
-                    desc = "declared FK, confirmed by value-overlap probe"
             else:
                 kw = {"review_state": "unreviewed"}
             if not grouped:
@@ -1747,16 +1828,20 @@ def _build_relationships(
                 report.notes.append(f"cross-schema relationship: {from_schema}.{ft} → {to_schema}.{tt} (declared FK)")
             ends = ({"from_column": fc[0], "to_column": tc[0]} if len(fc) == 1
                     else {"on": _composite_on(dialect, ft, fc, tt, tc)})
-            rels.append(Relationship(
+            rel = Relationship(
                 from_table=ft, to_table=tt, **ends,
                 from_schema=from_schema, to_schema=to_schema,
                 relationship=card, join_type="LEFT", confidence=confidence, description=desc, **kw,
-            ))
-        if overlap_probes >= FK_OVERLAP_PROBE_CAP:
-            report.notes.append(
-                f"declared-FK overlap confirmation capped at {FK_OVERLAP_PROBE_CAP} probes — "
-                "remaining declared FKs left unreviewed for sign-off on /agami-model")
-        if any(not grouped for _, grouped in fk_keys):
+            )
+            # Declared but not enforced (Redshift/Databricks/Trino): the catalog's FK is a
+            # declaration, not a guarantee, so the run's check of every join confirms it on the data
+            # (`_confirm_declared`), and one the data bears out is approved like an enforced key
+            # instead of landing in the review queue. This is what keeps inheritance-heavy schemas
+            # on an unenforcing warehouse from flooding review.
+            if not dialect.fk_enforced and grouped and not cross and declared is not None:
+                declared.append(rel)
+            rels.append(rel)
+        if ungrouped:
             report.notes.append(
                 "the catalog didn't say which foreign-key columns belong to one key, so joins with "
                 "several columns between the same two tables were kept apart and left for review")
@@ -2131,34 +2216,23 @@ def _too_big_to_probe(t: Table) -> bool:
     return rows is not None and rows > _OVERLAP_PROBE_MAX_ROWS
 
 
-def overlap_sql(dialect: D.Dialect, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> str:
+def overlap_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str) -> str:
     """The overlap probe as one statement: 50 sampled distinct values of `ft.fc`, counted against
     `tt.tc`. Split out of `_overlaps` so a caller that must not run SQL itself, the reconcile skill's
     join check, which hands every probe to the execution tier, emits exactly the probe introspection
     already trusts rather than a second spelling of it.
 
     The sample is bounded through `Dialect.limited`, so the 50-row cap now holds on TOP and FETCH
-    engines too; it used to apply only where the row-limit keyword was `LIMIT`.
-
-    A key over several columns (lists) samples their value combinations and matches all of them."""
+    engines too; it used to apply only where the row-limit keyword was `LIMIT`."""
     fq_from = dialect.qualified(ft.schema_name, ft.name)
     fq_to = dialect.qualified(tt.schema_name, tt.name)
-    if isinstance(fc, str) and isinstance(tc, str):
-        col_f = dialect.quote_ident(fc)
-        col_t = dialect.quote_ident(tc)
-        sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
-        return (
-            f"SELECT COUNT(*) AS matched FROM ({sample}) src "
-            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
-        )
-    fcs = [fc] if isinstance(fc, str) else fc
-    tcs = [tc] if isinstance(tc, str) else tc
-    cols_f = [dialect.quote_ident(c) for c in fcs]
-    picked = ", ".join(f"{c} AS v{i}" for i, c in enumerate(cols_f))
-    present = " AND ".join(f"{c} IS NOT NULL" for c in cols_f)
-    match = " AND ".join(f"t.{dialect.quote_ident(c)} = src.v{i}" for i, c in enumerate(tcs))
-    sample = dialect.limited(f"SELECT DISTINCT {picked} FROM {fq_from} WHERE {present}", 50)
-    return f"SELECT COUNT(*) AS matched FROM ({sample}) src WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE {match})"
+    col_f = dialect.quote_ident(fc)
+    col_t = dialect.quote_ident(tc)
+    sample = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", 50)
+    return (
+        f"SELECT COUNT(*) AS matched FROM ({sample}) src "
+        f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)"
+    )
 
 
 def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc: str) -> str:
@@ -2180,8 +2254,7 @@ def dropped_rows_sql(dialect: D.Dialect, left: Table, lc: str, right: Table, rc:
     )
 
 
-def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table,
-                   tc: str | list[str]) -> int:
+def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> int:
     """How many of the sampled from-column values exist in the target key (0 when the probe fails)."""
     res = _try(runner, overlap_sql(dialect, ft, fc, tt, tc))
     if not res:
@@ -2192,33 +2265,9 @@ def _overlap_count(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list
         return 0
 
 
-def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str | list[str], tt: Table, tc: str | list[str]) -> bool:
+def _overlaps(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table, tc: str) -> bool:
     """Sample from-column values and check they exist in the target key."""
     return _overlap_count(dialect, runner, ft, fc, tt, tc) > 0
-
-
-def overlap_rate_sql(dialect: D.Dialect, ft: Table, fc: str, tt: Table, tc: str,
-                     sample: int = _CANDIDATE_SAMPLE) -> str:
-    """How many of a bounded sample of `ft.fc`'s distinct values are found in `tt.tc`, beside the
-    sample's size: `overlap_sql` with the denominator a match rate needs. Read-only and bounded."""
-    fq_from = dialect.qualified(ft.schema_name, ft.name)
-    fq_to = dialect.qualified(tt.schema_name, tt.name)
-    col_f, col_t = dialect.quote_ident(fc), dialect.quote_ident(tc)
-    picked = dialect.limited(f"SELECT DISTINCT {col_f} AS v FROM {fq_from} WHERE {col_f} IS NOT NULL", sample)
-    return (f"SELECT (SELECT COUNT(*) FROM ({picked}) s) AS sampled, COUNT(*) AS matched FROM ({picked}) src "
-            f"WHERE EXISTS (SELECT 1 FROM {fq_to} t WHERE t.{col_t} = src.v)")
-
-
-def _overlap_rate(dialect: D.Dialect, runner: Runner, ft: Table, fc: str, tt: Table,
-                  tc: str) -> Optional[tuple[int, int]]:
-    """(matched, sampled), or None when the probe fails or returns nothing readable."""
-    res = _try(runner, overlap_rate_sql(dialect, ft, fc, tt, tc))
-    if not res:
-        return None
-    try:
-        return int(float(res[0].get("matched") or 0)), int(float(res[0].get("sampled") or 0))
-    except (ValueError, TypeError):
-        return None
 
 
 def _single_keys(t: Table) -> list[str]:
@@ -2295,16 +2344,10 @@ def _qualified_column(t: Table, column: str) -> str:
     return f"{t.schema_name}.{t.name}.{column}" if t.schema_name else f"{t.name}.{column}"
 
 
-def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, int]],
-               found_by: str) -> dict:
-    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence."""
-    if hit is None:
-        summary = "the probe could not compare the two columns"
-    else:
-        matched, sampled = hit
-        rate = matched / sampled if sampled else 0.0
-        summary = (f"{rate:.1%} of sampled {t.name}.{c.name} values found in {u.name}.{k} "
-                   f"({matched} of {sampled} distinct values)")
+def _candidate(t: Table, c: Column, u: Table, k: str, check: PF.JoinCheck, found_by: str) -> dict:
+    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence.
+    The op's description says only how it was found: the counts change with every load, so they stay
+    in the evidence and out of the model."""
     op = {"op": "add", "kind": "relationship", "from_table": t.name, "from_column": c.name,
           "to_table": u.name, "to_column": k,
           "relationship": build.infer_cardinality(t, u, [c.name], [k])}
@@ -2312,11 +2355,10 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
         op["from_schema"] = t.schema_name
     if u.schema_name:
         op["to_schema"] = u.schema_name
-    op["description"] = f"found by introspection: {summary}"
-    evidence = {"found_by": found_by, "summary": summary}
-    if hit is not None:
-        evidence.update(matched=hit[0], sampled=hit[1],
-                        match_rate=round(hit[0] / hit[1], 4) if hit[1] else 0.0)
+    op["description"] = f"found by introspection: its values match {u.name}.{k}"
+    evidence = {"found_by": found_by, **check.evidence()}
+    if check.rate is not None:   # rows, like the rate: on a whole read `values` counts the distinct keys
+        evidence.update(matched=check.rows_matched, sampled=check.rows_keyed)
     return {"id": f"{_qualified_column(t, c.name)}->{_qualified_column(u, k)}", "op": op,
             "evidence": evidence}
 
@@ -2327,39 +2369,157 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
     """Test columns no join covers against other tables' keys and report what the data bears out (#512).
 
     Nothing is written to the model: a candidate is listed in the report and join_candidates.json for
-    a person to accept with one `sm curate` call. Every probe is a bounded, read-only sample, at most
-    JOIN_CANDIDATE_PROBE_CAP per run, and a FROM table too large to scan is skipped."""
+    a person to accept with one `sm curate` call. Every check is a bounded, read-only aggregate (the
+    whole column on a table under the size guard, a sample above it), at most
+    JOIN_CANDIDATE_PROBE_CAP per run, run several to a statement in priority order."""
     # Its own count beside the uniqueness probes' `_ProbeBudget`, so neither cap eats into the other.
     left = JOIN_CANDIDATE_PROBE_CAP
     found: set[tuple] = set()   # columns already offered: one join per column is enough to review
     offered: set[tuple] = set()   # (from, to) column pairs, so a pair isn't offered again reversed
-    too_big: set[str] = set()
-    for prio, t, c, u, k in _candidate_pairs(rels, tables, sqlglot_dialect):
-        col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
-        if col in found or (key, col) in offered:
-            continue
-        if _too_big_to_probe(t):
-            too_big.add(_qualified(t))
-            continue
-        if left <= 0:
-            report.join_candidate_cap_hit = True
-            report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
-                                "columns past the cap were not tested")
+    too_big: dict[str, set[str]] = {}   # why a pair wasn't tested -> the columns
+    pairs = _candidate_pairs(rels, tables, sqlglot_dialect)
+    step = PF.CHECKS_PER_STATEMENT * PF.WORKERS
+    while True:
+        # One round of checks at a time, so a column offered in this round isn't checked again later.
+        round_: list[tuple] = []
+        for prio, t, c, u, k in pairs:
+            col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
+            if col in found or (key, col) in offered:
+                continue
+            why = PF.checkable(dialect, t, u, [c.name])
+            if why:
+                too_big.setdefault(why, set()).add(f"{_qualified(t)}.{c.name}")
+                continue
+            if left <= 0:
+                report.join_candidate_cap_hit = True
+                report.notes.append(f"join candidates: stopped after {JOIN_CANDIDATE_PROBE_CAP} probes; "
+                                    "columns past the cap were not tested")
+                break
+            left -= 1
+            round_.append((prio, t, c, u, col, key, PF.JoinCheck(t, [c.name], u, [k])))
+            if len(round_) >= step:
+                break
+        if not round_:
             break
-        left -= 1
-        report.join_candidate_probes += 1
-        hit = _overlap_rate(dialect, runner, t, c.name, u, k)
-        cand = _candidate(t, c, u, k, hit, "name" if prio == 0 else "type")
-        if hit is not None and hit[1] and hit[0] / hit[1] >= _CANDIDATE_MIN_MATCH:
-            found.add(col)
-            offered.add((col, key))
-            report.join_candidates.append(cand)
-        elif prio == 0 or (hit is not None and hit[0]):
-            # A type-only pair with no value in common is noise, not a near miss.
-            report.join_candidates_low.append(cand)
-    if too_big:
-        report.notes.append(f"join candidates: skipped {len(too_big)} table(s) over "
-                            f"{_OVERLAP_PROBE_MAX_ROWS:,} rows: {', '.join(sorted(too_big)[:8])}")
+        PF.run_checks(dialect, runner, [r[-1] for r in round_])
+        report.join_candidate_probes += len(round_)
+        for prio, t, c, u, col, key, check in round_:
+            if col in found:
+                continue
+            cand = _candidate(t, c, u, check.tc[0], check, "name" if prio == 0 else "type")
+            if check.borne_out:
+                found.add(col)
+                offered.add((col, key))
+                report.join_candidates.append(cand)
+            elif prio == 0 or check.values_matched or check.rows_matched:
+                # A type-only pair with no value in common is noise, not a near miss.
+                report.join_candidates_low.append(cand)
+        if report.join_candidate_cap_hit:
+            break
+    for why, cols in too_big.items():
+        report.notes.append(f"join candidates: {len(cols)} column(s) not tested ({why}): "
+                            + ", ".join(sorted(cols)[:8]))
+
+
+def _check_key(fs: Optional[str], ft: str, fc: list[str], ts: Optional[str], tt: str, tc: list[str]) -> tuple:
+    return ((fs or "").lower(), ft.lower(), tuple(c.lower() for c in fc),
+            (ts or "").lower(), tt.lower(), tuple(c.lower() for c in tc))
+
+
+def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
+                 report: IntrospectReport, sg: Optional[str], checked: dict,
+                 pp: Optional[Path] = None, first: Optional[list] = None) -> list[tuple[Relationship, PF.JoinCheck]]:
+    """Check every join of the model on the data, at most `PF.JOIN_CHECK_CAP` per run; each join
+    with its check, for `report.join_checks`. `first` (declared keys waiting to be confirmed) take
+    the budget before the rest.
+
+    Nothing about a join changes here: the figures are for the person reviewing the build and for
+    the profile, and stay out of the model because they change with every load."""
+    todo: list[tuple[Relationship, PF.JoinCheck]] = []
+    skipped: dict[str, int] = {}
+    capped = 0
+    ahead = {id(r) for r in first or []}
+    for r in sorted(rels, key=lambda r: id(r) not in ahead):
+        if r.review_state in _UNSERVED:
+            continue
+        # The key columns alone: a join that also filters (`AND h.current_flag = 'Y'`) would be
+        # checked against rows it never joins, so it is reported unchecked instead.
+        pairs = _key_pairs(r, sg)
+        if not pairs:
+            if _column_pairs(r, sg):
+                skipped["its join has a condition beyond its key columns"] = (
+                    skipped.get("its join has a condition beyond its key columns", 0) + 1)
+            continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
+        key = _check_key(r.from_schema, r.from_table, fc, r.to_schema, r.to_table, tc)
+        if key in checked:
+            todo.append((r, checked[key]))
+            continue
+        ft = _endpoint(tables, r.from_table, r.from_schema)
+        tt = _endpoint(tables, r.to_table, r.to_schema)
+        why = "a table it joins isn't in the model" if ft is None or tt is None else PF.checkable(dialect, ft, tt, fc)
+        if why:
+            skipped[why] = skipped.get(why, 0) + 1
+            continue
+        if len(checked) >= PF.JOIN_CHECK_CAP:
+            capped += 1
+            continue
+        checked[key] = PF.JoinCheck(ft, fc, tt, tc, target_is_one=r.relationship in ("many_to_one", "one_to_one"))
+        todo.append((r, checked[key]))
+    fresh = [c for _, c in todo if not c.read]
+    if fresh:
+        _progress(pp, f"joins: checking {len(fresh)} on the data")
+        PF.run_checks(dialect, runner, fresh)
+    for why, n in skipped.items():
+        report.notes.append(f"{n} join(s) not checked on the data: {why}")
+    if capped:
+        report.notes.append(f"{capped} join(s) not checked on the data: capped at {PF.JOIN_CHECK_CAP} "
+                            "checks per run; declared keys among them stay unreviewed for sign-off")
+    return todo
+
+
+def _left_for_the_data(r: Relationship) -> bool:
+    """A stored join the engine left unreviewed for the data to confirm, untouched by a person since:
+    nobody signed it, rejected it or wrote a description of their own."""
+    return (r.review_state == "unreviewed" and r.signed_off_by is None and r.confidence == "inferred"
+            and (not (r.description or "").strip() or _DATA_UNIQUE_NOTE in r.description))
+
+
+def served_join_keys(org: Datasource, sg: Optional[str] = None) -> set[tuple]:
+    """`_check_key` of every join the model serves, with both ends' tables and key columns served by
+    some copy of the table: the joins a saved check may still be shown for."""
+    tables: dict[tuple, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if t.review_state not in _UNSERVED:
+                tables.setdefault(((t.schema_name or "").lower(), t.name.lower()), set()).update(
+                    c.name.lower() for c in t.columns if c.review_state not in _UNSERVED)
+    rels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    out = set()
+    for r in rels:
+        pairs = _key_pairs(r, sg)
+        if r.review_state in _UNSERVED or not pairs:
+            continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
+        key = _check_key(r.from_schema, r.from_table, fc, r.to_schema, r.to_table, tc)
+        ends = (tables.get((key[0], key[1])), tables.get((key[3], key[4])))
+        if ends[0] is not None and ends[1] is not None and set(key[2]) <= ends[0] and set(key[5]) <= ends[1]:
+            out.add(key)
+    return out
+
+
+def _confirm_declared(declared: list[Relationship], checked: dict, sg: Optional[str]) -> None:
+    """Approve the declared keys an unenforcing engine left for the data to confirm, where it did:
+    at least `PF.JOIN_MIN_MATCH` of the rows read find their partner. The rest stay for review."""
+    for r in declared:
+        pairs = _key_pairs(r, sg) or []
+        c = checked.get(_check_key(r.from_schema, r.from_table, [f for f, _ in pairs], r.to_schema,
+                                   r.to_table, [t for _, t in pairs])) if pairs else None
+        if c is not None and c.borne_out:
+            r.confidence = "confirmed"
+            r.review_state, r.signed_off_by, r.signed_off_role, r.signed_off_at = (
+                "approved", "agami_introspect", "system", _NOW)
+            r.description = "declared FK, confirmed on the data"
 
 
 def _accept_command(out: str) -> str:
@@ -2383,6 +2543,36 @@ def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def write_profile(out: Path, report: IntrospectReport, model: list[Table], *, append: bool = False) -> Optional[Path]:
+    """Write `<model>/.introspect/profile.json`: the column profile and the join checks (#448).
+
+    The joins are this run's, every join of the model. On a batched build or a refresh (`append`) the
+    tables are merged into the last run's file, so it ends with every table read; otherwise the file
+    holds this run's tables only. Either way it is cut to what `model` serves now (`profile.scrub`):
+    the file sits beside a model that may be committed, so a table taken out of the model, or a
+    column now marked personal, leaves nothing behind. Best-effort, like the join candidates file.
+    Shape: docs/format-spec.md, section 8."""
+    import json
+
+    path = out / ".introspect" / PROFILE_FILE
+    tables: dict = {}
+    if append:
+        try:
+            tables = json.loads(path.read_text(encoding="utf-8")).get("tables", {})
+        except (OSError, ValueError, AttributeError):
+            tables = {}
+    tables.update(report.profile_tables)
+    tables = PF.scrub(tables, model, lambda t, c: _never_read(c))
+    doc = {"version": 1, "profiled_at": _NOW, "tables": dict(sorted(tables.items())),
+           "joins": report.join_checks}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=1, default=str) + "\n", encoding="utf-8")
     except OSError:
         return None
     return path

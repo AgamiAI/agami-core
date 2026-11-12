@@ -213,6 +213,32 @@ class Dialect:
             return f"{select} FETCH FIRST {n} ROWS ONLY"
         return f"{select} LIMIT {n}"
 
+    def text_cast(self, expr: str) -> str:
+        """`expr` as text, so values of different types can share a column. Truncated at 255
+        characters, which a value read for the profile never needs past."""
+        return f"CAST({expr} AS VARCHAR(255))"
+
+    # False where a bounded read (a LIMIT) of an object of unknown size can still scan all of it:
+    # a view the engine materialises first, or an engine that bills every byte a column holds.
+    # There, an object whose size the catalog doesn't give isn't read for the profile or a join check.
+    scans_unsized: bool = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        """The clause after a table name that reads about `percent` of its rows spread across it, or
+        None where the engine has no such clause (then a bounded read takes the first rows)."""
+        return None
+
+    def sampled_rows(self, select: str, n: int, est_rows: Optional[int]) -> tuple[str, str]:
+        """`select` (one `SELECT ... FROM <table>`) bounded to `n` rows, spread across the table where
+        the engine can sample and its size is known, with how they were read: `sample` or
+        `first_rows`. Twice the share needed is asked for, so a sample rarely comes up short."""
+        if est_rows and est_rows > n:
+            pct = min(99.0, max(0.0001, 200.0 * n / est_rows))
+            clause = self.tablesample(f"{pct:.4f}".rstrip("0").rstrip("."))
+            if clause:
+                return self.limited(f"{select} {clause}", n), "sample"
+        return self.limited(select, n), "first_rows"
+
     def count_distinct_sql(self, schema: Optional[str], table: str, column: str) -> str:
         q = self.qualified(schema, table)
         c = self.quote_ident(column)
@@ -410,6 +436,9 @@ class PostgreSQL(Dialect):
     name = "PostgreSQL"
     folds_unquoted = "lower"
 
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE SYSTEM ({percent})"   # whole pages: reads only the share asked for
+
     # Keys come from pg_constraint, not information_schema: Postgres shows a constraint in
     # table_constraints only to the table's owner or a role holding a privilege other than SELECT,
     # so the read-only role a deploy is told to use would see no keys at all and every grain and
@@ -551,6 +580,9 @@ class Redshift(PostgreSQL):
     fk_enforced = False  # Redshift declares but does not enforce FKs
     unique_enforced = False  # nor unique keys
 
+    def tablesample(self, percent: str) -> Optional[str]:
+        return None   # no TABLESAMPLE: a bounded read takes the first rows
+
     # Redshift has no LATERAL and no unnest(...) WITH ORDINALITY, so the pg_constraint queries
     # PostgreSQL uses would fail there. It keeps the information_schema ones.
     sql_primary_keys = Dialect.sql_primary_keys
@@ -612,6 +644,7 @@ class Redshift(PostgreSQL):
 
 class MySQL(Dialect):
     name = "MySQL"
+    scans_unsized = False   # a view is materialised before its LIMIT applies
     backslash_escapes = True
     duration_rounds = True
     reserved_extra = frozenset({
@@ -625,6 +658,9 @@ class MySQL(Dialect):
         "show", "signal", "spatial", "sql", "system", "trigger", "undo", "unlock", "unsigned",
         "usage", "use", "varying", "virtual", "while", "write", "xor", "year_month", "zerofill",
     })
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS CHAR)"
 
     def placeholder_value_expr(self, column: str, ctype: str) -> str:
         # Some drivers crash fetching a zero date (0000-00-00); as text it reads safely.
@@ -724,6 +760,9 @@ class Snowflake(Dialect):
     backslash_escapes = True
     unique_enforced = False  # Snowflake declares unique keys but does not enforce them
     duration_rounds = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"SAMPLE SYSTEM ({percent})"
     reserved_extra = frozenset({
         "account", "alter", "connect", "connection", "database", "gscluster", "ilike", "increment",
         "issue", "lateral", "localtime", "localtimestamp", "minus", "of", "organization", "qualify",
@@ -746,6 +785,9 @@ class Snowflake(Dialect):
 
 class DuckDB(Dialect):
     name = "DuckDB"
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE {percent}%"
 
     def sql_check_constraints(self, schema: str, table: str) -> Optional[str]:
         return (
@@ -771,6 +813,12 @@ class Databricks(Dialect):
     fk_enforced = False  # Unity Catalog constraints are informational
     duration_rounds = True
 
+    def tablesample(self, percent: str) -> Optional[str]:
+        return None   # TABLESAMPLE here samples rows, reading every one: a bounded read takes the first rows
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS STRING)"
+
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         return None  # Unity Catalog has no unique constraint
 
@@ -786,6 +834,10 @@ class Trino(Dialect):
     name = "Trino"
     fk_enforced = False  # Trino generally has no constraints -> probe FKs
     duration_rounds = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        # SYSTEM skips whole splits, so the scan is bounded; BERNOULLI would read every row.
+        return f"TABLESAMPLE SYSTEM ({percent})"
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
@@ -831,6 +883,9 @@ class SQLServer(Dialect):
 
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE ({percent} PERCENT)"
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
@@ -899,7 +954,14 @@ class SQLServer(Dialect):
 
 class BigQuery(Dialect):
     name = "BigQuery"
+    scans_unsized = False   # a LIMIT bills every byte of the columns it reads
     backslash_escapes = True
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"TABLESAMPLE SYSTEM ({percent} PERCENT)"
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS STRING)"
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound
@@ -1128,6 +1190,9 @@ class Oracle(Dialect):
         "rownum", "rows", "session", "set", "share", "size", "smallint", "start", "successful",
         "synonym", "sysdate", "uid", "validate", "varchar", "varchar2", "view", "whenever",
     })
+
+    def tablesample(self, percent: str) -> Optional[str]:
+        return f"SAMPLE BLOCK ({percent})"   # whole blocks: `SAMPLE (p)` alone would read every row
 
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:

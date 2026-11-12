@@ -520,6 +520,40 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def cmd_profile(args) -> int:
+    """What the build read from the data (#448): the column profile and the join checks from
+    `<root>/.introspect/profile.json`, narrowed to `--table` names (bare or `schema.table`) and the
+    joins that touch them. Enrichment reads this instead of sampling rows itself."""
+    from .introspect import PROFILE_FILE
+    path = Path(args.root) / ".introspect" / PROFILE_FILE
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _print_json({"error": f"no profile at {path}: run introspect first"})
+        return 1
+    # The file may predate a flag set since: cut it to what the model serves now before anyone reads it.
+    from . import profile as PF
+    from .introspect import _check_key, _never_read, served_join_keys
+    org = L.load_datasource(args.root, include_rejected=True)
+    model = [t for sa in org.subject_areas for t in sa.tables_defined]
+    doc["tables"] = PF.scrub(doc.get("tables", {}), model, lambda t, c: _never_read(c))
+    # A join's evidence only while the model serves that join, both its tables and its key columns;
+    # an entry without its key columns (an older file) can't be matched, so it is left out.
+    served = served_join_keys(org)
+    doc["joins"] = [j for j in doc.get("joins", []) if j.get("from_columns") and _check_key(
+        j.get("from_schema"), j["from_table"], j["from_columns"], j.get("to_schema"), j["to_table"],
+        j["to_columns"]) in served]
+    if args.table:
+        wanted = {t.lower() for t in args.table}
+        doc["tables"] = {k: v for k, v in doc.get("tables", {}).items()
+                         if k.lower() in wanted or k.lower().rsplit(".", 1)[-1] in wanted}
+        names = {k.lower().rsplit(".", 1)[-1] for k in doc["tables"]}
+        doc["joins"] = [j for j in doc.get("joins", [])
+                        if {j["from_table"].lower(), j["to_table"].lower()} & names]
+    _print_json(doc)
+    return 0
+
+
 def cmd_choice_coverage(args) -> int:
     """Coded columns whose `choice_field` skeleton still has blank labels. The enrichment
     runs this to confirm the value-enum decode ran — `ok: false` means coded columns are
@@ -1629,6 +1663,20 @@ def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:
     return out or None
 
 
+def _signs_in_with_a_browser(profile: str) -> bool:
+    """The profile signs in through a browser window (Snowflake's `externalbrowser`). Reads only the
+    `authenticator` setting, never a secret; False when the credentials file can't be read."""
+    import configparser
+
+    from agami_paths import credentials_path
+    cp = configparser.ConfigParser(interpolation=None)
+    try:
+        cp.read(credentials_path(), encoding="utf-8")
+        return cp.get(profile, "authenticator", fallback="").strip().lower() == "externalbrowser"
+    except (configparser.Error, OSError):
+        return False
+
+
 def cmd_introspect(args) -> int:
     from . import introspect as INTRO
     from . import validator as V
@@ -1643,6 +1691,9 @@ def cmd_introspect(args) -> int:
         tables = (tables or []) + _normalize_table_list(from_file)
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
+    # Each statement is its own connection: several at once would open as many sign-in windows.
+    from . import profile as PF
+    PF.WORKERS = 1 if _signs_in_with_a_browser(args.profile) else PF.WORKERS
     progress = args.progress or str(
         Path(args.artifacts).expanduser() / args.profile / ".introspect" / "progress.log")
     org, report = INTRO.introspect(
@@ -2089,6 +2140,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("profile", help="what the build read from the data: per-column fill, distinct counts, "
+                                        "ranges, frequent values and findings, and every join's check")
+    sp.add_argument("root")
+    sp.add_argument("--table", nargs="*", default=None, help="only these tables (bare or schema.table)")
+    sp.set_defaults(func=cmd_profile)
 
     sp = sub.add_parser("choice-coverage", help="coded columns whose choice_field labels are still blank (value-enum decode not done)")
     sp.add_argument("root")
