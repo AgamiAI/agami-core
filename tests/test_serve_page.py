@@ -198,3 +198,242 @@ def test_the_printed_link_reaches_a_page_whose_name_needs_escaping(tmp_path):
     finally:
         proc.kill()
         proc.wait()
+
+
+# --- Saving mode (#651): one post of decisions, the way the password page takes one password -------
+
+
+def _start_saving(page: Path, out: Path, minutes: str = "30") -> tuple[subprocess.Popen, str]:
+    proc = subprocess.Popen(
+        [sys.executable, str(SCRIPT), str(page), "--decisions", str(out), "--minutes", minutes],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    line = proc.stdout.readline()
+    assert line, proc.stderr.read()
+    first = json.loads(line)
+    assert first["expires_in"] == int(float(minutes) * 60)
+    return proc, first["url"]
+
+
+def _post(
+    url: str,
+    body: bytes | None = b'{"block": "x"}',
+    *,
+    origin: str | None = "same",
+    ctype: str = "application/json",
+    host: str | None = None,
+    length: str | None = None,
+) -> tuple[int, dict]:
+    headers = {"Content-Type": ctype}
+    if origin == "same":
+        origin = url.split("/", 3)[0] + "//" + url.split("/", 3)[2]
+    if origin is not None:
+        headers["Origin"] = origin
+    if host is not None:
+        headers["Host"] = host
+    if length is not None:
+        headers["Content-Length"] = length
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, {}
+
+
+@pytest.fixture
+def saving(tmp_path):
+    page = tmp_path / "review.html"
+    page.write_text("<p>review</p>", encoding="utf-8")
+    (tmp_path / "beside.json").write_text("{}", encoding="utf-8")
+    out = tmp_path / "out" / "decisions.json"
+    proc, url = _start_saving(page, out)
+    yield proc, url, out
+    proc.kill()
+    proc.wait()
+
+
+def test_saving_serves_the_page_under_a_token_on_loopback(saving):
+    _, url, _ = saving
+    assert re.fullmatch(r"http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{43}/", url)
+    status, body = _get(url)
+    assert (status, body) == (200, b"<p>review</p>")
+    with urllib.request.urlopen(url, timeout=5) as r:
+        assert "connect-src 'self'" in r.headers["Content-Security-Policy"]
+        assert r.headers["Referrer-Policy"] == "same-origin"
+    base = url.rsplit("/", 2)[0]
+    # Nothing else is served: not the page by its name, not a file beside it, not a wrong token.
+    for path in ("/review.html", "/beside.json", "/", "/" + "A" * 43 + "/", url.rsplit("/", 2)[1]):
+        assert _get(base + ("" if path.startswith("/") else "/") + path)[0] == 404, path
+
+
+def test_saving_takes_one_post_writes_it_and_exits(saving):
+    proc, url, out = saving
+    status, body = _post(
+        url + "save", json.dumps({"page": "x", "block": "profile: demo\ndone\n"}).encode()
+    )
+    assert (status, body["ok"]) == (200, True)
+    assert proc.wait(timeout=10) == 0
+    lines = [json.loads(x) for x in proc.stdout.read().splitlines()]
+    assert lines == [{"status": "saved", "decisions": str(out)}]
+    assert json.loads(out.read_text()) == {"page": "x", "block": "profile: demo\ndone\n"}
+    assert out.stat().st_mode & 0o777 == 0o600
+
+
+def test_saving_refuses_a_second_post(tmp_path):
+    """In-process, so the server is still up when the second post arrives."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    out = tmp_path / "d.json"
+    server = serve_page._Server(page.resolve(), out)
+    threading_ = __import__("threading")
+    threading_.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.port}{server.base}save"
+        assert _post(url, b'{"a": 1}')[0] == 200
+        status, body = _post(url, b'{"a": 2}')
+        assert status == 409 and "already" in body["message"]
+        assert (
+            _get(f"http://127.0.0.1:{server.port}{server.base}")[0] == 404
+        )  # the page is gone too
+        assert json.loads(out.read_text()) == {"a": 1}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "code"),
+    [
+        ({"origin": "http://evil.example"}, 403),
+        ({"origin": "null"}, 403),
+        ({"origin": None}, 403),  # a post with no Origin did not come from the page
+        ({"ctype": "text/plain"}, 415),  # a cross-site form can only send these
+        ({"ctype": "application/x-www-form-urlencoded"}, 415),
+        ({"body": b"not json"}, 400),
+        ({"body": b"[1, 2]"}, 400),  # JSON, but not an object
+        ({"body": b"\xff\xfe"}, 400),
+        ({"body": b"", "length": "0"}, 400),
+        ({"body": b"{}", "length": str(2 * 1024 * 1024)}, 413),
+    ],
+)
+def test_saving_refuses_a_bad_post_and_writes_nothing(saving, kwargs, code):
+    proc, url, out = saving
+    body = kwargs.pop("body", b'{"block": "x"}')
+    assert _post(url + "save", body, **kwargs)[0] == code
+    assert not out.exists()
+    assert proc.poll() is None  # still waiting for the real one
+    assert _post(url + "save", b'{"ok": 1}')[0] == 200  # and takes it
+
+
+def test_saving_refuses_a_wrong_token_path_or_host_with_a_plain_404(saving):
+    _, url, out = saving
+    base, token = url.rstrip("/").rsplit("/", 1)
+    for target in (
+        f"{base}/{'B' * 43}/save",
+        f"{base}/{token}/",
+        f"{base}/{token}/save?x=1",
+        f"{base}/save",
+    ):
+        assert _post(target)[0] == 404, target
+    assert _post(url + "save", host="evil.example")[0] == 404
+    assert _get(url.replace("127.0.0.1", "localhost"))[0] == 200  # its other own name is fine
+    assert not out.exists()
+
+
+def test_saving_expires_and_then_refuses(tmp_path):
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    out = tmp_path / "d.json"
+    proc, _ = _start_saving(page, out, minutes="0.01")
+    try:
+        assert proc.wait(timeout=10) == 0
+        assert [json.loads(x) for x in proc.stdout.read().splitlines()] == [{"status": "expired"}]
+        assert not out.exists()
+    finally:
+        proc.kill()
+
+
+def test_saving_refuses_a_post_that_arrives_after_expiry_in_process(tmp_path, capsys):
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    out = tmp_path / "d.json"
+    server = serve_page._Server(page.resolve(), out)
+    __import__("threading").Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        serve_page._wait_for_decisions(server, 0.05)
+        assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {"status": "expired"}
+        status, body = _post(f"http://127.0.0.1:{server.port}{server.base}save", b'{"a": 1}')
+        assert status == 410 and "expired" in body["message"]
+        assert not out.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_saving_in_process_reports_the_save(tmp_path, capsys):
+    """main() end to end in this process, so the coverage gate sees the saving path."""
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text("<b>x</b>", encoding="utf-8")
+    out = tmp_path / "d.json"
+    rc: list[int] = []
+    t = threading.Thread(
+        target=lambda: rc.append(serve_page.main([str(page), "--decisions", str(out)]))
+    )
+    t.start()
+    url = ""
+    for _ in range(100):
+        got = capsys.readouterr().out
+        if got:
+            url = json.loads(got.splitlines()[0])["url"]
+            break
+        threading.Event().wait(0.05)
+    assert _post(url + "save", b'{"x": true}')[0] == 200
+    t.join(timeout=10)
+    assert rc == [0]
+    assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {
+        "status": "saved",
+        "decisions": str(out),
+    }
+
+
+def test_saving_reports_a_write_failure_and_stays_open(tmp_path):
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    blocker = tmp_path / "file"
+    blocker.write_text("", encoding="utf-8")
+    server = serve_page._Server(page.resolve(), blocker / "d.json")  # its folder is a file
+    __import__("threading").Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        url = f"http://127.0.0.1:{server.port}{server.base}save"
+        assert _post(url, b'{"a": 1}')[0] == 500
+        assert not server.taken  # a fixed folder could still take the post
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_view_only_mode_still_refuses_every_post(served):
+    _, url = served
+    port = url.split(":")[2].split("/")[0]
+    assert _post(f"http://127.0.0.1:{port}/report.html")[0] == 405
