@@ -330,3 +330,65 @@ Self-contained Chart.js v4 HTML, rendered from [plugins/agami/shared/chart-templ
 ## 7. CSV exports (`<artifacts_dir>/local/exports/<ts>.csv`)
 
 Standard RFC 4180 CSV. UTF-8, no BOM.
+## 8. Build profile (`<artifacts_dir>/<profile>/.introspect/profile.json`)
+
+What `sm introspect` read from the data (#448), for the steps after it: enrichment's descriptions,
+plain-English review questions, ambiguity candidates. Written on every build that isn't a dry run;
+a batched build (`--append`) merges its tables into the file, so it ends with every table read. Read
+it with `sm profile <root> [--table <t> …]`, which narrows it to those tables and the joins that touch
+them. It is evidence, never model content: none of its figures goes into a description, rule or
+caveat, because they change with every load.
+
+```jsonc
+{
+  "version": 1,
+  "profiled_at": "2026-11-12T09:25:31Z",
+  "tables": {
+    "public.orders": {                      // schema.table (the bare name where there are no schemas)
+      "read": "whole",                      // whole | sample (spread across the table) | first_rows
+      "rows_read": 4100,
+      "rows_estimated": 4100,               // the catalog's estimate, when it has one
+      "columns_not_read": 0,                // past the 80-column cap (omitted when 0)
+      "columns": {
+        "status": {
+          "type": "string",
+          "filled": 0.98,                   // share of rows read that are not NULL
+          "blank_text": 0.01,               // text columns: share that is '' or spaces
+          "distinct": 4,
+          "top": [{"value": "paid", "share": 0.81}],   // at most 50 distinct values: the 10 most frequent
+          "stand_ins": [{"value": "-1", "reason": "a negative key among positive ones"}]
+        },
+        "placed_at": {"type": "timestamp", "filled": 1.0, "distinct": 3900,
+                      "min": "2023-01-02 08:00:00", "max": "2025-10-31 21:14:00"},   // numbers and dates
+        "contact_email": {"type": "string", "filled": 0.7, "distinct": 2800, "personal": true}
+      },
+      "date_order": [{"earlier": "placed_at", "later": "shipped_at", "share": 0.99, "rows": 3800}],
+      "findings": [{"column": "note", "kind": "mostly_blank", "detail": "note is blank on 96% of rows"}]
+    }
+  },
+  "joins": [
+    {"join": "orders.customer_id -> customers.id", "from_table": "orders", "to_table": "customers",
+     "relationship": "many_to_one", "declared": true, "read": "whole",
+     "rows_read": 4100, "rows_keyed": 4000, "rows_matched": 3990,   // rows of the starting table
+     "values": 1200, "values_matched": 1195,                         // its distinct keys
+     "to_keys": 1500, "to_rows": 1500,                               // the table it points at
+     "match_rate": 0.9958,                  // of values on a whole read, of rows on a sample
+     "summary": "1,195 of 1,200 values of orders.customer_id are found in customers.id (100%) (whole table checked); 110 of 4,100 orders rows have no match (100 blank): an inner join drops them; 305 of 1,500 customers keys have no orders row"}
+  ]
+}
+```
+
+- **How much is read.** A table under 500,000 rows (the catalog's estimate) is read whole; above
+  it, 10,000 rows for the profile and 5,000 for a join check, spread across the table where the
+  engine has a sample clause (Postgres, Snowflake, BigQuery, Databricks, SQL Server, Trino, Oracle,
+  DuckDB) and the first rows elsewhere. A join to a table over 3,000,000 rows is not checked. At most
+  200 tables and 300 joins per run; two statements per table, up to eight join checks per statement.
+- **Personal columns** (flagged sensitive, or whose values look personal) carry counts only: no
+  `top`, no `min`/`max`. Frequent values are listed only for columns with at most 50 distinct values.
+- **Finding kinds:** `empty`, `mostly_blank` (blank on 90% or more), `constant` (one value on every
+  row), `date_range` (dates after today on a column named for something that already happened),
+  `date_order` (one date before another on 90% or more of the rows that have both, the reverse of
+  the order their names usually come in), `mixed_formats` (a text column with two date shapes, or
+  numbers beside dates).
+- **A sample's figures are a sample's.** Distinct counts and shares on a `sample` or `first_rows`
+  read describe the rows read, not the table; the frequent values come from their own read.

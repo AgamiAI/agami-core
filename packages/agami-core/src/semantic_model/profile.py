@@ -237,3 +237,255 @@ def run_checks(dialect: D.Dialect, runner: Runner, checks: list[JoinCheck]) -> N
         return
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
         list(pool.map(lambda b: _batch(dialect, runner, b), batches))
+
+
+# ---------------------------------------------------------------------------
+# Column profile
+# ---------------------------------------------------------------------------
+
+# A table under this many rows is profiled whole; above it, a sample of PROFILE_SAMPLE_ROWS rows.
+PROFILE_WHOLE_MAX_ROWS = JOIN_WHOLE_MAX_ROWS
+PROFILE_SAMPLE_ROWS = 10_000
+PROFILE_TABLE_CAP = 200
+# Columns read per table, in catalog order: one statement holds them all.
+PROFILE_MAX_COLUMNS = 80
+# A column with at most this many distinct values gets its most frequent values, with their shares.
+PROFILE_TOP_MAX_DISTINCT = 50
+PROFILE_TOP = 10
+_DATE_TYPES = ("date", "timestamp")
+_DISTINCT_TYPES = ("string", "integer", "decimal", "float", "boolean", "date", "timestamp", "uuid")
+_RANGE_TYPES = ("integer", "decimal", "float", "date", "timestamp")
+_MAX_DATE_PAIRS_COLS = 6
+# Words that name when something happened, in the order a record usually goes through them. Two
+# dates whose names rank differently are expected in that order; the data saying the reverse on
+# nearly every row means one of the names doesn't say what the column holds.
+_LIFECYCLE = (("created", "opened", "submitted", "requested", "ordered", "placed", "booked", "registered",
+               "signup", "joined", "start", "started", "issued", "invoice", "invoiced"),
+              ("approved", "confirmed", "accepted", "assigned", "scheduled"),
+              ("paid", "payment", "shipped", "dispatched", "sent", "billed"),
+              ("delivered", "received", "arrived", "returned"),
+              ("closed", "completed", "resolved", "finished", "ended", "end", "cancelled", "canceled"))
+# Names of a date that has already happened: a value past today means it holds something else.
+_PAST_WORDS = frozenset({"created", "opened", "submitted", "ordered", "placed", "paid", "payment", "shipped",
+                         "delivered", "received", "closed", "completed", "resolved", "birth", "born",
+                         "signup", "joined", "registered", "updated", "modified", "sent", "posted"})
+_ORDER_MIN_ROWS = 20
+_ORDER_DOMINANT = 0.9
+_MOSTLY_BLANK = 0.9
+
+
+@dataclass
+class _ColStat:
+    name: str
+    type: str
+    personal: bool
+    filled: int = 0
+    blank: int = 0
+    distinct: Optional[int] = None
+    lo: Optional[str] = None
+    hi: Optional[str] = None
+
+
+def _words(name: str) -> set[str]:
+    import re
+    return {w for w in re.split(r"[_\W]+|(?<=[a-z])(?=[A-Z])", name.lower()) if w}
+
+
+def _stage(name: str) -> Optional[int]:
+    w = _words(name)
+    return next((i for i, words in enumerate(_LIFECYCLE) if w & set(words)), None)
+
+
+def _table_rows(dialect: D.Dialect, t: Table, cols: list[str]) -> tuple[str, str]:
+    picked = ", ".join(dialect.quote_ident(c) for c in cols)
+    q = dialect.qualified(t.schema_name, t.name)
+    rows = _rows(t)
+    if rows is not None and rows <= PROFILE_WHOLE_MAX_ROWS:
+        return f"SELECT {picked} FROM {q}", "whole"
+    return dialect.sampled_rows(f"SELECT {picked} FROM {q}", PROFILE_SAMPLE_ROWS, rows)
+
+
+def stats_sql(dialect: D.Dialect, src: str, stats: list[_ColStat], dates: list[tuple[int, int]]) -> str:
+    """One pass over the rows read: per column its filled and blank counts, distinct count and range,
+    and for each pair of same-typed dates how often one comes before the other."""
+    parts = ["COUNT(*) AS n"]
+    for i, c in enumerate(stats):
+        q = dialect.quote_ident(c.name)
+        parts.append(f"COUNT({q}) AS f{i}")
+        if c.type == "string":
+            parts.append(f"SUM(CASE WHEN TRIM({q}) = '' THEN 1 ELSE 0 END) AS b{i}")
+        if c.type in _DISTINCT_TYPES:
+            parts.append(f"COUNT(DISTINCT {q}) AS d{i}")
+        if c.type in _RANGE_TYPES and not c.personal:
+            parts += [f"MIN({q}) AS lo{i}", f"MAX({q}) AS hi{i}"]
+    for a, b in dates:
+        qa, qb = dialect.quote_ident(stats[a].name), dialect.quote_ident(stats[b].name)
+        parts += [f"SUM(CASE WHEN {qa} < {qb} THEN 1 ELSE 0 END) AS lt{a}_{b}",
+                  f"SUM(CASE WHEN {qa} > {qb} THEN 1 ELSE 0 END) AS gt{a}_{b}"]
+    return f"SELECT {', '.join(parts)} FROM ({src}) s"
+
+
+def top_sql(dialect: D.Dialect, src: str, stats: list[tuple[int, _ColStat]]) -> str:
+    """The values of each low-cardinality column with their row counts, as text so the arms line up."""
+    arms = [f"SELECT {i} AS c, {dialect.text_cast(dialect.quote_ident(c.name))} AS v, COUNT(*) AS n "
+            f"FROM ({src}) s GROUP BY {dialect.quote_ident(c.name)}" for i, c in stats]
+    return dialect.limited(f"SELECT c, v, n FROM ({' UNION ALL '.join(arms)}) x",
+                           len(stats) * (PROFILE_TOP_MAX_DISTINCT + 1))
+
+
+def _text(v) -> Optional[str]:
+    return None if v is None or v == "" else str(v)
+
+
+def _share(n: int, total: int) -> float:
+    return round(n / total, 3) if total else 0.0
+
+
+def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callable,
+                  sample: Optional[list] = None, today: Optional[str] = None) -> Optional[dict]:
+    """The profile of one table, or None when it couldn't be read. Two statements: the counts, then
+    the frequent values of the low-cardinality columns. A personal column gets counts only: none of
+    its values, not even a range, is read into the profile."""
+    from datetime import date
+
+    live = [c for c in t.columns if c.review_state not in ("rejected", "stale")][:PROFILE_MAX_COLUMNS]
+    if not live:
+        return None
+    stats = [_ColStat(c.name, c.type, personal(c)) for c in live]
+    src, how = _table_rows(dialect, t, [c.name for c in live])
+    di = [i for i, c in enumerate(stats) if c.type in _DATE_TYPES and not c.personal][:_MAX_DATE_PAIRS_COLS]
+    dates = [(a, b) for k, a in enumerate(di) for b in di[k + 1:] if stats[a].type == stats[b].type]
+    try:
+        rows = runner(stats_sql(dialect, src, stats, dates))
+    except Exception:
+        rows = None
+    if not rows:
+        return None
+    r = rows[0]
+    n = _num(r, "n")
+    for i, c in enumerate(stats):
+        c.filled, c.blank = _num(r, f"f{i}"), _num(r, f"b{i}")
+        c.distinct = _num(r, f"d{i}") if f"d{i}" in r else None
+        c.lo, c.hi = _text(r.get(f"lo{i}")), _text(r.get(f"hi{i}"))
+    listed = [(i, c) for i, c in enumerate(stats) if not c.personal and c.distinct is not None
+              and 0 < c.distinct <= PROFILE_TOP_MAX_DISTINCT]
+    top: dict[int, list[tuple[str, int]]] = {}
+    if listed:
+        try:
+            # Read from the listed columns only, so no other column's values are selected at all.
+            only, _ = _table_rows(dialect, t, [c.name for _, c in listed])
+            for row in runner(top_sql(dialect, only, listed)):
+                top.setdefault(_num(row, "c"), []).append((_text(row.get("v")), _num(row, "n")))
+        except Exception:
+            top = {}
+    cols: dict = {}
+    findings: list[dict] = []
+    now = today or date.today().isoformat()
+    by_name = {c.name: c for c in live}
+    for i, c in enumerate(stats):
+        entry: dict = {"type": c.type, "filled": _share(c.filled, n)}
+        if c.type == "string":
+            entry["blank_text"] = _share(c.blank, n)
+        if c.distinct is not None:
+            entry["distinct"] = c.distinct
+        if c.lo is not None:
+            entry["min"], entry["max"] = c.lo, c.hi
+        values = top.get(i)
+        if values:
+            total = sum(k for _, k in values)
+            entry["top"] = [{"value": v, "share": _share(k, total)}
+                            for v, k in sorted(values, key=lambda x: (-x[1], x[0] or ""))[:PROFILE_TOP] if v is not None]
+        stand_ins = [{"value": p.value, "reason": p.reason} for p in by_name[c.name].placeholders]
+        if stand_ins:
+            entry["stand_ins"] = stand_ins
+        if c.personal:
+            entry["personal"] = True
+        cols[c.name] = entry
+        findings += _column_findings(c, n, now, sample)
+    order = []
+    for a, b in dates:
+        lt, gt = _num(r, f"lt{a}_{b}"), _num(r, f"gt{a}_{b}")
+        if lt + gt < _ORDER_MIN_ROWS:
+            continue
+        first, then, k = (stats[a].name, stats[b].name, lt) if lt >= gt else (stats[b].name, stats[a].name, gt)
+        share = _share(k, lt + gt)
+        order.append({"earlier": first, "later": then, "share": share, "rows": lt + gt})
+        sf, st = _stage(first), _stage(then)
+        if share >= _ORDER_DOMINANT and sf is not None and st is not None and sf > st:
+            findings.append({"column": first, "kind": "date_order",
+                             "detail": f"{first} falls before {then} on {share:.0%} of rows that have both, "
+                                       "the reverse of what the names say: one of them holds a different date"})
+    out = {"read": how, "rows_read": n, "columns": cols}
+    if _rows(t) is not None:
+        out["rows_estimated"] = _rows(t)
+    if len(t.columns) > len(live):
+        out["columns_not_read"] = len(t.columns) - len(live)
+    if order:
+        out["date_order"] = order
+    if findings:
+        out["findings"] = findings
+    return out
+
+
+def _column_findings(c: _ColStat, n: int, today: str, sample: Optional[list]) -> list[dict]:
+    if not n:
+        return []
+    out = []
+    empty = n - c.filled + c.blank
+    if c.filled == 0:
+        out.append({"column": c.name, "kind": "empty", "detail": f"{c.name} is empty on every row read"})
+    elif empty / n >= _MOSTLY_BLANK:
+        out.append({"column": c.name, "kind": "mostly_blank",
+                    "detail": f"{c.name} is blank on {empty / n:.0%} of rows"})
+    elif c.distinct == 1 and c.filled == n and n >= _ORDER_MIN_ROWS:
+        out.append({"column": c.name, "kind": "constant", "detail": f"{c.name} holds one value on every row"})
+    if c.type in _DATE_TYPES and c.hi and c.hi[:10] > today and _words(c.name) & _PAST_WORDS:
+        out.append({"column": c.name, "kind": "date_range",
+                    "detail": f"{c.name} has dates after today, which a date named like this can't be"})
+    if c.type == "string" and sample and not c.personal:
+        mixed = _mixed_formats([row.get(c.name) for row in sample])
+        if mixed:
+            out.append({"column": c.name, "kind": "mixed_formats", "detail": f"{c.name} mixes {mixed}"})
+    return out
+
+
+_SHAPES = (("ISO dates (2024-01-31)", r"^\d{4}-\d{2}-\d{2}"),
+           ("slash dates (31/01/2024)", r"^\d{1,2}/\d{1,2}/\d{2,4}$"),
+           ("dotted or dashed dates (31-01-2024)", r"^\d{1,2}[-.]\d{1,2}[-.]\d{4}$"),
+           ("numbers", r"^[+-]?\d+(\.\d+)?$"))
+_MIXED_MIN_SHARE = 0.05
+_MIXED_MIN_VALUES = 20
+
+
+def _mixed_formats(values: list) -> Optional[str]:
+    """Which shapes a text column's values come in, when it holds more than one date shape, or
+    numbers beside dates: one column, two writers."""
+    import re
+    vals = [str(v).strip() for v in values if v not in (None, "") and str(v).strip()]
+    if len(vals) < _MIXED_MIN_VALUES:
+        return None
+    counts = {label: sum(1 for v in vals if re.match(rx, v)) for label, rx in _SHAPES}
+    seen = [label for label, k in counts.items() if k / len(vals) >= _MIXED_MIN_SHARE]
+    dates = [s for s in seen if "dates" in s]
+    if len(dates) >= 2 or (dates and "numbers" in seen):
+        return " and ".join(seen)
+    return None
+
+
+def profile_tables(dialect: D.Dialect, runner: Runner, tables: list[Table], personal: Callable,
+                   samples: Optional[dict] = None, done: Optional[Callable[[int], None]] = None) -> dict:
+    """The profile of each table (at most PROFILE_TABLE_CAP), keyed `schema.table`, a few at once."""
+    picked = tables[:PROFILE_TABLE_CAP]
+
+    def one(t: Table):
+        sample = (samples or {}).get((t.schema_name, t.name), (None,))[0]
+        return t, profile_table(dialect, runner, t, personal, sample)
+
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for k, (t, prof) in enumerate(pool.map(one, picked), 1):
+            if prof is not None:
+                out[f"{t.schema_name}.{t.name}" if t.schema_name else t.name] = prof
+            if done:
+                done(k)
+    return out

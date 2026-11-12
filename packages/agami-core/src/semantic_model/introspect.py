@@ -138,6 +138,7 @@ _NOT_A_REFERENCE_RE = re.compile(
     r"(^|_)(age|year|yr|month|day|week|hour|minute|qty|quantity|count|cnt|amount|total|price|score|rank|"
     r"level|size|duration|version|position|sort|seq)s?($|_)", re.IGNORECASE)
 JOIN_CANDIDATES_FILE = "join_candidates.json"
+PROFILE_FILE = "profile.json"
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -178,6 +179,8 @@ class IntrospectReport:
     join_candidate_cap_hit: bool = False
     # Every join of the model as checked on the data: its label, and the evidence (`JoinCheck.evidence`).
     join_checks: list[dict] = field(default_factory=list)
+    # The column profile of each table this run read, keyed `schema.table` (`profile.profile_table`).
+    profile_tables: dict = field(default_factory=dict)
     # `table.column (reason)` for columns whose sampled values look personal but aren't flagged.
     suspected_columns: list[str] = field(default_factory=list)
     # Values that look like placeholders and wait for a person to say what they mean (#445).
@@ -207,6 +210,7 @@ class IntrospectReport:
             *(f"large table {t}: about {rows:,} rows; date columns: {', '.join(cols) or '(none)'}"
               for t, (rows, cols) in self.large_tables.items()),
             f"sensitive columns: {self.sensitive_columns}",
+            *self._render_profile(),
             *self._render_join_checks(),
             *self._render_join_candidates(),
             *([f"suspected personal data (review): {', '.join(self.suspected_columns)}"]
@@ -220,6 +224,17 @@ class IntrospectReport:
             *[f"  {f}" for f in self.files_written[:60]],
         ]
         return "\n".join(lines)
+
+    def _render_profile(self) -> list[str]:
+        if not self.profile_tables:
+            return []
+        found = [(t, f) for t, p in self.profile_tables.items() for f in p.get("findings", [])]
+        out = [f"## column profile ({len(self.profile_tables)} tables read; {len(found)} finding(s); "
+               f"in .introspect/{PROFILE_FILE})"]
+        out += [f"  ! {t}: {f['detail']}" for t, f in found[:30]]
+        if len(found) > 30:
+            out.append(f"  … {len(found) - 30} more in the file")
+        return out
 
     def _render_join_checks(self) -> list[str]:
         if not self.join_checks:
@@ -375,6 +390,7 @@ def introspect(
             f"{reads.skipped} column(s) got no value list: the run's {DISTINCT_READ_CAP} DISTINCT reads were "
             "used up; build those tables in a separate run to list their values")
 
+    read_now = {table_key(t.name, t.schema_name) for t in built}   # profiled below; a refresh adds stored ones
     # Fail-fast on tables that yielded NO columns — a bogus allowlist entry (e.g. a malformed
     # --tables blob that mis-joined 52 names into one) describes nothing, and we must NOT persist
     # a garbage table. Drop them with a clear note; if that leaves nothing, raise rather than
@@ -556,6 +572,16 @@ def introspect(
     _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
                        samples, reads, report, sg, fresh_personal=fresh_personal,
                        prior=set(existing) if refreshing else set())
+    to_profile = [t for t in built if table_key(t.name, t.schema_name) in read_now
+                  and t.review_state not in _UNSERVED]
+    _progress(pp, f"profiling {len(to_profile)} tables…")
+    step = max(1, len(to_profile) // 10)
+
+    def profiled(k: int) -> None:
+        if k % step == 0 or k == len(to_profile):
+            _progress(pp, f"profiled {k}/{len(to_profile)} tables")
+
+    report.profile_tables = PF.profile_tables(dialect, runner, to_profile, _personal_column, samples, done=profiled)
     _progress(pp, "join candidates: testing columns no join covers…")
     _scan_join_candidates(dialect, runner, rels, built, report, sg)
     if refreshing:   # counted after the join merge and relabel, which are changes too
@@ -627,6 +653,7 @@ def introspect(
     report.files_unchanged = len(wr.files_unchanged)
     if not dry_run:
         write_join_candidates(out, report)
+        write_profile(out, report)
     return org, report
 
 
@@ -2411,7 +2438,8 @@ def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], t
         _progress(pp, f"joins: checking {len(fresh)} on the data")
         PF.run_checks(dialect, runner, fresh)
     for r, c in todo:
-        report.join_checks.append({"join": _join_label(r, sg), "relationship": r.relationship,
+        report.join_checks.append({"join": _join_label(r, sg), "from_table": r.from_table, "to_table": r.to_table,
+                                   "relationship": r.relationship,
                                    "declared": r.confidence == "confirmed", **c.evidence()})
     if skipped:
         report.notes.append(f"{skipped} join(s) not checked on the data: a table it joins to is over "
@@ -2442,6 +2470,31 @@ def write_join_candidates(out: Path, report: IntrospectReport) -> Optional[Path]
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        return None
+    return path
+
+
+def write_profile(out: Path, report: IntrospectReport) -> Optional[Path]:
+    """Write `<model>/.introspect/profile.json`: the column profile and the join checks (#448).
+
+    The joins are this run's, every join of the model. Tables are merged into the last run's file, so
+    a batched build (`--append`) ends with every table it read; a table this run read replaces its
+    entry. Best-effort, like the join candidates file. Shape: docs/format-spec.md, section 8."""
+    import json
+
+    path = out / ".introspect" / PROFILE_FILE
+    tables: dict = {}
+    try:
+        tables = json.loads(path.read_text(encoding="utf-8")).get("tables", {})
+    except (OSError, ValueError, AttributeError):
+        tables = {}
+    tables.update(report.profile_tables)
+    doc = {"version": 1, "profiled_at": _NOW, "tables": dict(sorted(tables.items())),
+           "joins": report.join_checks}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=1, default=str) + "\n", encoding="utf-8")
     except OSError:
         return None
     return path

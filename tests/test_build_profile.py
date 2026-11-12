@@ -285,3 +285,166 @@ def test_a_sample_that_comes_back_empty_is_read_again_from_the_first_rows(db, mo
     empty = PF.JoinCheck(stale, ["customer_id"], CUSTOMERS, ["id"])
     empty.read, empty.rows_read = "sample", 0
     assert empty.summary() == "no orders rows were read"
+
+
+# --- the column profile ----------------------------------------------------------------------
+
+def _claims_db(tmp_path: Path) -> Path:
+    """30 claims: payment_date before submitted_date on every row (a misnamed date), created_on in
+    the future on one, a note that's almost always blank, a constant source, an empty column, a
+    status list, a contact email, and a text date column written two ways."""
+    path = tmp_path / "claims.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE claims(id INTEGER PRIMARY KEY, status TEXT, submitted_date DATE, payment_date DATE,"
+                " created_on DATE, note TEXT, source TEXT, unused TEXT, contact_email TEXT, logged TEXT)")
+    for i in range(30):
+        con.execute("INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (i, "open" if i < 20 else "paid", f"2024-02-{i % 28 + 1:02d}", f"2024-01-{i % 28 + 1:02d}",
+                     "2999-01-01" if i == 0 else "2024-01-01", "x" if i == 0 else "", "web", None,
+                     f"p{i}@example.com", f"2024-01-{i % 28 + 1:02d}" if i % 2 else f"{i % 28 + 1:02d}/01/2024"))
+    con.commit()
+    con.close()
+    return path
+
+
+def _claims_table(rows: int | None = 30) -> Table:
+    types = {"id": "integer", "status": "string", "submitted_date": "date", "payment_date": "date",
+             "created_on": "date", "note": "string", "source": "string", "unused": "string",
+             "contact_email": "string", "logged": "string"}
+    t = _t("claims", list(types), rows)
+    for c in t.columns:
+        c.type = types[c.name]
+        c.sensitive = c.name == "contact_email"
+    return t
+
+
+def _profile(tmp_path, **kw):
+    db = _claims_db(tmp_path)
+    seen: list[str] = []
+    t = _claims_table(kw.pop("rows", 30))
+    sample = _runner(db)("SELECT * FROM claims")
+    prof = PF.profile_table(SQLITE, _runner(db, seen), t, lambda c: c.sensitive, sample, today="2026-01-01")
+    return prof, seen
+
+
+def test_a_table_is_profiled_in_two_statements_with_rates_counts_ranges_and_top_values(tmp_path):
+    prof, seen = _profile(tmp_path)
+    assert len(seen) == 2
+    assert prof["read"] == "whole" and prof["rows_read"] == 30
+    cols = prof["columns"]
+    assert cols["status"]["distinct"] == 2
+    assert cols["status"]["top"] == [{"value": "open", "share": 0.667}, {"value": "paid", "share": 0.333}]
+    assert (cols["payment_date"]["min"], cols["payment_date"]["max"]) == ("2024-01-01", "2024-01-28")
+    assert cols["note"]["blank_text"] == pytest.approx(0.967) and cols["unused"]["filled"] == 0.0
+
+
+def test_a_personal_column_gets_counts_and_never_a_value(tmp_path):
+    prof, seen = _profile(tmp_path)
+    email = prof["columns"]["contact_email"]
+    assert email["personal"] and email["distinct"] == 30
+    assert "top" not in email and "min" not in email
+    assert not any('"contact_email"' in s for s in seen[1:])   # not in the values read
+
+
+def test_the_profile_finds_the_quirks_that_give_a_plausible_wrong_number(tmp_path):
+    prof, _ = _profile(tmp_path)
+    kinds = {(f["column"], f["kind"]) for f in prof["findings"]}
+    assert kinds == {("unused", "empty"), ("note", "mostly_blank"), ("source", "constant"),
+                     ("created_on", "date_range"), ("payment_date", "date_order"), ("logged", "mixed_formats")}
+    assert {"earlier": "payment_date", "later": "submitted_date", "share": 1.0, "rows": 30} in prof["date_order"]
+    detail = {f["kind"]: f["detail"] for f in prof["findings"]}
+    assert detail["date_order"].startswith("payment_date falls before submitted_date on 100% of rows")
+    assert detail["mixed_formats"] == "logged mixes ISO dates (2024-01-31) and slash dates (31/01/2024)"
+
+
+def test_a_clean_table_has_no_findings(tmp_path):
+    path = tmp_path / "clean.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE orders(id INTEGER, placed DATE, closed DATE, status TEXT)")
+    for i in range(30):
+        con.execute("INSERT INTO orders VALUES (?,?,?,?)",
+                    (i, f"2024-01-{i % 28 + 1:02d}", f"2024-02-{i % 28 + 1:02d}", "open" if i % 2 else "done"))
+    con.commit()
+    con.close()
+    t = _t("orders", ["id", "placed", "closed", "status"], 30)
+    for c, ty in zip(t.columns, ["integer", "date", "date", "string"]):
+        c.type = ty
+    prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False, _runner(path)("SELECT * FROM orders"))
+    assert "findings" not in prof
+    assert prof["date_order"] == [{"earlier": "placed", "later": "closed", "share": 1.0, "rows": 30}]
+
+
+def test_a_large_table_is_profiled_on_a_bounded_sample(tmp_path, monkeypatch):
+    monkeypatch.setattr(PF, "PROFILE_WHOLE_MAX_ROWS", 10)
+    monkeypatch.setattr(PF, "PROFILE_SAMPLE_ROWS", 12)
+    prof, seen = _profile(tmp_path, rows=10**6)
+    assert prof["read"] == "first_rows" and prof["rows_read"] == 12 and prof["rows_estimated"] == 10**6
+    assert all("LIMIT 12" in s for s in seen)
+
+
+def test_a_table_that_cannot_be_read_has_no_profile_and_a_failed_value_read_keeps_the_counts(tmp_path):
+    db = _claims_db(tmp_path)
+    t = _claims_table()
+    assert PF.profile_table(SQLITE, _runner(db, fail_on="COUNT(*) AS n"), t, lambda c: False) is None
+    prof = PF.profile_table(SQLITE, _runner(db, fail_on="UNION ALL"), t, lambda c: False)
+    assert prof["columns"]["status"]["distinct"] == 2 and "top" not in prof["columns"]["status"]
+
+
+def test_a_wide_table_reads_a_bounded_number_of_columns(tmp_path, monkeypatch):
+    monkeypatch.setattr(PF, "PROFILE_MAX_COLUMNS", 3)
+    prof, _ = _profile(tmp_path)
+    assert list(prof["columns"]) == ["id", "status", "submitted_date"] and prof["columns_not_read"] == 7
+
+
+@pytest.mark.parametrize("key", sorted(_SQLGLOT))
+def test_the_profile_statements_parse_in_each_engine(key):
+    d = D.get_dialect(key)
+    t = _claims_table(10**7)
+    src, _ = PF._table_rows(d, t, [c.name for c in t.columns])
+    stats = [PF._ColStat(c.name, c.type, False) for c in t.columns]
+    sqlglot.parse_one(PF.stats_sql(d, src, stats, [(2, 3)]), read=_SQLGLOT[key])
+    sqlglot.parse_one(PF.top_sql(d, src, [(1, stats[1]), (0, stats[0])]), read=_SQLGLOT[key])
+
+
+@pytest.mark.parametrize("key,cast", [("postgres", "CAST(x AS VARCHAR(255))"), ("mysql", "CAST(x AS CHAR)"),
+                                      ("bigquery", "CAST(x AS STRING)"), ("databricks", "CAST(x AS STRING)")])
+def test_values_are_read_as_text_in_each_engines_spelling(key, cast):
+    assert D.get_dialect(key).text_cast("x") == cast
+
+
+def test_a_build_writes_the_profile_and_the_join_checks_beside_the_model(tmp_path):
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 1, 1.0), (3, NULL, 1.0);")
+    _, report = _build(tmp_path, path)
+    import json
+    doc = json.loads((tmp_path / "demo" / ".introspect" / "profile.json").read_text())
+    assert doc["version"] == 1 and set(doc["tables"]) == {"main.customers", "main.orders"}
+    assert doc["tables"]["main.orders"]["columns"]["customer_id"]["filled"] == pytest.approx(0.667)
+    assert [j["join"] for j in doc["joins"]] == ["orders.customer_id -> customers.id"]
+    assert "## column profile (2 tables read" in report.render()
+
+
+def test_a_batched_build_keeps_the_tables_an_earlier_batch_profiled(tmp_path):
+    import json
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0);")
+    out = tmp_path / "demo"
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, tables=["main.customers"])
+    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, tables=["main.orders"],
+                 append=True)
+    doc = json.loads((out / ".introspect" / "profile.json").read_text())
+    assert set(doc["tables"]) == {"main.customers", "main.orders"}
+
+
+def test_sm_profile_prints_the_tables_asked_for_and_the_joins_that_touch_them(tmp_path, capsys):
+    import json
+
+    from semantic_model import cli
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0);")
+    _build(tmp_path, path)
+    root = str(tmp_path / "demo")
+    assert cli.main(["profile", root, "--table", "customers"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert list(doc["tables"]) == ["main.customers"] and len(doc["joins"]) == 1
+    assert cli.main(["profile", root, "--table", "main.orders"]) == 0
+    assert list(json.loads(capsys.readouterr().out)["tables"]) == ["main.orders"]
+    assert cli.main(["profile", str(tmp_path / "nowhere")]) == 1
+    assert "run introspect first" in capsys.readouterr().out

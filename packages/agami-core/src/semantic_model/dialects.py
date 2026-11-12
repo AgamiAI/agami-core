@@ -213,6 +213,10 @@ class Dialect:
             return f"{select} FETCH FIRST {n} ROWS ONLY"
         return f"{select} LIMIT {n}"
 
+    def text_cast(self, expr: str) -> str:
+        """`expr` as text, so values of different types can share a column."""
+        return f"CAST({expr} AS VARCHAR(255))"
+
     def tablesample(self, percent: str) -> Optional[str]:
         """The clause after a table name that reads about `percent` of its rows spread across it, or
         None where the engine has no such clause (then a bounded read takes the first rows)."""
@@ -648,6 +652,9 @@ class MySQL(Dialect):
         "usage", "use", "varying", "virtual", "while", "write", "xor", "year_month", "zerofill",
     })
 
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS CHAR)"
+
     def placeholder_value_expr(self, column: str, ctype: str) -> str:
         # Some drivers crash fetching a zero date (0000-00-00); as text it reads safely.
         return f"CAST({column} AS CHAR)" if ctype in ("date", "timestamp") else column
@@ -802,6 +809,9 @@ class Databricks(Dialect):
     def tablesample(self, percent: str) -> Optional[str]:
         return f"TABLESAMPLE ({percent} PERCENT)"
 
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS STRING)"
+
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         return None  # Unity Catalog has no unique constraint
 
@@ -940,6 +950,9 @@ class BigQuery(Dialect):
 
     def tablesample(self, percent: str) -> Optional[str]:
         return f"TABLESAMPLE SYSTEM ({percent} PERCENT)"
+
+    def text_cast(self, expr: str) -> str:
+        return f"CAST({expr} AS STRING)"
 
     def sql_row_count(self, schema: str, table: str) -> Optional[str]:
         # No exact-count fallback here until introspection reads carry this engine's own bound

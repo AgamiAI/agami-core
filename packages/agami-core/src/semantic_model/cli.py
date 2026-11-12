@@ -520,6 +520,28 @@ def cmd_coverage(args) -> int:
     return 0
 
 
+def cmd_profile(args) -> int:
+    """What the build read from the data (#448): the column profile and the join checks from
+    `<root>/.introspect/profile.json`, narrowed to `--table` names (bare or `schema.table`) and the
+    joins that touch them. Enrichment reads this instead of sampling rows itself."""
+    from .introspect import PROFILE_FILE
+    path = Path(args.root) / ".introspect" / PROFILE_FILE
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _print_json({"error": f"no profile at {path}: run introspect first"})
+        return 1
+    if args.table:
+        wanted = {t.lower() for t in args.table}
+        doc["tables"] = {k: v for k, v in doc.get("tables", {}).items()
+                         if k.lower() in wanted or k.lower().rsplit(".", 1)[-1] in wanted}
+        names = {k.lower().rsplit(".", 1)[-1] for k in doc["tables"]}
+        doc["joins"] = [j for j in doc.get("joins", [])
+                        if {j["from_table"].lower(), j["to_table"].lower()} & names]
+    _print_json(doc)
+    return 0
+
+
 def cmd_choice_coverage(args) -> int:
     """Coded columns whose `choice_field` skeleton still has blank labels. The enrichment
     runs this to confirm the value-enum decode ran — `ok: false` means coded columns are
@@ -2089,6 +2111,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("coverage", help="per-table column-description coverage + enrichment-completeness verdict (ok:false ⇒ columns were skipped)")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_coverage)
+
+    sp = sub.add_parser("profile", help="what the build read from the data: per-column fill, distinct counts, "
+                                        "ranges, frequent values and findings, and every join's check")
+    sp.add_argument("root")
+    sp.add_argument("--table", nargs="*", default=None, help="only these tables (bare or schema.table)")
+    sp.set_defaults(func=cmd_profile)
 
     sp = sub.add_parser("choice-coverage", help="coded columns whose choice_field labels are still blank (value-enum decode not done)")
     sp.add_argument("root")
