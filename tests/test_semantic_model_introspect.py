@@ -826,6 +826,14 @@ def test_same_named_tables_in_two_schemas_both_survive(tmp_path):
     assert inv_join and inv_join[0].to_table == "products" and inv_join[0].cross_schema is False
 
 
+def _join_check_rows(sql: str, matches: bool) -> list[dict]:
+    """What the data check (`profile.check_sql`) answers: one row per check in the statement, every
+    one of 5 values found in the key, or none of them."""
+    hit = "5" if matches else "0"
+    return [{"probe": str(i), "rows_read": "5", "rows_keyed": "5", "rows_matched": hit, "vals": "5",
+             "vals_matched": hit, "to_keys": "5", "to_rows": "5"} for i in range(sql.count("AS rows_read"))]
+
+
 def _redshift_fk_runner(overlap_matches: bool):
     """A single-schema Redshift catalog: orders.customer_id is a DECLARED (but unenforced)
     FK to customers.id. Redshift's catalog records the FK; the data may or may not honour it,
@@ -848,8 +856,8 @@ def _redshift_fk_runner(overlap_matches: bool):
         if "FOREIGN KEY" in s:
             return [{"from_table": "orders", "from_column": "customer_id", "from_schema": "public",
                      "to_table": "customers", "to_column": "id", "to_schema": "public"}]
-        if "matched" in s:                       # _overlaps EXISTS probe
-            return [{"matched": "5"}] if overlap_matches else [{"matched": "0"}]
+        if "AS rows_read" in s:                  # the data check of a declared key
+            return _join_check_rows(s, overlap_matches)
         if "reltuples" in s:
             return [{"estimated_rows": "1000"}]
         return []
@@ -889,7 +897,9 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
     """A schema that declares MANY FKs on an unenforced dialect must not fire one sequential
     overlap COUNT per FK without bound. Past FK_OVERLAP_PROBE_CAP we stop probing and leave the
     rest unreviewed — the run stays bounded on inheritance-heavy Redshift/ServiceNow schemas."""
+    # The cap is on checks across the run: confirming a declared key and checking every join share it.
     monkeypatch.setattr(I, "FK_OVERLAP_PROBE_CAP", 3)
+    monkeypatch.setattr(I.PF, "JOIN_CHECK_CAP", 3)
     N = 8
     probes = {"n": 0}
 
@@ -911,15 +921,15 @@ def test_unenforced_fk_overlap_probing_is_capped(tmp_path, monkeypatch):
         if "FOREIGN KEY" in s:
             return [{"from_table": f"child{i}", "from_column": "parent_id", "from_schema": "public",
                      "to_table": "parent", "to_column": "id", "to_schema": "public"} for i in range(N)]
-        if "matched" in s:
-            probes["n"] += 1
-            return [{"matched": "5"}]
+        if "AS rows_read" in s:
+            probes["n"] += s.count("AS rows_read")
+            return _join_check_rows(s, True)
         if "reltuples" in s:
             return [{"estimated_rows": "1000"}]
         return []
 
     org, rep = I.introspect("shop", "redshift", runner=runner, artifacts_dir=tmp_path, dry_run=True)
-    # never probed more than the cap, even though there are N=8 declared FKs
+    # never checked more than the cap, even though there are N=8 declared FKs
     assert probes["n"] <= 3
     assert any("capped" in n for n in rep.notes), rep.notes
     # all FKs still modeled (the uncapped ones simply stay unreviewed rather than vanishing)

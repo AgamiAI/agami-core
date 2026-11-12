@@ -103,12 +103,15 @@ def test_an_undeclared_matching_column_is_a_candidate_and_is_not_written(tmp_pat
     assert cand["op"] == {"op": "add", "kind": "relationship", "from_table": "orders", "from_column": "cust_ref",
                           "to_table": "customers", "to_column": "id", "relationship": "many_to_one",
                           "from_schema": "main", "to_schema": "main",
-                          "description": "found by introspection: " + cand["evidence"]["summary"]}
+                          "description": "found by introspection: its values match customers.id"}
     assert cand["evidence"]["found_by"] == "type"
     assert (cand["evidence"]["matched"], cand["evidence"]["sampled"], cand["evidence"]["match_rate"]) == (3, 3, 1.0)
     text = report.render()
     assert "## join candidates" in text
-    assert f"+ {_CUST_REF}: 100.0% of sampled orders.cust_ref values found in customers.id" in text
+    # Says whether it was every value (#448): all of them here, the whole table read.
+    assert cand["evidence"]["read"] == "whole"
+    assert (f"+ {_CUST_REF}: all 3 values of orders.cust_ref are found in customers.id "
+            "(whole table checked)") in text
     assert "--candidate <id>" in text and str(out) in doc["how_to_accept"]
 
 
@@ -119,7 +122,8 @@ def test_a_low_overlap_pair_is_reported_as_rejected_not_offered(tmp_path):
     rejected = "main.orders.product_code->main.products.sku"
     assert rejected in low and rejected not in {c["id"] for c in doc["candidates"]}
     assert low[rejected]["evidence"]["match_rate"] == 0.25
-    assert f"- {rejected} (low overlap, not offered): 25.0%" in report.render()
+    assert (f"- {rejected} (low overlap, not offered): 1 of 4 values of orders.product_code are found in "
+            "products.sku (25%)") in report.render()
 
 
 def test_the_name_guessed_join_is_written_as_before_and_not_listed(tmp_path):
@@ -164,12 +168,14 @@ def test_the_probe_cap_stops_the_scan_and_says_so(tmp_path, monkeypatch):
     assert "stopped after 1 probes" in report.render()
 
 
-def test_the_probes_are_bounded_reads(tmp_path):
+def test_the_probes_are_bounded_reads(tmp_path, monkeypatch):
+    # Above the size guard a check reads a bounded sample, never the whole table.
+    monkeypatch.setattr(I.PF, "JOIN_WHOLE_MAX_ROWS", 0)
     seen: list[str] = []
     _build(tmp_path, seen=seen)
-    probes = [s for s in seen if "AS sampled" in s]
+    probes = [s for s in seen if "AS rows_read" in s]
     assert probes
-    assert all(s.lstrip().upper().startswith("SELECT") and f"LIMIT {I._CANDIDATE_SAMPLE}" in s for s in probes)
+    assert all(s.lstrip().upper().startswith("SELECT") and f"LIMIT {I.PF.JOIN_SAMPLE_ROWS}" in s for s in probes)
 
 
 def test_a_dry_run_writes_no_candidates_file(tmp_path):
