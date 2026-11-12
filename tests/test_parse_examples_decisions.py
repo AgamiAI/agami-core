@@ -90,6 +90,8 @@ def test_each_action_lands_where_its_command_reads_it(tmp_path, capsys):
         (_d(1, "keep") | {"signer": "x@example.com"}, "unknown keys: signer"),
         (_d(1, "keep") | {"n": "1"}, "n is not a number"),
         (_d(1, "approve"), "action 'approve' is not one of"),
+        (_d(1, "keep") | {"action": []}, "is not one of"),  # unhashable: a refusal, not a crash
+        (_d(1, "keep") | {"action": {}}, "is not one of"),
         (_d(2, "fix"), "a fix needs its sql"),
         (_d(2, "fix", sql="  "), "a fix needs its sql"),
         (_d(2, "note"), "a note needs its note"),
@@ -163,3 +165,18 @@ def test_unreadable_files_are_an_error_not_a_crash(tmp_path, capsys):
         ]
     )
     assert rc == 2
+
+
+def test_each_check_writes_its_files_to_its_own_private_folder(tmp_path, capsys):
+    """Two saves checked at once for the same area must not overwrite each other's files."""
+    out = tmp_path / "tmp"
+    _, first = _run(tmp_path, _doc(_d(1, "keep")), "--out-dir", str(out), capsys=capsys)
+    _, second = _run(tmp_path, _doc(_d(2, "keep")), "--out-dir", str(out), capsys=capsys)
+    a, b = (
+        Path(first["data"]["files"]["keep"]["sales"]),
+        Path(second["data"]["files"]["keep"]["sales"]),
+    )
+    assert a != b and a.parent != b.parent and a.parent.parent == out
+    assert json.loads(a.read_text())[0]["question"] == "How many orders?"
+    assert json.loads(b.read_text())[0]["question"] == "Revenue?"
+    assert a.parent.stat().st_mode & 0o777 == 0o700

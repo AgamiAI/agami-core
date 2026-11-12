@@ -206,7 +206,8 @@ The model explorer page, with every subject area, table, field, metric, entity, 
 First rule 6a's step 1 (a remote or SSH session uses the cards). Then, when the page will take approvals (it was picked on a review card, or nothing has needed sign-off yet this session) and `reviewer_email` / `reviewer_role` aren't saved, the identity card (Phase 0) first: the page signs approvals as that saved identity and can't change it. **Don't sign anything yet** there still opens the page, which then says approvals can't be saved from it.
 
 ```bash
-ts=$(date -u +%Y%m%d-%H%M%S)
+# The random part keeps two pages opened in the same second from sharing a decisions file.
+ts=$(date -u +%Y%m%d-%H%M%S)-$RANDOM
 # Per-model subdir so a person with several databases can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
 out="<artifacts_dir>/local/model/$profile/$ts.html"

@@ -733,6 +733,9 @@
     let sectionPlaced = !SECTION_PILES.length;   // set once the opening sub-tab and pile have been picked
     let joinTypeFilter = 'all';  // Joins tab: all | in | cross
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
+    // A describe card's text typed but not yet "Save description"-ed, by qname: kept across redraws
+    // (which rebuild the textarea) and holding a saving page's Save until it is saved or cleared.
+    const describeDrafts = {};
 
     // Sign-off identity (stamped on every Approve). Persisted to localStorage so it's
     // remembered across renders; the skill reads it from the `signed-off-by:` feedback line.
@@ -2363,8 +2366,14 @@
       const body = el('div', { class: 'table-body', style: 'padding:10px 18px 12px;' });
       const ta = el('textarea', { class: 'inline-edit-ta', rows: '2',
         placeholder: isTable ? 'Describe this table in one line (optional)…' : 'Describe this column in one line (optional)…' });
-      ta.value = (edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '';
+      const committed = (edits[uc.qname] && edits[uc.qname].fields && edits[uc.qname].fields.description) || '';
+      ta.value = describeDrafts[uc.qname] ?? committed;
+      ta.addEventListener('input', () => {
+        if (ta.value.trim() !== committed.trim()) describeDrafts[uc.qname] = ta.value;
+        else delete describeDrafts[uc.qname];
+      });
       const save = () => {
+        delete describeDrafts[uc.qname];
         const v = ta.value.trim();
         const base = isTable ? { kind: 'table', area: uc.area, name: uc.table, fields: {} }
                              : { kind: 'table', area: uc.area, name: uc.table, column: uc.col, fields: {} };
@@ -2426,6 +2435,14 @@
       const placeholders = placeholderFindings().filter(ph => !searchQ
         || (ph.col + ' ' + ph.table + ' ' + ph.value).toLowerCase().includes(searchQ));
 
+      // Opened on a section: pick, before the sub-tab bar and its
+      // items are built, the first sub-tab that holds that kind of item.
+      if (!sectionPlaced) {
+        sectionPlaced = true;
+        const pileIn = k => groups[k] && SECTION_PILES.find(pile => reviewKindGroups(groups[k].items).some(kg => kg.key === pile));
+        const k = ['eyes', 'looks', 'edited'].find(pileIn);
+        if (k) { reviewSubTab = k; reviewSubTabChosen = true; reviewKind = pileIn(k); }
+      }
       // sub-tab bar with counts ("Edited" appears only when non-empty)
       const order = ['eyes', 'looks'];
       if (groups.edited.items.length) order.push('edited');
@@ -2449,13 +2466,6 @@
       root.appendChild(bar);
 
       const g = groups[reviewSubTab] || groups.eyes;
-      // Opened on a section: start on the first sub-tab that holds that kind of item.
-      if (!sectionPlaced) {
-        sectionPlaced = true;
-        const pileIn = k => groups[k] && SECTION_PILES.find(pile => reviewKindGroups(groups[k].items).some(kg => kg.key === pile));
-        const k = ['eyes', 'looks', 'edited'].find(pileIn);
-        if (k) { reviewSubTab = k; reviewSubTabChosen = true; reviewKind = pileIn(k); }
-      }
       const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
 
       // Second-layer KIND pills: within this sub-tab, split the pile by kind (Metrics / Joins /
@@ -3167,6 +3177,8 @@
       if (addMetricOpen) open.push('the new metric');
       if (addJoinOpen) open.push('the new join');
       if (addExampleOpen) open.push('the new example');
+      const drafts = Object.keys(describeDrafts).length;
+      if (drafts) open.push(drafts === 1 ? 'a description not yet saved' : drafts + ' descriptions not yet saved');
       const glossaryTyped = typeof document !== 'undefined'
         && Array.from(document.querySelectorAll('.glossary-add input')).some(i => (i.value || '').trim());
       if (glossaryTyped) open.push('the new glossary term');
@@ -3315,6 +3327,7 @@
       Object.keys(moves).forEach(k => delete moves[k]);
       Object.keys(edits).forEach(k => delete edits[k]);
       Object.keys(exampleEdits).forEach(k => delete exampleEdits[k]);
+      Object.keys(describeDrafts).forEach(k => delete describeDrafts[k]);
       newMetrics.length = 0; newExamples.length = 0; dsEdit = null; termEdits = null; addMetricOpen = false; addExampleOpen = false;
       newJoins.length = 0; addJoinOpen = false; joinDraft = {};
       editOpen.clear();

@@ -490,7 +490,7 @@ _IDENTITY = "\n".join(
 def _blocker(state: str) -> str | None:
     return _node(
         "let inlineEditKey = null, addMetricOpen = false, addJoinOpen = false, addExampleOpen = false;\n"
-        "const editOpen = new Set(); const ops = {}; let signOff = { email: '' };\n"
+        "const editOpen = new Set(); const ops = {}; const describeDrafts = {}; let signOff = { email: '' };\n"
         + _IDENTITY
         + "\n"
         + _BLOCKER
@@ -508,6 +508,7 @@ def _blocker(state: str) -> str | None:
         "addMetricOpen = true;",
         "addJoinOpen = true;",
         "addExampleOpen = true;",
+        "describeDrafts['sales.orders.code'] = 'what the code means';",  # a describe card's unsaved text
     ],
 )
 def test_the_explorer_will_not_save_while_an_edit_is_open(state: str) -> None:
@@ -537,3 +538,18 @@ def test_a_saved_page_says_to_press_the_cards_button() -> None:
     assert (
         "classList.add('agami-save-over')" in html and "body.agami-save-over #btn-generate" in html
     )
+
+
+def test_a_describe_cards_draft_is_kept_across_redraws_and_cleared_on_save() -> None:
+    card = _between(_EXPLORER, "function describeCard(uc)", "function renderReviewTab(root)")
+    assert "ta.value = describeDrafts[uc.qname] ?? committed;" in card
+    assert "describeDrafts[uc.qname] = ta.value" in card
+    assert "delete describeDrafts[uc.qname];\n        const v = ta.value.trim();" in card
+
+
+def test_the_review_tab_places_the_section_before_building_its_controls() -> None:
+    tab = _between(_EXPLORER, "function renderReviewTab(root)", "function nextStepsCallout(")
+    placed = tab.index("if (!sectionPlaced)")
+    assert placed < tab.index("const bar = el('div', { class: 'subtab-bar' })")
+    assert placed < tab.index("const g = groups[reviewSubTab]")
+    assert placed < tab.index("!reviewSubTabChosen && reviewSubTab === 'eyes'")

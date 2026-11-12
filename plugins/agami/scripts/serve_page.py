@@ -91,7 +91,9 @@ class _Scripts(html.parser.HTMLParser):
 def script_hashes(page: str) -> list[str]:
     """The CSP source for each inline script of `page`: `'sha256-<base64>'`."""
     parser = _Scripts()
-    parser.feed(page)
+    # A browser normalises line endings before it hashes a script, and a page written on Windows
+    # has CRLF: hash what the browser will. The bytes served stay as they are.
+    parser.feed(page.replace("\r\n", "\n").replace("\r", "\n"))
     parser.close()
     return [
         "'sha256-" + base64.b64encode(hashlib.sha256(b.encode("utf-8")).digest()).decode() + "'"
@@ -345,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
     if not page.is_file():
         sys.stderr.write(f"serve_page: no such file: {page}\n")
         return 1
-    decisions = Path(args.decisions).expanduser().resolve() if args.decisions else None
+    # Absolute, but not resolved: a link at that name is replaced by the file, never written through.
+    decisions = Path(os.path.abspath(Path(args.decisions).expanduser())) if args.decisions else None
     server = _Server(page, decisions)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
