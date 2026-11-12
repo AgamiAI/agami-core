@@ -1,8 +1,8 @@
 """Ossie export (F19 / ACE-173): each subject area as one Apache Ossie semantic model.
 
-Apache Ossie (formerly OSI) is an open interchange format for semantic models. Its only release is
-0.1.1, so that is the default; 0.3.0.dev0 (`main`,
-no release yet, shape may still move) is written with `--ossie-version 0.3`. Both versions share
+Apache Ossie (formerly OSI) is an open interchange format for semantic models. Version 0.1.1 is
+the default; 0.3.0.dev0, a development version whose shape may still move, is written with
+`--ossie-version 0.3`. Both versions share
 every mapping and differ only in the document's wrapper, the extension block and how an expression
 is spelt, so one writer serves both.
 
@@ -500,8 +500,8 @@ def add_arguments(sp: argparse.ArgumentParser) -> None:
         dest="ossie_version",
         choices=list(VERSIONS),
         default=argparse.SUPPRESS,
-        help="Ossie version for --target ossie: 0.1.1 (default, the only release) or "
-        "0.3 (0.3.0.dev0, unreleased)",
+        help="Ossie version for --target ossie: 0.1.1 (default) or "
+        "0.3 (0.3.0.dev0, a development version)",
     )
 
 

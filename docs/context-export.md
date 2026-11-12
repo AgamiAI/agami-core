@@ -95,7 +95,7 @@ risk; "none" means it only changes what the files hold.
 | `--location DATABASE.SCHEMA` | none | Where the tables live on the target: `database.schema` for Snowflake, `catalog.schema` for Databricks. Required for `snowflake` always (the view is created in a schema), and for any target whose engine differs from the model's. Without it, those runs are refused. When the model is written for the target's engine, a table keeps the schema the model names and takes only the database or catalog from `--location`. | none |
 | `--include-unreviewed` | off | Also carry items not yet approved. The report lists each one under `included_unreviewed`. | Definitions nobody signed off reach the target's AI. They are never marked certified (Snowflake tags them `TO BE REVIEWED`), and their Pages stay drafts. |
 | `--include-sensitive` | off | Also carry columns flagged `sensitive`, and whatever names them. | Sensitive column names, and the SQL and text that use them, go into every file. |
-| `--ossie-version V` | `0.1.1` | `0.1.1` (Ossie's only release) or `0.3` (writes `0.3.0.dev0`, the unreleased `main` shape, which may still change). | none |
+| `--ossie-version V` | `0.1.1` | `0.1.1` or `0.3` (writes `0.3.0.dev0`, a development version whose shape may still change). | none |
 | `--snowflake-warehouse NAME` | none | The warehouse the Snowflake agent runs its SQL on, written as the tool's `execution_environment`. It must be a name an unquoted identifier reaches (letters, digits, `_` and `$`, not starting with a digit, all one case, not a keyword) and is written upper-case; any other name is refused. Without it no warehouse is written, and the agent does not run for a caller with no default warehouse. | none |
 | `--snowflake-certification-tags` | off | Tags the semantic view and its tables, dimensions, facts and metrics with `SNOWFLAKE.TAGS.CERTIFICATION_STATUS`: `CERTIFIED` for an approved item, `TO BE REVIEWED` for one `--include-unreviewed` carried. A table is `CERTIFIED` only when it and every column it carries are approved. The view is `CERTIFIED` only when every item carried for it is approved and it carries no key term or ambiguity: agami holds those with no review state, so no review of them is recorded, and the view is `TO BE REVIEWED`. A time dimension has no `tags` field and goes untagged. | Changes the catalog: the tags mark objects certified for everyone who can see them. Applying the view then needs the `SNOWFLAKE.OOB_TAG_APPLY` application role, which only ACCOUNTADMIN holds by default. |
 | `--snowflake-no-expected-answers` | off (answers are computed) | Writes the evaluation data without expected answers, except a golden item's `bounds`. | Turns off the one default that copies data: without this flag, running the evaluation file stores up to 20 rows of each golden query's result in a table and an evaluation dataset in your account. Only a query that reads columns the semantic view carries, and no `*`, is run that way. |
@@ -314,9 +314,9 @@ one. Restricting who can read a column is done with a Unity Catalog column mask.
 Load `<area>.ossie.yaml` with any tool that reads Ossie: Ossie's own validator and Python SDK in the
 `apache/ossie` repository, or Snowflake's Ossie importer,
 `SYSTEM$CREATE_SEMANTIC_VIEW_FROM_OSSIE_YAML`; see Snowflake's documentation for the Ossie version
-it reads and what it keeps. 0.1.1, Ossie's only release, is the default. For a semantic view built
+it reads and what it keeps. 0.1.1 is the default. For a semantic view built
 for Cortex Analyst, with its synonyms and verified queries, apply the Snowflake target's files.
-Write `--ossie-version 0.3` only for a tool that reads the unreleased `main` shape.
+Write `--ossie-version 0.3` only for a tool that reads that development version.
 
 ## Reading the report
 

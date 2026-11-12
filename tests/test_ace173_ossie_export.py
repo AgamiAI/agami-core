@@ -42,7 +42,7 @@ from semantic_model.loader import load_datasource  # noqa: E402
 
 SAMPLE = REPO / "plugins" / "agami" / "samples" / "store" / "model"
 FIXTURES = REPO / "tests" / "fixtures" / "ossie"
-# The 0.3.0.dev0 schema is unreleased, so it is pinned to the apache/ossie commit it was copied from.
+# The 0.3.0.dev0 schema is a development version, so it is pinned to the apache/ossie commit it was copied from.
 OSSIE_03_COMMIT = "e6ad94ee87a53fd8f8b6dbf0de33fab59e406c0c"
 SCHEMAS = {
     "0.1.1": FIXTURES / "osi-schema-0.1.1.json",
