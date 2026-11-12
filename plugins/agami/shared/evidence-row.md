@@ -42,8 +42,19 @@ bash "<plugin_root>/scripts/py" reconcile.py intake --file <path> [--file <path>
 Detection is by content, never by asking:
 
 - **A cell that starts with `SELECT` or `WITH`** is a statement. A `.sql` file is statements split on
-  `;`, and every chunk gets the same test: one that is not a `SELECT` or a `WITH` is skipped with a
-  reason, never a statement row.
+  `;` (never on one inside a quoted string or a comment), and every chunk gets the same test: one that
+  is not a `SELECT` or a `WITH` is skipped with a reason, never a statement row. A comment written
+  above a statement (the last block of comment lines, ended by a blank line) is its `question` when
+  it ends in "?" and its `label` otherwise, and is not part of the statement; a comment on the same
+  line as the `;` before belongs to that earlier statement.
+- **A folder** is every `.sql`, `.csv`, `.xlsx` and dashboard export in it, at any depth, in name
+  order, up to 500 files; `provenance.file` is the path inside the folder. Hidden folders and
+  `node_modules` are not entered and hidden files are left out. A link is never followed: it is
+  listed in `skipped`, because a link inside the folder can point anywhere. A file in a folder that
+  cannot be read is listed in `skipped` with the reason and the rest are still read; a file named on
+  its own that cannot be read exits `2`. A question list (`.txt`, `.md`) is read only when named on
+  its own, since in a folder of SQL it is likelier a README.
+- **An `.xlsx`** is one sheet, read the way a CSV is; with several sheets, `--sheet` names which.
 - **A `.txt` or `.md` file, or a file with no commas or tabs,** is one question per line; a line that
   starts with `SELECT` or `WITH` is a statement.
 - **A `.json` file** is a list of strings (questions) or objects with any of the keys `label`,
@@ -62,6 +73,31 @@ Detection is by content, never by asking:
 **Mixed input merges by label.** A statement whose label matches a tile's label, under a case and
 whitespace fold, joins that tile's row and the row's shape becomes `d`. An unmatched statement gets
 its own row (shape `b`); an unmatched tile stays a number-only row (shape `c`).
+
+## Dashboard exports
+
+`scripts/dashboard_exports.py` reads three exports into the same rows (#645). One row per worksheet,
+table or measure; `label` is its name, `statement` is set only when every piece translated, and
+`provenance.export` says what was read and what was not:
+
+| Export | What becomes a row | `statement` |
+|---|---|---|
+| Tableau `.twb`, `.twbx` | each worksheet with a field on it | its data source (custom SQL, wrapped as a subquery, or one table), its plain fields grouped, its sums, averages, counts and distinct counts, and its filters on a list of values or a number range. None when it uses a calculated field, a date part or bin, a blend, a join of several tables, a data-source filter, a parameter, or another kind of filter: `untranslated` says which |
+| Power BI `.pbit`, `.bim` | each table that loads with native SQL | that SQL, from the Power Query expression |
+| LookML `.lkml` | each view's derived table, and each measure of a plain type (`count`, `sum`, `average`, `min`, `max`, `count_distinct`) over one column with plain `field: value` filters | the derived-table SQL, or the measure composed over its view's table |
+
+`provenance.export` holds `kind`, the item's name, `untranslated` (a list of sentences; empty when the
+statement was composed) and `statement_from`; a Tableau row adds `datasource`, `base`, `custom_sql`,
+`fields`, `filters` and the `calculations` it uses. The output also carries `definitions`: every
+calculated field, DAX measure or calculated column, and LookML measure, as `{file, source, language,
+datasource, name, formula, used_by}`. They are listed for the person and never converted to SQL. A
+composed statement is evidence like any other and goes through the same checks.
+
+The export is untrusted: XML that declares a DTD or an entity is refused before it is parsed, a zip
+member is read only up to a size limit (so is the zip, its number of members, and a LookML file, at
+2 MB), a damaged or encrypted zip is a sentence rather than a crash, and the connection's server, user and database names are
+never read into the output. A `.pbix`, `.tds`, `.tdsx` or `.hyper` is skipped with a sentence saying
+what to send instead. A LookML explore's joins are not read here (#622).
 
 **What is skipped, and what is refused.** A row whose second column is neither a number nor a
 statement is skipped with a reason, in `skipped`. A file that does not exist exits `2`. An input with

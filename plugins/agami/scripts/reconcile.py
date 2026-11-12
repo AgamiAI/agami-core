@@ -37,11 +37,17 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
+import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import _xlsx
+import dashboard_exports
 
 # --- Number parsing -------------------------------------------------------
 
@@ -440,28 +446,180 @@ def _rows_from_json(items: Any, *, file: str, source: str | None) -> tuple[list[
 
 
 _MAX_INTAKE_BYTES = 20 * 1024 * 1024
+# What a folder is read for. A question list (.txt, .md) is read only when named on its own: in a
+# folder of SQL a README is far likelier than a list of questions, and it would become one row a line.
+_FOLDER_SUFFIXES = frozenset({".sql", ".csv", ".xlsx"}) | dashboard_exports.EXPORT_SUFFIXES
+_MAX_FOLDER_FILES = 500
+# What reading one file can raise when the file, not the program, is at fault.
+_UNREADABLE = (json.JSONDecodeError, UnicodeDecodeError, ValueError, csv.Error, RecursionError, OSError)
 
 
-def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[dict]]:
+def _split_sql(text: str) -> list[tuple[str, str | None]]:
+    """A .sql file's statements, each with the comment written above it (or None).
+
+    Cut on `;` outside quotes and comments, so a `;` inside a string literal or a comment does not
+    split a statement in two. The leading comment is taken off the statement, because it names the
+    statement rather than being part of it; a comment inside the statement stays where it is."""
+    chunks, buf, i, n = [], [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"'):
+            j = i + 1
+            while j < n and not (text[j] == ch and (j + 1 >= n or text[j + 1] != ch)):
+                j += 2 if text[j] == ch else 1
+            buf.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            buf.append(text[i:j])
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            buf.append(text[i:j])
+            i = j
+        elif ch == ";":
+            chunks.append("".join(buf))
+            buf, i = [], i + 1
+        else:
+            buf.append(ch)
+            i += 1
+    chunks.append("".join(buf))
+    out = []
+    for n, chunk in enumerate(chunks):
+        if not chunk.strip():
+            continue
+        out.append(_leading_comment(chunk, after_statement=n > 0))
+    return out
+
+
+def _leading_comment(chunk: str, *, after_statement: bool) -> tuple[str, str | None]:
+    """One chunk's statement and the comment block written directly above it.
+
+    A comment on the same line as the `;` before belongs to that statement and is dropped here. Only
+    the last block of comment lines counts: a blank line ends a block, so a file's header comment is
+    not merged into its first statement's label."""
+    pos = 0
+    while after_statement:
+        # What follows the `;` on its own line: a `--` comment runs to the line's end, a block comment
+        # to its `*/` (which may be on a later line, or followed by the next statement).
+        pos += len(chunk[pos:]) - len(chunk[pos:].lstrip(" \t\r"))
+        if chunk.startswith("/*", pos):
+            end = chunk.find("*/", pos + 2)
+            pos = len(chunk) if end < 0 else end + 2
+        elif chunk.startswith("--", pos):
+            end = chunk.find("\n", pos)
+            pos = len(chunk) if end < 0 else end + 1
+            break
+        else:
+            if chunk.startswith("\n", pos):
+                pos += 1
+            break
+    block: list[str] = []
+    while True:
+        pos += len(chunk[pos:]) - len(chunk[pos:].lstrip(" \t\r"))
+        if chunk.startswith("\n", pos):
+            block, pos = [], pos + 1
+        elif chunk.startswith("--", pos):
+            end = chunk.find("\n", pos)
+            end = len(chunk) if end < 0 else end
+            block.append(chunk[pos + 2:end].strip())
+            pos = end + 1
+        elif chunk.startswith("/*", pos) and "*/" in chunk[pos:]:
+            end = chunk.index("*/", pos)
+            block.extend(ln.strip(" *\t\r") for ln in chunk[pos + 2:end].splitlines())
+            pos = end + 2
+            tail = re.match(r"[ \t\r]*\n", chunk[pos:])
+            if tail:
+                pos += tail.end()
+        else:
+            break
+    comment = " ".join(c for c in block if c) or None
+    return chunk[pos:].strip(), comment
+
+
+def _expand(path: Path) -> tuple[list[tuple[Path, str]], list[dict]]:
+    """A file as itself; a folder as the files in it this intake reads, each with its path relative
+    to the folder (so two `queries.sql` in different subfolders stay apart), in name order, at any
+    depth. Hidden folders and `node_modules` are not entered, hidden files are left out, a link is
+    never followed (a link inside the folder can point anywhere), and the walk stops at the cap."""
+    if not path.is_dir():
+        return [(path, path.name)], []
+    root = path.resolve()
+    found: list[tuple[Path, str]] = []
+    skipped: list[dict] = []
+    for here, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "node_modules")
+        for name in sorted(files):
+            if name.startswith("."):
+                continue
+            f = Path(here) / name
+            rel = f.relative_to(root).as_posix()
+            suffix = f.suffix.lower()
+            if suffix not in _FOLDER_SUFFIXES and suffix not in dashboard_exports.UNREADABLE_EXPORTS:
+                continue
+            if f.is_symlink() or not f.resolve().is_relative_to(root):
+                skipped.append({"file": rel, "line": 0,
+                                "reason": "a link to another file; only files inside the folder are read"})
+                continue
+            if suffix in dashboard_exports.UNREADABLE_EXPORTS:
+                skipped.append({"file": rel, "line": 0, "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
+                continue
+            if len(found) == _MAX_FOLDER_FILES:
+                skipped.append({"file": rel, "line": 0,
+                                "reason": f"the folder holds more than {_MAX_FOLDER_FILES} files it could read; "
+                                          f"only the first {_MAX_FOLDER_FILES} were read"})
+                return found, skipped
+            found.append((f, rel))
+    return found, skipped
+
+
+def _rows_from_export(path: Path, source: str | None,
+                      file: str | None = None) -> tuple[list[dict], list[dict], list[dict]]:
+    """A dashboard export's rows, the lines it could not use, and the definitions it holds."""
+    got = dashboard_exports.read_export(path)
+    file = file or path.name
+    rows = []
+    for item in got["rows"]:
+        row = _new_row(file=file, line=item["line"], source=source, label=item["label"],
+                       statement=item["statement"])
+        row["provenance"]["export"] = item["export"]
+        rows.append(row)
+    skipped = [dict(s, file=file) for s in got["skipped"]]
+    definitions = [dict(d, file=file) for d in got["definitions"]]
+    return rows, skipped, definitions
+
+
+def _rows_from_file(path: Path, source: str | None, sheet: str | None = None,
+                    file: str | None = None) -> tuple[list[dict], list[dict]]:
     """One file's rows and the lines it could not use. The extension decides how lines are cut:
-    `.json` is a list, `.sql` is statements split on `;`, `.txt` and `.md` are one question per
-    line, and everything else is CSV."""
-    file = path.name
+    `.json` is a list, `.sql` is statements split on `;`, `.xlsx` is one sheet read like a CSV,
+    `.txt` and `.md` are one question per line, and everything else is CSV."""
+    file = file or path.name
     if path.stat().st_size > _MAX_INTAKE_BYTES:
         raise ValueError(f"{file} is {path.stat().st_size // (1024 * 1024)} MB; the intake reads files up to {_MAX_INTAKE_BYTES // (1024 * 1024)} MB. Export fewer rows, or split the file.")
-    text = path.read_text(encoding="utf-8")
     suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        sheet_name, cells = _xlsx.read_sheet(str(path), sheet)
+        return _rows_from_table([(n, r) for n, r in enumerate(cells, 1)], file=f"{file} ({sheet_name})",
+                                source=source)
+    text = path.read_text(encoding="utf-8")
     if suffix == ".json":
         return _rows_from_json(json.loads(text), file=file, source=source)
     if suffix == ".sql":
         rows, skipped = [], []
-        for n, stmt in enumerate((s for s in text.split(";") if s.strip()), 1):
+        for n, (stmt, comment) in enumerate(_split_sql(text), 1):
             # The same test a CSV cell gets: anything that is not a SELECT or a WITH is context or
-            # a mistake, and never reaches the tier as a statement the person supplied.
+            # a mistake, and never reaches the tier as a statement the person supplied. A comment
+            # above a statement is how a .sql file names it: the row's question when it is one (it
+            # ends in "?"), its label otherwise, which Phase 2a turns into a question.
             if _is_statement(stmt):
-                rows.append(_new_row(file=file, line=n, source=source, statement=stmt.strip()))
+                asks = bool(comment) and comment.rstrip().endswith("?")
+                rows.append(_new_row(file=file, line=n, source=source, statement=stmt,
+                                     question=comment if asks else None, label=None if asks else comment))
             else:
-                skipped.append({"file": file, "line": n, "text": stmt.strip()[:80],
+                skipped.append({"file": file, "line": n, "text": (comment or stmt).strip()[:80],
                                 "reason": "not a SELECT or WITH statement"})
         return rows, skipped
     if suffix in (".txt", ".md") or ("," not in text and "\t" not in text):
@@ -486,6 +644,15 @@ def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[di
                 continue
             seen_row = True
             numbered.append((n, r))
+    rows, skipped = _rows_from_table(numbered, file=file, source=source)
+    skipped.extend(guidance)
+    return rows, skipped
+
+
+def _rows_from_table(numbered: list[tuple[int, list[str]]], *, file: str,
+                     source: str | None) -> tuple[list[dict], list[dict]]:
+    """Rows of cells, a CSV's or a sheet's, read by header name when the first row is a header."""
+    numbered = [(n, r) for n, r in numbered if r and any(str(c).strip() for c in r)]
     if not numbered:
         return [], []
     fields = _header_map(numbered[0][1], [r for _n, r in numbered[1:]])
@@ -500,7 +667,6 @@ def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[di
             skipped.append({"file": file, "line": n, "reason": why})
         else:
             rows.append(row)
-    skipped.extend(guidance)
     return rows, skipped
 
 
@@ -527,7 +693,7 @@ def _merge_by_label(rows: list[dict]) -> list[dict]:
     return merged
 
 
-def intake(paths: list[Path], *, source: str | None = None) -> dict:
+def intake(paths: list[Path], *, source: str | None = None, sheet: str | None = None) -> dict:
     """Every file's rows, merged by label across files, with the shape that was seen.
 
     `shape` is one letter when every row has the same shape and `mixed` otherwise; each row also
@@ -535,10 +701,32 @@ def intake(paths: list[Path], *, source: str | None = None) -> dict:
     """
     rows: list[dict] = []
     skipped: list[dict] = []
-    for path in paths:
-        got, missed = _rows_from_file(Path(path).expanduser(), source)
-        rows.extend(got)
+    definitions: list[dict] = []
+    for given in paths:
+        given = Path(given).expanduser()
+        files, missed = _expand(given)
         skipped.extend(missed)
+        for path, name in files:
+            suffix = path.suffix.lower()
+            if suffix in dashboard_exports.UNREADABLE_EXPORTS:
+                skipped.append({"file": name, "line": 0,
+                                "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
+                continue
+            try:
+                if suffix in dashboard_exports.EXPORT_SUFFIXES:
+                    got, missed, defs = _rows_from_export(path, source, name)
+                else:
+                    got, missed, defs = (*_rows_from_file(path, source, sheet, name), [])
+            except _UNREADABLE as exc:
+                if not given.is_dir():
+                    raise  # a file named on its own: the caller says it could not be read
+                # In a folder, one file nobody can read does not cost the rest of the folder.
+                skipped.append({"file": name, "line": 0,
+                                "reason": f"could not be read: {str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__}"})
+                continue
+            definitions.extend(defs)
+            rows.extend(got)
+            skipped.extend(missed)
     rows = _merge_by_label(rows)
     # The row number is given once, here. The intake page shows it, its block names it, and the run
     # directory and the report page use it; a row dropped on the page never renumbers the others.
@@ -546,7 +734,12 @@ def intake(paths: list[Path], *, source: str | None = None) -> dict:
         row.setdefault("row", n)
     shapes = {row["provenance"]["shape"] for row in rows}
     shape = next(iter(shapes)) if len(shapes) == 1 else ("mixed" if shapes else None)
-    return {"shape": shape, "rows": rows, "skipped": skipped}
+    out = {"shape": shape, "rows": rows, "skipped": skipped}
+    if definitions:
+        # A calculated field, a measure: a definition the export states in its own language. Listed
+        # for the person to read beside the semantic model's, never converted to SQL or checked.
+        out["definitions"] = definitions
+    return out
 
 
 # --- Ledger ---------------------------------------------------------------
@@ -2902,6 +3095,242 @@ def report_items(run_dir: Path) -> list[dict]:
         })
     return items
 
+# --- Own examples (#645) ----------------------------------------------------------------------
+#
+# A run started from "Add my own" ends differently from a reconcile: the person asked to ADD their
+# statements as examples, so every row lands in exactly one of five lists, from the same items the
+# report page renders. Nothing here re-judges a row; the item's `status`, `fix` and `result` already
+# did, and this only reads them.
+#   add          the numbers agree and nothing in the person's query was proved wrong
+#   ask          the person's query disagrees with a definition: agami's answer on a filter, a date
+#                window, a join or the tables read, or a filter or metric the semantic model declares.
+#                Asked as "which should be the default?", and kept as an open question in the shape
+#                of a declared ambiguity (`name`, `when`, `options[{label, how}]`, `applies_to`), so a
+#                later step can propose it without re-reading the run
+#   fix          the data proved a part of the person's query wrong; never added
+#   reword       the query may not answer the question it came with
+#   not_checked  the row could not run, or brought no query of the person's
+# The card answers come back through `parse_reconcile_report.py` and move rows between the lists:
+# `nothing` on an add row leaves it out; on an ask row `change` makes theirs the default (through
+# /agami-save-correction), `example` keeps theirs for its own question, `fix` keeps agami's and adds
+# nothing, and no answer leaves the question open.
+
+_OWN_SETTLED = {"change": "yours", "example": "this_question", "fix": "agami"}
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:60] or "question"
+
+
+def _table_areas(root: Path | None) -> dict[str, str]:
+    """Each modelled table's bare name → its subject area, read from the model's own file layout
+    (`subject_areas/<area>/tables/<table>.yaml`). A name two areas share maps to neither."""
+    areas: dict[str, str] = {}
+    shared: set[str] = set()
+    for f in sorted((root / "subject_areas").glob("*/tables/*.yaml")) if root else []:
+        name = _fold(f.stem).split(".")[-1]
+        if name in areas and areas[name] != f.parent.parent.name:
+            shared.add(name)
+        areas[name] = f.parent.parent.name
+    return {k: v for k, v in areas.items() if k not in shared}
+
+
+def _receipt_tables(row_dir: Path) -> list[str]:
+    receipt = _load_json(row_dir / "statement-receipt.json") if (row_dir / "statement-receipt.json").exists() else None
+    names = []
+    for item in ((receipt or {}).get("tables") or {}).get("items", []):
+        name = item.get("ref") or item.get("qname")
+        if name and _fold(str(name)).split(".")[-1] not in [_fold(n).split(".")[-1] for n in names]:
+            names.append(str(name))
+    return names
+
+
+def _choice_options(item: dict, rec: dict, definitional: list[str]) -> list[dict]:
+    """The meanings a person could choose between, the person's own first: a filter the semantic model
+    declares and their query leaves out, and agami's query when the answers differ on a definition.
+    At most two; one option means there is no choice to ask about; a metric the semantic model lacks is not a
+    choice, it is a gap for /agami-save-correction, so it brings no option here."""
+    options = [{"label": "as your query has it", "how": item["sql_yours"]}]
+    if item["fix"] == "semantic_model":
+        for part in ((rec.get("ledger") or {}).get("rows") or []):
+            ev = part.get("evidence") or {}
+            if part.get("verdict") == MODEL_GAP and str(part.get("part", "")).startswith("default_filter:") and ev.get("expr"):
+                options.append({"label": "as the semantic model declares",
+                                "how": f"apply the declared filter {ev['expr']}"})
+    differs = item["result"].get("data") in ("differs", "partly")
+    # Two readings at most, so "keep the other one" on the card names exactly one: the semantic
+    # model's declaration when the query disagrees with it, else agami's query.
+    if len(options) == 1 and differs and definitional and item.get("sql_agami") and item["result"].get("query") == "different":
+        options.append({"label": "as agami answered", "how": item["sql_agami"]})
+    return options[:2]
+
+
+def _norm_sql(sql: Any) -> str:
+    return " ".join(str(sql or "").split())
+
+
+def _fit_confirmed(rec: dict) -> bool:
+    """Whether the ledger confirmed that the statement answers its question. Nothing is written as
+    the person's example without it, whatever the fix says: a sound query under the wrong question
+    is the most harmful example there is."""
+    parts = (rec.get("ledger") or {}).get("rows") or []
+    return any(p.get("part") == "question_fit" and p.get("verdict") == CONFIRMED for p in parts)
+
+
+def _row_area(tables: list[str], areas: dict[str, str]) -> str | None:
+    """The one subject area every table the statement reads belongs to; None when any table has no
+    single area or they span several, so the person is asked rather than the first table winning."""
+    found = {areas.get(_fold(t).split(".")[-1]) for t in tables}
+    return next(iter(found)) if len(found) == 1 and None not in found else None
+
+
+def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dict] | None = None,
+                 replace: set[int] | None = None, area_for: dict[int, str] | None = None,
+                 now: str | None = None) -> dict:
+    """The run's rows sorted into add / ask / fix / reword / not_checked, and the examples to write.
+
+    `decisions` are the cards' answers (parse_reconcile_report.py's), `replace` the rows the person
+    said "Replace it" for on the collision card, and `area_for` the areas picked on the Area card.
+    Replacing is only ever `replace`: no other answer is read as permission to overwrite."""
+    items = report_items(run_dir)
+    records = {r["row"]: r for r in _done_rows(run_dir)[0]}
+    decided = {d["row"]: d for d in decisions or []}
+    replace, area_for = set(replace or ()), dict(area_for or {})
+    areas = _table_areas(root)
+    plan: dict[str, Any] = {"run": run_dir.name, "add": [], "ask": [], "fix": [], "reword": [], "not_checked": [],
+                            "collisions": [], "duplicates": [], "needs_area": [], "written": []}
+    candidates: list[dict] = []
+    for item in items:
+        n, rec = item["row"], records.get(item["row"], {})
+        status, fix, result = item["status"], item["fix"], item["result"]
+        question = item["question"]
+        base = {"row": n, "question": question, "source": item.get("source")}
+        definitional = sorted(set(result.get("differs_in") or []) & _DEFINITIONAL)
+        tables = _receipt_tables(run_dir / "rows" / str(n))
+        if not item.get("sql_yours"):
+            plan["not_checked"].append({**base, "why": "no query of yours came with this row"})
+            continue
+        if status == "error":
+            plan["not_checked"].append({**base, "why": item["sentence"]})
+            continue
+        if fix == "query" or status == "expected_doubtful":
+            plan["fix"].append({**base, "why": item["sentence"], "change": item["change"]})
+            continue
+        if fix == "question" or not _fit_confirmed(rec):
+            plan["reword"].append({**base, "why": item["sentence"] if fix == "question" else
+                                   "whether your query answers this question could not be confirmed"})
+            continue
+        answer = decided.get(n, {}).get("decision")
+        options = _choice_options(item, rec, definitional)
+        if len(options) > 1:
+            # The checks where the two sides part, as the report page shows them: what the card's
+            # question names, in place of a sentence that only says how far apart the numbers are.
+            differences = [{"check": d["key"], "yours": d.get("yours"), "agami": d.get("agami"), "note": d.get("note")}
+                           for d in item["diff"] if d.get("state") in ("differs", "defect", "gap")]
+            plan["ask"].append({**base, "why": item["sentence"], "differs_in": definitional,
+                                "differences": differences,
+                                "yours": item.get("expected"), "agami": item.get("answer"),
+                                "status": "settled" if answer in _OWN_SETTLED else "open",
+                                "settled_as": _OWN_SETTLED.get(answer),
+                                "candidate": {"name": _slug(question), "when": question, "behaviour": "ask",
+                                              "options": options, "applies_to": tables}})
+            # Only "Mine for this question only" writes it; it is still a candidate now, so a clash
+            # is shown before that card is answered, not discovered after.
+            write = answer == "example"
+        elif status not in ("match", "match_unverified"):
+            plan["not_checked"].append({**base, "why": item["sentence"]})
+            continue
+        elif answer == "nothing":
+            plan["not_checked"].append({**base, "why": "left out on the card"})
+            continue
+        else:
+            # Every part that could not be confirmed, a column paired only through one repeated value
+            # included: the page's own count leaves that one out, and it is the reason for the row.
+            unchecked = sum(1 for part in ((rec.get("ledger") or {}).get("rows") or [])
+                            if part.get("verdict") == UNRESOLVED)
+            plan["add"].append({**base, "why": item["sentence"], "unchecked": unchecked, "tables": tables})
+            write = True
+        area = area_for.get(n) or _row_area(tables, areas)
+        candidates.append({**base, "sql": item["sql_yours"], "tables": tables, "area": area, "write": write})
+
+    held: set[int] = set()
+    for c in candidates:
+        if c["area"] is None:
+            plan["needs_area"].append({k: c[k] for k in ("row", "question", "tables")})
+            held.add(c["row"])
+    # Two of the person's own rows under one question in one area: `sm add-example` keeps the last.
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for c in candidates:
+        if c["area"] is not None:
+            groups.setdefault((c["area"], c["question"]), []).append(c)
+    for (area, question), group in groups.items():
+        first = group[0]
+        for c in group[1:]:
+            if _norm_sql(c["sql"]) == _norm_sql(first["sql"]):
+                plan["duplicates"].append({"row": c["row"], "question": question, "same_as": first["row"]})
+                held.add(c["row"])
+        distinct = [c for c in group if c["row"] not in held]
+        if len({_norm_sql(c["sql"]) for c in distinct}) > 1:
+            chosen = [c["row"] for c in distinct if c["row"] in replace]
+            plan["collisions"].append({"kind": "incoming", "area": area, "question": question,
+                                       "rows": [{"row": c["row"], "sql": c["sql"]} for c in distinct],
+                                       "chosen": chosen[0] if len(chosen) == 1 else None})
+            held.update(c["row"] for c in distinct if not (len(chosen) == 1 and c["row"] == chosen[0]))
+    # An example the area already keeps under the question, with other SQL (a correction, a reviewed
+    # seed): never overwritten unless the person said "Replace it" for that row.
+    cache: dict[str, dict[str, dict]] = {}
+    for c in candidates:
+        if c["area"] is None:
+            continue
+        if c["area"] not in cache:
+            cache[c["area"]] = _existing_examples(root, c["area"])
+        clash = cache[c["area"]].get(c["question"])
+        if clash is not None and _norm_sql(clash.get("sql")) != _norm_sql(c["sql"]):
+            plan["collisions"].append({"kind": "kept", "row": c["row"], "question": c["question"], "area": c["area"],
+                                       "existing_source": clash.get("source"), "existing_status": clash.get("status"),
+                                       "existing_sql": clash.get("sql"), "replace": c["row"] in replace})
+            if c["row"] not in replace:
+                held.add(c["row"])
+
+    examples: dict[str, list[dict]] = {}
+    for c in candidates:
+        if not c["write"] or c["row"] in held:
+            continue
+        plan["written"].append({"row": c["row"], "question": c["question"], "source": c["source"], "area": c["area"]})
+        examples.setdefault(c["area"], []).append({
+            "question": c["question"], "sql": c["sql"], "tables": [_fold(t).split(".")[-1] for t in c["tables"]],
+            "source": "own", "status": "confirmed", "created_at": now or _utc_now()})
+    for stale in run_dir.glob("own-examples.add.*.json"):
+        stale.unlink()  # a re-run after a card leaves out rows; an earlier file would still name them
+    plan["examples_files"] = {}
+    for area, exs in examples.items():
+        path = run_dir / f"own-examples.add.{area}.json"
+        path.write_text(json.dumps(exs, indent=2), encoding="utf-8")
+        plan["examples_files"][area] = str(path)
+    plan["collisions_checked"] = root is not None and importlib.util.find_spec("semantic_model") is not None
+    plan["counts"] = {k: len(plan[k]) for k in ("add", "ask", "fix", "reword", "not_checked", "collisions",
+                                                "duplicates", "needs_area", "written")}
+    (run_dir / "own-examples.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    return plan
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _existing_examples(root: Path | None, area: str) -> dict[str, dict]:
+    """The area's kept examples by question, read by agami-core's own loader. Without that package
+    (this script otherwise needs only the standard library) nothing is known to collide, and the
+    plan says so in `collisions_checked`."""
+    if root is None:
+        return {}
+    try:
+        from semantic_model.loader import list_prompt_examples
+    except ImportError:
+        return {}
+    return {e["question"]: e for e in list_prompt_examples(root, area) if isinstance(e, dict) and e.get("question")}
+
+
 class RecordError(Exception):
     """A row record could not be built from the row directory: the message names what is missing."""
 
@@ -3159,6 +3588,7 @@ def main(argv: list[str] | None = None) -> int:
     p_intake = sub.add_parser("intake", help="Read any input shape a person brings into evidence rows.")
     p_intake.add_argument("--file", action="append", required=True, dest="files")
     p_intake.add_argument("--source", default=None, help="the person's own words for where this came from")
+    p_intake.add_argument("--sheet", default=None, help="which sheet of an .xlsx to read, when it has several")
 
     p_ledger = sub.add_parser("ledger", help="Grade every part of a supplied statement from the files in its row directory.")
     p_ledger.add_argument("--row-dir", required=True, dest="row_dir")
@@ -3189,6 +3619,16 @@ def main(argv: list[str] | None = None) -> int:
     p_items = sub.add_parser("report-items", help="Build the report page's items from a run's rows.jsonl, ledgers, comparisons and receipts.")
     p_items.add_argument("--run-dir", required=True, dest="run_dir")
     p_items.add_argument("--out", default=None, help="where the items file goes (default <run-dir>/report-items.json)")
+
+    p_own = sub.add_parser("own-examples", help="Sort an own-examples run into add / ask / fix / reword / not_checked and write the examples to add.")
+    p_own.add_argument("--run-dir", required=True, dest="run_dir")
+    p_own.add_argument("--root", default=None, help="the profile's model folder, to file each example under its subject area")
+    p_own.add_argument("--replace", type=int, action="append", default=[],
+                       help="a row the person answered Replace it for on the collision card (repeat)")
+    p_own.add_argument("--area", action="append", default=[], dest="areas", metavar="ROW=AREA",
+                       help="the subject area picked on the Area card for a row (repeat)")
+    p_own.add_argument("--decisions", default=None,
+                       help="parse_reconcile_report.py's output for the cards' answers; without it nothing is decided yet")
 
     p_status = sub.add_parser("status", help="The status a row gets, from the number comparison and the ledger's verdict.")
     p_status.add_argument("--match", required=True, choices=["true", "false", "none"],
@@ -3259,6 +3699,40 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status}, indent=2))
         return 0
 
+    if args.cmd == "own-examples":
+        run_dir = Path(args.run_dir).expanduser()
+        if not (run_dir / "rows.jsonl").exists():
+            print(f"reconcile own-examples: no rows.jsonl in {run_dir}; finish the run first", file=sys.stderr)
+            return 2
+        decisions = None
+        if args.decisions:
+            try:
+                parsed = json.loads(Path(args.decisions).expanduser().read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"reconcile own-examples: the decisions file could not be read: {exc}", file=sys.stderr)
+                return 2
+            # Only the parser's own verdict is applied: a block it sent back is not the person's answer.
+            if not isinstance(parsed, dict) or not parsed.get("ok") or (parsed.get("data") or {}).get("run") != run_dir.name:
+                print("reconcile own-examples: the decisions are not parse_reconcile_report.py's ok output for this run",
+                      file=sys.stderr)
+                return 2
+            decisions = parsed["data"]["decisions"]
+        root = Path(args.root).expanduser() if args.root else None
+        area_for: dict[int, str] = {}
+        for given in args.areas:
+            row, _, area = given.partition("=")
+            if not row.strip().isdigit() or root is None or not area or not (root / "subject_areas" / area).is_dir():
+                print(f"reconcile own-examples: --area {given!r} is not ROW=AREA for an area of this model", file=sys.stderr)
+                return 2
+            area_for[int(row)] = area
+        try:
+            plan = own_examples(run_dir, root=root, decisions=decisions, replace=set(args.replace), area_for=area_for)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"reconcile own-examples: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(plan, indent=2))
+        return 0
+
     if args.cmd == "next-chunk":
         run_dir = Path(args.run_dir).expanduser()
         if not run_dir.is_dir():
@@ -3325,7 +3799,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         csv.field_size_limit(sys.maxsize)  # a long SQL cell is a row, not an error
         try:
-            result = intake(paths, source=args.source)
+            result = intake(paths, source=args.source, sheet=args.sheet)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError, csv.Error, RecursionError) as exc:
             print(f"reconcile intake: could not read the input: {str(exc).splitlines()[0][:300]}", file=sys.stderr)
             return 2

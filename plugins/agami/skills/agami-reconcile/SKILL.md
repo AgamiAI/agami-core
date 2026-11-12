@@ -1,7 +1,7 @@
 ---
 name: agami-reconcile
 description: "Reconciles known (label, expected_value) numbers from an existing dashboard against agami's answers. Input can be a SCREENSHOT of a Metabase / Power BI / Tableau / Looker dashboard (Claude's vision extracts the pairs), a CSV, or numbers pasted inline — the user doesn't need to know which; they can just ask. For each pair, the skill generates a matching NL question, runs it through the active profile's semantic model, diffs actual vs expected, and surfaces matches in green and mismatches in red with drill-down receipts. The strongest onboarding demo for a skeptical data engineer — either we agree with their numbers (trust earned via evidence) or we surface a real definitional disagreement (trust earned via transparency)."
-when_to_use: "Use when the user says 'reconcile against this dashboard', 'do these numbers match?', 'validate against my Tableau export', '/agami-reconcile <csv>', drops a screenshot of a BI dashboard (Metabase/Power BI/Tableau/Looker/spreadsheet) and asks agami to reproduce the numbers, or pastes a CSV / table of known numbers. Also use when they hand over SQL they trust ('here is the SQL behind each tile', 'validate this query part by part', 'audit this SQL', 'here is the query we trust, check it') or a list of questions with no answers ('check these questions'); the person's query is graded part by part against the semantic model and the warehouse, never taken as the answer. Also use after a run, when the user says 'keep these as golden questions' or 'promote these to a golden dataset' — the rows that agreed are split between the examples agami reads when answering and the answer key later runs are scored against. Requires agami-connect to have been run first (need a semantic model + examples library). A high-leverage validation surface for a skeptical data team — reproduce their dashboard numbers, or surface the definitional gap."
+when_to_use: "Use when the user says 'reconcile against this dashboard', 'do these numbers match?', 'validate against my Tableau export', or asks to add their own examples ('add an example', 'add my own examples', 'add these as examples': follow shared/own-examples.md), '/agami-reconcile <csv>', drops a screenshot of a BI dashboard (Metabase/Power BI/Tableau/Looker/spreadsheet) and asks agami to reproduce the numbers, or pastes a CSV / table of known numbers. Also use when they hand over SQL they trust ('here is the SQL behind each tile', 'validate this query part by part', 'audit this SQL', 'here is the query we trust, check it') or a list of questions with no answers ('check these questions'); the person's query is graded part by part against the semantic model and the warehouse, never taken as the answer. Also use after a run, when the user says 'keep these as golden questions' or 'promote these to a golden dataset' — the rows that agreed are split between the examples agami reads when answering and the answer key later runs are scored against. Requires agami-connect to have been run first (need a semantic model + examples library). A high-leverage validation surface for a skeptical data team — reproduce their dashboard numbers, or surface the definitional gap."
 argument-hint: "<screenshot | path-to-csv | pasted numbers>"
 ---
 
@@ -45,6 +45,7 @@ Same checks as agami-query / agami-connect:
    - **Numbers pasted inline** as a list/table — treat as inline CSV.
    - **SQL the person trusts** — one or more statements, pasted or in a `.sql` file, alone or beside the question each answers. Go to Phase 1's **statement branch**. The statement is evidence, never the answer: Phase 1.5 grades every part of it before it is compared with anything.
    - **A list of questions** with no answers — one per line. Go to Phase 1's **questions branch**.
+   - **A dashboard export or a folder** — a Tableau workbook (`.twb`, `.twbx`), a Power BI template (`.pbit`), LookML views (`.lkml`), or a folder of `.sql` files and sheets. `reconcile.py intake` reads each into the same rows (Phase 1n; what an export gives is in [`shared/evidence-row.md`](../../shared/evidence-row.md#dashboard-exports)), so it is the CSV branch with that file as `--file`.
    A screenshot and the SQL behind its tiles may arrive together; Phase 1n joins them by label. A filled `.csv` in `<artifacts_dir>/local/reconcile/inbox/` is the CSV branch: check the inbox before asking, so a person who filled the template and came back to say **reconcile** is not asked again. **If they gave nothing** (or just asked "can you check my dashboard?"), ask once the way `agami-connect` asks which database: **AskUserQuestion**, the four shapes as options, the lowest-friction one first, and the rarer inputs named in the prompt so they are visibly welcome (*"Something else, a pasted `label: value` list or a JSON export? Choose **Other** and paste it."*).
 
    | label | description |
@@ -724,6 +725,12 @@ End the turn. The user typically:
 
 ---
 
+## Own examples: a run that came from "Add my own"
+
+When the person asked to add their own examples, the run starts in [`shared/own-examples.md`](../../shared/own-examples.md) and its rows' `provenance.source` starts with **your own examples**. Phases 1n to 2f run unchanged. Phase 3 keeps 3a's summary, then follows that file's steps 4 to 7 in place of 3a.5's row cards and 3e's keep offer: the person asked to add examples, so the rows that agree go to the examples, signed as theirs, with no split into golden items, and a row that disagrees with a definition is asked as "which should be the default?". A run resumed on a later day is the same: read the source from `intake.json` before Phase 3.
+
+---
+
 ## Hard rules
 
 1. **No automatic question generation for ambiguous labels.** If the label is too short or too vague (e.g., `Total`, `Number`, `Value`), surface to the user: *"Row 5's label is just 'Total' — too ambiguous to translate to a question. Skipping. Add more context to the CSV (e.g., `Total Revenue Q3` instead of `Total`) and re-run."* Don't guess.
@@ -775,5 +782,5 @@ The screenshot is an **image of numbers**, and a misread expected value reads ex
 
 ## Roadmap (not in v1)
 
-- **Tableau / Looker / Mode export parsing** — parse `.twb` / `.twbx` / JSON exports directly (today a screenshot of any of them already works via the vision branch).
+- **Mode and Metabase exports** — Tableau, Power BI templates and LookML are read directly (Phase 0.4); for anything else a screenshot works through the vision branch.
 - **Recurring reconcile runs** — re-run a reconcile against a pinned dashboard on a schedule, rather than by asking each time.

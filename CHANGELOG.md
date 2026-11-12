@@ -14,6 +14,22 @@ below corresponds to one such version.
 
 ### Added
 
+- **Add your own examples at the examples step (#645).** The connect examples card now always
+  offers **Add my own**, and "add an example" in `/agami-model` or `/agami-reconcile` reaches the
+  same procedure (`shared/own-examples.md`). It reads a `.sql` file or a folder of them, a CSV or
+  `.xlsx` sheet of questions and SQL, a question and SQL typed in, a screenshot, or a dashboard
+  export: a Tableau workbook (`.twb`, `.twbx`: each worksheet's custom SQL or table, fields and
+  filters), a Power BI template (`.pbit`: each table's native SQL) or LookML views (`.lkml`: derived
+  tables and plain measures). Calculated fields, DAX and LookML measures are listed, never turned
+  into SQL. Every statement goes through reconcile's part-by-part check and agami answers the same
+  question cold; `reconcile.py own-examples` then sorts the run: the ones that agree are added as
+  examples signed as the person's, the ones that disagree with a definition are asked as "which
+  should be the default?" and kept as open questions in the shape of a declared ambiguity, and the
+  ones with a measured mistake are sent back. Workbook XML that declares a DTD or an entity is
+  refused, zip members are size-limited, a folder walk never follows a link out of the folder, an
+  example already kept under the same question is never overwritten without a yes, and connection
+  details in an export never reach the output.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
@@ -95,6 +111,10 @@ below corresponds to one such version.
   `prune-template.html` and `parse_prune_block.py` are gone.
 
 ### Fixed
+
+- **A `.sql` file whose statement has a comment above it is read (#645).** The intake skipped it
+  as "not a SELECT", and split a statement on a `;` inside a string or a comment. The comment now
+  names the statement.
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
