@@ -19,6 +19,12 @@ below corresponds to one such version.
   older refuse to load an `organization.yaml` with keys they do not know, so a core that wrote them
   would break every older one. This release accepts the keys and keeps them on a rewrite, but does
   not write them yet; a later release will, once no supported core predates this one.
+- **`sm curate` can reject prompt examples in the same ops file as model edits (#608).**
+  `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` rejects that
+  example as `sm remove-example` does (kept for audit, dropped from the runtime ranker) and is part
+  of the batch: a batch that fails validation or errors undoes the example change too. An unknown
+  area or a question that matches nothing is skipped with a reason; any other op on an example is
+  refused.
 
 ### Fixed
 
