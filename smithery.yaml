@@ -1,0 +1,20 @@
+# Smithery manifest. agami-core serves a local, read-only MCP server over stdio, backed by the
+# semantic model /agami-connect builds from your own database. The server needs no API key;
+# database credentials stay in your artifacts directory and never pass through Smithery.
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required: []
+    properties:
+      agamiProfile:
+        type: string
+        description: Which semantic-model profile to serve. Leave unset for the one /agami-connect created.
+  commandFunction: |-
+    (config) => ({
+      command: 'uvx',
+      args: ['--from', 'agami-core[model]', 'agami-core'],
+      env: config.agamiProfile ? { AGAMI_PROFILE: config.agamiProfile } : {}
+    })
+  exampleConfig:
+    agamiProfile: main
