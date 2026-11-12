@@ -770,9 +770,9 @@ def test_2g_asks_only_checked_questions_from_the_engine():
 def test_2g_cards_are_capped_and_every_question_can_skip_the_rest():
     s = _section_2g()
     assert "up to 4 questions per card" in s and "at most 12" in s
-    assert "Every question carries **Skip the rest**" in s
+    assert "every question ends with **Skip the rest**" in s
     assert "**Ask each time**" in s
-    assert "No option is marked Recommended" in s
+    assert "no option is marked Recommended" in s
 
 
 def test_2g_records_each_answer_as_the_persons_with_who_and_when():
@@ -794,3 +794,20 @@ def test_2g_runs_only_when_ask_me_as_you_go_was_picked_and_says_no_duration():
     steps = text[text.index("## Progress tracking") : text.index("## Phase −1")]
     assert "6. Answer what the data can't settle" in steps
     assert '6 when "Ask me as you go" wasn\'t picked' in steps
+
+
+def test_2f_keeps_its_closing_paragraphs_above_2g():
+    # A run that skips 2g, or has nothing to ask, still writes the description and the company draft.
+    s = _between("### 2f ", "### 2g ")
+    assert "**The one-line datasource description (from 1.4 C).**" in s
+    assert "**The company draft (from 1.4 A's" in s
+    # 2g is the last section before Phase 3: nothing of 2f follows it
+    assert _section_2g().rstrip().endswith("---")
+    assert "**The company draft" not in _section_2g()
+
+
+def test_2g_passes_the_engines_cards_unchanged_and_never_claims_settled_after_a_failure():
+    s = _section_2g()
+    assert "**Then the cards: each question's `card`, passed to AskUserQuestion unchanged**" in s
+    assert "never say the data settled anything while `counts.failed` is not 0" in s
+    assert "**Don't sign anything yet** on that card writes nothing" in s

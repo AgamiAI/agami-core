@@ -21,8 +21,10 @@ below corresponds to one such version.
   amount includes tax, which of two joins to the same table is meant, whether past rows count, a
   fiscal year, codes nobody could decode, unreadable columns and look-alike tables. `sm
   open-questions` finds the candidates from patterns in the model, runs every reading as a bounded
-  aggregate (one statement per table, plus one for its dates; never a personal column, never a
-  table above the size guard) and keeps only those whose answers differ. At most 12 are asked, with
+  aggregate (one statement per table, one more for its dates and two for a fiscal-year check;
+  never a personal column, never a table whose estimated size is above the guard) and keeps only
+  those whose answers differ. Each question comes with its card, ready to ask unchanged; a check
+  that fails is reported by its error's class, and the step never calls a failed run settled. At most 12 are asked, with
   **Skip the rest** on every card. Nothing is declared until the person answers: `sm curate`'s new
   `add` op for an ambiguity is refused without `--signer` and `--role`, and the curation log records
   who answered and when.
