@@ -24,6 +24,7 @@ local-only execution path the rest of agami uses; no new egress.
 from __future__ import annotations
 
 import csv
+import functools
 import io
 import os
 import re
@@ -152,6 +153,21 @@ def _progress(path: Optional[Path], msg: str) -> None:
             fh.flush()
     except Exception:
         pass
+
+
+def _logs_failure(fn: Callable) -> Callable:
+    """End the progress log with `failed: <reason>` when the run raises, then re-raise unchanged.
+    Without it a failed run leaves an unfinished log, which `sm steps` reads as a build still going."""
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except BaseException as exc:
+            path = kwargs.get("progress_path")
+            reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+            _progress(Path(path) if path else None, f"failed: {reason}")
+            raise
+    return run
 
 
 @dataclass
@@ -290,6 +306,7 @@ def make_execute_sql_runner(
 # ---------------------------------------------------------------------------
 
 
+@_logs_failure
 def introspect(
     profile: str,
     db_type: str,

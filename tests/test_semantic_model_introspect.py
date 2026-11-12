@@ -938,6 +938,27 @@ def test_introspect_writes_progress_log(tmp_path):
     assert lines[-1].startswith("done:")
 
 
+def test_a_build_that_raises_ends_its_log_with_failed(tmp_path, monkeypatch):
+    """A failed run must end its log, or `sm steps` reads the unfinished log as a build still going."""
+    from semantic_model import cli
+    pp = tmp_path / "progress.log"
+    with pytest.raises(RuntimeError, match="no tables discovered"):
+        I.introspect("shop", "postgres", runner=lambda sql: [],
+                     artifacts_dir=tmp_path, dry_run=True, progress_path=pp)
+    assert pp.read_text().splitlines()[-1].startswith("failed: no tables discovered. If the catalog")
+
+    # through `sm introspect`: the log ends the same way and the error propagates as it did
+    monkeypatch.setattr(I, "make_execute_sql_runner", lambda *a, **k: (lambda sql: []))
+    log = tmp_path / "acme" / ".introspect" / "progress.log"
+    with pytest.raises(RuntimeError, match="no tables discovered"):
+        cli.main(["introspect", "--profile", "acme", "--db-type", "postgres",
+                  "--artifacts", str(tmp_path)])
+    last = log.read_text().splitlines()[-1]
+    assert last.startswith("failed: no tables discovered.") and "\n" not in last
+    # sm progress posts it as a plain line, no bar
+    assert cli._progress_line(last) == {"line": last, "done": False}
+
+
 def test_normalize_table_list_splits_zsh_blob():
     from semantic_model import cli
     assert cli._normalize_table_list(["a", "b"]) == ["a", "b"]          # clean list untouched

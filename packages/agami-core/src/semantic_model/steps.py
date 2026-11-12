@@ -35,6 +35,10 @@ LABELS = {
 
 MARK_STATUSES = ("in_progress", "done", "skipped")
 
+# An unfinished build log this long untouched is taken for a build that died without a word (a
+# killed process writes no `failed:` line), so the list doesn't read "building" forever.
+STALE_BUILD_SECONDS = 1800
+
 # Each progress-log line, in the person's words: (pattern, phrase, unit). The engine's own wording
 # (`columns+grain 30/52`) is for the engine; a person reads "Reading columns … 30/52 tables".
 PROGRESS_PHRASES = (
@@ -59,7 +63,8 @@ def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
 def last_progress_line(log: Path) -> str:
     """The build log's latest non-blank line, or "" when there is none (yet)."""
     try:
-        lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        text = log.read_text(encoding="utf-8", errors="replace")
+        lines = [ln for ln in text.splitlines() if ln.strip()]
     except OSError:
         return ""
     return lines[-1] if lines else ""
@@ -128,12 +133,34 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         return None, f"The model in {root} couldn't be read: {first}"
 
 
-def _build_running(log: Path, model: Path) -> bool:
-    """A build is running while its log is unfinished (the engine ends it with `done:`) and newer
-    than the model it will replace; an older unfinished log is a build that was abandoned."""
-    if not log.exists() or last_progress_line(log).startswith("done:"):
-        return False
-    return not model.exists() or log.stat().st_mtime > model.stat().st_mtime
+def _build_state(log: Path, model: Path, now: float) -> tuple[Optional[str], Optional[str]]:
+    """(state, reason) of the build log that speaks for this model: "running", "failed" (with the
+    engine's reason), "stale" or "done"; (None, None) when no log is newer than the model. A file
+    that vanishes between the two stats (being replaced) reads as no log, never as running."""
+    try:
+        log_at = log.stat().st_mtime
+        model_at = model.stat().st_mtime if model.exists() else None
+    except OSError:
+        return None, None
+    if model_at is not None and log_at <= model_at:
+        return None, None
+    last = last_progress_line(log)
+    if last.startswith("done:"):
+        return "done", None
+    if last.startswith("failed:"):
+        return "failed", last[len("failed:"):].strip()
+    if now - log_at > STALE_BUILD_SECONDS:
+        return "stale", None
+    return "running", None
+
+
+def _unfinished(state: Optional[str], reason: Optional[str], rebuild: bool) -> Optional[str]:
+    """The problem line for a build that ended without finishing, else None."""
+    if state == "failed":
+        return f"The {'last rebuild' if rebuild else 'build'} didn't finish: {reason}"
+    if state == "stale":
+        return f"The {'last rebuild' if rebuild else 'build'} stopped before it finished."
+    return None
 
 
 def _build_count(log: Path) -> Optional[str]:
@@ -153,8 +180,9 @@ def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
     }
 
 
-def onboarding_steps(root: Path) -> dict[str, Any]:
-    """The nine steps with status, count and the label text to show, plus the current step."""
+def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, Any]:
+    """The nine steps with status, count and the label text to show, the current step, and a
+    one-line `problem` when the model on disk or the last build needs the person's attention."""
     root = Path(root).expanduser()
     status = {i: "pending" for i in STEP_IDS}
     status.update(_last_marks(root))
@@ -164,7 +192,8 @@ def onboarding_steps(root: Path) -> dict[str, Any]:
     log = root / ".introspect" / "progress.log"
     build_at = STEP_IDS.index("build")
     model = root / "datasource.yaml"
-    if _build_running(log, model):
+    state, reason = _build_state(log, model, (now or datetime.now(timezone.utc)).timestamp())
+    if state == "running":
         # The live count, not the numbers of a model this build will replace; and a half-written
         # tree is not a problem to report.
         status["build"] = "in_progress"
@@ -176,6 +205,11 @@ def onboarding_steps(root: Path) -> dict[str, Any]:
         totals, problem = _totals(root)
         if totals is not None:
             counts = _later_counts(totals)
+        # The model's own failure to load says more than a rebuild that didn't land.
+        problem = problem or _unfinished(state, reason, rebuild=True)
+    elif state in ("failed", "stale"):
+        status["build"] = "pending"
+        problem = _unfinished(state, reason, rebuild=False)
     elif log.exists():
         # The engine logs `done:` before the tree is written, so the build runs on until it lands.
         status["build"] = "in_progress"

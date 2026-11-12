@@ -159,6 +159,77 @@ def test_a_rebuild_shows_live_progress_not_the_old_model(model):
     assert result["problem"] is None
 
 
+def test_a_skipped_mark_survives_a_running_build(model):
+    _rebuild_log(model, "columns+grain 5/11")
+    steps.mark(model, "reports", "skipped")
+    steps.mark(model, "examples", "done")
+    s = _by_id(steps.onboarding_steps(model))
+    assert s["reports"]["status"] == "skipped"
+    assert s["examples"]["status"] == "pending"
+
+
+def test_a_running_build_over_an_unloadable_model_is_no_problem(model):
+    ds = model / "datasource.yaml"
+    doc = yaml.safe_load(ds.read_text())
+    doc["subject_areas"].append("subject_areas/missing")
+    ds.write_text(yaml.safe_dump(doc))
+    _rebuild_log(model, "columns+grain 5/11")
+    result = steps.onboarding_steps(model)
+    assert _by_id(result)["build"]["status"] == "in_progress"
+    assert result["problem"] is None
+
+
+def test_a_failed_rebuild_keeps_the_built_model_and_says_why(model):
+    _rebuild_log(model, "failed: could not connect to server")
+    steps.mark(model, "describe", "in_progress")
+    result = steps.onboarding_steps(model)
+    s = _by_id(result)
+    assert s["build"]["status"] == "done" and s["build"]["count"] == "11 tables, 12 joins"
+    assert s["describe"]["status"] == "in_progress"
+    assert result["problem"] == "The last rebuild didn't finish: could not connect to server"
+
+
+def test_a_failed_first_build_is_pending_with_the_reason(tmp_path):
+    root = _building(tmp_path)
+    (root / ".introspect" / "progress.log").write_text(
+        "discovered 34 tables — reading columns, grain, keys\nfailed: permission denied for schema demo\n")
+    steps.mark(root, "build", "in_progress")
+    steps.mark(root, "describe", "done")
+    result = steps.onboarding_steps(root)
+    s = _by_id(result)
+    assert s["build"]["status"] == "pending" and s["build"]["count"] is None
+    assert s["describe"]["status"] == "pending"
+    assert [s[i]["status"] for i in ("connect", "context", "tables")] == ["pending"] * 3
+    assert result["current"] == "connect"
+    assert result["problem"] == "The build didn't finish: permission denied for schema demo"
+
+
+def test_a_build_silent_for_30_minutes_is_not_running(model, tmp_path):
+    from datetime import datetime, timedelta, timezone
+    log = _rebuild_log(model, "columns+grain 5/11")
+    later = datetime.fromtimestamp(log.stat().st_mtime, timezone.utc) + timedelta(
+        seconds=steps.STALE_BUILD_SECONDS + 1)
+    soon = later - timedelta(seconds=2)
+    assert _by_id(steps.onboarding_steps(model, now=soon))["build"]["status"] == "in_progress"
+    result = steps.onboarding_steps(model, now=later)
+    assert _by_id(result)["build"]["status"] == "done"
+    assert result["problem"] == "The last rebuild stopped before it finished."
+
+    root = _building(tmp_path)
+    first = steps.onboarding_steps(root, now=datetime.fromtimestamp(
+        (root / ".introspect" / "progress.log").stat().st_mtime, timezone.utc) + timedelta(hours=1))
+    assert _by_id(first)["build"]["status"] == "pending"
+    assert first["problem"] == "The build stopped before it finished."
+
+
+def test_a_bad_byte_in_the_build_log_does_not_crash(tmp_path, capsys):
+    root = _building(tmp_path)
+    (root / ".introspect" / "progress.log").write_bytes(b"\xff\xfe\ncolumns+grain 2/9\n")
+    assert cli.main(["steps", str(root)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert _by_id(out)["build"]["count"] == "2 of 9 tables"
+
+
 def test_a_finished_log_does_not_hold_the_build_open(model):
     _rebuild_log(model, "done: 11 tables, 12 relationships")
     s = _by_id(steps.onboarding_steps(model))
