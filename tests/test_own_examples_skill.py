@@ -83,7 +83,7 @@ def test_the_default_question_has_four_answers_and_no_recommendation():
     for label, decision in (
         ("Make mine the default", "`change`"),
         ("Mine for this question only", "`example`"),
-        ("Keep agami's", "`fix`"),
+        ("Keep the current one", "`fix`"),
         ("Ask each time", "none"),
     ):
         assert f"| {label} | {decision} |" in card, label
@@ -95,10 +95,43 @@ def test_the_default_question_has_four_answers_and_no_recommendation():
 def test_the_procedures_cards_follow_the_card_rules():
     headers = re.findall(r"header `([^`]+)`", DOC)
     assert {"Your own", "Where", "Add", "Area"} <= set(headers)
-    assert all(len(h.replace("<k>/<n>", "1/9")) <= 12 for h in headers), headers
+    # a two-digit count is the longest a header gets
+    assert all(len(h.replace("<k>/<n>", "10/12").replace("<k>", "10")) <= 12 for h in headers), (
+        headers
+    )
     assert "**Type" not in DOC  # a value to type is asked for in the question (rule 5)
     rule_5a = "question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again"
     for paragraph in re.split(r"\n\s*\n", DOC):
         if "re-asked, never guessed" in paragraph:
             assert rule_5a in paragraph, paragraph[:80]
     assert "end the turn" not in DOC.lower() and "paste it back" not in DOC.lower()
+
+
+def test_the_add_card_asks_for_typed_rows_in_its_question_not_an_option():
+    add = _section(DOC, "**5a — Add.**", "**5b")
+    assert "To leave some out, type their row numbers in Other." in add
+    assert "**Leave some out**" not in add
+    for label in ("**Add all <n> (Recommended)**", "**Review one by one**", "**Don't add**"):
+        assert label in add, label
+
+
+def test_every_card_cites_the_numbered_list_fallback():
+    rule_7 = "question-cards.md#7-where-askuserquestion-is-unavailable"
+    for start, end in (
+        ("## 1. What do you have?", "## 2."),
+        ("**5a — Add.**", "**5b"),
+        ("**5b", "**5c"),
+    ):
+        assert rule_7 in _section(DOC, start, end), start
+
+
+def test_the_say_back_counts_what_was_written_and_what_was_kept():
+    say = _section(DOC, "## 7. Say what happened", "## Never")
+    assert "`counts.written`" in say and "`add` alone undercounts" in say
+    same = _section(DOC, "**5c", "## 6. Apply")
+    assert (
+        "never writes over an example" in same
+        and "`collisions`" in same
+        and "`collisions_checked`" in same
+    )
+    assert "per **Replace it**" in DOC

@@ -26,8 +26,9 @@ below corresponds to one such version.
   examples signed as the person's, the ones that disagree with a definition are asked as "which
   should be the default?" and kept as open questions in the shape of a declared ambiguity, and the
   ones with a measured mistake are sent back. Workbook XML that declares a DTD or an entity is
-  refused, zip members are size-limited, and connection details in an export never reach the
-  output.
+  refused, zip members are size-limited, a folder walk never follows a link out of the folder, an
+  example already kept under the same question is never overwritten without a yes, and connection
+  details in an export never reach the output.
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm

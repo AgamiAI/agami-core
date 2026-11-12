@@ -144,7 +144,15 @@ def test_each_row_lands_in_exactly_one_list(tmp_path):
     )
     rows = {k: [e["row"] for e in plan[k]] for k in ("add", "ask", "fix", "reword", "not_checked")}
     assert rows == {"add": [1, 8], "ask": [6, 7], "fix": [3], "reword": [], "not_checked": [4, 5]}
-    assert plan["counts"] == {"add": 2, "ask": 2, "fix": 1, "reword": 0, "not_checked": 2}
+    assert plan["counts"] == {
+        "add": 2,
+        "ask": 2,
+        "fix": 1,
+        "reword": 0,
+        "not_checked": 2,
+        "collisions": 0,
+        "written": 2,
+    }
 
 
 def test_a_query_the_data_proved_wrong_is_never_written_as_an_example(tmp_path):
@@ -281,3 +289,87 @@ def test_the_cli_applies_only_the_parsers_ok_answer_for_this_run(tmp_path, capsy
 def test_the_cli_refuses_a_run_that_has_not_finished(tmp_path, capsys):
     assert reconcile.main(["own-examples", "--run-dir", str(tmp_path)]) == 2
     assert "finish the run first" in capsys.readouterr().err
+
+
+# --- review fixes (#645) ------------------------------------------------------------------------
+
+
+def test_a_choice_names_at_most_two_readings(tmp_path):
+    # The person's query skips a declared filter AND agami answered differently on a definition: the
+    # card's "keep the other one" must mean one reading, the semantic model's declaration.
+    both = dict(
+        OMITS_DEFAULT,
+        row=9,
+        status="mismatch",
+        match=False,
+        actual=1.0,
+        delta_pct=-0.5,
+        sql="SELECT channel, COUNT(*) AS n FROM orders WHERE status != 'cancelled' GROUP BY channel",
+        recorded={"columns": ["n"], "rows": [[1.0]]},
+        claims=_claims(
+            ("tables", "agrees", ["orders"], ["orders"]),
+            ("filter_predicates", "differs", ["ne(orders.status, 'cancelled')"], []),
+        ),
+    )
+    run = _run(tmp_path, [both])
+    _receipt(run, 9, "orders")
+    (ask,) = reconcile.own_examples(run, root=_model(tmp_path))["ask"]
+    assert [o["label"] for o in ask["candidate"]["options"]] == [
+        "as your query has it",
+        "as the semantic model declares",
+    ]
+
+
+def test_a_match_held_open_only_by_a_value_pair_counts_it_as_unchecked(tmp_path):
+    pair = dict(
+        SCALAR_MATCH,
+        status="match_unverified",
+        ledger={
+            "rows": [
+                _part("runs", "confirmed"),
+                _part("question_fit", "confirmed"),
+                _part("value_pair:revenue~total", "unresolved", note="one value fills most rows"),
+            ],
+            "verdict": "unresolved",
+            "counts": {},
+        },
+        ledger_verdict="unresolved",
+    )
+    run = _run(tmp_path, [pair])
+    _receipt(run, 1, "orders")
+    (add,) = reconcile.own_examples(run, root=_model(tmp_path))["add"]
+    assert add["unchecked"] == 1
+
+
+def test_written_counts_every_example_including_one_kept_for_its_own_question(tmp_path):
+    run = _plan_run(tmp_path)
+    plan = reconcile.own_examples(
+        run, root=_model(tmp_path), decisions=[{"row": 7, "decision": "example"}]
+    )
+    assert plan["counts"]["add"] == 2 and plan["counts"]["written"] == 3
+    assert [w["row"] for w in plan["written"]] == [1, 7, 8]
+
+
+def test_an_existing_example_under_the_same_question_is_never_overwritten_silently(tmp_path):
+    root = _model(tmp_path)
+    (root / "prompt_examples" / "sales").mkdir(parents=True)
+    (root / "prompt_examples" / "sales" / "examples.yaml").write_text(
+        "- question: What was total revenue in Q3 2025?\n"
+        "  sql: SELECT SUM(net_amount) FROM orders\n"
+        "  source: correction\n  status: confirmed\n"
+        "- question: How many units shipped?\n"
+        "  sql: SELECT SUM(quantity) AS units FROM order_items\n"  # the same SQL: a re-save, no clash
+        "  source: seed\n"
+    )
+    run = _plan_run(tmp_path)
+    plan = reconcile.own_examples(run, root=root)
+    assert plan["collisions_checked"] is True
+    (clash,) = plan["collisions"]
+    assert (clash["row"], clash["existing_source"], clash["replace"]) == (1, "correction", False)
+    written = [e["question"] for e in json.loads(Path(plan["examples_files"]["sales"]).read_text())]
+    assert written == [NO_METRIC["question"]]
+    # "Replace it" on the card is an `example` decision for that row
+    plan = reconcile.own_examples(run, root=root, decisions=[{"row": 1, "decision": "example"}])
+    assert plan["collisions"][0]["replace"] is True
+    written = [e["question"] for e in json.loads(Path(plan["examples_files"]["sales"]).read_text())]
+    assert written == [SCALAR_MATCH["question"], NO_METRIC["question"]]

@@ -44,10 +44,16 @@ Detection is by content, never by asking:
 - **A cell that starts with `SELECT` or `WITH`** is a statement. A `.sql` file is statements split on
   `;` (never on one inside a quoted string or a comment), and every chunk gets the same test: one that
   is not a `SELECT` or a `WITH` is skipped with a reason, never a statement row. A comment written
-  above a statement is its `label`, and is not part of the statement.
+  above a statement (the last block of comment lines, ended by a blank line) is its `question` when
+  it ends in "?" and its `label` otherwise, and is not part of the statement; a comment on the same
+  line as the `;` before belongs to that earlier statement.
 - **A folder** is every `.sql`, `.csv`, `.xlsx` and dashboard export in it, at any depth, in name
-  order; hidden files are left out, and a question list (`.txt`, `.md`) is read only when named on its
-  own, since in a folder of SQL it is likelier a README.
+  order, up to 500 files; `provenance.file` is the path inside the folder. Hidden folders and
+  `node_modules` are not entered and hidden files are left out. A link is never followed: it is
+  listed in `skipped`, because a link inside the folder can point anywhere. A file in a folder that
+  cannot be read is listed in `skipped` with the reason and the rest are still read; a file named on
+  its own that cannot be read exits `2`. A question list (`.txt`, `.md`) is read only when named on
+  its own, since in a folder of SQL it is likelier a README.
 - **An `.xlsx`** is one sheet, read the way a CSV is; with several sheets, `--sheet` names which.
 - **A `.txt` or `.md` file, or a file with no commas or tabs,** is one question per line; a line that
   starts with `SELECT` or `WITH` is a statement.
@@ -88,7 +94,8 @@ datasource, name, formula, used_by}`. They are listed for the person and never c
 composed statement is evidence like any other and goes through the same checks.
 
 The export is untrusted: XML that declares a DTD or an entity is refused before it is parsed, a zip
-member is read only up to a size limit, and the connection's server, user and database names are
+member is read only up to a size limit (so is the zip, its number of members, and a LookML file, at
+2 MB), a damaged or encrypted zip is a sentence rather than a crash, and the connection's server, user and database names are
 never read into the output. A `.pbix`, `.tds`, `.tdsx` or `.hyper` is skipped with a sentence saying
 what to send instead. A LookML explore's joins are not read here (#622).
 

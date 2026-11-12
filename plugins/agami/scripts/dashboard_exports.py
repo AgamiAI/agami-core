@@ -28,13 +28,21 @@ import json
 import re
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from pathlib import Path
+from typing import Any
 
 import _xlsx
 
 # The largest document read out of an export: a workbook's XML or a model's JSON. A Tableau packaged
 # workbook can be hundreds of megabytes of data extract; only its `.twb` is read, and that is small.
 _MAX_DOC_BYTES = 64 * 1024 * 1024
+# A packaged workbook carries its data extract, so the zip itself may be far larger than the XML
+# read out of it; this bounds what is opened at all. LookML is hand-written text: a few hundred KB
+# is a large project file, and its parser is not built for more.
+_MAX_ZIP_BYTES = 512 * 1024 * 1024
+_MAX_ZIP_MEMBERS = 10_000
+_MAX_LKML_BYTES = 2 * 1024 * 1024
 
 _STATEMENT_RE = re.compile(r"^\s*(with|select)\b", re.IGNORECASE)
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -77,22 +85,29 @@ def read_export(path: Path) -> dict:
 
 
 def _zip_member(path: Path, want) -> tuple[str, bytes]:
-    """The first member `want(name)` accepts, read up to the size limit."""
+    """The first member `want(name)` accepts, read up to the size limit. A damaged, encrypted or
+    oddly compressed zip is a sentence for the person, never a traceback."""
+    if path.stat().st_size > _MAX_ZIP_BYTES:
+        raise ExportError(f"{path.name} is too large to read")
     try:
-        book = zipfile.ZipFile(path)
-    except zipfile.BadZipFile as exc:
+        with zipfile.ZipFile(path) as book:
+            members = book.infolist()
+            if len(members) > _MAX_ZIP_MEMBERS:
+                raise ExportError(
+                    f"{path.name} holds {len(members)} files, more than an export does"
+                )
+            for info in members:
+                if info.is_dir() or not want(info.filename):
+                    continue
+                if info.file_size > _MAX_DOC_BYTES:
+                    raise ExportError(f"{info.filename} inside {path.name} is too large to read")
+                # The declared size was checked above, and ZipFile reads no further than it.
+                return info.filename, book.read(info)
+    except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError) as exc:
+        # RuntimeError is an encrypted member; NotImplementedError a compression zipfile lacks.
         raise ExportError(
-            f"{path.name} is not a readable {path.suffix} file (it is not a zip)"
+            f"{path.name} is not a readable {path.suffix} file ({type(exc).__name__})"
         ) from exc
-    with book:
-        for info in book.infolist():
-            if info.is_dir() or not want(info.filename):
-                continue
-            if info.file_size > _MAX_DOC_BYTES:
-                raise ExportError(f"{info.filename} inside {path.name} is too large to read")
-            # The declared size was checked above, and ZipFile reads no further than it.
-            data = book.read(info)
-            return info.filename, data
     raise ExportError(f"{path.name} holds nothing this reader can use")
 
 
@@ -117,6 +132,28 @@ def _words(name: str) -> str:
 _TABLEAU_REF = re.compile(r"\[([^\]]+)\]\.\[([^\]]+)\]")
 _TABLEAU_INSTANCE = re.compile(r"^(?P<deriv>[a-z]+):(?P<field>.+):(?P<suffix>[a-z]+)$")
 _TABLEAU_AGG = {"sum": "SUM", "avg": "AVG", "min": "MIN", "max": "MAX", "cnt": "COUNT"}
+_TABLEAU_DATE_PARTS = frozenset(
+    {
+        "yr",
+        "qr",
+        "mn",
+        "wk",
+        "dy",
+        "wd",
+        "hr",
+        "mi",
+        "sc",
+        "my",
+        "tyr",
+        "tqr",
+        "tmn",
+        "twk",
+        "tdy",
+        "thr",
+        "tmi",
+        "tsc",
+    }
+)
 _TABLEAU_AGG_WORDS = {
     "sum": "total",
     "avg": "average",
@@ -295,9 +332,20 @@ def _tableau_sheet(sheet: ET.Element, sources: dict, n: int) -> dict | None:
             fields_words.append(
                 _words((src or {}).get("calcs", {}).get(field, {}).get("name") or field)
             )
+            if col:
+                untranslated.append(
+                    f"{_words(field)} is shown by an aggregate this reader does not translate"
+                )
+        elif deriv in _TABLEAU_DATE_PARTS:
+            fields_words.append(f"{_words(field)} ({deriv})")
+            untranslated.append(f"{_words(field)} is shown by a date part ({deriv})")
         else:
             fields_words.append(f"{_words(field)} ({deriv})")
-            untranslated.append(f"{_words(field)} is shown by a date part or bin ({deriv})")
+            untranslated.append(
+                f"{_words(field)} is shown by an aggregation or bin this reader does not translate ({deriv})"
+            )
+    if any(_TABLEAU_REF.search(el.text or "") for el in sheet.iter("pages")):
+        untranslated.append("the worksheet pages through a field, one view per value")
     where, having, filters_words = [], [], []
     for flt in sheet.iter("filter"):
         _tableau_filter(flt, column, where, having, filters_words, untranslated)
@@ -342,9 +390,15 @@ def _tableau_filter(
     refs = _TABLEAU_REF.findall(flt.get("column") or "")
     if not refs:
         return
-    m = _TABLEAU_INSTANCE.match(refs[0][1])
-    if refs[0][1].startswith(":") or m is None:
+    if refs[0][1].startswith(":"):
         return  # which measures to show, not which rows
+    m = _TABLEAU_INSTANCE.match(refs[0][1])
+    if m is None:
+        # A set, a group or a combined field: it keeps some rows, and dropping it silently would
+        # count everything.
+        words.append(f"a filter on {refs[0][1]}")
+        untranslated.append(f"the filter on {refs[0][1]} (a set or a group) is not translated")
+        return
     deriv, field = m["deriv"], m["field"]
     kind = flt.get("class")
     if kind == "categorical" and deriv == "none":
@@ -366,6 +420,11 @@ def _tableau_filter(
             )
         return
     if kind == "quantitative" and (deriv == "none" or deriv in _TABLEAU_AGG):
+        if (flt.get("included-values") or "in-range") != "in-range":
+            untranslated.append(
+                f"the range filter on {_words(field)} also keeps nulls or other values"
+            )
+            return
         lo, hi = flt.findtext("min"), flt.findtext("max")
         bounds = [b for b in (lo, hi) if b is not None]
         if not bounds or not all(re.fullmatch(r"-?\d+(\.\d+)?", b.strip()) for b in bounds):
@@ -401,6 +460,8 @@ def _tableau_members(gf: ET.Element | None) -> tuple[list[str] | None, bool]:
         return [], False
     if fn == "union":
         out: list[str] = []
+        if not gf.findall("groupfilter"):
+            return None, False  # keeps no value at all, which is not the same as no filter
         for child in gf.findall("groupfilter"):
             got, neg = _tableau_members(child)
             if got is None or neg:
@@ -451,17 +512,14 @@ def _powerbi(path: Path) -> dict:
         raise ExportError(f"{path.name} is not a readable Power BI model")
     rows, definitions, skipped = [], [], []
     no_sql = 0
-    for table in doc["model"].get("tables") or []:
-        if not isinstance(table, dict):
-            continue
+    for table in _dicts(doc["model"].get("tables")):
         tname = str(table.get("name") or "")
         found = []
-        for part in table.get("partitions") or []:
-            source = (part or {}).get("source") or {}
-            expr = (
+        for part in _dicts(table.get("partitions")):
+            source = part.get("source") if isinstance(part.get("source"), dict) else {}
+            expr = _text(
                 source.get("query") if source.get("type") == "query" else source.get("expression")
             )
-            expr = "\n".join(expr) if isinstance(expr, list) else (expr or "")
             found.extend(
                 _m_statements(str(expr))
                 if source.get("type") != "query"
@@ -483,28 +541,28 @@ def _powerbi(path: Path) -> dict:
                     },
                 }
             )
-        for measure in table.get("measures") or []:
-            expr = measure.get("expression")
+        for measure in _dicts(table.get("measures")):
+            expr = _text(measure.get("expression"))
             definitions.append(
                 {
                     "source": "Power BI",
                     "language": "DAX",
                     "datasource": tname,
                     "name": str(measure.get("name") or ""),
-                    "formula": "\n".join(expr) if isinstance(expr, list) else str(expr or ""),
+                    "formula": expr,
                     "used_by": [],
                 }
             )
-        for col in table.get("columns") or []:
-            if (col or {}).get("type") == "calculated":
-                expr = col.get("expression")
+        for col in _dicts(table.get("columns")):
+            if col.get("type") == "calculated":
+                expr = _text(col.get("expression"))
                 definitions.append(
                     {
                         "source": "Power BI",
                         "language": "DAX (calculated column)",
                         "datasource": tname,
                         "name": str(col.get("name") or ""),
-                        "formula": "\n".join(expr) if isinstance(expr, list) else str(expr or ""),
+                        "formula": expr,
                         "used_by": [],
                     }
                 )
@@ -517,6 +575,18 @@ def _powerbi(path: Path) -> dict:
             }
         )
     return {"rows": rows, "definitions": definitions, "skipped": skipped}
+
+
+def _dicts(value: Any) -> list[dict]:
+    """The objects in a JSON list: a model file is untrusted, so anything else in it is passed over."""
+    return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+
+def _text(value: Any) -> str:
+    """A model expression, which the format writes as one string or a list of lines."""
+    if isinstance(value, list):
+        return "\n".join(str(v) for v in value if isinstance(v, (str, int, float)))
+    return value if isinstance(value, str) else ""
 
 
 def _m_statements(expr: str) -> list[str]:
@@ -534,7 +604,37 @@ def _m_statements(expr: str) -> list[str]:
 
 # --- LookML -----------------------------------------------------------------------------------
 
-_LKML_SQL_VALUE = re.compile(r"\b(sql\w*|html|expression)\s*:(.*?);;", re.DOTALL)
+# The next thing the pre-pass must act on: a string, a comment, or a key whose value runs to `;;`.
+_LKML_NEXT = re.compile(r'["#]|(?<![\w.])(sql\w*|html|expression)[ \t]*:')
+# Looker's filter grammar gives these words meanings of their own (`NULL`, `NOT x`, `last 7 days`,
+# `yes` on a yes/no field), so a value that is one of them is never read as a literal.
+_LKML_FILTER_WORDS = frozenset(
+    {
+        "null",
+        "empty",
+        "not",
+        "to",
+        "before",
+        "after",
+        "last",
+        "this",
+        "next",
+        "ago",
+        "yes",
+        "no",
+        "today",
+        "yesterday",
+        "tomorrow",
+        "is",
+        "any",
+        "time",
+        "from",
+        "for",
+        "until",
+        "and",
+        "or",
+    }
+)
 _LKML_TOKEN = re.compile(
     r'\s*(?:(?P<brace>[{}\[\],])|(?P<str>"(?:[^"\\]|\\.)*")|(?P<key>[A-Za-z_][\w.]*)\s*:|'
     r'(?P<word>[^\s{}\[\],:"]+))'
@@ -551,16 +651,13 @@ _LKML_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
 
 def _lookml(path: Path) -> dict:
-    text = _read_file(path).decode("utf-8", errors="replace")
-    blocks: list[str] = []
-
-    def stash(m: re.Match) -> str:
-        blocks.append(m.group(2).strip())
-        return f"{m.group(1)}: \x00{len(blocks) - 1}\x00"
-
-    text = _LKML_SQL_VALUE.sub(stash, text)
-    text = re.sub(r"#[^\n]*", "", text)
+    if path.stat().st_size > _MAX_LKML_BYTES:
+        raise ExportError(
+            f"{path.name} is too large to read as LookML; send the view files on their own"
+        )
+    text = path.read_bytes().decode("utf-8", errors="replace")
     try:
+        text, blocks = _lkml_prepare(text)
         doc = _lkml_parse(text, blocks)
     except (ValueError, IndexError) as exc:
         raise ExportError(f"{path.name} is not readable LookML ({exc})") from exc
@@ -607,6 +704,37 @@ def _lookml(path: Path) -> dict:
                 row["line"] = len(rows) + 1
                 rows.append(row)
     return {"rows": rows, "definitions": definitions, "skipped": skipped}
+
+
+def _lkml_prepare(text: str) -> tuple[str, list[str]]:
+    """One linear pass: every `sql:`-like value (which runs to `;;` and may hold anything) is set
+    aside as a placeholder, and every `#` comment outside a string is dropped, so `"$#,##0.00"` or
+    `"Order #"` survive. Each step moves forward and never re-reads, whatever the file holds."""
+    out: list[str] = []
+    blocks: list[str] = []
+    i = 0
+    while True:
+        m = _LKML_NEXT.search(text, i)
+        if m is None:
+            out.append(text[i:])
+            return "".join(out), blocks
+        out.append(text[i : m.start()])
+        if m.group(1):
+            end = text.find(";;", m.end())
+            if end < 0:
+                raise ValueError(f"a {m.group(1)}: value has no closing ;;")
+            blocks.append(text[m.end() : end].strip())
+            out.append(f"{m.group(1)}: \x00{len(blocks) - 1}\x00")
+            i = end + 2
+        elif m.group(0) == "#":
+            end = text.find("\n", m.start())
+            i = len(text) if end < 0 else end
+        else:
+            j = m.start() + 1
+            while j < len(text) and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            out.append(text[m.start() : j + 1])
+            i = j + 1
 
 
 def _lkml_parse(text: str, blocks: list[str]) -> list:
@@ -705,7 +833,11 @@ def _lookml_measure(
         "name": label,
         "formula": f"type: {mtype}"
         + (f"; sql: {sql}" if sql else "")
-        + (f"; filters: {', '.join(filters)}" if filters else ""),
+        + (
+            f"; filters: {', '.join(str(f) for f in filters)}"
+            if isinstance(filters, list) and filters
+            else ""
+        ),
         "used_by": [],
     }
     untranslated = []
@@ -726,20 +858,26 @@ def _lookml_measure(
         untranslated.append(f"a {mtype} measure is not translated")
         agg = None
     where = []
-    for clause in filters or []:
-        # Only `field: value` with a plain value: Looker's filter grammar gives `-x`, `a,b`, `%`, `_`
-        # and `>1` meanings of their own, and a guess at one would be a wrong statement.
+    for clause in filters if isinstance(filters, list) else []:
+        # Only `field: value` with one plain word: Looker's filter grammar gives `-x`, `a,b`, `%`,
+        # `_`, `>1`, `1 to 5`, `NULL`, `NOT x` and `last 7 days` meanings of their own, and a guess
+        # at one would be a wrong statement saved under the person's name.
         field, _, value = clause.partition(":") if isinstance(clause, str) else ("", "", "")
         field, value = field.strip().split(".")[-1], value.strip()
         col = _lkml_column("${" + field + "}", dims) if field else None
-        if col is None or not re.fullmatch(r"[A-Za-z0-9 .]+", value):
+        plain = re.fullmatch(r"[A-Za-z0-9.]+", value) and value.lower() not in _LKML_FILTER_WORDS
+        if col is None or not plain:
             untranslated.append(f"the filter {str(clause).strip()!r} is not a plain value")
             continue
         where.append(
             f"{col} = {value if re.fullmatch(r'-?[0-9]+([.][0-9]+)?', value) else _quote(value)}"
         )
+    if not isinstance(filters, (list, type(None))):
+        untranslated.append("the measure's filters are not a plain list")
     if base is None:
         untranslated.append("the view names no plain table or derived-table SQL")
+    if not _IDENTIFIER.match(name):
+        untranslated.append(f"the measure name {name!r} is not a plain identifier")
     if untranslated:
         return None, definition
     statement = f"SELECT {agg} AS {name}\nFROM {base}" + (

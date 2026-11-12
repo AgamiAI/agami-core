@@ -37,9 +37,12 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import importlib.util
 import json
+import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -447,6 +450,8 @@ _MAX_INTAKE_BYTES = 20 * 1024 * 1024
 # folder of SQL a README is far likelier than a list of questions, and it would become one row a line.
 _FOLDER_SUFFIXES = frozenset({".sql", ".csv", ".xlsx"}) | dashboard_exports.EXPORT_SUFFIXES
 _MAX_FOLDER_FILES = 500
+# What reading one file can raise when the file, not the program, is at fault.
+_UNREADABLE = (json.JSONDecodeError, UnicodeDecodeError, ValueError, csv.Error, RecursionError, OSError)
 
 
 def _split_sql(text: str) -> list[tuple[str, str | None]]:
@@ -482,67 +487,106 @@ def _split_sql(text: str) -> list[tuple[str, str | None]]:
             i += 1
     chunks.append("".join(buf))
     out = []
-    for chunk in chunks:
+    for n, chunk in enumerate(chunks):
         if not chunk.strip():
             continue
-        comment_lines, rest = [], chunk.strip()
-        while True:
-            if rest.startswith("--"):
-                line, _, rest = rest.partition("\n")
-                comment_lines.append(line[2:].strip())
-            elif rest.startswith("/*") and "*/" in rest:
-                body, _, rest = rest[2:].partition("*/")
-                comment_lines.extend(ln.strip(" *") for ln in body.splitlines())
-            else:
-                break
-            rest = rest.strip()
-        comment = " ".join(c for c in comment_lines if c) or None
-        out.append((rest, comment))
+        out.append(_leading_comment(chunk, after_statement=n > 0))
     return out
 
 
-def _expand(path: Path) -> tuple[list[Path], list[dict]]:
-    """A file as itself; a folder as the files in it this intake reads, in name order, at any depth.
-    Hidden files and folders are left out, and so is anything past the first few hundred files."""
+def _leading_comment(chunk: str, *, after_statement: bool) -> tuple[str, str | None]:
+    """One chunk's statement and the comment block written directly above it.
+
+    A comment on the same line as the `;` before belongs to that statement and is dropped here. Only
+    the last block of comment lines counts: a blank line ends a block, so a file's header comment is
+    not merged into its first statement's label."""
+    pos = 0
+    if after_statement:
+        first = chunk.split("\n", 1)[0].strip()
+        if first.startswith(("--", "/*")):
+            end = chunk.find("\n")
+            pos = len(chunk) if end < 0 else end + 1
+    block: list[str] = []
+    while True:
+        pos += len(chunk[pos:]) - len(chunk[pos:].lstrip(" \t\r"))
+        if chunk.startswith("\n", pos):
+            block, pos = [], pos + 1
+        elif chunk.startswith("--", pos):
+            end = chunk.find("\n", pos)
+            end = len(chunk) if end < 0 else end
+            block.append(chunk[pos + 2:end].strip())
+            pos = end + 1
+        elif chunk.startswith("/*", pos) and "*/" in chunk[pos:]:
+            end = chunk.index("*/", pos)
+            block.extend(ln.strip(" *\t\r") for ln in chunk[pos + 2:end].splitlines())
+            pos = end + 2
+            tail = re.match(r"[ \t\r]*\n", chunk[pos:])
+            if tail:
+                pos += tail.end()
+        else:
+            break
+    comment = " ".join(c for c in block if c) or None
+    return chunk[pos:].strip(), comment
+
+
+def _expand(path: Path) -> tuple[list[tuple[Path, str]], list[dict]]:
+    """A file as itself; a folder as the files in it this intake reads, each with its path relative
+    to the folder (so two `queries.sql` in different subfolders stay apart), in name order, at any
+    depth. Hidden folders and `node_modules` are not entered, hidden files are left out, a link is
+    never followed (a link inside the folder can point anywhere), and the walk stops at the cap."""
     if not path.is_dir():
-        return [path], []
-    found, skipped = [], []
-    for f in sorted(path.rglob("*")):
-        rel = f.relative_to(path)
-        if not f.is_file() or any(part.startswith(".") for part in rel.parts):
-            continue
-        suffix = f.suffix.lower()
-        if suffix in _FOLDER_SUFFIXES:
-            found.append(f)
-        elif suffix in dashboard_exports.UNREADABLE_EXPORTS:
-            skipped.append({"file": str(rel), "line": 0, "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
-    if len(found) > _MAX_FOLDER_FILES:
-        skipped.append({"file": path.name, "line": 0,
-                        "reason": f"the folder holds {len(found)} files; only the first {_MAX_FOLDER_FILES} were read"})
-        found = found[:_MAX_FOLDER_FILES]
+        return [(path, path.name)], []
+    root = path.resolve()
+    found: list[tuple[Path, str]] = []
+    skipped: list[dict] = []
+    for here, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "node_modules")
+        for name in sorted(files):
+            if name.startswith("."):
+                continue
+            f = Path(here) / name
+            rel = f.relative_to(root).as_posix()
+            suffix = f.suffix.lower()
+            if suffix not in _FOLDER_SUFFIXES and suffix not in dashboard_exports.UNREADABLE_EXPORTS:
+                continue
+            if f.is_symlink() or not f.resolve().is_relative_to(root):
+                skipped.append({"file": rel, "line": 0,
+                                "reason": "a link to another file; only files inside the folder are read"})
+                continue
+            if suffix in dashboard_exports.UNREADABLE_EXPORTS:
+                skipped.append({"file": rel, "line": 0, "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
+                continue
+            if len(found) == _MAX_FOLDER_FILES:
+                skipped.append({"file": rel, "line": 0,
+                                "reason": f"the folder holds more than {_MAX_FOLDER_FILES} files it could read; "
+                                          f"only the first {_MAX_FOLDER_FILES} were read"})
+                return found, skipped
+            found.append((f, rel))
     return found, skipped
 
 
-def _rows_from_export(path: Path, source: str | None) -> tuple[list[dict], list[dict], list[dict]]:
+def _rows_from_export(path: Path, source: str | None,
+                      file: str | None = None) -> tuple[list[dict], list[dict], list[dict]]:
     """A dashboard export's rows, the lines it could not use, and the definitions it holds."""
     got = dashboard_exports.read_export(path)
+    file = file or path.name
     rows = []
     for item in got["rows"]:
-        row = _new_row(file=path.name, line=item["line"], source=source, label=item["label"],
+        row = _new_row(file=file, line=item["line"], source=source, label=item["label"],
                        statement=item["statement"])
         row["provenance"]["export"] = item["export"]
         rows.append(row)
-    skipped = [dict(s, file=path.name) for s in got["skipped"]]
-    definitions = [dict(d, file=path.name) for d in got["definitions"]]
+    skipped = [dict(s, file=file) for s in got["skipped"]]
+    definitions = [dict(d, file=file) for d in got["definitions"]]
     return rows, skipped, definitions
 
 
-def _rows_from_file(path: Path, source: str | None,
-                    sheet: str | None = None) -> tuple[list[dict], list[dict]]:
+def _rows_from_file(path: Path, source: str | None, sheet: str | None = None,
+                    file: str | None = None) -> tuple[list[dict], list[dict]]:
     """One file's rows and the lines it could not use. The extension decides how lines are cut:
     `.json` is a list, `.sql` is statements split on `;`, `.xlsx` is one sheet read like a CSV,
     `.txt` and `.md` are one question per line, and everything else is CSV."""
-    file = path.name
+    file = file or path.name
     if path.stat().st_size > _MAX_INTAKE_BYTES:
         raise ValueError(f"{file} is {path.stat().st_size // (1024 * 1024)} MB; the intake reads files up to {_MAX_INTAKE_BYTES // (1024 * 1024)} MB. Export fewer rows, or split the file.")
     suffix = path.suffix.lower()
@@ -649,19 +693,28 @@ def intake(paths: list[Path], *, source: str | None = None, sheet: str | None = 
     skipped: list[dict] = []
     definitions: list[dict] = []
     for given in paths:
-        files, missed = _expand(Path(given).expanduser())
+        given = Path(given).expanduser()
+        files, missed = _expand(given)
         skipped.extend(missed)
-        for path in files:
+        for path, name in files:
             suffix = path.suffix.lower()
             if suffix in dashboard_exports.UNREADABLE_EXPORTS:
-                skipped.append({"file": path.name, "line": 0,
+                skipped.append({"file": name, "line": 0,
                                 "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
                 continue
-            if suffix in dashboard_exports.EXPORT_SUFFIXES:
-                got, missed, defs = _rows_from_export(path, source)
-                definitions.extend(defs)
-            else:
-                got, missed = _rows_from_file(path, source, sheet)
+            try:
+                if suffix in dashboard_exports.EXPORT_SUFFIXES:
+                    got, missed, defs = _rows_from_export(path, source, name)
+                else:
+                    got, missed, defs = (*_rows_from_file(path, source, sheet, name), [])
+            except _UNREADABLE as exc:
+                if not given.is_dir():
+                    raise  # a file named on its own: the caller says it could not be read
+                # In a folder, one file nobody can read does not cost the rest of the folder.
+                skipped.append({"file": name, "line": 0,
+                                "reason": f"could not be read: {str(exc).splitlines()[0][:200] if str(exc) else type(exc).__name__}"})
+                continue
+            definitions.extend(defs)
             rows.extend(got)
             skipped.extend(missed)
     rows = _merge_by_label(rows)
@@ -3085,7 +3138,7 @@ def _receipt_tables(row_dir: Path) -> list[str]:
 def _choice_options(item: dict, rec: dict, definitional: list[str]) -> list[dict]:
     """The meanings a person could choose between, the person's own first: a filter the semantic model
     declares and their query leaves out, and agami's query when the answers differ on a definition.
-    One option means there is no choice to ask about; a metric the semantic model lacks is not a
+    At most two; one option means there is no choice to ask about; a metric the semantic model lacks is not a
     choice, it is a gap for /agami-save-correction, so it brings no option here."""
     options = [{"label": "as your query has it", "how": item["sql_yours"]}]
     if item["fix"] == "semantic_model":
@@ -3095,9 +3148,11 @@ def _choice_options(item: dict, rec: dict, definitional: list[str]) -> list[dict
                 options.append({"label": "as the semantic model declares",
                                 "how": f"apply the declared filter {ev['expr']}"})
     differs = item["result"].get("data") in ("differs", "partly")
-    if differs and definitional and item.get("sql_agami") and item["result"].get("query") == "different":
+    # Two readings at most, so "keep the other one" on the card names exactly one: the semantic
+    # model's declaration when the query disagrees with it, else agami's query.
+    if len(options) == 1 and differs and definitional and item.get("sql_agami") and item["result"].get("query") == "different":
         options.append({"label": "as agami answered", "how": item["sql_agami"]})
-    return options
+    return options[:2]
 
 
 def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dict] | None = None,
@@ -3107,8 +3162,16 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
     records = {r["row"]: r for r in _done_rows(run_dir)[0]}
     decided = {d["row"]: d for d in decisions or []}
     areas = _table_areas(root)
-    plan: dict[str, Any] = {"run": run_dir.name, "add": [], "ask": [], "fix": [], "reword": [], "not_checked": []}
+    plan: dict[str, Any] = {"run": run_dir.name, "add": [], "ask": [], "fix": [], "reword": [], "not_checked": [],
+                            "collisions": [], "written": []}
     examples: dict[str, list[dict]] = {}
+    cache: dict[str, dict[str, dict]] = {}
+
+    def existing(area: str) -> dict[str, dict]:
+        if area not in cache:
+            cache[area] = _existing_examples(root, area)
+        return cache[area]
+
     for item in items:
         n, rec = item["row"], records.get(item["row"], {})
         status, fix, result = item["status"], item["fix"], item["result"]
@@ -3151,9 +3214,22 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
             plan["not_checked"].append({**base, "why": "left out on the card"})
             continue
         else:
-            plan["add"].append({**base, "why": item["sentence"], "unchecked": result.get("unchecked") or 0,
-                                "tables": tables})
+            # Every part that could not be confirmed, a column paired only through one repeated value
+            # included: the page's own count leaves that one out, and it is the reason for the row.
+            unchecked = sum(1 for part in ((rec.get("ledger") or {}).get("rows") or [])
+                            if part.get("verdict") == UNRESOLVED)
+            plan["add"].append({**base, "why": item["sentence"], "unchecked": unchecked, "tables": tables})
         area = next((areas[_fold(t).split(".")[-1]] for t in tables if _fold(t).split(".")[-1] in areas), None)
+        clash = existing(area).get(question) if area else None
+        if clash is not None and " ".join(str(clash.get("sql", "")).split()) != " ".join(item["sql_yours"].split()):
+            # `sm add-example` replaces by question: an example already kept under this question
+            # (a correction, a reviewed seed) is never overwritten unless the person said so.
+            plan["collisions"].append({**base, "area": area, "existing_source": clash.get("source"),
+                                       "existing_status": clash.get("status"), "existing_sql": clash.get("sql"),
+                                       "replace": answer == "example"})
+            if answer != "example":
+                continue
+        plan["written"].append({**base, "area": area})
         examples.setdefault(area or "", []).append({
             "question": question, "sql": item["sql_yours"], "tables": [_fold(t).split(".")[-1] for t in tables],
             "source": "own", "status": "confirmed", "created_at": now or _utc_now()})
@@ -3165,16 +3241,29 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
         path.write_text(json.dumps(exs, indent=2), encoding="utf-8")
         written[area or None] = str(path)
     plan["examples_files"] = {k: v for k, v in written.items() if k}
+    plan["collisions_checked"] = root is not None and importlib.util.find_spec("semantic_model") is not None
     # A table no area claims (or two areas share) has no area to write into; the skill asks.
     plan["needs_area"] = written.get(None)
-    plan["counts"] = {k: len(plan[k]) for k in ("add", "ask", "fix", "reword", "not_checked")}
+    plan["counts"] = {k: len(plan[k]) for k in ("add", "ask", "fix", "reword", "not_checked", "collisions", "written")}
     (run_dir / "own-examples.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return plan
 
 
 def _utc_now() -> str:
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _existing_examples(root: Path | None, area: str) -> dict[str, dict]:
+    """The area's kept examples by question, read by agami-core's own loader. Without that package
+    (this script otherwise needs only the standard library) nothing is known to collide, and the
+    plan says so in `collisions_checked`."""
+    if root is None:
+        return {}
+    try:
+        from semantic_model.loader import list_prompt_examples
+    except ImportError:
+        return {}
+    return {e["question"]: e for e in list_prompt_examples(root, area) if isinstance(e, dict) and e.get("question")}
 
 
 class RecordError(Exception):

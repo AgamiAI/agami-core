@@ -31,7 +31,7 @@ Call AskUserQuestion, header `Your own`, *"What do you have? Type a file or fold
 - **A screenshot** is `agami-reconcile`'s vision branch: hand it over as reconcile's Phase 1 says, with the source below; a screenshot carries numbers, not SQL, so its rows are checked and reported, and none is added as an example.
 - **Something this does not read** (a `.pbix`, a link to a hosted dashboard, a Looker dashboard file): say in one line what is read, offer the export the tool can save (a Power BI template, the Tableau workbook, the LookML views) or a screenshot, and ask this card again.
 
-A question typed in Other ("what's a .pbit?") is answered, then the same card asked again ([question-cards rule 5a](question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). A path that does not exist is said back in one line and the card asked again: re-asked, never guessed.
+A question typed in Other ("what's a .pbit?") is answered, then the same card asked again ([question-cards rule 5a](question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). A path that does not exist is said back in one line and the card asked again: re-asked, never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([question-cards rule 7](question-cards.md#7-where-askuserquestion-is-unavailable)).
 
 ## 2. Read it
 
@@ -72,28 +72,32 @@ It reads the run's report items and puts every row in one list, and writes the p
 
 ## 5. The cards
 
-**5a — Add.** When `add` is not empty: a table `Row | Question | Result | Not confirmed` (the result from the report item; *Not confirmed* the checks named in `why`, or *—*), at most 15 rows, then AskUserQuestion, header `Add`, *"Add these <n> as examples, signed as you?"*:
+**5a — Add.** When `add` is not empty: a table `Row | Question | Result | Not confirmed` (the result from the report item; *Not confirmed* the checks named in `why`, or *—*), at most 15 rows, then AskUserQuestion, header `Add`, *"Add these <n> as examples, signed as you? To leave some out, type their row numbers in Other."*:
 
 - **Add all <n> (Recommended)**: its `preview` lists each question with its SQL laid out over lines (up to 15, then "and N more"), so what is signed is seen ([question-cards rule 3a](question-cards.md#3a-detail-goes-in-an-options-preview-not-the-question)).
-- **Leave some out**: type the rows to leave out in Other (*"3, 7"*).
+- **Review one by one**: up to 4 rows per card, header `Ex <k>/<n>`, options **Add** (its `preview` the row's SQL) / **Leave it out** / **Add all remaining**.
 - **Don't add**: nothing from this list is written.
 
-**5b — Which should be the default?** For each `ask` row, up to 4 per card, one question each, header `Default <k>/<n>`. The question is the row's `why` in one line, in the words of [`plain-language.md`](plain-language.md), naming both sides and ending *"Which should be the default?"*. Options:
+Row numbers typed in Other (*"3, 7"*) leave those rows out and add the rest. A question ("why is row 3 not confirmed?") is answered first, then the same card asked again ([question-cards rule 5a](question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)); a row the table does not have, or words you cannot place, are said back and the card asked again: re-asked, never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([question-cards rule 7](question-cards.md#7-where-askuserquestion-is-unavailable)).
+
+**5b — Which should be the default?** For each `ask` row, up to 4 per card, one question each, header `Pick <k>/<n>`. The question is the row's `why` in one line, in the words of [`plain-language.md`](plain-language.md), naming both sides and ending *"Which should be the default?"*. Options:
 
 | Option | Decision | What happens |
 |---|---|---|
 | Make mine the default | `change` | the definition changes through `/agami-save-correction`, with the person's query as its evidence; that skill also records the example |
 | Mine for this question only | `example` | added as the example for its own question; the default stays as it is |
-| Keep agami's | `fix` | nothing is added |
+| Keep the current one | `fix` | nothing is added; the reading the candidate's second option names stays the default |
 | Ask each time | none | nothing is added; the question stays open in `own-examples.json`, `status: open`, for whoever declares the semantic model's ambiguities |
 
-The first two options' `preview` is the person's SQL; **Keep agami's** shows the candidate's other option (`how`). No option is marked `(Recommended)`: which definition is right is the person's call. When more than 4 rows wait, every card carries **Ask each time for the rest** in place of the fourth option.
+A candidate holds two readings, the person's first and one other: the semantic model's declared filter when their query leaves it out, else agami's query. The first two options' `preview` is the person's SQL; **Keep the current one** says which reading it keeps in its description (*"the semantic model's filter: cancelled orders left out"* or *"agami's query"*) and shows that reading's `how` in its `preview`. No option is marked `(Recommended)`: which definition is right is the person's call. When more than 4 questions wait, the fourth option on every card reads **Ask each time, this and the rest**, which leaves this question and every one not yet shown open.
 
-"Other" is the person's words for one decision: *"mine, but only for refunds"* is `change` with those words. A question ("show me both queries") is answered first, then the same card asked again ([question-cards rule 5a](question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)); anything you cannot place on one of the four is said back and the same card asked again: re-asked, never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list (rule 7).
+"Other" is the person's words for one decision: *"mine, but only for refunds"* is `change` with those words. A question ("show me both queries") is answered first, then the same card asked again ([question-cards rule 5a](question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)); anything you cannot place on one of the four is said back and the same card asked again: re-asked, never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([question-cards rule 7](question-cards.md#7-where-askuserquestion-is-unavailable)).
+
+**5c — An example already kept under the same question.** `sm add-example` replaces by question, so `own-examples` never writes over an example the area already keeps under that question with different SQL (a correction, a reviewed seed): it lists it in `collisions` and holds it out. For each, up to 4 per card, header `Same q <k>`, *"An example for this question is already kept (from a <existing_source>). Replace it with yours?"*: **Replace it** (its `preview` both statements, the kept one first) / **Keep the kept one**. When `collisions_checked` is false (agami-core's loader was not available), say in one line that existing examples were not compared, before the Add card.
 
 ## 6. Apply
 
-1. **The answers become the block** `agami-reconcile` already parses: with the Write tool, `<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt`, `profile: <profile>`, `reconcile-run: <ts>`, `decisions:` and one JSON array, `{"row": 3, "decision": "nothing"}` per row left out on the Add card (and every `add` row on **Don't add**), `{"row": 6, "decision": "change", "words": "<the person's words>"}`, `{"row": 7, "decision": "example"}` or `{"row": 8, "decision": "fix"}` per answered question, `done`. **Ask each time** writes no entry.
+1. **The answers become the block** `agami-reconcile` already parses: with the Write tool, `<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt`, `profile: <profile>`, `reconcile-run: <ts>`, `decisions:` and one JSON array, `{"row": 3, "decision": "nothing"}` per row left out on the Add card (and every `add` row on **Don't add**), `{"row": 6, "decision": "change", "words": "<the person's words>"}`, `{"row": 7, "decision": "example"}` or `{"row": 8, "decision": "fix"}` per answered question, `{"row": 2, "decision": "example"}` per **Replace it**, `done`. **Ask each time** and **Keep the kept one** write no entry.
 2. **Parse it, then sort again with the answers:**
    ```bash
    bash "<plugin_root>/scripts/py" parse_reconcile_report.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt" \
@@ -107,14 +111,15 @@ The first two options' `preview` is the person's SQL; **Keep agami's** shows the
    bash "<plugin_root>/scripts/sm" add-example "$ROOT" --area <area> --file "<examples_files[area]>" \
      --signer "<reviewer_email>" --role "<reviewer_role>"
    ```
-   The file is written by `own-examples`, never by hand, so the SQL saved is the SQL that was checked. `needs_area` names a file whose tables no single subject area holds: ask which area on a card (header `Area`, the areas its tables are in, from `sm areas`), then the same call. **Don't sign anything yet** on the identity card writes nothing.
+   The file is written by `own-examples`, never by hand, so the SQL saved is the SQL that was checked. `needs_area` names a file whose tables no single subject area holds: ask which area on a card (header `Area`, the areas its tables are in, from `sm areas`; every area `sm areas` lists when the row's `tables` is empty), then the same call. **Don't sign anything yet** on the identity card writes nothing.
 4. **Each `change`** goes to `/agami-save-correction`, one at a time, after the writes.
 
 ## 7. Say what happened
 
-One short block, from the second `own-examples` output's `counts` and lists, never tallied by hand:
+One short block, from the second `own-examples` output's `counts` and lists, never tallied by hand. "Added" is `counts.written` and the questions in `written`, which include the ones kept for their own question on 5b and the replacements from 5c; `add` alone undercounts:
 
 > Added 4 examples, signed as you@example.com: How many orders were placed on the web?, …
+> 1 already had an example under the same question, kept as it was: What was total revenue in Q3?
 > 2 need an answer, kept as open questions: How many orders are there in each channel? (your query counts cancelled orders; the semantic model leaves them out by default), …
 > 1 has a mistake in the query, not added: What is the revenue from delivered orders? (no order has the channel value 'x;y').
 
