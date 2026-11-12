@@ -781,6 +781,9 @@ def test_2g_records_each_answer_as_the_persons_with_who_and_when():
     assert "the signer, the role and the time" in s
     assert '"default": "<that option\'s label>"' in s and '"behaviour": "ask"' in s
     assert "source: human" in s
+    # a live run decoded a code list itself and signed it under an email nobody typed
+    assert "**Only an answer the person gave on a card is written with `--signer`**" in s
+    assert "never one taken from git, the environment, the Claude login or memory" in s
 
 
 def test_2g_runs_only_when_ask_me_as_you_go_was_picked_and_says_no_duration():
