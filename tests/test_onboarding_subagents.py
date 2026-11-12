@@ -185,3 +185,164 @@ def test_a_description_for_an_unknown_area_is_reported_not_written(model, tmp_pa
     result = _result("agami-example", column_descriptions="another-area.orders.status\tsomething\n")
     rc, out = _apply(model, tmp_path, result, "agami-example", capsys)
     assert rc == 0 and out["described"] == 0 and out["unmatched"]
+
+
+# --- chunks: any model is described in parallel, at most CHUNK_MAX_TABLES tables per enricher ---
+
+def _synthetic(tmp_path: Path, areas: dict[str, int], hidden: tuple[str, ...] = ()) -> Path:
+    """A model with `areas` (name -> table count), tables t01, t02, … per area; `hidden` tables are
+    excluded the way a curator excludes them (`review_state: rejected`)."""
+    root = tmp_path / "acme"
+    conn = root / "datasources" / "demo_sqlite"
+    conn.mkdir(parents=True)
+    (conn / "storage.yaml").write_text(yaml.safe_dump(
+        {"name": "demo_sqlite", "storage_type": "SQLite",
+         "storage_config": {"profile": "acme", "credentials_ref": "<artifacts_dir>/local/credentials"}}))
+    for area, n in areas.items():
+        tdir = root / "subject_areas" / area / "tables"
+        tdir.mkdir(parents=True)
+        names = [f"{area}_t{i:02d}" for i in range(1, n + 1)]
+        (root / "subject_areas" / area / "subject_area.yaml").write_text(yaml.safe_dump(
+            {"name": area, "description": "", "tables": [
+                {"storage_connection": "demo_sqlite", "schema": "main", "table": t} for t in names]}))
+        for t in names:
+            doc = {"name": t, "schema": "main", "storage_connection": "demo_sqlite",
+                   "columns": [{"name": "id", "type": "integer"}]}
+            if t in hidden:
+                doc["review_state"] = "rejected"
+            (tdir / f"{t}.yaml").write_text(yaml.safe_dump(doc))
+    (root / "datasource.yaml").write_text(yaml.safe_dump(
+        {"datasource": "acme", "version": 1,
+         "storage_connections": [{"name": "demo_sqlite", "ref": "datasources/demo_sqlite/storage.yaml"}],
+         "subject_areas": [f"subject_areas/{a}" for a in areas]}))
+    return root
+
+
+def _chunks(root: Path, capsys, *extra: str) -> dict:
+    assert cli.main(["enrich-input", str(root), "--chunks", *extra]) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_chunks_split_an_area_into_runs_of_at_most_twelve(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 14}), capsys)
+    assert cli.CHUNK_MAX_TABLES == 12
+    assert [c["chunk"] for c in out["chunks"]] == ["demo-1", "demo-2"]
+    assert [len(c["tables"]) for c in out["chunks"]] == [12, 2]
+    assert out["chunks"][0]["tables"][0] == "demo_t01" and out["chunks"][1]["tables"] == [
+        "demo_t13", "demo_t14"]  # the model's order, consecutive
+    assert (out["tables"], out["max_tables"]) == (14, 12)
+    assert {c["area"] for c in out["chunks"]} == {"demo"}
+
+
+def test_a_small_model_is_one_chunk(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 6}), capsys)
+    assert [(c["chunk"], len(c["tables"])) for c in out["chunks"]] == [("demo-1", 6)]
+
+
+def test_chunks_follow_the_areas_in_the_models_order(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"acme": 5, "demo": 13}), capsys)
+    assert [(c["chunk"], c["area"], len(c["tables"])) for c in out["chunks"]] == [
+        ("acme-1", "acme", 5), ("demo-1", "demo", 12), ("demo-2", "demo", 1)]
+    assert out["tables"] == 18
+
+
+def test_chunks_leave_hidden_tables_out(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 13}, hidden=("demo_t02",)), capsys)
+    listed = [t for c in out["chunks"] for t in c["tables"]]
+    assert "demo_t02" not in listed and len(listed) == out["tables"] == 12
+    assert len(out["chunks"]) == 1
+
+
+def test_chunks_honour_max_tables(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 11}), capsys, "--max-tables", "5")
+    assert [len(c["tables"]) for c in out["chunks"]] == [5, 5, 1] and out["max_tables"] == 5
+
+
+def test_chunks_need_no_database(tmp_path, capsys, monkeypatch):
+    from semantic_model import introspect
+    monkeypatch.setattr(introspect, "make_execute_sql_runner",
+                        lambda *a, **k: pytest.fail("--chunks read the database"))
+    _chunks(_synthetic(tmp_path, {"demo": 3}), capsys)
+
+
+def test_chunks_take_no_area_or_out(tmp_path, capsys):
+    assert cli.main(["enrich-input", str(_synthetic(tmp_path, {"demo": 3})), "--chunks",
+                     "--area", "demo"]) == 2
+    assert "--chunks" in json.loads(capsys.readouterr().out)["error"]
+
+
+def test_chunks_refuse_a_max_below_one(tmp_path, capsys):
+    assert cli.main(["enrich-input", str(_synthetic(tmp_path, {"demo": 3})), "--chunks",
+                     "--max-tables", "0"]) == 2
+
+
+def test_enrich_input_without_chunks_still_needs_area_profile_and_out(model, capsys):
+    assert cli.main(["enrich-input", str(model), "--area", "agami-example"]) == 2
+    assert "error" in json.loads(capsys.readouterr().out)
+
+
+# --- enrich-input --tables: one chunk's input file ---
+
+@pytest.fixture
+def no_db(monkeypatch):
+    from semantic_model import introspect
+    monkeypatch.setattr(introspect, "make_execute_sql_runner",
+                        lambda *a, **k: (lambda sql: [{"id": "1"}]))
+
+
+def test_enrich_input_tables_writes_only_that_chunk(model, tmp_path, capsys, no_db):
+    out_file = tmp_path / "in.json"
+    assert cli.main(["enrich-input", str(model), "--area", "agami-example", "--profile", "acme",
+                     "--out", str(out_file), "--tables", "orders, customers"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    written = json.loads(out_file.read_text())
+    assert sorted(t["table"] for t in written["tables"]) == ["customers", "orders"]
+    assert written["chunk_tables"] == ["orders", "customers"] and out["tables"] == 2
+    # the bundle is the whole area's, so an enricher still sees the joins out of its chunk
+    assert written["bundle"] == json.loads(json.dumps(
+        cli.L.get_subject_area_bundle(cli.L.load_datasource(model), "agami-example"), default=str))
+
+
+def test_enrich_input_refuses_a_table_outside_the_area(model, tmp_path, capsys, no_db):
+    out_file = tmp_path / "in.json"
+    assert cli.main(["enrich-input", str(model), "--area", "agami-example", "--profile", "acme",
+                     "--out", str(out_file), "--tables", "orders,nope"]) == 2
+    assert json.loads(capsys.readouterr().out) == {"error": "unknown_table", "tables": ["nope"]}
+    assert not out_file.exists()
+
+
+# --- apply-enrichment --tables: a chunk's enricher edits only its own tables ---
+
+def _apply_tables(model: Path, tmp_path: Path, result: dict, tables: str, capsys) -> tuple[int, dict]:
+    f = tmp_path / "result.json"
+    f.write_text(json.dumps(result))
+    rc = cli.main(["apply-enrichment", str(model), "--file", str(f), "--area", "agami-example",
+                   "--tables", tables])
+    return rc, json.loads(capsys.readouterr().out)
+
+
+def _stray() -> dict:
+    return {"op": "edit", "kind": "table", "area": "agami-example", "name": "customers",
+            "field": "description", "value": "One row per customer."}
+
+
+@pytest.mark.parametrize("stray", [
+    {"curate_ops": [_edit("agami-example"), _stray()]},
+    {"column_descriptions": "agami-example.orders.status\tOrder status.\n"
+                            "agami-example.customers.email\tContact address.\n"},
+])
+def test_apply_enrichment_tables_refuses_an_edit_outside_the_chunk(model, tmp_path, capsys, stray):
+    before = sorted(p.read_text() for p in model.rglob("*.yaml"))
+    rc, out = _apply_tables(model, tmp_path, _result("agami-example", **stray), "orders,products",
+                            capsys)
+    assert rc == 1 and out["applied"] is False
+    assert len(out["refused"]) == 1 and "customers" in out["refused"][0]
+    assert "orders, products" in out["error"]
+    assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
+
+
+def test_apply_enrichment_tables_applies_edits_inside_the_chunk(model, tmp_path, capsys):
+    # the entity maps to customers, outside the chunk: entities are area-level and stay allowed
+    rc, out = _apply_tables(model, tmp_path, _result("agami-example"), "orders", capsys)
+    assert rc == 0 and out["applied"] is True, out
+    assert (out["described"], out["edited"], out["entities"]) == (1, 1, 1)

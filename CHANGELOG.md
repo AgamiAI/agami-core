@@ -14,6 +14,16 @@ below corresponds to one such version.
 
 ### Added
 
+- **Enrichers work in chunks of at most 12 tables, and the skill can wait on them without ending
+  the turn.** `sm enrich-input <root> --chunks [--max-tables 12]` splits the model into chunks
+  (each subject area in order, cut into runs of at most 12 live tables, named `<area>-1`,
+  `<area>-2`, …) without reading the database. `sm enrich-input … --tables t1,t2` writes one
+  chunk's input file (the area's bundle stays whole; the file gains `chunk_tables`) and refuses a
+  table outside the area. `sm apply-enrichment … --tables t1,t2` refuses the whole result when any
+  description or edit touches another table; entities stay area-level. `sm wait-files --file <path>
+  … --wait <seconds>` returns once every result file exists and is non-empty, or when the wait
+  (at most 600 s) runs out, so the main chat can block on background subagents with a pre-approved
+  call. Without the new flags both enrich commands behave as before.
 - **`sm steps` prints the onboarding step list.** The nine steps agami-connect shows as a task
   list, each with a status and a count read from disk: a model that loads finishes "Read the tables
   and joins" with its tables and joins, a running build shows "33 of 34 tables" from its progress

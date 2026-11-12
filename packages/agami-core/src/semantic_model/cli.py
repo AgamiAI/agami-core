@@ -30,6 +30,7 @@ import io
 import json
 import os
 import re
+import stat
 import sys
 import time
 from datetime import datetime, timezone
@@ -164,14 +165,54 @@ def _live_items(objs) -> list:
     return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
 
 
+# One enricher describes at most this many tables: past it, one subagent's input and answer grow
+# long enough that the person waits on it while smaller ones have finished.
+CHUNK_MAX_TABLES = 12
+
+
+def _split_list(value: Optional[str]) -> list[str]:
+    """A comma-separated flag as a list, blanks dropped and the first of each repeat kept."""
+    return list(dict.fromkeys(v.strip() for v in (value or "").split(",") if v.strip()))
+
+
+def _enrich_chunks(args) -> int:
+    """The model split into enricher-sized chunks: each area in the model's order, cut into runs of
+    at most `--max-tables` live tables. It reads only the model, so the skill can plan the subagents
+    before the database is touched."""
+    if args.area or args.out or args.tables:
+        _print_json({"error": "--chunks lists every area's chunks; it takes no --area, --out or --tables"})
+        return 2
+    if args.max_tables < 1:
+        _print_json({"error": "--max-tables must be at least 1"})
+        return 2
+    org = L.load_datasource(args.root)
+    chunks, total = [], 0
+    for area in org.subject_areas:
+        names = [t.name for t in _live_items(area.tables_defined)]
+        total += len(names)
+        for n, start in enumerate(range(0, len(names), args.max_tables), start=1):
+            chunks.append({"chunk": f"{area.name}-{n}", "area": area.name,
+                           "tables": names[start:start + args.max_tables]})
+    _print_json({"chunks": chunks, "tables": total, "max_tables": args.max_tables})
+    return 0
+
+
 def cmd_enrich_input(args) -> int:
     """Everything an agami-enricher subagent needs for one subject area, in one file: the area's
     bundle and up to 5 sample rows per table (only declared columns that are neither hidden nor
-    flagged sensitive, never a star).
+    flagged sensitive, never a star). `--tables` narrows the tables to one chunk; the bundle stays
+    the whole area's, so the enricher still sees the joins that leave its chunk. `--chunks` instead
+    prints how the model splits into chunks and writes nothing.
 
     The main chat runs this, a pre-approved `sm` call, so the enricher needs no commands of its own:
     a subagent doesn't get the skill's pre-approvals, and a live run showed every one of an
     enricher's own `sm` and sample-query calls stopping for permission in Manual mode."""
+    if args.chunks:
+        return _enrich_chunks(args)
+    missing = [f"--{f}" for f in ("area", "profile", "out") if not getattr(args, f)]
+    if missing:
+        _print_json({"error": f"enrich-input needs {', '.join(missing)} (or --chunks)"})
+        return 2
     from . import dialects as D
     from . import introspect as INTRO
     org = L.load_datasource(args.root)
@@ -180,10 +221,18 @@ def cmd_enrich_input(args) -> int:
         _print_json({"error": "unknown_area", "area": args.area,
                       "valid_areas": [a.name for a in org.subject_areas]})
         return 2
+    live = _live_items(area.tables_defined)
+    chunk = _split_list(args.tables)
+    if chunk:
+        unknown = [n for n in chunk if n not in {t.name for t in live}]
+        if unknown:
+            _print_json({"error": "unknown_table", "tables": unknown})
+            return 2
+        live = [t for t in live if t.name in chunk]
     dialect = D.get_dialect(org.storage_connections[0].storage_type)
     runner = INTRO.make_execute_sql_runner(args.profile)
     tables, errors = [], []
-    for t in _live_items(area.tables_defined):
+    for t in live:
         cols = _live_items(t.columns)
         readable = [c.name for c in cols if not c.sensitive]
         entry = {"table": t.name, "schema": t.schema_name, "description": t.description or "",
@@ -200,8 +249,10 @@ def cmd_enrich_input(args) -> int:
         tables.append(entry)
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"area": area.name, "bundle": L.get_subject_area_bundle(org, area.name),
-                               "tables": tables}, default=str, indent=1), encoding="utf-8")
+    doc = {"area": area.name, "bundle": L.get_subject_area_bundle(org, area.name), "tables": tables}
+    if chunk:
+        doc["chunk_tables"] = chunk
+    out.write_text(json.dumps(doc, default=str, indent=1), encoding="utf-8")
     _print_json({"area": area.name, "tables": len(tables),
                  "sampled": sum(1 for t in tables if t["sample"]), "errors": errors, "out": str(out)})
     return 0
@@ -603,6 +654,45 @@ def cmd_progress(args) -> int:
     return 0
 
 
+# The longest one `sm wait-files` call blocks: the skill calls it again if the subagents need longer,
+# and a shell tool's own timeout (10 minutes in Claude Code) would kill a longer call mid-wait.
+WAIT_FILES_MAX = 600
+
+
+def wait_files_seconds(value: float) -> float:
+    """`--wait` clamped to 0..WAIT_FILES_MAX."""
+    return min(max(0.0, value), float(WAIT_FILES_MAX))
+
+
+def cmd_wait_files(args) -> int:
+    """Wait until every `--file` exists and is non-empty, or until `--wait` seconds run out.
+
+    The skill runs enrichers in the background while the person answers cards, then blocks on their
+    result files with this pre-approved call, the same idea as `sm progress --wait`: a turn that ends
+    loses the skill's pre-approvals. An empty file is still waiting, since a write can land in two
+    steps. Exit 0 either way; `all_ready` says which."""
+    paths = [Path(f).expanduser() for f in args.file]
+
+    def ready(p: Path) -> bool:
+        # one stat, not is_file() then stat(): a file removed between the two would raise
+        try:
+            st = p.stat()
+        except OSError:
+            return False
+        return stat.S_ISREG(st.st_mode) and st.st_size > 0
+
+    deadline = time.monotonic() + wait_files_seconds(args.wait)
+    while True:
+        done = [p for p in paths if ready(p)]
+        left = deadline - time.monotonic()
+        if len(done) == len(paths) or left <= 0:
+            break
+        time.sleep(min(1.0, left))
+    _print_json({"ready": [str(p) for p in done], "waiting": [str(p) for p in paths if p not in done],
+                 "all_ready": len(done) == len(paths)})
+    return 0
+
+
 def cmd_steps(args) -> int:
     """The onboarding step list with status and counts read from disk, after applying any --mark.
     Every mark is checked before any is written, so a bad one leaves the timeline as it was."""
@@ -766,6 +856,19 @@ ENRICH_FIELDS = frozenset({"description", "description_source", "choice_field", 
                            "column_group_descriptions"})
 
 
+def _ops_off_tables(ops: list, tables: list[str], label: str) -> list[str]:
+    """The ops in an (already area-checked) batch that edit something other than one of `tables`.
+
+    A chunk's enricher sees only its own tables' samples, so an edit elsewhere is a guess about a
+    table it never read, and may race the enricher that owns it. A whole-area edit (the area's own
+    description) has no table, so it is refused too. An op may name a table `schema.table`."""
+    wanted = set(tables)
+    return [f"{label} {i}: {op.get('kind')} {op.get('name')!r} is not in tables {', '.join(tables)}"
+            for i, op in enumerate(ops)
+            if op.get("kind") != "table"
+            or not ({str(op.get("name")), str(op.get("name")).rsplit(".", 1)[-1]} & wanted)]
+
+
 def cmd_apply_enrichment(args) -> int:
     """Apply one agami-enricher subagent's result file for one subject area, in one tested call.
 
@@ -793,12 +896,17 @@ def cmd_apply_enrichment(args) -> int:
     entities = result.get("entities") or []
     refused = (_ops_outside(described["ops"], ENRICH_FIELDS, args.area)
                + _ops_outside(ops, ENRICH_FIELDS, args.area))
+    chunk = _split_list(args.tables)
+    if chunk and not refused:
+        refused = (_ops_off_tables(described["ops"], chunk, "description")
+                   + _ops_off_tables(ops, chunk, "op"))
     if not isinstance(entities, list):
         refused.append("entities: not a list")
     if refused:
+        where = f" in area {args.area}" + (f", tables {', '.join(chunk)}" if chunk else "")
         _print_json({"applied": False, "refused": refused,
                      "error": "nothing applied: an enricher may only edit "
-                              + ", ".join(sorted(ENRICH_FIELDS)) + f" in area {args.area}"})
+                              + ", ".join(sorted(ENRICH_FIELDS)) + where})
         return 1
     out: dict[str, Any] = {"area": args.area, "unmatched": described["unmatched"]}
     steps = (("described", described["ops"], lambda o: curate.apply(root, o)),
@@ -2298,15 +2406,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--file", required=True, help="the enricher's result JSON")
     sp.add_argument("--area", required=True, help="the subject area the enricher described")
+    sp.add_argument("--tables", help="comma-separated: the chunk's tables; an edit to any other is refused")
     sp.set_defaults(func=cmd_apply_enrichment)
 
-    sp = sub.add_parser("enrich-input", help="one area's bundle and 5-row samples (no sensitive columns) in one file, for an agami-enricher subagent")
+    sp = sub.add_parser("enrich-input", help="one area's bundle and 5-row samples (no sensitive columns) in one file, for an agami-enricher subagent; --chunks lists how the model splits into enricher-sized chunks")
     sp.add_argument("root")
-    sp.add_argument("--area", required=True)
-    sp.add_argument("--profile", required=True)
-    sp.add_argument("--out", required=True, help="where to write it (under <artifacts_dir>/local/tmp/)")
+    sp.add_argument("--area", help="required unless --chunks")
+    sp.add_argument("--profile", help="required unless --chunks")
+    sp.add_argument("--out", help="where to write it (under <artifacts_dir>/local/tmp/); required unless --chunks")
     sp.add_argument("--rows", type=int, default=5)
+    sp.add_argument("--tables", help="comma-separated: only these tables of the area (one chunk)")
+    sp.add_argument("--chunks", action="store_true",
+                    help="print the model's chunks (each area cut into runs of --max-tables) and write nothing")
+    sp.add_argument("--max-tables", type=int, default=CHUNK_MAX_TABLES,
+                    help=f"most tables in one chunk (default {CHUNK_MAX_TABLES})")
     sp.set_defaults(func=cmd_enrich_input)
+
+    sp = sub.add_parser("wait-files", help="wait until every --file exists and is non-empty, or --wait seconds pass; keeps the turn open while background subagents finish")
+    sp.add_argument("--file", action="append", required=True, help="a result file to wait on (repeatable)")
+    sp.add_argument("--wait", type=float, default=0.0,
+                    help=f"wait up to this many seconds (default 0: check once; at most {WAIT_FILES_MAX})")
+    sp.set_defaults(func=cmd_wait_files)
 
     sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
