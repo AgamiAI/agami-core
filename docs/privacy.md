@@ -95,9 +95,37 @@ in your browser instead of in the chat. `scripts/connect_helper.py` serves that 
 - **What it calls:** after saving, it runs `SELECT 1` against your own database through `execute_sql`, the
   same local connection every query uses.
 
-`tests/test_privacy_no_network.py` pins this: the helper is the only shipped script that listens, and it
-binds the loopback address. On Linux, and wherever no credential store is available, the helper refuses
+`tests/test_privacy_no_network.py` pins this: the helper and the page server below are the only shipped
+scripts that listen, and both bind the loopback address. On Linux, and wherever no credential store is available, the helper refuses
 and you use the manual credentials file step instead.
+
+---
+
+## Review pages save to a helper on this computer only
+
+When you pick **Review on a page** (or **Mark them on a page** for the seed examples), the page you
+mark decisions on sends them back by itself instead of asking you to copy and paste a block.
+`scripts/serve_page.py --decisions` serves that page:
+
+- **What it binds:** `127.0.0.1` only, on a random port, behind a one-time token of 43 random characters
+  in the URL. It serves that one page and takes one post of decisions, at most 1 MiB of JSON, from the
+  page itself. A wrong token or path, a request addressed to another host name, a post from another
+  page or origin, a body that isn't a JSON object, a second post, and any post after the link expires
+  are all refused. An idle or half-sent request is dropped after 10 seconds. The page loads nothing
+  from anywhere else; its content security policy lets it talk only to the helper that served it.
+- **For how long:** until the page is saved, or 30 minutes, whichever comes first. Then it stops
+  listening and exits.
+- **What it writes:** the decisions, to one file under `<artifacts_dir>/local/tmp/` (readable by you
+  only). Nothing else. The helper applies nothing: agami reads that file in the chat and applies it
+  with the same commands a card uses (`sm curate`, `sm add-example`, `sm remove-example`), which
+  validate the model and record each change, with your saved sign-off identity, in
+  `curation_log.jsonl`. The file is deleted once applied.
+- **What it calls:** nothing. It makes no connection of its own.
+
+Pages that only show something (the full view of a chart, say) are served by the same script
+without `--decisions`: every post to them is refused, and their banner says nothing on them is saved.
+`tests/test_privacy_no_network.py` pins both listeners (this one and the password page) to the
+loopback address, and `tests/test_serve_page.py` tests each refusal.
 
 ---
 

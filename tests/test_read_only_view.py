@@ -178,11 +178,16 @@ def test_render_chart_writes_a_read_only_page(tmp_path: Path, monkeypatch) -> No
     assert BANNER_TEXT in out.read_text()
 
 
-def test_every_renderer_a_skill_calls_is_given_read_only() -> None:
+def test_every_renderer_a_skill_calls_is_read_only_or_saves_to_a_waiting_helper() -> None:
+    """A page is either a view (`--read-only`) or one that saves its decisions (`--save-to-helper`,
+    #651), and a saving page is only rendered where the same block starts the helper it posts to."""
     offenders = []
     for skill in sorted((PLUGIN / "skills").glob("*/SKILL.md")):
         for block in re.findall(r"```bash\n(.*?)```", skill.read_text(), re.S):
             for call in re.findall(r"render_[a-z_]+\.py.*?--out", block, re.S):
-                if "--read-only" not in call:
+                saving = "--save-to-helper" in call
+                if "--read-only" not in call and not saving:
                     offenders.append(f"{skill.parent.name}: {call.splitlines()[0]}")
+                if saving and not re.search(r"serve_page\.py[^\n]*(?:\\\n[^\n]*)*--decisions", block):
+                    offenders.append(f"{skill.parent.name}: saving page without a helper: {call.splitlines()[0]}")
     assert not offenders, offenders

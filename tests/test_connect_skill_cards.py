@@ -402,7 +402,7 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
         "Keep all that ran (Recommended)",
         "Review one by one",
         "Drop the failing ones",
-        "Show the full view",
+        "Mark them on a page",
     ):
         assert f"- **{label}**" in s, label
     assert "Review the failing ones" not in s and "Review all one by one" not in s
@@ -710,12 +710,14 @@ def test_example_cards_show_the_sql_in_the_keep_preview():
 
 
 def test_review_cards_offer_the_full_view_as_an_option():
-    # "show the full view" worked only typed in Other, and no card said it existed.
+    # "show the full view" worked only typed in Other, and no card said it existed. #651: the page now
+    # saves its own decisions, so the option says what it does, on every question of a card.
     four, six = _phase_4(), _phase_6()
-    assert four.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
-    assert six.count("- **Show the full view**") == 1        # the Examples card
-    assert "and **Show the full view** (the page below" in six  # the example item cards
-    assert "| Show the full view |" in four and "| Show the full view |" in six
+    assert four.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
+    assert six.count("- **Mark them on a page**") == 1     # the Examples card
+    assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
+    assert "| Review on a page |" in four and "| Mark them on a page |" in six
+    assert "first question only" not in four + six
     phase_7 = _phase("## Phase 7", "## Phase 8")
     assert "`Show the full view`" in phase_7
 
@@ -746,3 +748,30 @@ def test_join_candidate_group_options_preview_the_joins_they_add():
     assert "each option's `preview` lists every join that option adds" in s
     assert "Never offer a numbered range" in s
     assert "Add all remaining" in s and "Add none" in s
+
+
+# --- pages that save their own decisions (#651) -------------------------------------------------
+
+
+def test_4a_full_view_saves_through_the_helper_and_applies_like_agami_model():
+    full = _phase_4().split("**Show the full view** (an option")[1]
+    assert "--save-to-helper" in full and "--decisions" in full and "--read-only" not in full
+    assert "question-cards.md#6a-a-page-that-saves-its-decisions" in full
+    assert "as `/agami-model` Phase 5b does" in full
+    assert "`--initial-tab pii` from the personal-data question" in full
+
+
+def test_4a_bulk_sign_off_lists_the_unseen_items_first():
+    s = _phase_4()
+    assert "a sign-off is never recorded for a definition the person hasn't seen" in s
+    assert '"bulk":true' in s
+
+
+def test_6_examples_page_saves_and_its_card_says_ive_marked_them():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "--save-to-helper --artifacts-dir" in full and "--decisions" in full
+    assert "**I've marked them on the page** and **Back to the cards**" in full
+    # what the page saved maps onto the old block's lines, applied by the same commands
+    for pair in ("`keep` is `validate N`", "`drop` is `reject N`", "`fix` (with its `sql`) is `edit N`", "`note_all` is `note all`"):
+        assert pair in full, pair
+    assert "is said back and not applied" in full
