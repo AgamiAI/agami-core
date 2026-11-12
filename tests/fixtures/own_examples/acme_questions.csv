@@ -1,0 +1,3 @@
+question,sql
+How many orders were placed on the web?,"SELECT COUNT(*) AS orders FROM orders WHERE channel = 'web' AND status != 'cancelled'"
+"How many orders have been placed, cancelled ones included?","SELECT COUNT(*) AS orders FROM orders"

@@ -43,6 +43,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import _xlsx
+import dashboard_exports
+
 # --- Number parsing -------------------------------------------------------
 
 # Currency symbols and their codes that we strip from the front of a number.
@@ -440,28 +443,126 @@ def _rows_from_json(items: Any, *, file: str, source: str | None) -> tuple[list[
 
 
 _MAX_INTAKE_BYTES = 20 * 1024 * 1024
+# What a folder is read for. A question list (.txt, .md) is read only when named on its own: in a
+# folder of SQL a README is far likelier than a list of questions, and it would become one row a line.
+_FOLDER_SUFFIXES = frozenset({".sql", ".csv", ".xlsx"}) | dashboard_exports.EXPORT_SUFFIXES
+_MAX_FOLDER_FILES = 500
 
 
-def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[dict]]:
+def _split_sql(text: str) -> list[tuple[str, str | None]]:
+    """A .sql file's statements, each with the comment written above it (or None).
+
+    Cut on `;` outside quotes and comments, so a `;` inside a string literal or a comment does not
+    split a statement in two. The leading comment is taken off the statement, because it names the
+    statement rather than being part of it; a comment inside the statement stays where it is."""
+    chunks, buf, i, n = [], [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ("'", '"'):
+            j = i + 1
+            while j < n and not (text[j] == ch and (j + 1 >= n or text[j + 1] != ch)):
+                j += 2 if text[j] == ch else 1
+            buf.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith("--", i):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            buf.append(text[i:j])
+            i = j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            buf.append(text[i:j])
+            i = j
+        elif ch == ";":
+            chunks.append("".join(buf))
+            buf, i = [], i + 1
+        else:
+            buf.append(ch)
+            i += 1
+    chunks.append("".join(buf))
+    out = []
+    for chunk in chunks:
+        if not chunk.strip():
+            continue
+        comment_lines, rest = [], chunk.strip()
+        while True:
+            if rest.startswith("--"):
+                line, _, rest = rest.partition("\n")
+                comment_lines.append(line[2:].strip())
+            elif rest.startswith("/*") and "*/" in rest:
+                body, _, rest = rest[2:].partition("*/")
+                comment_lines.extend(ln.strip(" *") for ln in body.splitlines())
+            else:
+                break
+            rest = rest.strip()
+        comment = " ".join(c for c in comment_lines if c) or None
+        out.append((rest, comment))
+    return out
+
+
+def _expand(path: Path) -> tuple[list[Path], list[dict]]:
+    """A file as itself; a folder as the files in it this intake reads, in name order, at any depth.
+    Hidden files and folders are left out, and so is anything past the first few hundred files."""
+    if not path.is_dir():
+        return [path], []
+    found, skipped = [], []
+    for f in sorted(path.rglob("*")):
+        rel = f.relative_to(path)
+        if not f.is_file() or any(part.startswith(".") for part in rel.parts):
+            continue
+        suffix = f.suffix.lower()
+        if suffix in _FOLDER_SUFFIXES:
+            found.append(f)
+        elif suffix in dashboard_exports.UNREADABLE_EXPORTS:
+            skipped.append({"file": str(rel), "line": 0, "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
+    if len(found) > _MAX_FOLDER_FILES:
+        skipped.append({"file": path.name, "line": 0,
+                        "reason": f"the folder holds {len(found)} files; only the first {_MAX_FOLDER_FILES} were read"})
+        found = found[:_MAX_FOLDER_FILES]
+    return found, skipped
+
+
+def _rows_from_export(path: Path, source: str | None) -> tuple[list[dict], list[dict], list[dict]]:
+    """A dashboard export's rows, the lines it could not use, and the definitions it holds."""
+    got = dashboard_exports.read_export(path)
+    rows = []
+    for item in got["rows"]:
+        row = _new_row(file=path.name, line=item["line"], source=source, label=item["label"],
+                       statement=item["statement"])
+        row["provenance"]["export"] = item["export"]
+        rows.append(row)
+    skipped = [dict(s, file=path.name) for s in got["skipped"]]
+    definitions = [dict(d, file=path.name) for d in got["definitions"]]
+    return rows, skipped, definitions
+
+
+def _rows_from_file(path: Path, source: str | None,
+                    sheet: str | None = None) -> tuple[list[dict], list[dict]]:
     """One file's rows and the lines it could not use. The extension decides how lines are cut:
-    `.json` is a list, `.sql` is statements split on `;`, `.txt` and `.md` are one question per
-    line, and everything else is CSV."""
+    `.json` is a list, `.sql` is statements split on `;`, `.xlsx` is one sheet read like a CSV,
+    `.txt` and `.md` are one question per line, and everything else is CSV."""
     file = path.name
     if path.stat().st_size > _MAX_INTAKE_BYTES:
         raise ValueError(f"{file} is {path.stat().st_size // (1024 * 1024)} MB; the intake reads files up to {_MAX_INTAKE_BYTES // (1024 * 1024)} MB. Export fewer rows, or split the file.")
-    text = path.read_text(encoding="utf-8")
     suffix = path.suffix.lower()
+    if suffix == ".xlsx":
+        sheet_name, cells = _xlsx.read_sheet(str(path), sheet)
+        return _rows_from_table([(n, r) for n, r in enumerate(cells, 1)], file=f"{file} ({sheet_name})",
+                                source=source)
+    text = path.read_text(encoding="utf-8")
     if suffix == ".json":
         return _rows_from_json(json.loads(text), file=file, source=source)
     if suffix == ".sql":
         rows, skipped = [], []
-        for n, stmt in enumerate((s for s in text.split(";") if s.strip()), 1):
+        for n, (stmt, comment) in enumerate(_split_sql(text), 1):
             # The same test a CSV cell gets: anything that is not a SELECT or a WITH is context or
-            # a mistake, and never reaches the tier as a statement the person supplied.
+            # a mistake, and never reaches the tier as a statement the person supplied. A comment
+            # above a statement is how a .sql file names it, so it becomes the row's label.
             if _is_statement(stmt):
-                rows.append(_new_row(file=file, line=n, source=source, statement=stmt.strip()))
+                rows.append(_new_row(file=file, line=n, source=source, statement=stmt, label=comment))
             else:
-                skipped.append({"file": file, "line": n, "text": stmt.strip()[:80],
+                skipped.append({"file": file, "line": n, "text": (comment or stmt).strip()[:80],
                                 "reason": "not a SELECT or WITH statement"})
         return rows, skipped
     if suffix in (".txt", ".md") or ("," not in text and "\t" not in text):
@@ -486,6 +587,15 @@ def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[di
                 continue
             seen_row = True
             numbered.append((n, r))
+    rows, skipped = _rows_from_table(numbered, file=file, source=source)
+    skipped.extend(guidance)
+    return rows, skipped
+
+
+def _rows_from_table(numbered: list[tuple[int, list[str]]], *, file: str,
+                     source: str | None) -> tuple[list[dict], list[dict]]:
+    """Rows of cells, a CSV's or a sheet's, read by header name when the first row is a header."""
+    numbered = [(n, r) for n, r in numbered if r and any(str(c).strip() for c in r)]
     if not numbered:
         return [], []
     fields = _header_map(numbered[0][1], [r for _n, r in numbered[1:]])
@@ -500,7 +610,6 @@ def _rows_from_file(path: Path, source: str | None) -> tuple[list[dict], list[di
             skipped.append({"file": file, "line": n, "reason": why})
         else:
             rows.append(row)
-    skipped.extend(guidance)
     return rows, skipped
 
 
@@ -527,7 +636,7 @@ def _merge_by_label(rows: list[dict]) -> list[dict]:
     return merged
 
 
-def intake(paths: list[Path], *, source: str | None = None) -> dict:
+def intake(paths: list[Path], *, source: str | None = None, sheet: str | None = None) -> dict:
     """Every file's rows, merged by label across files, with the shape that was seen.
 
     `shape` is one letter when every row has the same shape and `mixed` otherwise; each row also
@@ -535,10 +644,23 @@ def intake(paths: list[Path], *, source: str | None = None) -> dict:
     """
     rows: list[dict] = []
     skipped: list[dict] = []
-    for path in paths:
-        got, missed = _rows_from_file(Path(path).expanduser(), source)
-        rows.extend(got)
+    definitions: list[dict] = []
+    for given in paths:
+        files, missed = _expand(Path(given).expanduser())
         skipped.extend(missed)
+        for path in files:
+            suffix = path.suffix.lower()
+            if suffix in dashboard_exports.UNREADABLE_EXPORTS:
+                skipped.append({"file": path.name, "line": 0,
+                                "reason": dashboard_exports.UNREADABLE_EXPORTS[suffix]})
+                continue
+            if suffix in dashboard_exports.EXPORT_SUFFIXES:
+                got, missed, defs = _rows_from_export(path, source)
+                definitions.extend(defs)
+            else:
+                got, missed = _rows_from_file(path, source, sheet)
+            rows.extend(got)
+            skipped.extend(missed)
     rows = _merge_by_label(rows)
     # The row number is given once, here. The intake page shows it, its block names it, and the run
     # directory and the report page use it; a row dropped on the page never renumbers the others.
@@ -546,7 +668,12 @@ def intake(paths: list[Path], *, source: str | None = None) -> dict:
         row.setdefault("row", n)
     shapes = {row["provenance"]["shape"] for row in rows}
     shape = next(iter(shapes)) if len(shapes) == 1 else ("mixed" if shapes else None)
-    return {"shape": shape, "rows": rows, "skipped": skipped}
+    out = {"shape": shape, "rows": rows, "skipped": skipped}
+    if definitions:
+        # A calculated field, a measure: a definition the export states in its own language. Listed
+        # for the person to read beside the semantic model's, never converted to SQL or checked.
+        out["definitions"] = definitions
+    return out
 
 
 # --- Ledger ---------------------------------------------------------------
@@ -3159,6 +3286,7 @@ def main(argv: list[str] | None = None) -> int:
     p_intake = sub.add_parser("intake", help="Read any input shape a person brings into evidence rows.")
     p_intake.add_argument("--file", action="append", required=True, dest="files")
     p_intake.add_argument("--source", default=None, help="the person's own words for where this came from")
+    p_intake.add_argument("--sheet", default=None, help="which sheet of an .xlsx to read, when it has several")
 
     p_ledger = sub.add_parser("ledger", help="Grade every part of a supplied statement from the files in its row directory.")
     p_ledger.add_argument("--row-dir", required=True, dest="row_dir")
@@ -3325,7 +3453,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         csv.field_size_limit(sys.maxsize)  # a long SQL cell is a row, not an error
         try:
-            result = intake(paths, source=args.source)
+            result = intake(paths, source=args.source, sheet=args.sheet)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError, csv.Error, RecursionError) as exc:
             print(f"reconcile intake: could not read the input: {str(exc).splitlines()[0][:300]}", file=sys.stderr)
             return 2

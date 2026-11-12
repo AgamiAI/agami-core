@@ -1,0 +1,86 @@
+<?xml version='1.0' encoding='utf-8' ?>
+<!-- A synthetic Tableau workbook for the own-examples intake tests (#645). Neutral names only. -->
+<workbook source-build='2024.1.0' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>
+  <datasources>
+    <datasource caption='acme orders' inline='true' name='federated.acme1' version='18.1'>
+      <connection class='federated'>
+        <named-connections>
+          <named-connection caption='your-cluster.example.com' name='sqlite.acme'>
+            <connection class='sqlite' dbname='acme' server='your-cluster.example.com' username='you@example.com' />
+          </named-connection>
+        </named-connections>
+        <relation connection='sqlite.acme' name='Custom SQL Query' type='text'>SELECT o.id AS order_id, o.status, o.channel, o.total_amount AS amount, o.placed_at AS order_date, c.country
+FROM orders o JOIN customers c ON c.id = o.customer_id</relation>
+      </connection>
+      <column caption='Net revenue' datatype='real' name='[Calculation_1]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='SUM(IF [status] != &apos;refunded&apos; THEN [amount] END)' />
+      </column>
+      <column caption='Unused ratio' datatype='real' name='[Calculation_2]' role='measure' type='quantitative'>
+        <calculation class='tableau' formula='SUM([amount]) / COUNTD([order_id])' />
+      </column>
+    </datasource>
+    <datasource caption='acme orders table' inline='true' name='federated.acme2' version='18.1'>
+      <connection class='federated'>
+        <relation connection='sqlite.acme' name='orders' table='[orders]' type='table' />
+        <cols>
+          <map key='[Channel]' value='[orders].[channel]' />
+          <map key='[id]' value='[orders].[id]' />
+        </cols>
+      </connection>
+    </datasource>
+  </datasources>
+  <worksheets>
+    <worksheet name='Revenue by country'>
+      <table>
+        <view>
+          <datasources><datasource caption='acme orders' name='federated.acme1' /></datasources>
+          <filter class='categorical' column='[federated.acme1].[none:status:nk]'>
+            <groupfilter function='member' level='[none:status:nk]' member='&quot;delivered&quot;' user:ui-domain='database' />
+          </filter>
+        </view>
+        <rows>[federated.acme1].[none:country:nk]</rows>
+        <cols>[federated.acme1].[sum:amount:qk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Orders not cancelled'>
+      <table>
+        <view>
+          <datasources><datasource caption='acme orders' name='federated.acme1' /></datasources>
+          <filter class='categorical' column='[federated.acme1].[none:status:nk]'>
+            <groupfilter function='except' user:ui-domain='database'>
+              <groupfilter function='level-members' level='[none:status:nk]' />
+              <groupfilter function='member' level='[none:status:nk]' member='&quot;cancelled&quot;' />
+            </groupfilter>
+          </filter>
+        </view>
+        <panes><pane><encodings><text column='[federated.acme1].[cnt:order_id:qk]' /></encodings></pane></panes>
+        <rows />
+        <cols />
+      </table>
+    </worksheet>
+    <worksheet name='Net revenue'>
+      <table>
+        <view><datasources><datasource caption='acme orders' name='federated.acme1' /></datasources></view>
+        <rows />
+        <cols>[federated.acme1].[usr:Calculation_1:qk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Orders by year'>
+      <table>
+        <view><datasources><datasource caption='acme orders' name='federated.acme1' /></datasources></view>
+        <rows>[federated.acme1].[cnt:order_id:qk]</rows>
+        <cols>[federated.acme1].[yr:order_date:ok]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Orders by channel'>
+      <table>
+        <view><datasources><datasource caption='acme orders table' name='federated.acme2' /></datasources></view>
+        <rows>[federated.acme2].[none:Channel:nk]</rows>
+        <cols>[federated.acme2].[cnt:id:qk]</cols>
+      </table>
+    </worksheet>
+    <worksheet name='Blank sheet'>
+      <table><view /><rows /><cols /></table>
+    </worksheet>
+  </worksheets>
+</workbook>
