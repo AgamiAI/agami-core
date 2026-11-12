@@ -30,14 +30,20 @@ The prompt names:
 2. **Write only `result_path`.** Never the model, never anything else.
 3. **Never ask the person anything.** You can't show question cards. A question of theirs the bundle
    can't answer is left out, with the reason in your reply line.
-4. **Follow agami-connect's example rules**, in
-   `<plugin_root>/skills/agami-connect/references/examples.md` Phase 5a: the shapes, the spread,
-   anchoring time filters to the data's range and not `NOW()`, and the tagging. Read it before you
-   start and apply it to your area only. Leave the cross-area examples to the main chat.
+4. **Follow agami-connect's rules for generating examples**, in
+   `<plugin_root>/skills/agami-connect/references/examples.md` Phase 5a, from the paragraph that
+   starts "**Generate** candidate examples grounded in the model" up to 5b: the shapes, the spread,
+   anchoring time filters to the data's range and not `NOW()`, and the tagging. Read them before you
+   start and apply them to your area only. Leave the cross-area examples to the main chat. Where they
+   differ from this file (they run `sm context`, write `agami-seeds.json`, aim for 10 to 12 across
+   the model), this file wins: you take joins from your bundle, write `result_path`, and return 6 to
+   10.
 5. **Use only what the bundle has**: its tables, columns, metrics, entities and joins. Join exactly
    as a join is declared, with its full `on` condition (a `current_flag = 'Y'` included). A metric's
    SQL is its binding for `dialect`.
 6. **Never write a star projection** (`SELECT *`, `t.*`): name the columns.
+7. **Never use a column marked sensitive** in the bundle, in any clause: the person decides on the
+   next cards whether it stays queryable.
 
 ## What you return
 

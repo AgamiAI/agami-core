@@ -41,18 +41,18 @@ def test_each_agent_is_read_only_and_never_asks(name):
     assert meta["name"] == name
     tools = {t.strip() for t in meta["tools"].split(",")}
     assert not tools & {"Edit", "NotebookEdit", "AskUserQuestion", "Agent"}, tools
-    # the reader writes nothing; the enricher writes only its result file (Write, not a heredoc,
-    # which a live run showed is easy to get wrong), and never the model
-    assert ("Write" in tools) == (name != "agami-doc-reader")
-    if name != "agami-doc-reader":
-        assert tools == {"Read", "Write"}, tools
+    # each writes only its result file (Write, not a heredoc, which a live run showed is easy to
+    # get wrong), never the model; the reader also globs a project folder
+    assert tools == ({"Read", "Glob", "Grep", "Write"} if name == "agami-doc-reader"
+                     else {"Read", "Write"}), tools
+    assert "**Write only `result_path`.** Never the model" in body
     # neither runs commands: a subagent's commands each stop for permission (live run, Manual mode)
     assert "Bash" not in tools
     assert "never asks the person anything" in meta["description"]
     assert "**Never ask the person anything.**" in body
     # the reader returns its JSON; the enricher writes it to a file the engine applies whole
-    assert ("One JSON object, nothing else after it" in body if name == "agami-doc-reader"
-            else "to `result_path`" in body)
+    assert "Write one JSON object to `result_path`" in body or "Write one JSON list to `result_path`" in body
+    assert "reply with only the path and one" in body
     if name == "agami-example-writer":
         assert "never writes the model, never runs a command, never asks the person" in meta["description"]
         assert len(meta["description"]) < 1024

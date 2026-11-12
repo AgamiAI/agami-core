@@ -29,6 +29,11 @@ def _schedule() -> str:
     return text[start:end]
 
 
+def _flat(text: str) -> str:
+    """The text with each run of whitespace as one space, so a test doesn't pin line wrapping."""
+    return " ".join(text.split())
+
+
 def _section(text: str, start: str, end: str) -> str:
     i = text.index(start)
     return text[i:text.index(end, i + len(start))]
@@ -43,6 +48,10 @@ def test_the_schedule_names_every_agent_the_plugin_ships():
     assert named <= shipped, named - shipped
     assert "[shared/parallel-work.md](../../shared/parallel-work.md)" in section
     assert "| While the person is on | These run in the background |" in section
+    # the example run happens before its review card, so the row names the wait, not the card
+    assert ("| The wait for the example run (6) | `sm seed-validate` as a background task; the main "
+            "chat posts its progress |") in section
+    assert "The example review card" not in section
 
 
 def test_parallel_work_rules():
@@ -52,10 +61,69 @@ def test_parallel_work_rules():
     assert "wait-files" in text and "--wait 60" in text and "all_ready" in text
     assert "at most 4" in text
     assert "no Agent tool at all" in text and "inline" in text
-    low = text.lower()
-    assert "never" in low
-    for rule in ("writes the model", "runs a command", "asks the person"):
-        assert rule in text, rule
+    never = _flat(text[text.index("## 6. Never"):])
+    assert "Never a subagent that writes the model, runs a command, or asks the person anything" in never
+    assert "Never two writes at once" in never
+    assert "Never a second batch for the same tables" in never
+
+
+def test_the_give_up_limit_counts_per_subagent():
+    text = _flat(_read(PARALLEL))
+    give_up = text[text.index("## 4. Give up cleanly"):text.index("## 5.")]
+    assert "counts from each subagent's own start, not the batch's" in give_up
+    assert "10 passes (10 minutes) after that subagent started" in give_up
+    assert "do that piece yourself, inline" in give_up
+
+
+def test_queued_subagents_start_after_each_pass_and_each_card():
+    collect = _flat(_read(PARALLEL))
+    collect = collect[collect.index("## 3. Collect"):collect.index("## 4.")]
+    assert "start one queued subagent for each one that finished" in collect
+    assert "never more than 4 running" in collect
+    assert "whenever the person answers a card while a batch runs" in collect
+
+
+def test_every_batch_file_name_carries_the_batch_stamp():
+    assert 'scripts/sm" batch-id' in _read(PARALLEL)
+    names = {
+        "enrich.md": ["agami-enrich-<batch>-<chunk>.input.json",
+                      "agami-enrich-<batch>-<chunk>.result.json"],
+        "review.md": ["agami-examples-<batch>-<area>.input.json",
+                      "agami-examples-<batch>-<area>.candidates.json"],
+        "examples.md": ["agami-examples-<batch>-<area>.candidates.json"],
+        "context-and-tables.md": ["agami-doc-<batch>-<n>.result.json"],
+    }
+    for doc, wanted in names.items():
+        text = _read(REFS / doc)
+        for name in wanted:
+            assert name in text, (doc, name)
+        # no unstamped subagent file name is left behind
+        assert not re.search(r"agami-(enrich|examples|doc)-<(chunk|area|n)>", text), doc
+        if doc != "examples.md":
+            assert 'scripts/sm" batch-id' in text, doc
+
+
+def test_a_pause_collects_what_is_ready_and_a_resume_starts_the_writers_again():
+    review = _flat(_read(REFS / "review.md"))
+    assert "collect what is ready with one `sm wait-files --wait 0` pass and skip the rest" in review
+    assert "don't draft their examples yourself at a Pause" in review
+    assert "**On resume**, the writers are always started again with a new batch stamp" in review
+    assert "5a uses the files they wrote" not in review
+
+
+def test_with_a_model_spec_the_enrichers_wait_for_phase_2():
+    build = _read(REFS / "build.md")
+    start = build[build.index("**Start the enrichers now"):build.index("**Join candidates")]
+    assert "unless a model spec was attached" in start
+    assert "With one chunk, or with no Agent tool, nothing starts here" in start
+    enrich = _read(REFS / "enrich.md")
+    assert "**When 1.7 started the enrichers**" in enrich
+    assert "pick up at 2a step 3 (collect)" in enrich
+
+
+def test_one_asked_question_is_kept_once():
+    five_a = _section(_read(REFS / "examples.md"), "**5a", "**5b+5c")
+    assert "one question can come back from two areas: keep one" in five_a
 
 
 def test_enrichers_start_from_two_chunks():
@@ -82,7 +150,7 @@ def test_example_writers_start_with_sign_off_and_never_write():
     launch = review.index("agami-example-writer")
     first_card = review.index("**Sign-offs (when `preseed_count` > 0).**")
     assert launch < first_card
-    assert "agami-examples-<area>.candidates.json" in review
+    assert "agami-examples-<batch>-<area>.candidates.json" in review
     assert 'sm" bundle "$ROOT" --area <area> >' in review
     examples = _read(REFS / "examples.md")
     five_a = _section(examples, "**5a", "**5b+5c")
