@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -101,8 +102,25 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
         fh.write(json.dumps({"id": step_id, "status": status, "at": at.isoformat()}) + "\n")
 
 
-def _replay_marks(root: Path) -> dict[str, str]:
-    """The marks that still stand, replayed in order (rule A).
+@dataclass
+class _Replay:
+    """What the timeline says once replayed: the marks that still stand; whether a restart is in
+    effect (a step before the build was marked `in_progress` after the last build mark, or with no
+    build mark at all); and when the standing `build=in_progress` mark was written."""
+    marks: dict[str, str]
+    restarted: bool
+    build_started_at: Optional[float]
+
+
+def _mark_time(doc: dict) -> Optional[float]:
+    try:
+        return datetime.fromisoformat(doc["at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _replay_marks(root: Path) -> _Replay:
+    """Replay the marks in order (rule A).
 
     Marking a step `in_progress` restarts the run from there: every later step's earlier
     `in_progress`/`done` mark is dropped (a `skipped` one is kept), so a reintrospect after a
@@ -111,8 +129,11 @@ def _replay_marks(root: Path) -> dict[str, str]:
     try:
         text = _timeline(root).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {}
+        return _Replay({}, False, None)
     marks: dict[str, str] = {}
+    build_at = STEP_IDS.index("build")
+    restarted = False
+    build_started_at: Optional[float] = None
     for line in text.splitlines():
         try:
             doc = json.loads(line)
@@ -122,12 +143,20 @@ def _replay_marks(root: Path) -> dict[str, str]:
                 and doc.get("status") in MARK_STATUSES):
             continue
         step_id, status = doc["id"], doc["status"]
+        at = STEP_IDS.index(step_id)
         if status == "in_progress":
-            for later in STEP_IDS[STEP_IDS.index(step_id) + 1:]:
+            for later in STEP_IDS[at + 1:]:
                 if marks.get(later) in ("in_progress", "done"):
                     del marks[later]
+            if at < build_at:
+                restarted = True
+        if step_id == "build":
+            restarted = False
+            build_started_at = _mark_time(doc) if status == "in_progress" else None
+        elif status == "in_progress" and at < build_at:
+            build_started_at = None  # the build's own mark was just dropped
         marks[step_id] = status
-    return marks
+    return _Replay(marks, restarted, build_started_at)
 
 
 def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -144,16 +173,22 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         return None, f"The model in {root} couldn't be read: {first}"
 
 
-def _log_state(log: Path, model: Path, now: float) -> tuple[str, Optional[str]]:
+def _log_state(log: Path, model: Path, now: float,
+               attempt_at: Optional[float] = None) -> tuple[str, Optional[str]]:
     """(state, reason) of the build log that speaks for this model: "running", "failed" (with the
-    engine's reason), "stopped", or "none" when no log is newer than datasource.yaml. A file that
-    vanishes between the two stats (being replaced) reads as no log, never as running."""
+    engine's reason), "stopped", or "none" when no log is newer than datasource.yaml, or the log is
+    older than this attempt's `build=in_progress` mark (`attempt_at`): a retry's list must not
+    carry the last attempt's failure until the engine truncates the log. Marks are stamped to the
+    second, so a log written in the mark's own second is this attempt's. A file that vanishes
+    between the two stats (being replaced) reads as no log, never as running."""
     try:
         log_at = log.stat().st_mtime
         model_at = model.stat().st_mtime if model.exists() else None
     except OSError:
         return "none", None
     if model_at is not None and log_at <= model_at:
+        return "none", None
+    if attempt_at is not None and int(log_at) < attempt_at:
         return "none", None
     last = last_progress_line(log)
     if last.startswith("failed:"):
@@ -228,16 +263,19 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     model = root / "datasource.yaml"
     log = root / ".introspect" / "progress.log"
 
-    marks = _replay_marks(root)
+    replay = _replay_marks(root)
+    marks = replay.marks
     status = {i: marks.get(i, "pending") for i in STEP_IDS}
     totals, load_problem = _totals(root) if model.exists() else (None, None)
-    # B: resuming a profile with no marks, or the sample's copied model.
-    if ("build" not in marks and totals is not None
-            and not any(status[i] == "in_progress" for i in STEP_IDS[:build_at])):
+    # B: resuming a profile with no marks, or the sample's copied model. Not while a restart is in
+    # effect: a reintrospect hasn't reached its build, and the old model mustn't tick it.
+    if "build" not in marks and model.exists() and not replay.restarted:
         status["build"] = "done"
     _imply(status)
 
-    state, reason = _log_state(log, model, (now or datetime.now(timezone.utc)).timestamp())
+    attempt_at = replay.build_started_at if marks.get("build") == "in_progress" else None
+    state, reason = _log_state(log, model, (now or datetime.now(timezone.utc)).timestamp(),
+                               attempt_at)
     problem: Optional[str] = None
     live = False
     noun = "rebuild" if model.exists() else "build"
@@ -259,11 +297,9 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
         # D5: a built model stays built when a later rebuild didn't finish.
         problem = load_problem or (_unfinished(state, reason, "last rebuild")
                                    if state in ("failed", "stopped") else None)
-    # D6: a pending build (an earlier step reopened) ignores the log.
-    if status["build"] != "done":
-        for i in STEP_IDS[build_at + 1:]:
-            if status[i] in ("in_progress", "done"):
-                status[i] = "pending"
+    # D6: a pending build (an earlier step reopened) ignores the log. A pending or running build
+    # has no later step reached: _reopen_from or the restart already reset them. A `skipped` build
+    # is left alone, with the steps after it as marked.
 
     # E: only a step that is done or under way carries a count.
     counts: dict[str, Optional[str]] = {}

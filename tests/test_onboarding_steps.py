@@ -58,6 +58,17 @@ def _building(tmp_path: Path) -> Path:
     return root
 
 
+def _started(root: Path) -> None:
+    """Mark the build started, before any log already written: that log is this attempt's. Marks
+    are stamped to the second, so a mark written after the log could land a second later and make
+    the log read as an earlier attempt's."""
+    from datetime import datetime, timedelta, timezone
+    log = root / ".introspect" / "progress.log"
+    at = (datetime.fromtimestamp(log.stat().st_mtime, timezone.utc) - timedelta(seconds=2)
+          if log.exists() else None)
+    steps.mark(root, "build", "in_progress", now=at)
+
+
 def test_fresh_profile_is_all_pending(tmp_path):
     root = tmp_path / "acme"
     result = steps.onboarding_steps(root)
@@ -195,7 +206,7 @@ def test_a_failed_first_build_is_pending_with_the_reason(tmp_path):
     root = _building(tmp_path)
     (root / ".introspect" / "progress.log").write_text(
         "discovered 34 tables — reading columns, grain, keys\nfailed: permission denied for schema demo\n")
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     steps.mark(root, "describe", "done")
     result = steps.onboarding_steps(root)
     s = _by_id(result)
@@ -219,7 +230,7 @@ def test_a_build_silent_for_30_minutes_is_not_running(model, tmp_path):
     assert result["problem"] == "The last rebuild stopped before it finished."
 
     root = _building(tmp_path)
-    steps.mark(root, "build", "in_progress")  # a pending build ignores its log (rule D6)
+    _started(root)  # a pending build ignores its log (rule D6)
     first = steps.onboarding_steps(root, now=datetime.fromtimestamp(
         (root / ".introspect" / "progress.log").stat().st_mtime, timezone.utc) + timedelta(hours=1))
     assert _by_id(first)["build"]["status"] == "pending"
@@ -310,7 +321,7 @@ def test_a_finished_log_whose_model_never_lands_goes_stale(tmp_path):
     root = _building(tmp_path)
     log = root / ".introspect" / "progress.log"
     log.write_text("done: 34 tables, 7 relationships\n")
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     at = datetime.fromtimestamp(log.stat().st_mtime, timezone.utc)
     soon = at + timedelta(seconds=steps.STALE_BUILD_SECONDS - 1)
     assert _by_id(steps.onboarding_steps(root, now=soon))["build"]["status"] == "in_progress"
@@ -519,14 +530,14 @@ def _done_mark_no_yaml(tmp_path):
 
 def _running_first_build(tmp_path):
     root = _building(tmp_path)
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     return root, None
 
 
 def _restart_build(tmp_path):  # I1
     root = _sample(tmp_path)
     _complete(root)
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     return root, None
 
 
@@ -539,13 +550,13 @@ def _restart_build_running(tmp_path):
 def _failed_first_build(tmp_path):
     root = _building(tmp_path)
     (root / ".introspect" / "progress.log").write_text("columns+grain 3/34\nfailed: boom\n")
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     return root, None
 
 
 def _failed_rebuild_marked(tmp_path):
     root = _sample(tmp_path)
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     _rebuild_log(root, "failed: boom")
     return root, None
 
@@ -583,14 +594,14 @@ def _unloadable(tmp_path):
 
 def _stale_first_build(tmp_path):
     root = _building(tmp_path)
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     return root, _stale(root / ".introspect" / "progress.log")
 
 
 def _done_log_no_yaml(tmp_path):
     root = _building(tmp_path)
     (root / ".introspect" / "progress.log").write_text("done: 34 tables, 7 relationships\n")
-    steps.mark(root, "build", "in_progress")
+    _started(root)
     return root, None
 
 
@@ -625,6 +636,106 @@ def _restart_connect(tmp_path):
     root = _sample(tmp_path)
     _complete(root)
     steps.mark(root, "connect", "in_progress")
+    return root, None
+
+
+def _marks(root: Path, *specs: str) -> None:
+    for spec in specs:
+        steps.mark(root, *spec.split("="))
+
+
+def _restart_drops_later(tmp_path):
+    root = tmp_path / "acme"
+    _marks(root, "connect=in_progress", "connect=done", "context=in_progress", "context=done",
+           "tables=in_progress", "context=in_progress")
+    return root, None
+
+
+def _done_does_not_restart(tmp_path):
+    root = tmp_path / "acme"
+    _marks(root, "tables=in_progress", "tables=done", "connect=done")
+    return root, None
+
+
+def _unloadable_no_marks(tmp_path):
+    root, _ = _unloadable(tmp_path)
+    (root / ".introspect" / "timeline.jsonl").unlink()  # a profile from before the timeline
+    return root, None
+
+
+def _reintrospect_context_done(tmp_path):
+    root = _sample(tmp_path)
+    _complete(root)
+    _marks(root, "context=in_progress", "context=done")
+    return root, None
+
+
+def _reintrospect_tables_done(tmp_path):
+    root, _ = _reintrospect_context_done(tmp_path)
+    _marks(root, "tables=in_progress", "tables=done")
+    return root, None
+
+
+def _built_then_failed_rebuild(tmp_path):
+    root = _sample(tmp_path)
+    steps.mark(root, "build", "done")
+    _rebuild_log(root, "failed: boom")
+    return root, None
+
+
+def _unloadable_then_failed_rebuild(tmp_path):
+    root = _sample(tmp_path)
+    ds = root / "datasource.yaml"
+    doc = yaml.safe_load(ds.read_text())
+    doc["subject_areas"].append("subject_areas/missing")
+    ds.write_text(yaml.safe_dump(doc))
+    steps.mark(root, "build", "done")
+    _rebuild_log(root, "failed: boom")
+    return root, None
+
+
+def _stale_failed_first_build(tmp_path):
+    root, _ = _failed_first_build(tmp_path)
+    return root, _stale(root / ".introspect" / "progress.log")
+
+
+def _log_older_than_model(tmp_path):
+    root = _sample(tmp_path)
+    _rebuild_log(root, "columns+grain 5/11", newer=False)
+    return root, None
+
+
+def _done_log_with_model(tmp_path):
+    root = _sample(tmp_path)
+    _rebuild_log(root, "done: 11 tables, 12 relationships")
+    return root, None
+
+
+def _reports_passed_over(tmp_path):
+    root = _sample(tmp_path)
+    steps.mark(root, "first_question", "in_progress")
+    return root, None
+
+
+def _retry_after_failure(tmp_path):
+    root = _building(tmp_path)
+    log = root / ".introspect" / "progress.log"
+    log.write_text("columns+grain 3/34\nfailed: boom\n")
+    earlier = log.stat().st_mtime - 10
+    os.utime(log, (earlier, earlier))
+    steps.mark(root, "build", "in_progress")  # the retry, after the failed attempt's log
+    return root, None
+
+
+def _build_skipped(tmp_path):
+    root = tmp_path / "acme"
+    _marks(root, "build=skipped", "describe=in_progress")
+    return root, None
+
+
+def _sample_copied(tmp_path):  # sample.md 6A: the copy, then step 7's mark
+    root = _sample(tmp_path)
+    _marks(root, "connect=in_progress", "connect=done", "first_question=in_progress")
     return root, None
 
 
@@ -664,6 +775,26 @@ STATUS_RULES = {
     "18-pending-has-no-count": (_describing, "ddddipppp", "describe",
                                 {"build": BUILT, "describe": DESCRIBED}, None),
     "19-restart-connect": (_restart_connect, "ipppppppp", "connect", {}, None),
+    "A-restart-drops-later-marks": (_restart_drops_later, "dippppppp", "context", {}, None),
+    "A-done-does-not-restart": (_done_does_not_restart, "dddpppppp", "build", {}, None),
+    "B-unloadable-no-marks": (_unloadable_no_marks, "ddddppppp", "describe", {}, "The model in "),
+    "B-reintrospect-context-done": (_reintrospect_context_done, "ddppppppp", "tables", {}, None),
+    "B-reintrospect-tables-done": (_reintrospect_tables_done, "dddpppppp", "build", {}, None),
+    "D5-build-done-mark-failed-rebuild": (_built_then_failed_rebuild, "ddddppppp", "describe",
+                                          {"build": BUILT}, "The last rebuild didn't finish: boom"),
+    "D7-unloadable-beats-failed-rebuild": (_unloadable_then_failed_rebuild, "ddddppppp",
+                                           "describe", {}, "The model in "),
+    "D-stale-failed-log-stays-failed": (_stale_failed_first_build, "dddpppppp", "build", {},
+                                        "The build didn't finish: boom"),
+    "D-log-older-than-model-is-none": (_log_older_than_model, "ddddppppp", "describe",
+                                       {"build": BUILT}, None),
+    "D-done-log-with-model-is-none": (_done_log_with_model, "ddddppppp", "describe",
+                                      {"build": BUILT}, None),
+    "C-reports-implied-skipped": (_reports_passed_over, "dddddddsi", "first_question",
+                                  ALL_COUNTS, None),
+    "3-retry-after-failure": (_retry_after_failure, "dddippppp", "build", {}, None),
+    "build-skipped-is-harmless": (_build_skipped, "dddsipppp", "describe", {}, None),
+    "sample-copy-path": (_sample_copied, "dddddddsi", "first_question", ALL_COUNTS, None),
 }
 
 
