@@ -775,3 +775,23 @@ def test_6_examples_page_saves_and_its_card_says_ive_marked_them():
     for pair in ("`keep` is `validate N`", "`drop` is `reject N`", "`fix` (with its `sql`) is `edit N`", "`note_all` is `note all`"):
         assert pair in full, pair
     assert "is said back and not applied" in full
+
+
+def test_6_saved_examples_are_checked_by_the_parser_and_a_keep_needs_an_identity():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "parse_examples_decisions.py --decisions-file" in full and "--expect-profile <profile>" in full
+    assert "Never read it by hand" in full
+    assert "**A keep is a sign-off**" in full and "is not applied; say so" in full
+
+
+def test_6_with_add_my_own_drop_the_failing_ones_gives_way():
+    """With #649's Add my own on the card and some failures, five options would not fit."""
+    s = _phase_6()
+    rule = s[s.index("**When the card also offers Add my own**"):]
+    rule = rule[: rule.index("\n\n")]
+    assert "**Drop the failing ones** gives way" in rule
+    assert "**Keep all that ran** / **Review one by one** / **Add my own** / **Mark them on a page**" in rule
+
+
+def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
+    assert 'Each of its approve ops carries `"bulk": true`.' in _phase_4()

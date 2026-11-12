@@ -111,12 +111,18 @@ mark decisions on sends them back by itself instead of asking you to copy and pa
   in the URL. It serves that one page and takes one post of decisions, at most 1 MiB of JSON, from the
   page itself. A wrong token or path, a request addressed to another host name, a post from another
   page or origin, a body that isn't a JSON object, a second post, and any post after the link expires
-  are all refused. An idle or half-sent request is dropped after 10 seconds. The page loads nothing
-  from anywhere else; its content security policy lets it talk only to the helper that served it.
+  are all refused. A post has 10 seconds in all to send its body, an idle connection is dropped
+  after 10 seconds, and at most 8 connections are served at once. The page loads nothing from
+  anywhere else; its content security policy runs only the page's own scripts (each allowed by its
+  hash) and lets it talk only to the helper that served it.
 - **For how long:** until the page is saved, or 30 minutes, whichever comes first. Then it stops
   listening and exits.
 - **What it writes:** the decisions, to one file under `<artifacts_dir>/local/tmp/` (readable by you
-  only). Nothing else. The helper applies nothing: agami reads that file in the chat and applies it
+  only, written through a fresh temporary file, so a link planted beside it is never followed).
+  Nothing else. The decisions are then checked in the chat before anything is applied: the page and
+  model they name must be the ones agami opened (`parse_model_feedback.py --expect-profile`,
+  `parse_examples_decisions.py`), and the sign-off identity is always your saved one, never one the
+  page sent. The helper applies nothing: agami reads that file in the chat and applies it
   with the same commands a card uses (`sm curate`, `sm add-example`, `sm remove-example`), which
   validate the model and record each change, with your saved sign-off identity, in
   `curation_log.jsonl`. The file is deleted once applied.

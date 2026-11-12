@@ -27,7 +27,11 @@ below corresponds to one such version.
   saved sign-off identity, which the page shows and cannot change, and says back what changed in
   one line. Nothing is copied or pasted. A remote or SSH session, or a helper that can't start,
   stays on the cards and says why. A page that only shows something keeps its banner, which now
-  says nothing on it is saved.
+  says nothing on it is saved. The helper allows only the page's own scripts (by hash), gives a
+  post 10 seconds in all and serves at most 8 connections; what a page saved is checked before it
+  is applied (`parse_model_feedback.py --expect-profile`, the new `parse_examples_decisions.py`),
+  and neither a page nor its post can choose the signer. The password helper's credentials rewrite
+  no longer follows a link planted at its temporary file's name.
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm

@@ -992,6 +992,13 @@
         window.agamiSave.say('Press Save edit or Save note on ' + open.map(([n]) => '#' + n).join(', ') + ' first, or cancel it.', 'bad');
         return;
       }
+      // Keeping an example signs it off, as the saved identity; with none saved, a keep would be
+      // recorded unsigned, so it is refused here as the explorer refuses an approval.
+      const signer = (window.AGAMI_SAVE || {}).signer;
+      if (!signer && Object.values(pendingActions).some(p => p.action === 'validate')) {
+        window.agamiSave.say('Keeping an example signs it off, and no sign-off identity is saved. Set it in the chat, or take the keeps off and save the rest.', 'bad');
+        return;
+      }
       const decisions = [];
       Object.keys(pendingActions).sort((a, b) => Number(a) - Number(b)).forEach(n => {
         const p = pendingActions[n];

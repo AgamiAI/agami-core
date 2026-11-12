@@ -243,7 +243,7 @@ def test_the_explorer_renders_a_saving_page_deep_linked_to_a_section(
         and "agami-read-only" not in html.split("<body", 1)[1][:40]
     )
     manifest = _manifest(html)
-    assert manifest["initial_tab"] == "review" and manifest["initial_section"] == "Metrics"
+    assert manifest["initial_tab"] == "review" and manifest["initial_section"] == ["Metrics"]
     assert "you@example.com</strong> (Analyst)" in html
 
 
@@ -270,8 +270,11 @@ def test_the_section_names_match_the_pages_review_piles() -> None:
     import render_model_explorer
 
     text = EXPLORER.read_text(encoding="utf-8")
-    for label in render_model_explorer.REVIEW_SECTIONS.values():
-        assert f"label: '{label}'" in text, label
+    for labels in render_model_explorer.REVIEW_SECTIONS.values():
+        for label in labels:
+            assert f"label: '{label}'" in text, label
+    # the joins section reaches the cross-schema joins pile too
+    assert render_model_explorer.REVIEW_SECTIONS["joins"] == ["Joins", "Cross-schema joins"]
 
 
 def _render_examples(monkeypatch, tmp_path: Path, *extra: str) -> Path:
@@ -318,6 +321,7 @@ def test_the_examples_page_renders_as_a_saving_page(monkeypatch, artifacts: Path
     assert '<body class="agami-saves">' in html
     assert "you@example.com</strong> (Analyst)" in html
     assert f"b.textContent = {json.dumps(SAVE_LABEL)}" in html
+    assert "press I've marked them on the page" in html  # the examples card's own wording
 
 
 def test_the_examples_page_renders_read_only_too(monkeypatch, tmp_path: Path) -> None:
@@ -340,18 +344,28 @@ BLOCK = (
 )
 
 
+def _saved(tmp_path: Path, **over) -> Path:
+    saved = tmp_path / "decisions.json"
+    saved.write_text(
+        json.dumps({"page": "model-explorer", "profile": "demo", "block": BLOCK, **over})
+    )
+    return saved
+
+
 def test_the_parser_reads_the_helpers_file_as_it_reads_a_pasted_block(
     tmp_path: Path, capsys
 ) -> None:
-    saved = tmp_path / "decisions.json"
-    saved.write_text(json.dumps({"page": "model-explorer", "profile": "demo", "block": BLOCK}))
-    assert F.main(["--block-file", str(saved)]) == 0
+    assert F.main(["--block-file", str(_saved(tmp_path)), "--expect-profile", "demo"]) == 0
     from_file = json.loads(capsys.readouterr().out)
     pasted = tmp_path / "pasted.txt"
     pasted.write_text(BLOCK)
     assert F.main(["--block-file", str(pasted)]) == 0
-    assert json.loads(capsys.readouterr().out) == from_file
-    assert from_file["data"]["profile"] == "demo"
+    from_paste = json.loads(capsys.readouterr().out)
+    # the same ops; only the signer differs: a page signs as .config's identity, never its own line
+    assert from_paste["data"]["signer"] == "you@example.com"
+    assert from_file["data"]["signer"] is None and from_file["data"]["role"] is None
+    from_paste["data"]["signer"] = from_paste["data"]["role"] = None
+    assert from_file == from_paste
     assert from_file["data"]["ops"][0] == {
         "op": "exclude",
         "kind": "table",
@@ -359,6 +373,32 @@ def test_the_parser_reads_the_helpers_file_as_it_reads_a_pasted_block(
         "name": "orders",
         "column": "amount",
     }
+
+
+@pytest.mark.parametrize(
+    ("over", "args", "why"),
+    [
+        ({}, [], "needs --expect-profile"),
+        ({"page": "examples"}, ["--expect-profile", "demo"], "not the model explorer"),
+        ({"profile": "other"}, ["--expect-profile", "demo"], "another model"),
+        (
+            {},
+            ["--expect-profile", "other"],
+            "another model",
+        ),  # the block's own profile line says demo
+        (
+            {"profile": "other", "block": BLOCK.replace("profile: demo", "profile: other")},
+            ["--expect-profile", "demo"],
+            "another model",
+        ),
+    ],
+)
+def test_a_decisions_file_for_another_page_or_model_is_refused(
+    tmp_path: Path, capsys, over, args, why
+) -> None:
+    assert F.main(["--block-file", str(_saved(tmp_path, **over)), *args]) == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["ok"] is False and why in out["error"]
 
 
 @pytest.mark.parametrize("text", ["{not json", '{"block": 3}', "[1, 2]", "profile: demo\ndone\n"])
@@ -379,3 +419,121 @@ def test_a_bulk_approval_is_recorded_as_one_in_the_curation_log(artifacts: Path)
     approve = next(e for e in log if e["op"] == "approve")
     assert approve["bulk"] is True and approve["signer"] == "you@example.com"
     assert next(e for e in log if e["op"] == "exclude").get("bulk") is None
+
+
+# --- the pages' own save guards, executed under node (#651 review) ----------------------------
+
+
+def _node(script: str) -> dict:
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    out = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def _between(text: str, start: str, end: str) -> str:
+    i = text.index(start)
+    return text[i : text.index(end, i)]
+
+
+_EXAMPLES_SAVE = _between(
+    EXAMPLES.read_text(encoding="utf-8"), "const SAVE_ACTION", "function generateFeedback()"
+)
+
+
+def _examples(signer, pending: dict) -> dict:
+    return _node(
+        "let posted = null, said = null;\n"
+        "const window = { AGAMI_SAVE: { signer: " + json.dumps(signer) + " } };\n"
+        "window.agamiSave = (p) => { posted = p; return true; };\n"
+        "window.agamiSave.say = (m) => { said = m; };\n"
+        "const items = [{n: 1, area: 'sales', question: 'How many orders?'}, {n: 2, area: 'sales', question: 'Revenue?'}];\n"
+        "const profile = 'demo'; const globalNote = () => '';\n"
+        "const pendingActions = "
+        + json.dumps(pending)
+        + ";\n"
+        + _EXAMPLES_SAVE
+        + "\nsaveDecisions(); console.log(JSON.stringify({posted, said}));"
+    )
+
+
+def test_the_examples_page_refuses_a_keep_with_no_saved_identity() -> None:
+    got = _examples(None, {"1": {"action": "validate"}, "2": {"action": "reject"}})
+    assert got["posted"] is None and "no sign-off identity is saved" in got["said"]
+    # drops alone need no identity, and with one a keep is sent
+    assert _examples(None, {"2": {"action": "reject"}})["posted"]["decisions"] == [
+        {"n": 2, "area": "sales", "question": "Revenue?", "action": "drop"}
+    ]
+    kept = _examples(ME, {"1": {"action": "validate"}})["posted"]["decisions"]
+    assert kept == [{"n": 1, "area": "sales", "question": "How many orders?", "action": "keep"}]
+
+
+def test_the_examples_page_refuses_to_save_a_half_done_edit() -> None:
+    got = _examples(ME, {"1": {"action": "edit", "sql": "SELECT 1", "editSaved": False}})
+    assert got["posted"] is None and "Press Save edit or Save note on #1" in got["said"]
+
+
+_EXPLORER = EXPLORER.read_text(encoding="utf-8")
+_BLOCKER = _between(_EXPLORER, "function saveBlocker()", "function generateFeedback()")
+_IDENTITY = "\n".join(
+    line
+    for line in _EXPLORER.splitlines()
+    if line.strip().startswith(("function validEmail(", "function hasQueuedApprovals("))
+)
+
+
+def _blocker(state: str) -> str | None:
+    return _node(
+        "let inlineEditKey = null, addMetricOpen = false, addJoinOpen = false, addExampleOpen = false;\n"
+        "const editOpen = new Set(); const ops = {}; let signOff = { email: '' };\n"
+        + _IDENTITY
+        + "\n"
+        + _BLOCKER
+        + "\n"
+        + state
+        + "\nconsole.log(JSON.stringify({why: saveBlocker()}));"
+    )["why"]
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "inlineEditKey = 'sales.orders|description';",
+        "editOpen.add('sales.revenue');",
+        "addMetricOpen = true;",
+        "addJoinOpen = true;",
+        "addExampleOpen = true;",
+    ],
+)
+def test_the_explorer_will_not_save_while_an_edit_is_open(state: str) -> None:
+    assert _blocker(state).startswith("⚠ Press Save on the open edit first, or cancel it")
+
+
+def test_the_explorer_will_not_save_an_approval_without_a_saved_identity() -> None:
+    approve = "ops['sales.revenue'] = { op: 'approve' };"
+    assert "Approvals need a sign-off identity" in _blocker(approve)
+    assert _blocker(approve + " signOff.email = 'you@example.com';") is None
+    assert _blocker("ops['sales.orders'] = { op: 'exclude' };") is None  # a hide needs no identity
+
+
+def test_the_explorer_checks_before_it_sends() -> None:
+    gen = _between(_EXPLORER, "function generateFeedback()", "// ---- Wire up ----")
+    assert gen.index("const why = saveBlocker()") < gen.index("window.agamiSave(")
+
+
+def test_a_saved_page_says_to_press_the_cards_button() -> None:
+    html = make_saving("<html><head></head><body></body></html>", ME)
+    assert "Go back to the chat and press I've saved it" in html
+    assert "You can close this page" not in html
+    custom = make_saving(
+        "<html><head></head><body></body></html>", ME, back_label="I've marked them on the page"
+    )
+    assert "press I've marked them on the page" in custom
+    assert (
+        "classList.add('agami-save-over')" in html and "body.agami-save-over #btn-generate" in html
+    )

@@ -42,8 +42,13 @@ SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
 TEMPLATE_PATH = SHARED_DIR / "model-explorer-template.html"
 LOGO_DARK_PATH = SHARED_DIR / "agami-logo-dark.svg"
 LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
-# `--section` → the Review tab's kind pile it opens on (the labels the page's REVIEW_GROUPS use).
-REVIEW_SECTIONS = {"metrics": "Metrics", "entities": "Entities", "joins": "Joins"}
+# `--section` → the Review tab's kind piles it opens on, first found first (the labels the page's
+# REVIEW_GROUPS use): a model whose joins all cross schemas has only the second join pile.
+REVIEW_SECTIONS = {
+    "metrics": ["Metrics"],
+    "entities": ["Entities"],
+    "joins": ["Joins", "Cross-schema joins"],
+}
 
 
 def build_manifest(profile_dir: Path, profile: str) -> dict:
