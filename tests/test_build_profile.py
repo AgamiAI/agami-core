@@ -844,3 +844,14 @@ def test_duckdb_s_struct_field_and_columns_pattern_are_refused_on_the_real_engin
                 "SELECT COLUMNS('sec.*') FROM orders"):
         assert "HIDDEN" in str(_on_engine(sql, no_safety=True).data.rows), sql
         assert _on_engine(sql).status == "refused", sql
+
+
+def test_duckdb_s_columns_pattern_is_refused_as_a_star_off_the_build_profile(real_engine):
+    if real_engine[0] != "DuckDB":
+        pytest.skip("DuckDB only")
+    for sql in ("SELECT COLUMNS('.*') FROM orders", "SELECT COLUMNS('sec.*') FROM orders",
+                "SELECT max(COLUMNS('sec.*')) FROM orders"):
+        assert "HIDDEN" in str(_on_engine(sql, build_profile=False, no_safety=True).data.rows), sql
+        res = _on_engine(sql, build_profile=False)
+        assert res.status == "refused" and res.refusal.rule == guardrail.RULE_SELECT_STAR, sql
+    assert _on_engine("SELECT o.id, o.status FROM orders o", build_profile=False).status == "ok"

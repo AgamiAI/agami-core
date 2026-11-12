@@ -215,6 +215,52 @@ CASES: list[Case] = [
         guardrail.RULE_SELECT_STAR,
         "subquery-star",
     ),
+    # The star's other spellings (#615). DuckDB's COLUMNS() picks columns by pattern, so an excluded
+    # one returns unnamed; sqlglot reads it the same in every dialect, so these run on both engines.
+    Case("select_star", "SELECT COLUMNS('.*') FROM orders", guardrail.RULE_SELECT_STAR, "columns-all"),
+    Case(
+        "select_star",
+        "SELECT COLUMNS('sta.*') FROM orders",
+        guardrail.RULE_SELECT_STAR,
+        "columns-pattern",
+    ),
+    Case(
+        "select_star",
+        "SELECT MAX(COLUMNS('.*')) FROM orders",
+        guardrail.RULE_SELECT_STAR,
+        "columns-in-aggregate",
+    ),
+    Case(
+        "select_star",
+        "SELECT id FROM orders WHERE COLUMNS('.*') IS NOT NULL",
+        guardrail.RULE_SELECT_STAR,
+        "columns-in-where",
+    ),
+    Case(
+        "select_star",
+        "SELECT * EXCLUDE (status) FROM orders",
+        guardrail.RULE_SELECT_STAR,
+        "star-exclude",
+    ),
+    Case(
+        "select_star",
+        "SELECT o.* EXCLUDE (status) FROM orders o",
+        guardrail.RULE_SELECT_STAR,
+        "qualified-star-exclude",
+    ),
+    Case(
+        "select_star",
+        "SELECT * REPLACE (amount * 2 AS amount) FROM orders",
+        guardrail.RULE_SELECT_STAR,
+        "star-replace",
+    ),
+    # A star passed to a call expands the same way (Snowflake OBJECT_CONSTRUCT(*)).
+    Case(
+        "select_star",
+        "SELECT OBJECT_CONSTRUCT(*) FROM orders",
+        guardrail.RULE_SELECT_STAR,
+        "star-in-call",
+    ),
     # ── class 2c: an undeclared column → column_scope ───────────────────────────────────────────
     Case(
         "column_scope",

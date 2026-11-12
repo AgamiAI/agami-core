@@ -185,3 +185,29 @@ def test_deploy_writes_one_org_row_and_two_datasource_rows_on_one_org_id(tmp_pat
     ]  # two datasource rows, same org_id
     # The deploy refreshed the datasource list from disk and derived it into the org row's doc.
     assert deployed_record.datasources == ["crm", "erp"]
+
+
+def _stored_doc(s: Store, org_id: str) -> str:
+    return s.query("SELECT doc FROM organization WHERE org_id = ?", (org_id,))[0]["doc"]
+
+
+def test_record_without_the_rewrite_stamps_stores_the_same_doc_as_before():
+    s = _store()
+    MS.write_organization_record(s, _full_record(), org_id="org1")
+    assert _stored_doc(s, "org1") == (
+        '{"fiscal_year_start_month": 4, "display_conventions": {"currency": "USD", "rounding": 2,'
+        ' "week_start": "monday", "notes": []}, "glossary": {"ARR": "annual recurring revenue"},'
+        ' "datasources": [], "cross_datasource_relationships": [], "cross_datasource_metrics": []}'
+    )
+    s.close()
+
+
+def test_rewrite_stamps_survive_the_store_round_trip():
+    s = _store()
+    rec = OrgRecord.model_validate(
+        {**_full_record().model_dump(), "written_by": "agami-core 9.9.9",
+         "rewrite_needs": "agami-core 9.9.0"}
+    )
+    MS.write_organization_record(s, rec, org_id="org1")
+    assert MS.load_organization_record(s, "org1") == rec
+    s.close()
