@@ -1078,6 +1078,16 @@ def test_a_plain_column_beside_a_bare_count_is_skipped_not_confirmed_as_a_count(
     assert parts == {"metric:n": "confirmed"}
 
 
+def test_a_metric_computed_differently_is_neither_confirmed_nor_a_gap():
+    """#655: a declared metric reads the same columns and is written differently. The receipt did not
+    compare the two, so the part stays open rather than becoming a model gap."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "paid", "status": "computed_differently",
+                                      "aggregate": True}]}, "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(amount)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:paid", "unresolved")
+    assert "not compared" in row["note"]
+
+
 def test_without_a_pre_flight_an_unmatched_aggregate_stays_open():
     older = {"columns": {"items": [{"kind": "output", "column": "total", "status": "unmatched"}]}, "tables": {"items": []}}
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, None)] == [("metric:total", "unresolved")]
