@@ -24,7 +24,7 @@ Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/ru
 - **A run with failures is a SUCCESSFUL run** — the failures are the whole value. A 9/12 run is the run that just told this team three things about their model. Lead with what did not pass; never soften it, never bury it under the passes.
 - **Tight loops.** This skill is a tool, not a tutorial. One question per turn, at most two sentences of prose between phases.
 - **Don't paste SQL in chat.** The script prints none, and neither do you. Same hard rule as agami-query.
-- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). The score and the failing questions are markdown tables in the chat (at most 15 rows, saying how many more); every decision is a card. The run's report page opens only when the person asks to look at the failures, served from localhost.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md); which element to use, with its fallback: [`shared/native-elements.md`](../../shared/native-elements.md)). The score and the failing questions are markdown tables in the chat (at most 15 rows, saying how many more); every decision is a card. The run's report page opens only when the person asks to look at the failures, served from localhost.
 
 ---
 

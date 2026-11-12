@@ -126,7 +126,7 @@ give the URL and ask the same card again: the decision still happens on the card
 from `localhost`, never as a `file://` page: the Code tab's built-in browser shows a local file
 outside the project folder as a frozen snapshot. Run `serve_page.py` with `run_in_background`: it
 keeps serving until its time is up, so in the foreground it would hold the turn and the URL would
-never reach the person.
+never reach the person. (The page is the last row of [native-elements.md](native-elements.md).)
 
 Always pass `--open`, so the page opens in the person's own browser (Chrome, Safari, Edge…), not in
 the Desktop app's narrow built-in pane, where a clicked link would land. Give the URL either way: with

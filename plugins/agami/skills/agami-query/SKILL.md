@@ -34,7 +34,7 @@ For dialect-specific syntax: [`shared/dialect-rules.md`](../../shared/dialect-ru
 For connection method + execution: [`shared/connection-reference.md`](../../shared/connection-reference.md).
 For DB error classification: [`shared/db_error_classifier.md`](../../shared/db_error_classifier.md).
 For chart template: [`shared/chart-template.html`](../../shared/chart-template.html).
-For cards (every decision is one): [`shared/question-cards.md`](../../shared/question-cards.md).
+For cards (every decision is one): [`shared/question-cards.md`](../../shared/question-cards.md). Which element to use, with its fallback: [`shared/native-elements.md`](../../shared/native-elements.md).
 
 ## Invocation conventions
 

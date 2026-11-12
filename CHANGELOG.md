@@ -14,6 +14,17 @@ below corresponds to one such version.
 
 ### Added
 
+- **One rule for which native element a skill uses, with a fallback for each.**
+  `shared/native-elements.md` is the table every skill follows: a question card for a decision,
+  the session's task list for onboarding progress, a background task for a wait over 10 seconds, a
+  markdown table for a result, an inline visual for a summary of a few numbers, and the full view
+  for anything longer, each with what to use where the session doesn't offer it. Every skill that
+  shows an overview, serves a page or runs work in the background links it, and the inline visual
+  tool is named only there and in `shared/overview-card.md`.
+- **The onboarding summary says how long setup took.** `sm timing <root>` reads the step marks
+  `sm steps --mark` writes and prints each step's seconds, the total and a line such as
+  *"Set up in 6 min 40 s"*; a restarted step counts its last attempt. agami-connect shows the line
+  right under the overview.
 - **Onboarding runs its subagents in the background while the person answers cards.**
   agami-connect's SKILL.md gains a schedule, "What runs at the same time", and
   `shared/parallel-work.md` says how a batch starts, is collected with `sm wait-files` and is given

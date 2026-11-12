@@ -31,7 +31,13 @@ agami-connect just ran. Here's what we found:
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
 
-**Then, where the host can draw a visual in the chat, the overview card** ([`shared/overview-card.md`](../../../shared/overview-card.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. It comes after the block above (which stays: it is the record in the transcript), and a click on a tile carries on in the chat. Where the host can't draw one, the block alone is the summary.
+**Then, where the host can draw a visual in the chat, the overview card** ([`shared/overview-card.md`](../../../shared/overview-card.md); how it is drawn, and its fallback: [`shared/native-elements.md`](../../../shared/native-elements.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. It comes after the block above (which stays: it is the record in the transcript), and a click on a tile carries on in the chat. Where the host can't draw one, the block alone is the summary.
+
+**Right under the overview** (the card, or the block where there is no card), how long setup took, from the step marks:
+```bash
+bash "<plugin_root>/scripts/sm" timing "$ROOT"
+```
+Show its `text` as printed, on its own line (*"Set up in 6 min 40 s"*); when `text` is empty, show nothing. Never time it yourself.
 
 When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 

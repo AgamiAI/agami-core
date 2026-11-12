@@ -25,7 +25,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
 
 `--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
-**On a server database the build takes from seconds to many minutes, and the command prints nothing until it returns, which reads as hung.** So on every server database (anything but SQLite and DuckDB, which return in seconds) run it **in the background and show progress from its log**:
+**On a server database the build takes from seconds to many minutes, and the command prints nothing until it returns, which reads as hung.** So on every server database (anything but SQLite and DuckDB, which return in seconds) run it **in the background and show progress from its log** (the rules for any wait: [native-elements.md](../../../shared/native-elements.md#waits)):
 
 1. **One background call.** Bash with `run_in_background: true`, and a `description` the person can read in the app's Background tasks pane, in their words: *"Read the tables (Snowflake, 84 tables)"*.
 2. **Say once where to watch**, the first time a background step starts in a run: *"Reading your tables in the background. In the Desktop app, ⋮ → Background tasks shows it live."* (Leave out the second sentence outside the Desktop app.)

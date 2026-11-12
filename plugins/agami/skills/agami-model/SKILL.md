@@ -84,7 +84,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 Post the overview, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
-2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more. **Where the host can draw a visual in the chat, show the overview card in place of this table** ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here); keep the table where it can't.
+2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more. **Where the host can draw a visual in the chat, show the overview card in place of this table** ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here); keep the table where it can't ([`shared/native-elements.md`](../../shared/native-elements.md)).
 3. When `count` or `suspected_count` > 0, one line: *"<n> columns look like personal data and are still queryable."*
 
 Then call AskUserQuestion, one question (header `Model`), *"What would you like to do with the model?"*:

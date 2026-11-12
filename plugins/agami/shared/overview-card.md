@@ -6,6 +6,9 @@ A picture of the whole model in one glance: one tile per subject area, and one f
 sign-off. agami-connect shows it in its summary (Phase 7) and agami-model in its overview (Phase 1).
 It is a snapshot in the chat, not a page: the complete browse stays **Show the full view**
 ([question-cards rule 6](question-cards.md#6-no-page-opens-by-default-and-nothing-is-pasted-back)).
+It is the "summary of 4 to 5 numbers" row of [native-elements.md](native-elements.md), and the
+three rules for any inline visual there ([Inline visuals](native-elements.md#inline-visuals))
+apply to it.
 
 ## When
 

@@ -27,7 +27,7 @@ Spec for the deterministic half: [`scripts/golden_author.py`](../../scripts/gold
 - **One question per turn.** This is a tool, not a tutorial. At most two sentences of prose between phases.
 - **Show before you write.** Nothing reaches disk that the user has not seen rendered first — parsed rows as a table, a replacement as a before and an after.
 - **Never volunteer SQL for a question that has none.** See the rule above; it is the reason this skill exists in the shape it does.
-- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md)). What was parsed is a markdown table in the chat (at most 15 rows, saying how many more); every decision is a card. The golden-datasets page is the optional, read-only **Show the full view**, served from localhost; changes are decided on cards, and a block pasted from an older, editable page is still accepted.
+- **Tables and cards** ([`shared/question-cards.md`](../../shared/question-cards.md); which element to use, with its fallback: [`shared/native-elements.md`](../../shared/native-elements.md)). What was parsed is a markdown table in the chat (at most 15 rows, saying how many more); every decision is a card. The golden-datasets page is the optional, read-only **Show the full view**, served from localhost; changes are decided on cards, and a block pasted from an older, editable page is still accepted.
 
 ---
 
