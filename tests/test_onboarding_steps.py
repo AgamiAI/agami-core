@@ -739,6 +739,38 @@ def _sample_copied(tmp_path):  # sample.md 6A: the copy, then step 7's mark
     return root, None
 
 
+def _stale_mark(root: Path, *, model_at_mark: bool = False):
+    """A `build=in_progress` mark left from a session that ended: no log since, and now long after."""
+    from datetime import datetime, timedelta, timezone
+    at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    steps.mark(root, "build", "in_progress", now=at)
+    return at + timedelta(seconds=steps.STALE_BUILD_SECONDS + 1)
+
+
+def _stale_mark_no_log(tmp_path):
+    root = tmp_path / "acme"
+    return root, _stale_mark(root)
+
+
+def _stale_mark_older_log(tmp_path):  # a rebuild's mark; the only log is the last attempt's
+    root = _sample(tmp_path)
+    log = _rebuild_log(root, "failed: boom", newer=False)
+    os.utime(log, (1_000_000, 1_000_000))
+    return root, _stale_mark(root)
+
+
+def _context_done_over_model(tmp_path):
+    root = _sample(tmp_path)
+    _marks(root, "context=done")
+    return root, None
+
+
+def _done_marks_before_build(tmp_path):  # a `done` mark is no restart; only `in_progress` is
+    root = _sample(tmp_path)
+    _marks(root, "connect=done", "tables=done")
+    return root, None
+
+
 DESCRIBED, SIGNED, EXAMPLES = "40% described, 8 metrics", "8 of 8 signed", "14 examples"
 ALL_COUNTS = {"build": BUILT, "describe": DESCRIBED, "signoff": SIGNED, "examples": EXAMPLES}
 
@@ -795,6 +827,14 @@ STATUS_RULES = {
     "3-retry-after-failure": (_retry_after_failure, "dddippppp", "build", {}, None),
     "build-skipped-is-harmless": (_build_skipped, "dddsipppp", "describe", {}, None),
     "sample-copy-path": (_sample_copied, "dddddddsi", "first_question", ALL_COUNTS, None),
+    "D-stale-mark-no-log": (_stale_mark_no_log, "dddpppppp", "build", {},
+                            "The build stopped before it finished."),
+    "D-stale-mark-older-log": (_stale_mark_older_log, "dddpppppp", "build", {},
+                               "The rebuild stopped before it finished."),
+    "B-model-only-context-done": (_context_done_over_model, "ddddppppp", "describe",
+                                  {"build": BUILT}, None),
+    "A-done-before-build-is-no-restart": (_done_marks_before_build, "ddddppppp", "describe",
+                                          {"build": BUILT}, None),
 }
 
 

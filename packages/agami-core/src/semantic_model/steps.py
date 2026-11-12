@@ -152,11 +152,9 @@ def _replay_marks(root: Path) -> _Replay:
                     del marks[later]
             if at < build_at:
                 restarted = True
-        if step_id == "build":
-            restarted = False
-            build_started_at = _mark_time(doc) if status == "in_progress" else None
-        elif status == "in_progress" and at < build_at:
-            build_started_at = None  # the build's own mark was just dropped
+        if step_id == "build" and status == "in_progress":
+            # Read only while this mark still stands (see onboarding_steps), so no reset is needed.
+            build_started_at = _mark_time(doc)
         marks[step_id] = status
     return _Replay(marks, restarted, build_started_at)
 
@@ -201,6 +199,14 @@ def _log_state(log: Path, model: Path, now: float,
     # Unfinished, or `done:` with no tree yet (the engine logs it before writing; a run killed in
     # between, or a dry run, never writes it): live until it has been silent too long.
     return ("stopped" if now - log_at > STALE_BUILD_SECONDS else "running"), None
+
+
+def _own_log(log: Path, attempt_at: float) -> bool:
+    """Whether the build log was written during this attempt (same second-stamp rule as _log_state)."""
+    try:
+        return int(log.stat().st_mtime) >= attempt_at
+    except OSError:
+        return False
 
 
 def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
@@ -276,8 +282,12 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     _imply(status)
 
     attempt_at = replay.build_started_at if marks.get("build") == "in_progress" else None
-    state, reason = _log_state(log, model, (now or datetime.now(timezone.utc)).timestamp(),
-                               attempt_at)
+    now_at = (now or datetime.now(timezone.utc)).timestamp()
+    state, reason = _log_state(log, model, now_at, attempt_at)
+    if state == "none" and attempt_at is not None and now_at - attempt_at > STALE_BUILD_SECONDS \
+            and not _own_log(log, attempt_at):
+        # A mark left by a session that ended before the build wrote a line: nothing is building.
+        state = "stopped"
     problem: Optional[str] = None
     live = False
     noun = "rebuild" if model.exists() else "build"
