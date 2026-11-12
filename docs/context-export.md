@@ -60,13 +60,15 @@ with who approved it.
 
 ## The command
 
-In Claude Code, ask for it ("export my model to Snowflake"): the `/agami-model` skill runs the
-command for the active profile. Directly, with the plugin installed:
+In Claude Code, ask for it ("export my model to Snowflake"): the `/agami-export` skill asks for the
+formats, the location and the extras on cards, shows the exact command, and writes the files to
+`<artifacts_dir>/local/exports/context/<profile>/`. This section is the command reference. Directly,
+with the plugin installed (`<plugin_root>` is the plugin's own folder):
 
 ```bash
-bash "$AGAMI_PLUGIN_ROOT/scripts/sm" export ~/agami-artifacts/<profile> \
+bash "<plugin_root>/scripts/sm" export ~/agami-artifacts/<profile> \
   --target snowflake --target databricks --target ossie \
-  --location demo.sales_data --out ~/agami-exports/<profile>
+  --location demo.sales_data --out ~/agami-artifacts/local/exports/context/<profile>
 ```
 
 From a clone of this repository, against the bundled sample:

@@ -23,8 +23,8 @@ below corresponds to one such version.
   `--target` named twice, and a flag that belongs to a target or artifact the run does not select
   (`--uc-comments` without `--target databricks`) are refused before anything is written. The same model and options give
   the same bytes. `docs/context-export.md` covers every flag, each target's files, the order to
-  apply them in, the report, and what does not carry over per target; asking `/agami-model` to
-  "export my model to Snowflake" runs it. The bundled sample's eight metrics gain hand-written
+  apply them in, the report, and what does not carry over per target; `/agami-export` runs it
+  from Claude Code. The bundled sample's eight metrics gain hand-written
   Snowflake and Databricks bindings, so the demo has metrics to carry.
 - **What leaves agami, decided once for every target.** Only approved items travel unless
   `--include-unreviewed` is passed (the report lists each one it adds). A column flagged
@@ -126,6 +126,16 @@ below corresponds to one such version.
   SQL; default filters and sign-off state ride in the extension block. At 0.1.1 `ai_context` is one
   text of labelled lines.
 
+- **`/agami-export`: the export, asked on cards (ACE-174).** "Export my model" says how many items
+  stay behind because they are not approved and how many sensitive columns stay behind (counts
+  only), then asks on one card for the formats, the database and schema the tables live in, the
+  Snowflake warehouse and the opt-in extras; each extra that changes a catalog or shows content to
+  others is its own option, with its flag and risk in the preview, and stays off unless picked. A
+  `Run it?` card shows the exact `sm export` command, which writes to
+  `<artifacts_dir>/local/exports/context/<profile>/`. The summary is in the chat: files and counts
+  per target, what stayed behind grouped by reason (a metric with no SQL for a target's engine is
+  called out), the extras left off and what never travels. The skill never applies the files and
+  never calls a vendor. `/agami-model` no longer handles export; its closing line points here.
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a

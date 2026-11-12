@@ -227,6 +227,30 @@ You: export this
 
 Writes the full result (no row cap) to `<artifacts_dir>/local/exports/<ts>.csv`.
 
+### Export the model to Snowflake, Databricks or Ossie
+
+```
+You: export my model to Snowflake
+# or: /agami-export databricks
+```
+
+agami says how many items stay behind because they are not approved, and how many
+sensitive columns stay behind (counts only), then asks on one card: which formats,
+the database and schema the tables live in (typed in "Other"), the Snowflake
+warehouse the agent runs on, and which opt-in extras to allow. Anything that changes
+a catalog or shows content to others (certification tags, Unity Catalog comments and
+keys, published Pages, an MCP server) is off unless you pick it, on a follow-up card
+that shows each flag and its risk. A `Run it?` card shows the exact `sm export`
+command; on a yes it writes the files to
+`<artifacts_dir>/local/exports/context/<profile>/`, one folder per target plus
+`export-report.json`, replacing a target's folder whole on every run.
+
+The summary stays in the chat: the files and counts per target, what stayed behind
+grouped by reason (a metric with no SQL for a target's engine is called out, since it
+did not travel), the extras left off, and what never travels (pre-query checks,
+receipts, audit rows, who signed off). agami never applies the files and never calls
+a vendor: [docs/context-export.md](context-export.md) says how to apply each one.
+
 ### Use agami from the Claude Desktop app (`/agami-serve`)
 
 Everything above works inside Claude Code. To ask the same questions from the

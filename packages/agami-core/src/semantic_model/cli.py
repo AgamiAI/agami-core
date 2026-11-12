@@ -161,6 +161,18 @@ def cmd_bundle(args) -> int:
     return 0
 
 
+def cmd_export(args) -> int:
+    # The flags are declared in `export.add_arguments`, since each target adds its own.
+    from . import export as X
+    try:
+        text = X.run_export(Path(args.root), Path(args.out), X.options_from_args(args))
+    except X.ExportRefused as exc:
+        _print_json({"error": "export_refused", "detail": str(exc)})
+        return 2
+    sys.stdout.write(text)
+    return 0
+
+
 def cmd_areas(args) -> int:
     org = L.load_datasource(args.root)
     _print_json(RT.list_subject_areas(org))
@@ -1985,7 +1997,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("export", help="write the reviewed model in a target agent's format, with a report of what did not carry over")
     from . import export as X
     X.add_arguments(sp)
-    sp.set_defaults(func=X.cmd_export)
+    sp.set_defaults(func=cmd_export)
 
     sp = sub.add_parser("areas", help="list subject areas")
     sp.add_argument("root")

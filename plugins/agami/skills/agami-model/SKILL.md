@@ -314,7 +314,7 @@ When the person says `done` (in a card's "Other" or as a message) or dismisses t
 ```
 Done. <X> tables and <Y> columns are hidden; <P> definitions still need sign-off.
 Hidden tables and columns are never read by a query. To bring one back, run /agami-model and
-say which.
+say which. To use the model in Snowflake, Databricks or Ossie, say 'export my model'.
 ```
 
 The skill is one-shot per invocation; re-enter via the slash command or a natural-language request.

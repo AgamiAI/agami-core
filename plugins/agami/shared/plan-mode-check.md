@@ -89,6 +89,12 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 > I can't save a golden item in plan mode — every door here writes to the model tree. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me with the dataset name.
 
+### `agami-export`
+
+Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** `sm export` writes the export files under `<artifacts_dir>/local/exports/context/<profile>/` (Bash + Write). Surface ONLY this:
+
+> I can't export in plan mode — it writes the export files under your artifacts folder. Switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke me.
+
 ## When the system context is silent
 
 If neither signal 1 nor signal 2 confirms plan mode is active, **skip this phase silently** and go to Phase 0 of the skill. Don't pop a modal asking "are you in plan mode?" — that's noise for the 95% of users who aren't. The probe-on-Bash-failure path catches the rest naturally.

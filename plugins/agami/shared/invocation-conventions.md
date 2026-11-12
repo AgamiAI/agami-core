@@ -6,7 +6,7 @@ Code fills `${CLAUDE_PLUGIN_ROOT}` in when a skill loads; it does not do so for 
 afterward, and no `AGAMI_PLUGIN_ROOT` variable exists in your shell). Write that absolute path into the
 command, quoted: never paste `<plugin_root>` or an unset variable into Bash.**
 
-agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
+agami ships ten skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
 
 | Skill | Slash command | Natural-language triggers (via `when_to_use`) |
 |---|---|---|
@@ -18,6 +18,7 @@ agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Co
 | agami-eval | `/agami-eval` | "run the evals", "run the golden dataset", "score the model against my golden questions", "did anything regress?", "how accurate is agami on my data?" |
 | agami-save-golden | `/agami-save-golden` | "save this as a golden question", "add this to the golden dataset", "import my question bank", "turn this spreadsheet into a golden dataset", "show me the golden datasets", "what does this dataset not test", "apply my queued changes" |
 | agami-serve | `/agami-serve` | "set up agami for Claude Desktop", "use agami in the Claude app", "hook up the MCP server", "let me test what my end users would see" |
+| agami-export | `/agami-export` | "export my model", "export my model to Snowflake / Databricks / Ossie", "make a Genie space from my model", "write the model as a Snowflake semantic view", "give my Snowflake agent this context", "take the model to Databricks" |
 | agami-deploy | `/agami-deploy` | "deploy agami", "self-host agami", "set up the agami server for my team", "host agami on a VM" (early access — in testing) |
 
 **`/agami-init` no longer exists** — its credential-setup flow was folded into `/agami-connect` Phase 0a. Users who haven't run setup before invoke `/agami-connect`; the skill detects missing credentials and runs the DB-type picker + writes `<artifacts_dir>/local/credentials.example` inline before introspecting.
@@ -51,6 +52,7 @@ For most chat replies, **prefer natural-language phrasing over slash commands** 
 |---|---|
 | "Run `/agami-connect reintrospect`" | "Say 'reload the schema' and I'll re-introspect from your DB." |
 | "Run `/agami-save-correction`" | "Say 'save this as a correction' and I'll add it to the examples library." |
+| "Run `/agami-export`" | "Say 'export my model' and I'll write it for Snowflake, Databricks or Ossie." |
 | "Run `/agami-review`" (removed) | "Say 'review my model' to sign off what's waiting." (routes to `/agami-model review`) |
 | "Type `/agami-query`" | Just answer the question directly. Slash commands are unnecessary. |
 

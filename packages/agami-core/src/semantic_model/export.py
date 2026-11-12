@@ -1629,16 +1629,11 @@ def add_arguments(sp: argparse.ArgumentParser) -> None:
             t.add_arguments(sp)
 
 
-def cmd_export(args: argparse.Namespace) -> int:
-    try:
-        options = ExportOptions(
-            targets=tuple(args.targets), areas=tuple(args.areas),
-            include_unreviewed=args.include_unreviewed, include_sensitive=args.include_sensitive,
-            location=parse_location(args.location) if args.location else None,
-            target_args={k: v for k, v in vars(args).items() if k not in _CORE_DESTS})
-        text = run_export(Path(args.root), Path(args.out), options)
-    except ExportRefused as exc:
-        print(json.dumps({"error": "export_refused", "detail": str(exc)}, indent=2))
-        return 2
-    print(text, end="")
-    return 0
+def options_from_args(args: argparse.Namespace) -> ExportOptions:
+    """The options `add_arguments` parsed; a flag a target added lands in `target_args`. Raises
+    `ExportRefused` for a malformed `--location`."""
+    return ExportOptions(
+        targets=tuple(args.targets), areas=tuple(args.areas),
+        include_unreviewed=args.include_unreviewed, include_sensitive=args.include_sensitive,
+        location=parse_location(args.location) if args.location else None,
+        target_args={k: v for k, v in vars(args).items() if k not in _CORE_DESTS})
