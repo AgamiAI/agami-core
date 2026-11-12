@@ -279,6 +279,7 @@ class _ColStat:
     name: str
     type: str
     personal: bool
+    is_date: bool = False     # a date or timestamp, or text holding ISO dates (which sort as dates)
     filled: int = 0
     blank: int = 0
     distinct: Optional[int] = None
@@ -316,7 +317,7 @@ def stats_sql(dialect: D.Dialect, src: str, stats: list[_ColStat], dates: list[t
             parts.append(f"SUM(CASE WHEN TRIM({q}) = '' THEN 1 ELSE 0 END) AS b{i}")
         if c.type in _DISTINCT_TYPES:
             parts.append(f"COUNT(DISTINCT {q}) AS d{i}")
-        if c.type in _RANGE_TYPES and not c.personal:
+        if (c.type in _RANGE_TYPES or c.is_date) and not c.personal:
             parts += [f"MIN({q}) AS lo{i}", f"MAX({q}) AS hi{i}"]
     for a, b in dates:
         qa, qb = dialect.quote_ident(stats[a].name), dialect.quote_ident(stats[b].name)
@@ -351,9 +352,10 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
     live = [c for c in t.columns if c.review_state not in ("rejected", "stale")][:PROFILE_MAX_COLUMNS]
     if not live:
         return None
-    stats = [_ColStat(c.name, c.type, personal(c)) for c in live]
+    stats = [_ColStat(c.name, c.type, personal(c), c.type in _DATE_TYPES or c.date_format == "iso8601")
+             for c in live]
     src, how = _table_rows(dialect, t, [c.name for c in live])
-    di = [i for i, c in enumerate(stats) if c.type in _DATE_TYPES and not c.personal][:_MAX_DATE_PAIRS_COLS]
+    di = [i for i, c in enumerate(stats) if c.is_date and not c.personal][:_MAX_DATE_PAIRS_COLS]
     dates = [(a, b) for k, a in enumerate(di) for b in di[k + 1:] if stats[a].type == stats[b].type]
     try:
         rows = runner(stats_sql(dialect, src, stats, dates))
@@ -439,10 +441,10 @@ def _column_findings(c: _ColStat, n: int, today: str, sample: Optional[list]) ->
                     "detail": f"{c.name} is blank on {empty / n:.0%} of rows"})
     elif c.distinct == 1 and c.filled == n and n >= _ORDER_MIN_ROWS:
         out.append({"column": c.name, "kind": "constant", "detail": f"{c.name} holds one value on every row"})
-    if c.type in _DATE_TYPES and c.hi and c.hi[:10] > today and _words(c.name) & _PAST_WORDS:
+    if c.is_date and c.hi and c.hi[:10] > today and _words(c.name) & _PAST_WORDS:
         out.append({"column": c.name, "kind": "date_range",
                     "detail": f"{c.name} has dates after today, which a date named like this can't be"})
-    if c.type == "string" and sample and not c.personal:
+    if c.type == "string" and not c.is_date and sample and not c.personal:
         mixed = _mixed_formats([row.get(c.name) for row in sample])
         if mixed:
             out.append({"column": c.name, "kind": "mixed_formats", "detail": f"{c.name} mixes {mixed}"})

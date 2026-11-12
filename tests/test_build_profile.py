@@ -459,3 +459,18 @@ def test_a_join_checked_on_the_whole_key_settles_uniqueness_with_no_extra_probe(
     [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
     assert "unique on 2 rows" in r.description and r.review_state == "unreviewed"
     assert not any("AS distinct_count" in s for s in seen)
+
+
+def test_text_holding_iso_dates_is_profiled_as_dates(tmp_path):
+    path = tmp_path / "t.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE orders(id INTEGER, placed_at TEXT, shipped_at TEXT)")
+    for i in range(25):
+        con.execute("INSERT INTO orders VALUES (?,?,?)", (i, f"2024-01-{i + 1:02d} 10:00:00", f"2024-02-{i + 1:02d}"))
+    con.commit()
+    con.close()
+    t = _t("orders", ["id", "placed_at", "shipped_at"], 25)
+    t.columns[1].date_format = t.columns[2].date_format = "iso8601"
+    prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False)
+    assert prof["columns"]["placed_at"]["max"] == "2024-01-25 10:00:00"
+    assert prof["date_order"] == [{"earlier": "placed_at", "later": "shipped_at", "share": 1.0, "rows": 25}]
