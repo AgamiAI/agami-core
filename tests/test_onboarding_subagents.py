@@ -429,3 +429,41 @@ def test_a_metric_named_with_a_slash_passes_allow(model, tmp_path, capsys):
           "field": "description", "value": "Active subscriptions per order."}
     rc, out = _curate(model, tmp_path, [op], capsys, "--allow", "description", "--area", "agami-example")
     assert rc == 0 and out["validated"] is True, out
+
+
+def _with_other_area_join(model: Path) -> None:
+    """A second area holding its own join, and a cross-area join in datasource.yaml."""
+    src = next((model / "subject_areas").glob("*/relationships.yaml"))
+    other = model / "subject_areas" / "other"
+    other.mkdir()
+    (other / "relationships.yaml").write_text(src.read_text())
+    ds = yaml.safe_load((model / "datasource.yaml").read_text())
+    rel = yaml.safe_load(src.read_text())["relationships"][0]
+    ds["cross_subject_area_relationships"] = [
+        {**rel, "from_subject_area": "agami-example", "to_subject_area": "other"}]
+    (model / "datasource.yaml").write_text(yaml.safe_dump(ds, sort_keys=False))
+
+
+@pytest.mark.parametrize("join", ["invoices->subscriptions", "order_items->products"])
+def test_a_join_edit_is_refused_when_an_area_is_given(model, tmp_path, capsys, join):
+    # curate falls back to every area and the cross-area joins when the named area lacks the join
+    _with_other_area_join(model)
+    op = {"op": "edit", "kind": "relationship", "area": "agami-example", "name": join,
+          "field": "description", "value": "Each invoice bills one subscription."}
+    files = [model / "datasource.yaml", model / "subject_areas" / "other" / "relationships.yaml"]
+    before = [f.read_bytes() for f in files] + [sorted(p.read_text() for p in model.rglob("*.yaml"))]
+    rc, out = _apply(model, tmp_path, _result("agami-example", curate_ops=[op]), "agami-example",
+                     capsys)
+    assert rc == 1 and out["applied"] is False and "a join" in out["refused"][0]
+    rc, out = _curate(model, tmp_path, [op], capsys, "--allow", "description", "--area",
+                      "agami-example")
+    assert rc == 1 and out["applied"] == 0 and "a join" in out["refused"][0]
+    after = [f.read_bytes() for f in files] + [sorted(p.read_text() for p in model.rglob("*.yaml"))]
+    assert after == before
+
+
+@pytest.mark.parametrize("kind", [["table"], {"t": 1}, 3])
+def test_an_odd_kind_is_refused_not_a_crash(model, tmp_path, capsys, kind):
+    rc, out = _curate(model, tmp_path, [{**_edit("agami-example"), "kind": kind}], capsys,
+                      "--allow", ENRICH_FIELDS, "--area", "agami-example")
+    assert rc == 1 and out["applied"] == 0 and len(out["refused"]) == 1

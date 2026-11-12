@@ -846,10 +846,15 @@ def _ops_outside(ops: Any, fields: set[str], area: Optional[str]) -> list[str]:
         return ["the ops file is not a list of ops"]
     out = []
     for i, op in enumerate(ops):
-        if not isinstance(op, dict) or op.get("op") != "edit" or op.get("field") not in fields:
-            out.append(f"op {i}: {json.dumps(op)[:120]}")
+        if (not isinstance(op, dict) or op.get("op") != "edit" or not isinstance(op.get("kind", ""), str)
+                or not isinstance(op.get("field"), str) or op.get("field") not in fields):
+            out.append(f"op {i}: {json.dumps(op, default=str)[:120]}")
         elif area is not None and op.get("area") != area:
             out.append(f"op {i}: area {op.get('area')!r}, not {area!r}")
+        elif area is not None and op.get("kind") == "relationship":
+            # curate looks a join up in every area and the cross-area lists when the named area lacks
+            # it, so `area` doesn't hold it in; and an enricher describes tables, the person decides joins.
+            out.append(f"op {i}: a join ({op.get('name')!r}) is not an edit made in area {area!r}")
         elif bad := _path_keys(op):
             out.append(f"op {i}: {', '.join(bad)} is not a plain name: {json.dumps(op)[:120]}")
     return out
