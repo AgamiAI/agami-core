@@ -199,8 +199,9 @@ def test_a_failed_first_build_is_pending_with_the_reason(tmp_path):
     s = _by_id(result)
     assert s["build"]["status"] == "pending" and s["build"]["count"] is None
     assert s["describe"]["status"] == "pending"
-    assert [s[i]["status"] for i in ("connect", "context", "tables")] == ["pending"] * 3
-    assert result["current"] == "connect"
+    # the build was reached, so the steps before it are done and the list stops at the build
+    assert [s[i]["status"] for i in ("connect", "context", "tables")] == ["done"] * 3
+    assert result["current"] == "build"
     assert result["problem"] == "The build didn't finish: permission denied for schema demo"
 
 
@@ -220,6 +221,7 @@ def test_a_build_silent_for_30_minutes_is_not_running(model, tmp_path):
         (root / ".introspect" / "progress.log").stat().st_mtime, timezone.utc) + timedelta(hours=1))
     assert _by_id(first)["build"]["status"] == "pending"
     assert first["problem"] == "The build stopped before it finished."
+    assert first["current"] == "build"
 
 
 def test_a_bad_byte_in_the_build_log_does_not_crash(tmp_path, capsys):
@@ -285,7 +287,7 @@ def test_progress_parsing_is_shared_with_sm_progress():
     # one table of phrases: an unknown line has no count here and is passed through by sm progress
     assert steps.parse_progress("something the engine never writes") is None
     assert cli._progress_line("something the engine never writes") == {
-        "line": "something the engine never writes", "done": False}
+        "line": "something the engine never writes", "done": False, "failed": False}
     m, phrase, unit = steps.parse_progress("columns+grain 33/34")
     assert (m.groups(), unit) == (("33", "34"), "tables")
 
@@ -296,6 +298,22 @@ def test_a_finished_log_before_the_model_lands_is_still_building(tmp_path):
     (root / ".introspect" / "progress.log").write_text("done: 34 tables, 7 relationships\n")
     s = _by_id(steps.onboarding_steps(root))
     assert s["build"]["status"] == "in_progress" and s["build"]["count"] is None
+
+
+def test_a_finished_log_whose_model_never_lands_goes_stale(tmp_path):
+    # a kill between the `done:` line and the tree write (or a dry run) must not read "building"
+    # forever
+    from datetime import datetime, timedelta, timezone
+    root = _building(tmp_path)
+    log = root / ".introspect" / "progress.log"
+    log.write_text("done: 34 tables, 7 relationships\n")
+    at = datetime.fromtimestamp(log.stat().st_mtime, timezone.utc)
+    soon = at + timedelta(seconds=steps.STALE_BUILD_SECONDS - 1)
+    assert _by_id(steps.onboarding_steps(root, now=soon))["build"]["status"] == "in_progress"
+    result = steps.onboarding_steps(root, now=at + timedelta(seconds=steps.STALE_BUILD_SECONDS + 1))
+    assert _by_id(result)["build"]["status"] == "pending"
+    assert result["current"] == "build"
+    assert result["problem"] == "The build stopped before it finished."
 
 
 def test_mark_appends_and_keeps_one_in_progress(model):

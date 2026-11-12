@@ -145,11 +145,14 @@ def _build_state(log: Path, model: Path, now: float) -> tuple[Optional[str], Opt
     if model_at is not None and log_at <= model_at:
         return None, None
     last = last_progress_line(log)
+    stale = now - log_at > STALE_BUILD_SECONDS
     if last.startswith("done:"):
-        return "done", None
+        # The engine logs `done:` before it writes the tree; a run killed in between (or a dry
+        # run) never writes it, so a finished log with no model goes stale like any other.
+        return ("stale" if model_at is None and stale else "done"), None
     if last.startswith("failed:"):
         return "failed", last[len("failed:"):].strip()
-    if now - log_at > STALE_BUILD_SECONDS:
+    if stale:
         return "stale", None
     return "running", None
 
@@ -208,8 +211,12 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
         # The model's own failure to load says more than a rebuild that didn't land.
         problem = problem or _unfinished(state, reason, rebuild=True)
     elif state in ("failed", "stale"):
+        # The build was reached, so the steps before it are done; the list stops at the build.
         status["build"] = "pending"
         problem = _unfinished(state, reason, rebuild=False)
+        for i in STEP_IDS[:build_at]:
+            if status[i] in ("pending", "in_progress"):
+                status[i] = "done"
     elif log.exists():
         # The engine logs `done:` before the tree is written, so the build runs on until it lands.
         status["build"] = "in_progress"

@@ -954,9 +954,22 @@ def test_a_build_that_raises_ends_its_log_with_failed(tmp_path, monkeypatch):
         cli.main(["introspect", "--profile", "acme", "--db-type", "postgres",
                   "--artifacts", str(tmp_path)])
     last = log.read_text().splitlines()[-1]
-    assert last.startswith("failed: no tables discovered.") and "\n" not in last
-    # sm progress posts it as a plain line, no bar
-    assert cli._progress_line(last) == {"line": last, "done": False}
+    assert last.startswith("failed: no tables discovered.")
+    # sm progress posts it as a plain line, no bar, and says the build failed
+    assert cli._progress_line(last) == {"line": last, "done": False, "failed": True}
+
+
+def test_a_multi_line_failure_logs_only_its_first_line(tmp_path):
+    pp = tmp_path / "progress.log"
+    pp.write_text("columns+grain 1/2\n")
+
+    @I._logs_failure
+    def run(*, progress_path=None):
+        raise RuntimeError("first\nsecond")
+
+    with pytest.raises(RuntimeError, match="first\nsecond"):
+        run(progress_path=pp)
+    assert pp.read_text().splitlines()[-1] == "failed: first"
 
 
 def test_normalize_table_list_splits_zsh_blob():

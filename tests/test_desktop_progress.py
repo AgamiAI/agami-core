@@ -151,7 +151,9 @@ def test_progress_turns_the_engines_log_into_a_persons_line_with_a_rounded_down_
     assert line("columns+grain 34/34")["line"] == "Reading columns ▰▰▰▰▰▰▰▰ 34/34 tables"
     assert line("columns+grain 3/34")["line"] == "Reading columns ▱▱▱▱▱▱▱▱ 3/34 tables"
     assert line("relationships: declared FK 80/187")["line"].startswith("Checking joins ▰▰▰")
-    assert line("done: 34 tables, 7 relationships") == {"line": "Done: 34 tables, 7 joins", "done": True}
+    assert line("done: 34 tables, 7 relationships") == {"line": "Done: 34 tables, 7 joins", "done": True,
+                                                        "failed": False}
+    assert line("columns+grain 3/34")["failed"] is False
     assert "▰" not in line("building relationships (34 tables; FK + value-overlap probes)…")["line"]
 
 
@@ -164,7 +166,19 @@ def test_progress_waits_for_the_log_to_move_on(tmp_path, capsys):
     out = _run(["progress", str(tmp_path / "acme"), "--wait", "5"], capsys)
     assert out["changed"] is True and out["n"] == 6
     missing = _run(["progress", str(tmp_path / "missing")], capsys)
-    assert missing == {"line": "", "done": False, "started": False}
+    assert missing == {"line": "", "done": False, "failed": False, "started": False}
+
+
+def test_progress_wait_returns_at_once_on_a_failed_log(tmp_path, capsys):
+    # a skill looping on --wait needs an end signal for a failed build, not a 30 s stall per call
+    import time
+    log = tmp_path / "acme" / ".introspect" / "progress.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("columns+grain 3/34\nfailed: permission denied for schema demo\n")
+    started = time.monotonic()
+    out = _run(["progress", str(tmp_path / "acme"), "--wait", "30"], capsys)
+    assert time.monotonic() - started < 2
+    assert out["failed"] is True and out["done"] is False
 
 
 def test_enrich_input_samples_only_what_queries_may_read(model, tmp_path, capsys, monkeypatch):

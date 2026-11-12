@@ -564,15 +564,15 @@ def _progress_line(raw: str) -> dict:
     from . import steps
     parsed = steps.parse_progress(raw)
     if not parsed:
-        return {"line": raw, "done": False}
+        return {"line": raw, "done": False, "failed": raw.startswith("failed:")}
     m, phrase, unit = parsed
     if unit:
         n, total = int(m.group(1)), int(m.group(2))
         filled = (8 * n) // total if total else 0
         bar = "▰" * filled + "▱" * (8 - filled)
         return {"line": f"{phrase} {bar} {n}/{total} {unit}", "n": n, "total": total,
-                "done": False}
-    return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:")}
+                "done": False, "failed": False}
+    return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:"), "failed": False}
 
 
 def cmd_progress(args) -> int:
@@ -591,12 +591,13 @@ def cmd_progress(args) -> int:
     start = last()
     deadline = time.monotonic() + max(0.0, args.wait)
     current = start
-    while args.wait and current == start and not current.startswith("done:") \
+    # A finished or failed log won't move on, so waiting on it would only stall the skill's loop.
+    while args.wait and current == start and not current.startswith(("done:", "failed:")) \
             and time.monotonic() < deadline:
         time.sleep(0.5)
         current = last()
     if not current:
-        _print_json({"line": "", "done": False, "started": False})
+        _print_json({"line": "", "done": False, "failed": False, "started": False})
         return 0
     _print_json({**_progress_line(current), "started": True, "changed": current != start})
     return 0
