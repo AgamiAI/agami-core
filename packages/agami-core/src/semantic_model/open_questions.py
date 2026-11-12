@@ -43,7 +43,7 @@ from typing import Any, Callable, Optional
 from . import build as B
 from . import dialects as D
 from . import introspect as I
-from .models import Column, Datasource, Table
+from .models import Column, Datasource, Table, table_key
 from .plain_names import plain_words
 
 Runner = Callable[[str], list[dict]]
@@ -472,6 +472,11 @@ def _plan_dates(p: _Probe, runner: Runner, today: date) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _meaning(c: Column, value: str) -> str:
+    """A stored status value with its decoded label, so `D` labelled "Delivered" reads as delivered."""
+    return f"{value} {((c.choice_field or {}).get(value) or '').strip()}"
+
+
 def _family(value: str) -> Optional[str]:
     words = set(_words(value))
     if words & _NEGATING:
@@ -504,7 +509,7 @@ def _plan_status(p: _Probe) -> None:
         if not (_readable(c) and c.choice_field and _STATUS_NAME.search(c.name)):
             continue
         for fam in ("done", "open"):
-            values = [v for v in c.choice_field if _family(v) == fam]
+            values = [v for v in c.choice_field if _family(_meaning(c, v)) == fam]
             if len(values) < 2:
                 continue
             aliases = [p.count_where(f"{p.q(c.name)} = {p.dialect.quote_lit(v)}") for v in values]
@@ -519,7 +524,7 @@ def _status_check(p: _Probe, c: Column, fam: str, values: list[str], aliases: li
             return None, f"only one {fam} value of {c.name} has rows", "status"
         if fam == "done":
             # In the order things happen (paid, shipped, delivered); the narrow reading is the last.
-            present.sort(key=lambda v: -_done_rank(v))
+            present.sort(key=lambda v: -_done_rank(_meaning(c, v)))
             narrow = present[-1]
         else:
             narrow = max(present, key=lambda v: counts[v])
@@ -628,7 +633,11 @@ def _join_groups(org: Datasource) -> dict[tuple, list]:
     for r in rels:
         if r.on or not r.from_column or not r.to_column or r.review_state == "rejected":
             continue
-        key = (r.from_table, r.from_schema, r.to_table, r.to_schema, r.to_column)
+        key = (
+            table_key(r.from_table, r.from_schema),
+            table_key(r.to_table, r.to_schema),
+            r.to_column.lower(),
+        )
         if all(x.from_column != r.from_column for x in groups.get(key, [])):
             groups.setdefault(key, []).append(r)
     return {k: v for k, v in groups.items() if len(v) >= 2}
@@ -638,11 +647,19 @@ def _link_words(column: str) -> str:
     return plain_words(re.sub(r"(_id|_key|_ref)$", "", column, flags=re.IGNORECASE))
 
 
-def _plan_joins(p: _Probe, groups: dict[tuple, list]) -> None:
+def _refers_to(key: tuple[str, str], t: Table) -> bool:
+    """Whether a reference's `table_key` names table `t`: the bare names match, and so do the
+    schemas when both are known (a reference with no schema matches the name in any schema)."""
+    mine = table_key(t.name, t.schema_name)
+    return key[1] == mine[1] and (not key[0] or not mine[0] or key[0] == mine[0])
+
+
+def _plan_joins(p: _Probe, groups: dict[tuple, list], targets: dict[tuple, str]) -> None:
     cols = {c.name: c for c in p.table.columns}
-    for (ft, fs, tt, _ts, tc), rels in groups.items():
-        if ft != p.table.name or (fs and p.table.schema_name and fs != p.table.schema_name):
+    for (frm, to, _), rels in groups.items():
+        if not _refers_to(frm, p.table):
             continue
+        tt, tc = targets.get(to, rels[0].to_table), rels[0].to_column
         rels = [r for r in rels if r.from_column in cols and _readable(cols[r.from_column])][
             :_MAX_READINGS
         ]
@@ -658,6 +675,17 @@ def _plan_joins(p: _Probe, groups: dict[tuple, list]) -> None:
                     f"SUM(CASE WHEN {a} = {b} OR ({a} IS NULL AND {b} IS NULL) THEN 0 ELSE 1 END)"
                 )
         p.checks.append(_join_check(p, tt, tc, rels, linked, apart))
+
+
+def _targets(groups: dict[tuple, list], tables: list[tuple[Table, str, str]]) -> dict[tuple, str]:
+    """Each join target's label, schema-qualified when its bare name is shared, so joins to
+    `sales.users` and `support.users` get different names and guidance."""
+    out = {}
+    for _, to, _ in groups:
+        hits = [label for t, label, _ in tables if _refers_to(to, t)]
+        if len(hits) == 1:
+            out[to] = hits[0]
+    return out
 
 
 def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apart: dict):
@@ -684,7 +712,7 @@ def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apar
             for i in keep
         ]
         fw = _phrase(p.table.name)
-        one = I._singular(_phrase(tt))
+        one = I._singular(_phrase(tt.rsplit(".", 1)[-1]))
         return (
             _candidate(
                 "join",
@@ -694,7 +722,7 @@ def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apar
                 + "; ".join(f"{o['shown']} rows have a {o['label']}" for o in options),
                 options,
                 _op(
-                    _name(p.label, f"{tt}_link"),
+                    _name(p.label, _name(tt, "link")),
                     f"a question about {fw} by {one} that doesn't say which {one}",
                     options,
                     [p.label],
@@ -765,11 +793,22 @@ def _current_check(p: _Probe, alias: str, how: str):
 
 def _relatives(tables: list[tuple[Table, str, str]]) -> list[tuple[str, tuple, tuple]]:
     """(kind, base, other) for each table named like another plus a history or copy word."""
-    by_words = {tuple(_words(t.name)): (t, label, area) for t, label, area in tables}
+    by_words: dict[tuple, list] = {}
+    for entry in tables:
+        by_words.setdefault(tuple(_words(entry[0].name)), []).append(entry)
     out = []
-    for words, other in by_words.items():
+    for other in tables:
+        words = tuple(_words(other[0].name))
         for cut, extra in ((words[:-1], words[-1:]), (words[1:], words[:1])):
-            base = by_words.get(cut) if cut else None
+            bases = by_words.get(cut, []) if cut else []
+            # Same schema first; across schemas only when exactly one table could be meant.
+            same = [
+                b
+                for b in bases
+                if table_key(b[0].name, b[0].schema_name)[0]
+                == table_key(other[0].name, other[0].schema_name)[0]
+            ]
+            base = same[0] if same else bases[0] if len(bases) == 1 else None
             if not base:
                 continue
             word = extra[0]
@@ -822,6 +861,17 @@ def _history_candidate(base: _Probe, other: _Probe) -> tuple[Optional[dict], Opt
 _COPY_NOTE = "Looks like a copy of"
 
 
+def _copy_note(current: Table) -> str:
+    name = plain_words(current.name)
+    return f"{_COPY_NOTE} {name}; the current data is in {name}."
+
+
+def _answered(a: Table, b: Table) -> bool:
+    """Whether this pair was answered: one table carries the caveat naming the other as current.
+    Another pair's answer on the same table (orders beside orders_new) leaves this one asked."""
+    return _copy_note(b) in a.caveats or _copy_note(a) in b.caveats
+
+
 def _table_op(t: Table, area: str, **edit: Any) -> dict:
     op = {"op": "edit", "kind": "table", "area": area, "name": t.name, **edit}
     return {**op, "schema": t.schema_name} if t.schema_name else op
@@ -833,7 +883,7 @@ def _look_alike(base: tuple, other: tuple, probes: dict) -> dict:
     tables = []
     for (t, label, area), (u, _, u_area) in ((base, other), (other, base)):
         p = probes.get(label)
-        note = f"{_COPY_NOTE} {plain_words(t.name)}; the current data is in {plain_words(t.name)}."
+        note = _copy_note(t)
         tables.append(
             {
                 "table": label,
@@ -856,13 +906,15 @@ def _look_alike(base: tuple, other: tuple, probes: dict) -> dict:
 
 
 def _fiscal_candidate(
-    org: Datasource, runner: Runner, dialect: D.Dialect, probes: dict, today: date
+    org: Datasource, runner: Runner, dialect: D.Dialect, pool: list, today: date
 ) -> tuple[Optional[dict], Optional[str]]:
+    """Checked on the largest table with a business date, one date column being enough (a table
+    the other patterns never needed to probe included), within the same size and table guards."""
     m = org.fiscal_year_start_month
-    dated = [(p, c) for p in probes.values() if p.row for c in _date_columns(p.table)[:1]]
+    dated = [(p, c) for p in pool for c in _date_columns(p.table)[:1]]
     if not dated:
-        return None, "no table with a business date was probed"
-    p, c = max(dated, key=lambda pc: pc[0].n())
+        return None, "no table with a business date can be probed"
+    p, c = max(dated, key=lambda pc: pc[0].n() if pc[0].row else (_rows(pc[0].table) or 0))
     end = _run(runner, f"SELECT MAX({p.q(c.name)}) AS x FROM {p.fq}")
     last = _day(end.get("x"))
     if not last:
@@ -929,57 +981,55 @@ def _codes(values: list[str]) -> bool:
     return bool(values) and sum(_code_like(v) for v in values) * 2 >= len(values)
 
 
-def _unread_columns(org: Datasource, labels: dict) -> tuple[list[dict], list[dict]]:
+def _unread_columns(tables: list[tuple[Table, str, str]]) -> tuple[list[dict], list[dict]]:
     coded, unknown = [], []
-    for sa in org.subject_areas:
-        for t in sa.tables_defined:
-            if t.review_state == "rejected":
+    labels = {id(t): label for t, label, _ in tables}
+    for t, _, area in tables:
+        for c in t.columns:
+            if not _readable(c):
                 continue
-            for c in t.columns:
-                if not _readable(c):
-                    continue
-                blank = [v for v, lbl in (c.choice_field or {}).items() if not (lbl or "").strip()]
-                if (c.type != "string" and not _CODE_NAME.search(c.name)) or not _codes(blank):
-                    blank = []  # a count of 1 to 5 is a number, and "east" or "enterprise" says itself
-                where = {"table": labels[id(t)], "column": c.name}
-                if blank:
-                    shown = ", ".join(f"{v} = …" for v in blank[:2])
-                    coded.append(
-                        {
-                            "kind": "coded_values",
-                            **where,
-                            "values": blank,
-                            "evidence": "Codes: " + ", ".join(blank),
-                            # the labels the person gives are filled into this map's blanks
-                            "op": _table_op(
-                                t,
-                                sa.name,
-                                column=c.name,
-                                field="choice_field",
-                                value=dict(c.choice_field or {}),
-                            ),
-                            "question": f"What do the values of {plain_words(c.name)} on "
-                            f"{plain_words(t.name)} mean? Type them in Other, e.g. {shown}",
-                        }
-                    )
-                elif c.description_source == "ai_unknown" and not (c.description or "").strip():
-                    unknown.append(
-                        {
-                            "kind": "unknown_column",
-                            **where,
-                            "question": f"What does {plain_words(c.name)} on {plain_words(t.name)} "
-                            "hold? Type a short description in Other.",
-                            # the person's words go in `value`; `source: human` says whose they are
-                            "op": _table_op(
-                                t,
-                                sa.name,
-                                column=c.name,
-                                field="description",
-                                source="human",
-                                value="",
-                            ),
-                        }
-                    )
+            blank = [v for v, lbl in (c.choice_field or {}).items() if not (lbl or "").strip()]
+            if (c.type != "string" and not _CODE_NAME.search(c.name)) or not _codes(blank):
+                blank = []  # a count of 1 to 5 is a number, and "east" or "enterprise" says itself
+            where = {"table": labels[id(t)], "column": c.name}
+            if blank:
+                shown = ", ".join(f"{v} = …" for v in blank[:2])
+                coded.append(
+                    {
+                        "kind": "coded_values",
+                        **where,
+                        "values": blank,
+                        "evidence": "Codes: " + ", ".join(blank),
+                        # the labels the person gives are filled into this map's blanks
+                        "op": _table_op(
+                            t,
+                            area,
+                            column=c.name,
+                            field="choice_field",
+                            value=dict(c.choice_field or {}),
+                        ),
+                        "question": f"What do the values of {plain_words(c.name)} on "
+                        f"{plain_words(t.name)} mean? Type them in Other, e.g. {shown}",
+                    }
+                )
+            elif c.description_source == "ai_unknown" and not (c.description or "").strip():
+                unknown.append(
+                    {
+                        "kind": "unknown_column",
+                        **where,
+                        "question": f"What does {plain_words(c.name)} on {plain_words(t.name)} "
+                        "hold? Type a short description in Other.",
+                        # the person's words go in `value`; `source: human` says whose they are
+                        "op": _table_op(
+                            t,
+                            area,
+                            column=c.name,
+                            field="description",
+                            source="human",
+                            value="",
+                        ),
+                    }
+                )
     return coded, unknown
 
 
@@ -1048,12 +1098,37 @@ def _card(q: dict, header: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _physical_tables(org: Datasource) -> list[tuple[Table, str, str]]:
+    """One entry per physical table (`table_key`), however many subject areas define it: the first
+    definition, with every column that ANY definition flags sensitive or hides marked sensitive, so
+    a copy that forgot the flag can never let a probe read it. (table, label, area of that copy)."""
+    labels = _labels(org)
+    hidden: dict[tuple, set[str]] = {}
+    first: dict[tuple, tuple[Table, str, str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            key = table_key(t.name, t.schema_name)
+            hidden.setdefault(key, set()).update(
+                c.name.lower() for c in t.columns if c.sensitive or c.review_state == "rejected"
+            )
+            if t.review_state != "rejected" and key not in first:
+                first[key] = (t, labels[id(t)], sa.name)
+    out = []
+    for key, (t, label, area) in first.items():
+        merged = t.model_copy(deep=True)
+        for c in merged.columns:
+            if c.name.lower() in hidden[key]:
+                c.sensitive = True
+        out.append((merged, label, area))
+    return out
+
+
 def _labels(org: Datasource) -> dict[int, str]:
     """Each table's name as an `applies_to` entry: schema-qualified only when the bare name is shared."""
     tables = [t for sa in org.subject_areas for t in sa.tables_defined]
     count: dict[str, int] = {}
-    for t in tables:
-        count[t.name.lower()] = count.get(t.name.lower(), 0) + 1
+    for key in {table_key(t.name, t.schema_name) for t in tables}:
+        count[key[1]] = count.get(key[1], 0) + 1
     return {
         id(t): (
             f"{t.schema_name}.{t.name}" if count[t.name.lower()] > 1 and t.schema_name else t.name
@@ -1074,27 +1149,25 @@ def open_questions(
         calls[0] += 1
         return runner(sql)
 
-    labels = _labels(org)
     declared = {a.name for a in org.ambiguities}
     groups = _join_groups(org)
-    tables = [
-        (t, labels[id(t)], sa.name)
-        for sa in org.subject_areas
-        for t in sa.tables_defined
-        if t.review_state != "rejected"
-    ]
+    tables = _physical_tables(org)
+    targets = _targets(groups, tables)
     relatives = _relatives(tables)
     related = {lbl for _, base, other in relatives for lbl in (base[1], other[1])}
 
     probes: dict[str, _Probe] = {}
+    eligible: list[_Probe] = []  # every table it would be safe to probe, for the fiscal check
     skipped: list[dict] = []
     for t, label, area in tables:
         p = _Probe(dialect, t, label, area)
         _plan_dates(p, counted, today)
         _plan_status(p)
         _plan_amounts(p)
-        _plan_joins(p, groups)
+        _plan_joins(p, groups, targets)
         _plan_current(p, today)
+        if t.source_type == "table" and not I._too_big_to_probe(t) and _rows(t) != 0:
+            eligible.append(p)
         if not p.checks and label not in related:
             continue
         if t.source_type != "table" or I._too_big_to_probe(t):
@@ -1158,20 +1231,19 @@ def open_questions(
         ):
             cand, why, _ = _history_candidate(probes[base[1]], probes[other[1]])
             keep(cand, why, base[1], "current")
-        elif kind == "look_alike" and not any(
-            c.startswith(_COPY_NOTE) for t in (base[0], other[0]) for c in t.caveats
-        ):
+        elif kind == "look_alike" and not _answered(base[0], other[0]):
             look_alikes.append(_look_alike(base, other, probes))
 
     if org.fiscal_year_start_month != 1 and "fiscal_year" not in declared:
         try:
-            cand, why = _fiscal_candidate(org, counted, dialect, probes, today)
+            pool = [p for p in eligible if p.label in probes or len(probes) < MAX_TABLES]
+            cand, why = _fiscal_candidate(org, counted, dialect, pool, today)
             keep(cand, why, None, "fiscal")
         except ProbeFailed as e:
             failed.append({"table": None, "pattern": "fiscal", "reason": str(e)})
 
     candidates.sort(key=lambda c: -c["spread"])
-    coded, unknown = _unread_columns(org, labels)
+    coded, unknown = _unread_columns(tables)
     questions = (candidates + look_alikes + coded + unknown)[:MAX_QUESTIONS]
     for i, q in enumerate(questions, 1):
         q["card"] = _card(q, f"Ask {i}/{len(questions)}")

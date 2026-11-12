@@ -670,3 +670,174 @@ def test_a_link_filled_on_few_rows_is_an_event_not_a_reading(store):
     assert _dropped(out, "join", "tickets") == [
         "fewer than two links to users are filled on most rows"
     ]
+
+
+# --- Copilot review on #648: one physical table, however many copies or schemas ----------------
+
+
+def _ask_org(org, db: Path, seen: list[str] | None = None) -> dict:
+    return OQ.open_questions(org, _sqlite_runner(db, seen), D.get_dialect("sqlite"), today=TODAY)
+
+
+def _table(org, name: str, schema: str = "main"):
+    return next(
+        t
+        for sa in org.subject_areas
+        for t in sa.tables_defined
+        if t.name == name and t.schema_name == schema
+    )
+
+
+def _copy_into_new_area(org, table, area: str = "other"):
+    from semantic_model.models import SubjectArea
+
+    copy = table.model_copy(deep=True)
+    org.subject_areas.append(SubjectArea(name=area, tables_defined=[copy]))
+    return copy
+
+
+def test_a_column_sensitive_in_any_copy_of_a_table_is_never_read(store):
+    root, db = store
+    org = L.load_datasource(root)
+    copy = _copy_into_new_area(org, _table(org, "orders"))
+    next(
+        c for c in copy.columns if c.name == "shipped_at"
+    ).sensitive = True  # the copy says personal
+    seen: list[str] = []
+    out = _ask_org(org, db, seen)
+    assert not any("shipped_at" in sql for sql in seen)
+    # and the physical table is probed once, not once per copy
+    assert (
+        sum(
+            1
+            for sql in seen
+            if sql.startswith("SELECT COUNT(*) AS n") and 'FROM "main"."orders"' in sql
+        )
+        == 1
+    )
+    assert (
+        len(
+            [q for q in out["questions"] if q.get("pattern") == "status" and q["table"] == "orders"]
+        )
+        == 1
+    )
+
+
+def test_a_status_whose_codes_are_decoded_is_read_by_its_meanings(store):
+    root, db = store
+    con = sqlite3.connect(db)
+    con.execute("UPDATE orders SET status = upper(substr(status, 1, 1))")  # P, S, D, C
+    con.commit()
+    con.close()
+    org = L.load_datasource(root)
+    status = next(c for c in _table(org, "orders").columns if c.name == "status")
+    status.choice_field = {"P": "Paid", "S": "Shipped", "D": "Delivered", "C": "Cancelled"}
+    q = _found(_ask_org(org, db), "status", "orders")
+    assert [(o["label"], o["value"]) for o in q["options"]] == [
+        ("Only Delivered", 50),
+        ("Paid, Shipped or Delivered", 150),
+    ]
+    assert q["options"][1]["how"] == "orders.status IN ('P', 'S', 'D')"
+
+
+def test_a_join_whose_table_name_carries_its_schema_still_matches(store):
+    root, db = store
+    org = L.load_datasource(root)
+    for r in org.subject_areas[0].relationships:
+        if r.from_table == "tickets":
+            r.from_table, r.from_schema = "main.tickets", None
+    assert _found(_ask_org(org, db), "join", "tickets") is not None
+
+
+def test_joins_to_same_named_tables_in_two_schemas_get_their_own_names(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _copy_into_new_area(org, _table(org, "users"), "support").schema_name = "support"
+    for r in [r for r in org.subject_areas[0].relationships if r.from_table == "tickets"]:
+        org.subject_areas[0].relationships.append(r.model_copy(update={"to_schema": "support"}))
+    joins = [
+        q
+        for q in _ask_org(org, db)["questions"]
+        if q.get("pattern") == "join" and q["table"] == "tickets"
+    ]
+    assert sorted(q["op"]["name"] for q in joins) == [
+        "tickets_main_users_link",
+        "tickets_support_users_link",
+    ]
+    assert any("= support.users.id" in o["how"] for q in joins for o in q["op"]["options"])
+
+
+def test_a_copy_pairs_with_the_table_in_its_own_schema(store):
+    root, db = store
+    org = L.load_datasource(root)
+    _copy_into_new_area(org, _table(org, "orders"), "archive").schema_name = "archive"
+    q = next(q for q in _ask_org(org, db)["questions"] if q["kind"] == "look_alike")
+    assert [t["table"] for t in q["tables"]] == ["main.orders", "orders_old"]
+
+
+def test_a_fiscal_year_is_checked_on_a_table_with_a_single_date(store):
+    from semantic_model.models import Column, PerformanceHints, Table
+
+    root, db = store
+    start = date(2026, 1, 1)
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE visits(id INTEGER PRIMARY KEY, visited_at TEXT)")
+    con.executemany(
+        "INSERT INTO visits VALUES (?, ?)",
+        [(i + 1, str(start + timedelta(days=i))) for i in range(250)],
+    )
+    con.commit()
+    con.close()
+    org = L.load_datasource(root)
+    org.fiscal_year_start_month = 4
+    org.subject_areas[0].tables_defined.append(
+        Table(
+            name="visits",
+            schema="main",
+            performance_hints=PerformanceHints(estimated_row_count=250),
+            columns=[
+                Column(name="id", type="integer", primary_key=True),
+                Column(name="visited_at", type="string", date_format="iso8601"),
+            ],
+        )
+    )
+    q = _found(_ask_org(org, db), "fiscal", None)
+    assert q["evidence"].startswith("visits by Visited at")
+    assert [o["value"] for o in q["options"]] == [250, 160]
+
+
+def test_answering_one_look_alike_pair_leaves_the_others_asked(store):
+    from semantic_model.models import Column, Table
+
+    root, db = store
+    con = sqlite3.connect(db)
+    for name in ("orders_new", "orders_backup"):
+        con.execute(f"CREATE TABLE {name}(id INTEGER PRIMARY KEY)")
+        con.executemany(f"INSERT INTO {name} VALUES (?)", [(i,) for i in range(1, 11)])
+    con.commit()
+    con.close()
+    org = L.load_datasource(root)
+    for name in ("orders_new", "orders_backup"):
+        org.subject_areas[0].tables_defined.append(
+            Table(
+                name=name,
+                schema="main",
+                columns=[Column(name="id", type="integer", primary_key=True)],
+            )
+        )
+    out = _ask_org(org, db)
+    pair = next(
+        q
+        for q in out["questions"]
+        if q["kind"] == "look_alike"
+        and {t["table"] for t in q["tables"]} == {"orders", "orders_new"}
+    )
+    (op,) = next(t for t in pair["tables"] if t["table"] == "orders_new")["ops"]
+    _table(org, "orders").caveats = op["value"]  # what applying the answer writes
+    pairs = [
+        {t["table"] for t in q["tables"]}
+        for q in _ask_org(org, db)["questions"]
+        if q["kind"] == "look_alike"
+    ]
+    assert {"orders", "orders_new"} not in pairs
+    assert {"orders", "orders_backup"} in pairs and {"orders", "orders_old"} in pairs
