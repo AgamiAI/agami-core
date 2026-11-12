@@ -4,6 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 1: Introspect → semantic model
 
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark context=in_progress
+```
+
 ### 1.0 — Set expectations before kicking off
 
 Introspection can take a while against cloud DBs. Tell the user **before** the first probe. Honest estimates — **don't lowball** (a user told "5 min" who waits 4 thinks "almost there"; one told "1 min" thinks "stuck").
@@ -158,7 +163,17 @@ Stay anchored to the tables you actually introspected; don't invent fields the l
 
 Stash everything gathered (the readers' merged findings, or doc text + repo definitions you read yourself) as `$DATA_MODEL_DOC_TEXT` for enrichment — give entities/metrics/relationships found here **`confidence: inferred`** (a declared metric is a strong signal but still wants a human sign-off; FK-derived joins stay as the engine set them). **Never written to disk** — lives only in the enrichment prompt, then discarded. `Skip` → proceed.
 
+The context is gathered: mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark context=done
+```
+
 ### 1.6 — Discover & prune the table list (cheap first pass)
+
+Mark the table step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=in_progress
+```
 
 **Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
 
@@ -230,7 +245,17 @@ bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_pat
 
 `{"exclude_columns": [...]}` → pass them to 1.7 as `--exclude-columns <names…>` and say how many columns are left out. `{"unmatched": [...]}` (exit 1) → say which names are not columns and ask the same card again; never guess. Personal-data columns are asked about again on their own card after the build (Phase 4), and any column can be hidden later from `/agami-model`, so nobody has to find every column now.
 
+Once the kept set is settled (or the person chose to model everything), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=done
+```
+
 ### 1.6s — With a model spec: the spec IS the kept set
+
+The spec names the tables, so there is no table pick: mark the step skipped and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=skipped
+```
 
 When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 table card — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
 

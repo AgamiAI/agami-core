@@ -4,6 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 5: Seed prompt examples
 
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=in_progress
+```
+
 **Surface a progress warning first** (second-longest phase): "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud / a multi-schema DB). I'll narrate per-example progress."
 
 **5a — generate** (your job — the LLM step) candidate examples grounded in the model. Aim for **coverage and a good spread**, not a fixed count:
@@ -120,9 +125,29 @@ Validation often surfaces a result that's *obviously wrong* — a bounded ratio 
 
    On **Fix it everywhere** → apply the seed + metric-binding + column-caveat edits as one batch. Do **not** present a "patch the bindings vs add a caveat" choice — that's the skill's call, not the user's. (If the user is technical and asks for the detail, then show it.)
 
+When every example has its answer on a card (and any bad number above is settled), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=done
+```
+
 ---
 
 ### 6b — Check the reports the person shared (only when 1.5 saved some)
 
+When 1.5 saved nothing, mark the step skipped and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=skipped
+```
+
+When it saved some, mark the step started and refresh the task list:
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=in_progress
+```
+
 When `<artifacts_dir>/local/reconcile/inbox/` has files (or a screenshot path) from 1.5, say in one line what was shared, then AskUserQuestion, one question, header `Reports`: *"Check your <n> reports against the new model now?"* Options: **Check them now (Recommended)** / **Later** (say they can run `/agami-reconcile` any time; the files stay in the inbox). **Check them now** hands the files to [agami-reconcile](../../agami-reconcile/SKILL.md), which grades any SQL part by part, compares the numbers, and asks about each mismatch on cards; come back to Phase 7 when it is done.
+
+When agami-reconcile is done, mark the step done and refresh the task list (on **Later**, mark it `reports=skipped` instead):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=done
+```
 

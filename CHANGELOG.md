@@ -19,7 +19,11 @@ below corresponds to one such version.
   and joins" with its tables and joins, a running build shows "33 of 34 tables" from its progress
   log, and later steps carry the described share, metrics signed and examples from `sm overview`'s
   totals. `--mark <id>=<status>` appends to `<profile>/.introspect/timeline.jsonl`, so the list
-  survives a turn that ends.
+  survives a turn that ends. agami-connect now copies its task list from `sm steps` at every step
+  change instead of typing it, each phase file marks its own step where it starts and ends, and the
+  rule lives in one place, `shared/task-list.md`. A build that fails or stops says why and the list
+  stays at "Read the tables and joins"; `sm progress --wait` returns at once on a failed build, with
+  `"failed": true`.
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm

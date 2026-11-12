@@ -4,6 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 3: Review the subject-area split
 
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark signoff=in_progress
+```
+
 The engine **proposes** the split (one area for small DBs; for large single-schema ones, tables grouped where they join each other most densely — no target number of areas, none past the size limit, a hub table doesn't pull everything into one area — with tables that have no joins grouped by their whole first name word; each table owned once, cross-area joins as `cross_subject_area_relationships`). Area names keep the table's plural (`suppliers`, `status`). For a multi-area split, **surface it for the user to adjust** — boundaries are a curation decision, not a fact:
 
 ```
@@ -119,6 +124,11 @@ The page is read-only; decisions stay on the cards, so after the URL ask the car
 This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **Personal data left queryable does NOT block seeds** — keeping a sensitive column queryable is the person's call; only unreviewed *sign-offs* gate the seeds.
 
 On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip silently.
+
+When the sign-off cards are finished (items left for later included, and when 4a found nothing to review), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark signoff=done
+```
 
 ---
 

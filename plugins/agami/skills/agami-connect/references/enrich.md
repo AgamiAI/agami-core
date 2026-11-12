@@ -4,6 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 2: Enrich (the LLM layer — validated into the model)
 
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark describe=in_progress
+```
+
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
 
 **One progress line per step, no card.** After each step below, post one line with the numbers that step's command printed, and nothing invented: never a count you worked out by reading YAML, never a percentage you estimated. Leave out a step that didn't run.
@@ -275,6 +280,11 @@ If the user **did** write a narrative in 1.4, leave it untouched. The glossary f
 - skipped → leave it; `datasource.yaml` keeps whatever description it already had (re-introspection preserves it).
 
 **The company draft (from 1.4 A's "Draft it from the database").** Write two or three plain sentences on what the business does, inferred only from the subject areas and table descriptions you just wrote (never from general knowledge of a company name), and apply them as 1.4 A says (`sm set-org` plus `organization.md`), with the first line of `organization.md` reading *"Draft from the database; correct it in /agami-model."*. Phase 7 shows it for correction.
+
+With the coverage gate passed (`sm coverage` returned `ok: true`, 2a) and 2b–2f done, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark describe=done
+```
 
 ---
 

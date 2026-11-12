@@ -4,6 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark first_question=in_progress
+```
+
 **Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered** (a full view page being open doesn't hold it: the page is read-only and its card is asked again) — wait for the person, don't summarize over them.
 
 Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved. Lead with the **must-do** count, break out optional polish separately.
@@ -74,6 +79,11 @@ The model keeps improving as you use it:
   or columns you don't want queried, add metrics, and edit descriptions.
 ```
 End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
+
+After the first question is answered, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark first_question=done
+```
 
 ---
 

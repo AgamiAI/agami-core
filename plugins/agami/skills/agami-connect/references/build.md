@@ -4,6 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark build=in_progress
+```
+
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. Run it exactly as written, with the full quoted path (never `cd` into the scripts folder, never a shell variable for the path): that form is the one agami pre-approves, so it doesn't stop for permission.
 
 ```bash
@@ -24,11 +29,18 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
 
 1. **One background call.** Bash with `run_in_background: true`, and a `description` the person can read in the app's Background tasks pane, in their words: *"Read the tables (Snowflake, 84 tables)"*.
 2. **Say once where to watch**, the first time a background step starts in a run: *"Reading your tables in the background. In the Desktop app, ⋮ → Background tasks shows it live."* (Leave out the second sentence outside the Desktop app.)
-3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done`:
+3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done` or `failed`:
    ```bash
    bash "<plugin_root>/scripts/sm" progress "<artifacts_dir>/<profile>" --wait 20
    ```
    It returns as soon as the build's log moves on (or after 20 seconds) with `line`, ready to post: *"Reading columns ▰▰▰▱▱▱▱▱ 12/34 tables"*, the bar drawn from the log's own counts and rounded down (never an estimate), and `done` once the build has finished. Post `line` when `changed` is true. Use this, not `tail` or a watcher of your own: it is pre-approved, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later command would stop for permission. If you do end your turn while it runs, say so in that message (*"Still reading your tables; I'll carry on as soon as it finishes."*).
+
+   After every `sm progress --wait` call, refresh the task list ([task-list.md](../../../shared/task-list.md)):
+   ```bash
+   bash "<plugin_root>/scripts/sm" steps "$ROOT"
+   ```
+
+   When `failed` is true, the build stopped: run the same `sm steps`, say its `problem` to the person in one sentence, and handle it as a failed build below (surface the errors and stop).
 4. **Update the onboarding step's label** with the same count while it runs (*"Read the tables and joins — 12 of 34 tables"*), and with the final numbers when it ends.
 5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.
 
@@ -104,6 +116,11 @@ Introspection proposed areas by name and joins only where the catalog or `*_id` 
 Surface any `notes` too — in particular a metric flagged as a plain aggregate: ask once whether to drop it and put its name in the column description instead (re-run 1.6s after they edit the workbook), or keep it.
 
 **After a spec, the model's structure is the person's, not yours.** Through the rest of the run: don't propose, add or re-infer joins; don't re-split subject areas (Phase 3 shows the spec's areas, it doesn't propose new ones); don't add metrics the spec didn't name (2c — the spec's metrics are already in); carry its rules as written (they are in `datasource.md` already). Enrichment still describes tables and the columns the spec's Columns sheet left out — the spec's own descriptions are `human` and a generated one is refused over them. **Run 2b (entities) as usual:** entities are the model's vocabulary (the business nouns questions are routed by), not structure, and a spec doesn't declare them. **Regroup wide tables as usual too** (the step at the end of 2a), even when the spec described every column: a spec doesn't declare column groups, so they're still the engine's name-prefix buckets.
+
+When the model has validated (and the spec, if one was attached, is applied), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark build=done
+```
 
 ---
 
