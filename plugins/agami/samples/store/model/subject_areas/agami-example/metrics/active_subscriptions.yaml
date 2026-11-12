@@ -6,6 +6,8 @@ other_names:
 calculation: Number of subscriptions currently in the active state.
 bindings:
   SQLite: SUM(CASE WHEN subscriptions.status = 'active' THEN 1 ELSE 0 END)
+  Snowflake: SUM(CASE WHEN subscriptions.status = 'active' THEN 1 ELSE 0 END)
+  Databricks: SUM(CASE WHEN subscriptions.status = 'active' THEN 1 ELSE 0 END)
 source_tables:
 - subscriptions
 base_metrics: []

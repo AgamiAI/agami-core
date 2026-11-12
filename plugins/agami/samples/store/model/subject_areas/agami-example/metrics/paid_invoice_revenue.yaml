@@ -6,6 +6,8 @@ other_names:
 calculation: Revenue collected from paid subscription invoices.
 bindings:
   SQLite: SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END)
+  Snowflake: SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END)
+  Databricks: SUM(CASE WHEN invoices.status = 'paid' THEN invoices.amount ELSE 0 END)
 unit: USD
 source_tables:
 - invoices

@@ -6,6 +6,8 @@ other_names:
 calculation: Revenue per order — total revenue divided by the number of orders.
 bindings:
   SQLite: '{revenue} / {order count}'
+  Snowflake: '{revenue} / {order count}'
+  Databricks: '{revenue} / {order count}'
 unit: USD
 source_tables:
 - orders

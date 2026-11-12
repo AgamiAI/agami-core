@@ -6,6 +6,8 @@ other_names:
 calculation: Total quantity of product units sold across order line items.
 bindings:
   SQLite: SUM(order_items.quantity)
+  Snowflake: SUM(order_items.quantity)
+  Databricks: SUM(order_items.quantity)
 source_tables:
 - order_items
 base_metrics: []

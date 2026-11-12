@@ -14,6 +14,8 @@ identical wherever the model is exercised. Subcommands:
                                             (safety pass on) → examples-validation items
     remove-example <root> --area A --question Q — mark example(s) rejected by question
                                             (kept in the file for audit, not deleted)
+    export    <root> --target T --out DIR — write the model in another agent's format
+                                            (a report of what did not carry over included)
 
 `seed-examples`, `seed-validate` and `remove-example` take `--area` repeated, or none for every
 area; then they print one combined result (per-area entries labelled with the area, plus totals).
@@ -1979,6 +1981,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("root")
     sp.add_argument("--area", required=True)
     sp.set_defaults(func=cmd_bundle)
+
+    sp = sub.add_parser("export", help="write the reviewed model in a target agent's format, with a report of what did not carry over")
+    from . import export as X
+    X.add_arguments(sp)
+    sp.set_defaults(func=X.cmd_export)
 
     sp = sub.add_parser("areas", help="list subject areas")
     sp.add_argument("root")

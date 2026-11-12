@@ -9,6 +9,8 @@ calculation: Total order revenue — the sum of order totals (order grain). Pre-
   to line items so it isn't double-counted.
 bindings:
   SQLite: SUM(orders.total_amount)
+  Snowflake: SUM(orders.total_amount)
+  Databricks: SUM(orders.total_amount)
 unit: USD
 source_tables:
 - orders

@@ -6,6 +6,8 @@ other_names:
 calculation: Total amount refunded to customers.
 bindings:
   SQLite: SUM(refunds.amount)
+  Snowflake: SUM(refunds.amount)
+  Databricks: SUM(refunds.amount)
 unit: USD
 source_tables:
 - refunds

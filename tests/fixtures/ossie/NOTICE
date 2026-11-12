@@ -1,0 +1,31 @@
+Third-party test fixtures: Apache Ossie JSON Schemas
+====================================================
+
+The two JSON Schema files in this directory are copied unmodified from the Apache Ossie
+project (formerly Open Semantic Interchange, OSI), https://github.com/apache/ossie. They are
+licensed under the Apache License, Version 2.0; the full text is in LICENSE beside this file.
+JSON has no comment syntax, so this file carries their attribution in place of a header.
+
+They are test fixtures only. tests/test_ace173_ossie_export.py validates `sm export --target
+ossie` output against them; they are not part of the agami-core package and are not shipped.
+
+  osi-schema-0.1.1.json
+    source:  core-spec/osi-schema.json
+    tag:     osi-0.1.1-rc1 (commit faf581054dcf7964d5fe0ceae7d6f415c8ce32a5), the 0.1.1 release
+
+  ossie-schema-0.3.0.dev0.json
+    source:  core-spec/ossie-schema.json
+    commit:  e6ad94ee87a53fd8f8b6dbf0de33fab59e406c0c on main (version 0.3.0.dev0, unreleased)
+
+Upstream NOTICE at the 0.1.1 tag:
+
+  Open Semantic Interchange
+  Copyright 2026 - Open Semantic Interchange
+
+Upstream NOTICE at the 0.3.0.dev0 commit:
+
+  Apache Ossie (incubating)
+  Copyright 2026 The Apache Software Foundation
+
+  This product includes software developed at
+  The Apache Software Foundation (http://www.apache.org/).

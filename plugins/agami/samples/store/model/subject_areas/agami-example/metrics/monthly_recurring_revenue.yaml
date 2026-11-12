@@ -6,6 +6,8 @@ other_names:
 calculation: MRR — the monthly price of all currently-active subscriptions.
 bindings:
   SQLite: SUM(CASE WHEN subscriptions.status = 'active' THEN plans.monthly_price ELSE 0 END)
+  Snowflake: SUM(CASE WHEN subscriptions.status = 'active' THEN plans.monthly_price ELSE 0 END)
+  Databricks: SUM(CASE WHEN subscriptions.status = 'active' THEN plans.monthly_price ELSE 0 END)
 unit: USD
 source_tables:
 - subscriptions
