@@ -558,33 +558,21 @@ def cmd_model_tree(args) -> int:
     return 0
 
 
-# Each progress-log line, in the person's words: (pattern, phrase, unit). The engine's own wording
-# (`columns+grain 30/52`) is for the engine; a person reads "Reading columns … 30/52 tables".
-_PROGRESS_PHRASES = (
-    (re.compile(r"^discovered (\d+) tables"), "Found {0} tables", None),
-    (re.compile(r"^columns\+grain (\d+)/(\d+)"), "Reading columns", "tables"),
-    (re.compile(r"^relationships: declared FK (\d+)/(\d+)"), "Checking joins", "keys"),
-    (re.compile(r"^building relationships"), "Working out the joins", None),
-    (re.compile(r"^join candidates"), "Testing possible joins", None),
-    (re.compile(r"^done: (\d+) tables, (\d+) relationships"), "Done: {0} tables, {1} joins", None),
-)
-
-
 def _progress_line(raw: str) -> dict:
     """One progress-log line as a person's line, with an 8-cell bar drawn from its own counts,
     rounded down so the bar is full only at the end. Never an estimate: no count, no bar."""
-    for pattern, phrase, unit in _PROGRESS_PHRASES:
-        m = pattern.match(raw)
-        if not m:
-            continue
-        if unit:
-            n, total = int(m.group(1)), int(m.group(2))
-            filled = (8 * n) // total if total else 0
-            bar = "▰" * filled + "▱" * (8 - filled)
-            return {"line": f"{phrase} {bar} {n}/{total} {unit}", "n": n, "total": total,
-                    "done": False}
-        return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:")}
-    return {"line": raw, "done": False}
+    from . import steps
+    parsed = steps.parse_progress(raw)
+    if not parsed:
+        return {"line": raw, "done": False}
+    m, phrase, unit = parsed
+    if unit:
+        n, total = int(m.group(1)), int(m.group(2))
+        filled = (8 * n) // total if total else 0
+        bar = "▰" * filled + "▱" * (8 - filled)
+        return {"line": f"{phrase} {bar} {n}/{total} {unit}", "n": n, "total": total,
+                "done": False}
+    return {"line": phrase.format(*m.groups()), "done": raw.startswith("done:")}
 
 
 def cmd_progress(args) -> int:
@@ -594,14 +582,11 @@ def cmd_progress(args) -> int:
     while the build runs in the background: each call is a pre-approved `sm` command that keeps the
     turn open, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later
     command would stop for permission."""
+    from . import steps
     log = Path(args.root).expanduser() / ".introspect" / "progress.log"
 
     def last() -> str:
-        try:
-            lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        except OSError:
-            return ""
-        return lines[-1] if lines else ""
+        return steps.last_progress_line(log)
 
     start = last()
     deadline = time.monotonic() + max(0.0, args.wait)
@@ -614,6 +599,21 @@ def cmd_progress(args) -> int:
         _print_json({"line": "", "done": False, "started": False})
         return 0
     _print_json({**_progress_line(current), "started": True, "changed": current != start})
+    return 0
+
+
+def cmd_steps(args) -> int:
+    """The onboarding step list with status and counts read from disk, after applying any --mark.
+    Every mark is checked before any is written, so a bad one leaves the timeline as it was."""
+    from . import steps
+    try:
+        marks = [steps.parse_mark(spec) for spec in args.mark]
+    except ValueError as exc:
+        print(f"sm steps: {exc}", file=sys.stderr)
+        return 2
+    for step_id, status in marks:
+        steps.mark(Path(args.root), step_id, status)
+    _print_json(steps.onboarding_steps(Path(args.root)))
     return 0
 
 
@@ -2307,6 +2307,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--wait", type=float, default=0.0,
                     help="wait up to this many seconds for the next line (default 0: answer now)")
     sp.set_defaults(func=cmd_progress)
+
+    sp = sub.add_parser("steps", help="the onboarding step list, status and counts read from disk; --mark <id>=<status> records a step first")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile> (need not exist yet)")
+    sp.add_argument("--mark", action="append", default=[], metavar="ID=STATUS",
+                    help="mark a step in_progress, done or skipped (repeatable, applied in order)")
+    sp.set_defaults(func=cmd_steps)
 
     sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
     sp.add_argument("root")

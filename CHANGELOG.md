@@ -14,6 +14,13 @@ below corresponds to one such version.
 
 ### Added
 
+- **`sm steps` prints the onboarding step list.** The nine steps agami-connect shows as a task
+  list, each with a status and a count read from disk: a model that loads finishes "Read the tables
+  and joins" with its tables and joins, a running build shows "33 of 34 tables" from its progress
+  log, and later steps carry the described share, metrics signed and examples from `sm overview`'s
+  totals. `--mark <id>=<status>` appends to `<profile>/.introspect/timeline.jsonl`, so the list
+  survives a turn that ends.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
