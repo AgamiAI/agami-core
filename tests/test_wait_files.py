@@ -71,3 +71,12 @@ def test_wait_is_clamped_to_ten_minutes():
     assert cli.wait_files_seconds(args.wait) == cli.WAIT_FILES_MAX == 600
     assert cli.wait_files_seconds(-3) == 0
     assert cli._parse_args(["wait-files", "--file", "x"]).wait == 0
+
+
+def test_a_long_wait_stops_at_ten_minutes(tmp_path, capsys, monkeypatch):
+    # a simulated clock: the call must give up at WAIT_FILES_MAX, not at the 9999 asked for
+    clock = {"now": 0.0}
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(cli.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s))
+    out = _wait(capsys, "--file", str(tmp_path / "never.json"), "--wait", "9999")
+    assert out["all_ready"] is False and clock["now"] == cli.WAIT_FILES_MAX

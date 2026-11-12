@@ -346,3 +346,47 @@ def test_apply_enrichment_tables_applies_edits_inside_the_chunk(model, tmp_path,
     rc, out = _apply_tables(model, tmp_path, _result("agami-example"), "orders", capsys)
     assert rc == 0 and out["applied"] is True, out
     assert (out["described"], out["edited"], out["entities"]) == (1, 1, 1)
+
+
+@pytest.mark.parametrize("tables", ["", " , "])
+def test_an_empty_tables_list_is_refused_not_read_as_the_whole_area(model, tmp_path, capsys, tables,
+                                                                   no_db):
+    # an unset variable in the skill must not lift a chunk's limit to the whole area
+    before = sorted(p.read_text() for p in model.rglob("*.yaml"))
+    rc, out = _apply_tables(model, tmp_path, _result("agami-example", curate_ops=[_stray()]), tables,
+                            capsys)
+    assert rc == 2 and out["applied"] is False
+    assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
+    out_file = tmp_path / "in.json"
+    assert cli.main(["enrich-input", str(model), "--area", "agami-example", "--profile", "acme",
+                     "--out", str(out_file), "--tables", tables]) == 2
+    assert "--tables" in json.loads(capsys.readouterr().out)["error"] and not out_file.exists()
+
+
+def test_apply_enrichment_tables_match_the_name_exactly(model, tmp_path, capsys):
+    dotted = {**_edit("agami-example"), "name": "main.orders"}
+    before = sorted(p.read_text() for p in model.rglob("*.yaml"))
+    rc, out = _apply_tables(model, tmp_path, _result("agami-example", curate_ops=[dotted]), "orders",
+                            capsys)
+    assert rc == 1 and "main.orders" in out["refused"][0]
+    assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
+
+
+@pytest.mark.parametrize("name", ["../tables/customers", "../../other/tables/t", "..\\x", 7])
+def test_a_path_shaped_name_is_refused_by_both_commands(model, tmp_path, capsys, name):
+    # curate joins area and name into a file path: `..` would reach past the area check
+    bad = {**_edit("agami-example"), "name": name}
+    before = sorted(p.read_text() for p in model.rglob("*.yaml"))
+    rc, out = _apply(model, tmp_path, _result("agami-example", curate_ops=[bad]), "agami-example",
+                     capsys)
+    assert rc == 1 and out["applied"] is False and "not a plain name" in out["refused"][0]
+    rc, out = _curate(model, tmp_path, [bad], capsys, "--allow", ENRICH_FIELDS, "--area",
+                      "agami-example")
+    assert rc == 1 and out["applied"] == 0 and "not a plain name" in out["refused"][0]
+    assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
+
+
+def test_curate_allow_without_area_refuses_a_path_shaped_area(model, tmp_path, capsys):
+    bad = {**_edit("agami-example"), "area": "agami-example/../agami-example"}
+    rc, out = _curate(model, tmp_path, [bad], capsys, "--allow", ENRICH_FIELDS)
+    assert rc == 1 and "area" in out["refused"][0]

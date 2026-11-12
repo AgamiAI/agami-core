@@ -179,7 +179,7 @@ def _enrich_chunks(args) -> int:
     """The model split into enricher-sized chunks: each area in the model's order, cut into runs of
     at most `--max-tables` live tables. It reads only the model, so the skill can plan the subagents
     before the database is touched."""
-    if args.area or args.out or args.tables:
+    if args.area or args.out or args.tables is not None:
         _print_json({"error": "--chunks lists every area's chunks; it takes no --area, --out or --tables"})
         return 2
     if args.max_tables < 1:
@@ -223,6 +223,9 @@ def cmd_enrich_input(args) -> int:
         return 2
     live = _live_items(area.tables_defined)
     chunk = _split_list(args.tables)
+    if args.tables is not None and not chunk:
+        _print_json({"error": "--tables names no table"})
+        return 2
     if chunk:
         unknown = [n for n in chunk if n not in {t.name for t in live}]
         if unknown:
@@ -847,7 +850,19 @@ def _ops_outside(ops: Any, fields: set[str], area: Optional[str]) -> list[str]:
             out.append(f"op {i}: {json.dumps(op)[:120]}")
         elif area is not None and op.get("area") != area:
             out.append(f"op {i}: area {op.get('area')!r}, not {area!r}")
+        elif bad := [k for k in _OP_NAME_KEYS if k in op and not _plain_name(op[k])]:
+            out.append(f"op {i}: {', '.join(bad)} is not a plain name: {json.dumps(op)[:120]}")
     return out
+
+
+# The op fields curate turns into file paths (subject_areas/<area>/tables/<name>.yaml) or looks up.
+_OP_NAME_KEYS = ("name", "area", "table", "column")
+
+
+def _plain_name(value: Any) -> bool:
+    """A model name, not a path: curate joins `area` and `name` into a file path, so `../tables/x`
+    would edit a file the area check never saw, in another area or outside the model."""
+    return isinstance(value, str) and not any(s in value for s in ("/", "\\", ".."))
 
 
 # What an agami-enricher subagent may change: descriptions, the "looked, couldn't tell" flag, coded
@@ -861,12 +876,12 @@ def _ops_off_tables(ops: list, tables: list[str], label: str) -> list[str]:
 
     A chunk's enricher sees only its own tables' samples, so an edit elsewhere is a guess about a
     table it never read, and may race the enricher that owns it. A whole-area edit (the area's own
-    description) has no table, so it is refused too. An op may name a table `schema.table`."""
+    description) has no table, so it is refused too. The name must match exactly: curate opens the
+    table's file by the op's name, so `main.orders` would pass a looser check and edit nothing."""
     wanted = set(tables)
     return [f"{label} {i}: {op.get('kind')} {op.get('name')!r} is not in tables {', '.join(tables)}"
             for i, op in enumerate(ops)
-            if op.get("kind") != "table"
-            or not ({str(op.get("name")), str(op.get("name")).rsplit(".", 1)[-1]} & wanted)]
+            if op.get("kind") != "table" or op.get("name") not in wanted]
 
 
 def cmd_apply_enrichment(args) -> int:
@@ -877,9 +892,18 @@ def cmd_apply_enrichment(args) -> int:
     that area, and `entities` is a list. Then descriptions, edits and entities are applied in that
     order, each validated; a failed step stops the rest. What the main chat decides on later
     (`metric_ideas`, `terms`, `questions`, `cross_area`, `notes`) is passed back untouched, so no
-    glue script ever splits the file."""
+    glue script ever splits the file.
+
+    With `--tables` (one chunk's enricher), every description and edit must also be on one of those
+    tables, or nothing is applied; entities are area-level and stay allowed. An empty `--tables` is
+    refused rather than read as the whole area."""
     from . import curate
     from . import dictionary as DD
+    chunk = _split_list(args.tables)
+    if args.tables is not None and not chunk:
+        # an empty variable in the skill would otherwise lift the chunk's limit to the whole area
+        _print_json({"applied": False, "error": "--tables names no table"})
+        return 2
     result = _read_json_file(args.file)
     if not isinstance(result, dict) or result.get("area") != args.area:
         _print_json({"applied": False, "error": f"not an enricher result for area {args.area!r}"})
@@ -896,7 +920,6 @@ def cmd_apply_enrichment(args) -> int:
     entities = result.get("entities") or []
     refused = (_ops_outside(described["ops"], ENRICH_FIELDS, args.area)
                + _ops_outside(ops, ENRICH_FIELDS, args.area))
-    chunk = _split_list(args.tables)
     if chunk and not refused:
         refused = (_ops_off_tables(described["ops"], chunk, "description")
                    + _ops_off_tables(ops, chunk, "op"))
