@@ -683,7 +683,7 @@ def cmd_add_example(args) -> int:
         items = items.get("examples", items.get("items", []))
     res = curate.add_examples(args.root, args.area, items, signer=args.signer, role=args.role)
     _print_json(res.as_dict())
-    return 0 if (res.applied or not res.skipped) else 1
+    return 0 if (res.applied or not res.skipped) and not res.errors else 1
 
 
 def cmd_remove_example(args) -> int:
@@ -708,8 +708,9 @@ def cmd_remove_example(args) -> int:
     # `rejected` keeps its old shape (one label per example) for callers that parse it; the
     # detail is added beside it.
     _print_json({"rejected": res.applied, "examples": examples, **note, "skipped": res.skipped,
+                 **({"errors": res.errors} if res.errors else {}),
                  "validated": res.validated, "committed": res.committed, **_commit_note(res)})
-    return 0 if (res.applied or not res.skipped) else 1
+    return 0 if (res.applied or not res.skipped) and not res.errors else 1
 
 
 def cmd_suggest_units(args) -> int:
@@ -1262,8 +1263,9 @@ def cmd_seed_examples(args) -> int:
     # A seed the writer refused (an unknown metric tag) is rejected like one the database refused.
     rejected += [{"question": s["item"], "error": s["reason"]} for s in res.skipped]
     _print_json({"added": res.applied, "written": res.validated,
-                 "committed": res.committed, **_commit_note(res), "rejected": rejected})
-    return 0
+                 "committed": res.committed, **_commit_note(res), "rejected": rejected,
+                 **({"errors": res.errors} if res.errors else {})})
+    return 1 if res.errors else 0
 
 
 def cmd_seed_validate(args) -> int:
@@ -1498,17 +1500,19 @@ def cmd_remove_example_areas(args) -> int:
     rejected = [x for a in per_area for x in a["rejected"]]
     examples = [x for a in per_area for x in a["examples"]]
     skipped = missing + [s for a in per_area for s in a["skipped"]]
+    errors = [e for a in per_area for e in a.get("errors", [])]
     note = ({"note": f"marked rejected (kept for audit): {len(examples)} example(s) stay in their "
                      "area's prompt_examples/<area>/examples.yaml with status: rejected, not deleted, "
                      "and are no longer offered as examples for a question"} if examples else {})
     _print_json({"rejected": rejected, "examples": examples, **note, "skipped": skipped,
+                 **({"errors": list(dict.fromkeys(errors))} if errors else {}),
                  "validated": any(a["validated"] for a in per_area),
                  "committed": _all_committed([a for a in per_area if a["rejected"]]),
                  **_commit_notes(per_area),
                  "areas": per_area,
                  "totals": {"areas": len(per_area), "rejected": len(rejected),
                             "skipped": len(skipped)}})
-    return 0 if (rejected or not skipped) else 1
+    return 0 if (rejected or not skipped) and not errors else 1
 
 
 def _normalize_table_list(raw: Optional[list[str]]) -> Optional[list[str]]:

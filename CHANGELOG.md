@@ -26,6 +26,15 @@ below corresponds to one such version.
   area or a question that matches nothing is skipped with a reason; any other op on an example is
   refused.
 
+- **An older agami-core refuses to rebuild a model a newer one wrote in a breaking format (#633).**
+  Every rebuild now stamps `datasource.yaml` with `written_by` (the core that wrote it) and
+  `rewrite_needs` (the oldest core that can rebuild it without losing anything, from the list of
+  breaking format changes in `semantic_model/model_format.py`). Re-introspection, applying a model
+  spec and curation by a core older than `rewrite_needs` stop with an "upgrade agami-core" message
+  and write nothing. A model without the stamp, or with one that can't be read, is never refused,
+  and loading, validating and querying are never refused. `organization.yaml` is not stamped yet:
+  every released core rejects unknown keys there (#635).
+
 ### Fixed
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**

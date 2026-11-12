@@ -18,6 +18,7 @@ from typing import Any, Collection, Optional
 
 import yaml
 
+from . import model_format
 from .models import (
     DEEP_TABLE_COLUMN_THRESHOLD,
     Column,
@@ -839,6 +840,8 @@ def write_tree(
     is already on disk is left untouched and listed under `files_unchanged` (#472)."""
     examples_by_area = examples_by_area or {}
     rep = WriteReport(out_dir=str(out), dry_run=dry_run)
+    if not dry_run:
+        model_format.check_rewrite(out)
 
     def write(rel: str, content: str) -> None:
         if _same_content(out / rel, content):
@@ -874,6 +877,7 @@ def write_tree(
             _model_dump(r) for r in org.cross_subject_area_relationships
         ],
         **_carried_datasource_fields(org, out),
+        **model_format.stamp(),
     }))
     for sc in org.storage_connections:
         write(f"datasources/{sc.name}/storage.yaml", _dump(_model_dump(sc)))
