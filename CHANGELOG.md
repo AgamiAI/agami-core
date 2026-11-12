@@ -14,6 +14,11 @@ below corresponds to one such version.
 
 ### Added
 
+- **`organization.yaml` may carry `written_by` and `rewrite_needs` (#635).** These keys record
+  which agami-core wrote the file and the oldest one allowed to rewrite it. agami-core 0.9.22 and
+  older refuse to load an `organization.yaml` with keys they do not know, so a core that wrote them
+  would break every older one. This release accepts the keys and keeps them on a rewrite, but does
+  not write them yet; a later release will, once no supported core predates this one.
 - **`sm curate` can reject prompt examples in the same ops file as model edits (#608).**
   `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` rejects that
   example as `sm remove-example` does (kept for audit, dropped from the runtime ranker) and is part
@@ -27,6 +32,12 @@ below corresponds to one such version.
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those
   keys are now carried over verbatim, so the newer core that wrote them can still read them.
+- **DuckDB's `COLUMNS()` is refused like `SELECT *` (#615).** `SELECT COLUMNS('.*') FROM orders`
+  picks columns by pattern when it runs, so it returned columns the model excludes, and neither the
+  star ban nor column scope saw them. `COLUMNS()` anywhere in a statement (projection, aggregate,
+  `WHERE`, subquery) is now refused under `select_star` with the same "name each column" fix. So is
+  a `*` passed to any call but `COUNT`, such as Snowflake's `OBJECT_CONSTRUCT(*)`, Oracle's
+  `JSON_OBJECT(*)` or Databricks' `struct(*)`, which expand to every column the same way.
 
 ## [0.9.22] — 2026-11-05
 
