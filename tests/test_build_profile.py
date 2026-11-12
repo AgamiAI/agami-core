@@ -339,6 +339,13 @@ def test_a_table_is_profiled_in_two_statements_with_rates_counts_ranges_and_top_
     assert cols["note"]["blank_text"] == pytest.approx(0.967) and cols["unused"]["filled"] == 0.0
 
 
+def test_a_column_of_one_off_values_has_no_frequent_values_listed(tmp_path):
+    """30 distinct references on 30 rows is under the 50-value line, but nothing repeats."""
+    prof, _ = _profile(tmp_path)
+    assert prof["columns"]["id"]["distinct"] == 30 and "top" not in prof["columns"]["id"]
+    assert "top" in prof["columns"]["status"]
+
+
 def test_a_personal_column_gets_counts_and_never_a_value(tmp_path):
     prof, seen = _profile(tmp_path)
     email = prof["columns"]["contact_email"]

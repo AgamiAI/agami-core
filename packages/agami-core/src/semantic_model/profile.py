@@ -371,8 +371,10 @@ def profile_table(dialect: D.Dialect, runner: Runner, t: Table, personal: Callab
         c.filled, c.blank = _num(r, f"f{i}"), _num(r, f"b{i}")
         c.distinct = _num(r, f"d{i}") if f"d{i}" in r else None
         c.lo, c.hi = _text(r.get(f"lo{i}")), _text(r.get(f"hi{i}"))
+    # A coded column only: few values, each on two rows or more on average. A column of mostly
+    # one-off values (names, reference numbers) on a small table also has few, and isn't listed.
     listed = [(i, c) for i, c in enumerate(stats) if not c.personal and c.distinct is not None
-              and 0 < c.distinct <= PROFILE_TOP_MAX_DISTINCT]
+              and 0 < c.distinct <= PROFILE_TOP_MAX_DISTINCT and 2 * c.distinct <= c.filled]
     top: dict[int, list[tuple[str, int]]] = {}
     if listed:
         try:

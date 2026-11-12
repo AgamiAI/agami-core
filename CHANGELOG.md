@@ -22,7 +22,7 @@ below corresponds to one such version.
   (96%)". The check also counts rows with no partner, which an inner join drops, and a key that
   repeats on the side it points at, which multiplies totals. A declared key on a database that
   doesn't enforce it now needs 95% of its values to match. Each table is also profiled, whole or
-  sampled the same way: how full each column is, its distinct count, range and most frequent values,
+  sampled the same way: how full each column is, its distinct count, range, the most frequent values of a coded column,
   and findings such as a column that is always empty or one value, a date after today on a column
   named for something that already happened, two dates in the reverse of their names' order, and a
   text column mixing date formats. Personal columns get counts only. The profile and the join

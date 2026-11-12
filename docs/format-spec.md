@@ -355,7 +355,7 @@ caveat, because they change with every load.
           "filled": 0.98,                   // share of rows read that are not NULL
           "blank_text": 0.01,               // text columns: share that is '' or spaces
           "distinct": 4,
-          "top": [{"value": "paid", "share": 0.81}],   // at most 50 distinct values: the 10 most frequent
+          "top": [{"value": "paid", "share": 0.81}],   // coded columns (≤50 values that repeat): the 10 most frequent
           "stand_ins": [{"value": "-1", "reason": "a negative key among positive ones"}]
         },
         "placed_at": {"type": "timestamp", "filled": 1.0, "distinct": 3900,
@@ -384,7 +384,9 @@ caveat, because they change with every load.
   DuckDB) and the first rows elsewhere. A join to a table over 3,000,000 rows is not checked. At most
   200 tables and 300 joins per run; two statements per table, up to eight join checks per statement.
 - **Personal columns** (flagged sensitive, or whose values look personal) carry counts only: no
-  `top`, no `min`/`max`. Frequent values are listed only for columns with at most 50 distinct values.
+  `top`, no `min`/`max`. Frequent values are listed only for coded columns: at most 50 distinct
+  values, each on two rows or more on average, so a column of one-off values (names, reference
+  numbers) on a small table isn't listed.
 - **Finding kinds:** `empty`, `mostly_blank` (blank on 90% or more), `constant` (one value on every
   row), `date_range` (dates after today on a column named for something that already happened),
   `date_order` (one date before another on 90% or more of the rows that have both, the reverse of
