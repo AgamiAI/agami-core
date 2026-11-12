@@ -123,3 +123,16 @@ def test_a_corrupt_state_file_is_treated_as_not_checked(art, monkeypatch):
     calls = _pip(monkeypatch, _listing("0.9.22"))
     UC.main(DAY)
     assert len(calls) == 1
+
+
+def test_pip_runs_from_a_neutral_folder(art, monkeypatch):
+    # A project's own pip.py or pip/ in the working directory must not run in place of pip.
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 0, stdout=_listing("0.9.25"), stderr="")
+
+    monkeypatch.setattr(UC.subprocess, "run", run)
+    UC.main(DAY)
+    assert seen["cwd"] == "/"

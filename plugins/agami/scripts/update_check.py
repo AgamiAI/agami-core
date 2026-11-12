@@ -58,10 +58,12 @@ def _record(path: Path, today: date) -> None:
 def newest_published() -> Optional[str]:
     """The newest agami-core version on the index pip is configured for, or None."""
     try:
+        # cwd="/": `python -m` searches the working directory first, so a project's own `pip.py`
+        # or `pip/` would run in place of pip (same guard as scripts/sm).
         out = subprocess.run(
             [sys.executable, "-m", "pip", "index", "versions", "agami-core",
              "--timeout", "3", "--retries", "0", "--disable-pip-version-check"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd="/",
         )
     except (OSError, subprocess.SubprocessError):
         return None
