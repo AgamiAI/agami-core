@@ -3029,6 +3029,146 @@ def report_items(run_dir: Path) -> list[dict]:
         })
     return items
 
+# --- Own examples (#645) ----------------------------------------------------------------------
+#
+# A run started from "Add my own" ends differently from a reconcile: the person asked to ADD their
+# statements as examples, so every row lands in exactly one of five lists, from the same items the
+# report page renders. Nothing here re-judges a row; the item's `status`, `fix` and `result` already
+# did, and this only reads them.
+#   add          the numbers agree and nothing in the person's query was proved wrong
+#   ask          the person's query disagrees with a definition: agami's answer on a filter, a date
+#                window, a join or the tables read, or a filter or metric the semantic model declares.
+#                Asked as "which should be the default?", and kept as an open question in the shape
+#                of a declared ambiguity (`name`, `when`, `options[{label, how}]`, `applies_to`), so a
+#                later step can propose it without re-reading the run
+#   fix          the data proved a part of the person's query wrong; never added
+#   reword       the query may not answer the question it came with
+#   not_checked  the row could not run, or brought no query of the person's
+# The card answers come back through `parse_reconcile_report.py` and move rows between the lists:
+# `nothing` on an add row leaves it out; on an ask row `change` makes theirs the default (through
+# /agami-save-correction), `example` keeps theirs for its own question, `fix` keeps agami's and adds
+# nothing, and no answer leaves the question open.
+
+_OWN_SETTLED = {"change": "yours", "example": "this_question", "fix": "agami"}
+
+
+def _slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")[:60] or "question"
+
+
+def _table_areas(root: Path | None) -> dict[str, str]:
+    """Each modelled table's bare name → its subject area, read from the model's own file layout
+    (`subject_areas/<area>/tables/<table>.yaml`). A name two areas share maps to neither."""
+    areas: dict[str, str] = {}
+    shared: set[str] = set()
+    for f in sorted((root / "subject_areas").glob("*/tables/*.yaml")) if root else []:
+        name = _fold(f.stem).split(".")[-1]
+        if name in areas and areas[name] != f.parent.parent.name:
+            shared.add(name)
+        areas[name] = f.parent.parent.name
+    return {k: v for k, v in areas.items() if k not in shared}
+
+
+def _receipt_tables(row_dir: Path) -> list[str]:
+    receipt = _load_json(row_dir / "statement-receipt.json") if (row_dir / "statement-receipt.json").exists() else None
+    names = []
+    for item in ((receipt or {}).get("tables") or {}).get("items", []):
+        name = item.get("ref") or item.get("qname")
+        if name and _fold(str(name)).split(".")[-1] not in [_fold(n).split(".")[-1] for n in names]:
+            names.append(str(name))
+    return names
+
+
+def _choice_options(item: dict, rec: dict, definitional: list[str]) -> list[dict]:
+    """The meanings a person could choose between, the person's own first: a filter the semantic model
+    declares and their query leaves out, and agami's query when the answers differ on a definition.
+    One option means there is no choice to ask about; a metric the semantic model lacks is not a
+    choice, it is a gap for /agami-save-correction, so it brings no option here."""
+    options = [{"label": "as your query has it", "how": item["sql_yours"]}]
+    if item["fix"] == "semantic_model":
+        for part in ((rec.get("ledger") or {}).get("rows") or []):
+            ev = part.get("evidence") or {}
+            if part.get("verdict") == MODEL_GAP and str(part.get("part", "")).startswith("default_filter:") and ev.get("expr"):
+                options.append({"label": "as the semantic model declares",
+                                "how": f"apply the declared filter {ev['expr']}"})
+    differs = item["result"].get("data") in ("differs", "partly")
+    if differs and definitional and item.get("sql_agami") and item["result"].get("query") == "different":
+        options.append({"label": "as agami answered", "how": item["sql_agami"]})
+    return options
+
+
+def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dict] | None = None,
+                 now: str | None = None) -> dict:
+    """The run's rows sorted into add / ask / fix / reword / not_checked, and the examples to write."""
+    items = report_items(run_dir)
+    records = {r["row"]: r for r in _done_rows(run_dir)[0]}
+    decided = {d["row"]: d for d in decisions or []}
+    areas = _table_areas(root)
+    plan: dict[str, Any] = {"run": run_dir.name, "add": [], "ask": [], "fix": [], "reword": [], "not_checked": []}
+    examples: dict[str, list[dict]] = {}
+    for item in items:
+        n, rec = item["row"], records.get(item["row"], {})
+        status, fix, result = item["status"], item["fix"], item["result"]
+        question = item["question"]
+        base = {"row": n, "question": question, "source": item.get("source")}
+        definitional = sorted(set(result.get("differs_in") or []) & _DEFINITIONAL)
+        tables = _receipt_tables(run_dir / "rows" / str(n))
+        if not item.get("sql_yours"):
+            plan["not_checked"].append({**base, "why": "no query of yours came with this row"})
+            continue
+        if status == "error":
+            plan["not_checked"].append({**base, "why": item["sentence"]})
+            continue
+        if fix == "query" or status == "expected_doubtful":
+            plan["fix"].append({**base, "why": item["sentence"], "change": item["change"]})
+            continue
+        if fix == "question":
+            plan["reword"].append({**base, "why": item["sentence"]})
+            continue
+        answer = decided.get(n, {}).get("decision")
+        options = _choice_options(item, rec, definitional)
+        if len(options) > 1:
+            plan["ask"].append({**base, "why": item["sentence"], "differs_in": definitional,
+                                "yours": item.get("expected"), "agami": item.get("answer"),
+                                "status": "settled" if answer in _OWN_SETTLED else "open",
+                                "settled_as": _OWN_SETTLED.get(answer),
+                                "candidate": {"name": _slug(question), "when": question, "behaviour": "ask",
+                                              "options": options, "applies_to": tables}})
+            if answer != "example":
+                continue  # only "keep mine for this question" adds it; the rest add nothing
+        elif status not in ("match", "match_unverified"):
+            plan["not_checked"].append({**base, "why": item["sentence"]})
+            continue
+        elif answer == "nothing":
+            plan["not_checked"].append({**base, "why": "left out on the card"})
+            continue
+        else:
+            plan["add"].append({**base, "why": item["sentence"], "unchecked": result.get("unchecked") or 0,
+                                "tables": tables})
+        area = next((areas[_fold(t).split(".")[-1]] for t in tables if _fold(t).split(".")[-1] in areas), None)
+        examples.setdefault(area or "", []).append({
+            "question": question, "sql": item["sql_yours"], "tables": [_fold(t).split(".")[-1] for t in tables],
+            "source": "own", "status": "confirmed", "created_at": now or _utc_now()})
+    for stale in run_dir.glob("own-examples.add.*.json"):
+        stale.unlink()  # a re-run after a card leaves out rows; an earlier file would still name them
+    written = {}
+    for area, exs in examples.items():
+        path = run_dir / f"own-examples.add.{area or 'no-area'}.json"
+        path.write_text(json.dumps(exs, indent=2), encoding="utf-8")
+        written[area or None] = str(path)
+    plan["examples_files"] = {k: v for k, v in written.items() if k}
+    # A table no area claims (or two areas share) has no area to write into; the skill asks.
+    plan["needs_area"] = written.get(None)
+    plan["counts"] = {k: len(plan[k]) for k in ("add", "ask", "fix", "reword", "not_checked")}
+    (run_dir / "own-examples.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    return plan
+
+
+def _utc_now() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class RecordError(Exception):
     """A row record could not be built from the row directory: the message names what is missing."""
 
@@ -3318,6 +3458,12 @@ def main(argv: list[str] | None = None) -> int:
     p_items.add_argument("--run-dir", required=True, dest="run_dir")
     p_items.add_argument("--out", default=None, help="where the items file goes (default <run-dir>/report-items.json)")
 
+    p_own = sub.add_parser("own-examples", help="Sort an own-examples run into add / ask / fix / reword / not_checked and write the examples to add.")
+    p_own.add_argument("--run-dir", required=True, dest="run_dir")
+    p_own.add_argument("--root", default=None, help="the profile's model folder, to file each example under its subject area")
+    p_own.add_argument("--decisions", default=None,
+                       help="parse_reconcile_report.py's output for the cards' answers; without it nothing is decided yet")
+
     p_status = sub.add_parser("status", help="The status a row gets, from the number comparison and the ledger's verdict.")
     p_status.add_argument("--match", required=True, choices=["true", "false", "none"],
                           help="reconcile.py diff's match, or none when the row could not run")
@@ -3385,6 +3531,32 @@ def main(argv: list[str] | None = None) -> int:
         for item in items:
             by_status[item["status"]] = by_status.get(item["status"], 0) + 1
         print(json.dumps({"items": len(items), "out": str(out), "by_status": by_status}, indent=2))
+        return 0
+
+    if args.cmd == "own-examples":
+        run_dir = Path(args.run_dir).expanduser()
+        if not (run_dir / "rows.jsonl").exists():
+            print(f"reconcile own-examples: no rows.jsonl in {run_dir}; finish the run first", file=sys.stderr)
+            return 2
+        decisions = None
+        if args.decisions:
+            try:
+                parsed = json.loads(Path(args.decisions).expanduser().read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f"reconcile own-examples: the decisions file could not be read: {exc}", file=sys.stderr)
+                return 2
+            # Only the parser's own verdict is applied: a block it sent back is not the person's answer.
+            if not isinstance(parsed, dict) or not parsed.get("ok") or (parsed.get("data") or {}).get("run") != run_dir.name:
+                print("reconcile own-examples: the decisions are not parse_reconcile_report.py's ok output for this run",
+                      file=sys.stderr)
+                return 2
+            decisions = parsed["data"]["decisions"]
+        try:
+            plan = own_examples(run_dir, root=Path(args.root).expanduser() if args.root else None, decisions=decisions)
+        except (json.JSONDecodeError, ValueError) as exc:
+            print(f"reconcile own-examples: {exc}", file=sys.stderr)
+            return 2
+        print(json.dumps(plan, indent=2))
         return 0
 
     if args.cmd == "next-chunk":
