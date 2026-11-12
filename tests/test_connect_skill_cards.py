@@ -731,7 +731,7 @@ def test_currency_and_flag_rate_asks_name_columns_in_words():
 
 
 def _join_candidates() -> str:
-    text = SKILL.read_text(encoding="utf-8")
+    text = skill_text("agami-connect")
     start = text.index("**Join candidates (tested, not written).**")
     return text[start:text.index("Never accept them all unasked")]
 
