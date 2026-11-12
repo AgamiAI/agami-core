@@ -1,7 +1,8 @@
 """agami-connect reads documents and describes larger models in parallel subagents.
 
-A doc reader per document runs while the database is read; on a model with 2+ areas and more than
-30 tables an enricher per area describes it. Subagents can't show question cards, so they only read
+A doc reader per document runs while the database is read; on a model of 2 or more chunks an
+enricher per chunk describes it, and an example writer per area drafts example questions during
+sign-off. Subagents can't show question cards, so they only read
 and return data: the main chat writes, one batch at a time, and an enricher's edits go through
 `sm curate --allow`, which refuses a batch that does anything but edit the allowed fields.
 """
@@ -34,7 +35,7 @@ def _agent(name: str) -> tuple[dict, str]:
     return yaml.safe_load(head), body
 
 
-@pytest.mark.parametrize("name", ["agami-doc-reader", "agami-enricher"])
+@pytest.mark.parametrize("name", ["agami-doc-reader", "agami-enricher", "agami-example-writer"])
 def test_each_agent_is_read_only_and_never_asks(name):
     meta, body = _agent(name)
     assert meta["name"] == name
@@ -42,14 +43,21 @@ def test_each_agent_is_read_only_and_never_asks(name):
     assert not tools & {"Edit", "NotebookEdit", "AskUserQuestion", "Agent"}, tools
     # the reader writes nothing; the enricher writes only its result file (Write, not a heredoc,
     # which a live run showed is easy to get wrong), and never the model
-    assert ("Write" in tools) == (name == "agami-enricher")
+    assert ("Write" in tools) == (name != "agami-doc-reader")
+    if name != "agami-doc-reader":
+        assert tools == {"Read", "Write"}, tools
     # neither runs commands: a subagent's commands each stop for permission (live run, Manual mode)
     assert "Bash" not in tools
     assert "never asks the person anything" in meta["description"]
     assert "**Never ask the person anything.**" in body
     # the reader returns its JSON; the enricher writes it to a file the engine applies whole
     assert ("One JSON object, nothing else after it" in body if name == "agami-doc-reader"
-            else "Write one JSON object to `result_path`" in body)
+            else "to `result_path`" in body)
+    if name == "agami-example-writer":
+        assert "never writes the model, never runs a command, never asks the person" in meta["description"]
+        assert len(meta["description"]) < 1024
+        assert "You run no commands" in body and "Never the model" in body
+        assert "skills/agami-connect/references/examples.md" in body  # one set of rules
 
 
 def test_the_doc_reader_cannot_run_commands_and_leaves_parsed_files_alone():
@@ -77,12 +85,12 @@ def test_1_5_gives_each_document_its_own_reader_in_the_background():
     assert "<plugin_root>/agents/agami-doc-reader.md" in text  # the fallback names the real file
 
 
-def test_2a_uses_enrichers_only_on_a_larger_model_and_applies_with_allow():
+def test_2a_uses_enrichers_from_two_chunks_and_applies_with_tables():
     text = (REFS / "enrich.md").read_text(encoding="utf-8")
-    assert "**2 or more subject areas and more than 30 tables**" in text
-    assert 'scripts/sm" apply-enrichment "$ROOT" --area <area>' in text
-    assert 'scripts/sm" enrich-input "$ROOT" --area <area> --profile <profile>' in text
-    assert "**Launch the enrichers in one message, in the foreground**" in text
+    assert "**2 or more chunks**" in text
+    assert 'scripts/sm" apply-enrichment "$ROOT" --area <area> --tables <t1,t2,…>' in text
+    assert 'scripts/sm" enrich-input "$ROOT" --area <area> --tables <t1,t2,…> --profile <profile>' in text
+    assert "parallel-work.md" in text
     assert "never split the file yourself" in text  # no glue script between agent and engine
     assert "never two writes at once" in text
     assert "<plugin_root>/agents/agami-enricher.md" in text
