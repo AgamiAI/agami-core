@@ -61,7 +61,8 @@ def test_an_unsigned_approve_after_include_or_reject_fails_the_batch(root, kind,
     assert any("signer" in e for e in res.errors), res.errors
 
 
-@pytest.mark.parametrize("signer, role", [("you@example.com", None), (None, "owner")])
+@pytest.mark.parametrize("signer, role", [("you@example.com", None), (None, "owner"),
+                                          ("   ", "owner"), ("you@example.com", " "), ("", "")])
 def test_an_approve_needs_both_signer_and_role(root, signer, role):
     res = curate.apply(root, _ops("metric", "revenue"), signer=signer, role=role)
     assert not res.applied and "signer" in res.errors[0]
@@ -74,6 +75,14 @@ def test_a_signed_approve_after_include_stamps_the_signer(root, kind, name):
     it = _item(root, kind, name)
     assert (it["review_state"], it["signed_off_by"], it["signed_off_role"], it["signed_off_at"]) == \
         ("approved", "you@example.com", "owner", AT)
+
+
+def test_an_approve_without_a_time_is_stamped_now(root):
+    ops = [{"op": "include", "kind": "metric", "area": "sales", "name": "revenue"},
+           {"op": "approve", "kind": "metric", "area": "sales", "name": "revenue"}]
+    res = curate.apply(root, ops, **SIGN)
+    assert res.validated, res.errors
+    assert _item(root, "metric", "revenue")["signed_off_at"]
 
 
 def test_sm_curate_without_signer_refuses_the_batch(root, tmp_path, capsys):

@@ -1911,6 +1911,8 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
         doc[fld] = val
         return before
     before = doc.get("review_state")
+    # A blank signer or role is saved as an empty string, so it is no sign-off either.
+    signer, role = (signer or "").strip() or None, (role or "").strip() or None
     if new_state == "approved" and not (signer and role):
         # Without one, an approve would keep whatever stamp the entry holds (another person's, or
         # none after an include earlier in the batch); refusing the batch matches what a join gets (#616).
@@ -1920,7 +1922,8 @@ def _set_trust(doc: dict, op: dict, new_state: Optional[str], signer, role,
     if new_state == "approved":
         doc["signed_off_by"] = signer
         doc["signed_off_role"] = role
-        doc["signed_off_at"] = op.get("at")  # caller stamps (Date.now unavailable here)
+        # The CLI stamps one time for the whole batch; a direct call without one gets now.
+        doc["signed_off_at"] = op.get("at") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if new_state in ("unreviewed", "rejected"):
         # clear stale sign-off on un-approve
         for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
