@@ -14,6 +14,21 @@ below corresponds to one such version.
 
 ### Added
 
+- **Onboarding asks what the data can't settle, and proposes ambiguities (#486).** The "What can
+  you share" card now opens with **Ask me as you go**, the default, for people with no document to
+  hand over. After the descriptions, a new step asks on cards, in plain words, only what the data
+  can't answer: which date "sales last month" means, which statuses "completed" covers, whether an
+  amount includes tax, which of two joins to the same table is meant, whether past rows count, a
+  fiscal year, codes nobody could decode, unreadable columns and look-alike tables. `sm
+  open-questions` finds the candidates from patterns in the model, runs every reading as a bounded
+  aggregate (one statement per table, one more for its dates and two for a fiscal-year check;
+  never a personal column, never a table whose estimated size is above the guard) and keeps only
+  those whose answers differ. Each question comes with its card, ready to ask unchanged; a check
+  that fails is reported by its error's class, and the step never calls a failed run settled. At most 12 are asked, with
+  **Skip the rest** on every card. Nothing is declared until the person answers: `sm curate`'s new
+  `add` op for an ambiguity is refused without `--signer` and `--role`, and the curation log records
+  who answered and when.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a

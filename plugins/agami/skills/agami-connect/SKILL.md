@@ -39,13 +39,14 @@ The same steps every run, in the person's words (no "introspect", "enrich" or "N
 3. Pick the tables
 4. Read the tables and joins
 5. Describe columns and add metrics
-6. Sign off definitions and hide personal data
-7. Write and check example questions
-8. Check your reports
-9. Summary and first question
+6. Answer what the data can't settle
+7. Sign off definitions and hide personal data
+8. Write and check example questions
+9. Check your reports
+10. Summary and first question
 ```
 
-Leave out a step that won't run (8 when no reports were shared in 1.5; 3 with a model spec workbook, which names the tables); never add your own working steps to this list. **When a step finishes, add its numbers to its label**, so the list reads as a running summary: *"Read the tables and joins — 21 tables, 19 joins"*, *"Describe columns and add metrics — 93% described, 7 metrics"*, *"Sign off definitions — 5 of 7 signed"*, *"Write and check example questions — 10 of 11 ran"*. Take every number from the command output that step already posts in its progress line, never an estimate; a step with nothing to count keeps its plain label. **Mark each step in progress when it starts and done the moment it ends**, exactly one in progress at a time, and keep it in progress while a card for that step is waiting, so the list shows where the person is while they decide. The sample path uses its own short list (Phase 0s).
+Leave out a step that won't run (6 when "Ask me as you go" wasn't picked in 1.5; 9 when no reports were shared in 1.5; 3 with a model spec workbook, which names the tables); never add your own working steps to this list. **When a step finishes, add its numbers to its label**, so the list reads as a running summary: *"Read the tables and joins — 21 tables, 19 joins"*, *"Describe columns and add metrics — 93% described, 7 metrics"*, *"Sign off definitions — 5 of 7 signed"*, *"Write and check example questions — 10 of 11 ran"*. Take every number from the command output that step already posts in its progress line, never an estimate; a step with nothing to count keeps its plain label. **Mark each step in progress when it starts and done the moment it ends**, exactly one in progress at a time, and keep it in progress while a card for that step is waiting, so the list shows where the person is while they decide. The sample path uses its own short list (Phase 0s).
 
 **Don't seed it again if the list already holds these steps** (the skill is resuming after a hand-off, a password page or a file wait). When `$ARGUMENTS == reintrospect`, the list starts at step 3.
 
@@ -100,7 +101,7 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 
      **An empty database gets no recommendation to ask it.** When every table in the active database's `sm model-tree` has `rows` of 0, the first option is `Ask a question` without "(Recommended)", its description says *"<database> has no rows, so answers will be empty"*, and `Connect another database` is marked **(Recommended)** instead.
 
-     Route "Other" text by what it asks for. An action goes to that action: re-introspect, reload or refresh the schema → `Reload the schema`; add a schema that lives in the same database → `Reload the schema` with the schema selection in 1.3 widened to the old and new schemas (see the note under 1.1: same database, another schema is a re-introspect, never a new database); review or sign off the model, edit descriptions, exclude tables → [agami-model](../agami-model/SKILL.md); add or connect a different database → `Connect another database`. Only a question goes to agami-query. When the text could be either (a schema name alone, say), ask which with a card rather than guess.
+     Route "Other" text by what it asks for. An action goes to that action: re-introspect, reload or refresh the schema → `Reload the schema`; add a schema that lives in the same database → `Reload the schema` with the schema selection in 1.3 widened to the old and new schemas (see the note under 1.1: same database, another schema is a re-introspect, never a new database); review or sign off the model, edit descriptions, exclude tables → [agami-model](../agami-model/SKILL.md); add or connect a different database → `Connect another database`; answer the open questions, or what the data can't settle → [2g](#2g--ask-what-the-data-cant-settle) on the active database. Only a question goes to agami-query. When the text could be either (a schema name alone, say), ask which with a card rather than guess.
 
      This card replaces the 1.1 menu for a returning person; don't ask 1.1 again after it.
 
@@ -646,10 +647,12 @@ The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion,
 
 | label | description | then |
 |---|---|---|
+| `Ask me as you go (Recommended)` | I'll answer what the data can't settle. Picked alone: build from the database and ask only that | Nothing now. After the descriptions, [2g](#2g--ask-what-the-data-cant-settle) asks on cards only what the data itself can't answer. |
 | `Definitions or a semantic layer` | A data dictionary, metrics list, ERD, spec workbook, or a dbt / LookML / Cube repo | A follow-up card: *"Type the file or folder path in Other, or attach the file to your next message."*, options **Skip this one** / **I'll attach it** (wait for the attachment). Then read it as the sections below say: a doc, a column dictionary, a model spec workbook, or a semantic-layer repo by what the path holds. |
 | `Questions people ask` | Real questions from your team; they become checked examples | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
 | `Report SQL or dashboards` | SQL you trust, an export, or a screenshot; checked against the model after the build | A follow-up card: *"Type a path to a .sql or .csv file in Other, or attach a screenshot to your next message."*, options **Skip this one** / **I'll attach it**. Copy files or pasted SQL into `<artifacts_dir>/local/reconcile/inbox/` (SQL as `<ts>.sql`, a CSV as is; note a screenshot's path). Phase 6b hands them to `/agami-reconcile`. |
-| `Nothing to share` | Build from the database alone | Go to 1.6. Picked with another option: say it back and ask the card again. |
+
+`Ask me as you go` comes first because most people have no document to hand over, and a model built from the database alone guesses wherever the data has two readings: knowledge is asked for where the data shows a gap, not handed over up front. It goes with any of the others, and picked alone it is also the card's "nothing to hand over" answer, so the card can always be submitted. A person who wants neither documents nor questions types it in "Other" ("nothing", "don't ask me"): build from the database alone and leave 2g out.
 
 **"Other" on the context card** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
@@ -1110,6 +1113,41 @@ If the user **did** write a narrative in 1.4, leave it untouched. The glossary f
 
 **The company draft (from 1.4 A's "Draft it from the database").** Write two or three plain sentences on what the business does, inferred only from the subject areas and table descriptions you just wrote (never from general knowledge of a company name), and apply them as 1.4 A says (`sm set-org` plus `organization.md`), with the first line of `organization.md` reading *"Draft from the database; correct it in /agami-model."*. Phase 7 shows it for correction.
 
+### 2g — Ask what the data can't settle
+
+**Runs when 1.5's `Ask me as you go` was picked** (alone or with others), after 2a–2f, so the descriptions are written and the build knows what it couldn't read; also when a returning person asks for it ("ask me the open questions"). Otherwise leave it out, with its step in the list. The person is asked only what the data can't answer, in plain English, on cards; a document is asked for only for what only a person knows (1.5 did that). Say what happens first, in one line, with no duration: *"Checking a few things in the data that could be read two ways, one query per table."* Then:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" open-questions "$ROOT" --profile <profile>
+```
+
+It is read-only: each check is an aggregate over one table through `execute_sql`'s gates (one statement per table, one more for its dates, two for a fiscal-year check), no table whose estimated size is above introspection's guard, and never a column flagged personal. It prints `{questions, more, counts, failed, dropped, skipped, tables_probed, statements}`. Every `kind: ambiguity` question has been **checked on the data**: the command ran each reading (counted by each date, summed each amount, counted each status set) and kept the question only when the answers differ; the ones whose readings agree are under `dropped` with the reason, and are never asked. The other kinds are what the build already knows it couldn't read: `coded_values` (codes whose meanings enrichment left blank), `unknown_column` (a column marked unreadable in 2a) and `look_alike` (two tables named alike, `orders` and `orders_old`). `questions` holds at most 12, ambiguities first and the widest-apart first; `more` counts the rest, which are not asked this run.
+
+Post one progress line from its output: `✓ Checked <tables_probed> tables (<statements> queries): <counts.ambiguities> things the data reads two ways, <counts.coded_values> code lists and <counts.unknown_columns> columns I couldn't read.` **When `counts.failed` is not 0, say so on the next line, before anything else: *"<counts.failed> tables couldn't be checked: <reason>"*** (the `reason` of the entries in `failed`: the error's kind, such as a dropped connection). A check that failed settled nothing, so never say the data settled anything while `counts.failed` is not 0. When `questions` is empty and nothing failed, say *"The data settled everything I checked."* and go to Phase 3; when `questions` is empty and checks failed, offer to run it again once the connection works, and go on.
+
+**Show them before asking** ([question-cards rule 3](../../shared/question-cards.md#3-a-result-is-chat-output-before-the-card-that-acts-on-it)): a table, `# | Question | What the data shows`, one row per question, its `question` and its `evidence` (a code or column question has no evidence: leave the cell empty), then *"and <more> more I won't ask now"* when `more` is not 0.
+
+**Then the cards: each question's `card`, passed to AskUserQuestion unchanged**, up to 4 questions per card, in order. The command builds every `card` within [question-cards.md](../../shared/question-cards.md)'s limits, so don't reword its question, rename its header, or add, drop or reorder an option: a live run that wrote its own cards dropped **Skip the rest** and invented a reading the data never showed. What the cards hold, so you can act on the answers: no option is marked Recommended (which date a word means is a fact only the person knows); every question ends with **Skip the rest**, so the list can be ended in one press, like *Approve all remaining* on the sign-off cards; an `ambiguity` offers its first two readings and **Ask each time** (a third reading, listed in that option's preview, is picked by typing its label in "Other"); a `look_alike` offers its two tables and **Both are in use**; `coded_values` and `unknown_column` take the meaning typed in "Other", with **Not sure**.
+
+**Recording the answers: as the person's, with who and when.** Before the first write, take `reviewer_email` and `reviewer_role` from `<artifacts_dir>/local/.config`; when either is missing, ask Phase 4's identity card (its email and role questions, saved under the same keys), which Phase 4 then doesn't ask again. **Don't sign anything yet** on that card writes nothing: say the answers weren't recorded, that the same questions come back the next time this step runs, and go to Phase 3. `curate` refuses an ambiguity signed by anyone but the `reviewer_email` that `.config` records. After each card, write its answers in one `sm curate` batch with `--signer "<reviewer_email>" --role "<reviewer_role>"`: the curation log records each answer with the signer, the role and the time (`sm history "$ROOT"` shows them), and the model holds only what the person said, never your reading of the data in their name. **Only an answer the person gave on a card is written with `--signer`**, and only under an email they typed (on Phase 4's identity card, now or earlier) or that `.config` already holds: never one taken from git, the environment, the Claude login or memory, and never a meaning you worked out yourself. A code list you can decode from the data (country codes, say) is 2a's job: write it there with `source: ai` and no signer, then run `open-questions` again so it isn't asked; a live run that filled one in and signed it in an invented name is why this rule exists. Each question carries the op its answer completes; never write one by hand:
+
+| answer | op |
+|---|---|
+| a reading of an `ambiguity` | its `op` with `"default": "<that option's label>"` (the agent answers with it and offers the others) |
+| **Ask each time** | its `op` with `"behaviour": "ask"` (no default) |
+| a table of a `look_alike` | that entry's `ops` (a caveat on the other table, saying which holds the current data) |
+| meanings typed for `coded_values` | its `op`, with each named code's label filled into `value` (the codes not named keep their blank label) |
+| words typed for an `unknown_column` | its `op`, with the words as `value` (it is stamped `source: human`) |
+| **Both are in use**, **Not sure** | nothing |
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-answers.json" --signer "<reviewer_email>" --role "<reviewer_role>"
+```
+
+**Skip the rest** applies the card's other answers and asks nothing more; say how many were left, and that they come back the next time the schema is reloaded. **"Other" on an ambiguity** that names one of its options is that option; one that says the word isn't ambiguous here ("it's always the paid date") is that option too. A code typed for `coded_values` that isn't one of its `values`, or words you can't place, are re-asked, never guessed: say in one line what didn't match and ask the same card again; a question ("which one do the reports use?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). `curate`'s `skipped` (an ambiguity already declared, say) is said back in one line.
+
+When an answer changes a metric proposed in 2c (people mean the total with tax, and the metric sums the subtotal), say which metric in one line; it is fixed on its sign-off card in Phase 4, where "Other" takes the change. Then post: `✓ Recorded <k> answers as yours: <a> questions with two readings, <c> code lists, <d> column descriptions.`, every number from `curate`'s `applied`.
+
 ---
 
 ## Phase 3: Review the subject-area split
@@ -1377,6 +1415,8 @@ agami-connect just ran. Here's what we found:
   that use them and self-approve as you query.
 ```
 (Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
+
+When 2g ran, one line from its answers: *"<k> answers recorded as yours; <n> questions left for the next reload."* (leave out the second clause when none are left).
 
 When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 

@@ -808,6 +808,24 @@ def cmd_remove_example(args) -> int:
     return 0 if (res.applied or not res.skipped) else 1
 
 
+def cmd_open_questions(args) -> int:
+    """The questions the data can't settle, for the build's "ask me as you go" step (#486): candidate
+    ambiguities found from patterns in the model and kept only when running both readings gives
+    different answers, then coded values and columns the build couldn't read. Read-only: each probe
+    is a bounded aggregate through `execute_sql`'s gates, and nothing is declared; each candidate
+    carries the `curate` op a person's answer completes."""
+    from . import dialects as D
+    from . import introspect as INTRO
+    from . import open_questions as OQ
+    org = L.load_datasource(args.root)
+    if not org.storage_connections:
+        _print_json({"error": "the model declares no storage connection, so there is nothing to probe"})
+        return 2
+    dialect = D.get_dialect(org.storage_connections[0].storage_type)
+    _print_json(OQ.open_questions(org, INTRO.make_execute_sql_runner(args.profile), dialect))
+    return 0
+
+
 def cmd_suggest_units(args) -> int:
     """List the numeric **money** columns (so a currency `unit` can be stamped) using the
     tested name matcher — never a hand-rolled regex that mis-handles `count` inside
@@ -2234,6 +2252,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "from the customer's dictionary, stamped metadata; not checked against the data "
                          "(see #564); never replaces a description a person wrote")
     sp.set_defaults(func=cmd_describe_file)
+
+    sp = sub.add_parser("open-questions", help="what the data can't settle: candidate ambiguities checked by running both readings, plus coded values and columns the build couldn't read (read-only; nothing is declared)")
+    sp.add_argument("root")
+    sp.add_argument("--profile", required=True, help="the database to probe (bounded aggregates only)")
+    sp.set_defaults(func=cmd_open_questions)
 
     sp = sub.add_parser("suggest-units", help="list numeric money columns (for currency-unit stamping) via the tested name matcher")
     sp.add_argument("root")

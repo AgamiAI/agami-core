@@ -159,6 +159,12 @@ class Dialect:
             return f"{self.quote_ident(schema)}.{self.quote_ident(table)}"
         return self.quote_ident(table)
 
+    def date_literal(self, iso_day: str) -> str:
+        """A `YYYY-MM-DD` day to compare a date, timestamp or ISO-text column against. A plain string
+        literal is what most engines coerce on both kinds of column (BigQuery refuses a DATE literal
+        beside a TIMESTAMP); the engines that never coerce a string override it."""
+        return self.quote_lit(iso_day)
+
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
         """Per-row 'days between two columns' (identifiers as written) for an avg-duration metric.
@@ -787,6 +793,10 @@ class Trino(Dialect):
     fk_enforced = False  # Trino generally has no constraints -> probe FKs
     duration_rounds = True
 
+    def date_literal(self, iso_day: str) -> str:
+        # Trino compares no timestamp with a varchar; a DATE literal is coerced to the column's type.
+        return f"DATE {self.quote_lit(iso_day)}"
+
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
         return f"date_diff('day', {start}, {end})"
@@ -829,6 +839,10 @@ class SQLServer(Dialect):
     _SYS_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
     case_insensitive_compare = True   # the default collations are *_CI_*
 
+
+    def date_literal(self, iso_day: str) -> str:
+        # `'YYYY-MM-DD'` is read through the session's DATEFORMAT for a datetime; `'YYYYMMDD'` never is.
+        return self.quote_lit(iso_day.replace("-", ""))
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
 
@@ -1119,6 +1133,10 @@ class Oracle(Dialect):
     name = "Oracle"
     limit_style = "fetch"
     folds_unquoted = "upper"
+
+    def date_literal(self, iso_day: str) -> str:
+        # A bare string is read through the session's NLS_DATE_FORMAT, which need not be ISO.
+        return f"DATE {self.quote_lit(iso_day)}"
     reserved_extra = frozenset({
         "access", "add", "alter", "audit", "char", "cluster", "comment", "compress", "connect",
         "date", "decimal", "exclusive", "file", "float", "identified", "immediate", "increment",
