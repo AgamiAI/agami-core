@@ -151,6 +151,8 @@ def test_each_row_lands_in_exactly_one_list(tmp_path):
         "reword": 0,
         "not_checked": 2,
         "collisions": 0,
+        "duplicates": 0,
+        "needs_area": 0,
         "written": 2,
     }
 
@@ -171,7 +173,7 @@ def test_a_query_the_data_proved_wrong_is_never_written_as_an_example(tmp_path):
 def test_examples_are_filed_by_area_signed_later_and_marked_as_the_persons_own(tmp_path):
     run = _plan_run(tmp_path)
     plan = reconcile.own_examples(run, root=_model(tmp_path), now="2026-11-12T00:00:00Z")
-    assert set(plan["examples_files"]) == {"sales"} and plan["needs_area"] is None
+    assert set(plan["examples_files"]) == {"sales"} and plan["needs_area"] == []
     (first, second) = json.loads(Path(plan["examples_files"]["sales"]).read_text())
     assert first == {
         "question": SCALAR_MATCH["question"],
@@ -187,10 +189,9 @@ def test_examples_are_filed_by_area_signed_later_and_marked_as_the_persons_own(t
 def test_a_table_no_area_claims_is_written_apart_for_the_skill_to_ask(tmp_path):
     run = _plan_run(tmp_path)
     plan = reconcile.own_examples(run, root=None)
-    assert (
-        plan["examples_files"] == {}
-        and Path(plan["needs_area"]).name == "own-examples.add.no-area.json"
-    )
+    # nothing is written until the Area card is answered; then the same run, with --area
+    assert plan["examples_files"] == {} and not list(run.glob("own-examples.add.*.json"))
+    assert [r["row"] for r in plan["needs_area"]] == [1, 6, 7, 8]
 
 
 def test_an_open_question_has_the_shape_of_a_declared_ambiguity(tmp_path):
@@ -247,10 +248,14 @@ def test_card_answers_settle_questions_and_leave_rows_out(tmp_path):
 
 def test_a_rerun_leaves_no_stale_examples_file(tmp_path):
     run = _plan_run(tmp_path)
-    reconcile.own_examples(run, root=None)
-    assert (run / "own-examples.add.no-area.json").exists()
     reconcile.own_examples(run, root=_model(tmp_path))
-    assert not (run / "own-examples.add.no-area.json").exists()
+    assert (run / "own-examples.add.sales.json").exists()
+    reconcile.own_examples(
+        run,
+        root=_model(tmp_path),
+        decisions=[{"row": 1, "decision": "nothing"}, {"row": 8, "decision": "nothing"}],
+    )
+    assert not (run / "own-examples.add.sales.json").exists()
 
 
 def test_the_cli_applies_only_the_parsers_ok_answer_for_this_run(tmp_path, capsys):
@@ -368,8 +373,123 @@ def test_an_existing_example_under_the_same_question_is_never_overwritten_silent
     assert (clash["row"], clash["existing_source"], clash["replace"]) == (1, "correction", False)
     written = [e["question"] for e in json.loads(Path(plan["examples_files"]["sales"]).read_text())]
     assert written == [NO_METRIC["question"]]
-    # "Replace it" on the card is an `example` decision for that row
+    # "Replace it" on the collision card is --replace for that row, and nothing else
     plan = reconcile.own_examples(run, root=root, decisions=[{"row": 1, "decision": "example"}])
+    assert plan["collisions"][0]["replace"] is False and plan["counts"]["written"] == 1
+    plan = reconcile.own_examples(run, root=root, replace={1})
     assert plan["collisions"][0]["replace"] is True
     written = [e["question"] for e in json.loads(Path(plan["examples_files"]["sales"]).read_text())]
     assert written == [SCALAR_MATCH["question"], NO_METRIC["question"]]
+
+
+# --- Copilot review on #649 ----------------------------------------------------------------------
+
+
+def test_nothing_is_written_when_the_question_fit_is_unconfirmed(tmp_path):
+    # A model gap returns the "semantic model" fix before fit is looked at; fit must still gate.
+    unfit = dict(
+        OMITS_DEFAULT,
+        row=2,
+        ledger={
+            "rows": [
+                _part("runs", "confirmed"),
+                _part("question_fit", "unresolved", {"fit": "doubtful"}),
+                _part(
+                    "default_filter:orders:orders.status != 'cancelled'",
+                    "model_gap",
+                    {"table": "orders", "expr": "orders.status != 'cancelled'"},
+                    kind="filter",
+                ),
+            ],
+            "verdict": "model_gap",
+            "counts": {},
+        },
+    )
+    no_fit = dict(
+        SCALAR_MATCH,
+        row=3,
+        ledger={"rows": [_part("runs", "confirmed")], "verdict": "confirmed", "counts": {}},
+    )
+    run = _run(tmp_path, [unfit, no_fit])
+    _receipt(run, 2, "orders")
+    _receipt(run, 3, "orders")
+    plan = reconcile.own_examples(
+        run, root=_model(tmp_path), decisions=[{"row": 2, "decision": "example"}]
+    )
+    assert [r["row"] for r in plan["reword"]] == [2, 3]
+    assert plan["written"] == [] and plan["ask"] == [] and plan["add"] == []
+
+
+def test_a_disputed_row_shows_its_clash_before_the_card_and_mine_only_is_not_replace(tmp_path):
+    root = _model(tmp_path)
+    (root / "prompt_examples" / "sales").mkdir(parents=True)
+    (root / "prompt_examples" / "sales" / "examples.yaml").write_text(
+        f"- question: {OMITS_DEFAULT['question']}\n  sql: SELECT channel, COUNT(*) FROM orders"
+        " WHERE status != 'cancelled' GROUP BY channel\n  source: correction\n"
+    )
+    run = _plan_run(tmp_path)
+    plan = reconcile.own_examples(run, root=root)  # before any card
+    assert [(c["kind"], c["row"]) for c in plan["collisions"]] == [("kept", 7)]
+    plan = reconcile.own_examples(run, root=root, decisions=[{"row": 7, "decision": "example"}])
+    assert 7 not in [w["row"] for w in plan["written"]]
+    plan = reconcile.own_examples(
+        run, root=root, decisions=[{"row": 7, "decision": "example"}], replace={7}
+    )
+    assert 7 in [w["row"] for w in plan["written"]]
+
+
+def test_two_incoming_rows_under_one_question_are_never_both_written(tmp_path):
+    same_a = dict(SCALAR_MATCH, row=1)
+    same_b = dict(SCALAR_MATCH, row=2)  # the same SQL: a duplicate, written once
+    other = dict(SCALAR_MATCH, row=3, statement="SELECT SUM(net_amount) AS revenue FROM orders")
+    run = _run(tmp_path, [same_a, same_b, other])
+    for n in (1, 2, 3):
+        _receipt(run, n, "orders")
+    plan = reconcile.own_examples(run, root=_model(tmp_path))
+    assert plan["duplicates"] == [{"row": 2, "question": SCALAR_MATCH["question"], "same_as": 1}]
+    (clash,) = plan["collisions"]
+    assert clash["kind"] == "incoming" and [r["row"] for r in clash["rows"]] == [1, 3]
+    assert clash["chosen"] is None and plan["written"] == []
+    plan = reconcile.own_examples(run, root=_model(tmp_path), replace={3})
+    assert [w["row"] for w in plan["written"]] == [3]
+    (only,) = json.loads(Path(plan["examples_files"]["sales"]).read_text())
+    assert only["sql"] == other["statement"]
+
+
+def test_a_query_over_two_areas_goes_to_the_area_card_then_its_clash_is_checked(tmp_path, capsys):
+    root = _model(tmp_path)
+    (root / "prompt_examples" / "traffic").mkdir(parents=True)
+    (root / "prompt_examples" / "traffic" / "examples.yaml").write_text(
+        f"- question: {SCALAR_MATCH['question']}\n  sql: SELECT 1\n  source: correction\n"
+    )
+    run = _run(tmp_path, [SCALAR_MATCH])
+    _receipt(run, 1, "orders", "arrivals")  # sales and traffic
+    plan = reconcile.own_examples(run, root=root)
+    assert [r["row"] for r in plan["needs_area"]] == [1] and plan["written"] == []
+    # the Area card's answer, then the clash in that area holds it until "Replace it"
+    plan = reconcile.own_examples(run, root=root, area_for={1: "traffic"})
+    assert plan["needs_area"] == [] and [c["area"] for c in plan["collisions"]] == ["traffic"]
+    assert plan["written"] == []
+    assert (
+        reconcile.main(
+            [
+                "own-examples",
+                "--run-dir",
+                str(run),
+                "--root",
+                str(root),
+                "--area",
+                "1=traffic",
+                "--replace",
+                "1",
+            ]
+        )
+        == 0
+    )
+    assert [w["area"] for w in json.loads(capsys.readouterr().out)["written"]] == ["traffic"]
+    assert (
+        reconcile.main(
+            ["own-examples", "--run-dir", str(run), "--root", str(root), "--area", "1=nowhere"]
+        )
+        == 2
+    )

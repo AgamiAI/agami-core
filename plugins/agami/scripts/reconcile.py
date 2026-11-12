@@ -501,11 +501,21 @@ def _leading_comment(chunk: str, *, after_statement: bool) -> tuple[str, str | N
     the last block of comment lines counts: a blank line ends a block, so a file's header comment is
     not merged into its first statement's label."""
     pos = 0
-    if after_statement:
-        first = chunk.split("\n", 1)[0].strip()
-        if first.startswith(("--", "/*")):
-            end = chunk.find("\n")
+    while after_statement:
+        # What follows the `;` on its own line: a `--` comment runs to the line's end, a block comment
+        # to its `*/` (which may be on a later line, or followed by the next statement).
+        pos += len(chunk[pos:]) - len(chunk[pos:].lstrip(" \t\r"))
+        if chunk.startswith("/*", pos):
+            end = chunk.find("*/", pos + 2)
+            pos = len(chunk) if end < 0 else end + 2
+        elif chunk.startswith("--", pos):
+            end = chunk.find("\n", pos)
             pos = len(chunk) if end < 0 else end + 1
+            break
+        else:
+            if chunk.startswith("\n", pos):
+                pos += 1
+            break
     block: list[str] = []
     while True:
         pos += len(chunk[pos:]) - len(chunk[pos:].lstrip(" \t\r"))
@@ -3155,23 +3165,41 @@ def _choice_options(item: dict, rec: dict, definitional: list[str]) -> list[dict
     return options[:2]
 
 
+def _norm_sql(sql: Any) -> str:
+    return " ".join(str(sql or "").split())
+
+
+def _fit_confirmed(rec: dict) -> bool:
+    """Whether the ledger confirmed that the statement answers its question. Nothing is written as
+    the person's example without it, whatever the fix says: a sound query under the wrong question
+    is the most harmful example there is."""
+    parts = (rec.get("ledger") or {}).get("rows") or []
+    return any(p.get("part") == "question_fit" and p.get("verdict") == CONFIRMED for p in parts)
+
+
+def _row_area(tables: list[str], areas: dict[str, str]) -> str | None:
+    """The one subject area every table the statement reads belongs to; None when any table has no
+    single area or they span several, so the person is asked rather than the first table winning."""
+    found = {areas.get(_fold(t).split(".")[-1]) for t in tables}
+    return next(iter(found)) if len(found) == 1 and None not in found else None
+
+
 def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dict] | None = None,
+                 replace: set[int] | None = None, area_for: dict[int, str] | None = None,
                  now: str | None = None) -> dict:
-    """The run's rows sorted into add / ask / fix / reword / not_checked, and the examples to write."""
+    """The run's rows sorted into add / ask / fix / reword / not_checked, and the examples to write.
+
+    `decisions` are the cards' answers (parse_reconcile_report.py's), `replace` the rows the person
+    said "Replace it" for on the collision card, and `area_for` the areas picked on the Area card.
+    Replacing is only ever `replace`: no other answer is read as permission to overwrite."""
     items = report_items(run_dir)
     records = {r["row"]: r for r in _done_rows(run_dir)[0]}
     decided = {d["row"]: d for d in decisions or []}
+    replace, area_for = set(replace or ()), dict(area_for or {})
     areas = _table_areas(root)
     plan: dict[str, Any] = {"run": run_dir.name, "add": [], "ask": [], "fix": [], "reword": [], "not_checked": [],
-                            "collisions": [], "written": []}
-    examples: dict[str, list[dict]] = {}
-    cache: dict[str, dict[str, dict]] = {}
-
-    def existing(area: str) -> dict[str, dict]:
-        if area not in cache:
-            cache[area] = _existing_examples(root, area)
-        return cache[area]
-
+                            "collisions": [], "duplicates": [], "needs_area": [], "written": []}
+    candidates: list[dict] = []
     for item in items:
         n, rec = item["row"], records.get(item["row"], {})
         status, fix, result = item["status"], item["fix"], item["result"]
@@ -3188,8 +3216,9 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
         if fix == "query" or status == "expected_doubtful":
             plan["fix"].append({**base, "why": item["sentence"], "change": item["change"]})
             continue
-        if fix == "question":
-            plan["reword"].append({**base, "why": item["sentence"]})
+        if fix == "question" or not _fit_confirmed(rec):
+            plan["reword"].append({**base, "why": item["sentence"] if fix == "question" else
+                                   "whether your query answers this question could not be confirmed"})
             continue
         answer = decided.get(n, {}).get("decision")
         options = _choice_options(item, rec, definitional)
@@ -3205,8 +3234,9 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
                                 "settled_as": _OWN_SETTLED.get(answer),
                                 "candidate": {"name": _slug(question), "when": question, "behaviour": "ask",
                                               "options": options, "applies_to": tables}})
-            if answer != "example":
-                continue  # only "keep mine for this question" adds it; the rest add nothing
+            # Only "Mine for this question only" writes it; it is still a candidate now, so a clash
+            # is shown before that card is answered, not discovered after.
+            write = answer == "example"
         elif status not in ("match", "match_unverified"):
             plan["not_checked"].append({**base, "why": item["sentence"]})
             continue
@@ -3219,32 +3249,67 @@ def own_examples(run_dir: Path, *, root: Path | None = None, decisions: list[dic
             unchecked = sum(1 for part in ((rec.get("ledger") or {}).get("rows") or [])
                             if part.get("verdict") == UNRESOLVED)
             plan["add"].append({**base, "why": item["sentence"], "unchecked": unchecked, "tables": tables})
-        area = next((areas[_fold(t).split(".")[-1]] for t in tables if _fold(t).split(".")[-1] in areas), None)
-        clash = existing(area).get(question) if area else None
-        if clash is not None and " ".join(str(clash.get("sql", "")).split()) != " ".join(item["sql_yours"].split()):
-            # `sm add-example` replaces by question: an example already kept under this question
-            # (a correction, a reviewed seed) is never overwritten unless the person said so.
-            plan["collisions"].append({**base, "area": area, "existing_source": clash.get("source"),
-                                       "existing_status": clash.get("status"), "existing_sql": clash.get("sql"),
-                                       "replace": answer == "example"})
-            if answer != "example":
-                continue
-        plan["written"].append({**base, "area": area})
-        examples.setdefault(area or "", []).append({
-            "question": question, "sql": item["sql_yours"], "tables": [_fold(t).split(".")[-1] for t in tables],
+            write = True
+        area = area_for.get(n) or _row_area(tables, areas)
+        candidates.append({**base, "sql": item["sql_yours"], "tables": tables, "area": area, "write": write})
+
+    held: set[int] = set()
+    for c in candidates:
+        if c["area"] is None:
+            plan["needs_area"].append({k: c[k] for k in ("row", "question", "tables")})
+            held.add(c["row"])
+    # Two of the person's own rows under one question in one area: `sm add-example` keeps the last.
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for c in candidates:
+        if c["area"] is not None:
+            groups.setdefault((c["area"], c["question"]), []).append(c)
+    for (area, question), group in groups.items():
+        first = group[0]
+        for c in group[1:]:
+            if _norm_sql(c["sql"]) == _norm_sql(first["sql"]):
+                plan["duplicates"].append({"row": c["row"], "question": question, "same_as": first["row"]})
+                held.add(c["row"])
+        distinct = [c for c in group if c["row"] not in held]
+        if len({_norm_sql(c["sql"]) for c in distinct}) > 1:
+            chosen = [c["row"] for c in distinct if c["row"] in replace]
+            plan["collisions"].append({"kind": "incoming", "area": area, "question": question,
+                                       "rows": [{"row": c["row"], "sql": c["sql"]} for c in distinct],
+                                       "chosen": chosen[0] if len(chosen) == 1 else None})
+            held.update(c["row"] for c in distinct if not (len(chosen) == 1 and c["row"] == chosen[0]))
+    # An example the area already keeps under the question, with other SQL (a correction, a reviewed
+    # seed): never overwritten unless the person said "Replace it" for that row.
+    cache: dict[str, dict[str, dict]] = {}
+    for c in candidates:
+        if c["area"] is None:
+            continue
+        if c["area"] not in cache:
+            cache[c["area"]] = _existing_examples(root, c["area"])
+        clash = cache[c["area"]].get(c["question"])
+        if clash is not None and _norm_sql(clash.get("sql")) != _norm_sql(c["sql"]):
+            plan["collisions"].append({"kind": "kept", "row": c["row"], "question": c["question"], "area": c["area"],
+                                       "existing_source": clash.get("source"), "existing_status": clash.get("status"),
+                                       "existing_sql": clash.get("sql"), "replace": c["row"] in replace})
+            if c["row"] not in replace:
+                held.add(c["row"])
+
+    examples: dict[str, list[dict]] = {}
+    for c in candidates:
+        if not c["write"] or c["row"] in held:
+            continue
+        plan["written"].append({"row": c["row"], "question": c["question"], "source": c["source"], "area": c["area"]})
+        examples.setdefault(c["area"], []).append({
+            "question": c["question"], "sql": c["sql"], "tables": [_fold(t).split(".")[-1] for t in c["tables"]],
             "source": "own", "status": "confirmed", "created_at": now or _utc_now()})
     for stale in run_dir.glob("own-examples.add.*.json"):
         stale.unlink()  # a re-run after a card leaves out rows; an earlier file would still name them
-    written = {}
+    plan["examples_files"] = {}
     for area, exs in examples.items():
-        path = run_dir / f"own-examples.add.{area or 'no-area'}.json"
+        path = run_dir / f"own-examples.add.{area}.json"
         path.write_text(json.dumps(exs, indent=2), encoding="utf-8")
-        written[area or None] = str(path)
-    plan["examples_files"] = {k: v for k, v in written.items() if k}
+        plan["examples_files"][area] = str(path)
     plan["collisions_checked"] = root is not None and importlib.util.find_spec("semantic_model") is not None
-    # A table no area claims (or two areas share) has no area to write into; the skill asks.
-    plan["needs_area"] = written.get(None)
-    plan["counts"] = {k: len(plan[k]) for k in ("add", "ask", "fix", "reword", "not_checked", "collisions", "written")}
+    plan["counts"] = {k: len(plan[k]) for k in ("add", "ask", "fix", "reword", "not_checked", "collisions",
+                                                "duplicates", "needs_area", "written")}
     (run_dir / "own-examples.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
     return plan
 
@@ -3558,6 +3623,10 @@ def main(argv: list[str] | None = None) -> int:
     p_own = sub.add_parser("own-examples", help="Sort an own-examples run into add / ask / fix / reword / not_checked and write the examples to add.")
     p_own.add_argument("--run-dir", required=True, dest="run_dir")
     p_own.add_argument("--root", default=None, help="the profile's model folder, to file each example under its subject area")
+    p_own.add_argument("--replace", type=int, action="append", default=[],
+                       help="a row the person answered Replace it for on the collision card (repeat)")
+    p_own.add_argument("--area", action="append", default=[], dest="areas", metavar="ROW=AREA",
+                       help="the subject area picked on the Area card for a row (repeat)")
     p_own.add_argument("--decisions", default=None,
                        help="parse_reconcile_report.py's output for the cards' answers; without it nothing is decided yet")
 
@@ -3648,8 +3717,16 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
                 return 2
             decisions = parsed["data"]["decisions"]
+        root = Path(args.root).expanduser() if args.root else None
+        area_for: dict[int, str] = {}
+        for given in args.areas:
+            row, _, area = given.partition("=")
+            if not row.strip().isdigit() or root is None or not area or not (root / "subject_areas" / area).is_dir():
+                print(f"reconcile own-examples: --area {given!r} is not ROW=AREA for an area of this model", file=sys.stderr)
+                return 2
+            area_for[int(row)] = area
         try:
-            plan = own_examples(run_dir, root=Path(args.root).expanduser() if args.root else None, decisions=decisions)
+            plan = own_examples(run_dir, root=root, decisions=decisions, replace=set(args.replace), area_for=area_for)
         except (json.JSONDecodeError, ValueError) as exc:
             print(f"reconcile own-examples: {exc}", file=sys.stderr)
             return 2

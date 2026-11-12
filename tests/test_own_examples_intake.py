@@ -741,3 +741,119 @@ def test_a_model_file_with_odd_entries_is_read_around_them(tmp_path):
     d = intake([bim])
     assert [r["label"] for r in d["rows"]] == ["orders"]
     assert [x["name"] for x in d["definitions"]] == ["Delivered revenue", "is_web"]
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (
+            "SELECT 1 AS a; /* note */ SELECT 2 AS b;",
+            [("SELECT 1 AS a", None), ("SELECT 2 AS b", None)],
+        ),
+        (
+            "SELECT 1 AS a; /* a note\n   over two lines */\nSELECT 2 AS b",
+            [("SELECT 1 AS a", None), ("SELECT 2 AS b", None)],
+        ),
+        (
+            "SELECT 1 AS a; /* x */ -- y\n-- Second\nSELECT 2 AS b",
+            [("SELECT 1 AS a", None), ("SELECT 2 AS b", "Second")],
+        ),
+    ],
+)
+def test_a_block_comment_after_a_semicolon_ends_at_its_close(text, expected):
+    assert reconcile._split_sql(text) == expected
+
+
+@pytest.mark.parametrize(
+    "line, statements, pieced",
+    [
+        # a server name that starts with "select" is never a statement
+        (
+            'Sql.Database("select-db.example.com", "acme", [Query="SELECT 1 AS n"])',
+            ["SELECT 1 AS n"],
+            False,
+        ),
+        ('Sql.Database("select-db.example.com", "acme")', [], False),
+        # a query put together from pieces is never read in part
+        (
+            'Sql.Database("your-cluster.example.com", "acme", [Query="SELECT id FROM orders" & " WHERE status = \'paid\'"])',
+            [],
+            True,
+        ),
+        (
+            'Value.NativeQuery(Source, "SELECT id FROM orders WHERE status = " & Status, null)',
+            [],
+            True,
+        ),
+        ("Value.NativeQuery(Source, Sql, null)", [], True),
+        (
+            'Value.NativeQuery(Source, "SELECT ""a"" AS x FROM t", null, [EnableFolding=true])',
+            ['SELECT "a" AS x FROM t'],
+            False,
+        ),
+        ('Odbc.Query("dsn=select-dsn", "SELECT id FROM orders")', ["SELECT id FROM orders"], False),
+    ],
+)
+def test_power_query_is_read_only_from_whole_native_query_literals(line, statements, pieced):
+    got, n = dashboard_exports._m_statements(line)
+    assert got == statements and bool(n) is pieced
+    assert not any("example.com" in g or "select-dsn" in g for g in got)
+
+
+def test_a_pieced_power_bi_query_is_named_in_skipped(tmp_path):
+    bim = tmp_path / "model.bim"
+    bim.write_text(json.dumps(_model('"SELECT id FROM orders" & " WHERE x = 1"')), encoding="utf-8")
+    d = intake([bim])
+    assert d["rows"] == []
+    assert any(
+        "table 'orders': its native query is put together" in s["reason"] for s in d["skipped"]
+    )
+
+
+def _lkml_view(tmp_path, dims: str, filters: str) -> Path:
+    f = tmp_path / "v.view.lkml"
+    f.write_text(
+        "view: orders {\n  sql_table_name: orders ;;\n"
+        + dims
+        + f"  measure: n {{ type: count filters: [{filters}] }}\n}}\n"
+    )
+    return f
+
+
+@pytest.mark.parametrize(
+    "dims, filters, where",
+    [
+        (
+            "  dimension: postal_code { type: string sql: ${TABLE}.postal_code ;; }\n",
+            'postal_code: "00123"',
+            "WHERE postal_code = '00123'",
+        ),
+        (
+            "  dimension: postal_code { sql: ${TABLE}.postal_code ;; }\n",
+            'postal_code: "00123"',
+            "WHERE postal_code = '00123'",
+        ),  # LookML's default type is string
+        ("  dimension: qty { type: number sql: ${TABLE}.qty ;; }\n", 'qty: "5"', "WHERE qty = 5"),
+        (
+            "  dimension: status { sql: ${TABLE}.status ;; }\n",
+            'orders.status: "paid"',
+            "WHERE status = 'paid'",
+        ),
+        ("  dimension: qty { type: number sql: ${TABLE}.qty ;; }\n", 'qty: "five"', None),
+        (
+            "  dimension: is_paid { type: yesno sql: ${TABLE}.is_paid ;; }\n",
+            'is_paid: "true"',
+            None,
+        ),
+        # another view's dimension, even when this view has one of the same name
+        ("  dimension: status { sql: ${TABLE}.status ;; }\n", 'customers.status: "paid"', None),
+    ],
+)
+def test_a_lookml_filter_is_typed_by_its_dimension_and_bound_to_its_view(
+    tmp_path, dims, filters, where
+):
+    rows = intake([_lkml_view(tmp_path, dims, filters)])["rows"]
+    if where is None:
+        assert rows == []
+    else:
+        assert rows[0]["statement"].endswith(where)

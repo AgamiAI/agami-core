@@ -512,6 +512,7 @@ def _powerbi(path: Path) -> dict:
         raise ExportError(f"{path.name} is not a readable Power BI model")
     rows, definitions, skipped = [], [], []
     no_sql = 0
+    pieced_tables: list[str] = []
     for table in _dicts(doc["model"].get("tables")):
         tname = str(table.get("name") or "")
         found = []
@@ -520,12 +521,14 @@ def _powerbi(path: Path) -> dict:
             expr = _text(
                 source.get("query") if source.get("type") == "query" else source.get("expression")
             )
-            found.extend(
-                _m_statements(str(expr))
-                if source.get("type") != "query"
-                else ([expr.strip()] if _STATEMENT_RE.match(expr) else [])
-            )
-        if not found:
+            if source.get("type") == "query":
+                found.extend([expr.strip()] if _STATEMENT_RE.match(expr) else [])
+            else:
+                got, pieced = _m_statements(expr)
+                found.extend(got)
+                if pieced:
+                    pieced_tables.append(tname)
+        if not found and tname not in pieced_tables:
             no_sql += 1
         for sql in dict.fromkeys(found):
             rows.append(
@@ -566,6 +569,14 @@ def _powerbi(path: Path) -> dict:
                         "used_by": [],
                     }
                 )
+    for tname in dict.fromkeys(pieced_tables):
+        skipped.append(
+            {
+                "line": 0,
+                "reason": f"table {tname!r}: its native query is put together when the report "
+                "refreshes (with & or a variable), so it is not read",
+            }
+        )
     if no_sql:
         skipped.append(
             {
@@ -589,17 +600,76 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _m_statements(expr: str) -> list[str]:
-    """Every M string literal in a Power Query expression that holds a SELECT or a WITH: the native
-    query, wherever the connector puts it (`[Query="..."]`, `Value.NativeQuery(_, "...")`)."""
-    out = []
-    for m in _M_STRING.finditer(expr):
-        text = m.group(1).replace('""', '"')
-        for esc, ch in _M_ESCAPES.items():
-            text = text.replace(esc, ch)
+# Where a Power Query connector takes a native query: the second argument of `Value.NativeQuery`
+# and `Odbc.Query`, and the `Query` field of a connector's options record (`Sql.Database(server,
+# db, [Query="..."])`). Every other string in the expression, a server name first among them, is
+# never read.
+_M_NATIVE_CALL = re.compile(r"\b(?:Value\.NativeQuery|Odbc\.Query)\s*\(")
+_M_QUERY_FIELD = re.compile(r"(?<![\w.#])Query\s*=\s*")
+
+
+def _m_literal(expr: str, i: int) -> tuple[str | None, int]:
+    """The M string literal starting at `i` (unescaped) and the index after it; None when `i` is
+    not the start of one, or the literal never closes."""
+    if i >= len(expr) or expr[i] != '"':
+        return None, i
+    j = i + 1
+    while j < len(expr):
+        if expr[j] == '"':
+            if expr.startswith('""', j):
+                j += 2
+                continue
+            text = expr[i + 1 : j].replace('""', '"')
+            for esc, ch in _M_ESCAPES.items():
+                text = text.replace(esc, ch)
+            return text, j + 1
+        j += 1
+    return None, len(expr)
+
+
+def _m_second_argument(expr: str, i: int) -> int | None:
+    """The index of a call's second argument, `i` being just past its `(`: the first comma at the
+    call's own depth, skipping strings and nested brackets."""
+    depth = 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch == '"':
+            _text_, i = _m_literal(expr, i)
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return None
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return i + 1
+        i += 1
+    return None
+
+
+def _m_statements(expr: str) -> tuple[list[str], int]:
+    """The complete native queries a Power Query expression passes, and how many it builds instead.
+
+    A query counts only when it is one whole literal: an argument written `"SELECT ..." & filter`, or
+    a variable, is put together at refresh time, and reading its first piece would be a statement
+    that leaves part of the query out. Those are counted, never read."""
+    starts = [m.end() for m in _M_QUERY_FIELD.finditer(expr)]
+    for m in _M_NATIVE_CALL.finditer(expr):
+        second = _m_second_argument(expr, m.end())
+        if second is not None:
+            starts.append(second)
+    found, pieced = [], 0
+    for i in sorted(starts):
+        i += len(expr[i:]) - len(expr[i:].lstrip())
+        text, after = _m_literal(expr, i)
+        rest = expr[after:].lstrip()
+        if text is None or not rest[:1] or rest[0] not in ",)]":
+            pieced += 1
+            continue
         if _STATEMENT_RE.match(text):
-            out.append(text.strip())
-    return out
+            found.append(text.strip())
+    return found, pieced
 
 
 # --- LookML -----------------------------------------------------------------------------------
@@ -818,6 +888,21 @@ def _lkml_column(sql: str, dims: dict) -> str | None:
     return None
 
 
+def _lkml_literal(value: str, dim: Any) -> str | None:
+    """A filter value as SQL, typed by the dimension it filters rather than by its characters: a
+    string dimension's `00123` is `'00123'`, a number dimension's `5` is `5`. One plain word only;
+    a Looker filter keyword, or a dimension of any other type (a date, a yes/no, a tier), is None."""
+    if not re.fullmatch(r"[A-Za-z0-9.]+", value) or value.lower() in _LKML_FILTER_WORDS:
+        return None
+    props = {k: v for k, _n, v in dim} if isinstance(dim, list) else {}
+    kind = str(props.get("type") or "string")
+    if kind == "string":
+        return _quote(value)
+    if kind == "number" and re.fullmatch(r"-?[0-9]+([.][0-9]+)?", value):
+        return value
+    return None
+
+
 def _lookml_measure(
     view: str, name: str, body: list, dims: dict, base: str | None
 ) -> tuple[dict | None, dict]:
@@ -863,15 +948,19 @@ def _lookml_measure(
         # `_`, `>1`, `1 to 5`, `NULL`, `NOT x` and `last 7 days` meanings of their own, and a guess
         # at one would be a wrong statement saved under the person's name.
         field, _, value = clause.partition(":") if isinstance(clause, str) else ("", "", "")
-        field, value = field.strip().split(".")[-1], value.strip()
+        qualifier, _, field = field.strip().rpartition(".")
+        value = value.strip()
+        if qualifier and qualifier != view:
+            # Another view's dimension is reached through an explore's join, which is not read here;
+            # resolving it to this view's same-named field would filter the wrong table.
+            untranslated.append(f"the filter {str(clause).strip()!r} is on another view")
+            continue
+        literal = _lkml_literal(value, dims.get(field)) if field else None
         col = _lkml_column("${" + field + "}", dims) if field else None
-        plain = re.fullmatch(r"[A-Za-z0-9.]+", value) and value.lower() not in _LKML_FILTER_WORDS
-        if col is None or not plain:
+        if col is None or literal is None:
             untranslated.append(f"the filter {str(clause).strip()!r} is not a plain value")
             continue
-        where.append(
-            f"{col} = {value if re.fullmatch(r'-?[0-9]+([.][0-9]+)?', value) else _quote(value)}"
-        )
+        where.append(f"{col} = {literal}")
     if not isinstance(filters, (list, type(None))):
         untranslated.append("the measure's filters are not a plain list")
     if base is None:

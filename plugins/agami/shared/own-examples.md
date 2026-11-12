@@ -67,8 +67,16 @@ It reads the run's report items and puts every row in one list, and writes the p
 | `add` | the numbers agree and nothing in the person's query was proved wrong | the Add card (5a); its `why` names any check that could not be confirmed |
 | `ask` | the query disagrees with a definition: agami's answer on a filter, a date window, a join or the tables read, or a filter the semantic model declares | one question each (5b). Each carries `candidate`, an open question in the shape of a declared ambiguity (`name`, `when`, `options`, `applies_to`) |
 | `fix` | the data proved a part of the query wrong | said back with its `change`; never added |
-| `reword` | the query may not answer the question it came with | said back; the person rewords and adds it again |
+| `reword` | the query may not answer the question it came with, or nothing confirmed that it does | said back; the person rewords and adds it again. Nothing is ever written as the person's example without a confirmed fit |
 | `not_checked` | the row could not run, or brought no query of the person's | said back in one line each |
+
+Beside the lists, three things a write must wait on, found for every row that could be written (the `add` rows and every `ask` row, before any card is answered):
+
+| Key | What it holds | What happens |
+|---|---|---|
+| `needs_area` | rows whose tables are not all in one subject area (or in none) | the Area card (5c); nothing of theirs is written until it is answered |
+| `collisions` | `kind: kept`, an example the area already keeps under the same question with other SQL; `kind: incoming`, two of the person's own rows under one question with different SQL | the Same-question card (5d); held out until the person says which |
+| `duplicates` | a row with the same question and the same SQL as an earlier one | written once, said back |
 
 ## 5. The cards
 
@@ -93,30 +101,39 @@ A candidate holds two readings, the person's first and one other: the semantic m
 
 "Other" is the person's words for one decision: *"mine, but only for refunds"* is `change` with those words. A question ("show me both queries") is answered first, then the same card asked again ([question-cards rule 5a](question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)); anything you cannot place on one of the four is said back and the same card asked again: re-asked, never guessed. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([question-cards rule 7](question-cards.md#7-where-askuserquestion-is-unavailable)).
 
-**5c — An example already kept under the same question.** `sm add-example` replaces by question, so `own-examples` never writes over an example the area already keeps under that question with different SQL (a correction, a reviewed seed): it lists it in `collisions` and holds it out. For each, up to 4 per card, header `Same q <k>`, *"An example for this question is already kept (from a <existing_source>). Replace it with yours?"*: **Replace it** (its `preview` both statements, the kept one first) / **Keep the kept one**. When `collisions_checked` is false (agami-core's loader was not available), say in one line that existing examples were not compared, before the Add card.
+**5c — Which subject area?** For each `needs_area` row, up to 4 per card, header `Area <k>`, *"Which subject area should this example be kept under?"*: one option per area its tables are in (every area `sm areas` lists when the row's `tables` is empty), up to 4; "Other" takes another area's name. Then run `own-examples` again with `--area <row>=<area>` per answer (step 6), so the next card sees any clash in that area.
+
+**5d — Same question.** `sm add-example` replaces by question, so `own-examples` never writes over what is already there unless the person says so, and the only way to say so is this card. Read `collisions` from the plan after 5c. For each, up to 4 per card, header `Same q <k>`:
+
+- `kind: kept`: *"An example for this question is already kept (from a <existing_source>). Replace it with yours?"*: **Replace it** (its `preview` both statements, the kept one first) / **Keep the kept one**.
+- `kind: incoming`: *"Two of your queries answer this question differently. Which should be kept?"*: one option per row (its `preview` that row's SQL), up to 3, then **Neither**.
+
+**Replace it**, or a row picked, is `--replace <row>` (step 6); nothing else is. **Mine for this question only** on 5b is not permission to replace: a disputed row that clashes still comes here. When `collisions_checked` is false (agami-core's loader was not available), say in one line that existing examples were not compared, before the Add card. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([question-cards rule 7](question-cards.md#7-where-askuserquestion-is-unavailable)).
 
 ## 6. Apply
 
-1. **The answers become the block** `agami-reconcile` already parses: with the Write tool, `<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt`, `profile: <profile>`, `reconcile-run: <ts>`, `decisions:` and one JSON array, `{"row": 3, "decision": "nothing"}` per row left out on the Add card (and every `add` row on **Don't add**), `{"row": 6, "decision": "change", "words": "<the person's words>"}`, `{"row": 7, "decision": "example"}` or `{"row": 8, "decision": "fix"}` per answered question, `{"row": 2, "decision": "example"}` per **Replace it**, `done`. **Ask each time** and **Keep the kept one** write no entry.
+1. **The answers become the block** `agami-reconcile` already parses: with the Write tool, `<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt`, `profile: <profile>`, `reconcile-run: <ts>`, `decisions:` and one JSON array, `{"row": 3, "decision": "nothing"}` per row left out on the Add card (and every `add` row on **Don't add**), `{"row": 6, "decision": "change", "words": "<the person's words>"}`, `{"row": 7, "decision": "example"}` or `{"row": 8, "decision": "fix"}` per answered question, `done`. **Ask each time** writes no entry. The Area and Same-question answers are not in the block: they are the `--area` and `--replace` arguments below.
 2. **Parse it, then sort again with the answers:**
    ```bash
    bash "<plugin_root>/scripts/py" parse_reconcile_report.py --block-file "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.txt" \
      --run-dir "<artifacts_dir>/local/reconcile/<ts>" > "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.json"
    bash "<plugin_root>/scripts/py" reconcile.py own-examples --run-dir "<artifacts_dir>/local/reconcile/<ts>" --root "$ROOT" \
-     --decisions "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.json"
+     --decisions "<artifacts_dir>/local/tmp/agami-reconcile-decisions-<ts>.json" \
+     [--area <row>=<area> ...] [--replace <row> ...]
    ```
+   An `--area` naming an area the model does not have exits `2`: ask that Area card again.
    A parser answer that is not `ok` is refused by `own-examples` (exit `2`): say what its `needs_judgment` names in one line and ask that card again.
 3. **Write the examples, signed.** The sign-off identity comes from `reviewer_email` and `reviewer_role` in `<artifacts_dir>/local/.config`; when either is missing, the identity card from `agami-connect` Phase 4 first. Then, for each subject area in `examples_files`:
    ```bash
    bash "<plugin_root>/scripts/sm" add-example "$ROOT" --area <area> --file "<examples_files[area]>" \
      --signer "<reviewer_email>" --role "<reviewer_role>"
    ```
-   The file is written by `own-examples`, never by hand, so the SQL saved is the SQL that was checked. `needs_area` names a file whose tables no single subject area holds: ask which area on a card (header `Area`, the areas its tables are in, from `sm areas`; every area `sm areas` lists when the row's `tables` is empty), then the same call. **Don't sign anything yet** on the identity card writes nothing.
+   The file is written by `own-examples`, never by hand, so the SQL saved is the SQL that was checked, and only for rows with an area and no unanswered clash. **Don't sign anything yet** on the identity card writes nothing.
 4. **Each `change`** goes to `/agami-save-correction`, one at a time, after the writes.
 
 ## 7. Say what happened
 
-One short block, from the second `own-examples` output's `counts` and lists, never tallied by hand. "Added" is `counts.written` and the questions in `written`, which include the ones kept for their own question on 5b and the replacements from 5c; `add` alone undercounts:
+One short block, from the second `own-examples` output's `counts` and lists, never tallied by hand. "Added" is `counts.written` and the questions in `written`, which include the ones kept for their own question on 5b and the replacements from 5d; `add` alone undercounts. `duplicates` are said as written once:
 
 > Added 4 examples, signed as you@example.com: How many orders were placed on the web?, …
 > 1 already had an example under the same question, kept as it was: What was total revenue in Q3?

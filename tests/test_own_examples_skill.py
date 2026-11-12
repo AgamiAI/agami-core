@@ -94,7 +94,7 @@ def test_the_default_question_has_four_answers_and_no_recommendation():
 
 def test_the_procedures_cards_follow_the_card_rules():
     headers = re.findall(r"header `([^`]+)`", DOC)
-    assert {"Your own", "Where", "Add", "Area"} <= set(headers)
+    assert {"Your own", "Where", "Add", "Area <k>", "Same q <k>"} <= set(headers)
     # a two-digit count is the longest a header gets
     assert all(len(h.replace("<k>/<n>", "10/12").replace("<k>", "10")) <= 12 for h in headers), (
         headers
@@ -128,10 +128,15 @@ def test_every_card_cites_the_numbered_list_fallback():
 def test_the_say_back_counts_what_was_written_and_what_was_kept():
     say = _section(DOC, "## 7. Say what happened", "## Never")
     assert "`counts.written`" in say and "`add` alone undercounts" in say
-    same = _section(DOC, "**5c", "## 6. Apply")
+    same = _section(DOC, "**5d", "## 6. Apply")
     assert (
-        "never writes over an example" in same
+        "never writes over what is already there" in same
         and "`collisions`" in same
         and "`collisions_checked`" in same
     )
-    assert "per **Replace it**" in DOC
+    # consent to replace is only ever the Same-question card, passed as --replace
+    assert "the only way to say so is this card" in same and "`--replace <row>`" in same
+    assert "**Mine for this question only** on 5b is not permission to replace" in same
+    assert "per **Replace it**" not in DOC
+    area = _section(DOC, "**5c", "**5d")
+    assert "`--area <row>=<area>`" in area and "next card sees any clash in that area" in area
