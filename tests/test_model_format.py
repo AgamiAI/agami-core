@@ -155,6 +155,33 @@ def test_curation_is_refused_and_writes_nothing(newer, write):
     assert _files(newer) == before
 
 
+@pytest.mark.parametrize("write", [
+    lambda root: curate.add_examples(root, "sales", [{"question": "new", "sql": "select 2"}]),
+    lambda root: curate.remove_examples(root, "sales", ["old"]),
+])
+def test_example_writes_are_refused_and_write_nothing(newer, monkeypatch, write):
+    _on(monkeypatch, "0.9.22")
+    assert curate.add_examples(newer, "sales", [{"question": "old", "sql": "select 1"}]).applied
+    _on(monkeypatch, "0.9.10")
+    before = _files(newer)
+    res = write(newer)
+    assert not res.applied and "0.9.21 or later" in res.errors[0]
+    assert _files(newer) == before
+
+
+@pytest.mark.parametrize("argv", [
+    ["remove-example", "--area", "sales", "--question", "old"],
+    ["remove-example", "--question", "old"],
+])
+def test_a_refused_example_command_exits_nonzero(newer, monkeypatch, capsys, argv):
+    from semantic_model import cli
+    _on(monkeypatch, "0.9.22")
+    curate.add_examples(newer, "sales", [{"question": "old", "sql": "select 1"}])
+    _on(monkeypatch, "0.9.10")
+    code = cli.main([argv[0], str(newer), *argv[1:]])
+    assert code == 1 and "0.9.21 or later" in capsys.readouterr().out
+
+
 def test_a_core_older_than_the_choice_field_change_is_refused(newer, monkeypatch):
     # 0.9.20 trims choice_field keys on load, merging 'Open' and 'Open ' (0.9.21).
     _on(monkeypatch, "0.9.20")

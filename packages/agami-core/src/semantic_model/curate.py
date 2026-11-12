@@ -2321,6 +2321,8 @@ def add_examples(root: str | Path, area: str, examples: list[dict],
     from .loader import list_prompt_examples
     root = Path(root)
     res = ApplyResult()
+    if _refused(root, res):
+        return res
     # include rejected so re-adding a previously-rejected question replaces (un-rejects) it
     # rather than duplicating.
     existing = list(list_prompt_examples(root, area, include_rejected=True))
@@ -2378,6 +2380,8 @@ def remove_examples(root: str | Path, area: str, questions: list[str],
     from .loader import list_prompt_examples
     root = Path(root)
     res = ApplyResult()
+    if _refused(root, res):
+        return res
     existing = list(list_prompt_examples(root, area, include_rejected=True))
     wanted = {(q or "").strip() for q in (questions or []) if (q or "").strip()}
     if not wanted:
