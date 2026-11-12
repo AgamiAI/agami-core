@@ -100,7 +100,7 @@ def _last_marks(root: Path) -> dict[str, str]:
     """The last mark per step. A line that doesn't parse (a write cut short) is skipped, not fatal:
     the list is a view, and one bad line shouldn't hide the rest."""
     try:
-        text = _timeline(root).read_text(encoding="utf-8")
+        text = _timeline(root).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
     marks: dict[str, str] = {}
@@ -114,15 +114,18 @@ def _last_marks(root: Path) -> dict[str, str]:
     return marks
 
 
-def _totals(root: Path) -> Optional[dict[str, Any]]:
-    """The overview totals when the model loads, else None. Any failure to load counts as not
-    built: mid-build the tree is half-written, and that must read as "building", not as an error."""
+def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """(overview totals, None) when the model loads, else (None, a one-line problem). The catch is
+    broad on purpose: a built model that stops loading (a hand edit, a missing area, a loader bug)
+    must still read as built, with the reason shown, rather than crash the list or send it back to
+    "building"."""
     from . import curate
     try:
         org = L.load_datasource(root, include_rejected=True)
-    except Exception:  # noqa: BLE001 — see docstring
-        return None
-    return curate.overview(org, root)["totals"]
+        return curate.overview(org, root)["totals"], None
+    except Exception as exc:  # noqa: BLE001 — see docstring
+        first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        return None, f"The model in {root} couldn't be read: {first}"
 
 
 def _build_count(log: Path) -> Optional[str]:
@@ -148,13 +151,17 @@ def onboarding_steps(root: Path) -> dict[str, Any]:
     status = {i: "pending" for i in STEP_IDS}
     status.update(_last_marks(root))
     counts: dict[str, Optional[str]] = {}
+    problem: Optional[str] = None
 
-    totals = _totals(root)
     log = root / ".introspect" / "progress.log"
     build_at = STEP_IDS.index("build")
-    if totals is not None:
+    # A model on disk is built even when it fails to load: a hand edit or a missing area later
+    # must show as a problem on a finished list, not send the list back to "building".
+    if (root / "datasource.yaml").exists():
         status["build"] = "done"
-        counts = _later_counts(totals)
+        totals, problem = _totals(root)
+        if totals is not None:
+            counts = _later_counts(totals)
     elif log.exists():
         status["build"] = "in_progress"
         counts["build"] = _build_count(log)
@@ -172,9 +179,9 @@ def onboarding_steps(root: Path) -> dict[str, Any]:
             if status[i] == "pending":
                 # A report check is optional: passed over, it was skipped, not done.
                 status[i] = "skipped" if i == "reports" else "done"
-    running = [i for i in STEP_IDS if status[i] == "in_progress"]
-    for i in running[:-1]:
-        status[i] = "done"
+            elif status[i] == "in_progress":
+                # Only the furthest step reached can still be running.
+                status[i] = "done"
 
     result = []
     for i in STEP_IDS:
@@ -184,4 +191,5 @@ def onboarding_steps(root: Path) -> dict[str, Any]:
                        "text": text})
     current = next((i for i in STEP_IDS if status[i] == "in_progress"),
                    next((i for i in STEP_IDS if status[i] == "pending"), None))
-    return {"steps": result, "current": current, "timeline": str(_timeline(root))}
+    return {"steps": result, "current": current, "timeline": str(_timeline(root)),
+            "problem": problem}

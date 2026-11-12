@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from skill_docs import PLUGIN, SKILLS_DIR
 
@@ -80,6 +81,7 @@ def test_built_model_marks_build_done_with_counts(model):
     totals = _totals(model)
     assert s["build"]["status"] == "done"
     assert s["build"]["count"] == f"{totals['tables']} tables, {totals['joins']} joins"
+    assert s["build"]["count"] == "11 tables, 12 joins"  # the sample, pinned
     assert s["build"]["text"] == f"Read the tables and joins — {s['build']['count']}"
     assert [s[i]["status"] for i in ("connect", "context", "tables")] == ["done"] * 3
     assert s["describe"]["status"] == "pending"
@@ -92,6 +94,43 @@ def test_describe_count_matches_overview(model):
     signed = totals["metrics"] - totals["needs_signoff"]
     assert s["signoff"]["count"] == f"{signed} of {totals['metrics']} signed"
     assert s["examples"]["count"] == (f"{totals['examples']} examples" if totals["examples"] else None)
+    # pinned to the sample, so a count that drifts from overview's totals can't pass by rebuilding it
+    assert [s[i]["count"] for i in ("describe", "signoff", "examples")] == [
+        "40% described, 8 metrics", "8 of 8 signed", "14 examples"]
+
+
+def test_signoff_counts_only_signed_metrics(model):
+    metric = next((model / "subject_areas").glob("*/metrics/*.yaml"))
+    doc = yaml.safe_load(metric.read_text())
+    doc["review_state"] = "unreviewed"
+    metric.write_text(yaml.safe_dump(doc))
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "7 of 8 signed"
+
+
+def test_a_model_that_stops_loading_does_not_regress_the_list(model):
+    ds = model / "datasource.yaml"
+    doc = yaml.safe_load(ds.read_text())
+    doc["subject_areas"].append("subject_areas/missing")
+    ds.write_text(yaml.safe_dump(doc))
+    log = model / ".introspect" / "progress.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("columns+grain 3/34\n")
+    steps.mark(model, "signoff", "in_progress")
+    result = steps.onboarding_steps(model)
+    s = _by_id(result)
+    assert s["build"]["status"] == "done" and s["build"]["count"] is None
+    assert s["describe"] == {"id": "describe", "label": "Describe columns and add metrics",
+                             "status": "done", "count": None,
+                             "text": "Describe columns and add metrics"}
+    assert s["signoff"]["status"] == "in_progress" and s["signoff"]["count"] is None
+    assert result["current"] == "signoff"
+    assert result["problem"].startswith(f"The model in {model} couldn't be read: ")
+    assert "\n" not in result["problem"]
+
+
+def test_problem_is_none_when_the_model_loads(model, tmp_path):
+    assert steps.onboarding_steps(model)["problem"] is None
+    assert steps.onboarding_steps(tmp_path / "fresh")["problem"] is None
 
 
 def test_build_in_progress_is_never_done_early(tmp_path):
@@ -165,6 +204,16 @@ def test_mark_stamps_utc_seconds(tmp_path):
         steps.mark(root, "build", "pending")
 
 
+def test_a_running_step_behind_a_finished_one_is_done(model):
+    steps.mark(model, "describe", "in_progress")
+    steps.mark(model, "signoff", "done")
+    result = steps.onboarding_steps(model)
+    s = _by_id(result)
+    assert s["describe"]["status"] == "done"
+    assert not [i for i, v in s.items() if v["status"] == "in_progress"]
+    assert result["current"] == "examples"
+
+
 def test_reports_is_skipped_when_passed_over(model):
     steps.mark(model, "first_question", "in_progress")
     result = steps.onboarding_steps(model)
@@ -207,3 +256,11 @@ def test_unreadable_timeline_lines_are_ignored(model):
     result = steps.onboarding_steps(model)
     assert result["current"] == "signoff"
     assert _by_id(result)["signoff"]["status"] == "in_progress"
+
+
+def test_a_timeline_line_that_is_not_utf8_is_ignored(model):
+    timeline = model / ".introspect" / "timeline.jsonl"
+    timeline.parent.mkdir(parents=True, exist_ok=True)
+    timeline.write_bytes(b'\xff\xfe{"id": "nope"\n'
+                         b'{"id": "examples", "status": "in_progress", "at": "2026-01-01T00:00:00+00:00"}\n')
+    assert steps.onboarding_steps(model)["current"] == "examples"
