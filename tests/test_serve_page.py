@@ -259,8 +259,33 @@ def saving(tmp_path):
     proc.wait()
 
 
-def test_saving_serves_the_page_under_a_token_on_loopback(saving):
-    _, url, _ = saving
+@pytest.fixture
+def saving_here(tmp_path):
+    """The same server in this process, so the coverage gate sees each refusal."""
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "review.html"
+    page.write_text("<p>review</p>", encoding="utf-8")
+    (tmp_path / "beside.json").write_text("{}", encoding="utf-8")
+    out = tmp_path / "out" / "decisions.json"
+    server = serve_page._Server(page.resolve(), out)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    class _Running:  # answers like Popen.poll(): None while it still waits for the post
+        @staticmethod
+        def poll():
+            return 0 if server.taken else None
+
+    yield _Running, f"http://127.0.0.1:{server.port}{server.base}", out
+    server.shutdown()
+    server.server_close()
+
+
+def test_saving_serves_the_page_under_a_token_on_loopback(saving_here):
+    _, url, _ = saving_here
     assert re.fullmatch(r"http://127\.0\.0\.1:\d+/[A-Za-z0-9_-]{43}/", url)
     status, body = _get(url)
     assert (status, body) == (200, b"<p>review</p>")
@@ -326,8 +351,8 @@ def test_saving_refuses_a_second_post(tmp_path):
         ({"body": b"{}", "length": str(2 * 1024 * 1024)}, 413),
     ],
 )
-def test_saving_refuses_a_bad_post_and_writes_nothing(saving, kwargs, code):
-    proc, url, out = saving
+def test_saving_refuses_a_bad_post_and_writes_nothing(saving_here, kwargs, code):
+    proc, url, out = saving_here
     body = kwargs.pop("body", b'{"block": "x"}')
     assert _post(url + "save", body, **kwargs)[0] == code
     assert not out.exists()
@@ -335,8 +360,8 @@ def test_saving_refuses_a_bad_post_and_writes_nothing(saving, kwargs, code):
     assert _post(url + "save", b'{"ok": 1}')[0] == 200  # and takes it
 
 
-def test_saving_refuses_a_wrong_token_path_or_host_with_a_plain_404(saving):
-    _, url, out = saving
+def test_saving_refuses_a_wrong_token_path_or_host_with_a_plain_404(saving_here):
+    _, url, out = saving_here
     base, token = url.rstrip("/").rsplit("/", 1)
     for target in (
         f"{base}/{'B' * 43}/save",

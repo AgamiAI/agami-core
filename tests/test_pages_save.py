@@ -320,6 +320,13 @@ def test_the_examples_page_renders_as_a_saving_page(monkeypatch, artifacts: Path
     assert f"b.textContent = {json.dumps(SAVE_LABEL)}" in html
 
 
+def test_the_examples_page_renders_read_only_too(monkeypatch, tmp_path: Path) -> None:
+    assert (
+        '<body class="agami-read-only">'
+        in _render_examples(monkeypatch, tmp_path, "--read-only").read_text()
+    )
+
+
 def test_the_examples_page_needs_to_know_who_signs(monkeypatch, tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         _render_examples(monkeypatch, tmp_path, "--save-to-helper")
