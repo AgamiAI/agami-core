@@ -38,6 +38,7 @@ from . import validator as V
 from .loader import _read_yaml as _load
 from .loader import load_datasource
 from .models import (
+    Ambiguity,
     CrossSubjectAreaRelationship,
     Datasource,
     Entity,
@@ -611,6 +612,8 @@ _VALID_OPS = {"approve", "reject", "exclude", "include", "edit", "move", "add"}
 # move == {op:move, kind:table, name, area, to_area}: the table changes owning area (see _move_table)
 # add == {op:add, kind:relationship, from_table, to_table, from_column + to_column | on, relationship}:
 #        a new join, written unreviewed where its two tables' areas say (see _add_join)
+# add == {op:add, kind:ambiguity, name, when, options, applies_to, default?, behaviour?}: a declared
+#        ambiguity a person confirmed, written to datasource.yaml under their sign-off (see _add_ambiguity)
 # reject example == {op:reject, kind:example, area, question}: as remove_examples (see _reject_example)
 
 # The `area` that names the datasource-level lists (cross_subject_area_metrics / _entities) rather
@@ -778,9 +781,12 @@ def _apply_one(root: Path, op: dict, signer, role,
         carried, joins, keys = _move_table(root, op, area, backups, notes if notes is not None else [])
         return keys, None, False, {"carried": carried, "joins": joins}
 
+    if action == "add" and kind == "ambiguity":
+        return _add_ambiguity(root, op, signer, role, backups)
     if action == "add":
         if kind != "relationship":
-            raise ValueError("add applies to joins only (kind: relationship); add metrics with `sm add`")
+            raise ValueError("add applies to joins and ambiguities only (kind: relationship or "
+                             "ambiguity); add metrics with `sm add`")
         place, entry = _add_join(root, op, backups)
         return [(None, _key("relationship", place, entry), None)], None, False, {}
 
@@ -872,6 +878,40 @@ def _apply_one(root: Path, op: dict, signer, role,
         return keys, before, staled, _resolved_area(op, place)
 
     raise ValueError(f"unknown kind {kind!r}")
+
+
+def _add_ambiguity(root: Path, op: dict, signer, role,
+                   backups: "dict[Path, Optional[str]]") -> tuple[list, Any, bool, dict]:
+    """Declare an ambiguity a person confirmed (#486): `sm open-questions` proposes the entry, and the
+    person picks the usual reading (`default`, an option's label) and whether the agent asks or
+    answers with it and offers the others (`behaviour`; answer_and_offer when a default is picked,
+    ask otherwise). Never written without a person's sign-off: the curation log records who said it
+    and when. An entry of the same name already declared is left as it is."""
+    if not signer or not role or role == "system":
+        raise ValueError("an ambiguity is a person's choice: sign it off with --signer and --role")
+    if not str(op.get("when") or "").strip():
+        raise ValueError("an ambiguity needs `when`: the kind of question it is about")
+    options = [{k: v for k, v in dict(o).items() if k != "default"} for o in op.get("options") or []]
+    default = op.get("default")
+    if default is not None and default not in [o.get("label") for o in options]:
+        raise ValueError(f"default {default!r} is not one of the options "
+                         f"({', '.join(str(o.get('label')) for o in options)})")
+    for o in options:
+        if default is not None and o.get("label") == default:
+            o["default"] = True
+    entry = {"name": op["name"], "when": op["when"], "options": options,
+             "behaviour": op.get("behaviour") or ("answer_and_offer" if default is not None else "ask")}
+    entry.update({k: list(op[k]) for k in ("applies_to", "columns", "column_groups", "metrics") if op.get(k)})
+    Ambiguity.model_validate(entry)
+    path = root / "datasource.yaml"
+    _snapshot(backups, path)
+    doc = _load(path) or {}
+    declared = doc.get("ambiguities") or []
+    if any(a.get("name") == entry["name"] for a in declared):
+        raise ValueError(f"an ambiguity named {entry['name']!r} is already declared")
+    doc["ambiguities"] = [*declared, entry]
+    _dump(path, doc)
+    return [(None, ("ambiguity", CROSS_AREA, entry["name"]), None)], None, False, {}
 
 
 def _apply_placeholder(root: Path, area: str, op: dict, new_state: Optional[str], signer, role,
