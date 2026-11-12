@@ -128,6 +128,14 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         return None, f"The model in {root} couldn't be read: {first}"
 
 
+def _build_running(log: Path, model: Path) -> bool:
+    """A build is running while its log is unfinished (the engine ends it with `done:`) and newer
+    than the model it will replace; an older unfinished log is a build that was abandoned."""
+    if not log.exists() or last_progress_line(log).startswith("done:"):
+        return False
+    return not model.exists() or log.stat().st_mtime > model.stat().st_mtime
+
+
 def _build_count(log: Path) -> Optional[str]:
     parsed = parse_progress(last_progress_line(log))
     if parsed and parsed[2] == "tables":
@@ -155,14 +163,21 @@ def onboarding_steps(root: Path) -> dict[str, Any]:
 
     log = root / ".introspect" / "progress.log"
     build_at = STEP_IDS.index("build")
-    # A model on disk is built even when it fails to load: a hand edit or a missing area later
-    # must show as a problem on a finished list, not send the list back to "building".
-    if (root / "datasource.yaml").exists():
+    model = root / "datasource.yaml"
+    if _build_running(log, model):
+        # The live count, not the numbers of a model this build will replace; and a half-written
+        # tree is not a problem to report.
+        status["build"] = "in_progress"
+        counts["build"] = _build_count(log)
+    elif model.exists():
+        # A model on disk is built even when it fails to load: a hand edit or a missing area later
+        # must show as a problem on a finished list, not send the list back to "building".
         status["build"] = "done"
         totals, problem = _totals(root)
         if totals is not None:
             counts = _later_counts(totals)
     elif log.exists():
+        # The engine logs `done:` before the tree is written, so the build runs on until it lands.
         status["build"] = "in_progress"
         counts["build"] = _build_count(log)
     elif status["build"] == "done":

@@ -5,6 +5,7 @@ and a count read from disk, so every surface draws the same list and a turn that
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -115,6 +116,7 @@ def test_a_model_that_stops_loading_does_not_regress_the_list(model):
     log = model / ".introspect" / "progress.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text("columns+grain 3/34\n")
+    _age(log, ds)  # a stale log from an earlier build, not one running now
     steps.mark(model, "signoff", "in_progress")
     result = steps.onboarding_steps(model)
     s = _by_id(result)
@@ -126,6 +128,49 @@ def test_a_model_that_stops_loading_does_not_regress_the_list(model):
     assert result["current"] == "signoff"
     assert result["problem"].startswith(f"The model in {model} couldn't be read: ")
     assert "\n" not in result["problem"]
+
+
+def _age(older: Path, newer: Path) -> None:
+    t = newer.stat().st_mtime
+    os.utime(older, (t - 60, t - 60))
+
+
+def _rebuild_log(model: Path, last: str, *, newer: bool = True) -> Path:
+    log = model / ".introspect" / "progress.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(f"discovered 11 tables — reading columns, grain, keys\n{last}\n")
+    ds = model / "datasource.yaml"
+    if newer:
+        _age(ds, log)
+    else:
+        _age(log, ds)
+    return log
+
+
+def test_a_rebuild_shows_live_progress_not_the_old_model(model):
+    _rebuild_log(model, "columns+grain 5/11")
+    steps.mark(model, "describe", "done")
+    result = steps.onboarding_steps(model)
+    s = _by_id(result)
+    assert s["build"]["status"] == "in_progress"
+    assert s["build"]["count"] == "5 of 11 tables"
+    assert s["describe"]["status"] == "pending" and s["describe"]["count"] is None
+    assert result["current"] == "build"
+    assert result["problem"] is None
+
+
+def test_a_finished_log_does_not_hold_the_build_open(model):
+    _rebuild_log(model, "done: 11 tables, 12 relationships")
+    s = _by_id(steps.onboarding_steps(model))
+    assert s["build"]["status"] == "done"
+    assert s["build"]["count"] == "11 tables, 12 joins"
+
+
+def test_an_old_log_does_not_hold_the_build_open(model):
+    _rebuild_log(model, "columns+grain 5/11", newer=False)
+    s = _by_id(steps.onboarding_steps(model))
+    assert s["build"]["status"] == "done"
+    assert s["build"]["count"] == "11 tables, 12 joins"
 
 
 def test_problem_is_none_when_the_model_loads(model, tmp_path):
@@ -172,6 +217,14 @@ def test_progress_parsing_is_shared_with_sm_progress():
         "line": "something the engine never writes", "done": False}
     m, phrase, unit = steps.parse_progress("columns+grain 33/34")
     assert (m.groups(), unit) == (("33", "34"), "tables")
+
+
+def test_a_finished_log_before_the_model_lands_is_still_building(tmp_path):
+    # the engine logs `done:` before it writes the tree, so the step stays open until the model lands
+    root = _building(tmp_path)
+    (root / ".introspect" / "progress.log").write_text("done: 34 tables, 7 relationships\n")
+    s = _by_id(steps.onboarding_steps(root))
+    assert s["build"]["status"] == "in_progress" and s["build"]["count"] is None
 
 
 def test_mark_appends_and_keeps_one_in_progress(model):
