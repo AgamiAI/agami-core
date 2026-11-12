@@ -423,3 +423,67 @@ def test_broken_lookml_is_refused_in_words(tmp_path, capsys):
     f.write_text('view: x { dimension: y { sql: ${TABLE}.y ;; } } :: "')
     assert reconcile.main(["intake", "--file", str(f)]) == 2
     assert "not readable LookML" in capsys.readouterr().err
+
+
+_COUNTRY_FILTER = "<filter class='categorical' column='[federated.acme1].[none:status:nk]'>"
+
+
+@pytest.mark.parametrize(
+    "flt, where, untranslated",
+    [
+        (
+            _COUNTRY_FILTER + "<groupfilter function='union'>"
+            "<groupfilter function='member' member='&quot;paid&quot;' />"
+            "<groupfilter function='member' member='&quot;delivered&quot;' /></groupfilter></filter>",
+            "WHERE status IN ('paid', 'delivered')",
+            [],
+        ),
+        (
+            "<filter class='quantitative' column='[federated.acme1].[none:amount:qk]'>"
+            "<min>10</min><max>500.5</max></filter>",
+            "WHERE amount >= 10\n  AND amount <= 500.5",
+            [],
+        ),
+        (
+            "<filter class='quantitative' column='[federated.acme1].[sum:amount:qk]'><min>100</min></filter>",
+            "HAVING SUM(amount) >= 100",
+            [],
+        ),
+        (
+            "<filter class='quantitative' column='[federated.acme1].[none:amount:qk]'><min>#2024-01-01#</min></filter>",
+            None,
+            ["the range filter on amount is not a plain number range"],
+        ),
+        (
+            "<filter class='relative-date' column='[federated.acme1].[none:order_date:qk]' />",
+            None,
+            ["the relative-date filter on order date is not translated"],
+        ),
+        (
+            _COUNTRY_FILTER + "<groupfilter function='end' count='10' /></filter>",
+            None,
+            ["the filter on status is not a plain list of values"],
+        ),
+        (
+            _COUNTRY_FILTER + "<groupfilter function='member' member='%null%' /></filter>",
+            None,
+            ["the filter on status holds a value this reader does not translate"],
+        ),
+    ],
+)
+def test_each_kind_of_worksheet_filter(tmp_path, flt, where, untranslated):
+    text = TWB.read_text().replace(
+        "<filter class='categorical' column='[federated.acme1].[none:status:nk]'>\n"
+        "            <groupfilter function='member' level='[none:status:nk]' member='&quot;delivered&quot;' user:ui-domain='database' />\n"
+        "          </filter>",
+        flt,
+    )
+    assert text != TWB.read_text()
+    f = tmp_path / "f.twb"
+    f.write_text(text)
+    row = _by_label(intake([f]))["Revenue by country"]
+    assert row["provenance"]["export"]["untranslated"] == untranslated
+    if where is None:
+        assert row["statement"] is None
+    else:
+        assert where in row["statement"]
