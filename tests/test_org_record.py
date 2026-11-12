@@ -177,3 +177,34 @@ def test_set_org_cli_writes_name_and_description(tmp_path):
     assert cli.main(["set-org", str(tmp_path), "--name", "Acme", "--description", "Demo co."]) == 0
     rec = OR.load_org_record(tmp_path)
     assert rec.name == "Acme" and rec.description == "Demo co."
+
+
+def test_record_carrying_the_rewrite_stamps_loads_and_round_trips(tmp_path):
+    # A later core stamps organization.yaml with these keys (#635); this core must load the file.
+    OR.record_path(tmp_path).write_text(
+        "org_id: abc123\nname: Acme\n"
+        "written_by: agami-core 9.9.9\nrewrite_needs: agami-core 9.9.0\n",
+        encoding="utf-8",
+    )
+    rec = OR.load_org_record(tmp_path)
+    assert rec.written_by == "agami-core 9.9.9"
+    assert rec.rewrite_needs == "agami-core 9.9.0"
+
+    OR.write_org_record(tmp_path, rec)  # a rewrite keeps the stamps it read
+    doc = yaml.safe_load(OR.record_path(tmp_path).read_text(encoding="utf-8"))
+    assert doc["written_by"] == "agami-core 9.9.9"
+    assert doc["rewrite_needs"] == "agami-core 9.9.0"
+
+
+def test_record_without_the_rewrite_stamps_writes_as_before(tmp_path):
+    OR.write_org_record(tmp_path, OrgRecord(org_id="abc123", name="Acme"))
+    assert OR.record_path(tmp_path).read_text(encoding="utf-8") == (
+        "org_id: abc123\n"
+        "name: Acme\n"
+        "display_conventions:\n"
+        "  notes: []\n"
+        "glossary: {}\n"
+        "datasources: []\n"
+        "cross_datasource_relationships: []\n"
+        "cross_datasource_metrics: []\n"
+    )

@@ -1391,6 +1391,9 @@ class OrgRecord(_Base):
     # Same home as the bridges (and for the same reason): a metric spanning datasources can't belong to a
     # single per-profile model. Deduped by `name` on load.
     cross_datasource_metrics: list[CrossDatasourceMetric] = Field(default_factory=list)
+    # Accepted ahead of being written, so a later core can stamp them without breaking this one (#635).
+    written_by: Optional[str] = None
+    rewrite_needs: Optional[str] = None
 
     @field_validator("fiscal_year_start_month")
     @classmethod
