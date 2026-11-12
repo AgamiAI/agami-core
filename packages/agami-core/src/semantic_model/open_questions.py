@@ -328,7 +328,7 @@ class _Probe:
     def count_where(self, condition: str) -> str:
         return self.add(f"SUM(CASE WHEN {condition} THEN 1 ELSE 0 END)")
 
-    def sql(self) -> str:
+    def statement(self) -> str:
         return f"SELECT {', '.join(self.exprs)} FROM {self.fq}"
 
     def n(self) -> int:
@@ -995,7 +995,7 @@ def open_questions(
     candidates: list[dict] = []
     dropped: list[dict] = []
     for label, p in probes.items():
-        p.row = _run(counted, p.sql())
+        p.row = _run(counted, p.statement())
         if p.row is None:
             dropped += [{"table": label, "reason": "the probe failed"}]
             continue
