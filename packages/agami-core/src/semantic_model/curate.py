@@ -639,7 +639,7 @@ def apply(root: str | Path, ops: list[dict], *, signer: Optional[str] = None,
                 op = {**op, "area": _resolve_area(root, op)}
             if op.get("kind") == "example" and not op.get("name"):
                 op = {**op, "name": (op.get("question") or "").strip() or "?"}   # for the label and the log
-            if op.get("op") == "add" and not op.get("name"):
+            if op.get("op") == "add" and op.get("kind") == "relationship" and not op.get("name"):
                 op = {**op, "name": f"{op.get('from_table') or '?'}->{op.get('to_table') or '?'}"}
             keys, before, staled, resolved = _apply_one(root, op, signer, role, backups, res.notes)
             if op.get("op") == "add" and keys[0][1][1] != CROSS_AREA:
@@ -889,6 +889,14 @@ def _add_ambiguity(root: Path, op: dict, signer, role,
     and when. An entry of the same name already declared is left as it is."""
     if not signer or not role or role == "system":
         raise ValueError("an ambiguity is a person's choice: sign it off with --signer and --role")
+    configured = _configured_reviewer(root)
+    if configured and signer.strip().lower() != configured.strip().lower():
+        raise ValueError(f"signer {signer!r} is not the reviewer_email this folder's .config "
+                         "records; an answer is signed by the person who gave it")
+    for k in ("applies_to", "columns", "column_groups", "metrics"):
+        v = op.get(k)
+        if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+            raise ValueError(f"{k} must be a list of names")
     if not str(op.get("when") or "").strip():
         raise ValueError("an ambiguity needs `when`: the kind of question it is about")
     options = [{k: v for k, v in dict(o).items() if k != "default"} for o in op.get("options") or []]
@@ -912,6 +920,17 @@ def _add_ambiguity(root: Path, op: dict, signer, role,
     doc["ambiguities"] = [*declared, entry]
     _dump(path, doc)
     return [(None, ("ambiguity", CROSS_AREA, entry["name"]), None)], None, False, {}
+
+
+def _configured_reviewer(root: Path) -> Optional[str]:
+    """The `reviewer_email` in `<artifacts_dir>/local/.config`, the identity the person typed once for
+    sign-offs, or None when there is none to hold a signer to."""
+    try:
+        cfg = json.loads((root.parent / "local" / ".config").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    email = cfg.get("reviewer_email") if isinstance(cfg, dict) else None
+    return email if isinstance(email, str) and email.strip() else None
 
 
 def _apply_placeholder(root: Path, area: str, op: dict, new_state: Optional[str], signer, role,

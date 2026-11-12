@@ -22,9 +22,11 @@ coded values whose meaning enrichment left blank, columns it marked unreadable, 
 (`orders` beside `orders_old`). These need no probe.
 
 **Bounded.** Every probe is an aggregate over one table: one statement per table for every pattern,
-plus one for its date windows, built with the dialect helpers introspection uses. A table above
-introspection's overlap-probe size guard is not scanned, and at most `MAX_TABLES` tables are probed.
-A column flagged sensitive is never read. Only counts and sums come back; no row value is printed.
+one more for a table's date windows, and two for the fiscal check, built with the dialect helpers
+introspection uses. A table whose estimated size is above introspection's overlap-probe guard is not
+scanned; one whose size is unknown is, as introspection itself probes it. At most `MAX_TABLES` tables
+are probed. A column flagged sensitive is never read. Only counts and sums come back; no row value is
+printed, and a failed probe is reported by its error's class alone.
 
 **Nothing is declared here.** Each candidate carries the `add` op that would declare it, without a
 default or behaviour: the person picks the usual reading, and whether the agent asks or answers and
@@ -57,6 +59,12 @@ MIN_DIFFERENCE = 0.05
 # (a refund, a void), not when the row's thing happened, so it is not one of the readings.
 _MIN_DATE_FILL = 0.2
 _MAX_READINGS = 3
+# A count below this, in the window a date check compares, is too few rows to call a difference.
+MIN_COUNT = 5
+# Text built from the data (a status label, a value) goes into an agent's instructions, so it must be
+# one short line: a line break or a control character in it is a way to write instructions.
+_MAX_TEXT = 500
+_UNSAFE = re.compile(r"[\x00-\x1f\x7f\u2028\u2029]")
 
 # Stamps of when a row was written or changed, or of a deadline or a notification: not what a
 # question about a period means by "when".
@@ -225,15 +233,19 @@ def _number(value: Any) -> Optional[float]:
 
 
 def spread(values: list[Optional[float]]) -> float:
-    """How far apart the readings' answers are, as a share of the largest (0 when all are zero)."""
-    nums = [abs(v) if v is not None else 0.0 for v in values]
-    top = max(nums, default=0.0)
-    return (top - min(nums)) / top if top else 0.0
+    """How far apart the readings' answers are, as a share of the largest in size. A reading with no
+    answer (an amount column that is empty on every row) is not compared, and signs count: a total
+    of 100 and one of -100 are not the same answer."""
+    nums = [float(v) for v in values if v is not None]
+    top = max((abs(v) for v in nums), default=0.0)
+    return (max(nums) - min(nums)) / top if len(nums) >= 2 and top else 0.0
 
 
-def differ(values: list[Optional[float]]) -> bool:
-    """Whether the readings' answers are far enough apart to be worth a person's choice."""
-    return spread(values) >= MIN_DIFFERENCE
+def differ(values: list[Optional[float]], floor: float = 0) -> bool:
+    """Whether the readings' answers are far enough apart to be worth a person's choice; `floor` is
+    the largest answer below which a difference is noise (1 against 2 is 50% of almost nothing)."""
+    largest = max((abs(v) for v in values if v is not None), default=0.0)
+    return largest >= floor and spread(values) >= MIN_DIFFERENCE
 
 
 def _shown(value: Optional[float]) -> str:
@@ -266,12 +278,41 @@ def _phrase(name: str) -> str:
     return words if first.isupper() and len(first) > 1 else words[:1].lower() + words[1:]
 
 
-def _run(runner: Runner, sql: str) -> Optional[dict]:
+class ProbeFailed(Exception):
+    """A probe the database refused or couldn't run. The reason is the error's class (and the
+    executor's failure kind, such as `network`), never its text: a database message can quote the
+    value it choked on, and that value may come from a column flagged personal."""
+
+    def __init__(self, error: Exception):
+        kind = getattr(error, "kind", None)
+        super().__init__(f"{type(error).__name__} ({kind})" if kind else type(error).__name__)
+
+
+def _run(runner: Runner, sql: str) -> dict:
     try:
         rows = runner(sql)
-    except Exception:
-        return None
-    return rows[0] if rows else None
+    except Exception as e:
+        raise ProbeFailed(e) from None
+    return rows[0] if rows else {}
+
+
+def _unsafe(op: dict) -> bool:
+    """Whether text the op carries into the model would break out of one short line."""
+    texts = [op.get("when") or ""] + [
+        str(o.get(k) or "") for o in op.get("options", []) for k in ("label", "how")
+    ]
+    return any(_UNSAFE.search(t) or len(t) > _MAX_TEXT for t in texts)
+
+
+def _name(label: str, suffix: str) -> str:
+    """An ambiguity's name: the table's `applies_to` label, so two schemas' `orders` don't collide."""
+    return f"{label.replace('.', '_')}_{suffix}"
+
+
+def _day_literal(dialect: D.Dialect, c: Column, iso_day: str) -> str:
+    """A day to compare `c` with: a text column holding ISO dates compares as text on every engine,
+    a native date or timestamp with the engine's own day literal."""
+    return dialect.quote_lit(iso_day) if c.type == "string" else dialect.date_literal(iso_day)
 
 
 def _op(name: str, when: str, options: list[dict], applies_to: list[str]) -> dict:
@@ -292,8 +333,16 @@ def _reading(label: str, how: str, value: Optional[float]) -> dict:
 
 
 def _candidate(
-    pattern: str, table: Optional[str], question: str, evidence: str, options: list[dict], op: dict
+    pattern: str,
+    table: Optional[str],
+    question: str,
+    evidence: str,
+    options: list[dict],
+    op: dict,
+    share: Optional[float] = None,
 ) -> dict:
+    """`share` is how far apart the readings are when their values don't say it (a join's readings
+    are how many rows each links; what differs is how many rows they link differently)."""
     return {
         "kind": "ambiguity",
         "pattern": pattern,
@@ -301,7 +350,7 @@ def _candidate(
         "question": question,
         "evidence": evidence,
         "options": options,
-        "spread": round(spread([o["value"] for o in options]), 4),
+        "spread": round(share if share is not None else spread([o["value"] for o in options]), 4),
         "op": op,
     }
 
@@ -376,16 +425,14 @@ def _plan_dates(p: _Probe, runner: Runner, today: date) -> None:
         if len(keep) < 2:
             return None, "fewer than two date columns are filled on most rows", "date"
         windows = _date_windows([k[2] for k in keep], today)
-        lit = p.dialect.date_literal
+        lit = p.dialect
         exprs = [
-            f"SUM(CASE WHEN {p.q(c.name)} >= {lit(lo.isoformat())} AND {p.q(c.name)} < "
-            f"{lit(hi.isoformat())} THEN 1 ELSE 0 END) AS w{w}_{i}"
+            f"SUM(CASE WHEN {p.q(c.name)} >= {_day_literal(lit, c, lo.isoformat())} AND {p.q(c.name)} < "
+            f"{_day_literal(lit, c, hi.isoformat())} THEN 1 ELSE 0 END) AS w{w}_{i}"
             for w, (_, lo, hi) in enumerate(windows)
             for i, (c, _, _) in enumerate(keep)
         ]
         row = _run(runner, f"SELECT {', '.join(exprs)} FROM {p.fq}")
-        if row is None:
-            return None, "the date probe failed", "date"
         tw = _phrase(p.table.name)
         for w, (name, _, _) in enumerate(windows):
             options = [
@@ -396,7 +443,7 @@ def _plan_dates(p: _Probe, runner: Runner, today: date) -> None:
                 )
                 for i, (c, _, _) in enumerate(keep)
             ]
-            if differ([o["value"] for o in options]):
+            if differ([o["value"] for o in options], floor=MIN_COUNT):
                 return (
                     _candidate(
                         "date",
@@ -405,7 +452,7 @@ def _plan_dates(p: _Probe, runner: Runner, today: date) -> None:
                         f"{name}: " + "; ".join(f"{o['shown']} by {o['label']}" for o in options),
                         options,
                         _op(
-                            f"{p.table.name}_date",
+                            _name(p.label, "date"),
                             f"a question about {tw} in a period ('last month', "
                             "'by year') that doesn't say which date",
                             options,
@@ -499,7 +546,7 @@ def _status_check(p: _Probe, c: Column, fam: str, values: list[str], aliases: li
                 "; ".join(f"{_shown(counts[v])} {_status_label(c, v)}" for v in present),
                 options,
                 _op(
-                    f"{p.table.name}_{c.name}_{fam}",
+                    _name(p.label, f"{c.name}_{fam}"),
                     f"a question about {word} {tw} that doesn't name the statuses",
                     options,
                     [p.label],
@@ -542,8 +589,9 @@ def _plan_amounts(p: _Probe) -> None:
         options = [
             _reading(plain_words(c.name), f"SUM({p.label}.{c.name})", p.value(a))
             for c, a in zip(cols, aliases)
+            if p.value(a) is not None  # a column empty on every row is no reading of "how much"
         ]
-        if not differ([o["value"] for o in options]):
+        if len(options) < 2 or not differ([o["value"] for o in options]):
             return None, "the amount columns add up to the same total", "amount"
         tw = _phrase(p.table.name)
         return (
@@ -554,7 +602,7 @@ def _plan_amounts(p: _Probe) -> None:
                 "all rows: " + "; ".join(f"{o['shown']} in {o['label']}" for o in options),
                 options,
                 _op(
-                    f"{p.table.name}_amount",
+                    _name(p.label, "amount"),
                     f"a question about how much {tw} came to that doesn't name the amount",
                     options,
                     [p.label],
@@ -600,31 +648,40 @@ def _plan_joins(p: _Probe, groups: dict[tuple, list]) -> None:
         ]
         if len(rels) < 2:
             continue
-        first = p.q(rels[0].from_column)
         linked = [p.add(f"COUNT({p.q(r.from_column)})") for r in rels]
-        apart = [
-            p.count_where(
-                f"NOT ({first} = {p.q(r.from_column)} OR ({first} IS NULL AND "
-                f"{p.q(r.from_column)} IS NULL))"
-            )
-            for r in rels[1:]
-        ]
+        apart = {}
+        for x in range(len(rels)):
+            for y in range(x + 1, len(rels)):
+                a, b = p.q(rels[x].from_column), p.q(rels[y].from_column)
+                # NULL-safe: a key set on one side and empty on the other links the row differently
+                apart[(x, y)] = p.add(
+                    f"SUM(CASE WHEN {a} = {b} OR ({a} IS NULL AND {b} IS NULL) THEN 0 ELSE 1 END)"
+                )
         p.checks.append(_join_check(p, tt, tc, rels, linked, apart))
 
 
-def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apart: list[str]):
+def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apart: dict):
     def check(_row: dict):
         n = p.n()
-        moved = max((p.value(a) or 0 for a in apart), default=0)
-        if not n or moved < MIN_DIFFERENCE * n:
+        # A key filled on few rows records an event (who voided it), not another reading of the link,
+        # as a date filled on few rows does; the most filled keys are the readings, in that order.
+        keep = [i for i, a in enumerate(linked) if n and (p.value(a) or 0) >= _MIN_DATE_FILL * n]
+        keep.sort(key=lambda i: -(p.value(linked[i]) or 0))
+        if len(keep) < 2:
+            return None, f"fewer than two links to {tt} are filled on most rows", "join"
+        moved = max(
+            p.value(apart[tuple(sorted(pair))]) or 0
+            for pair in ((x, y) for x in keep for y in keep if x < y)
+        )
+        if moved < max(MIN_COUNT, MIN_DIFFERENCE * n):
             return None, f"the joins to {tt} link nearly every row to the same row", "join"
         options = [
             _reading(
-                _link_words(r.from_column),
-                f"join {p.label}.{r.from_column} = {tt}.{tc}",
-                p.value(a),
+                _link_words(rels[i].from_column),
+                f"join {p.label}.{rels[i].from_column} = {tt}.{tc}",
+                p.value(linked[i]),
             )
-            for r, a in zip(rels, linked)
+            for i in keep
         ]
         fw = _phrase(p.table.name)
         one = I._singular(_phrase(tt))
@@ -637,11 +694,12 @@ def _join_check(p: _Probe, tt: str, tc: str, rels: list, linked: list[str], apar
                 + "; ".join(f"{o['shown']} rows have a {o['label']}" for o in options),
                 options,
                 _op(
-                    f"{p.table.name}_{tt}_link",
+                    _name(p.label, f"{tt}_link"),
                     f"a question about {fw} by {one} that doesn't say which {one}",
                     options,
                     [p.label],
                 ),
+                share=moved / n,
             ),
             None,
             "join",
@@ -666,7 +724,7 @@ def _plan_current(p: _Probe, today: date) -> None:
         elif _VALID_TO.match(c.name) and _is_date(c):
             alias = p.count_where(
                 f"{p.q(c.name)} IS NULL OR {p.q(c.name)} >= "
-                f"{p.dialect.date_literal(today.isoformat())}"
+                f"{_day_literal(p.dialect, c, today.isoformat())}"
             )
             how = f"only rows where {p.label}.{c.name} is empty or not yet passed (>= CURRENT_DATE)"
         else:
@@ -692,7 +750,7 @@ def _current_check(p: _Probe, alias: str, how: str):
                 f"{options[0]['shown']} current of {options[1]['shown']} rows",
                 options,
                 _op(
-                    f"{p.table.name}_current",
+                    _name(p.label, "current"),
                     f"a question that counts {tw} without saying current or all",
                     options,
                     [p.label],
@@ -732,7 +790,7 @@ def _history_candidate(base: _Probe, other: _Probe) -> tuple[Optional[dict], Opt
     options = [
         _reading(f"Only {plain_words(base.table.name)}", f"count rows of {base.label}", base.n()),
         _reading(
-            f"{plain_words(other.table.name)} as well",
+            f"Every version, in {plain_words(other.table.name)}",
             f"count rows of {other.label} (every recorded version)",
             other.n(),
         ),
@@ -749,7 +807,7 @@ def _history_candidate(base: _Probe, other: _Probe) -> tuple[Optional[dict], Opt
             f"{plain_words(other.table.name)}",
             options,
             _op(
-                f"{base.table.name}_history",
+                _name(base.label, "history"),
                 f"a question about {bw} that doesn't say current rows or their history",
                 options,
                 [base.label, other.label],
@@ -806,13 +864,17 @@ def _fiscal_candidate(
         return None, "no table with a business date was probed"
     p, c = max(dated, key=lambda pc: pc[0].n())
     end = _run(runner, f"SELECT MAX({p.q(c.name)}) AS x FROM {p.fq}")
-    last = _day((end or {}).get("x"))
+    last = _day(end.get("x"))
     if not last:
-        return None, "the fiscal probe failed"
+        return None, "the dates could not be read"
     # "This year" both ways, as of when the data ends: the calendar year and the fiscal year it is in.
     ref = min(last, today)
     y, fy = ref.year, ref.year if ref.month >= m else ref.year - 1
-    lit, q = dialect.date_literal, p.q(c.name)
+    q = p.q(c.name)
+
+    def lit(day: str) -> str:
+        return _day_literal(dialect, c, day)
+
     win = {"cal": (date(y, 1, 1), date(y + 1, 1, 1)), "fis": (date(fy, m, 1), date(fy + 1, m, 1))}
     row = _run(
         runner,
@@ -823,8 +885,6 @@ def _fiscal_candidate(
         )
         + f" FROM {p.fq}",
     )
-    if row is None:
-        return None, "the fiscal probe failed"
     month = calendar.month_name[m]
     options = [
         _reading("Calendar year", "January to December", _number(row.get("cal")) or 0),
@@ -834,7 +894,7 @@ def _fiscal_candidate(
             _number(row.get("fis")) or 0,
         ),
     ]
-    if not differ([o["value"] for o in options]):
+    if not differ([o["value"] for o in options], floor=MIN_COUNT):
         return None, "the calendar and the fiscal year give the same count"
     tw = _phrase(p.table.name)
     return _candidate(
@@ -889,6 +949,7 @@ def _unread_columns(org: Datasource, labels: dict) -> tuple[list[dict], list[dic
                             "kind": "coded_values",
                             **where,
                             "values": blank,
+                            "evidence": "Codes: " + ", ".join(blank),
                             # the labels the person gives are filled into this map's blanks
                             "op": _table_op(
                                 t,
@@ -920,6 +981,66 @@ def _unread_columns(org: Datasource, labels: dict) -> tuple[list[dict], list[dic
                         }
                     )
     return coded, unknown
+
+
+# ---------------------------------------------------------------------------
+# The card each question is asked on
+# ---------------------------------------------------------------------------
+
+_SKIP = {
+    "label": "Skip the rest",
+    "description": "Ask nothing more now; the rest come back next time",
+}
+
+
+def _says(q: dict, o: dict) -> str:
+    """What one reading's answer is, in a few words, for its option's description."""
+    if q["pattern"] == "date":
+        return f"{o['shown']} in {q['evidence'].split(':', 1)[0]}"
+    unit = {"amount": "over all rows", "join": "rows have one"}.get(q["pattern"], "rows")
+    return f"{o['shown']} {unit}"
+
+
+def _card(q: dict, header: str) -> dict:
+    """The AskUserQuestion question for `q`, within question-cards.md's limits: a header of at most
+    12 characters, 2 to 4 options, no recommendation (which reading a word means is a fact only the
+    person knows), and Skip the rest on every one, so a long list ends in one press."""
+    if q["kind"] == "ambiguity":
+        shown = q["options"][:2]
+        options = [
+            {
+                "label": o["label"],
+                "description": _says(q, o),
+                "preview": o["how"],
+            }
+            for o in shown
+        ]
+        options.append(
+            {
+                "label": "Ask each time",
+                "description": "agami asks which one when a question doesn't say",
+                "preview": "\n".join(f"{o['label']}: {o['shown']}" for o in q["options"]),
+            }
+        )
+    elif q["kind"] == "look_alike":
+        options = [
+            {
+                "label": t["label"],
+                "description": f"{_shown(t['rows'])} rows"
+                if t["rows"] is not None
+                else "Holds the current data",
+            }
+            for t in q["tables"]
+        ]
+        options.append({"label": "Both are in use", "description": "Nothing is written"})
+    else:
+        options = [{"label": "Not sure", "description": "Nothing is written"}]
+    return {
+        "header": header,
+        "question": q["question"],
+        "multiSelect": False,
+        "options": [*options, _SKIP],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -994,19 +1115,37 @@ def open_questions(
 
     candidates: list[dict] = []
     dropped: list[dict] = []
+    failed: list[dict] = []
+
+    def keep(cand: Optional[dict], why: Optional[str], table: Optional[str], pattern: str) -> None:
+        if cand and cand["op"]["name"] in declared:
+            dropped.append({"table": table, "pattern": pattern, "reason": "already declared"})
+        elif cand and _unsafe(cand["op"]):
+            dropped.append(
+                {
+                    "table": table,
+                    "pattern": pattern,
+                    "reason": "a value holds a line break or a control character, or is too long",
+                }
+            )
+        elif cand:
+            candidates.append(cand)
+        else:
+            dropped.append({"table": table, "pattern": pattern, "reason": why})
+
     for label, p in probes.items():
-        p.row = _run(counted, p.statement())
-        if p.row is None:
-            dropped += [{"table": label, "reason": "the probe failed"}]
+        try:
+            p.row = _run(counted, p.statement())
+        except ProbeFailed as e:
+            failed.append({"table": label, "reason": str(e)})
             continue
         for check in p.checks:
-            cand, why, pattern = check(p.row)
-            if cand and cand["op"]["name"] in declared:
-                dropped.append({"table": label, "pattern": pattern, "reason": "already declared"})
-            elif cand:
-                candidates.append(cand)
-            else:
-                dropped.append({"table": label, "pattern": pattern, "reason": why})
+            try:
+                cand, why, pattern = check(p.row)
+            except ProbeFailed as e:
+                failed.append({"table": label, "reason": str(e)})
+                continue
+            keep(cand, why, label, pattern)
 
     look_alikes = []
     for kind, base, other in relatives:
@@ -1018,34 +1157,35 @@ def open_questions(
             and probes[other[1]].row
         ):
             cand, why, _ = _history_candidate(probes[base[1]], probes[other[1]])
-            if cand and cand["op"]["name"] not in declared:
-                candidates.append(cand)
-            elif why:
-                dropped.append({"table": base[1], "pattern": "current", "reason": why})
+            keep(cand, why, base[1], "current")
         elif kind == "look_alike" and not any(
             c.startswith(_COPY_NOTE) for t in (base[0], other[0]) for c in t.caveats
         ):
             look_alikes.append(_look_alike(base, other, probes))
 
     if org.fiscal_year_start_month != 1 and "fiscal_year" not in declared:
-        cand, why = _fiscal_candidate(org, counted, dialect, probes, today)
-        if cand:
-            candidates.append(cand)
-        else:
-            dropped.append({"table": None, "pattern": "fiscal", "reason": why})
+        try:
+            cand, why = _fiscal_candidate(org, counted, dialect, probes, today)
+            keep(cand, why, None, "fiscal")
+        except ProbeFailed as e:
+            failed.append({"table": None, "pattern": "fiscal", "reason": str(e)})
 
     candidates.sort(key=lambda c: -c["spread"])
     coded, unknown = _unread_columns(org, labels)
-    questions = candidates + look_alikes + coded + unknown
+    questions = (candidates + look_alikes + coded + unknown)[:MAX_QUESTIONS]
+    for i, q in enumerate(questions, 1):
+        q["card"] = _card(q, f"Ask {i}/{len(questions)}")
     return {
-        "questions": questions[:MAX_QUESTIONS],
-        "more": max(0, len(questions) - MAX_QUESTIONS),
+        "questions": questions,
+        "more": max(0, len(candidates + look_alikes + coded + unknown) - MAX_QUESTIONS),
         "counts": {
             "ambiguities": len(candidates),
             "look_alike": len(look_alikes),
             "coded_values": len(coded),
             "unknown_columns": len(unknown),
+            "failed": len({f["table"] for f in failed}),
         },
+        "failed": failed,
         "dropped": dropped,
         "skipped": skipped,
         "tables_probed": len(probes),

@@ -839,6 +839,10 @@ class SQLServer(Dialect):
     _SYS_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
     case_insensitive_compare = True   # the default collations are *_CI_*
 
+
+    def date_literal(self, iso_day: str) -> str:
+        # `'YYYY-MM-DD'` is read through the session's DATEFORMAT for a datetime; `'YYYYMMDD'` never is.
+        return self.quote_lit(iso_day.replace("-", ""))
     def quote_ident(self, name: str) -> str:
         return "[" + name.replace("]", "]]") + "]"
 
