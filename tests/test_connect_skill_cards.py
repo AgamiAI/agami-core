@@ -555,11 +555,13 @@ def test_1_5_context_card_asks_for_definitions_questions_and_reports():
     s = _between("### 1.5 ", "### 1.6 ")
     assert "header `Context`" in s and "multiSelect" in s
     labels = _card_labels(s)
+    # Issue 3 of the question-cards test log: a person with nothing to hand over got a model built
+    # from guesses. "Ask me as you go" replaced "Nothing to share" as the default (a card holds 4).
     assert labels == [
+        "Ask me as you go (Recommended)",
         "Definitions or a semantic layer",
         "Questions people ask",
         "Report SQL or dashboards",
-        "Nothing to share",
     ]
     assert "spec workbook" in s and "dbt / LookML / Cube" in s
     assert "agami-asked-questions.txt" in s and "reconcile/inbox" in s
@@ -746,3 +748,66 @@ def test_join_candidate_group_options_preview_the_joins_they_add():
     assert "each option's `preview` lists every join that option adds" in s
     assert "Never offer a numbered range" in s
     assert "Add all remaining" in s and "Add none" in s
+
+
+# --- 2g: ask what the data can't settle (issues 3 and 9 of the question-cards test log, #486) ---
+
+
+def _section_2g() -> str:
+    return _between("### 2g ", "## Phase 3:")
+
+
+def test_2g_asks_only_checked_questions_from_the_engine():
+    s = _section_2g()
+    assert 'sm" open-questions "$ROOT" --profile <profile>' in s
+    assert "checked on the data" in s and "`dropped`" in s
+    # the engine words every question; the skill never writes its own SQL or ops
+    assert "never write one by hand" in s
+    for kind in ("`ambiguity`", "`look_alike`", "`coded_values`", "`unknown_column`"):
+        assert kind in s, kind
+
+
+def test_2g_cards_are_capped_and_every_question_can_skip_the_rest():
+    s = _section_2g()
+    assert "up to 4 questions per card" in s and "at most 12" in s
+    assert "every question ends with **Skip the rest**" in s
+    assert "**Ask each time**" in s
+    assert "no option is marked Recommended" in s
+
+
+def test_2g_records_each_answer_as_the_persons_with_who_and_when():
+    s = _section_2g()
+    assert '--signer "<reviewer_email>" --role "<reviewer_role>"' in s
+    assert "the signer, the role and the time" in s
+    assert '"default": "<that option\'s label>"' in s and '"behaviour": "ask"' in s
+    assert "source: human" in s
+    # a live run decoded a code list itself and signed it under an email nobody typed
+    assert "**Only an answer the person gave on a card is written with `--signer`**" in s
+    assert "never one taken from git, the environment, the Claude login or memory" in s
+
+
+def test_2g_runs_only_when_ask_me_as_you_go_was_picked_and_says_no_duration():
+    s = _section_2g()
+    assert "`Ask me as you go` was picked" in s
+    assert not re.search(r"\d+\s*(?:–|-)?\s*\d*\s*(?:seconds|minutes|min)\b", s)
+    text = SKILL.read_text(encoding="utf-8")
+    steps = text[text.index("## Progress tracking") : text.index("## Phase −1")]
+    assert "6. Answer what the data can't settle" in steps
+    assert '6 when "Ask me as you go" wasn\'t picked' in steps
+
+
+def test_2f_keeps_its_closing_paragraphs_above_2g():
+    # A run that skips 2g, or has nothing to ask, still writes the description and the company draft.
+    s = _between("### 2f ", "### 2g ")
+    assert "**The one-line datasource description (from 1.4 C).**" in s
+    assert "**The company draft (from 1.4 A's" in s
+    # 2g is the last section before Phase 3: nothing of 2f follows it
+    assert _section_2g().rstrip().endswith("---")
+    assert "**The company draft" not in _section_2g()
+
+
+def test_2g_passes_the_engines_cards_unchanged_and_never_claims_settled_after_a_failure():
+    s = _section_2g()
+    assert "**Then the cards: each question's `card`, passed to AskUserQuestion unchanged**" in s
+    assert "never say the data settled anything while `counts.failed` is not 0" in s
+    assert "**Don't sign anything yet** on that card writes nothing" in s
