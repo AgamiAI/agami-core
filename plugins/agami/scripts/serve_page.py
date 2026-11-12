@@ -24,7 +24,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 HOST = "127.0.0.1"
 # The page itself is always served; beside it, only the kinds of file a report page loads.
@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        print(json.dumps({"url": f"http://localhost:{server.port}/{page.name}"}), flush=True)
+        print(json.dumps({"url": f"http://localhost:{server.port}/{quote(page.name)}"}), flush=True)
         worker.join(max(args.minutes, 0) * 60)
     except KeyboardInterrupt:
         pass

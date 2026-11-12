@@ -230,5 +230,7 @@ def test_the_page_says_an_unsigned_metric_still_answers():
 def test_the_review_tab_opens_where_the_items_are():
     # The badge counts every open item; an empty "Needs your eyes" next to "Review 3" read as a bug.
     text = TEMPLATE.read_text()
-    assert "!reviewSubTabChosen && reviewSubTab === 'eyes' && !groups.eyes.items.length && groups.looks.items.length" in text
+    # Unreadable columns and placeholder findings sit under "Needs your eyes" too, counted apart from
+    # its items: the tab stays there while any of the three has something.
+    assert "!reviewSubTabChosen && reviewSubTab === 'eyes' && !groups.eyes.items.length && !unknown.length && !placeholders.length && groups.looks.items.length" in text
     assert "manifest.signoff && manifest.signoff.email" in text

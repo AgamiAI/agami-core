@@ -583,3 +583,11 @@ def test_a_persons_name_is_still_personal(table, column):
 @pytest.mark.parametrize("table", ["cmdb_ci", "cmdb_model", "schools", "service_offering"])
 def test_a_bare_name_on_these_tables_of_things_is_not_suspected(table):
     assert not suspected_pii("name", table)
+
+
+@pytest.mark.parametrize(("column", "table"), [("Principal Name", "schools"), ("Student Name", "courses"),
+                                               ("Owner Name", "products")])
+def test_only_a_column_called_just_name_is_left_out_on_a_table_of_things(column, table):
+    # A qualified name ("Principal Name") may be a person whatever the table holds, so it stays
+    # listed for a person to confirm, as it was before tables were taken into account.
+    assert suspected_pii(column, table)

@@ -232,7 +232,8 @@ def suspected_pii(column_name: str, table_name: str | None = None) -> bool:
         return True
     if not WEAK_PII_RE.search(column_name):
         return False
-    bare_name = tokens(column_name)[-1:] == ["name"] and not person_name(column_name)
+    # Only a column called just `name`: `principal_name` or `student_name` names a person on any table.
+    bare_name = tokens(column_name) == ["name"]
     return not (bare_name and table_name is not None and _thing_table(table_name))
 
 

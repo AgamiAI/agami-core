@@ -2399,7 +2399,7 @@
       if (reviewSubTab === 'unknown') reviewSubTab = 'eyes';  // retired sub-tab → eyes
       // The tab's badge counts every open item, so opening on an empty "Needs your eyes" while the
       // items sit under "Looks right" reads as "Review 3" against "0 needs your eyes".
-      if (!reviewSubTabChosen && reviewSubTab === 'eyes' && !groups.eyes.items.length && groups.looks.items.length) {
+      if (!reviewSubTabChosen && reviewSubTab === 'eyes' && !groups.eyes.items.length && !unknown.length && !placeholders.length && groups.looks.items.length) {
         reviewSubTab = 'looks';
       }
       const eyesCount = groups.eyes.items.length + unknown.length + placeholders.length;  // couldn't-read counts here now

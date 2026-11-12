@@ -185,3 +185,16 @@ def test_every_header_quoted_in_the_conventions_doc_fits_a_card():
     headers = re.findall(r'"header":\s*"([^"]*)"', doc.read_text(encoding="utf-8"))
     assert headers
     assert all(len(h) <= 12 for h in headers), [h for h in headers if len(h) > 12]
+
+
+def test_the_printed_link_reaches_a_page_whose_name_needs_escaping(tmp_path):
+    # `#` and `?` in a file name would otherwise end the path, and the browser would get a 404.
+    page = tmp_path / "sales#1 ?.html"
+    page.write_text("<p>ok</p>", encoding="utf-8")
+    proc, url = _start(page)
+    try:
+        status, body = _get(url)
+        assert status == 200 and b"ok" in body
+    finally:
+        proc.kill()
+        proc.wait()
