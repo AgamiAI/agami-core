@@ -24,7 +24,7 @@ apps, to see a card: use the fallback and carry on.
 
 Three rules for any visual drawn in the chat:
 
-1. **Small.** Each tile: 4 to 5 numbers at most, and a click on a tile sends one chat message.
+1. **Small.** Each tile: at most 6 numbers, and a click on a tile sends one chat message.
    Besides tile clicks, at most 2 actions. No scrolling inside it. How many tiles a visual has is
    set by its own file ([overview-card.md](overview-card.md) for the overview).
 2. **Readable in light and dark.** No colour that carries meaning on its own; a state is said in

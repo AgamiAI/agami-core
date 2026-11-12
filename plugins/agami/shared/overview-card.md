@@ -37,8 +37,7 @@ that shows a wrong number is worse than no card.
   joins and entities can wait; they approve as you query."*
 - **One tile per area, at most 8**, ordered by `tables` (largest first): the area's `plain_name`,
   then `tables` tables, `described_pct`% described, `metrics` metrics (with *"<metrics_waiting>
-  waiting"* when not 0) and `joins` joins: at most 5 numbers a tile, so the area's examples are
-  left to the header and the fallback table. More than 8 areas: the 7 largest and a
+  waiting"* when not 0), `joins` joins, `examples` examples. More than 8 areas: the 7 largest and a
   tile *"<n> more areas"*.
 - **Names in words** ([question-cards rule 3b](question-cards.md#3b-things-are-named-in-plain-words)):
   the tile title is `plain_name`, never the identifier.

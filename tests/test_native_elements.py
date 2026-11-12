@@ -34,7 +34,7 @@ def test_ladder_wording_agrees_with_the_phase_files():
     assert "as the phase file's wait loop says" in text
     assert "say what is running before it starts and the result when it ends" in text
     assert "(overview, review groups)" in text
-    assert "Each tile: 4 to 5 numbers at most" in text
+    assert "Each tile: at most 6 numbers" in text
     assert "question-cards.md#6-" in text
 
 
