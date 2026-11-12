@@ -80,3 +80,16 @@ def test_a_long_wait_stops_at_ten_minutes(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(cli.time, "sleep", lambda s: clock.__setitem__("now", clock["now"] + s))
     out = _wait(capsys, "--file", str(tmp_path / "never.json"), "--wait", "9999")
     assert out["all_ready"] is False and clock["now"] == cli.WAIT_FILES_MAX
+
+
+BATCH = r"^\d{8}-\d{6}-[0-9a-f]{4}$"
+
+
+def test_batch_id_is_a_utc_stamp_with_four_hex(capsys):
+    import re
+    assert cli.main(["batch-id"]) == 0
+    first = json.loads(capsys.readouterr().out)["batch"]
+    assert re.match(BATCH, first), first
+    assert cli.main(["batch-id"]) == 0
+    second = json.loads(capsys.readouterr().out)["batch"]
+    assert re.match(BATCH, second) and second != first  # two batches never share file names

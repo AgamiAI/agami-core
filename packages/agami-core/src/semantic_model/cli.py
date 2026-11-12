@@ -667,6 +667,17 @@ def wait_files_seconds(value: float) -> float:
     return min(max(0.0, value), float(WAIT_FILES_MAX))
 
 
+def cmd_batch_id(args) -> int:
+    """Print `{"batch": "<YYYYMMDD-HHMMSS>-<4 hex>"}`: a stamp the skill puts in one batch's input
+    and result file names. Without it a result left by an earlier run (a reintrospect, a sample
+    rebuild, another database with the same area name) reads as this run's to `wait-files` at once,
+    and a subagent's Write onto a file it hasn't read can fail. The random part keeps two batches
+    started in the same second apart."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    _print_json({"batch": f"{stamp}-{os.urandom(2).hex()}"})
+    return 0
+
+
 def cmd_wait_files(args) -> int:
     """Wait until every `--file` exists and is non-empty, or until `--wait` seconds run out.
 
@@ -2457,6 +2468,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-tables", type=int, default=CHUNK_MAX_TABLES,
                     help=f"most tables in one chunk (default {CHUNK_MAX_TABLES})")
     sp.set_defaults(func=cmd_enrich_input)
+
+    sp = sub.add_parser("batch-id", help="print a fresh stamp for one batch of subagents' input and result file names")
+    sp.set_defaults(func=cmd_batch_id)
 
     sp = sub.add_parser("wait-files", help="wait until every --file exists and is non-empty, or --wait seconds pass; keeps the turn open while background subagents finish")
     sp.add_argument("--file", action="append", required=True, help="a result file to wait on (repeatable)")
