@@ -14,6 +14,118 @@ below corresponds to one such version.
 
 ### Added
 
+- **`sm export` writes a reviewed semantic model in the formats Snowflake, Databricks and Apache
+  Ossie load (ACE-167 to ACE-175).** `sm export <root> --target T --out DIR` reads the model and
+  writes files only: it opens no database connection, makes no network call, and never applies
+  what it writes. Each run replaces `<out>/<target>/` whole and writes `<out>/export-report.json`
+  (also printed), naming every item dropped or weakened with one closed reason code. An `--out`
+  that is, holds or lies inside the model, two subject areas a target would name alike, a
+  `--target` named twice, and a flag that belongs to a target or artifact the run does not select
+  (`--uc-comments` without `--target databricks`) are refused before anything is written. The same model and options give
+  the same bytes. `docs/context-export.md` covers every flag, each target's files, the order to
+  apply them in, the report, and what does not carry over per target; asking `/agami-model` to
+  "export my model to Snowflake" runs it. The bundled sample's eight metrics gain hand-written
+  Snowflake and Databricks bindings, so the demo has metrics to carry.
+- **What leaves agami, decided once for every target.** Only approved items travel unless
+  `--include-unreviewed` is passed (the report lists each one it adds). A column flagged
+  `sensitive` stays home with anything that names it, matched by name in any table: SQL that names
+  it, cannot be parsed, or projects `*` over its table, a table defined by a query that reads it,
+  and prose fields that mention it, which travel blank. `--include-sensitive` carries them. The
+  report names a sensitive column, and an item whose name holds one, by an export id. Who signed an
+  item off never travels; when it was signed off may. SQL is never translated: a metric travels
+  only with a binding written for the target's engine, and example, golden-answer, default-filter
+  and `on:` SQL only when the model is written for that engine. SQL that names a table in a schema
+  or catalog other than the model table's own (`archive.orders`), spells it as another object
+  (`"orders"` for Snowflake's `ORDERS`) or names it dynamically (`IDENTIFIER('orders')`) is never
+  pointed at the model's table: the item is left out or loses its SQL, and the report says why.
+  Key terms and ambiguities have no review state: they travel as approved, but no target marks one
+  certified or published. A default filter travels with one
+  wording on every target: optional, used only when the question asks for it, and not part of any
+  metric's definition. A golden item's fields a target has no place for are named in one `degraded`
+  · `detail_lost` entry per item, and a golden file or case that does not load is reported.
+- **Snowflake: a semantic view per subject area.** `snowflake/<area>.semantic_view.yaml` and
+  `<area>.sql`, the `SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML` call that creates it in the
+  `--location` schema. Tables, keys, columns, metrics, relationships, entities and key terms carry
+  over; examples become verified queries on the view's logical names, with `verified_at` from the
+  sign-off time, and the first five approved are onboarding questions. Ambiguities, the fiscal year
+  and the default time window become Cortex Analyst instructions. A self-join becomes a second
+  logical table on the same base table, and a metric across tables no one table relates to becomes
+  a view-level (derived) metric when each of its aggregates reads one table. Snowflake's documented
+  rules are checked at export. `--snowflake-certification-tags` (off by default) tags the view and
+  its members with `SNOWFLAKE.TAGS.CERTIFICATION_STATUS` from review state (`CERTIFIED`, or `TO BE
+  REVIEWED` for an item `--include-unreviewed` carried, for a table carrying such a column, and for
+  a view carrying key terms or ambiguities, of which no review is recorded); applying it needs the `SNOWFLAKE.OOB_TAG_APPLY` application
+  role, re-applying with CREATE OR ALTER does not change tags, and time dimensions cannot be tagged.
+- **Snowflake: a Cortex Agent, its evaluation files and, on request, an MCP server.**
+  `<area>.agent.sql` creates an agent bound to the view, with `COPY GRANTS`, the fiscal year and the
+  optional-filter rule in its instructions, an instruction to name the view as the source of the
+  tool's results, and the example questions as sample questions.
+  `--snowflake-warehouse NAME` names the warehouse it runs on; without it the agent uses the
+  caller's default warehouse, and the file's header shows the lines to add. When an area has
+  golden items, `<area>.evaluation.sql` loads them as an evaluation dataset and computes
+  each expected answer inside your account when it runs (the row count and up to 20 rows of the
+  golden query's result; it needs SELECT on the tables and goes stale when the data changes;
+  `--snowflake-no-expected-answers` turns it off), with a golden item's bounds as rubric sentences.
+  Each result row is quoted as JSON with its keys in order and each number rounded to 6 decimal
+  places in positional notation. A row's expected tool output is the golden SQL rewritten onto the
+  view's logical names, as its verified queries are, or the SQL as written, reported, where that
+  rewrite is refused.
+  An answer is computed only from a query that reads columns the view carries and no `*` anywhere,
+  with distinctly named result columns, so no value of a column left out of the model is copied.
+  `<area>.evaluation_config.yaml` (system metrics pinned to `v3`, plus custom metrics for agami's
+  ambiguity rules and optional filters, each naming its judge, `claude-sonnet-4-6`),
+  `<area>.analyst_evaluation_config.yaml` (Cortex Analyst's result-based
+  scoring of the view's verified queries, written whenever the view holds one; it names the view
+  `<database>.<schema>.<view>` and lists the queries it scores by question) and
+  `<area>.evaluation_run.sql` set up and start the runs; the run file sets the view's schema, since
+  an evaluation started with SQL runs in the session's database and schema. `--snowflake-mcp-server` (off by default) writes `<area>.mcp_server.sql`, a
+  Snowflake-managed MCP server over the view and the agent.
+- **Databricks: metric views.** One per fact table (`databricks/metric_views/<area>__<table>.sql`,
+  version 1.1), with many-to-one joins, the joined tables' columns as fields, and each metric's
+  Databricks binding as a measure with its synonyms. Semi-additive metrics become `semiadditive`
+  windows; a second-order metric becomes a level-of-detail measure (`partition`) when that states
+  agami's meaning exactly, and is otherwise dropped with the reason; a plain currency unit becomes
+  a currency `format`. Default filters never go into a view's always-on filter. A definition holding
+  a `$` says in its header to run it outside a notebook, whose widget syntax would read it.
+- **Databricks: a Genie space per subject area.** `databricks/<area>.geniespace.json` and the bundle
+  resource `resources/<area>.genie.yml`, deployed with the direct deployment engine and the
+  warehouse as the bundle variable `genie_warehouse_id`. Tables, metric views, column descriptions
+  with units, caveats and code labels, entity matching on coded string columns, joins, filters,
+  measures, examples, every example question as a sample question, benchmarks, and one text
+  instruction (ambiguities, the datasource description, the fiscal year, the default time window,
+  key terms) carry over. Example and benchmark SQL names every table `catalog.schema.table`, so it
+  does not depend on a default schema. Genie's sorting, id and size rules hold at export. The
+  resource's header shows how to start a benchmark run. The report counts the sensitive columns of
+  the tables a space lists; `--genie-hide-sensitive` (off by default) marks them hidden in the
+  space, which writes their names into the space file. Hiding is not access control: it does not
+  prevent a query that names the column; a Unity Catalog column mask restricts who can read it.
+- **Databricks: Pages.** One request body per approved entity and key term under `databricks/pages/`
+  (and per metric with `--pages-metrics`), plus a per-area manifest listing the calls in order:
+  governed tag policy, domain, page, asset links, then certification, which stays a curator's action
+  in the Databricks UI. Key terms sit once in a datasource domain. Pages are drafts only their owner
+  sees unless `--pages-publish` (off by default) publishes the approved ones; a key-term page stays
+  a draft and is never marked certified, since agami records no review of a key term. You fill in the domain
+  and metastore ids and submit them yourself.
+- **Databricks: Unity Catalog comments, keys and certification, each on request.** `--uc-comments`,
+  `--uc-constraints` and `--uc-certify` (all off by default; nothing is written without one) write
+  `databricks/unity_catalog/<area>.sql` and `<area>_undo.sql`: comments that replace the existing
+  ones, informational primary and foreign keys (declared without RELY, since agami never checked
+  the data against them, and named `agami__…`), and the `system.certification_status` tag on tables
+  approved with every column they carry and on fully approved metric views without a
+  level-of-detail measure. A table two subject areas carry gets its statements once, in the first
+  area's file. Each section's header says what it overwrites, the privileges it needs, and what
+  undo cannot restore; both files say to reverse only statements that succeeded. The certification
+  section opens with a check per schema that stops it, naming the objects, when one already
+  carries `system.certification_status`, and the undo file's tag removals are commented out, to
+  enable per object. Undo clears a column comment with an empty string and a table comment with
+  NULL. The keys section's header covers a table that already has a primary key (a table has at
+  most one) and says the section runs once until its undo has run; a commented-out query lists the
+  existing primary keys.
+- **Ossie: one semantic model per subject area.** `ossie/<area>.ossie.yaml`, at version 0.1.1 by
+  default or 0.3.0.dev0 with `--ossie-version 0.3`. Metrics carry their Snowflake and Databricks
+  SQL; default filters and sign-off state ride in the extension block. At 0.1.1 `ai_context` is one
+  text of labelled lines.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a

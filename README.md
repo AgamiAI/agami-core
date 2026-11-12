@@ -54,6 +54,7 @@ Each path is walked through in full below ([Quickstart](#quickstart-under-5-minu
 - 🔒 **Local and private** — runs inside Claude Code via Bash/Read/Write. Credentials, schema, and results never touch a server we operate.
 - 🧩 **A portable semantic model** — plain YAML you own and can keep in git (subject areas, tables, entities, metrics, relationships). No lock-in.
 - 📋 **Built the way your warehouse's owners describe it** — when the joins aren't declared (a star schema of views, keys named for their role), fill in a [model spec workbook](plugins/agami/shared/model-spec-format.md) and the model is built exactly as it says.
+- 📤 **Take the model to Snowflake, Databricks or Ossie** — `sm export` writes your reviewed model in the formats Snowflake (a semantic view, an agent and its evaluation files), Databricks (metric views, a Genie space, Pages) and Apache Ossie load, and reports everything it left out. Anything that would change your catalog or publish content (certification tags, Unity Catalog comments and keys, published Pages, an MCP server) is written only when you pass its flag. It carries definitions, not agami's checks or receipts, and never translates SQL between engines. You apply the files yourself ([context export](docs/context-export.md)).
 - 🎯 **Proof it still answers correctly** — keep a golden dataset of questions with agreed answers, and re-score the model against it whenever it changes.
 - 🗄️ **Works with your database** — Postgres · Supabase · Redshift · MySQL · Snowflake · BigQuery · SQL Server · Oracle · Databricks · Trino · DuckDB · SQLite.
 - 🛠️ **Zero infra to start** — no backend, no proxy. If you have a DB CLI you have everything; an optional local MCP server lets Claude Desktop use the same model.
@@ -332,6 +333,7 @@ by environment variables, and **LLM-free + zero-egress by default**. Self-hostin
 - [The trust layer](docs/trust-layer.md) — confidence, sign-off, receipts, snapshots
 - [Format spec](docs/format-spec.md) — the semantic-model layout + a worked example
 - [Model spec workbook](plugins/agami/shared/model-spec-format.md) *(early)* — build the model from a filled-in spreadsheet ([template](plugins/agami/shared/model-spec-template.xlsx))
+- [Context export](docs/context-export.md) — write the model as Snowflake, Databricks or Ossie files, and what does not carry over
 - [Golden datasets](plugins/agami/shared/golden-dataset-shape.md) — the question bank `/agami-eval` scores against
 - [Security](SECURITY.md) — the read-only guarantee per dialect, and what a refusal may name
 - [MCP server](docs/mcp-server.md) — use agami from Claude Desktop

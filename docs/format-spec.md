@@ -101,6 +101,18 @@ A column's `placeholders` (#445) lists stored values that stand in for something
 
 Every write is gated by the validator at [`packages/agami-core/src/semantic_model/validator.py`](../packages/agami-core/src/semantic_model/validator.py) (driven via `python3 -m semantic_model.cli validate <root>`). **No model that fails validation is ever persisted.**
 
+**Exporting the model.** `sm export` writes this model as Snowflake, Databricks or Ossie files
+([context export](context-export.md)). What leaves agami that way: approved tables, columns,
+metrics, joins, entities, examples, golden questions, ambiguities and key terms, each in the target's
+own shape. What stays: columns flagged `sensitive` and anything that names them (unless asked
+for; `--genie-hide-sensitive` writes their names into the Genie space only to hide them there),
+unapproved items (unless asked for), who signed an item off (when it was signed off may travel),
+SQL written for an engine the target does not run (a metric needs a binding for the target's
+engine; SQL is never translated), and agami's pre-query checks, receipts and audit log. No
+expected answer leaves agami with a golden item: the Snowflake evaluation file computes each one
+from the golden SQL inside the customer's account when it runs. Every run writes a report naming each item
+left out or weakened.
+
 ### Worked example — a minimal model on disk
 
 ```yaml
