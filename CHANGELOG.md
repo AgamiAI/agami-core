@@ -22,8 +22,10 @@ below corresponds to one such version.
   build so they run during the join cards. A new `agami-example-writer` agent drafts example
   questions for one subject area while the person signs off definitions; the main chat drops or
   rewrites what sign-off changed, adds the cross-area examples, and `seed-examples` checks every
-  one as before. With no Agent tool the same work is done inline. Subagents still never write the
-  model, run a command or ask the person anything. `sm steps` reads a build mark left by a session
+  one as before. Document readers now write their findings to a result file and are collected the
+  same way. `sm batch-id` prints a fresh stamp that goes into every batch's file names, so a file
+  from an earlier run is never taken for this one's. With no Agent tool the same work is done
+  inline. Subagents still never write the model, run a command or ask the person anything. `sm steps` reads a build mark left by a session
   that ended, with no log written since, as stopped once it is older than 30 minutes.
 - **Enrichers work in chunks of at most 12 tables, and the skill can wait on them without ending
   the turn.** `sm enrich-input <root> --chunks [--max-tables 12]` splits the model into chunks
