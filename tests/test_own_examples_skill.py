@@ -27,7 +27,7 @@ LINK = "shared/own-examples.md"
 
 def _section(text: str, start: str, end: str) -> str:
     i = text.index(start)
-    return text[i:text.index(end, i + len(start))]
+    return text[i : text.index(end, i + len(start))]
 
 
 def test_the_examples_card_offers_add_my_own_every_time():
@@ -53,14 +53,22 @@ def test_the_source_prefix_is_the_one_reconcile_reads():
 
 
 def test_every_input_goes_through_the_packaged_readers_and_checks():
-    for needle in ("reconcile.py intake", "reconcile.py own-examples", "parse_reconcile_report.py",
-                   'sm" add-example "$ROOT" --area <area> --file "<examples_files[area]>"',
-                   '--signer "<reviewer_email>" --role "<reviewer_role>"', "Phase 1n", "Phase 2"):
+    for needle in (
+        "reconcile.py intake",
+        "reconcile.py own-examples",
+        "parse_reconcile_report.py",
+        'sm" add-example "$ROOT" --area <area> --file "<examples_files[area]>"',
+        '--signer "<reviewer_email>" --role "<reviewer_role>"',
+        "Phase 1n",
+        "Phase 2",
+    ):
         assert needle in DOC, needle
     for export in (".twb", ".twbx", ".pbit", ".lkml", ".xlsx", "folder", "screenshot"):
         assert export in DOC, export
     assert "evidence-row.md#dashboard-exports" in DOC
-    assert "## Dashboard exports" in (PLUGIN / "shared" / "evidence-row.md").read_text(encoding="utf-8")
+    assert "## Dashboard exports" in (PLUGIN / "shared" / "evidence-row.md").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_nothing_is_trusted_as_read_or_written_by_hand():
@@ -72,8 +80,12 @@ def test_nothing_is_trusted_as_read_or_written_by_hand():
 
 def test_the_default_question_has_four_answers_and_no_recommendation():
     card = _section(DOC, "**5b — Which should be the default?**", "## 6. Apply")
-    for label, decision in (("Make mine the default", "`change`"), ("Mine for this question only", "`example`"),
-                            ("Keep agami's", "`fix`"), ("Ask each time", "none")):
+    for label, decision in (
+        ("Make mine the default", "`change`"),
+        ("Mine for this question only", "`example`"),
+        ("Keep agami's", "`fix`"),
+        ("Ask each time", "none"),
+    ):
         assert f"| {label} | {decision} |" in card, label
     assert "No option is marked `(Recommended)`" in card
     # the decisions the card writes are the ones the verb settles a question with

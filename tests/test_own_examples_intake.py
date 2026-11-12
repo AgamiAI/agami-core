@@ -50,16 +50,21 @@ def test_a_comment_above_a_statement_names_it_and_is_not_part_of_it():
         "Orders placed, not counting cancelled ones",
         "Revenue from delivered orders; a ';' inside a string must not split it",
     ]
-    assert rows[0]["statement"] == "SELECT COUNT(*) AS orders FROM orders WHERE status != 'cancelled'"
+    assert (
+        rows[0]["statement"] == "SELECT COUNT(*) AS orders FROM orders WHERE status != 'cancelled'"
+    )
     assert rows[1]["statement"].endswith("channel <> 'x;y'")
     assert [(s["text"], s["reason"]) for s in d["skipped"]] == [
-        ("DELETE FROM orders", "not a SELECT or WITH statement")]
+        ("DELETE FROM orders", "not a SELECT or WITH statement")
+    ]
 
 
 def test_a_comment_that_asks_a_question_is_the_rows_question(tmp_path):
     f = tmp_path / "q.sql"
-    f.write_text("-- How many paid orders are there?\nSELECT COUNT(*) FROM orders WHERE status = 'paid';\n"
-                 "-- Paid orders\nSELECT COUNT(*) FROM orders WHERE status = 'paid'")
+    f.write_text(
+        "-- How many paid orders are there?\nSELECT COUNT(*) FROM orders WHERE status = 'paid';\n"
+        "-- Paid orders\nSELECT COUNT(*) FROM orders WHERE status = 'paid'"
+    )
     first, second = intake([f])["rows"]
     assert (first["question"], first["label"]) == ("How many paid orders are there?", None)
     assert (second["question"], second["label"]) == (None, "Paid orders")
@@ -69,14 +74,19 @@ def test_a_semicolon_in_a_comment_or_a_doubled_quote_does_not_split(tmp_path):
     f = tmp_path / "q.sql"
     f.write_text("-- one; still the comment\nSELECT 'it''s; fine' AS x;\nSELECT 2 /* a ; b */ AS y")
     d = intake([f])
-    assert [r["statement"] for r in d["rows"]] == ["SELECT 'it''s; fine' AS x", "SELECT 2 /* a ; b */ AS y"]
+    assert [r["statement"] for r in d["rows"]] == [
+        "SELECT 'it''s; fine' AS x",
+        "SELECT 2 /* a ; b */ AS y",
+    ]
     assert d["rows"][0]["label"] == "one; still the comment"
 
 
 def test_a_folder_reads_every_file_it_can_and_names_what_it_cannot(tmp_path):
     (tmp_path / "sub").mkdir()
     (tmp_path / "a.sql").write_text("SELECT COUNT(*) FROM orders")
-    (tmp_path / "sub" / "b.sql").write_text("-- Paid orders\nSELECT COUNT(*) FROM orders WHERE status = 'paid'")
+    (tmp_path / "sub" / "b.sql").write_text(
+        "-- Paid orders\nSELECT COUNT(*) FROM orders WHERE status = 'paid'"
+    )
     (tmp_path / "README.md").write_text("How these queries were written\nSee the team wiki")
     (tmp_path / ".hidden.sql").write_text("SELECT 1")
     (tmp_path / "report.pbix").write_bytes(b"\x00binary")
@@ -91,7 +101,12 @@ def test_a_folder_reads_every_file_it_can_and_names_what_it_cannot(tmp_path):
 def test_the_fixture_folder_reads_as_one_intake():
     d = intake([FIXTURES], source="your own examples")
     files = {r["provenance"]["file"] for r in d["rows"]}
-    assert files == {"acme_orders.twb", "acme_orders.view.lkml", "acme_queries.sql", "acme_questions.csv"}
+    assert files == {
+        "acme_orders.twb",
+        "acme_orders.view.lkml",
+        "acme_queries.sql",
+        "acme_questions.csv",
+    }
     assert all(r["provenance"]["source"] == "your own examples" for r in d["rows"])
     assert [r["row"] for r in d["rows"]] == list(range(1, len(d["rows"]) + 1))
 
@@ -110,30 +125,55 @@ def _xlsx(path: Path, rows: list[list[str]]) -> Path:
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
     pkg = "http://schemas.openxmlformats.org/package/2006/relationships"
     body = "".join(
-        f'<row r="{r}">' + "".join(
-            f'<c r="{chr(65 + i)}{r}" t="inlineStr"><is><t>{escape(v)}</t></is></c>' for i, v in enumerate(cells))
-        + "</row>" for r, cells in enumerate(rows, 1))
+        f'<row r="{r}">'
+        + "".join(
+            f'<c r="{chr(65 + i)}{r}" t="inlineStr"><is><t>{escape(v)}</t></is></c>'
+            for i, v in enumerate(cells)
+        )
+        + "</row>"
+        for r, cells in enumerate(rows, 1)
+    )
     with zipfile.ZipFile(path, "w") as book:
-        book.writestr("xl/worksheets/sheet1.xml", f'<worksheet xmlns="{main}"><sheetData>{body}</sheetData></worksheet>')
-        book.writestr("xl/workbook.xml", f'<workbook xmlns="{main}" xmlns:r="{rel}"><sheets>'
-                                         f'<sheet name="Examples" sheetId="1" r:id="rId1"/></sheets></workbook>')
-        book.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="{pkg}"><Relationship Id="rId1" '
-                                                    f'Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
-        book.writestr("_rels/.rels", f'<Relationships xmlns="{pkg}"><Relationship Id="rId1" '
-                                     f'Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        book.writestr(
+            "xl/worksheets/sheet1.xml",
+            f'<worksheet xmlns="{main}"><sheetData>{body}</sheetData></worksheet>',
+        )
+        book.writestr(
+            "xl/workbook.xml",
+            f'<workbook xmlns="{main}" xmlns:r="{rel}"><sheets>'
+            f'<sheet name="Examples" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        )
+        book.writestr(
+            "xl/_rels/workbook.xml.rels",
+            f'<Relationships xmlns="{pkg}"><Relationship Id="rId1" '
+            f'Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        )
+        book.writestr(
+            "_rels/.rels",
+            f'<Relationships xmlns="{pkg}"><Relationship Id="rId1" '
+            f'Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        )
     return path
 
 
 def test_a_sheet_of_questions_and_sql_reads_like_the_csv(tmp_path):
-    book = _xlsx(tmp_path / "examples.xlsx", [
-        ["question", "sql"],
-        ["How many orders were placed on the web?", "SELECT COUNT(*) FROM orders WHERE channel = 'web'"],
-    ])
+    book = _xlsx(
+        tmp_path / "examples.xlsx",
+        [
+            ["question", "sql"],
+            [
+                "How many orders were placed on the web?",
+                "SELECT COUNT(*) FROM orders WHERE channel = 'web'",
+            ],
+        ],
+    )
     d = intake([book])
     (row,) = d["rows"]
     assert row["question"] == "How many orders were placed on the web?"
     assert row["statement"] == "SELECT COUNT(*) FROM orders WHERE channel = 'web'"
-    assert row["provenance"]["file"] == "examples.xlsx (Examples)" and row["provenance"]["line"] == 2
+    assert (
+        row["provenance"]["file"] == "examples.xlsx (Examples)" and row["provenance"]["line"] == 2
+    )
 
 
 # --- Tableau ----------------------------------------------------------------------------------
@@ -152,7 +192,7 @@ def test_a_worksheet_on_custom_sql_composes_its_fields_and_filter():
         GROUP BY country""")
     export = revenue["provenance"]["export"]
     assert export["kind"] == "Tableau worksheet" and export["base"] == "custom SQL"
-    assert export["filters"] == ["status is one of \"delivered\""]
+    assert export["filters"] == ['status is one of "delivered"']
     assert export["fields"] == ["country", "total of amount"] and export["untranslated"] == []
     assert revenue["provenance"]["shape"] == "b"
 
@@ -165,16 +205,22 @@ def test_an_all_but_filter_and_a_text_tile_compose_too():
 
 def test_a_table_data_source_maps_a_renamed_field_to_its_column():
     row = _by_label(intake([TWB]))["Orders by channel"]
-    assert _one_line(row["statement"]) == "SELECT channel, COUNT(id) AS cnt_id FROM orders GROUP BY channel"
+    assert (
+        _one_line(row["statement"])
+        == "SELECT channel, COUNT(id) AS cnt_id FROM orders GROUP BY channel"
+    )
 
 
 def test_a_calculated_field_or_a_date_part_is_never_translated_and_says_so():
     rows = _by_label(intake([TWB]))
     net, by_year = rows["Net revenue"], rows["Orders by year"]
     assert net["statement"] is None and by_year["statement"] is None
-    assert net["provenance"]["export"]["untranslated"] == ["the calculated field 'Net revenue' is a Tableau formula"]
+    assert net["provenance"]["export"]["untranslated"] == [
+        "the calculated field 'Net revenue' is a Tableau formula"
+    ]
     assert net["provenance"]["export"]["calculations"] == [
-        {"name": "Net revenue", "formula": "SUM(IF [status] != 'refunded' THEN [amount] END)"}]
+        {"name": "Net revenue", "formula": "SUM(IF [status] != 'refunded' THEN [amount] END)"}
+    ]
     assert "date part" in by_year["provenance"]["export"]["untranslated"][0]
 
 
@@ -182,13 +228,20 @@ def test_calculated_fields_are_listed_as_definitions_with_the_sheets_that_use_th
     d = intake([TWB])
     defs = {x["name"]: x for x in d["definitions"]}
     assert defs["Net revenue"]["used_by"] == ["Net revenue"]
-    assert defs["Unused ratio"]["used_by"] == [] and defs["Unused ratio"]["language"] == "Tableau calculation"
+    assert (
+        defs["Unused ratio"]["used_by"] == []
+        and defs["Unused ratio"]["language"] == "Tableau calculation"
+    )
     assert all(x["file"] == "acme_orders.twb" for x in d["definitions"])
 
 
 def test_a_sheet_with_no_fields_is_skipped_with_a_reason():
     d = intake([TWB])
-    assert {"line": 6, "reason": "worksheet 'Blank sheet' shows no fields", "file": "acme_orders.twb"} in d["skipped"]
+    assert {
+        "line": 6,
+        "reason": "worksheet 'Blank sheet' shows no fields",
+        "file": "acme_orders.twb",
+    } in d["skipped"]
 
 
 def test_connection_details_in_the_workbook_never_reach_the_output():
@@ -201,14 +254,18 @@ def test_a_packaged_workbook_reads_its_twb_and_ignores_the_extract(tmp_path):
     with zipfile.ZipFile(twbx, "w") as z:
         z.writestr("Data/Extracts/acme.hyper", b"\x00" * 1024)
         z.write(TWB, "acme_orders.twb")
-    assert _by_label(intake([twbx]))["Orders by channel"]["statement"] == _by_label(intake([TWB]))["Orders by channel"]["statement"]
+    assert (
+        _by_label(intake([twbx]))["Orders by channel"]["statement"]
+        == _by_label(intake([TWB]))["Orders by channel"]["statement"]
+    )
 
 
 def test_a_data_source_filter_stops_composition(tmp_path):
     text = TWB.read_text().replace(
         "<column caption='Net revenue'",
         "<filter class='categorical' column='[federated.acme1].[none:channel:nk]'>"
-        "<groupfilter function='member' member='&quot;web&quot;' /></filter><column caption='Net revenue'")
+        "<groupfilter function='member' member='&quot;web&quot;' /></filter><column caption='Net revenue'",
+    )
     f = tmp_path / "f.twb"
     f.write_text(text)
     row = _by_label(intake([f]))["Revenue by country"]
@@ -216,11 +273,16 @@ def test_a_data_source_filter_stops_composition(tmp_path):
     assert row["provenance"]["export"]["untranslated"] == ["the data source has filters of its own"]
 
 
-@pytest.mark.parametrize("prolog", [
-    "<!DOCTYPE workbook [<!ENTITY a 'aaaaaaaaaa'><!ENTITY b '&a;&a;&a;&a;&a;&a;&a;&a;'>]>",
-    "<!DOCTYPE workbook SYSTEM 'http://example.com/evil.dtd'>",
-])
-def test_a_workbook_declaring_a_dtd_or_an_entity_is_refused_before_parsing(tmp_path, capsys, prolog):
+@pytest.mark.parametrize(
+    "prolog",
+    [
+        "<!DOCTYPE workbook [<!ENTITY a 'aaaaaaaaaa'><!ENTITY b '&a;&a;&a;&a;&a;&a;&a;&a;'>]>",
+        "<!DOCTYPE workbook SYSTEM 'http://example.com/evil.dtd'>",
+    ],
+)
+def test_a_workbook_declaring_a_dtd_or_an_entity_is_refused_before_parsing(
+    tmp_path, capsys, prolog
+):
     f = tmp_path / "evil.twb"
     f.write_text(f"<?xml version='1.0'?>{prolog}<workbook><worksheets/></workbook>")
     assert reconcile.main(["intake", "--file", str(f)]) == 2
@@ -247,17 +309,46 @@ def test_a_file_that_is_not_a_workbook_is_refused_in_words(tmp_path, capsys):
 
 
 def _model(query_line: str) -> dict:
-    return {"name": "acme", "model": {"tables": [
-        {"name": "orders",
-         "partitions": [{"source": {"type": "m", "expression": [
-             "let",
-             f'    Source = Sql.Database("your-cluster.example.com", "acme", [Query={query_line}])',
-             "in", "    Source"]}}],
-         "measures": [{"name": "Delivered revenue",
-                       "expression": "CALCULATE(SUM(orders[total_amount]), orders[status] = \"delivered\")"}],
-         "columns": [{"name": "is_web", "type": "calculated", "expression": "orders[channel] = \"web\""}]},
-        {"name": "LocalDateTable_1", "partitions": [{"source": {"type": "calculated", "expression": "Calendar()"}}]},
-    ]}}
+    return {
+        "name": "acme",
+        "model": {
+            "tables": [
+                {
+                    "name": "orders",
+                    "partitions": [
+                        {
+                            "source": {
+                                "type": "m",
+                                "expression": [
+                                    "let",
+                                    f'    Source = Sql.Database("your-cluster.example.com", "acme", [Query={query_line}])',
+                                    "in",
+                                    "    Source",
+                                ],
+                            }
+                        }
+                    ],
+                    "measures": [
+                        {
+                            "name": "Delivered revenue",
+                            "expression": 'CALCULATE(SUM(orders[total_amount]), orders[status] = "delivered")',
+                        }
+                    ],
+                    "columns": [
+                        {
+                            "name": "is_web",
+                            "type": "calculated",
+                            "expression": 'orders[channel] = "web"',
+                        }
+                    ],
+                },
+                {
+                    "name": "LocalDateTable_1",
+                    "partitions": [{"source": {"type": "calculated", "expression": "Calendar()"}}],
+                },
+            ]
+        },
+    }
 
 
 _M_QUERY = '"SELECT id, status, total_amount#(lf)FROM orders#(lf)WHERE status <> ""cancelled"""'
@@ -271,10 +362,15 @@ def test_a_power_bi_template_reads_each_tables_native_sql_and_lists_measures(tmp
     d = intake([pbit])
     (row,) = d["rows"]
     assert row["label"] == "orders"
-    assert row["statement"] == "SELECT id, status, total_amount\nFROM orders\nWHERE status <> \"cancelled\""
+    assert (
+        row["statement"]
+        == 'SELECT id, status, total_amount\nFROM orders\nWHERE status <> "cancelled"'
+    )
     assert row["provenance"]["export"]["kind"] == "Power BI table"
     assert [(x["name"], x["language"]) for x in d["definitions"]] == [
-        ("Delivered revenue", "DAX"), ("is_web", "DAX (calculated column)")]
+        ("Delivered revenue", "DAX"),
+        ("is_web", "DAX (calculated column)"),
+    ]
     assert "1 table(s) load without a SQL query" in d["skipped"][0]["reason"]
     assert "your-cluster.example.com" not in json.dumps(d)
 
@@ -298,12 +394,19 @@ def test_a_template_without_a_model_is_refused_in_words(tmp_path, capsys):
 
 def test_lookml_measures_with_a_plain_column_and_value_compose():
     rows = _by_label(intake([FIXTURES / "acme_orders.view.lkml"]))
-    assert _one_line(rows["Delivered revenue"]["statement"]) == \
-        "SELECT SUM(total_amount) AS delivered_revenue FROM orders WHERE status = 'delivered'"
-    assert _one_line(rows["order count"]["statement"]) == "SELECT COUNT(*) AS order_count FROM orders"
+    assert (
+        _one_line(rows["Delivered revenue"]["statement"])
+        == "SELECT SUM(total_amount) AS delivered_revenue FROM orders WHERE status = 'delivered'"
+    )
+    assert (
+        _one_line(rows["order count"]["statement"]) == "SELECT COUNT(*) AS order_count FROM orders"
+    )
     assert _one_line(rows["big order count"]["statement"]) == _one_line(
-        "SELECT COUNT(DISTINCT id) AS big_order_count FROM ( SELECT id, total_amount FROM orders WHERE total_amount > 100 ) t")
-    assert rows["big orders (derived table)"]["statement"].startswith("SELECT id, total_amount FROM orders")
+        "SELECT COUNT(DISTINCT id) AS big_order_count FROM ( SELECT id, total_amount FROM orders WHERE total_amount > 100 ) t"
+    )
+    assert rows["big orders (derived table)"]["statement"].startswith(
+        "SELECT id, total_amount FROM orders"
+    )
 
 
 def test_lookml_measures_that_need_lookers_own_grammar_are_definitions_only():

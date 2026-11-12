@@ -29,7 +29,6 @@ import re
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import Any
 
 import _xlsx
 
@@ -46,7 +45,7 @@ EXPORT_SUFFIXES = frozenset({".twb", ".twbx", ".pbit", ".bim", ".lkml"})
 # told what to send instead, never met with "could not read".
 UNREADABLE_EXPORTS = {
     ".pbix": "a .pbix keeps its model in a binary form; save it from Power BI Desktop as a template "
-             "(File > Export > Power BI template, .pbit), or send a screenshot of the report",
+    "(File > Export > Power BI template, .pbit), or send a screenshot of the report",
     ".tds": "a Tableau data source file has no worksheets; send the workbook (.twb or .twbx), or a screenshot",
     ".tdsx": "a Tableau data source file has no worksheets; send the workbook (.twb or .twbx), or a screenshot",
     ".hyper": "a Tableau extract holds data, not the questions asked of it; send the workbook (.twb or .twbx)",
@@ -82,7 +81,9 @@ def _zip_member(path: Path, want) -> tuple[str, bytes]:
     try:
         book = zipfile.ZipFile(path)
     except zipfile.BadZipFile as exc:
-        raise ExportError(f"{path.name} is not a readable {path.suffix} file (it is not a zip)") from exc
+        raise ExportError(
+            f"{path.name} is not a readable {path.suffix} file (it is not a zip)"
+        ) from exc
     with book:
         for info in book.infolist():
             if info.is_dir() or not want(info.filename):
@@ -118,8 +119,14 @@ def _words(name: str) -> str:
 _TABLEAU_REF = re.compile(r"\[([^\]]+)\]\.\[([^\]]+)\]")
 _TABLEAU_INSTANCE = re.compile(r"^(?P<deriv>[a-z]+):(?P<field>.+):(?P<suffix>[a-z]+)$")
 _TABLEAU_AGG = {"sum": "SUM", "avg": "AVG", "min": "MIN", "max": "MAX", "cnt": "COUNT"}
-_TABLEAU_AGG_WORDS = {"sum": "total", "avg": "average", "min": "minimum", "max": "maximum",
-                      "cnt": "count", "ctd": "distinct count"}
+_TABLEAU_AGG_WORDS = {
+    "sum": "total",
+    "avg": "average",
+    "min": "minimum",
+    "max": "maximum",
+    "cnt": "count",
+    "ctd": "distinct count",
+}
 
 
 def _tableau(path: Path) -> dict:
@@ -137,24 +144,38 @@ def _tableau(path: Path) -> dict:
     if root.tag != "workbook":
         raise ExportError(f"{path.name} is not a Tableau workbook")
 
-    sources = {ds.get("name"): _tableau_source(ds) for ds in root.iter("datasource")
-               if ds.get("name") and ds.find("connection") is not None}
+    sources = {
+        ds.get("name"): _tableau_source(ds)
+        for ds in root.iter("datasource")
+        if ds.get("name") and ds.find("connection") is not None
+    }
     rows, skipped = [], []
     used_by: dict[tuple[str, str], list[str]] = {}
     for n, sheet in enumerate(root.findall("./worksheets/worksheet"), 1):
         row = _tableau_sheet(sheet, sources, n)
         if row is None:
-            skipped.append({"line": n, "reason": f"worksheet {sheet.get('name')!r} shows no fields"})
+            skipped.append(
+                {"line": n, "reason": f"worksheet {sheet.get('name')!r} shows no fields"}
+            )
             continue
         for calc in row["export"]["calculations"]:
-            used_by.setdefault((row["export"]["datasource"] or "", calc["name"]), []).append(row["label"])
+            used_by.setdefault((row["export"]["datasource"] or "", calc["name"]), []).append(
+                row["label"]
+            )
         rows.append(row)
     definitions = []
     for src in sources.values():
         for calc in src["calcs"].values():
-            definitions.append({"source": "Tableau", "language": "Tableau calculation",
-                                "datasource": src["caption"], "name": calc["name"], "formula": calc["formula"],
-                                "used_by": used_by.get((src["caption"] or "", calc["name"]), [])})
+            definitions.append(
+                {
+                    "source": "Tableau",
+                    "language": "Tableau calculation",
+                    "datasource": src["caption"],
+                    "name": calc["name"],
+                    "formula": calc["formula"],
+                    "used_by": used_by.get((src["caption"] or "", calc["name"]), []),
+                }
+            )
     return {"rows": rows, "definitions": definitions, "skipped": skipped}
 
 
@@ -207,14 +228,23 @@ def _tableau_source(ds: ET.Element) -> dict:
         if calc is not None and calc.get("formula") is not None:
             name = (col.get("name") or "").strip("[]")
             calcs[name] = {"name": col.get("caption") or name, "formula": calc.get("formula")}
-    return {"caption": ds.get("caption") or ds.get("name"), "base": base, "custom_sql": custom_sql,
-            "base_why": why, "columns": columns, "calcs": calcs, "table": table}
+    return {
+        "caption": ds.get("caption") or ds.get("name"),
+        "base": base,
+        "custom_sql": custom_sql,
+        "base_why": why,
+        "columns": columns,
+        "calcs": calcs,
+        "table": table,
+    }
 
 
 def _tableau_sheet(sheet: ET.Element, sources: dict, n: int) -> dict | None:
     name = sheet.get("name") or f"worksheet {n}"
     shelf_text = " ".join((el.text or "") for el in sheet.iter() if el.tag in ("rows", "cols"))
-    shelf_text += " " + " ".join(el.get("column") or "" for enc in sheet.iter("encodings") for el in enc)
+    shelf_text += " " + " ".join(
+        el.get("column") or "" for enc in sheet.iter("encodings") for el in enc
+    )
     refs = [(ds, inst) for ds, inst in _TABLEAU_REF.findall(shelf_text) if ds != "Parameters"]
     if not refs:
         return None
@@ -251,16 +281,22 @@ def _tableau_sheet(sheet: ET.Element, sources: dict, n: int) -> dict | None:
         deriv, field = m["deriv"], m["field"]
         col = column(field)
         if deriv == "none":
-            fields_words.append(_words((src or {}).get("calcs", {}).get(field, {}).get("name") or field))
+            fields_words.append(
+                _words((src or {}).get("calcs", {}).get(field, {}).get("name") or field)
+            )
             if col:
                 dims.append(col)
         elif deriv in _TABLEAU_AGG or deriv == "ctd":
             fields_words.append(f"{_TABLEAU_AGG_WORDS[deriv]} of {_words(field)}")
             if col:
-                agg = f"COUNT(DISTINCT {col})" if deriv == "ctd" else f"{_TABLEAU_AGG[deriv]}({col})"
+                agg = (
+                    f"COUNT(DISTINCT {col})" if deriv == "ctd" else f"{_TABLEAU_AGG[deriv]}({col})"
+                )
                 measures.append(f"{agg} AS {deriv}_{col}")
         elif deriv == "usr":
-            fields_words.append(_words((src or {}).get("calcs", {}).get(field, {}).get("name") or field))
+            fields_words.append(
+                _words((src or {}).get("calcs", {}).get(field, {}).get("name") or field)
+            )
         else:
             fields_words.append(f"{_words(field)} ({deriv})")
             untranslated.append(f"{_words(field)} is shown by a date part or bin ({deriv})")
@@ -279,16 +315,32 @@ def _tableau_sheet(sheet: ET.Element, sources: dict, n: int) -> dict | None:
         if having:
             lines.append("HAVING " + "\n  AND ".join(having))
         statement = "\n".join(lines)
-    return {"label": name, "statement": statement, "line": n, "export": {
-        "kind": "Tableau worksheet", "worksheet": name, "datasource": (src or {}).get("caption"),
-        "base": "custom SQL" if (src or {}).get("custom_sql") else ((src or {}).get("table") and "a table"),
-        "custom_sql": (src or {}).get("custom_sql"), "fields": fields_words, "filters": filters_words,
-        "calculations": calcs_used, "untranslated": list(dict.fromkeys(untranslated)),
-        "statement_from": "composed from the worksheet's data source, fields and filters" if statement else None}}
+    return {
+        "label": name,
+        "statement": statement,
+        "line": n,
+        "export": {
+            "kind": "Tableau worksheet",
+            "worksheet": name,
+            "datasource": (src or {}).get("caption"),
+            "base": "custom SQL"
+            if (src or {}).get("custom_sql")
+            else ((src or {}).get("table") and "a table"),
+            "custom_sql": (src or {}).get("custom_sql"),
+            "fields": fields_words,
+            "filters": filters_words,
+            "calculations": calcs_used,
+            "untranslated": list(dict.fromkeys(untranslated)),
+            "statement_from": "composed from the worksheet's data source, fields and filters"
+            if statement
+            else None,
+        },
+    }
 
 
-def _tableau_filter(flt: ET.Element, column, where: list, having: list, words: list,
-                    untranslated: list) -> None:
+def _tableau_filter(
+    flt: ET.Element, column, where: list, having: list, words: list, untranslated: list
+) -> None:
     refs = _TABLEAU_REF.findall(flt.get("column") or "")
     if not refs:
         return
@@ -311,7 +363,9 @@ def _tableau_filter(flt: ET.Element, column, where: list, having: list, words: l
         if col and all(lit is not None for lit in literals):
             where.append(f"{col} {'NOT IN' if negate else 'IN'} ({', '.join(literals)})")
         elif col:
-            untranslated.append(f"the filter on {_words(field)} holds a value this reader does not translate")
+            untranslated.append(
+                f"the filter on {_words(field)} holds a value this reader does not translate"
+            )
         return
     if kind == "quantitative" and (deriv == "none" or deriv in _TABLEAU_AGG):
         lo, hi = flt.findtext("min"), flt.findtext("max")
@@ -320,7 +374,9 @@ def _tableau_filter(flt: ET.Element, column, where: list, having: list, words: l
             untranslated.append(f"the range filter on {_words(field)} is not a plain number range")
             return
         col = column(field)
-        words.append(f"{_words(field)} between {lo if lo is not None else 'any'} and {hi if hi is not None else 'any'}")
+        words.append(
+            f"{_words(field)} between {lo if lo is not None else 'any'} and {hi if hi is not None else 'any'}"
+        )
         if col:
             expr = col if deriv == "none" else f"{_TABLEAU_AGG[deriv]}({col})"
             target = where if deriv == "none" else having
@@ -404,33 +460,64 @@ def _powerbi(path: Path) -> dict:
         found = []
         for part in table.get("partitions") or []:
             source = (part or {}).get("source") or {}
-            expr = source.get("query") if source.get("type") == "query" else source.get("expression")
+            expr = (
+                source.get("query") if source.get("type") == "query" else source.get("expression")
+            )
             expr = "\n".join(expr) if isinstance(expr, list) else (expr or "")
-            found.extend(_m_statements(str(expr)) if source.get("type") != "query" else
-                         ([expr.strip()] if _STATEMENT_RE.match(expr) else []))
+            found.extend(
+                _m_statements(str(expr))
+                if source.get("type") != "query"
+                else ([expr.strip()] if _STATEMENT_RE.match(expr) else [])
+            )
         if not found:
             no_sql += 1
         for sql in dict.fromkeys(found):
-            rows.append({"label": tname, "statement": sql.rstrip().rstrip(";").rstrip(),
-                         "line": len(rows) + 1, "export": {
-                             "kind": "Power BI table", "table": tname, "untranslated": [],
-                             "statement_from": "the native SQL the table loads with"}})
+            rows.append(
+                {
+                    "label": tname,
+                    "statement": sql.rstrip().rstrip(";").rstrip(),
+                    "line": len(rows) + 1,
+                    "export": {
+                        "kind": "Power BI table",
+                        "table": tname,
+                        "untranslated": [],
+                        "statement_from": "the native SQL the table loads with",
+                    },
+                }
+            )
         for measure in table.get("measures") or []:
             expr = measure.get("expression")
-            definitions.append({"source": "Power BI", "language": "DAX", "datasource": tname,
-                                "name": str(measure.get("name") or ""),
-                                "formula": "\n".join(expr) if isinstance(expr, list) else str(expr or ""),
-                                "used_by": []})
+            definitions.append(
+                {
+                    "source": "Power BI",
+                    "language": "DAX",
+                    "datasource": tname,
+                    "name": str(measure.get("name") or ""),
+                    "formula": "\n".join(expr) if isinstance(expr, list) else str(expr or ""),
+                    "used_by": [],
+                }
+            )
         for col in table.get("columns") or []:
             if (col or {}).get("type") == "calculated":
                 expr = col.get("expression")
-                definitions.append({"source": "Power BI", "language": "DAX (calculated column)",
-                                    "datasource": tname, "name": str(col.get("name") or ""),
-                                    "formula": "\n".join(expr) if isinstance(expr, list) else str(expr or ""),
-                                    "used_by": []})
+                definitions.append(
+                    {
+                        "source": "Power BI",
+                        "language": "DAX (calculated column)",
+                        "datasource": tname,
+                        "name": str(col.get("name") or ""),
+                        "formula": "\n".join(expr) if isinstance(expr, list) else str(expr or ""),
+                        "used_by": [],
+                    }
+                )
     if no_sql:
-        skipped.append({"line": 0, "reason": f"{no_sql} table(s) load without a SQL query of their own "
-                                             "(a table picked by name, or Power Query steps); not read"})
+        skipped.append(
+            {
+                "line": 0,
+                "reason": f"{no_sql} table(s) load without a SQL query of their own "
+                "(a table picked by name, or Power Query steps); not read",
+            }
+        )
     return {"rows": rows, "definitions": definitions, "skipped": skipped}
 
 
@@ -450,9 +537,17 @@ def _m_statements(expr: str) -> list[str]:
 # --- LookML -----------------------------------------------------------------------------------
 
 _LKML_SQL_VALUE = re.compile(r"\b(sql\w*|html|expression)\s*:(.*?);;", re.DOTALL)
-_LKML_TOKEN = re.compile(r'\s*(?:(?P<brace>[{}\[\],])|(?P<str>"(?:[^"\\]|\\.)*")|(?P<key>[A-Za-z_][\w.]*)\s*:|'
-                         r'(?P<word>[^\s{}\[\],:"]+))')
-_LKML_AGG = {"sum": "SUM", "average": "AVG", "min": "MIN", "max": "MAX", "count_distinct": "COUNT_DISTINCT"}
+_LKML_TOKEN = re.compile(
+    r'\s*(?:(?P<brace>[{}\[\],])|(?P<str>"(?:[^"\\]|\\.)*")|(?P<key>[A-Za-z_][\w.]*)\s*:|'
+    r'(?P<word>[^\s{}\[\],:"]+))'
+)
+_LKML_AGG = {
+    "sum": "SUM",
+    "average": "AVG",
+    "min": "MIN",
+    "max": "MAX",
+    "count_distinct": "COUNT_DISTINCT",
+}
 _LKML_TABLE_COL = re.compile(r"^\$\{TABLE\}\.([A-Za-z_][A-Za-z0-9_]*)$")
 _LKML_REF = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$")
 
@@ -478,14 +573,30 @@ def _lookml(path: Path) -> dict:
         if key != "view" or not isinstance(body, list):
             continue
         view = {k: v for k, _n, v in body if not isinstance(v, list)}
-        dims = {n: v for k, n, v in body if k in ("dimension", "dimension_group") and isinstance(v, list)}
-        derived = next((v for k, _n, v in body if k == "derived_table" and isinstance(v, list)), None)
+        dims = {
+            n: v
+            for k, n, v in body
+            if k in ("dimension", "dimension_group") and isinstance(v, list)
+        }
+        derived = next(
+            (v for k, _n, v in body if k == "derived_table" and isinstance(v, list)), None
+        )
         derived_sql = next((v for k, _n, v in (derived or []) if k == "sql"), None)
         if derived_sql and _STATEMENT_RE.match(derived_sql):
             base = f"(\n{derived_sql.rstrip().rstrip(';')}\n) t"
-            rows.append({"label": f"{_words(name)} (derived table)", "statement": derived_sql.rstrip().rstrip(";"),
-                         "line": len(rows) + 1, "export": {"kind": "LookML derived table", "view": name,
-                                                            "untranslated": [], "statement_from": "the view's derived-table SQL"}})
+            rows.append(
+                {
+                    "label": f"{_words(name)} (derived table)",
+                    "statement": derived_sql.rstrip().rstrip(";"),
+                    "line": len(rows) + 1,
+                    "export": {
+                        "kind": "LookML derived table",
+                        "view": name,
+                        "untranslated": [],
+                        "statement_from": "the view's derived-table SQL",
+                    },
+                }
+            )
         else:
             table = str(view.get("sql_table_name") or "").strip()
             base = table if table and all(_IDENTIFIER.match(p) for p in table.split(".")) else None
@@ -509,7 +620,7 @@ def _lkml_parse(text: str, blocks: list[str]) -> list:
         m = _LKML_TOKEN.match(text, pos)
         if m is None:
             if text[pos:].strip():
-                raise ValueError(f"unexpected text near {text[pos:pos + 20]!r}")
+                raise ValueError(f"unexpected text near {text[pos : pos + 20]!r}")
             break
         pos = m.end()
         tokens.append(m)
@@ -538,8 +649,12 @@ def _lkml_block(tokens: list, i: int, blocks: list[str]) -> tuple[list, int]:
         key = tok.group("key")
         i += 1
         name = ""
-        if i < len(tokens) and (tokens[i].group("word") or tokens[i].group("str")) and \
-                i + 1 < len(tokens) and tokens[i + 1].group("brace") == "{":
+        if (
+            i < len(tokens)
+            and (tokens[i].group("word") or tokens[i].group("str"))
+            and i + 1 < len(tokens)
+            and tokens[i + 1].group("brace") == "{"
+        ):
             name = _lkml_value(tokens[i], blocks)
             i += 1
         if i < len(tokens) and tokens[i].group("brace") == "{":
@@ -577,15 +692,24 @@ def _lkml_column(sql: str, dims: dict) -> str | None:
     return None
 
 
-def _lookml_measure(view: str, name: str, body: list, dims: dict, base: str | None) -> tuple[dict | None, dict]:
+def _lookml_measure(
+    view: str, name: str, body: list, dims: dict, base: str | None
+) -> tuple[dict | None, dict]:
     props = {k: v for k, _n, v in body}
     mtype = str(props.get("type") or "count")
     sql = props.get("sql")
     label = props.get("label") or _words(name)
     filters = props.get("filters")
-    definition = {"source": "LookML", "language": "LookML measure", "datasource": view, "name": label,
-                  "formula": f"type: {mtype}" + (f"; sql: {sql}" if sql else "") +
-                             (f"; filters: {', '.join(filters)}" if filters else ""), "used_by": []}
+    definition = {
+        "source": "LookML",
+        "language": "LookML measure",
+        "datasource": view,
+        "name": label,
+        "formula": f"type: {mtype}"
+        + (f"; sql: {sql}" if sql else "")
+        + (f"; filters: {', '.join(filters)}" if filters else ""),
+        "used_by": [],
+    }
     untranslated = []
     if mtype == "count" and not sql:
         agg = "COUNT(*)"
@@ -595,7 +719,11 @@ def _lookml_measure(view: str, name: str, body: list, dims: dict, base: str | No
             untranslated.append("the measure's SQL is more than one column")
             agg = None
         else:
-            agg = f"COUNT(DISTINCT {col})" if mtype == "count_distinct" else f"{_LKML_AGG[mtype]}({col})"
+            agg = (
+                f"COUNT(DISTINCT {col})"
+                if mtype == "count_distinct"
+                else f"{_LKML_AGG[mtype]}({col})"
+            )
     else:
         untranslated.append(f"a {mtype} measure is not translated")
         agg = None
@@ -609,12 +737,24 @@ def _lookml_measure(view: str, name: str, body: list, dims: dict, base: str | No
         if col is None or not re.fullmatch(r"[A-Za-z0-9 .]+", value):
             untranslated.append(f"the filter {str(clause).strip()!r} is not a plain value")
             continue
-        where.append(f"{col} = {value if re.fullmatch(r'-?[0-9]+([.][0-9]+)?', value) else _quote(value)}")
+        where.append(
+            f"{col} = {value if re.fullmatch(r'-?[0-9]+([.][0-9]+)?', value) else _quote(value)}"
+        )
     if base is None:
         untranslated.append("the view names no plain table or derived-table SQL")
     if untranslated:
         return None, definition
-    statement = f"SELECT {agg} AS {name}\nFROM {base}" + (("\nWHERE " + "\n  AND ".join(where)) if where else "")
-    return {"label": label, "statement": statement, "export": {
-        "kind": "LookML measure", "view": view, "measure": name, "untranslated": [],
-        "statement_from": "composed from the measure's type, SQL and filters"}}, definition
+    statement = f"SELECT {agg} AS {name}\nFROM {base}" + (
+        ("\nWHERE " + "\n  AND ".join(where)) if where else ""
+    )
+    return {
+        "label": label,
+        "statement": statement,
+        "export": {
+            "kind": "LookML measure",
+            "view": view,
+            "measure": name,
+            "untranslated": [],
+            "statement_from": "composed from the measure's type, SQL and filters",
+        },
+    }, definition
