@@ -18,6 +18,7 @@ The prompt names:
 - `area`: the subject area you write for.
 - `input_path`: the area's bundle: its tables with their columns, its joins, metrics and entities.
 - `plugin_root`: the plugin's absolute path.
+- `dialect`: the database type; write SQL in its dialect and use metric bindings for it.
 - `asked_questions`: the path of the person's own questions (one per line), or "none".
 - `result_path`: where to write your examples (under `<artifacts_dir>/local/tmp/`).
 
@@ -35,7 +36,7 @@ The prompt names:
    start and apply it to your area only. Leave the cross-area examples to the main chat.
 5. **Use only what the bundle has**: its tables, columns, metrics, entities and joins. Join exactly
    as a join is declared, with its full `on` condition (a `current_flag = 'Y'` included). A metric's
-   SQL is its binding for the database's dialect.
+   SQL is its binding for `dialect`.
 6. **Never write a star projection** (`SELECT *`, `t.*`): name the columns.
 
 ## What you return

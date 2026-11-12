@@ -60,6 +60,20 @@ Leave out a step that won't run (8 when no reports were shared in 1.5; 3 with a 
 
 **Don't seed it again if the list already holds these steps** (the skill is resuming after a hand-off, a password page or a file wait): run `sm steps` first and show what it prints ([shared/task-list.md](../../shared/task-list.md), resuming). When `$ARGUMENTS == reintrospect`, the list restarts at the first step this run marks started (step 2, when Phase 1 begins): `sm steps` reopens that step and every step after it, and keeps the steps before it done.
 
+## What runs at the same time
+
+Subagents read and draft in the background while the person answers cards, so nobody waits on one thing while another could run. How a batch is started, collected and given up on is in [shared/parallel-work.md](../../shared/parallel-work.md); the phase files say when. Subagents only read and return data: you write the model, run every command and ask every question.
+
+| While the person is on | These run in the background |
+|---|---|
+| The context and table cards (1.5–1.6) | One `agami-doc-reader` per shared document, up to 4 |
+| The build (1.7) | Document readers still running; the build itself is a background task |
+| The join cards after the build (1.7) | `agami-enricher`s: one per chunk of up to 12 tables |
+| The sign-off cards (4) | `agami-example-writer`s: one per subject area, drafting example questions |
+| The example review card (6) | The example run (`sm seed-validate`) |
+
+With no Agent tool the same work is done inline, in this order.
+
 ---
 
 ## Phase −1: Plan-mode check

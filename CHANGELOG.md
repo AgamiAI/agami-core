@@ -14,6 +14,17 @@ below corresponds to one such version.
 
 ### Added
 
+- **Onboarding runs its subagents in the background while the person answers cards.**
+  agami-connect's SKILL.md gains a schedule, "What runs at the same time", and
+  `shared/parallel-work.md` says how a batch starts, is collected with `sm wait-files` and is given
+  up on. Column descriptions go to one `agami-enricher` per chunk of up to 12 tables whenever the
+  model has 2 or more chunks (it was 2+ areas and more than 30 tables), started right after the
+  build so they run during the join cards. A new `agami-example-writer` agent drafts example
+  questions for one subject area while the person signs off definitions; the main chat drops or
+  rewrites what sign-off changed, adds the cross-area examples, and `seed-examples` checks every
+  one as before. With no Agent tool the same work is done inline. Subagents still never write the
+  model, run a command or ask the person anything. `sm steps` reads a build mark left by a session
+  that ended, with no log written since, as stopped once it is older than 30 minutes.
 - **Enrichers work in chunks of at most 12 tables, and the skill can wait on them without ending
   the turn.** `sm enrich-input <root> --chunks [--max-tables 12]` splits the model into chunks
   (each subject area in order, cut into runs of at most 12 live tables, named `<area>-1`,

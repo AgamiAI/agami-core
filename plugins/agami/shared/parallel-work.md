@@ -1,15 +1,16 @@
 # Running subagents in the background
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 agami-connect hands some reading and drafting to subagents so the person is never waiting on one
 thing while another could run. This is the one place that says how. The schedule (what runs while
 the person is on which cards) is in agami-connect's SKILL.md, "What runs at the same time".
 
-> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
-
 ## 1. Start
 
 - Launch every subagent of a batch in one message: one Agent call each, with
-  `run_in_background: true`. At most 4 run at once; the rest of the batch starts as one finishes.
+  `run_in_background: true`, at most 4 running at once; the rest of the batch starts as one
+  finishes.
 - Each gets an input file path (`input_path`) and a `result_path` to write its result to, both under
   `<artifacts_dir>/local/tmp/`. Prepare every input file first, with the pre-approved `sm` call the
   phase file names: a subagent runs no commands of its own.
@@ -51,8 +52,8 @@ applied as usual.
 
 1. **The Agent tool has no `run_in_background`:** launch the batch in one message in the foreground
    (the turn waits for them, at most 4 per message), then ask the paired cards after.
-2. **No Agent tool at all** (`claude -p`, older clients): do the same work inline, in the order the
-   schedule lists it.
+2. **With no Agent tool at all** (`claude -p`, older clients), do the same work inline, in the
+   order the schedule lists it.
 
 The result must be the same model either way.
 

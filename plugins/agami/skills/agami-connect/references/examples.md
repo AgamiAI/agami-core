@@ -11,7 +11,15 @@ bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=in_progress
 
 **Surface a progress warning first** (second-longest phase): "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud / a multi-schema DB). I'll narrate per-example progress."
 
-**5a — generate** (your job — the LLM step) candidate examples grounded in the model. Aim for **coverage and a good spread**, not a fixed count:
+**5a — the candidates.** When Phase 4 started example writers, the candidates come from their files; you check and finish them:
+
+1. **Collect** every area's `<artifacts_dir>/local/tmp/agami-examples-<area>.candidates.json` with `sm wait-files`, as [parallel-work.md](../../../shared/parallel-work.md) says (they have had the whole sign-off to run, so usually all are ready on the first pass). A writer given up on there: draft that area's candidates yourself, by the rules below.
+2. **Bring them up to date with sign-off**: (i) drop any candidate that uses a metric or entity rejected in sign-off, or a column hidden on the personal-data card; (ii) rewrite any that uses a definition the person changed in sign-off, to the definition as it now stands (`sm review-items` or `sm context` show it); (iii) write the cross-area candidates yourself, with the whole model in view (the writers each saw one area); (iv) write the person's own questions yourself if a writer could not (its reply line says which).
+3. **Write them all as one JSON array** to `<artifacts_dir>/local/tmp/agami-seeds.json` with the Write tool, each keeping its `area`, then go to 5b+5c. Nothing a writer drafted reaches the model unchecked: `seed-examples` validates every candidate and refuses until sign-off is done.
+
+With no writers (no Agent tool), you generate the candidates yourself, as follows. The writers follow these same rules.
+
+**Generate** candidate examples grounded in the model. Aim for **coverage and a good spread**, not a fixed count:
 
 - **Shapes:** a count, a top-N, a time-bucketed trend, a breakdown, a recency filter. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset.
 - **Spread:** across the whole set, touch each major table/family, exercise **every approved metric at least once**, use the key **entities** by their real names/synonyms, and cover **representative joins** — intra-area *and* cross-schema.

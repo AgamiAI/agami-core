@@ -15,7 +15,7 @@ from skill_docs import PLUGIN, SKILLS_DIR
 SKILL = SKILLS_DIR / "agami-connect" / "SKILL.md"
 REFS = SKILLS_DIR / "agami-connect" / "references"
 PARALLEL = PLUGIN / "shared" / "parallel-work.md"
-INLINE = "with no Agent tool the same work is done inline, in this order"
+INLINE = "With no Agent tool the same work is done inline, in this order."
 
 
 def _read(path) -> str:

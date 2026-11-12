@@ -47,7 +47,17 @@ Also run `bash "<plugin_root>/scripts/sm" sensitive "$ROOT"` every time: besides
 
 **Guessed joins: one line, no card.** Read them with `bash "<plugin_root>/scripts/sm" review-items "$ROOT" --scope rule2` and keep the items whose `kind` is `relationship` (that scope also returns entities, which the Sign-off step covers). When there are any, post: *"<N> joins were guessed from names and data; they're used as you query and flagged on the answer until confirmed. Review them any time in agami-model."* With 5 or fewer, a short table under it (`Join | Kind`, the item's `title` and `cardinality`); more, just the line. They are not put on a card.
 
-**If `pii_count`, `preseed_count` and `suspected_count` are all 0 → say "Nothing to review before examples; continuing."** and go to Phase 5.
+**Start the example writers now, before the first card**, so example questions are drafted while the person signs off and hides columns ([parallel-work.md](../../../shared/parallel-work.md); Phase 5a collects them). With the Agent tool, every model gets them, one area or many: they run while the cards are answered.
+
+1. **Prepare each area's input**, one pre-approved call per area (`sm areas "$ROOT"` lists them), the area's bundle with its tables, columns, metrics, entities and joins:
+   ```bash
+   bash "<plugin_root>/scripts/sm" bundle "$ROOT" --area <area> > "<artifacts_dir>/local/tmp/agami-examples-<area>.input.json"
+   ```
+2. **Launch one `agami-example-writer` per area in one message**, in the background as [parallel-work.md](../../../shared/parallel-work.md) says (`subagent_type` `agami-core:agami-example-writer`, `run_in_background: true`, at most 4 running at once), each described in words, *"Draft example questions for Sales"*. Each prompt names `area`, `input_path` (the file above), `result_path` (`<artifacts_dir>/local/tmp/agami-examples-<area>.candidates.json`), `plugin_root` (the absolute path), `dialect` (the database type), and `asked_questions`: the path of `<artifacts_dir>/local/tmp/agami-asked-questions.txt` if 1.5 saved one, else "none". Where the Agent tool doesn't list it, use a general-purpose subagent told to *"Read `<plugin_root>/agents/agami-example-writer.md` and follow it for this input: …"*.
+
+Then go on with the cards below; the turn stays open while the writers run. With no Agent tool, nothing starts here: Phase 5a drafts the examples inline.
+
+**If `pii_count`, `preseed_count` and `suspected_count` are all 0 → say "Nothing to review before examples; continuing."** and go to Phase 5 (it collects the writers just started).
 
 Otherwise run the two steps below that apply (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). When both apply, the review question and the personal-data question can go on the same card, two questions on one AskUserQuestion call.
 
@@ -119,7 +129,7 @@ The page is read-only; decisions stay on the cards, so after the URL ask the car
 **4b — after the cards:** **recount the sign-offs** with `bash "<plugin_root>/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
 
 - the person picked **Skip for now** or **Don't sign anything yet** → that is their decision to continue: say in one line that <n> definitions are unsigned and answers using them carry a warning, and go to Phase 5.
-- they stopped part-way (an "Other" on an item card asked to stop, pause or finish later) → AskUserQuestion: `Continue (Recommended)` (seeds run against the current state; answers warn) / `Pause — I'll finish review first` (stop here; resume via `/agami-connect`).
+- they stopped part-way (an "Other" on an item card asked to stop, pause or finish later) → AskUserQuestion: `Continue (Recommended)` (seeds run against the current state; answers warn) / `Pause — I'll finish review first` (stop here; resume via `/agami-connect`). Before a Pause ends the turn, collect the example writers' files with `sm wait-files` ([parallel-work.md](../../../shared/parallel-work.md)), so none is still running; on resume, 5a uses the files they wrote.
 
 This is the **only** place "continue to examples with items still unreviewed" is offered — and the **only** place you pass `seed-examples --after-review` (otherwise the preseed-review refusal is the engine telling you Phase 4 hasn't happened). **Personal data left queryable does NOT block seeds** — keeping a sensitive column queryable is the person's call; only unreviewed *sign-offs* gate the seeds.
 
