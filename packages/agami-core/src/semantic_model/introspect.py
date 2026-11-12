@@ -248,9 +248,9 @@ class IntrospectReport:
         ran = [c for c in self.join_checks if c["read"] != "not_run"]
         rated = [c for c in ran if "match_rate" in c]
         whole = sum(1 for c in ran if c["read"] == "whole")
-        # Blank keys are an optional join's normal state; a value with no partner, or a key that
-        # repeats on the side it points at, is not.
-        worth = [c for c in rated if c["match_rate"] < 1 or c["to_rows"] > c["to_keys"]]
+        # Blank keys are an optional join's normal state; a value with no partner is not, nor a key
+        # the rows read point at repeating where the join promises one row (`JoinCheck.fans_out`).
+        worth = [c for c in rated if c["match_rate"] < 1 or c.get("fans_out")]
         out = [f"## joins checked on the data ({len(ran)} of {len(self.join_checks)}: {whole} on the whole "
                f"table, {len(ran) - whole} on a sample; {len(ran) - len(rated)} with no values to compare; "
                f"{len(worth)} worth a look)"]
@@ -570,6 +570,10 @@ def introspect(
             prev_rels = [r for r in prev_rels if id(r) not in dropped]
         # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = [r for r in rels if not any(_same_join(r, p, sg) for p in prev_rels)]
+        # A declared key the model already has is kept as stored, so the copy built this run is
+        # dropped: confirm the stored one instead, while it is still the engine's own unreviewed join.
+        declared = [next((p for p in prev_rels if _same_join(d, p, sg)), d) for d in declared]
+        declared = [d for d in declared if any(d is r for r in rels) or _left_for_the_data(d)]
     # Every join checked on the data first: its counts also settle the uniqueness checks below.
     join_checks = _check_joins(dialect, runner, [*prev_rels, *rels], built, report, sg, checked, pp, declared)
     _confirm_declared(declared, checked, sg)
@@ -581,7 +585,8 @@ def introspect(
         rels = list(prev_rels) + rels
     for r, c in join_checks:   # after the relabelling, so each carries the label it ends with
         report.join_checks.append({"join": _join_label(r, sg), "from_table": r.from_table, "to_table": r.to_table,
-                                   "relationship": r.relationship,
+                                   "from_schema": r.from_schema, "to_schema": r.to_schema,
+                                   "from_columns": c.fc, "to_columns": c.tc, "relationship": r.relationship,
                                    "declared": r.confidence == "confirmed", **c.evidence()})
     # Placeholder values (#445), on the small and dimension tables this run read: a dimension is the
     # one side of a join, so this waits for the joins.
@@ -597,10 +602,16 @@ def introspect(
         if k % step == 0 or k == len(to_profile):
             _progress(pp, f"profiled {k}/{len(to_profile)} tables")
 
+    # Personal in any copy of a table (two areas may each define it), or in this run's reading of a
+    # refreshed one: a merged column keeps its stored flags, and one that now holds phone numbers is
+    # personal even before anyone flags it.
+    personal_cols: dict[tuple, set[str]] = {k: set(v) for k, v in fresh_personal.items()}
+    for t in [*built, *(per_area.values() if refreshing else ())]:
+        personal_cols.setdefault((t.schema_name, t.name), set()).update(
+            c.name.lower() for c in t.columns if _never_read(c))
+
     def personal(t: Table, c: Column) -> bool:
-        # On a refresh a merged column keeps its stored flags, so this run's reading of it counts too:
-        # a column that now holds phone numbers is personal even before anyone flags it.
-        return _never_read(c) or c.name.lower() in fresh_personal.get((t.schema_name, t.name), set())
+        return _never_read(c) or c.name.lower() in personal_cols.get((t.schema_name, t.name), set())
 
     report.profile_tables = PF.profile_tables(dialect, runner, to_profile, personal, samples, done=profiled)
     _progress(pp, "join candidates: testing columns no join covers…")
@@ -2429,8 +2440,15 @@ def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], t
     capped = 0
     ahead = {id(r) for r in first or []}
     for r in sorted(rels, key=lambda r: id(r) not in ahead):
-        pairs = _column_pairs(r, sg)
-        if r.review_state in _UNSERVED or not pairs:
+        if r.review_state in _UNSERVED:
+            continue
+        # The key columns alone: a join that also filters (`AND h.current_flag = 'Y'`) would be
+        # checked against rows it never joins, so it is reported unchecked instead.
+        pairs = _key_pairs(r, sg)
+        if not pairs:
+            if _column_pairs(r, sg):
+                skipped["its join has a condition beyond its key columns"] = (
+                    skipped.get("its join has a condition beyond its key columns", 0) + 1)
             continue
         fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
         key = _check_key(r.from_schema, r.from_table, fc, r.to_schema, r.to_table, tc)
@@ -2460,13 +2478,43 @@ def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], t
     return todo
 
 
+def _left_for_the_data(r: Relationship) -> bool:
+    """A stored join the engine left unreviewed for the data to confirm, untouched by a person since:
+    nobody signed it, rejected it or wrote a description of their own."""
+    return (r.review_state == "unreviewed" and r.signed_off_by is None and r.confidence == "inferred"
+            and (not (r.description or "").strip() or _DATA_UNIQUE_NOTE in r.description))
+
+
+def served_join_keys(org: Datasource, sg: Optional[str] = None) -> set[tuple]:
+    """`_check_key` of every join the model serves, with both ends' tables and key columns served by
+    some copy of the table: the joins a saved check may still be shown for."""
+    tables: dict[tuple, set[str]] = {}
+    for sa in org.subject_areas:
+        for t in sa.tables_defined:
+            if t.review_state not in _UNSERVED:
+                tables.setdefault(((t.schema_name or "").lower(), t.name.lower()), set()).update(
+                    c.name.lower() for c in t.columns if c.review_state not in _UNSERVED)
+    rels = [r for sa in org.subject_areas for r in sa.relationships] + list(org.cross_subject_area_relationships)
+    out = set()
+    for r in rels:
+        pairs = _key_pairs(r, sg)
+        if r.review_state in _UNSERVED or not pairs:
+            continue
+        fc, tc = [f for f, _ in pairs], [t for _, t in pairs]
+        key = _check_key(r.from_schema, r.from_table, fc, r.to_schema, r.to_table, tc)
+        ends = (tables.get((key[0], key[1])), tables.get((key[3], key[4])))
+        if ends[0] is not None and ends[1] is not None and set(key[2]) <= ends[0] and set(key[5]) <= ends[1]:
+            out.add(key)
+    return out
+
+
 def _confirm_declared(declared: list[Relationship], checked: dict, sg: Optional[str]) -> None:
     """Approve the declared keys an unenforcing engine left for the data to confirm, where it did:
     at least `PF.JOIN_MIN_MATCH` of the rows read find their partner. The rest stay for review."""
     for r in declared:
-        pairs = _column_pairs(r, sg) or []
+        pairs = _key_pairs(r, sg) or []
         c = checked.get(_check_key(r.from_schema, r.from_table, [f for f, _ in pairs], r.to_schema,
-                                   r.to_table, [t for _, t in pairs]))
+                                   r.to_table, [t for _, t in pairs])) if pairs else None
         if c is not None and c.borne_out:
             r.confidence = "confirmed"
             r.review_state, r.signed_off_by, r.signed_off_role, r.signed_off_at = (

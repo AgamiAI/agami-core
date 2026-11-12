@@ -336,8 +336,9 @@ What `sm introspect` read from the data (#448), for the steps after it: enrichme
 plain-English review questions, ambiguity candidates. Written on every build that isn't a dry run. A
 full build replaces the file; a batched build or refresh (`--append`) merges its tables into it, so it
 ends with every table read. Every write, and every `sm profile <root> [--table <t> …]` read, is cut to
-what the model serves now: a table or column taken out of the model is dropped, and a column the
-model marks personal loses its values. It is evidence, never model content: none of its figures goes
+what the model serves now: a table or column taken out of the model is dropped, a column any copy of
+its table marks personal loses its values, and a join's check is shown only while the model serves
+that join with both its tables and key columns. It is evidence, never model content: none of its figures goes
 into a description, rule or caveat, because they change with every load.
 
 ```jsonc
@@ -369,11 +370,14 @@ into a description, rule or caveat, because they change with every load.
   },
   "joins": [
     {"join": "orders.customer_id -> customers.id", "from_table": "orders", "to_table": "customers",
+     "from_schema": "public", "to_schema": "public", "from_columns": ["customer_id"], "to_columns": ["id"],
      "relationship": "many_to_one", "declared": true, "read": "whole",
      "target_read": "whole",                // whole | lookup (only the keys read were looked up)
      "rows_read": 4100, "rows_keyed": 4000, "rows_matched": 3990,   // rows of the starting table
      "values": 1200, "values_matched": 1195,                         // its distinct keys
      "to_keys": 1500, "to_rows": 1500,      // the table it points at (on a lookup: the keys found)
+     "to_rows_matched": 1195,               // its rows holding a key the rows read hold
+     "fans_out": false,                     // the join promises one row and a matched key repeats
      "match_rate": 0.9975,                  // rows_matched / rows_keyed, on every kind of read
      "summary": "3,990 of 4,000 orders rows find their customer_id in customers.id (99%; whole table checked, 1,195 of 1,200 values); 110 of 4,100 orders rows have no match (100 blank): an inner join drops them; 305 of 1,500 customers keys have no orders row"}
   ]
@@ -391,9 +395,11 @@ into a description, rule or caveat, because they change with every load.
   tables and 300 joins per run; two statements per table, up to eight join checks per statement.
 - **Connections.** Up to 4 statements run at once, so a build holds up to 4 database connections
   beside its own; a profile that signs in through a browser (Snowflake's `externalbrowser`) runs one.
-- **Failures.** A refused statement is retried check by check, and a refused sample clause falls back
-  to the first rows; a statement stopped by the time limit is not retried, and its checks read
-  `not_run`.
+- **Failures.** A refused statement is retried check by check, and a refused sample clause, or a
+  sample that came back empty, falls back to the first rows, for a join check and a table's profile
+  alike; a statement stopped by the time limit is not retried, and its checks read `not_run`.
+- **Not checked:** a join with a condition beyond its key columns (`AND h.current_flag = 'Y'`) is
+  listed as not checked, since checking its keys alone would count rows it never joins.
 - **Personal columns** (flagged sensitive, whose values look personal, or named like a person's or
   party's name, a contact, tax or licence number) carry counts only: no `top`, no `min`/`max`. Pay to a
   person (salary, pay rate, bonus) has no range. Frequent values are listed only for coded columns, by
@@ -401,7 +407,8 @@ into a description, rule or caveat, because they change with every load.
   more on average, none of them an email, a phone number or a GUID.
 - **Finding kinds:** `empty`, `mostly_blank` (blank on 90% or more), `constant` (one value on every
   row), `date_range` (dates after today on a column named for something that already happened),
-  `date_order` (one date before another on 90% or more of the rows that have both, the reverse of
+  `date_order` (one date before another on 90% or more of the rows that have both, same-day rows
+  counted too, the reverse of
   the order their names usually come in), `mixed_formats` (a text column with two date shapes, or
   numbers beside dates).
 - **A sample's figures are a sample's.** Distinct counts and shares on a `sample` or `first_rows`
