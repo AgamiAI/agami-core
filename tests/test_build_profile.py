@@ -448,3 +448,14 @@ def test_sm_profile_prints_the_tables_asked_for_and_the_joins_that_touch_them(tm
     assert list(json.loads(capsys.readouterr().out)["tables"]) == ["main.orders"]
     assert cli.main(["profile", str(tmp_path / "nowhere")]) == 1
     assert "run introspect first" in capsys.readouterr().out
+
+
+def test_a_join_checked_on_the_whole_key_settles_uniqueness_with_no_extra_probe(tmp_path):
+    """The many side of a join whose values turn out unique is flagged one-to-one for review (#511);
+    the join check already counted its rows and distinct values, so no COUNT(DISTINCT) runs."""
+    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 2, 1.0);")
+    seen: list[str] = []
+    org, _ = _build(tmp_path, path, seen=seen)
+    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
+    assert "unique on 2 rows" in r.description and r.review_state == "unreviewed"
+    assert not any("AS distinct_count" in s for s in seen)

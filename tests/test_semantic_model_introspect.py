@@ -588,7 +588,9 @@ def test_giant_table_skips_grain_probe(tmp_path):
     fact = org.subject_areas[0].defined_table("sm_asset_mgmt")
     assert fact.grain == []                                   # left empty, not guessed
     assert rep.mode_per_capability["grain"] == "probe_skipped_large"
-    assert not any("COUNT(DISTINCT" in s for s in seen)       # the full scans never ran
+    # the full scans never ran: the profile's distinct counts on it read a bounded sample (#448)
+    assert not any("COUNT(DISTINCT" in s and "LIMIT" not in s for s in seen)
+    assert any("COUNT(DISTINCT" in s and "TABLESAMPLE SYSTEM" in s and "LIMIT 10000" in s for s in seen)
     assert any("skipped grain probe" in n for n in rep.notes)  # and the skip is surfaced
     # the catalog row estimate is still recorded (it's a cheap stat, fetched once)
     assert fact.performance_hints.estimated_row_count == 40_000_000

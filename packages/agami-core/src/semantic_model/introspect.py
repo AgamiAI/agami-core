@@ -559,14 +559,20 @@ def introspect(
         if dropped:
             prev = _without_joins(prev, dropped)
             prev_rels = [r for r in prev_rels if id(r) not in dropped]
-        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
-        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg)
         # keep prior edges; add only genuinely-new ones (dedup by endpoint+column)
         rels = [r for r in rels if not any(_same_join(r, p, sg) for p in prev_rels)]
-    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget)
+    # Every join checked on the data first: its counts also settle the uniqueness checks below.
+    join_checks = _check_joins(dialect, runner, [*prev_rels, *rels], built, report, sg, checked, pp)
+    if prev_rels:
+        # After the merge, so a split join about to be replaced isn't also listed as relabelled.
+        _recheck_engine_joins(dialect, runner, prev_rels, built, report, probe_budget, unread, sg, checked)
+    _suggest_data_unique(dialect, runner, rels, built, report, probe_budget, checked)
     if prev_rels:
         rels = list(prev_rels) + rels
-    _check_joins(dialect, runner, rels, built, report, sg, checked, pp)
+    for r, c in join_checks:   # after the relabelling, so each carries the label it ends with
+        report.join_checks.append({"join": _join_label(r, sg), "from_table": r.from_table, "to_table": r.to_table,
+                                   "relationship": r.relationship,
+                                   "declared": r.confidence == "confirmed", **c.evidence()})
     # Placeholder values (#445), on the small and dimension tables this run read: a dimension is the
     # one side of a join, so this waits for the joins.
     _scan_placeholders(dialect, runner, [*built, *(per_area.values() if refreshing else ())], rels,
@@ -1584,15 +1590,21 @@ class _ProbeBudget:
 
 def _suggest_data_unique(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
-    report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
+    report: IntrospectReport, budget: Optional[_ProbeBudget] = None, checked: Optional[dict] = None,
 ) -> None:
     """Check each join's many side on the data when no key settles it, and flag a join whose
     values turn out unique for review. The label is left as it is: data that is unique today is not
-    a promise, so a person confirms the join is one-to-one (#511)."""
+    a promise, so a person confirms the join is one-to-one (#511). A join this run checked on the
+    whole key already has the counts, so it costs no statement."""
     budget = budget if budget is not None else _ProbeBudget()
     for r in rels:
         hit = _many_side(r, tables)
         if hit is None:
+            continue
+        known = _unique_from_check(r, checked or {})
+        if known is not False:
+            if known is not None:
+                _flag_one_to_one(r, hit[0], hit[1], known)
             continue
         if budget.left <= 0:
             if not budget.noted:
@@ -1605,6 +1617,20 @@ def _suggest_data_unique(
         rows = _distinct_rows(dialect, runner, table.schema_name, table.name, column)
         if rows is not None:
             _flag_one_to_one(r, table, column, rows)
+
+
+def _unique_from_check(r: Relationship, checked: dict) -> "int | None | bool":
+    """What this run's data check of `r` says about its many side: the filled rows when every value is
+    distinct, None when some repeat, or False when the check didn't read that side whole."""
+    c = checked.get(_check_key(r.from_schema, r.from_table, [r.from_column], r.to_schema, r.to_table,
+                               [r.to_column]))
+    if c is None or not c.ran:
+        return False
+    if r.relationship == "many_to_one":   # the many side is the one the check starts from
+        if c.read != "whole":
+            return False
+        return c.rows_keyed if 0 < c.rows_keyed == c.values else None
+    return c.to_rows if 0 < c.to_rows == c.to_keys else None   # the side it points at, always read whole
 
 
 def _many_side(r: Relationship, tables: list[Table]) -> Optional[tuple[Table, str]]:
@@ -1648,7 +1674,7 @@ def _key_reason(t: Table, cols: list[str]) -> str:
 def _recheck_engine_joins(
     dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
     report: IntrospectReport, budget: Optional[_ProbeBudget] = None,
-    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None,
+    keys_unread: Optional[list[Table]] = None, sg: Optional[str] = None, checked: Optional[dict] = None,
 ) -> None:
     """On a refresh, label each join the engine approved itself from the database's keys as they
     are now, and list every one whose label that changes. A join a person signed off or edited is
@@ -1677,7 +1703,7 @@ def _recheck_engine_joins(
             f"{label}: {r.relationship} → {card} ({why})")
         r.relationship = card
     engine = [r for r in rels if _engine_approved(r)]
-    _suggest_data_unique(dialect, runner, engine, tables, report, budget)
+    _suggest_data_unique(dialect, runner, engine, tables, report, budget, checked)
     for r in engine:
         if not _engine_approved(r):
             ft = _endpoint(tables, r.from_table, r.from_schema)
@@ -2406,8 +2432,8 @@ def _check_key(fs: Optional[str], ft: str, fc: list[str], ts: Optional[str], tt:
 
 def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], tables: list[Table],
                  report: IntrospectReport, sg: Optional[str], checked: dict,
-                 pp: Optional[Path] = None) -> None:
-    """Check every join of the model on the data and keep the evidence in `report.join_checks`.
+                 pp: Optional[Path] = None) -> list[tuple[Relationship, PF.JoinCheck]]:
+    """Check every join of the model on the data; each join with its check, for `report.join_checks`.
 
     A join checked already this run (a declared key on an engine that doesn't enforce it) isn't read
     again. Nothing about a join changes here: the figures are for the person reviewing the build and
@@ -2437,16 +2463,13 @@ def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], t
     if fresh:
         _progress(pp, f"joins: checking {len(fresh)} on the data")
         PF.run_checks(dialect, runner, fresh)
-    for r, c in todo:
-        report.join_checks.append({"join": _join_label(r, sg), "from_table": r.from_table, "to_table": r.to_table,
-                                   "relationship": r.relationship,
-                                   "declared": r.confidence == "confirmed", **c.evidence()})
     if skipped:
         report.notes.append(f"{skipped} join(s) not checked on the data: a table it joins to is over "
                             f"{PF.JOIN_TARGET_MAX_ROWS:,} rows")
     if capped:
         report.notes.append(f"{capped} join(s) not checked on the data: the run checks at most "
                             f"{PF.JOIN_CHECK_CAP}")
+    return todo
 
 
 def _accept_command(out: str) -> str:
