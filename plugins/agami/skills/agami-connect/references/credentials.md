@@ -143,7 +143,7 @@ The helper exits when the page is submitted or the 5 minutes pass, and that exit
 
 `Use a file instead (manual)` always means 0a.4 → 0a.9 → 0a.10, the same as Linux. A line that is not one of these, or no final line at all: show the last line of output and offer `Try again` / `Use a file instead (manual)`. Delete the spec file once the helper has exited.
 
-On `connected`, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+On `connected` (the connection test passed), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)); `$ROOT` is `<artifacts_dir>/<profile>`:
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark connect=done
 ```
@@ -297,7 +297,7 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
 ```
 `python3` MUST be the `$PY` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 <artifacts_dir>/local/.config`.
 
-The database's folder is known from here: mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+The database's folder is known from here, `$ROOT` = `<artifacts_dir>/<profile>`: mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark connect=in_progress
 ```
@@ -358,7 +358,7 @@ Read the first token of stdout and act:
 
 **Run `setup_pgauth.py --all`** before the first native-CLI query (writes `.pgpass` / `.mysql.cnf` so passwords never hit the command line). Idempotent. Then continue to Phase 1.
 
-Before Phase 1, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+Before Phase 1, with the connection saved (this path doesn't test it; Phase 1's first read does), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark connect=done
 ```

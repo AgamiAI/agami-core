@@ -607,6 +607,11 @@ def cmd_steps(args) -> int:
     """The onboarding step list with status and counts read from disk, after applying any --mark.
     Every mark is checked before any is written, so a bad one leaves the timeline as it was."""
     from . import steps
+    if not str(args.root).strip():
+        # An unset "$ROOT" arrives as "": it would put a timeline in the working directory.
+        print("sm steps: the database folder is empty; pass <artifacts_dir>/<profile>",
+              file=sys.stderr)
+        return 2
     try:
         marks = [steps.parse_mark(spec) for spec in args.mark]
     except ValueError as exc:

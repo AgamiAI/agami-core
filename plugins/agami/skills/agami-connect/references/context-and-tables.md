@@ -4,7 +4,7 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 1: Introspect → semantic model
 
-Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `$ROOT` is `<artifacts_dir>/<profile>`:
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark context=in_progress
 ```
@@ -162,6 +162,11 @@ Stay anchored to the tables you actually introspected; don't invent fields the l
 > | **Cube** | `model/**/*.{yml,js}` (or `schema/**`) | `measures`, `dimensions`, `joins` |
 
 Stash everything gathered (the readers' merged findings, or doc text + repo definitions you read yourself) as `$DATA_MODEL_DOC_TEXT` for enrichment — give entities/metrics/relationships found here **`confidence: inferred`** (a declared metric is a strong signal but still wants a human sign-off; FK-derived joins stay as the engine set them). **Never written to disk** — lives only in the enrichment prompt, then discarded. `Skip` → proceed.
+
+When 1.5 saved no report SQL, export or screenshot, mark the report check skipped now, so it leaves the list:
+```bash
+bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=skipped
+```
 
 The context is gathered: mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash

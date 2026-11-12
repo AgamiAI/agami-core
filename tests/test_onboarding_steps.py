@@ -406,3 +406,63 @@ def test_a_timeline_line_that_is_not_utf8_is_ignored(model):
     timeline.write_bytes(b'\xff\xfe{"id": "nope"\n'
                          b'{"id": "examples", "status": "in_progress", "at": "2026-01-01T00:00:00+00:00"}\n')
     assert steps.onboarding_steps(model)["current"] == "examples"
+
+
+def _complete(root: Path) -> None:
+    for i in steps.STEP_IDS:
+        steps.mark(root, i, "in_progress")
+        steps.mark(root, i, "done")
+
+
+def test_restarting_an_earlier_step_reopens_the_later_ones(model):
+    # a reintrospect after a finished onboarding must not show a finished list for the whole run
+    _complete(model)
+    steps.mark(model, "reports", "skipped")
+    assert steps.onboarding_steps(model)["current"] is None
+    steps.mark(model, "tables", "in_progress")
+    result = steps.onboarding_steps(model)
+    s = _by_id(result)
+    assert [s[i]["status"] for i in ("connect", "context")] == ["done", "done"]
+    assert s["tables"]["status"] == "in_progress"
+    assert [s[i]["status"] for i in ("build", "describe", "signoff", "examples", "first_question")] \
+        == ["pending"] * 5
+    assert s["reports"]["status"] == "skipped"  # a skip survives the restart
+    assert s["build"]["count"] is None  # the old model's numbers are not this run's
+    assert result["current"] == "tables"
+
+
+def test_a_rebuild_after_restart_completes_normally(model):
+    _complete(model)
+    steps.mark(model, "tables", "in_progress")
+    steps.mark(model, "tables", "done")
+    steps.mark(model, "build", "in_progress")
+    _rebuild_log(model, "columns+grain 5/11")
+    s = _by_id(steps.onboarding_steps(model))
+    assert s["tables"]["status"] == "done"
+    assert s["build"]["status"] == "in_progress" and s["build"]["count"] == "5 of 11 tables"
+    assert s["describe"]["status"] == "pending"
+
+    _rebuild_log(model, "columns+grain 5/11", newer=False)  # the rebuilt model has landed
+    steps.mark(model, "build", "done")
+    steps.mark(model, "describe", "in_progress")
+    result = steps.onboarding_steps(model)
+    s = _by_id(result)
+    assert s["build"]["status"] == "done" and s["build"]["count"] == "11 tables, 12 joins"
+    assert s["describe"]["status"] == "in_progress"
+    assert [s[i]["status"] for i in ("signoff", "examples", "first_question")] == ["pending"] * 3
+    assert result["current"] == "describe"
+    for i in steps.STEP_IDS[steps.STEP_IDS.index("describe"):]:
+        steps.mark(model, i, "in_progress")
+        steps.mark(model, i, "done")
+    result = steps.onboarding_steps(model)
+    assert {s["status"] for s in result["steps"]} == {"done"}
+    assert result["current"] is None
+
+
+def test_steps_refuses_an_empty_root(tmp_path, capsys, monkeypatch):
+    # an unset "$ROOT" reaches the command as "": it must not write a timeline into the cwd
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["steps", "", "--mark", "connect=done"]) == 2
+    err = capsys.readouterr().err.strip()
+    assert err and "\n" not in err
+    assert not list(tmp_path.iterdir())

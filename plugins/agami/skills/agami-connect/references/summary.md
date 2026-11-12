@@ -4,7 +4,7 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `$ROOT` is `<artifacts_dir>/<profile>`:
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark first_question=in_progress
 ```
@@ -78,12 +78,12 @@ The model keeps improving as you use it:
 • /agami-model — the model in the chat: sign off metrics/joins/entities, hide tables
   or columns you don't want queried, add metrics, and edit descriptions.
 ```
-End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
-
-After the first question is answered, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+Once the summary and these question choices are posted, before ending the turn, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark first_question=done
 ```
+
+End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
 
 ---
 

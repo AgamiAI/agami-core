@@ -34,9 +34,11 @@ RULE = ("Run `sm steps` at the start of onboarding, when a step starts or ends, 
 # check (`reports`) is 6b of the examples file: that is where the shared reports are checked.
 PHASE_MARKS = {
     "credentials.md": ["connect=in_progress", "connect=done"],
-    "sample.md": ["connect=in_progress", "connect=done"],
+    "sample.md": ["connect=in_progress", "connect=done", "first_question=in_progress",
+                  "first_question=done"],
+    # nothing shared in 1.5: the report check is skipped there, so it never shows as pending
     "context-and-tables.md": ["context=in_progress", "context=done", "tables=in_progress",
-                              "tables=done", "tables=skipped"],
+                              "tables=done", "tables=skipped", "reports=skipped"],
     "build.md": ["build=in_progress", "build=done"],
     "enrich.md": ["describe=in_progress", "describe=done"],
     "review.md": ["signoff=in_progress", "signoff=done"],
@@ -68,12 +70,17 @@ def test_task_list_rule_is_stated_once():
 
 
 def test_only_the_shared_file_names_a_host_task_tool():
-    offenders = [str(p.relative_to(SKILLS_DIR)) for p in SKILLS_DIR.rglob("*")
-                 if p.is_file() and p.suffix in (".md", ".py", ".json", ".yaml", ".html")
-                 and re.search(r"TodoWrite|TaskCreate", _text(p))]
+    docs = [p for p in PLUGIN.rglob("*") if p.is_file() and p != TASK_LIST
+            and p.suffix in (".md", ".py", ".json", ".yaml", ".html", ".sh")]
+    offenders = [str(p.relative_to(PLUGIN)) for p in docs
+                 if re.search(r"TodoWrite|TaskCreate", p.read_text(encoding="utf-8", errors="replace"))]
     assert not offenders, offenders
     text = _text(TASK_LIST)
     assert "TodoWrite" in text and "TaskCreate" in text
+    # and the rule is stated in one place only
+    stated = [p for p in [*docs, TASK_LIST] if p.suffix == ".md"
+              and RULE in " ".join(p.read_text(encoding="utf-8", errors="replace").split())]
+    assert stated == [TASK_LIST]
 
 
 def test_connect_links_the_task_list_rule():
@@ -123,6 +130,24 @@ def test_task_list_ids_table_matches_the_engine():
     rows = re.findall(r"^\| `([a-z_]+)` \| ([^|]+?) \|$", _text(TASK_LIST), re.MULTILINE)
     assert [i for i, _ in rows] == list(steps.STEP_IDS)
     assert {i: label for i, label in rows} == steps.LABELS
+
+
+def test_every_path_shows_the_same_nine_steps():
+    # one list on every path: the sample doesn't seed a list of its own
+    assert "Todo seed" not in _text(REFS / "sample.md")
+    assert "own short list" not in _text(CONNECT / "SKILL.md")
+
+
+def test_the_last_step_is_done_before_the_turn_ends():
+    # the first answer comes in a later turn, from agami-query: a mark after it would never run
+    text = _text(REFS / "summary.md")
+    assert text.index("--mark first_question=done") < text.index("End the turn.")
+
+
+def test_build_stops_waiting_on_a_problem():
+    text = _text(REFS / "build.md")
+    assert "or `sm steps` (below) prints a `problem`" in text
+    assert '"The validator gates the write"' in text and "\nThe validator gates the write" in text
 
 
 def test_connect_skill_stays_under_500_lines():

@@ -29,7 +29,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
 
 1. **One background call.** Bash with `run_in_background: true`, and a `description` the person can read in the app's Background tasks pane, in their words: *"Read the tables (Snowflake, 84 tables)"*.
 2. **Say once where to watch**, the first time a background step starts in a run: *"Reading your tables in the background. In the Desktop app, ⋮ → Background tasks shows it live."* (Leave out the second sentence outside the Desktop app.)
-3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done` or `failed`:
+3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done` or `failed`, or `sm steps` (below) prints a `problem`:
    ```bash
    bash "<plugin_root>/scripts/sm" progress "<artifacts_dir>/<profile>" --wait 20
    ```
@@ -40,8 +40,8 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
    bash "<plugin_root>/scripts/sm" steps "$ROOT"
    ```
 
-   When `failed` is true, the build stopped: run the same `sm steps`, say its `problem` to the person in one sentence, and handle it as a failed build below (surface the errors and stop).
-4. **Update the onboarding step's label** with the same count while it runs (*"Read the tables and joins — 12 of 34 tables"*), and with the final numbers when it ends.
+   When `failed` is true, or `sm steps` prints a `problem` that is not null (a killed build writes no `failed` line; `sm steps` calls it stopped after 30 silent minutes), the build stopped: say the `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
+4. **The onboarding step's label** is the build step's `text` from that `sm steps` output, with the live count while it runs (*"Read the tables and joins — 12 of 34 tables"*) and the final numbers when it ends; never type the count yourself.
 5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.
 
 **Where background commands aren't available, a batched build** keeps it legible instead:

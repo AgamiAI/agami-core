@@ -23,7 +23,9 @@ below corresponds to one such version.
   change instead of typing it, each phase file marks its own step where it starts and ends, and the
   rule lives in one place, `shared/task-list.md`. A build that fails or stops says why and the list
   stays at "Read the tables and joins"; `sm progress --wait` returns at once on a failed build, with
-  `"failed": true`.
+  `"failed": true`. Marking an earlier step started reopens every step after it, so reloading the
+  schema shows that run's progress rather than the finished list. The sample path shows the same
+  nine steps.
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm

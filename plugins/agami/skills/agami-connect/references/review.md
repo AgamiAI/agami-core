@@ -125,7 +125,7 @@ This is the **only** place "continue to examples with items still unreviewed" is
 
 On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip silently.
 
-When the sign-off cards are finished (items left for later included, and when 4a found nothing to review), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+When the sign-off cards are finished (items left for later included, and when 4a found nothing to review; not on Pause), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark signoff=done
 ```

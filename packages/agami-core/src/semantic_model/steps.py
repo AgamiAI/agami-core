@@ -101,22 +101,42 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
         fh.write(json.dumps({"id": step_id, "status": status, "at": at.isoformat()}) + "\n")
 
 
-def _last_marks(root: Path) -> dict[str, str]:
-    """The last mark per step. A line that doesn't parse (a write cut short) is skipped, not fatal:
-    the list is a view, and one bad line shouldn't hide the rest."""
+def _replay_marks(root: Path) -> tuple[dict[str, str], bool]:
+    """The marks that still stand, replayed in order, and whether the build was reopened.
+
+    Marking a step `in_progress` restarts the run from there: every later step's earlier
+    `in_progress`/`done` mark is dropped (a `skipped` one is kept), so a reintrospect after a
+    finished onboarding doesn't show a finished list. The build is reopened when the latest restart
+    is before it and it hasn't been marked since: a model on disk from the earlier run then no
+    longer finishes it. A line that doesn't parse (a write cut short) is skipped, not fatal: the
+    list is a view, and one bad line shouldn't hide the rest."""
     try:
         text = _timeline(root).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {}
+        return {}, False
     marks: dict[str, str] = {}
+    build_at = STEP_IDS.index("build")
+    restart: Optional[int] = None
+    since_restart: set[str] = set()
     for line in text.splitlines():
         try:
             doc = json.loads(line)
         except ValueError:
             continue
-        if isinstance(doc, dict) and doc.get("id") in STEP_IDS and doc.get("status") in MARK_STATUSES:
-            marks[doc["id"]] = doc["status"]
-    return marks
+        if not (isinstance(doc, dict) and doc.get("id") in STEP_IDS
+                and doc.get("status") in MARK_STATUSES):
+            continue
+        step_id, status = doc["id"], doc["status"]
+        if status == "in_progress":
+            restart = STEP_IDS.index(step_id)
+            since_restart = set()
+            for later in STEP_IDS[restart + 1:]:
+                if marks.get(later) in ("in_progress", "done"):
+                    del marks[later]
+        marks[step_id] = status
+        since_restart.add(step_id)
+    reopened = restart is not None and restart < build_at and "build" not in since_restart
+    return marks, reopened
 
 
 def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -188,7 +208,8 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     one-line `problem` when the model on disk or the last build needs the person's attention."""
     root = Path(root).expanduser()
     status = {i: "pending" for i in STEP_IDS}
-    status.update(_last_marks(root))
+    marks, reopened = _replay_marks(root)
+    status.update(marks)
     counts: dict[str, Optional[str]] = {}
     problem: Optional[str] = None
 
@@ -201,7 +222,7 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
         # tree is not a problem to report.
         status["build"] = "in_progress"
         counts["build"] = _build_count(log)
-    elif model.exists():
+    elif model.exists() and not reopened:
         # A model on disk is built even when it fails to load: a hand edit or a missing area later
         # must show as a problem on a finished list, not send the list back to "building".
         status["build"] = "done"
@@ -213,10 +234,14 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     elif state in ("failed", "stale"):
         # The build was reached, so the steps before it are done; the list stops at the build.
         status["build"] = "pending"
-        problem = _unfinished(state, reason, rebuild=False)
+        problem = _unfinished(state, reason, rebuild=model.exists())
         for i in STEP_IDS[:build_at]:
             if status[i] in ("pending", "in_progress"):
                 status[i] = "done"
+    elif reopened and model.exists():
+        # The earlier run's model: this run hasn't reached the build yet, and its numbers aren't
+        # this run's.
+        status["build"] = "pending"
     elif log.exists():
         # The engine logs `done:` before the tree is written, so the build runs on until it lands.
         status["build"] = "in_progress"
