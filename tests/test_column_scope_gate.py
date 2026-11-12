@@ -99,6 +99,66 @@ def test_count_star_allowed():
     assert rt.check_no_select_star("SELECT COUNT(*) FROM orders") is None
 
 
+@pytest.mark.parametrize("sql", [
+    "SELECT COLUMNS('.*') FROM orders",
+    "SELECT COLUMNS('sec.*') FROM orders",
+    "SELECT COLUMNS(*) FROM orders",
+    "SELECT COLUMNS(c -> c LIKE 'sec%') FROM orders",
+    "SELECT *COLUMNS('.*') FROM orders",
+    # Off the projection too: inside an aggregate, in WHERE, one level down.
+    "SELECT max(COLUMNS('.*')) FROM orders",
+    "SELECT id FROM orders WHERE COLUMNS('.*') IS NOT NULL",
+    "SELECT s.v FROM (SELECT COLUMNS('sec.*') AS v FROM orders) s",
+])
+def test_duckdb_columns_expression_refused_as_a_star(sql):
+    # #615: COLUMNS() picks columns by pattern at run time, so an excluded one comes back unnamed.
+    refusal = rt.check_no_select_star(sql, dialect="duckdb")
+    assert refusal is not None and refusal.rule == guardrail.RULE_SELECT_STAR, sql
+    assert refusal.reason == "undetermined"
+    assert refusal.detail == ("query uses COLUMNS() — it returns columns the statement never names, "
+                              "so they cannot be checked against the semantic model.")
+    assert refusal.remediation == "List the columns explicitly instead of COLUMNS(), naming each one."
+
+
+@pytest.mark.parametrize(("dialect", "sql"), [
+    ("snowflake", "SELECT OBJECT_CONSTRUCT(*) FROM orders"),
+    ("snowflake", "SELECT OBJECT_AGG(*) FROM orders"),
+    ("oracle", "SELECT JSON_OBJECT(*) FROM orders"),
+    ("databricks", "SELECT to_json(struct(*)) FROM orders"),
+    ("postgres", "SELECT ROW(o.*) FROM orders o"),
+    ("postgres", "SELECT COUNT(DISTINCT o.*) FROM orders o"),
+])
+def test_star_inside_an_expression_refused(dialect, sql):
+    refusal = rt.check_no_select_star(sql, dialect=dialect)
+    assert refusal is not None and refusal.rule == guardrail.RULE_SELECT_STAR, sql
+    assert refusal.detail == ("query uses * inside an expression — the star expands to columns the "
+                              "statement never names, so they cannot be checked against the semantic "
+                              "model.")
+    assert refusal.remediation == "List the columns explicitly instead of '*'; only COUNT(*) takes a star."
+
+
+@pytest.mark.parametrize(("dialect", "sql"), [
+    ("duckdb", "SELECT * EXCLUDE (status) FROM orders"),
+    ("duckdb", "SELECT o.* EXCLUDE (status) FROM orders o"),
+    ("duckdb", "SELECT * REPLACE (amount * 2 AS amount) FROM orders"),
+    ("bigquery", "SELECT * EXCEPT (status) FROM orders"),
+    ("snowflake", "SELECT * ILIKE '%stat%' FROM orders"),
+])
+def test_star_with_a_modifier_is_still_a_projected_star(dialect, sql):
+    _assert_star_refused(rt.check_no_select_star(sql, dialect=dialect))
+
+
+@pytest.mark.parametrize(("dialect", "sql"), [
+    ("duckdb", "SELECT id, status FROM orders"),
+    ("duckdb", "SELECT COUNT(*) OVER () AS n, id FROM orders"),
+    ("postgres", "SELECT COUNT(o.*) FROM orders o"),
+    ("tsql", "SELECT COUNT_BIG(*) FROM orders"),
+    ("duckdb", "SELECT amount * 2 AS doubled FROM orders"),
+])
+def test_count_star_and_named_columns_still_allowed(dialect, sql):
+    assert rt.check_no_select_star(sql, dialect=dialect) is None
+
+
 def test_star_non_select_degrades_to_allow():
     # Non-SELECT is the upstream read-only guard's job; this gate defers (allow).
     assert rt.check_no_select_star("DELETE FROM orders") is None
