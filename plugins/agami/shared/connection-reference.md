@@ -1,5 +1,7 @@
 # Database Connection Reference
 
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+
 How `agami` connects to your database. Used by the `connect`, `query-database`, and `agami-save-correction` skills.
 
 ## HARD RULES — read first
@@ -8,7 +10,7 @@ These are non-negotiable. Skills that read this document must follow them under 
 
 1. **Connect ONLY to the host/port/database/user/password in `<artifacts_dir>/local/credentials`** — the sole credential source; there is no env-var bypass. Never use `localhost` or any other host as a fallback. If the credentials say `host = remote-prod.example.com`, the only acceptable connection is to `remote-prod.example.com` — not also to `localhost` "to see if there's something there".
 2. **Never ask the user for connection details in chat.** Credentials live in `<artifacts_dir>/local/credentials` only. If the file is missing, invoke agami-connect Phase 0a (which writes a `credentials.example` template the user edits). Never accept host / port / database / user / password values typed inline.
-3. **Never scan or guess.** Tool detection is `which <tool>` and `bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
+3. **Never scan or guess.** Tool detection is `which <tool>` and `bash "<plugin_root>/scripts/py" -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
    - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
@@ -201,7 +203,7 @@ Used when neither the native CLI nor DuckDB is available, but Python with the ri
 **Always invoke it with `$PY` — the interpreter recorded in `<artifacts_dir>/local/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
 
 ```bash
-PY="$(bash "$AGAMI_PLUGIN_ROOT/scripts/py" -c 'import sys; print(sys.executable)' | tr -d '\r')"   # Windows Python ends lines \r\n
+PY="$(bash "<plugin_root>/scripts/py" -c 'import sys; print(sys.executable)' | tr -d '\r')"   # Windows Python ends lines \r\n
 ```
 
 (`py` resolves it the way the `sm` wrapper does — `$AGAMI_PYTHON`, then `.config`'s `tool_paths.python3`, then `python3`/`python` on PATH, never the Windows Store stub — with no Python needed to find it. Same interpreter the introspection engine uses. Keeping them identical means the driver is present wherever a DB connection is opened.)
@@ -243,7 +245,7 @@ Supported end-to-end: Postgres + Redshift + MySQL + Snowflake + SQLite + **BigQu
 # Ensure the auth file exists for the active profile (idempotent, fast).
 # Generates <artifacts_dir>/local/.pgpass from credentials. Bash command line contains
 # NO password.
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_pgauth.py --profile "$PROFILE"
+bash "<plugin_root>/scripts/py" setup_pgauth.py --profile "$PROFILE"
 
 # Execute a query and return CSV. PGPASSFILE points at the auth file;
 # psql reads the password silently. The bash command itself is password-free.
@@ -289,7 +291,7 @@ Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI 
 
 ```bash
 # Ensure the snowsql config exists (idempotent).
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_pgauth.py --profile "$PROFILE"
+bash "<plugin_root>/scripts/py" setup_pgauth.py --profile "$PROFILE"
 
 # Run a query — snowsql reads the password from the config silently.
 snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "$PROFILE" \
@@ -369,7 +371,7 @@ These are sufficient for SELECT-only workloads, which is all agami issues.
 # Ensure the auth file exists for the active profile (idempotent, fast).
 # Generates <artifacts_dir>/local/.mysql.cnf with [client_<profile>] sections. Bash
 # command line contains NO password.
-bash "$AGAMI_PLUGIN_ROOT/scripts/py" setup_pgauth.py --profile "$PROFILE"
+bash "<plugin_root>/scripts/py" setup_pgauth.py --profile "$PROFILE"
 
 # Execute a query — mysql reads creds from the auth file via --defaults-file
 # + --defaults-group-suffix=_<profile>. Visible bash command is password-free.

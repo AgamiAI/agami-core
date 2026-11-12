@@ -295,3 +295,52 @@ def test_later_pythons_on_path_are_candidates_too(monkeypatch, tmp_path):
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     got = CR._candidate_interpreters()
     assert got.index(str(first / "python3")) < got.index(str(second / "python3"))
+
+
+def _model(art: Path, profile: str) -> None:
+    (art / profile).mkdir(parents=True)
+    (art / profile / "datasource.yaml").write_text("name: demo\n", encoding="utf-8")
+
+
+def _no_model_anomalies(anomalies: list) -> list:
+    return [a for a in anomalies if a["kind"] == "env_profile_has_no_model"]
+
+
+def test_env_profile_without_a_model_is_named_when_other_models_exist(tmp_path, monkeypatch):
+    # AGAMI_PROFILE wins over .config, so one left pointing at a database with no model points every
+    # skill at nothing. The anomaly names the variable, the missing database and the ones that exist.
+    _model(tmp_path, "sales")
+    _model(tmp_path, "agami-example")
+    data, anomalies = _run(monkeypatch, tmp_path, AGAMI_PROFILE="main")
+    assert data["profile"] == "main"
+    [hit] = _no_model_anomalies(anomalies)
+    assert hit["where"] == "AGAMI_PROFILE"
+    assert hit["profile"] == "main"
+    assert hit["existing"] == ["agami-example", "sales"]
+    assert "AGAMI_PROFILE" in hit["detail"] and "main" in hit["detail"] and "sales" in hit["detail"]
+    assert "profile" not in hit["detail"].replace("AGAMI_PROFILE", "")  # user-facing: "database"
+
+
+@pytest.mark.parametrize("case", ["model_exists", "no_other_models", "from_config", "explicit"])
+def test_no_model_anomaly_only_for_an_env_profile_without_a_model(tmp_path, monkeypatch, case):
+    _model(tmp_path, "sales")
+    if case == "model_exists":
+        _model(tmp_path, "main")
+        _, anomalies = _run(monkeypatch, tmp_path, AGAMI_PROFILE="main")
+    elif case == "no_other_models":
+        _, anomalies = _run(monkeypatch, tmp_path / "empty", AGAMI_PROFILE="main")
+    elif case == "from_config":
+        local = tmp_path / "local"
+        local.mkdir()
+        (local / ".config").write_text(json.dumps({"active_profile": "main"}), encoding="utf-8")
+        _, anomalies = _run(monkeypatch, tmp_path)
+    else:
+        monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+        monkeypatch.setenv("AGAMI_PROFILE", "main")
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            CR.main(["--profile", "main"])
+        anomalies = json.loads(buf.getvalue())["anomalies"]
+    assert _no_model_anomalies(anomalies) == []

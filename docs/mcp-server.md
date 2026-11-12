@@ -86,9 +86,12 @@ From Claude Code, just say *"set up agami for Claude Desktop"* (the **`agami-ser
 skill), or run the helper directly:
 
 ```bash
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py" --dry-run   # preview the plan
-python3 "$AGAMI_PLUGIN_ROOT/scripts/setup_desktop_mcp.py"             # apply it
+python3 "<plugin dir>/scripts/setup_desktop_mcp.py" --dry-run   # preview the plan
+python3 "<plugin dir>/scripts/setup_desktop_mcp.py"             # apply it
 ```
+
+`<plugin dir>` is the folder you installed the agami plugin into (for a marketplace install, under
+`~/.claude/plugins/cache/<marketplace>/agami-core/<version>/`; for a checkout, `plugins/agami/` in the repo).
 
 It removes all three sharp edges of hand-editing:
 

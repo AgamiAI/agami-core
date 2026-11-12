@@ -13,8 +13,8 @@ This page is the deep dive. For the summary, see the [README](../README.md#the-t
    review state (detailed below). Things the database vouches for (declared foreign keys,
    self-evident structural column names) auto-approve; anything the model *inferred*
    stays `unreviewed` until a human signs it off.
-2. **You sign off what needs eyes, in one queue.** The Review tab lists the unreviewed
-   entries. **Metrics** must be signed off before the runtime treats them as truth
+2. **You sign off what needs eyes, in one queue.** `/agami-model review` lists the unreviewed
+   entries in the chat and asks about them on question cards. **Metrics** must be signed off before the runtime treats them as truth
    (Rule 1); **joins and entities** are usable-but-flagged until confirmed (Rule 2).
 3. **Every answer ships a receipt** — the exact SQL, the joins and metrics it used with
    their review state, and the model snapshot it pinned. If any unreviewed entry was
@@ -60,7 +60,7 @@ Auto-approve collapses the queue to what actually needs human eyes:
   `email`, `status`, `is_*`/`has_*` flags…) needs no description and is never
   queued.
 
-Everything inferred stays `unreviewed` and surfaces in the Review tab.
+Everything inferred stays `unreviewed` and comes up for sign-off in `/agami-model review`.
 
 ## Editing an approved entry sends it back to review
 
@@ -114,7 +114,7 @@ At runtime, `agami-query` still **answers** questions that use `unreviewed`
 metrics, joins, or entities — but every unreviewed entry it relied on arrives on
 the receipt carrying its own `review_state`, and the report reads that state to
 raise its banners: an unreviewed **join** raises the trust banner (with a pointer
-to the Review tab), an unapproved **metric** raises the approve/change banner,
+to `/agami-model review`), an unapproved **metric** raises the approve/change banner,
 whose buttons write your decision straight back into the model. Nothing is
 silently trusted; nothing is hard-blocked. Only `rejected` (excluded) entries are
 dropped entirely — those never appear in an answer.
@@ -126,24 +126,23 @@ instead of LLM guesses. Rule 2 polish (low-confidence joins / field descriptions
 stays in Phase 7's optional collapsed panel — it self-approves as the user queries
 and never blocks the path to first answer.
 
-## The review queue (a tab of the model dashboard)
+## The review queue
 
-`/agami-model review` (or "open the review dashboard") opens the model dashboard
-on its **Review** tab — the trust-layer sign-off queue. The queue splits into
-**Needs your eyes** (Rule 1 metrics, low-confidence or drifted entries) and
-**Looks right (confident)** (FK-derived joins, clearly-defined entries) with a
-one-click "Approve all". Each card shows:
+`/agami-model review` (or "review my model") lists what needs sign-off in the chat, as a
+short table: each metric, entity or guessed join with its one-line meaning. Then a question
+card asks **Approve all**, **Review one by one** or **Skip for now** (unsigned items still
+answer, with a warning). One by one, a card holds up to four items, each with **Approve** /
+**Reject** / **Approve all remaining**, and "Other" takes a change to the definition in your
+own words; agami edits it with `sm curate` and asks about that one again. Personal-data
+columns come up on one card, "Hide these from queries".
 
-- The inferred SQL fragment / definition / mapping
-- Its confidence + review state
-- An inline editable textarea for the description / `calculation`
-- Per-card Approve / Reject / Edit buttons + group-level "Approve all" and "Reject all"
-  (a bulk reject asks for one reason, written with each rejected item to `curation_log.jsonl`)
+Approving stamps the curator's email + role (asked once on a card and saved). agami applies
+each decision, runs the validator, and commits the result to `<artifacts_dir>/<profile>/.git/`.
 
-Approving stamps the curator's email + role (resolved once and saved). Click
-through the queue, hit "Generate feedback for Claude" at the bottom, paste back
-into chat. agami applies each edit, runs the validator, commits the result to
-`<artifacts_dir>/<profile>/.git/`, and re-renders.
+The model explorer page, with its **Review** tab, per-card Approve / Reject / Edit buttons
+and group-level "Approve all" / "Reject all", is the optional full view: `/agami-model`
+serves it from `localhost` when you pick **Show the full view**. Its "Generate feedback for
+Claude" block is still accepted when pasted into the chat.
 
 ## Every answer ships a receipt
 
@@ -200,7 +199,9 @@ all of it:
 The statement itself is not in this panel: each report section carries its own
 SQL, under that section's own disclosure, next to the numbers it produced.
 
-Above the report, two banners: one if any join it used is unreviewed, one if any
+In the chat, the answer card after every query offers **Sign off the definitions used** when the
+answer relied on an unsigned metric. The chart page (the answer's full view, on **Show as a
+chart**) carries the full receipt. Above the report, two banners: one if any join it used is unreviewed, one if any
 metric it used is unapproved. The metric banner's Approve / Change buttons queue
 your decision; your choice goes back to Claude to apply. Nothing lands in the
 model until you send it.
@@ -210,8 +211,9 @@ model until you send it.
 Phase 5 of `agami-connect` generates 10–12 NL→SQL seed examples that each satisfy
 one of five **analytical shapes**: aggregation with a measure, segmentation, time
 comparison, filtered top-N with context, or cohort / retention. Plain row-listing
-is disqualified. Each seed is EXPLAIN-validated against the live DB, then surfaced
-in an examples-validation dashboard
-(`<artifacts_dir>/local/examples-validation/<ts>.html`) — same per-card pattern as
-the review dashboard, with Validate / Reject / Edit / Add note buttons + an inline
-"Add example" affordance.
+is disqualified. Each seed is EXPLAIN-validated against the live DB, then shown in the
+chat as a table (question, rows returned, or the error) with one card: keep all that ran,
+review the failing ones, drop them, or review all one by one (Keep / Drop / Fix, with the fix
+described in "Other"). The examples-validation page
+(`<artifacts_dir>/local/examples-validation/<ts>.html`), with Validate / Reject / Edit /
+Add note buttons and an inline "Add example", is the optional full view.

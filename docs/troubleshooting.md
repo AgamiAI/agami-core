@@ -10,11 +10,11 @@
 | `bq: command not found` | Install the [`gcloud` SDK](https://cloud.google.com/sdk/docs/install) and run `gcloud components install bq`. Or `pip install google-cloud-bigquery` for the Python path. |
 | `snowsql` flag-guessing failures | Snowflake CLI is fussy about flag ordering; use the explicit invocation table in [connection-reference.md](../plugins/agami/shared/connection-reference.md). |
 | `connection refused` on a remote DB | Check VPN / firewall, then connect with your native CLI (`psql -h ... -U ...` or `snowsql -a ... -u ...`) directly to confirm. |
-| "I don't have a model for `<profile>`" | Tell agami "introspect my schema" or run `/agami-connect`. The skill picks up `AGAMI_PROFILE` automatically. |
+| "I don't have a model for `<profile>`" | Run `/agami-connect` (or say "connect my database"). If `AGAMI_PROFILE` is set to a database with no model, agami says so and names the databases that have one: unset the variable or set it to one of them. |
 | The generated SQL keeps using a column that doesn't exist | The model is stale. Run `/agami-connect reintrospect` — it preserves your hand-edits, refreshes from the DB, and surfaces any new entries in the review queue. See [When the database schema changes](usage.md#when-the-database-schema-changes-new-tables--new-columns--dropped-columns). |
 | Just added new tables / columns / metrics to your DB | Run `/agami-connect reintrospect`. Same as above — hand-edits + sign-offs survive; new structure flows in; drifted entries flip to `stale`. |
 | Query times out on a large table | Add a date filter or `LIMIT`; the skill flags HIGH-risk scans before running. |
-| "agami warned that revenue isn't signed off" | The answer still came back — the warning just means the `revenue` metric is unreviewed. Open `/agami-model` (Review tab), check the metric (or fix its `calculation` if it's wrong), and approve it; the warning then disappears. |
+| "agami warned that revenue isn't signed off" | The answer still came back — the warning just means the `revenue` metric is unreviewed. Run `/agami-model review`, check the metric on its card (or type a fix to its `calculation` in "Other"), and approve it; the answer card's **Sign off the definitions used** does the same; the warning then disappears. |
 | Validator rejects a hand-edited YAML | Read the error verbatim — it'll point at the exact line. Most common: a metric set to `approved` without `signed_off_by`/`signed_off_role`, or a non-empty `calculation`. |
 | Want to switch profiles | `AGAMI_PROFILE=staging` then re-ask the question. |
 

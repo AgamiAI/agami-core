@@ -195,3 +195,42 @@ def test_subject_areas_are_not_called_schemas(profile_dir, tmp_path, monkeypatch
     counts = capsys.readouterr().out.split("(", 1)[1]   # past the output path, which can say anything
     assert counts.startswith("1 subject area ·") and "schema" not in counts
     assert "plural(t.schemas || 0, 'subject area')" in out.read_text(encoding="utf-8")
+
+
+# --- found in a live run: the saved sign-off, the metric wording, the review sub-tab ---
+
+from render_model_explorer import saved_signoff  # noqa: E402
+
+TEMPLATE = REPO_ROOT / "plugins" / "agami" / "shared" / "model-explorer-template.html"
+
+
+def test_saved_signoff_reads_the_identity_the_cards_saved(tmp_path):
+    (tmp_path / "local").mkdir()
+    (tmp_path / "local" / ".config").write_text(
+        '{"active_profile": "demo", "reviewer_email": "you@example.com", "reviewer_role": "Data Lead"}'
+    )
+    assert saved_signoff(tmp_path) == {"email": "you@example.com", "role": "Data Lead"}
+
+
+@pytest.mark.parametrize("config", [None, "not json", "[1]", '{"reviewer_email": ""}'])
+def test_saved_signoff_is_empty_when_nothing_usable_is_saved(tmp_path, config):
+    if config is not None:
+        (tmp_path / "local").mkdir()
+        (tmp_path / "local" / ".config").write_text(config)
+    assert saved_signoff(tmp_path) == {}
+
+
+def test_the_page_says_an_unsigned_metric_still_answers():
+    text = TEMPLATE.read_text()
+    assert "refuse to answer" not in text
+    assert "before agami will use it" not in text
+    assert "is still answered, with a warning on the answer, until you approve it" in text
+
+
+def test_the_review_tab_opens_where_the_items_are():
+    # The badge counts every open item; an empty "Needs your eyes" next to "Review 3" read as a bug.
+    text = TEMPLATE.read_text()
+    # Unreadable columns and placeholder findings sit under "Needs your eyes" too, counted apart from
+    # its items: the tab stays there while any of the three has something.
+    assert "!reviewSubTabChosen && reviewSubTab === 'eyes' && !groups.eyes.items.length && !unknown.length && !placeholders.length && groups.looks.items.length" in text
+    assert "manifest.signoff && manifest.signoff.email" in text

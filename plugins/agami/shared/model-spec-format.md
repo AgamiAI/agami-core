@@ -46,7 +46,7 @@ and keep the two in different areas: one area can't hold two tables with the sam
 | Condition | instead of the two columns, a full join condition, for anything beyond `a = b` — e.g. `sales_f.customer_ntrl_key = customer_d.customer_ntrl_key AND customer_d.current_flag = 'Y'` |
 | Role | what the join means in a question: `Approver`, `Ship-to customer`, `Customer (current)`. When two tables join more than one way, this is how the right join is picked |
 | Cardinality | `many_to_one` (default), `one_to_many`, `one_to_one` |
-| Approved | `yes` signs the join off, as the person running agami-connect (it asks first); anything else leaves it for review in the model explorer |
+| Approved | `yes` signs the join off, as the person running agami-connect (it asks first); anything else leaves it for review in `/agami-model review` |
 
 You don't say which area a join lives in: it goes in the area that owns both tables, otherwise it
 becomes a join between the two owning areas — which is where questions will find it.

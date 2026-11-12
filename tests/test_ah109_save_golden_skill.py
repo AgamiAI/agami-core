@@ -162,3 +162,54 @@ def test_a_pasted_block_routes_here_without_the_user_naming_the_skill():
     assert "golden-ops:" in frontmatter
     assert "profile:" in frontmatter
     assert "done" in frontmatter
+
+
+def _section(start: str, end: str) -> str:
+    i = SKILL.index(start)
+    return SKILL[i: SKILL.index(end, i + len(start))]
+
+
+def test_the_import_preview_is_a_table_and_a_confirm_card():
+    """Question cards: the parsed rows as a bounded table, then a card. The import still waits for an
+    explicit yes, now pressed rather than typed."""
+    preview = _section("### 2c", "### 2d")
+    assert "AskUserQuestion" in preview
+    for label in ("**Import them**", "**Don't import**"):
+        assert label in preview, label
+    assert "at most 15 rows" in preview
+    assert "Wait for an explicit yes" in preview
+    assert "shared/question-cards.md" in SKILL
+
+
+def test_the_datasets_page_is_the_full_view_served_from_localhost():
+    body = _section("## Phase 3b", "## Phase 4")
+    assert "**Show the full view**" in body and "serve_page.py" in body
+    # The page's block is still accepted, and still goes through the parser before the write.
+    assert "parse_golden_feedback.py" in body
+    assert "file://" not in SKILL and "open_in_browser" not in SKILL
+
+
+def test_a_replacement_and_a_convention_stop_are_asked_on_cards():
+    stops = _section("## Phase 4", "## Hard rules")
+    assert "**Replace it**" in stops and "**Keep the existing one**" in stops
+    convention = _section("**A statement that departs", "**A relative question")
+    assert "**Save anyway**" in convention and "**Don't save**" in convention
+
+
+def test_every_card_header_fits_twelve_characters():
+    headers = re.findall(r"header `([^`]+)`", SKILL)
+    assert headers and [h for h in headers if len(h) > 12] == []
+
+
+def test_a_relative_question_is_renamed_never_re_anchored():
+    """Matches agami-reconcile: the question names its window; the SQL stays as it ran."""
+    assert "CURRENT_DATE" not in SKILL
+    shape = (SHARED / "golden-dataset-shape.md").read_text(encoding="utf-8")
+    assert "Either anchor" not in shape and "Never re-anchor" in shape
+    relative = _section("**A relative question", "---")
+    assert "Never re-anchor" in relative
+
+
+def test_with_no_dataset_yet_the_dataset_card_has_two_options():
+    s = _section("4. **Which dataset**", "**Never glob")
+    assert "Create one named" in s and "Name it myself" in s

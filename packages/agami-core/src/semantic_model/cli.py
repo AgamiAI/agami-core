@@ -38,6 +38,7 @@ from typing import Any, Optional
 from . import loader as L
 from . import runtime as RT
 from . import validator as V
+from .plain_names import column_label, distinct_labels
 
 
 def _print_json(obj) -> None:
@@ -653,14 +654,109 @@ def cmd_approve_queue(args) -> int:
     return 0 if res.validated else 1
 
 
+# Failure kinds (execute_sql's exit-code table) that say the database could not be reached as
+# configured: every metric would fail the same way, so none of them is the binding's fault.
+_CONNECTION_KINDS = frozenset({"auth", "dsn", "network", "driver_missing", "sign_in_required"})
+# Kinds that say the statement itself is wrong: the binding's fault, never a connection check.
+_STATEMENT_KINDS = frozenset({"syntax", "column_not_found", "table_not_found", "permission"})
+
+
+def _connection_failed(runner, exc: Exception) -> bool:
+    """Whether a failed test run means the database could not be reached, not that the SQL is
+    wrong: the failure kind says so, or, when it says nothing, a trivial `SELECT 1` fails too."""
+    kind = getattr(exc, "kind", None)
+    if kind in _CONNECTION_KINDS:
+        return True
+    if kind in _STATEMENT_KINDS:
+        return False
+    try:
+        runner("SELECT 1")
+    except Exception:  # noqa: BLE001 — any failure of SELECT 1 is the connection's
+        return True
+    return False
+
+
+def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, dict], Optional[str]]:
+    """Each metric's binding for this database, run once over zero rows: name → {ok} or {error}.
+    The second value is the reason the database could not be reached, which stops the batch.
+
+    A live run signed off two metrics whose SQL named a column the table doesn't have and compared
+    a text code to a number; neither was caught, because nothing ran the SQL before the sign-off.
+    `WHERE 1 = 0` reads no rows and still makes the database resolve every column and operator.
+    A metric over several tables needs their join to run, so it is reported `not_test_run`.
+    """
+    from . import dialects as D
+    from . import introspect as INTRO
+    from .models import table_key
+    from .validator import _tables_named
+    org = L.load_datasource(root)
+    if not org.storage_connections:
+        return {}, None
+    storage_type = org.storage_connections[0].storage_type
+    dialect = D.get_dialect(storage_type)
+    # Keyed by (schema, name): two same-named tables in different schemas stay apart.
+    defs = list({table_key(t.name, t.schema_name): t for sa in org.subject_areas for t in sa.tables_defined}.items())
+    runner = INTRO.make_execute_sql_runner(profile, building_the_model=True)
+    out: dict[str, dict] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        name = it.get("name")
+        binding = (it.get("bindings") or {}).get(storage_type)
+        sources = it.get("source_tables") or []
+        if not binding:
+            out[name] = {"not_test_run": f"no binding for {storage_type}"}
+            continue
+        hits = _tables_named(defs, str(sources[0])) if len(sources) == 1 else []
+        if len(sources) != 1 or not hits:
+            out[name] = {"not_test_run": "reads more than one table, or a table the model doesn't have"}
+            continue
+        if len(hits) > 1:
+            out[name] = {"not_test_run": f"{sources[0]} names a table in several schemas; qualify it with its schema"}
+            continue
+        src = dialect.qualified(hits[0].schema_name, hits[0].name)
+        # The binding on lines of its own, so a trailing `-- comment` in it can't swallow the FROM.
+        sql = f"SELECT\n{binding}\nAS v\nFROM {src}\nWHERE 1 = 0"
+        try:
+            runner(sql)
+            out[name] = {"ok": True}
+        except Exception as e:  # noqa: BLE001 — a failed binding is reported per metric, not raised
+            reason = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
+            if _connection_failed(runner, e):
+                return {"connection": {"error": reason}}, reason
+            out[name] = {"error": reason}
+    return out, None
+
+
 def cmd_add(args) -> int:
     from . import curate
     items = _read_json_file(args.file)
     if isinstance(items, dict):
         items = items.get(args.kind + "s", items.get("items", []))
+    test_runs = None
+    if args.kind == "metric" and getattr(args, "profile", None):
+        test_runs, unreachable = _metric_test_runs(args.root, args.profile, items)
+        if unreachable:
+            # Not the metrics' fault: say the database could not be reached, and write nothing,
+            # since none of the bindings was actually tested.
+            _print_json({"applied": [], "validated": False, "test_run": test_runs,
+                         "errors": [f"could not reach the database to test the metrics' SQL ({unreachable}); "
+                                    "nothing was written. Check the connection and add again"]})
+            return 1
+        failed = {n for n, r in test_runs.items() if "error" in r}
+        if failed:
+            # Nothing is written while a binding fails: a metric whose SQL doesn't run would
+            # otherwise reach sign-off looking like any other.
+            _print_json({"applied": [], "validated": False, "test_run": test_runs,
+                         "errors": [f"metric {n}: its SQL failed on the database; fix the binding and add again"
+                                    for n in sorted(failed)]})
+            return 1
     res = curate.write_items(args.root, args.area, args.kind, items,
                              signer=args.signer, role=args.role)
-    _print_json(res.as_dict())
+    out = res.as_dict()
+    if test_runs is not None:
+        out["test_run"] = test_runs
+    _print_json(out)
     return 0 if res.validated else 1
 
 
@@ -716,9 +812,10 @@ def cmd_suggest_units(args) -> int:
     """List the numeric **money** columns (so a currency `unit` can be stamped) using the
     tested name matcher — never a hand-rolled regex that mis-handles `count` inside
     `discount`. Skips columns that already carry a `unit`. Emits
-    {money_columns: [{area, table, column, type, suggested_unit}]}, where `suggested_unit`
+    {money_columns: [{area, table, column, type, label, suggested_unit}]}, where `suggested_unit`
     is the unit the name spells out (`revenue_usd_millions` -> `USD_millions`) or null, for
-    the caller to show, confirm and apply."""
+    the caller to show, confirm and apply, and `label` is the column in plain words for a card
+    ("Price on Widgets")."""
     from . import build as B
     org = L.load_datasource(args.root)
     numeric = {"integer", "decimal", "float"}
@@ -728,8 +825,9 @@ def cmd_suggest_units(args) -> int:
             for c in t.columns:
                 if not c.unit and c.type in numeric and B.detect_money_column(c.name):
                     money.append({"area": sa.name, "table": t.name, "column": c.name, "type": c.type,
+                                  "label": column_label(t.name, c.name),
                                   "suggested_unit": B.suggest_unit(c.name)})
-    _print_json({"money_columns": money})
+    _print_json({"money_columns": distinct_labels(money)})
     return 0
 
 
@@ -763,7 +861,9 @@ def cmd_set_units(args) -> int:
                     continue
                 else:
                     col_unit = B.suggest_unit(c.name) or unit
-                plan.append({"area": sa.name, "table": t.name, "column": c.name, "unit": col_unit})
+                plan.append({"area": sa.name, "table": t.name, "column": c.name,
+                             "label": column_label(t.name, c.name), "unit": col_unit})
+    distinct_labels(plan)
     if not plan:
         _print_json({"set": 0, "unit": unit, "reason": "no matching money columns"})
         return 0
@@ -923,14 +1023,19 @@ def _resolve_flag_rates(areas: list, wanted: set[tuple[str, str]], area: Optiona
     return asked, errors, ambiguous
 
 
-def _flag_rate_summary(columns: list[str]) -> dict:
-    """One entry for the flag columns given no rate, in place of a proposal for each (#530)."""
-    out: dict = {"available": len(columns), "columns": columns[:_LISTED_FLAG_COLUMNS]}
+def _flag_rate_summary(columns: list[tuple[str, str]]) -> dict:
+    """One entry for the flag columns given no rate, in place of a proposal for each (#530).
+    `columns` are (`table.column`, plain label) pairs: the name is what `--flag-rates` takes,
+    the label what a card says ("In stock on Widgets")."""
+    listed = columns[:_LISTED_FLAG_COLUMNS]
+    out: dict = {"available": len(columns), "columns": [n for n, _ in listed],
+                 "labels": [lbl for _, lbl in listed]}
     if len(columns) > _LISTED_FLAG_COLUMNS:
         out["more"] = len(columns) - _LISTED_FLAG_COLUMNS
     if columns:
-        out["hint"] = (f"{len(columns)} boolean column(s) could each have a share-of-true metric; "
-                       "add one with --flag-rates <table.column>[,...] or --flag-rates all")
+        out["hint"] = (f"{len(columns)} yes/no column(s) could each have a metric for the share of "
+                       "rows where it is true; add one with --flag-rates <table.column>[,...] or "
+                       "--flag-rates all")
     return out
 
 
@@ -1003,7 +1108,7 @@ def cmd_suggest_metrics(args) -> int:
     proposals: list[dict] = []
     written = skipped_opaque = 0
     errors: list[str] = flag_errors + flag_problems
-    flag_available: list[str] = []
+    flag_available: list[tuple[str, str]] = []
     flag_present: list[str] = []
     for sa in areas:
         existing = set(on_disk.get(sa.name, ()))
@@ -1026,7 +1131,8 @@ def cmd_suggest_metrics(args) -> int:
             rate_names = {B.flag_rate_name(t.name, c.name) for c in asked}
             if not flag_all:
                 flag_present += sorted(n for n in rate_names if n in existing)
-            flag_available += [f"{label}.{c.name}" for c in B.flag_columns(t)
+            flag_available += [(f"{label}.{c.name}", column_label(t.name, c.name))
+                               for c in B.flag_columns(t)
                                if B.flag_rate_name(t.name, c.name) not in rate_names | existing]
             dialect = dialects[conn_type.get(t.storage_connection, default_type)]
             props = [m for m in B.suggest_metrics(t, dialect, max_per_table=args.max_per_table,
@@ -1804,34 +1910,11 @@ def _route_references(org, specs: list[dict]) -> tuple[dict, list, int]:
     return dict(intra), cross, skipped_target
 
 
-def _load_render_prune():
-    """Import the `render_prune` script (the prune-page renderer) and return the module.
-
-    render_prune lives in the PLUGIN (`plugins/agami/scripts/`), not this package — a package-relative
-    import fails on every layout (`site-packages/` installed, `src/` in a dev checkout; neither has it).
-    Locate it via `AGAMI_PLUGIN_ROOT`, which the `sm` launcher always exports (deriving it from its own
-    location if the caller didn't), so it's present in this `python -m semantic_model.cli` subprocess even
-    under `sm`'s `cd /` + `PYTHONSAFEPATH` (an explicit `sys.path.insert` is honored). Raise a clear error
-    if it's unset or doesn't point at the plugin.
-    """
-    plugin_root = os.environ.get("AGAMI_PLUGIN_ROOT")
-    scripts_dir = Path(plugin_root).expanduser() / "scripts" if plugin_root else None
-    if scripts_dir and (scripts_dir / "render_prune.py").is_file():
-        d = str(scripts_dir)
-        if d not in sys.path:
-            sys.path.insert(0, d)
-        import render_prune  # noqa: E402
-        return render_prune
-    raise RuntimeError(
-        "render_prune.py not found — set AGAMI_PLUGIN_ROOT to the agami plugin dir (its scripts/ holds "
-        f"the prune-page renderer). AGAMI_PLUGIN_ROOT={plugin_root!r}"
-    )
-
-
 def cmd_discover(args) -> int:
-    """First pass: cheap discovery (tables + columns only) → inventory JSON +
-    a prune HTML page. The user prunes, then `introspect --tables <kept>` runs
-    the full build on only the kept tables. No grain/FK/row-count probes here."""
+    """First pass: cheap discovery (tables + columns only) → inventory JSON. The person picks
+    tables on a card in the chat, then `introspect --tables <kept>` runs the full build on only
+    the kept tables. No grain/FK/row-count probes here. No page is written: the prune page was
+    removed, and `--out` is still accepted from older callers but ignored (said in `note`)."""
     from . import introspect as INTRO
 
     runner = INTRO.make_execute_sql_runner(args.profile, building_the_model=True)
@@ -1850,13 +1933,6 @@ def cmd_discover(args) -> int:
     inv_path.parent.mkdir(parents=True, exist_ok=True)
     inv_path.write_text(json.dumps(inventory, indent=2, default=str), encoding="utf-8")
 
-    # Render the standalone prune page via the plugin's render_prune script (located by AGAMI_PLUGIN_ROOT).
-    render_prune = _load_render_prune()
-
-    manifest = render_prune.build_manifest(inventory)
-    out_path = Path(args.out).expanduser()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_prune.render(manifest), encoding="utf-8")
 
     _print_json({
         "profile": args.profile,
@@ -1864,7 +1940,9 @@ def cmd_discover(args) -> int:
         "column_mode": inventory["column_mode"],
         "schemas": inventory["schemas"],
         "inventory_path": str(inv_path),
-        "prune_html": str(out_path),
+        "prune_html": None,
+        **({"note": "--out is ignored: the prune page was removed; tables are picked on a card in the chat"}
+           if args.out else {}),
     })
     return 0
 
@@ -2086,6 +2164,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", required=True, help="JSON: a list of items (or {metrics:[…]}/{entities:[…]})")
     sp.add_argument("--signer", default=None)
     sp.add_argument("--role", default=None)
+    sp.add_argument("--profile", default=None,
+                    help="run each metric's SQL over zero rows on this database first; nothing is "
+                         "written if one fails (a metric over several tables is reported not_test_run)")
     sp.set_defaults(func=cmd_add)
 
     sp = sub.add_parser("add-example", help="append/replace NL→SQL examples (prompt_examples/<area>/examples.yaml)")
@@ -2233,7 +2314,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="postgres|mysql|snowflake|bigquery|redshift|sqlite|sqlserver|"
                          "databricks|trino|oracle|duckdb|supabase")
     sp.add_argument("--artifacts", required=True, help="artifacts_dir (inventory: <artifacts>/<profile>/.introspect/)")
-    sp.add_argument("--out", required=True, help="output HTML path for the prune page")
+    sp.add_argument("--out", default=None, help="ignored (the prune page was removed); kept so older callers don't fail")
     sp.add_argument("--inventory-out", default=None, dest="inventory_out",
                     help="override inventory JSON path (default <artifacts>/<profile>/.introspect/inventory.json)")
     sp.add_argument("--tables", nargs="*", default=None,

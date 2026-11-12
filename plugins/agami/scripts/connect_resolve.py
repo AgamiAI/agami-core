@@ -26,7 +26,8 @@ Output (the standard refactor contract):
       "tools": {"psql": "/path"|null, "sqlite3": ...},
       "next": "ready" | "promote" | "bootstrap"
     },
-    "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current
+    "anomalies": [...],   # incl. library_older_than_plugin, agami_python_cannot_be_brought_current,
+                          # env_profile_has_no_model (AGAMI_PROFILE names a database with no model)
     "needs_judgment": null
   }
 
@@ -79,6 +80,22 @@ _DRIVER_MOD = {
 # the "driver missing" branch installs them up front. duckdb needs pytz to materialize
 # TIMESTAMP WITH TIME ZONE values into Python — without it a timestamptz query fails at runtime.
 _DRIVER_EXTRA = {"duckdb": ["pytz"]}
+# The pip package that provides each module above (agami-connect 0a.5's table).
+_DRIVER_PIP = {
+    "psycopg2": "psycopg2-binary", "pymysql": "pymysql", "snowflake.connector": "snowflake-connector-python",
+    "google.cloud.bigquery": "google-cloud-bigquery", "pymssql": "pymssql", "oracledb": "oracledb",
+    "databricks.sql": "databricks-sql-connector", "trino": "trino", "duckdb": "duckdb", "pytz": "pytz",
+}
+
+
+def driver_packages(db_type: str | None) -> dict[str, str]:
+    """Every module a `db_type` connection imports, mapped to the pip package that provides it; {} when the
+    stdlib is enough (sqlite) or the type is not one agami knows."""
+    db_key = (db_type or "").lower()
+    driver = _DRIVER_MOD.get(db_key)
+    if not driver:
+        return {}
+    return {m: _DRIVER_PIP[m] for m in (driver, *_DRIVER_EXTRA.get(db_key, []))}
 _MODEL_DEPS = ("pydantic", "sqlglot", "yaml")
 
 # The output lands in the agent's transcript, so a secret's VALUE never goes in it: the skill only
@@ -245,6 +262,31 @@ def _resolve_interpreter(db_type: str | None, configured: str | None) -> dict:
             "candidates_scored": scored, "warnings": warnings}
 
 
+def _models_in(art: Path) -> list[str]:
+    """Every database under `art` that has a model (a `<name>/datasource.yaml`), sorted."""
+    try:
+        return sorted(d.name for d in art.iterdir() if (d / "datasource.yaml").is_file())
+    except OSError:
+        return []
+
+
+def _env_profile_has_no_model(profile: str, art: Path) -> dict | None:
+    """The anomaly for an AGAMI_PROFILE that names a database with no model while others have one.
+
+    The variable wins over `.config`'s active_profile, so a stale one points every skill at nothing and
+    the skills would otherwise read it as "no model yet" and offer to connect again. With no model
+    anywhere that IS a first run, so it is not flagged."""
+    if (agami_paths.profile_dir(profile, art) / "datasource.yaml").is_file():
+        return None
+    existing = _models_in(art)
+    if not existing:
+        return None
+    return {"kind": "env_profile_has_no_model", "where": "AGAMI_PROFILE", "profile": profile,
+            "existing": existing,
+            "detail": (f"AGAMI_PROFILE is set to '{profile}', and that database has no model. Databases with a "
+                       f"model: {', '.join(existing)}. Unset AGAMI_PROFILE or set it to one of them.")}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Resolve agami env state + next-phase decision.")
     ap.add_argument("--db-type", default=None, help="bind the interpreter probe to this dialect's driver")
@@ -276,6 +318,11 @@ def main(argv=None) -> int:
         profile, profile_source = config["active_profile"], "active_profile"
     else:
         profile, profile_source = "main", "default"
+
+    if profile_source == "env":
+        no_model = _env_profile_has_no_model(profile, art)
+        if no_model:
+            anomalies.append(no_model)
 
     # credentials section + chmod
     creds = {"present": False, "chmod_ok": True, "type": None, "fields": {}, "missing_fields": []}

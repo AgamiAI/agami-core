@@ -45,7 +45,7 @@ If you haven't set up credentials yet, the skill walks you through the DB-type p
 
 ## 5. Set up credentials
 
-Same as the CLI / VS Code: agami writes `<artifacts_dir>/local/credentials.example`, you fill it in and save it, then say *"introspect my database"* — agami moves it into place and locks it down (`chmod 600`) for you. Format and per-database fields: [docs/credentials.md](../credentials.md).
+Same as the CLI / VS Code: on macOS and Windows a question card takes the connection details and a one-time `localhost` page takes the password (it goes to the OS keychain); on Linux agami writes `<artifacts_dir>/local/credentials.example`, you fill it in and save it, then press **I've filled it in** on the card — agami moves it into place and locks it down (`chmod 600`) for you. Format and per-database fields: [docs/credentials.md](../credentials.md).
 
 ## Cursor-specific notes
 

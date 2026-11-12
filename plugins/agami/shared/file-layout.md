@@ -1,5 +1,7 @@
 # File layout — what lives where
 
+`<plugin_root>` is defined at the top of `invocation-conventions.md`.
+
 Everything agami stores lives under **one folder the user chooses** — the *artifacts dir*. Inside it, the **committable model** sits next to a gitignored **`local/`** subfolder that holds secrets + per-user state, so you can check the model into a team repo without ever risking a credential leak, and there's no separate `~/.agami` to hunt for.
 
 The only thing outside the folder is a one-line, non-sensitive **pointer** at `~/.config/agami/path` recording the folder's location (so a fresh shell can find it). `AGAMI_ARTIFACTS_DIR` overrides it.
@@ -72,6 +74,17 @@ local_dir="$artifacts_dir/local"   # credentials, .config, dashboards, logs
 ### Resolving in Python
 
 Scripts import `agami_paths` (the single source of truth): `agami_paths.artifacts_dir()`, `.local_dir()`, `.credentials_path()`, `.config_path()`, etc. The semantic-model tools (`sm …` / `semantic_model.cli`) take the profile root (`<artifacts_dir>/<profile>/`) as a positional argument.
+
+### When `AGAMI_PROFILE` names a database with no model
+
+`AGAMI_PROFILE` wins over `.config`'s `active_profile`, so a variable left set to a database that has no
+model (say `main`) points every skill at nothing. Before a skill treats a missing
+`<artifacts_dir>/<profile>/datasource.yaml` as "no model yet" and hands off to agami-connect, it runs
+`bash "<plugin_root>/scripts/py" connect_resolve.py` once. If `anomalies` holds
+`env_profile_has_no_model`, the model is not missing, the variable is pointing elsewhere: say its
+`detail` in one line (it names the variable, the database and the databases that have a model) and
+stop. Do not start a new connection under that name. Without the anomaly (the variable is unset, or no
+database has a model yet), hand off to agami-connect as the skill says.
 
 ## Permissions
 

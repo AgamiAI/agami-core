@@ -458,12 +458,16 @@ def test_no_flag_rate_is_proposed_unasked_only_a_summary(tmp_path):
     fr = out["flag_rates"]
     assert fr["available"] == 10 and fr["columns"] == [f"tickets.{n}" for n in _TEN_FLAGS]
     assert "--flag-rates" in fr["hint"] and "more" not in fr
+    # what a card says: the column in plain words, never `tickets.is_flag_0`
+    assert fr["labels"] == [f"Is flag {i} on Tickets" for i in range(10)]
+    assert "share-of" not in fr["hint"]
 
 
 def test_the_summary_lists_twenty_columns_and_counts_the_rest():
     from semantic_model.cli import _flag_rate_summary
-    fr = _flag_rate_summary([f"t.c{i}" for i in range(25)])
+    fr = _flag_rate_summary([(f"t.c{i}", f"C{i} on T") for i in range(25)])
     assert fr["available"] == 25 and len(fr["columns"]) == 20 and fr["more"] == 5
+    assert fr["labels"][:2] == ["C0 on T", "C1 on T"] and len(fr["labels"]) == 20
 
 
 def test_flag_rates_names_columns_case_insensitively(tmp_path):
@@ -483,7 +487,7 @@ def test_flag_rates_all_proposes_every_one(tmp_path):
     names = {p["name"] for p in out["proposals"]}
     assert rc == 0 and names == {f"tickets_{n}_rate" for n in _TEN_FLAGS} | {
         "tickets_avg_duration_days"}, out
-    assert out["flag_rates"] == {"available": 0, "columns": []}
+    assert out["flag_rates"] == {"available": 0, "columns": [], "labels": []}
 
 
 @pytest.mark.parametrize("name, why", [

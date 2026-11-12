@@ -22,7 +22,7 @@ DOCS = sorted([*PLUGIN.glob("skills/*/SKILL.md"), *PLUGIN.glob("shared/*.md")])
 
 # Telling Claude to RUN python3: a plugin script, `-c`, or `-m`. Prose that forbids `python3 -c`, and
 # the `tool_paths.python3` setting name, are not commands.
-_RUNS_PYTHON3 = re.compile(r'(?<![\w.])python3 (?:"\$AGAMI_PLUGIN_ROOT|-[cm] |"?[\w./$-]*\.py\b)')
+_RUNS_PYTHON3 = re.compile(r'(?<![\w.])python3 (?:"(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)|-[cm] |"?[\w./$-]*\.py\b)')
 _FORBIDS = re.compile(r"never[^.\n]{0,60}python3 -c|python3 -c`\)|`python3 -c` —|no `python3 -c`|forbidden", re.I)
 
 
@@ -52,7 +52,8 @@ def test_no_skill_inlines_the_open_chain():
 
 
 def test_the_scan_catches_what_it_claims_to():
-    assert _RUNS_PYTHON3.search('python3 "$AGAMI_PLUGIN_ROOT/scripts/x.py"')
+    assert _RUNS_PYTHON3.search('python3 "${CLAUDE_PLUGIN_ROOT}/scripts/x.py"')
+    assert _RUNS_PYTHON3.search('python3 "<plugin_root>/scripts/x.py"')
     assert _RUNS_PYTHON3.search("`python3 -c 'import yaml'`")
     assert _RUNS_PYTHON3.search("python3 execute_sql.py [-h] [--profile PROFILE]")
     assert not _RUNS_PYTHON3.search("tool_paths.python3 = $PY")
@@ -129,12 +130,12 @@ def test_no_artifacts_folder_is_created_before_one_was_chosen(tmp_path):
 def test_every_plugin_script_runs_through_py():
     # A script run by its own name hits its `#!/usr/bin/env python3` shebang, which is the Store stub on
     # Windows — and the plugin's scripts folder isn't on PATH anyway.
-    found = _offending(re.compile(r'^\s*[a-z_]+\.py\b|(?:^|[|;&(]\s*)"?\$AGAMI_PLUGIN_ROOT/scripts/[a-z_]+\.py"?'))
-    assert not found, "Run plugin scripts as `bash \"$AGAMI_PLUGIN_ROOT/scripts/py\" <name>.py`:\n" + "\n".join(found)
+    found = _offending(re.compile(r'^\s*[a-z_]+\.py\b|(?:^|[|;&(]\s*)"?(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/[a-z_]+\.py"?'))
+    assert not found, "Run plugin scripts as `bash \"<plugin_root>/scripts/py\" <name>.py`:\n" + "\n".join(found)
 
 
 def test_captured_python_output_strips_the_carriage_return():
-    pattern = re.compile(r'\$\((?:bash "\$AGAMI_PLUGIN_ROOT/scripts/py"|"\$PY")')
+    pattern = re.compile(r'\$\((?:bash "(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/py"|"\$PY")')
     found = []
     for doc in DOCS:
         text = doc.read_text(encoding="utf-8")

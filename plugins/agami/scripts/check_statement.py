@@ -54,6 +54,21 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _agami_lib  # noqa: E402
 
+
+def _missing_library_message(exc: ImportError) -> str:
+    """The line printed when agami-core is not importable.
+
+    Claude runs the `sm install` command in it, and no plugin-root variable is set in its shell, so the
+    launcher is named by the absolute path this script sits beside.
+    """
+    sm = Path(__file__).resolve().parent / "sm"
+    return (
+        "check_statement needs agami-core and its model extra (pydantic, sqlglot, pyyaml): run "
+        f'`bash "{sm}" install` and call this with "$PY". '
+        f"({type(exc).__name__})"
+    )
+
+
 try:
     # Inside the try because it raises ImportError too, when no layout provides the library. Outside
     # it, that raise left a traceback and exit 1 where this script promises exit 2.
@@ -65,13 +80,8 @@ try:
     from semantic_model import cli as sm_cli
 except ImportError as exc:
     # Only the error's type, never its text: an import error's message can name an absolute path,
-    # and this script keeps a path out of every line it prints.
-    print(
-        "check_statement needs agami-core and its model extra (pydantic, sqlglot, pyyaml): run "
-        f'`bash "$AGAMI_PLUGIN_ROOT/scripts/sm" install` and call this with "$PY". '
-        f"({type(exc).__name__})",
-        file=sys.stderr,
-    )
+    # and this script keeps an import's path out of the lines it prints (the launcher path is its own).
+    print(_missing_library_message(exc), file=sys.stderr)
     raise SystemExit(2) from exc
 
 _CANNOT_START = 2

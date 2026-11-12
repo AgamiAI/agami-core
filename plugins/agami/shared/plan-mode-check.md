@@ -69,7 +69,7 @@ Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call
 
 Stay-in-plan-mode → **refuse to proceed. Do not write a plan file. Do not call ExitPlanMode.** Excluding / editing / approving / rejecting entries writes back to YAML files. Surface ONLY this:
 
-> I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke. (You can still inspect a previously-rendered dashboard at `<artifacts_dir>/local/model/<profile>/<ts>.html`.)
+> I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke.
 
 ### `agami-reconcile`
 

@@ -723,6 +723,7 @@
     let activeTab = (manifest.initial_tab || 'tables');  // validated against TABS once it's defined below
     let activeFilter = 'all';
     let reviewSubTab = 'eyes';   // Review tab sub-view: eyes | looks | approved | rejected
+    let reviewSubTabChosen = false;   // set once the person picks a sub-tab; until then it follows the items
     let piiSubTab = 'all';       // PII tab sub-view: all | flagged | suspected
     let reviewKind = 'all';      // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown)
     let joinTypeFilter = 'all';  // Joins tab: all | in | cross
@@ -735,6 +736,12 @@
       { value: 'engineer', label: 'Engineer' }, { value: 'analyst', label: 'Analyst' }, { value: 'other', label: 'Other…' },
     ];
     let signOff = { email: '', role: 'data_lead', roleOther: '' };
+    // Saved by the cards in local/.config (the renderer passes it in); what this browser remembers wins.
+    if (manifest.signoff && manifest.signoff.email) signOff.email = manifest.signoff.email;
+    if (manifest.signoff && manifest.signoff.role) {
+      const r = manifest.signoff.role, known = ROLE_OPTIONS.find(o => o.value === r || o.label === r);
+      if (known) signOff.role = known.value; else { signOff.role = 'other'; signOff.roleOther = r; }
+    }
     try { const s = JSON.parse(localStorage.getItem('agami_signoff') || '{}'); if (s.email) signOff.email = s.email; if (s.role) signOff.role = s.role; if (s.roleOther) signOff.roleOther = s.roleOther; } catch (e) {}
     function saveSignOff() { try { localStorage.setItem('agami_signoff', JSON.stringify(signOff)); } catch (e) {} }
     function signOffRole() { return signOff.role === 'other' ? (signOff.roleOther.trim() || 'other') : signOff.role; }
@@ -821,7 +828,12 @@
         'data-tip': "agami couldn't tell what this column means. Describe it on the Review tab (under “Needs your eyes”) — or agami will ask the first time a query uses it." });
       return null;  // human-written or unknown source → no tag (trusted)
     }
-    function labelLine(text) { return el('div', { class: 'label-line', text }); }
+    // A read-only full view (rendered with --read-only) is for reading; its edit prompts would point
+    // at controls it hides.
+    const READ_ONLY = !!(document.body && document.body.classList && document.body.classList.contains('agami-read-only'));
+    function labelLine(text) {
+      return el('div', { class: 'label-line', text: READ_ONLY ? text.replace(/ \(click to edit\)$/, '') : text });
+    }
     function hintLine(text) { return el('div', { class: 'field-hint', text }); }
     function preBlock(text) { return el('pre', { class: 'code-block', text }); }
     function descBlock(text) {
@@ -1904,7 +1916,7 @@
       const allRejectable = all.filter(isRejectable);
       if (allApprovable.length || allRejectable.length) {
         const bar = el('div', { class: 'card-actions', style: 'padding:0 0 10px;' });
-        if (allApprovable.length) bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary',
+        if (allApprovable.length) bar.appendChild(el('button', { type: 'button', class: 'btn-sm primary bulk-approve',
           onclick: () => bulkApprove(all) }, `✓ Approve all ${allApprovable.length} proposed`));
         bar.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
           onclick: () => bulkReject(all) }, `✕ Reject all ${allRejectable.length} proposed`));
@@ -2094,7 +2106,7 @@
       if (bulk) {
         const approvable = items.filter(isApprovable);
         const rejectable = items.filter(isRejectable);
-        if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm',
+        if (approvable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-approve',
           style: 'margin-left:auto;', onclick: () => bulkApprove(items) }, `✓ Approve ${approvable.length}`));
         if (rejectable.length) h.appendChild(el('button', { type: 'button', class: 'btn-sm bulk-reject',
           style: approvable.length ? '' : 'margin-left:auto;', onclick: () => bulkReject(items) }, `✕ Reject ${rejectable.length}`));
@@ -2117,7 +2129,7 @@
       return groups;
     }
     function needsEyes(it) {
-      // Rule 1 (metrics — block runtime), low-confidence guesses, and drifted entries
+      // Rule 1 (metrics — answered with a warning until signed off), low-confidence guesses, and drifted entries
       return it.rule === 1 || it.confidence === 'proposed' || effReviewState(it) === 'stale';
     }
     function bulkApprove(items) {
@@ -2348,7 +2360,7 @@
         '• <span class="conf-chip conf-proposed tip" data-tip="' + CONF_MEANING.proposed + '">proposed</span> a guess → <strong>check these first</strong> &nbsp; ' +
         '• <span class="conf-chip conf-inferred tip" data-tip="' + CONF_MEANING.inferred + '">inferred</span> worked out from strong clues &nbsp; ' +
         '• <span class="conf-chip conf-confirmed tip" data-tip="' + CONF_MEANING.confirmed + '">confirmed</span> the database says so → <strong>usually fine</strong>.<br>' +
-        '<strong>Metrics matter most:</strong> agami will refuse to answer a question that uses a metric you have not approved. Entities and joins are safer — agami can use them before you approve, and just adds a small note on the answer. Approve, reject, or edit below, then click <strong>Generate feedback for Claude</strong>.' }));
+        '<strong>Metrics matter most:</strong> a question that uses a metric you have not approved is still answered, with a warning on the answer, until you approve it. Entities and joins work the same way: agami uses them before you approve and notes it on the answer.' + (READ_ONLY ? ' Approve or reject on the cards in the chat.' : ' Approve, reject, or edit below, then click <strong>Generate feedback for Claude</strong>.') }));
 
       const all = reviewAll().filter(it => !searchQ
         || (relName(it) + ' ' + (it.name || '') + ' ' + (it.calculation || '') + ' ' + (it.description || '')).toLowerCase().includes(searchQ));
@@ -2364,7 +2376,7 @@
                     hint: 'These look right (built-in keys or strong matches). You can approve them all at once unless one looks off.',
                     items: all.filter(it => isOpen(it) && !effExcluded(it) && !hasEdit(it) && !needsEyes(it)) },
         edited:   { label: 'Edited', bulk: true,
-                    hint: 'You changed these — your edits apply when you submit. Approve one too if it’s ready (a metric still needs sign-off before agami will use it).',
+                    hint: 'You changed these — your edits apply when you submit. Approve one too if it’s ready (a metric is answered with a warning until it is signed off).',
                     items: all.filter(it => isOpen(it) && !effExcluded(it) && hasEdit(it)) },
         approved: { label: 'Approved', bulk: false, hint: 'Already approved. Reject one to send it back for review.',
                     items: all.filter(it => !effExcluded(it) && effReviewState(it) === 'approved') },
@@ -2385,12 +2397,17 @@
       order.push('approved', 'rejected');
       if (reviewSubTab === 'edited' && !groups.edited.items.length) reviewSubTab = 'eyes';
       if (reviewSubTab === 'unknown') reviewSubTab = 'eyes';  // retired sub-tab → eyes
+      // The tab's badge counts every open item, so opening on an empty "Needs your eyes" while the
+      // items sit under "Looks right" reads as "Review 3" against "0 needs your eyes".
+      if (!reviewSubTabChosen && reviewSubTab === 'eyes' && !groups.eyes.items.length && !unknown.length && !placeholders.length && groups.looks.items.length) {
+        reviewSubTab = 'looks';
+      }
       const eyesCount = groups.eyes.items.length + unknown.length + placeholders.length;  // couldn't-read counts here now
       const bar = el('div', { class: 'subtab-bar' });
       order.forEach(k => {
         const cnt = k === 'eyes' ? eyesCount : groups[k].items.length;
         const b = el('button', { type: 'button', class: reviewSubTab === k ? 'active' : '',
-          onclick: () => { reviewSubTab = k; reviewKind = 'all'; renderBody(); } }, groups[k].label);
+          onclick: () => { reviewSubTab = k; reviewSubTabChosen = true; reviewKind = 'all'; renderBody(); } }, groups[k].label);
         b.appendChild(el('span', { class: 'subtab-count', text: String(cnt) }));
         bar.appendChild(b);
       });

@@ -1,0 +1,387 @@
+"""inventory_summary.py: summarise a discover inventory and write the kept-tables file."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+SCRIPT = (
+    Path(__file__).resolve().parent.parent
+    / "plugins"
+    / "agami"
+    / "scripts"
+    / "inventory_summary.py"
+)
+sys.path.insert(0, str(SCRIPT.parent))
+
+import inventory_summary  # noqa: E402
+
+
+def _inventory(spec: dict[str, list[str]]) -> dict:
+    return {
+        "schemas": list(spec),
+        "tables": [
+            {"schema": s, "table": t, "columns": [{"name": "id", "type": "int"}]}
+            for s, ts in spec.items()
+            for t in ts
+        ],
+    }
+
+
+def _run(tmp_path: Path, inv: dict, *args: str) -> tuple[int, dict]:
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps(inv), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--inventory", str(path), *args],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode, json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "stg_orders",
+        "orders_bak",
+        "orders_2023",
+        "OrdersBackup",
+        "tmp.orders",
+        "orders-archive",
+        "orders_20230115",
+        "orders_2023_01",
+        "orders_old",
+        "orders_temp",
+        "orders_copy",
+        "tmp",
+    ],
+)
+def test_noise_names_are_flagged(name):
+    assert inventory_summary.noise_reason(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "customers",
+        "testimonials",
+        "stage_name",
+        "orders",
+        "oldest_orders",
+        "tempest",
+        "order_items_v2",
+        "h3_cells",
+        "test_results",
+        "test_scores",
+        "temp_readings",
+        "test_orders",  # no `orders` to copy
+        "order_test_runs",
+    ],
+)
+def test_ordinary_names_are_not_flagged(name):
+    assert inventory_summary.noise_reason(name) is None
+
+
+def test_a_leading_test_or_temp_is_noise_only_beside_the_table_it_copies():
+    names = {"orders", "test_orders", "temp_customers", "customers", "test_scores"}
+    assert inventory_summary.noise_reason("test_orders", "sales", names)
+    assert inventory_summary.noise_reason("TempCustomers", "sales", names)
+    assert inventory_summary.noise_reason("test_scores", "sales", names) is None
+
+
+def test_flagged_tables_name_what_they_copy(tmp_path):
+    code, out = _run(
+        tmp_path, _inventory({"sales": ["orders", "orders_bak", "test_orders", "test_results"]})
+    )
+    assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
+        "sales.orders_bak": "sales.orders",
+        "sales.test_orders": "sales.orders",
+    }
+    assert out["noise_all_copies"] is True
+
+
+def test_noise_without_a_counterpart_is_not_all_copies(tmp_path):
+    code, out = _run(tmp_path, _inventory({"sales": ["orders", "orders_bak", "stg_events"]}))
+    assert {n["table"]: n["copy_of"] for n in out["likely_noise"]} == {
+        "sales.orders_bak": "sales.orders",
+        "sales.stg_events": None,
+    }
+    assert out["noise_all_copies"] is False
+    code, out = _run(tmp_path, _inventory({"sales": ["orders"]}))
+    assert out["noise_all_copies"] is False
+
+
+def test_a_noise_schema_copies_the_same_named_table_elsewhere(tmp_path):
+    code, out = _run(tmp_path, _inventory({"staging": ["orders"], "sales": ["orders"]}))
+    assert out["likely_noise"][0]["copy_of"] == "sales.orders"
+
+
+def test_drop_noise_keeps_real_test_tables(tmp_path):
+    inv = _inventory({"lab": ["test_results", "temp_readings", "orders", "test_orders"]})
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", "drop_noise", "--tables-out", str(out_file))
+    assert out_file.read_text().split() == ["lab.test_results", "lab.temp_readings", "lab.orders"]
+
+
+def test_summary_shape(tmp_path):
+    inv = _inventory({"sales": ["orders", "customers", "stg_orders"], "ops": ["orders_bak"]})
+    code, out = _run(tmp_path, inv)
+    assert code == 0
+    assert out["tables"] == 4
+    assert {s["name"]: s["tables"] for s in out["schemas"]} == {"sales": 3, "ops": 1}
+    assert {n["table"] for n in out["likely_noise"]} == {"sales.stg_orders", "ops.orders_bak"}
+    assert all(n["why"] for n in out["likely_noise"])
+    assert out["groups"]["noise_by_pattern"]
+
+
+def test_keep_everything_and_drop_noise(tmp_path):
+    inv = _inventory({"sales": ["orders", "customers", "stg_orders"], "ops": ["orders_bak"]})
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", "drop_noise", "--tables-out", str(out_file))
+    assert code == 0 and out == {"tables_file": str(out_file), "kept": 2}
+    assert out_file.read_text().splitlines() == ["sales.orders", "sales.customers"]
+    code, out = _run(tmp_path, inv, "--keep", "all", "--tables-out", str(out_file))
+    assert out["kept"] == 4
+
+
+def test_keep_schemas(tmp_path):
+    inv = _inventory({"sales": ["orders"], "ops": ["jobs", "runs"], "hr": ["staff"]})
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", "schemas:ops,hr", "--tables-out", str(out_file))
+    assert code == 0 and out["kept"] == 3
+    assert out_file.read_text().splitlines() == ["ops.jobs", "ops.runs", "hr.staff"]
+
+
+def test_unknown_schema_is_reported_not_guessed(tmp_path):
+    inv = _inventory({"sales": ["orders"]})
+    code, out = _run(
+        tmp_path, inv, "--keep", "schemas:sales,nope", "--tables-out", str(tmp_path / "k")
+    )
+    assert code == 1 and out["unmatched"] == ["nope"]
+    assert not (tmp_path / "k").exists()
+
+
+def test_keep_named_tables(tmp_path):
+    inv = _inventory({"sales": ["orders", "customers"], "ops": ["orders"]})
+    names = tmp_path / "names.txt"
+    names.write_text("sales.orders\ncustomers\n", encoding="utf-8")
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(out_file))
+    assert code == 0 and out["kept"] == 2
+    assert out_file.read_text().splitlines() == ["sales.orders", "sales.customers"]
+
+
+def test_named_tables_that_match_nothing_or_are_ambiguous_are_reported(tmp_path):
+    inv = _inventory({"sales": ["orders", "customers"], "ops": ["orders"]})
+    names = tmp_path / "names.txt"
+    names.write_text("orders\nwidgets\ncustomers\n", encoding="utf-8")
+    code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(tmp_path / "k"))
+    assert code == 1
+    assert out["unmatched"] == ["widgets"] and out["ambiguous"] == {
+        "orders": ["sales.orders", "ops.orders"]
+    }
+    assert not (tmp_path / "k").exists()
+
+
+def test_large_inventory_is_summarised_to_15_rows(tmp_path):
+    inv = _inventory({f"s{i:02d}": [f"t{j}" for j in range(15)] for i in range(40)})
+    assert len(inv["tables"]) == 600
+    code, out = _run(tmp_path, inv)
+    assert out["tables"] == 600
+    assert len(out["schemas"]) <= 15
+    assert out["schemas_more"] == {"schemas": 25, "tables": 375}
+    groups = out["groups"]["schema_groups"]
+    assert len(groups) <= 4
+    assert sorted(s for g in groups for s in g["schemas"]) == sorted(f"s{i:02d}" for i in range(40))
+
+
+def test_few_schemas_have_no_overflow_or_groups(tmp_path):
+    code, out = _run(tmp_path, _inventory({"a": ["x"], "b": ["y"]}))
+    assert out["schemas_more"] is None and out["groups"]["schema_groups"] == []
+
+
+def test_every_table_in_a_noise_named_schema_is_flagged():
+    for schema in ("staging", "Scratch", "tmp"):
+        assert "schema" in inventory_summary.noise_reason("orders", schema)
+    assert inventory_summary.noise_reason("orders", "sales") is None
+
+
+@pytest.mark.parametrize("name", ["orders_2023_q1", "orders_2023_v2", "orders_20230115_v3"])
+def test_a_date_before_a_version_or_quarter_is_flagged(name):
+    assert inventory_summary.noise_reason(name)
+
+
+def test_a_version_alone_is_not_noise():
+    assert inventory_summary.noise_reason("order_items_v2") is None
+
+
+def test_summary_flags_the_tables_of_a_noise_schema(tmp_path):
+    code, out = _run(tmp_path, _inventory({"staging": ["orders"], "sales": ["orders"]}))
+    assert [n["table"] for n in out["likely_noise"]] == ["staging.orders"]
+    assert "staging" in out["likely_noise"][0]["why"]
+
+
+def test_keeping_nothing_is_an_error_and_writes_nothing(tmp_path):
+    out_file = tmp_path / "k"
+    inv = _inventory({"staging": ["a", "b"]})
+    code, out = _run(tmp_path, inv, "--keep", "drop_noise", "--tables-out", str(out_file))
+    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    names = tmp_path / "names.txt"
+    names.write_text("\n", encoding="utf-8")
+    code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(out_file))
+    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+    code, out = _run(
+        tmp_path, _inventory({"a": ["x"]}), "--keep", "schemas:", "--tables-out", str(out_file)
+    )
+    assert code == 1 and out == {"error": "no tables kept"} and not out_file.exists()
+
+
+def test_names_match_case_insensitively_and_strip_quotes(tmp_path):
+    inv = _inventory({"sales": ["Orders", "customers"]})
+    names = tmp_path / "names.txt"
+    names.write_text('"SALES.orders"\n`Customers`,\n', encoding="utf-8")
+    out_file = tmp_path / "keep.txt"
+    code, out = _run(tmp_path, inv, "--keep", f"names:{names}", "--tables-out", str(out_file))
+    assert code == 0 and out["kept"] == 2
+    assert out_file.read_text().splitlines() == ["sales.Orders", "sales.customers"]
+
+
+def test_schema_groups_carry_schema_and_table_counts(tmp_path):
+    inv = _inventory({f"s{i}": ["t", "u"] for i in range(6)})
+    _, out = _run(tmp_path, inv)
+    for g in out["groups"]["schema_groups"]:
+        assert g["schema_count"] == len(g["schemas"]) and g["tables"] == 2 * g["schema_count"]
+
+
+# --- --show and --check-columns: what replaced the prune page -----------------
+
+from inventory_summary import check_columns, show  # noqa: E402
+
+_INV = {
+    "tables": [
+        {
+            "schema": "sales",
+            "table": "orders",
+            "columns": [{"name": "id", "type": "int"}, {"name": "Notes", "type": "text"}],
+        },
+        {"schema": "sales", "table": "customers", "columns": [{"name": "email", "type": "text"}]},
+        {"schema": "billing", "table": "orders", "columns": [{"name": "id", "type": "int"}]},
+    ]
+}
+
+
+def test_show_a_schema_lists_its_tables_with_column_counts():
+    result, ok = show(_INV, "Sales")
+    assert ok and result == {
+        "schema": "sales",
+        "tables": [{"table": "orders", "columns": 2}, {"table": "customers", "columns": 1}],
+        "more": 0,
+    }
+
+
+def test_show_a_table_lists_its_columns():
+    result, ok = show(_INV, "sales.orders")
+    assert (
+        ok
+        and result["table"] == "sales.orders"
+        and [c["name"] for c in result["columns"]] == ["id", "Notes"]
+    )
+    result, ok = show(_INV, "customers")
+    assert ok and result["table"] == "sales.customers"
+
+
+def test_show_caps_the_list_and_counts_the_rest():
+    inv = {"tables": [{"schema": "s", "table": f"t{i}", "columns": []} for i in range(20)]}
+    result, ok = show(inv, "s")
+    assert ok and len(result["tables"]) == 15 and result["more"] == 5
+
+
+def test_show_says_what_did_not_match():
+    assert show(_INV, "orders") == (
+        {"ambiguous": {"orders": ["sales.orders", "billing.orders"]}},
+        False,
+    )
+    assert show(_INV, "nope") == ({"unmatched": ["nope"]}, False)
+
+
+def test_check_columns_spells_names_as_the_inventory_does():
+    assert check_columns(_INV, ["sales.orders.notes", "SALES.CUSTOMERS.EMAIL"]) == (
+        ["sales.orders.Notes", "sales.customers.email"],
+        [],
+    )
+    assert check_columns(_INV, ["sales.orders.ssn"]) == ([], ["sales.orders.ssn"])
+
+
+def test_check_columns_cli(tmp_path, capsys):
+    import json
+
+    from inventory_summary import main
+
+    inv = tmp_path / "inv.json"
+    inv.write_text(json.dumps(_INV))
+    names = tmp_path / "cols.txt"
+    names.write_text("sales.orders.notes\n")
+    assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"exclude_columns": ["sales.orders.Notes"]}
+    names.write_text("sales.orders.ssn\n")
+    assert main(["--inventory", str(inv), "--check-columns", str(names)]) == 1
+    assert main(["--inventory", str(inv), "--show", "nope"]) == 1
+
+
+def test_used_schemas_counts_the_schemas_shared_sql_names():
+    # A live run's alphabetical groups hid the schemas 64 of 69 shared questions read.
+    from inventory_summary import used_schemas
+
+    sql = "SELECT * FROM sales.orders o JOIN sales.customers c ON 1=1; SELECT 1 FROM billing.orders; FROM nope.x; sales.unknown"
+    assert used_schemas(_INV, sql) == [
+        {"schema": "sales", "mentions": 2},
+        {"schema": "billing", "mentions": 1},
+    ]
+
+
+def test_used_by_adds_used_schemas_to_the_summary(tmp_path, capsys):
+    import json
+
+    from inventory_summary import main
+
+    inv = tmp_path / "inv.json"
+    inv.write_text(json.dumps(_INV))
+    shared = tmp_path / "q.sql"
+    shared.write_text("select count(*) from billing.orders")
+    assert main(["--inventory", str(inv), "--used-by", str(shared)]) == 0
+    assert json.loads(capsys.readouterr().out)["used_schemas"] == [
+        {"schema": "billing", "mentions": 1}
+    ]
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT * FROM warehouse.sales.orders",  # three-part: db.schema.table
+        'SELECT * FROM "sales"."orders"',
+        "SELECT * FROM `sales`.`orders`",
+        "SELECT * FROM `proj.sales.orders`",  # one backtick-quoted three-part name
+        "SELECT * FROM [sales].[orders]",
+        "SELECT * FROM [warehouse].[SALES].[Orders]",
+        "SELECT sales.orders.amount FROM sales.orders",  # a column reference counts once per name
+    ],
+)
+def test_used_schemas_reads_quoted_and_three_part_names(sql):
+    from inventory_summary import used_schemas
+
+    got = used_schemas(_INV, sql)
+    assert got and got[0]["schema"] == "sales", got
+    assert "billing" not in [g["schema"] for g in got]
+
+
+def test_used_schemas_counts_each_dotted_name_once():
+    from inventory_summary import used_schemas
+
+    assert used_schemas(_INV, "FROM db.sales.orders JOIN billing.orders") == [
+        {"schema": "billing", "mentions": 1},
+        {"schema": "sales", "mentions": 1},
+    ]

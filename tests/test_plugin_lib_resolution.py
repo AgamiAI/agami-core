@@ -31,6 +31,7 @@ SRC = REPO / "packages" / "agami-core" / "src"
 # Source path -> path under lib/, as in dev.py::_VENDORED.
 VENDORED = {
     "agami_paths.py": "agami_paths.py",
+    "credential_store.py": "credential_store.py",
     "execute_sql.py": "execute_sql.py",
     "guardrail.py": "guardrail.py",
     "sql_guard.py": "sql_guard.py",
@@ -67,7 +68,7 @@ def test_connect_resolve_runs_in_marketplace_layout(marketplace_cache):
 
 
 @pytest.mark.parametrize("mod",
-                         ["csv_to_sections", "setup_pgauth", "build_duckdb_attach",
+                         ["csv_to_sections", "setup_pgauth", "build_duckdb_attach", "connect_helper",
                           "render_golden_run"])
 def test_scripts_import_in_marketplace_layout(marketplace_cache, mod):
     code = f"import sys; sys.path.insert(0, {str(marketplace_cache / 'scripts')!r}); import {mod}"
