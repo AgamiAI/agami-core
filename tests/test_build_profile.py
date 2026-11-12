@@ -1,510 +1,857 @@
-"""Joins are checked on the data at build time, on the whole key or a spread-out sample (#448).
+"""`execute_sql --build-profile`: the local model-building mode (#523).
 
-A join used to be confirmed on 50 distinct values with one match enough, and the card said
-"100% of 38 sampled values match" without saying whether 38 was every value. These tests pin the
-check: whole key under the size guard, a bounded sample above it, a match rate for declared keys,
-both directions and a repeating key, several checks to a statement. Synthetic, generic names only.
+It allows exactly two things the model pass otherwise refuses, catalog reads and JSON/array table
+functions over a column, and lets agami's own catalog queries call `pg_get_constraintdef`. Every other
+check still runs. It is refused on a hosted server and in the child the MCP tool forks, and the MCP tool
+has no way to ask for it, so what the tool accepts and refuses is unchanged.
 """
 
 from __future__ import annotations
 
-import sqlite3
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
 pytest.importorskip("pydantic")
-sqlglot = pytest.importorskip("sqlglot")
+pytest.importorskip("sqlglot")
+yaml = pytest.importorskip("yaml")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PKG_SRC = REPO_ROOT / "packages" / "agami-core" / "src"
 if str(PKG_SRC) not in sys.path:
     sys.path.insert(0, str(PKG_SRC))
 
+import execute_sql  # noqa: E402
+import guardrail  # noqa: E402
+import tools  # noqa: E402
 from semantic_model import dialects as D  # noqa: E402
-from semantic_model import introspect as I  # noqa: E402
-from semantic_model import profile as PF  # noqa: E402
-from semantic_model.models import Column, PerformanceHints, Table  # noqa: E402
+from semantic_model import introspect as INTRO  # noqa: E402
 
-# orders.customer_id: 5 rows, one blank, one pointing at a customer that isn't there (9).
-# customers 3 has no order. visits.region_code points at regions.code, which repeats.
-_SCHEMA = (
-    "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
-    "CREATE TABLE orders(id INTEGER PRIMARY KEY, customer_id INTEGER, amount REAL);"
-    "CREATE TABLE regions(code TEXT, loaded_on TEXT);"
-    "CREATE TABLE visits(id INTEGER PRIMARY KEY, region_code TEXT);"
-    "INSERT INTO customers VALUES (1, 'a'), (2, 'b'), (3, 'c');"
-    "INSERT INTO orders VALUES (1, 1, 2.0), (2, 1, 3.0), (3, 2, 1.0), (4, NULL, 5.0), (5, 9, 1.0);"
-    "INSERT INTO regions VALUES ('n', '2024-01-01'), ('n', '2024-02-01'), ('s', '2024-01-01');"
-    "INSERT INTO visits VALUES (1, 'n'), (2, 's');"
-)
+PROFILE = "acme"
+
+
+class _Rows:
+    """An executor that returns one row and records what reached it."""
+
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def execute(self, vetted_sql, creds, *, profile):  # noqa: ANN001, ANN201
+        self.seen.append(vetted_sql)
+        return execute_sql.ExecResult(columns=["x"], rows=[(1,)])
+
+
+def _write_model(root: Path) -> None:
+    """orders(id, status, payload) on Postgres, with `secret` excluded by the curator."""
+    (root / "subject_areas" / "sales" / "tables").mkdir(parents=True)
+    (root / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "Shop", "version": 1,
+        "storage_connections": [{"name": "c", "storage_type": "PostgreSQL"}],
+        "subject_areas": ["subject_areas/sales"]}))
+    (root / "subject_areas" / "sales" / "subject_area.yaml").write_text(yaml.safe_dump({
+        "name": "sales", "tables": [{"storage_connection": "c", "schema": "public", "table": "orders"}]}))
+    (root / "subject_areas" / "sales" / "tables" / "orders.yaml").write_text(yaml.safe_dump({
+        "name": "orders", "schema": "public", "storage_connection": "c", "grain": ["id"],
+        "description": "orders",
+        "columns": [
+            {"name": "id", "type": "integer", "primary_key": True},
+            {"name": "status", "type": "string"},
+            {"name": "payload", "type": "json"},
+            {"name": "secret", "type": "json", "review_state": "rejected"},
+        ]}))
 
 
 @pytest.fixture
-def db(tmp_path: Path) -> Path:
-    path = tmp_path / "shop.db"
-    con = sqlite3.connect(path)
-    con.executescript(_SCHEMA)
-    con.commit()
-    con.close()
-    return path
-
-
-def _runner(db: Path, seen: list[str] | None = None, fail_on: str | None = None):
-    def run(sql: str) -> list[dict]:
-        if seen is not None:
-            seen.append(sql)
-        if fail_on and fail_on in sql:
-            raise RuntimeError("refused")
-        con = sqlite3.connect(db)
-        try:
-            cur = con.execute(sql)
-            names = [d[0] for d in cur.description or []]
-            return [dict(zip(names, row)) for row in cur.fetchall()]
-        finally:
-            con.close()
-    return run
-
-
-def _t(name: str, cols: list[str], rows: int | None) -> Table:
-    return Table(name=name, schema=None, storage_connection="c", grain=[], description="",
-                 columns=[Column(name=c, type="string", description="") for c in cols],
-                 performance_hints=PerformanceHints(estimated_row_count=rows) if rows is not None else None)
-
-
-ORDERS = _t("orders", ["id", "customer_id"], 5)
-CUSTOMERS = _t("customers", ["id"], 3)
-SQLITE = D.get_dialect("sqlite")
-
-
-def test_a_small_table_is_checked_on_the_whole_key_with_both_directions(db):
-    c = PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"])
-    PF.run_checks(SQLITE, _runner(db), [c])
-    assert c.read == "whole"
-    assert (c.rows_read, c.rows_keyed, c.rows_matched) == (5, 4, 3)
-    assert (c.values, c.values_matched, c.to_keys, c.to_rows) == (3, 2, 3, 3)
-    assert c.rate == pytest.approx(2 / 3) and not c.borne_out and not c.fans_out
-    assert c.summary() == (
-        "2 of 3 values of orders.customer_id are found in customers.id (67%) (whole table checked); "
-        "2 of 5 orders rows have no match (1 blank): an inner join drops them; "
-        "1 of 3 customers keys have no orders row")
-
-
-def test_every_value_matching_says_all_and_that_the_whole_table_was_read(db):
-    c = PF.JoinCheck(ORDERS, ["id"], CUSTOMERS, ["id"])   # 1..5 against 1..3
-    PF.run_checks(SQLITE, _runner(db), [c])
-    assert c.summary().startswith("3 of 5 values of orders.id")
-    ok = PF.JoinCheck(_t("customers", ["id"], 3), ["id"], _t("orders", ["id"], 5), ["id"])
-    PF.run_checks(SQLITE, _runner(db), [ok])
-    assert ok.borne_out and ok.summary().startswith("all 3 values of customers.id are found in orders.id "
-                                                    "(whole table checked)")
-
-
-def test_a_key_that_repeats_on_the_side_it_points_at_is_called_a_fan_out(db):
-    c = PF.JoinCheck(_t("visits", ["region_code"], 2), ["region_code"], _t("regions", ["code"], 3), ["code"])
-    PF.run_checks(SQLITE, _runner(db), [c])
-    assert c.borne_out and c.fans_out
-    assert "regions.code repeats (3 rows for 2 values): each row joins to several" in c.summary()
-
-
-def test_a_large_table_is_read_as_a_bounded_sample_and_says_so(db, monkeypatch):
-    monkeypatch.setattr(PF, "JOIN_WHOLE_MAX_ROWS", 2)
-    monkeypatch.setattr(PF, "JOIN_SAMPLE_ROWS", 4)
-    seen: list[str] = []
-    c = PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"])
-    PF.run_checks(SQLITE, _runner(db, seen), [c])
-    assert "LIMIT 4" in seen[0]
-    assert c.read == "first_rows" and c.rows_read == 4
-    assert "sampled orders rows are found in customers.id" in c.summary()
-    assert "the first rows read, 4 rows" in c.summary()
-    assert "inner join drops" not in c.summary()   # a sample says nothing about the other rows
-
-
-def test_several_checks_share_one_statement_and_a_failing_one_costs_only_itself(db):
-    seen: list[str] = []
-    checks = [PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"]) for _ in range(3)]
-    PF.run_checks(SQLITE, _runner(db, seen), checks)
-    assert len(seen) == 1 and seen[0].count("UNION ALL") == 2
-    assert all(c.rows_matched == 3 for c in checks)
-
-    seen.clear()
-    bad = PF.JoinCheck(ORDERS, ["customer_id"], _t("missing_table", ["id"], 1), ["id"])
-    good = PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"])
-    PF.run_checks(SQLITE, _runner(db, seen), [bad, good])
-    assert len(seen) == 3   # the batch, then each alone
-    assert bad.failed and bad.rate is None and bad.summary() == "the check could not compare the two columns"
-    assert good.ran and good.rows_matched == 3
-
-
-def test_many_checks_run_in_batches_of_the_statement_size(db):
-    seen: list[str] = []
-    checks = [PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"]) for _ in range(PF.CHECKS_PER_STATEMENT * 2 + 1)]
-    PF.run_checks(SQLITE, _runner(db, seen), checks)
-    assert len(seen) == 3 and all(c.ran for c in checks)
-
+def model(tmp_path, monkeypatch):
+    _write_model(tmp_path / PROFILE)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setenv(f"DATASOURCE_URL__{PROFILE.upper()}", "postgresql://demo@localhost:5432/demo")
+    monkeypatch.delenv("AGAMI_DB_URL", raising=False)
+    monkeypatch.delenv("APP_DATABASE_URL", raising=False)
+    monkeypatch.delenv(execute_sql.SERVED_CHILD_ENV, raising=False)
+    monkeypatch.setenv("AGAMI_GOVERNANCE_ENFORCED", "true")
+    return tmp_path
+
+
+def _run(sql: str, **kw):
+    executor = _Rows()
+    env = execute_sql.execute_guarded(sql, PROFILE, None, executor=executor, **kw)
+    return env, executor
+
+
+INFO_SCHEMA = "SELECT c.column_name FROM information_schema.columns c WHERE c.table_name = 'orders'"
+JSONB_EACH = "SELECT kv.key, COUNT(*) AS n FROM orders o, jsonb_each(o.payload) AS kv GROUP BY kv.key"
+LATERAL_JSONB = "SELECT kv.key FROM orders o CROSS JOIN LATERAL jsonb_each(o.payload) AS kv"
+PG_CATALOG = ("SELECT con.conname FROM pg_catalog.pg_constraint con "
+              "JOIN pg_catalog.pg_class c ON c.oid = con.conrelid WHERE c.relname = 'orders'")
+
+
+@pytest.mark.parametrize("sql", [
+    INFO_SCHEMA, PG_CATALOG, JSONB_EACH, LATERAL_JSONB,
+    # Bare names are fine where no model table is read, and an ORDER BY of the select's own alias.
+    "SELECT column_name FROM information_schema.columns WHERE table_name = 'orders'",
+    "SELECT kv.key, COUNT(*) AS n FROM orders o, jsonb_each(o.payload) AS kv GROUP BY kv.key ORDER BY n",
+])
+def test_a_profiling_read_runs_under_build_profile_and_is_refused_without_it(model, sql):
+    refused, executor = _run(sql)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule in (guardrail.RULE_TABLE_SCOPE, guardrail.RULE_UNSCOPABLE)
+
+    ran, executor = _run(sql, build_profile=True)
+    assert ran.status == "ok", ran.refusal
+    assert executor.seen == [sql]
+
+
+@pytest.mark.parametrize(("sql", "rule"), [
+    # The left-out column, however the statement reaches it.
+    ("SELECT o.secret FROM orders o", guardrail.RULE_COLUMN_SCOPE),
+    ("SELECT kv.key FROM orders o, jsonb_each(o.secret) AS kv", guardrail.RULE_COLUMN_SCOPE),
+    ("SELECT kv.key FROM orders o CROSS JOIN LATERAL jsonb_each(o.secret) AS kv", guardrail.RULE_COLUMN_SCOPE),
+    ("SELECT o.secret, c.column_name FROM orders o JOIN information_schema.columns c "
+     "ON c.table_name = 'orders'", guardrail.RULE_UNSCOPABLE),
+    # A column nobody declared.
+    ("SELECT kv.key FROM orders o, jsonb_each(o.notes) AS kv", guardrail.RULE_COLUMN_SCOPE),
+    # Undeclared user tables, and catalog tables that hold row values rather than structure.
+    ("SELECT p.id FROM payroll p", guardrail.RULE_TABLE_SCOPE),
+    ("SELECT s.most_common_vals FROM pg_catalog.pg_stats s", guardrail.RULE_TABLE_SCOPE),
+    ("SELECT c.relname FROM pg_class c", guardrail.RULE_TABLE_SCOPE),
+    # Sources that are not a function over a column.
+    ("SELECT s.v FROM orders o, LATERAL (SELECT o.status AS v) s", guardrail.RULE_UNSCOPABLE),
+    ("SELECT kv.key FROM orders o, jsonb_each((SELECT p.doc FROM payroll p)) AS kv", guardrail.RULE_UNSCOPABLE),
+    ("SELECT g.n FROM generate_series(1, 3) AS g(n)", guardrail.RULE_UNSCOPABLE),
+    ("SELECT o.id FROM orders o UNION ALL (VALUES (1))", guardrail.RULE_UNSCOPABLE),
+    # A bare name beside a model table could resolve to the model table's left-out column from an
+    # inner scope that lacks it, so every column there is qualified.
+    ("SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM jsonb_each(o.payload) AS kv WHERE secret IS NULL)",
+     guardrail.RULE_UNSCOPABLE),
+    ("SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM information_schema.columns c WHERE secret IS NULL)",
+     guardrail.RULE_UNSCOPABLE),
+    ("SELECT o.id AS secret FROM orders o WHERE EXISTS "
+     "(SELECT 1 FROM jsonb_each(o.payload) AS kv WHERE secret IS NULL)", guardrail.RULE_UNSCOPABLE),
+    ("SELECT kv.key AS secret, COUNT(*) AS n FROM orders o, jsonb_each(o.payload) AS kv GROUP BY secret",
+     guardrail.RULE_UNSCOPABLE),
+    # The star ban still holds, over a catalog view too.
+    ("SELECT * FROM information_schema.columns", guardrail.RULE_SELECT_STAR),
+    # The always-on guard.
+    ("DELETE FROM orders", guardrail.RULE_READ_ONLY),
+    ("SELECT pg_sleep(1)", guardrail.RULE_READ_ONLY),
+    ("SELECT version()", guardrail.RULE_RECON),
+    ("SELECT 'orders'::regclass", guardrail.RULE_RECON),
+])
+def test_everything_else_is_still_refused_under_build_profile(model, sql, rule):
+    env, executor = _run(sql, build_profile=True)
+    assert env.status == "refused" and env.refusal.rule == rule, env
+    assert not executor.seen
+
+
+def test_the_length_cap_is_unchanged(model):
+    sql = "SELECT o.id FROM orders o WHERE o.status = '" + "x" * 50_000 + "'"
+    for kw in ({}, {"build_profile": True}, {"no_safety": True, "build_profile": True}):
+        env, _ = _run(sql, **kw)
+        assert env.status == "refused" and env.refusal.rule == guardrail.RULE_READ_ONLY
+        assert "50000" in env.refusal.detail
+
+
+def test_pg_get_constraintdef_runs_only_as_agami_s_own_catalog_query(model):
+    builtin = D.PostgreSQL().sql_constraint_definitions("public")
+    assert "pg_get_constraintdef" in builtin
+    # Agami's own query, for any schema: the fingerprint ignores the literal.
+    for schema in ("public", "sales"):
+        env, executor = _run(D.PostgreSQL().sql_constraint_definitions(schema), build_profile=True)
+        assert env.status == "ok", env.refusal
+        assert executor.seen
+    # The same query is refused without the build profile, with or without `--no-safety`.
+    for kw in ({}, {"no_safety": True}):
+        env, _ = _run(builtin, **kw)
+        assert env.status == "refused" and env.refusal.rule == guardrail.RULE_RECON
+    # A statement an agent wrote, or agami's query with anything changed, is refused.
+    for sql in (
+        "SELECT pg_get_constraintdef(con.oid) AS d FROM pg_catalog.pg_constraint con",
+        builtin.replace("ORDER BY c.relname, con.conname", "AND 1 = 1 ORDER BY c.relname, con.conname"),
+        builtin.replace("con.conname AS constraint_name", "con.conname AS constraint_name, version() AS v"),
+        builtin.replace("pg_get_constraintdef(con.oid)", "pg_get_constraintdef(con.oid, true)"),
+    ):
+        for kw in ({"build_profile": True}, {"no_safety": True, "build_profile": True}):
+            env, executor = _run(sql, **kw)
+            assert env.status == "refused" and env.refusal.rule == guardrail.RULE_RECON, sql
+            assert not executor.seen
 
-def test_a_composite_key_is_matched_on_all_its_columns(tmp_path):
-    path = tmp_path / "c.db"
-    con = sqlite3.connect(path)
-    con.executescript("CREATE TABLE lines(o INTEGER, n INTEGER); CREATE TABLE ships(o INTEGER, n INTEGER);"
-                      "INSERT INTO lines VALUES (1,1),(1,2); INSERT INTO ships VALUES (1,1),(1,3);")
-    con.close()
-    c = PF.JoinCheck(_t("ships", ["o", "n"], 2), ["o", "n"], _t("lines", ["o", "n"], 2), ["o", "n"])
-    PF.run_checks(SQLITE, _runner(path), [c])
-    assert (c.values, c.values_matched) == (2, 1)
-    assert c.summary().startswith("1 of 2 values of ships(o, n) are found in lines(o, n)")
 
-
-def test_a_join_to_a_table_too_large_to_read_is_not_checked():
-    assert PF.checkable(CUSTOMERS)
-    assert not PF.checkable(_t("huge", ["id"], PF.JOIN_TARGET_MAX_ROWS + 1))
-
-
-# --- one spread-out sample clause per engine that has one -------------------------------------
-
-_CLAUSES = {
-    "postgres": "TABLESAMPLE SYSTEM (2)",
-    "supabase": "TABLESAMPLE SYSTEM (2)",
-    "duckdb": "TABLESAMPLE 2%",
-    "snowflake": "SAMPLE SYSTEM (2)",
-    "bigquery": "TABLESAMPLE SYSTEM (2 PERCENT)",
-    "databricks": "TABLESAMPLE (2 PERCENT)",
-    "sqlserver": "TABLESAMPLE (2 PERCENT)",
-    "trino": "TABLESAMPLE BERNOULLI (2)",
-    "oracle": "SAMPLE (2)",
-}
-
-
-@pytest.mark.parametrize("key", sorted(_CLAUSES))
-def test_an_engine_with_a_sample_clause_spreads_the_sample(key):
-    d = D.get_dialect(key)
-    sql, how = d.sampled_rows("SELECT a FROM t", 5_000, 500_000)
-    assert how == "sample" and _CLAUSES[key] in sql and "5000" in sql
-
-
-@pytest.mark.parametrize("key", ["redshift", "mysql", "sqlite"])
-def test_an_engine_without_one_reads_the_first_rows_bounded(key):
-    sql, how = D.get_dialect(key).sampled_rows("SELECT a FROM t", 5_000, 500_000)
-    assert how == "first_rows" and sql == "SELECT a FROM t LIMIT 5000"
-
-
-def test_an_unknown_size_or_a_small_table_is_not_sampled_by_share():
-    pg = D.get_dialect("postgres")
-    assert pg.sampled_rows("SELECT a FROM t", 5_000, None) == ("SELECT a FROM t LIMIT 5000", "first_rows")
-    assert pg.sampled_rows("SELECT a FROM t", 5_000, 4_000)[1] == "first_rows"
-    assert "TABLESAMPLE SYSTEM (0.0001)" in pg.sampled_rows("SELECT a FROM t", 1, 10**12)[0]
-    assert "SAMPLE (99)" in D.get_dialect("oracle").sampled_rows("SELECT a FROM t", 9, 10)[0]
-
-
-_SQLGLOT = {"postgres": "postgres", "duckdb": "duckdb", "snowflake": "snowflake", "bigquery": "bigquery",
-            "databricks": "databricks", "sqlserver": "tsql", "trino": "trino", "oracle": "oracle",
-            "mysql": "mysql", "redshift": "redshift", "sqlite": "sqlite"}
-
-
-@pytest.mark.parametrize("key", sorted(_SQLGLOT))
-def test_a_sampled_check_parses_in_its_engine(key):
-    d = D.get_dialect(key)
-    big = _t("orders", ["customer_id"], 10_000_000)
-    sql, _ = PF.check_sql(d, PF.JoinCheck(big, ["customer_id"], CUSTOMERS, ["id"]), 0)
-    sqlglot.parse_one(sql, read=_SQLGLOT[key])
-
-
-def test_a_refused_sample_clause_falls_back_to_the_first_rows(db, monkeypatch):
-    """A view, say, may not take the engine's sample clause: the check is read from the first rows."""
-    monkeypatch.setattr(PF, "JOIN_WHOLE_MAX_ROWS", 2)
-    monkeypatch.setattr(D.SQLite, "tablesample", lambda self, pct: f"TABLESAMPLE SYSTEM ({pct})", raising=False)
-    c = PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"])
-    PF.run_checks(SQLITE, _runner(db, fail_on="TABLESAMPLE"), [c])
-    assert c.read == "first_rows" and c.ran
-
-
-# --- in a build ------------------------------------------------------------------------------
-
-def _build(tmp_path: Path, db: Path, db_type: str = "sqlite", seen: list[str] | None = None):
-    return I.introspect("demo", db_type, runner=_runner(db, seen), artifacts_dir=tmp_path,
-                        out_dir=tmp_path / "demo")
-
-
-_FK = (
-    "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
-    "CREATE TABLE orders(id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id), amount REAL);"
-    "INSERT INTO customers VALUES (1, 'a'), (2, 'b');"
-)
-
-
-def _fk_db(tmp_path: Path, orders: str) -> Path:
-    path = tmp_path / "fk.db"
-    con = sqlite3.connect(path)
-    con.executescript(_FK + orders)
-    con.close()
-    return path
-
-
-def test_every_join_of_a_build_is_checked_and_reported(tmp_path):
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 7, 1.0), (3, 8, 1.0);")
-    _, report = _build(tmp_path, path)
-    [chk] = [c for c in report.join_checks if c["join"].startswith("orders")]
-    assert chk["read"] == "whole" and chk["declared"] and chk["values"] == 3 and chk["values_matched"] == 1
-    text = report.render()
-    assert ("## joins checked on the data (1 of 1: 1 on the whole table, 0 on a sample; 0 with no values to "
-            "compare; 1 worth a look)") in text
-    assert "! orders.customer_id -> customers.id: 1 of 3 values of orders.customer_id" in text
-
-
-def test_an_unenforced_declared_key_needs_a_match_rate_not_one_hit(tmp_path, monkeypatch):
-    """One matching value used to confirm a declared key on an engine that doesn't enforce it."""
-    monkeypatch.setattr(D.SQLite, "fk_enforced", False)
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 7, 1.0), (3, 8, 1.0);")
-    org, _ = _build(tmp_path, path)
-    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
-    assert r.confidence == "inferred" and r.review_state == "unreviewed"
-
-
-def test_an_unenforced_declared_key_the_data_bears_out_is_confirmed_and_read_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(D.SQLite, "fk_enforced", False)
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 1, 1.0), (3, NULL, 1.0);")
-    seen: list[str] = []
-    org, report = _build(tmp_path, path, seen=seen)
-    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
-    assert r.confidence == "confirmed" and r.review_state == "approved"
-    assert r.description == "declared FK, confirmed on the data"   # no figure in the model
-    checks = [s for s in seen if "AS rows_read" in s and '"orders"' in s.split("LEFT JOIN")[0]
-              and '"customers"' in s]
-    assert len(checks) == 1   # the later check of every join reuses it
-    assert report.join_checks[0]["match_rate"] == 1.0
-
-
-def test_a_sample_that_comes_back_empty_is_read_again_from_the_first_rows(db, monkeypatch):
-    """A share of a table taken from a stale estimate can return no rows at all."""
-    monkeypatch.setattr(PF, "JOIN_WHOLE_MAX_ROWS", 2)
-    monkeypatch.setattr(D.SQLite, "tablesample", lambda self, pct: "WHERE 1 = 0", raising=False)
-    stale = _t("orders", ["customer_id"], 10**9)
-    checks = [PF.JoinCheck(stale, ["customer_id"], CUSTOMERS, ["id"]) for _ in range(2)]
-    PF.run_checks(SQLITE, _runner(db), checks)
-    assert all(c.read == "first_rows" and c.rows_read == 5 for c in checks)
-    empty = PF.JoinCheck(stale, ["customer_id"], CUSTOMERS, ["id"])
-    empty.read, empty.rows_read = "sample", 0
-    assert empty.summary() == "no orders rows were read"
-
-
-# --- the column profile ----------------------------------------------------------------------
-
-def _claims_db(tmp_path: Path) -> Path:
-    """30 claims: payment_date before submitted_date on every row (a misnamed date), created_on in
-    the future on one, a note that's almost always blank, a constant source, an empty column, a
-    status list, a contact email, and a text date column written two ways."""
-    path = tmp_path / "claims.db"
-    con = sqlite3.connect(path)
-    con.execute("CREATE TABLE claims(id INTEGER PRIMARY KEY, status TEXT, submitted_date DATE, payment_date DATE,"
-                " created_on DATE, note TEXT, source TEXT, unused TEXT, contact_email TEXT, logged TEXT)")
-    for i in range(30):
-        con.execute("INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (i, "open" if i < 20 else "paid", f"2024-02-{i % 28 + 1:02d}", f"2024-01-{i % 28 + 1:02d}",
-                     "2999-01-01" if i == 0 else "2024-01-01", "x" if i == 0 else "", "web", None,
-                     f"p{i}@example.com", f"2024-01-{i % 28 + 1:02d}" if i % 2 else f"{i % 28 + 1:02d}/01/2024"))
-    con.commit()
-    con.close()
-    return path
-
-
-def _claims_table(rows: int | None = 30) -> Table:
-    types = {"id": "integer", "status": "string", "submitted_date": "date", "payment_date": "date",
-             "created_on": "date", "note": "string", "source": "string", "unused": "string",
-             "contact_email": "string", "logged": "string"}
-    t = _t("claims", list(types), rows)
-    for c in t.columns:
-        c.type = types[c.name]
-        c.sensitive = c.name == "contact_email"
-    return t
-
-
-def _profile(tmp_path, **kw):
-    db = _claims_db(tmp_path)
-    seen: list[str] = []
-    t = _claims_table(kw.pop("rows", 30))
-    sample = _runner(db)("SELECT * FROM claims")
-    prof = PF.profile_table(SQLITE, _runner(db, seen), t, lambda c: c.sensitive, sample, today="2026-01-01")
-    return prof, seen
-
-
-def test_a_table_is_profiled_in_two_statements_with_rates_counts_ranges_and_top_values(tmp_path):
-    prof, seen = _profile(tmp_path)
-    assert len(seen) == 2
-    assert prof["read"] == "whole" and prof["rows_read"] == 30
-    cols = prof["columns"]
-    assert cols["status"]["distinct"] == 2
-    assert cols["status"]["top"] == [{"value": "open", "share": 0.667}, {"value": "paid", "share": 0.333}]
-    assert (cols["payment_date"]["min"], cols["payment_date"]["max"]) == ("2024-01-01", "2024-01-28")
-    assert cols["note"]["blank_text"] == pytest.approx(0.967) and cols["unused"]["filled"] == 0.0
-
-
-def test_a_column_of_one_off_values_has_no_frequent_values_listed(tmp_path):
-    """30 distinct references on 30 rows is under the 50-value line, but nothing repeats."""
-    prof, _ = _profile(tmp_path)
-    assert prof["columns"]["id"]["distinct"] == 30 and "top" not in prof["columns"]["id"]
-    assert "top" in prof["columns"]["status"]
-
-
-def test_a_personal_column_gets_counts_and_never_a_value(tmp_path):
-    prof, seen = _profile(tmp_path)
-    email = prof["columns"]["contact_email"]
-    assert email["personal"] and email["distinct"] == 30
-    assert "top" not in email and "min" not in email
-    assert not any('"contact_email"' in s for s in seen[1:])   # not in the values read
-
-
-def test_the_profile_finds_the_quirks_that_give_a_plausible_wrong_number(tmp_path):
-    prof, _ = _profile(tmp_path)
-    kinds = {(f["column"], f["kind"]) for f in prof["findings"]}
-    assert kinds == {("unused", "empty"), ("note", "mostly_blank"), ("source", "constant"),
-                     ("created_on", "date_range"), ("payment_date", "date_order"), ("logged", "mixed_formats")}
-    assert {"earlier": "payment_date", "later": "submitted_date", "share": 1.0, "rows": 30} in prof["date_order"]
-    detail = {f["kind"]: f["detail"] for f in prof["findings"]}
-    assert detail["date_order"].startswith("payment_date falls before submitted_date on 100% of rows")
-    assert detail["mixed_formats"] == "logged mixes ISO dates (2024-01-31) and slash dates (31/01/2024)"
-
-
-def test_a_clean_table_has_no_findings(tmp_path):
-    path = tmp_path / "clean.db"
-    con = sqlite3.connect(path)
-    con.execute("CREATE TABLE orders(id INTEGER, placed DATE, closed DATE, status TEXT)")
-    for i in range(30):
-        con.execute("INSERT INTO orders VALUES (?,?,?,?)",
-                    (i, f"2024-01-{i % 28 + 1:02d}", f"2024-02-{i % 28 + 1:02d}", "open" if i % 2 else "done"))
-    con.commit()
-    con.close()
-    t = _t("orders", ["id", "placed", "closed", "status"], 30)
-    for c, ty in zip(t.columns, ["integer", "date", "date", "string"]):
-        c.type = ty
-    prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False, _runner(path)("SELECT * FROM orders"))
-    assert "findings" not in prof
-    assert prof["date_order"] == [{"earlier": "placed", "later": "closed", "share": 1.0, "rows": 30}]
-
-
-def test_a_large_table_is_profiled_on_a_bounded_sample(tmp_path, monkeypatch):
-    monkeypatch.setattr(PF, "PROFILE_WHOLE_MAX_ROWS", 10)
-    monkeypatch.setattr(PF, "PROFILE_SAMPLE_ROWS", 12)
-    prof, seen = _profile(tmp_path, rows=10**6)
-    assert prof["read"] == "first_rows" and prof["rows_read"] == 12 and prof["rows_estimated"] == 10**6
-    assert all("LIMIT 12" in s for s in seen)
-
-
-def test_a_table_that_cannot_be_read_has_no_profile_and_a_failed_value_read_keeps_the_counts(tmp_path):
-    db = _claims_db(tmp_path)
-    t = _claims_table()
-    assert PF.profile_table(SQLITE, _runner(db, fail_on="COUNT(*) AS n"), t, lambda c: False) is None
-    prof = PF.profile_table(SQLITE, _runner(db, fail_on="UNION ALL"), t, lambda c: False)
-    assert prof["columns"]["status"]["distinct"] == 2 and "top" not in prof["columns"]["status"]
-
-
-def test_a_wide_table_reads_a_bounded_number_of_columns(tmp_path, monkeypatch):
-    monkeypatch.setattr(PF, "PROFILE_MAX_COLUMNS", 3)
-    prof, _ = _profile(tmp_path)
-    assert list(prof["columns"]) == ["id", "status", "submitted_date"] and prof["columns_not_read"] == 7
-
-
-@pytest.mark.parametrize("key", sorted(_SQLGLOT))
-def test_the_profile_statements_parse_in_each_engine(key):
-    d = D.get_dialect(key)
-    t = _claims_table(10**7)
-    src, _ = PF._table_rows(d, t, [c.name for c in t.columns])
-    stats = [PF._ColStat(c.name, c.type, False) for c in t.columns]
-    sqlglot.parse_one(PF.stats_sql(d, src, stats, [(2, 3)]), read=_SQLGLOT[key])
-    sqlglot.parse_one(PF.top_sql(d, src, [(1, stats[1]), (0, stats[0])]), read=_SQLGLOT[key])
-
-
-@pytest.mark.parametrize("key,cast", [("postgres", "CAST(x AS VARCHAR(255))"), ("mysql", "CAST(x AS CHAR)"),
-                                      ("bigquery", "CAST(x AS STRING)"), ("databricks", "CAST(x AS STRING)")])
-def test_values_are_read_as_text_in_each_engines_spelling(key, cast):
-    assert D.get_dialect(key).text_cast("x") == cast
-
-
-def test_a_build_writes_the_profile_and_the_join_checks_beside_the_model(tmp_path):
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 1, 1.0), (3, NULL, 1.0);")
-    _, report = _build(tmp_path, path)
-    import json
-    doc = json.loads((tmp_path / "demo" / ".introspect" / "profile.json").read_text())
-    assert doc["version"] == 1 and set(doc["tables"]) == {"main.customers", "main.orders"}
-    assert doc["tables"]["main.orders"]["columns"]["customer_id"]["filled"] == pytest.approx(0.667)
-    assert [j["join"] for j in doc["joins"]] == ["orders.customer_id -> customers.id"]
-    assert "## column profile (2 tables read" in report.render()
-
-
-def test_a_batched_build_keeps_the_tables_an_earlier_batch_profiled(tmp_path):
-    import json
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0);")
-    out = tmp_path / "demo"
-    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, tables=["main.customers"])
-    I.introspect("demo", "sqlite", runner=_runner(path), artifacts_dir=tmp_path, out_dir=out, tables=["main.orders"],
-                 append=True)
-    doc = json.loads((out / ".introspect" / "profile.json").read_text())
-    assert set(doc["tables"]) == {"main.customers", "main.orders"}
-
-
-def test_sm_profile_prints_the_tables_asked_for_and_the_joins_that_touch_them(tmp_path, capsys):
-    import json
-
-    from semantic_model import cli
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0);")
-    _build(tmp_path, path)
-    root = str(tmp_path / "demo")
-    assert cli.main(["profile", root, "--table", "customers"]) == 0
-    doc = json.loads(capsys.readouterr().out)
-    assert list(doc["tables"]) == ["main.customers"] and len(doc["joins"]) == 1
-    assert cli.main(["profile", root, "--table", "main.orders"]) == 0
-    assert list(json.loads(capsys.readouterr().out)["tables"]) == ["main.orders"]
-    assert cli.main(["profile", str(tmp_path / "nowhere")]) == 1
-    assert "run introspect first" in capsys.readouterr().out
-
-
-def test_a_join_checked_on_the_whole_key_settles_uniqueness_with_no_extra_probe(tmp_path):
-    """The many side of a join whose values turn out unique is flagged one-to-one for review (#511);
-    the join check already counted its rows and distinct values, so no COUNT(DISTINCT) runs."""
-    path = _fk_db(tmp_path, "INSERT INTO orders VALUES (1, 1, 1.0), (2, 2, 1.0);")
-    seen: list[str] = []
-    org, _ = _build(tmp_path, path, seen=seen)
-    [r] = [r for sa in org.subject_areas for r in sa.relationships if r.from_table == "orders"]
-    assert "unique on 2 rows" in r.description and r.review_state == "unreviewed"
-    assert not any("AS distinct_count" in s for s in seen)
-
-
-def test_text_holding_iso_dates_is_profiled_as_dates(tmp_path):
-    path = tmp_path / "t.db"
-    con = sqlite3.connect(path)
-    con.execute("CREATE TABLE orders(id INTEGER, placed_at TEXT, shipped_at TEXT)")
-    for i in range(25):
-        con.execute("INSERT INTO orders VALUES (?,?,?)", (i, f"2024-01-{i + 1:02d} 10:00:00", f"2024-02-{i + 1:02d}"))
-    con.commit()
-    con.close()
-    t = _t("orders", ["id", "placed_at", "shipped_at"], 25)
-    t.columns[1].date_format = t.columns[2].date_format = "iso8601"
-    prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False)
-    assert prof["columns"]["placed_at"]["max"] == "2024-01-25 10:00:00"
-    assert prof["date_order"] == [{"earlier": "placed_at", "later": "shipped_at", "share": 1.0, "rows": 25}]
-
-
-def _checked(**kw) -> PF.JoinCheck:
-    c = PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"], read="whole")
-    for k, v in kw.items():
-        setattr(c, k, v)
-    return c
-
-
-def test_keys_left_blank_are_named_as_such_and_an_empty_table_says_so():
-    c = _checked(rows_read=10, rows_keyed=4, rows_matched=4, values=2, values_matched=2, to_keys=2, to_rows=2)
-    assert c.summary() == ("all 2 values of orders.customer_id are found in customers.id (whole table checked); "
-                           "6 of 10 orders rows leave customer_id blank: an inner join drops them")
-    assert _checked().summary() == "orders has no rows"
-    assert _checked(read="sample").summary() == "no orders rows were read"
-
-
-def test_the_report_lists_common_findings_one_line_per_table(tmp_path):
-    rep = I.IntrospectReport(profile="p", db_type="sqlite", out_dir=str(tmp_path), dry_run=True)
-    rep.profile_tables = {"main.t": {"findings": [
-        {"column": "a", "kind": "empty", "detail": "a is empty on every row read"},
-        {"column": "b", "kind": "empty", "detail": "b is empty on every row read"},
-        {"column": "d", "kind": "date_range", "detail": "d has dates after today"}]}}
-    text = rep.render()
-    assert "## column profile (1 tables read; 3 finding(s)" in text
-    assert "  - main.t: empty on every row read: a, b" in text and "  ! main.t: d has dates after today" in text
+def test_the_built_in_list_failing_to_load_keeps_the_gate_shut(model, monkeypatch):
+    monkeypatch.setattr(D, "catalog_function_queries", lambda: 1 / 0)
+    env, _ = _run(D.PostgreSQL().sql_constraint_definitions("public"), build_profile=True)
+    assert env.status == "refused" and env.refusal.rule == guardrail.RULE_RECON
+
+
+def test_a_hosted_server_never_gets_the_build_profile_even_in_process(model, monkeypatch, tmp_path):
+    from store import Store
+
+    store = Store.connect(f"sqlite:///{tmp_path / 'app.db'}")
+    store.run_migrations()
+    store.close()
+    monkeypatch.setenv("AGAMI_DB_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    for sql in (INFO_SCHEMA, JSONB_EACH):
+        env, executor = _run(sql, build_profile=True)
+        assert env.status == "refused" and not executor.seen
+    env, _ = _run(D.PostgreSQL().sql_constraint_definitions("public"), build_profile=True)
+    assert env.status == "refused" and env.refusal.rule == guardrail.RULE_RECON
+
+
+# --- the command line ---------------------------------------------------------------------------
+
+
+def _main(monkeypatch, *argv: str) -> int:
+    monkeypatch.setattr(sys, "argv", ["execute_sql", "--profile", PROFILE, *argv])
+    return execute_sql.main()
+
+
+def test_the_flag_reaches_the_guard_from_a_local_command_line(model, monkeypatch, capsys):
+    executor = _Rows()
+    monkeypatch.setattr(execute_sql, "BUILTIN_EXECUTOR", executor)
+    assert _main(monkeypatch, "--sql", INFO_SCHEMA) == 1
+    assert json.loads(capsys.readouterr().err)["refusal"]["rule"] == guardrail.RULE_TABLE_SCOPE
+    assert _main(monkeypatch, "--build-profile", "--sql", INFO_SCHEMA) == 0
+    assert executor.seen == [INFO_SCHEMA]
+
+
+@pytest.mark.parametrize("marker", ["hosted", "served_child"])
+def test_the_flag_is_refused_on_a_hosted_server_and_in_the_mcp_child(model, monkeypatch, capsys, marker):
+    executor = _Rows()
+    monkeypatch.setattr(execute_sql, "BUILTIN_EXECUTOR", executor)
+    if marker == "hosted":
+        monkeypatch.setenv("AGAMI_DB_URL", "sqlite:///unused.db")
+    else:
+        monkeypatch.setenv(execute_sql.SERVED_CHILD_ENV, "1")
+    for argv in (("--sql", INFO_SCHEMA), ("--batch", str(model / "plan.json"))):
+        assert _main(monkeypatch, "--build-profile", *argv) == 2
+        assert "--build-profile" in capsys.readouterr().err
+    assert not executor.seen and not (model / "plan.json.manifest.json").exists()
+
+
+# --- the MCP tool -------------------------------------------------------------------------------
+
+
+def test_the_mcp_tool_cannot_ask_for_the_build_profile():
+    source = (PKG_SRC / "tools.py").read_text(encoding="utf-8")
+    assert "build-profile" not in source and "build_profile" not in source
+    assert tools._pass_child_env()[execute_sql.SERVED_CHILD_ENV] == "1"
+
+
+@pytest.mark.parametrize("path", ["forked", "in_process"])
+@pytest.mark.parametrize("sql", [INFO_SCHEMA, JSONB_EACH, D.PostgreSQL().sql_constraint_definitions("public")])
+def test_the_mcp_tool_refuses_profiling_reads_as_it_always_did(model, path, sql):
+    """The tool's answer to these is the one it gave before #523, whatever the call carries."""
+    args = {"sql": sql, "datasource": PROFILE, "build_profile": True, "build-profile": True}
+    if path == "in_process":
+        tools.set_injected_executor(_Rows())
+    try:
+        body = json.loads(tools.tool_execute_sql(args))
+    finally:
+        tools.set_injected_executor(None)
+    assert body["status"] == "refused"
+    assert body["refusal"]["rule"] in (guardrail.RULE_TABLE_SCOPE, guardrail.RULE_UNSCOPABLE,
+                                       guardrail.RULE_RECON)
+
+
+def test_a_statement_spelled_as_the_flag_is_not_a_flag(model):
+    body = json.loads(tools.tool_execute_sql({"sql": "--build-profile", "datasource": PROFILE}))
+    assert body["status"] == "refused" and body["refusal"]["rule"] == guardrail.RULE_READ_ONLY
+
+
+# --- the build-time runner ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("hosted", [False, True])
+def test_the_build_time_runner_keeps_no_safety_and_adds_the_build_profile_locally(monkeypatch, hosted):
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode, stdout, stderr = 0, "x\n1\n", ""
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        seen.append(cmd)
+        return _Done()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.delenv("APP_DATABASE_URL", raising=False)
+    if hosted:
+        monkeypatch.setenv("AGAMI_DB_URL", "sqlite:///unused.db")
+    else:
+        monkeypatch.delenv("AGAMI_DB_URL", raising=False)
+    INTRO.make_execute_sql_runner(PROFILE, building_the_model=True)("SELECT 1")
+    INTRO.make_execute_sql_runner(PROFILE)("SELECT 1")
+    build, answer = seen
+    assert "--no-safety" in build and ("--build-profile" in build) is not hosted
+    assert "--no-safety" not in answer and "--build-profile" not in answer
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT o.id FROM orders o JOIN orders p USING (id)",
+    "SELECT o.id FROM orders o NATURAL JOIN orders p",
+    "SELECT o.id FROM orders o NATURAL LEFT JOIN orders p",
+    "SELECT o.id, c.column_name FROM orders o JOIN information_schema.columns c USING (status)",
+])
+def test_a_using_or_natural_join_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_UNSCOPABLE and "explicit ON" in refused.refusal.remediation
+
+
+def test_a_using_join_is_unchanged_without_build_profile_and_an_explicit_on_runs_with_it(model):
+    using = "SELECT o.id FROM orders o JOIN orders p USING (id)"
+    assert _run(using)[0].status == "ok"
+    on = "SELECT o.id FROM orders o JOIN orders p ON p.id = o.id"
+    assert _run(on, build_profile=True)[0].status == "ok"
+
+
+@pytest.mark.parametrize("sql", [
+    # An ordinary quoted table whose name only starts like BigQuery's catalog spelling.
+    'SELECT p.secret FROM public."information_schema.payroll" p',
+    # information_schema views that hold row values or statement text.
+    "SELECT s.histogram FROM information_schema.column_statistics s",
+    "SELECT p.info FROM information_schema.processlist p",
+    "SELECT t.trx_query FROM information_schema.innodb_trx t",
+])
+def test_a_catalog_name_that_is_not_a_structure_view_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+@pytest.mark.parametrize(("sql", "dialect", "allowed"), [
+    ("SELECT t.table_name FROM ds.INFORMATION_SCHEMA.TABLES t", "bigquery", True),
+    ("SELECT t.table_name FROM `proj.ds.INFORMATION_SCHEMA.COLUMNS` t", "bigquery", True),
+    ("SELECT j.query FROM proj.ds.INFORMATION_SCHEMA.JOBS j", "bigquery", False),
+    ('SELECT p.secret FROM public."information_schema.payroll" p', "postgres", False),
+    ('SELECT p.secret FROM "information_schema.tables" p', "sqlite", False),
+    ("SELECT t.name FROM main.information_schema.tables t", "sqlite", False),
+    ("SELECT t.table_name FROM information_schema.tables t", "postgres", True),
+    ("SELECT t.table_name FROM information_schema.tables t", "mysql", True),
+])
+def test_only_bigquery_spells_a_catalog_view_as_one_dotted_name(sql, dialect, allowed):
+    import sqlglot
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    tbl = sqlglot.parse_one(sql, read=dialect).find(exp.Table)
+    assert runtime._is_catalog_relation(tbl, dialect) is allowed
+
+
+@pytest.mark.parametrize("sql", [
+    # On Postgres a quoted name keeps its case, so these are ordinary schemas, not the catalog.
+    'SELECT p.secret FROM "INFORMATION_SCHEMA".tables p',
+    'SELECT p.secret FROM information_schema."TABLES" p',
+    'SELECT p.secret FROM "PG_CATALOG".pg_class p',
+])
+def test_a_quoted_lookalike_of_a_catalog_schema_is_refused_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+@pytest.mark.parametrize(("sql", "dialect", "allowed"), [
+    ('SELECT t.table_name FROM "information_schema"."tables" t', "postgres", True),
+    ('SELECT t.table_name FROM "INFORMATION_SCHEMA".tables t', "postgres", False),
+    ('SELECT t.table_name FROM "INFORMATION_SCHEMA"."COLUMNS" t', "snowflake", True),
+    ("SELECT t.table_name FROM information_schema.columns t", "snowflake", True),
+    ('SELECT t.table_name FROM "information_schema".columns t', "snowflake", False),
+    ("SELECT t.table_name FROM INFORMATION_SCHEMA.COLUMNS t", "tsql", True),
+    ("SELECT t.table_name FROM information_schema.columns t", "duckdb", True),
+    # Oracle has no information_schema, and an engine nobody resolved is trusted with none.
+    ("SELECT c.secret FROM information_schema.columns c", "oracle", False),
+    ("SELECT c.secret FROM information_schema.columns c", None, False),
+])
+def test_a_catalog_schema_matches_only_as_the_engine_spells_it(sql, dialect, allowed):
+    import sqlglot
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    tbl = sqlglot.parse_one(sql, read=dialect).find(exp.Table)
+    assert runtime._is_catalog_relation(tbl, dialect) is allowed
+
+
+def test_order_by_a_name_that_only_case_folds_to_an_alias_reads_the_column(model):
+    # Postgres resolves `secret` to orders.secret here, not to the output "SECRET".
+    sql = 'SELECT o.id AS "SECRET" FROM orders o, jsonb_each(o.payload) kv ORDER BY secret LIMIT 1'
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_UNSCOPABLE
+
+    same = 'SELECT kv.key, COUNT(*) AS "n" FROM orders o, jsonb_each(o.payload) AS kv GROUP BY kv.key ORDER BY n'
+    ran, executor = _run(same, build_profile=True)
+    assert ran.status == "ok", ran.refusal
+
+
+# ------------------------------------------------- beside table identity (#337, merged with #523)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT t.table_name FROM demo..information_schema.tables t",
+    "SELECT o.id FROM demo..orders o",
+    # A catalog view in another database lists that database's structure.
+    "SELECT t.table_name FROM other_db.information_schema.tables t",
+    "SELECT c.relname FROM other_db.pg_catalog.pg_class c",
+])
+def test_table_identity_refusals_hold_under_build_profile(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_TABLE_SCOPE
+
+
+def test_a_catalog_view_in_the_connections_own_database_runs_under_build_profile(model):
+    ran, _ = _run("SELECT t.table_name FROM demo.information_schema.tables t", build_profile=True)
+    assert ran.status == "ok", ran.refusal
+
+
+@pytest.mark.parametrize(("engine", "sql", "connection", "refused"), [
+    ("Snowflake", "SELECT t.table_name FROM other_db.information_schema.tables t", "ANALYTICS", True),
+    ("Snowflake", "SELECT t.table_name FROM analytics.information_schema.tables t", "ANALYTICS", False),
+    ("Snowflake", "SELECT t.table_name FROM analytics.information_schema.tables t", None, True),
+    ("BigQuery", "SELECT t.table_name FROM `other-project.ds.INFORMATION_SCHEMA.TABLES` t", "acme-project", True),
+    ("BigQuery", "SELECT t.table_name FROM `acme-project.ds.INFORMATION_SCHEMA.TABLES` t", "acme-project", False),
+    ("BigQuery", "SELECT t.table_name FROM ds.INFORMATION_SCHEMA.TABLES t", None, False),
+])
+def test_the_catalog_check_judges_a_catalog_views_database(engine, sql, connection, refused):
+    from semantic_model import models as m
+    from semantic_model import runtime
+
+    table = m.Table(name="orders", schema="sales", storage_connection="c", grain=["id"],
+                    description="orders", columns=[m.Column(name="id", type="integer")])
+    org = m.Datasource(datasource="acme",
+                       storage_connections=[m.StorageConnection(name="c", storage_type=engine)],
+                       subject_areas=[m.SubjectArea(name="sales", tables_defined=[table])])
+    res = runtime.check_catalog_scope(sql, org, connection)
+    assert (res is not None) is refused
+    assert res is None or res.rule == guardrail.RULE_TABLE_SCOPE
+
+
+def test_the_default_schema_spelling_is_never_a_catalog_relation():
+    import sqlglot
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    tbl = sqlglot.parse_one("SELECT name FROM db..sqlite_master", read="sqlite").find(exp.Table)
+    assert runtime._is_catalog_relation(tbl, "sqlite") is False
+
+
+@pytest.mark.parametrize("dialect", [
+    "postgres", "snowflake", "oracle", "duckdb", "tsql", "bigquery", "sqlite", "databricks", "trino",
+])
+def test_the_catalog_name_rule_agrees_with_the_table_name_rule(dialect):
+    """`_engine_name` (catalog views, ORDER BY aliases) and `_part_names` (declared tables) agree on a
+    name stored in the engine's own folded case, which is how every catalog name is stored."""
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    stored = "ORDERS" if dialect in ("snowflake", "oracle") else "orders"
+    want = runtime._engine_name(exp.Identifier(this=stored, quoted=True), dialect)
+    for spelling in ("orders", "ORDERS", "Orders"):
+        for quoted in (False, True):
+            ident = exp.Identifier(this=spelling, quoted=quoted)
+            by_table_rule = (spelling.lower() == stored.lower()
+                             and runtime._part_names(ident, stored, dialect))
+            assert (runtime._engine_name(ident, dialect) == want) is by_table_rule, (spelling, quoted)
+
+
+# ------------------------------------------------- aliases that differ only in case
+
+
+@pytest.mark.parametrize("sql", [
+    'SELECT c.secret FROM orders c CROSS JOIN information_schema.columns AS "C"',
+    'SELECT c.secret FROM information_schema.columns AS "C" CROSS JOIN orders c',
+    "SELECT columns.secret FROM orders columns CROSS JOIN information_schema.columns",
+    'SELECT c.id FROM orders c CROSS JOIN information_schema.columns AS "C"',
+    "SELECT o.id, c.column_name FROM orders o CROSS JOIN information_schema.columns AS c",
+])
+def test_a_catalog_view_and_a_model_table_never_share_a_statement(model, sql):
+    refused, executor = _run(sql, build_profile=True)
+    assert refused.status == "refused" and not executor.seen
+    assert refused.refusal.rule == guardrail.RULE_UNSCOPABLE
+    assert "catalog view and a model table" in refused.refusal.detail
+
+
+def _org(engine: str):
+    """orders(id, tags) and customers(id, secret), with orders' `secret` left out of the model."""
+    from semantic_model import models as m
+
+    def table(name: str, *cols: str):
+        return m.Table(name=name, schema="sales", storage_connection="c", grain=["id"], description=name,
+                       columns=[m.Column(name=c, type="array" if c == "tags" else "string") for c in cols])
+
+    return m.Datasource(datasource="acme",
+                        storage_connections=[m.StorageConnection(name="c", storage_type=engine)],
+                        subject_areas=[m.SubjectArea(name="sales", tables_defined=[
+                            table("orders", "id", "tags"), table("customers", "id", "secret")])])
+
+
+def test_an_alias_two_model_tables_share_apart_from_case_is_judged_against_both():
+    from semantic_model import runtime
+
+    org = _org("PostgreSQL")
+    # `c` is orders, which leaves `secret` out; customers declaring it must not let it through.
+    for sql in ('SELECT c.secret FROM orders c JOIN customers "C" ON c.id = "C".id',
+                'SELECT c.secret FROM customers "C" JOIN orders c ON c.id = "C".id'):
+        res = runtime.check_column_scope(sql, org)
+        assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE, sql
+    # Declared on both, so whichever the alias names, it is declared.
+    assert runtime.check_column_scope('SELECT c.id FROM orders c JOIN customers "C" ON c.id = "C".id', org) is None
+
+
+# ------------------------------------------------- BigQuery UNNEST value and offset aliases
+
+
+def _gates(sql: str, org, **kw):
+    from semantic_model import runtime
+
+    for gate in (runtime.check_scopable, runtime.check_table_scope):
+        res = gate(sql, org, **kw)
+        if res is not None:
+            return res
+    return runtime.check_column_scope(sql, org)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT tag FROM sales.orders o, UNNEST(o.tags) AS tag",
+    "SELECT tag, i FROM sales.orders o, UNNEST(o.tags) AS tag WITH OFFSET AS i ORDER BY i",
+    "SELECT o.id, tag FROM sales.orders o CROSS JOIN UNNEST(o.tags) AS tag WITH OFFSET AS i WHERE i = 0",
+])
+def test_a_bigquery_unnest_value_and_offset_alias_run_under_build_profile(sql):
+    org = _org("BigQuery")
+    assert _gates(sql, org, build_profile=True) is None
+    res = _gates(sql, org)
+    assert res is not None and res.rule == guardrail.RULE_UNSCOPABLE
+
+
+@pytest.mark.parametrize(("sql", "rule"), [
+    # A name no source of that SELECT binds still has to be qualified.
+    ("SELECT o.id FROM sales.orders o, UNNEST(o.tags) AS tag WHERE secret IS NULL", guardrail.RULE_UNSCOPABLE),
+    ("SELECT secret FROM sales.orders o, UNNEST(o.tags) AS tag", guardrail.RULE_UNSCOPABLE),
+    # Bound in the outer SELECT only, so the inner `tag` is not the unnest's.
+    ("SELECT o.id FROM sales.orders o, UNNEST(o.tags) AS tag "
+     "WHERE EXISTS (SELECT 1 FROM sales.customers c WHERE tag = c.id)", guardrail.RULE_UNSCOPABLE),
+    ("SELECT tag FROM sales.orders o, UNNEST(o.secret) AS tag", guardrail.RULE_COLUMN_SCOPE),
+])
+def test_a_bigquery_unnest_does_not_open_anything_else_under_build_profile(sql, rule):
+    res = _gates(sql, _org("BigQuery"), build_profile=True)
+    assert res is not None and res.rule == rule
+
+
+# ------------------------------------------------- what a table function's argument and alias name
+
+
+@pytest.mark.parametrize("sql", [
+    # The argument is read from `orders`, whatever the function's column list calls its outputs.
+    "SELECT kv.value FROM orders o, jsonb_each(secret) AS kv(secret, value)",
+    "SELECT kv.value FROM orders o CROSS JOIN LATERAL jsonb_each(secret) AS kv(secret, value)",
+    "SELECT u.secret FROM orders o, unnest(secret) AS u(secret)",
+    # `jsonb_each` returns `key` and `value`, and `jsonb_array_elements` `value`: a bare alias names
+    # the row, so `secret` is still `orders.secret`.
+    "SELECT secret FROM orders o, jsonb_each(o.payload) AS secret",
+    "SELECT secret FROM orders o CROSS JOIN LATERAL jsonb_each(o.payload) AS secret",
+    "SELECT secret FROM orders o, jsonb_array_elements(o.payload) AS secret",
+    # Postgres reads `o` from the outer query: the inner `"O"` is a different alias there.
+    'SELECT (SELECT o.secret FROM information_schema.columns AS "O" LIMIT 1) AS leaked FROM orders o',
+    'SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM information_schema.columns AS "O" '
+    "WHERE o.secret IS NULL)",
+])
+def test_a_left_out_column_behind_a_table_function_or_an_inner_alias_is_refused(model, sql):
+    env, executor = _run(sql, build_profile=True)
+    assert env.status == "refused" and not executor.seen, env
+    assert env.refusal.rule in (guardrail.RULE_COLUMN_SCOPE, guardrail.RULE_UNSCOPABLE)
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT kv.key, kv.value FROM orders o, jsonb_each(o.payload) AS kv(key, value)",
+    "SELECT key, value FROM orders o, jsonb_each(o.payload) AS kv",
+    "SELECT k, value FROM orders o CROSS JOIN LATERAL jsonb_each(o.payload) AS kv(k)",
+    "SELECT value FROM orders o, jsonb_array_elements(o.payload) AS e",
+    "SELECT k FROM orders o, jsonb_object_keys(o.payload) AS k",
+])
+def test_a_table_function_s_real_outputs_and_distinct_aliases_still_run(model, sql):
+    ran, executor = _run(sql, build_profile=True)
+    assert ran.status == "ok", ran.refusal
+    assert executor.seen == [sql]
+
+
+def test_an_argument_is_never_vouched_for_by_its_own_outputs_or_a_later_table():
+    from semantic_model import runtime
+
+    org = _org("PostgreSQL")
+    for sql in ("SELECT kv.value FROM sales.orders o, jsonb_each(secret) AS kv(secret, value)",
+                # customers declares `secret`, but the argument cannot see it.
+                "SELECT kv.value FROM sales.orders o, jsonb_each(secret) AS kv, sales.customers c"):
+        res = runtime.check_column_scope(sql, org)
+        assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE, sql
+
+
+@pytest.mark.parametrize(("engine", "inner", "refused"), [
+    # customers declares `secret`, orders does not: the outer `o` may be the one read.
+    ("PostgreSQL", '"O"', True),
+    # MySQL's alias case depends on the server's settings, so even unquoted it is not known.
+    ("MySQL", "O", True),
+    # Postgres folds an unquoted `O` to `o`, so the inner customers is certainly the one read.
+    ("PostgreSQL", "O", False),
+    ("PostgreSQL", "o", False),
+])
+def test_an_inner_alias_differing_only_in_case_does_not_hide_the_outer_table(engine, inner, refused):
+    from semantic_model import runtime
+
+    sql = f"SELECT (SELECT o.secret FROM sales.customers AS {inner} LIMIT 1) AS x FROM sales.orders o"
+    res = runtime.check_column_scope(sql, _org(engine))
+    if refused:
+        assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+        assert "differ only in case" in res.remediation
+    else:
+        assert res is None
+
+
+@pytest.mark.parametrize(("engine", "inner", "written"), [
+    ("MySQL", "`o`", "o"), ("MySQL", "o", "`o`"), ("MySQL", "`o`", "`o`"),
+    ("SQLServer", "[o]", "o"), ("SQLServer", "o", "[o]"), ('SQLServer', '"o"', "[o]"),
+    ("BigQuery", "`o`", "o"), ("BigQuery", "o", "`o`"),
+])
+def test_quoting_an_alias_does_not_change_which_table_it_names(engine, inner, written):
+    from semantic_model import runtime
+
+    top, limit = ("TOP 1 ", "") if engine == "SQLServer" else ("", " LIMIT 1")
+
+    def statement(inner_table: str, outer_table: str) -> str:
+        return (f"SELECT (SELECT {top}{written}.secret FROM sales.{inner_table} {inner}{limit}) AS x "
+                f"FROM sales.{outer_table} o")
+
+    assert runtime.check_column_scope(statement("customers", "orders"), _org(engine)) is None
+    # Either spelling names the inner table, so one that leaves the column out is refused.
+    res = runtime.check_column_scope(statement("orders", "customers"), _org(engine))
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+
+
+@pytest.mark.parametrize(("engine", "inner", "written"), [
+    ("MySQL", "`O`", "o"), ("MySQL", "O", "`o`"), ("MySQL", "`o`", "O"),
+    ("SQLServer", "[O]", "o"), ("SQLServer", "O", "[o]"),
+    ("BigQuery", "`O`", "o"), ("BigQuery", "O", "`o`"),
+])
+def test_quoted_aliases_differing_only_in_case_are_still_refused(engine, inner, written):
+    from semantic_model import runtime
+
+    top, limit = ("TOP 1 ", "") if engine == "SQLServer" else ("", " LIMIT 1")
+    sql = f"SELECT (SELECT {top}{written}.secret FROM sales.customers {inner}{limit}) AS x FROM sales.orders o"
+    res = runtime.check_column_scope(sql, _org(engine))
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+    assert "differ only in case" in res.remediation
+
+
+def test_with_no_engine_a_quoted_alias_is_not_assumed_to_be_the_unquoted_one():
+    from semantic_model import runtime
+    from sqlglot import exp
+
+    quoted, bare = exp.to_identifier("o", quoted=True), exp.to_identifier("o", quoted=False)
+    assert not runtime._same_alias((quoted,), (bare,), None)
+    assert runtime._same_alias((quoted,), (bare,), "mysql")
+
+
+# ------------------------------------------------- a catalog view's alias over a model table's
+
+
+_VIEWS = {"SQLite": ["sqlite_master", "main.sqlite_schema"],
+          "MySQL": ["information_schema.columns", "INFORMATION_SCHEMA.TABLES"],
+          "DuckDB": ["information_schema.columns"],
+          "PostgreSQL": ["information_schema.columns", "pg_catalog.pg_class"]}
+_SHADOWS = [
+    "SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT O.SECRET FROM {view} o LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT o.secret FROM {view} O LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT secret FROM {view} LIMIT 1) AS v FROM sales.orders",
+    "SELECT (SELECT (SELECT o.secret FROM {view} o LIMIT 1) FROM sales.customers c LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT orders.secret FROM {view} AS orders LIMIT 1) AS v FROM sales.orders",
+    "SELECT (WITH c AS (SELECT o.secret AS v FROM {view} o LIMIT 1) SELECT c.v FROM c) AS v FROM sales.orders o",
+    "SELECT d.v FROM (SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM sales.orders o) d",
+    "WITH d AS (SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM sales.orders o) SELECT d.v FROM d",
+    "SELECT l.v FROM sales.orders o, LATERAL (SELECT o.secret AS v FROM {view} o LIMIT 1) l",
+    "SELECT o.id FROM sales.orders o WHERE EXISTS (SELECT 1 FROM {view} o WHERE o.secret = 'x')",
+    # A column the view does have is refused too: which source answers is not this gate's to guess.
+    "SELECT (SELECT o.name FROM {view} o LIMIT 1) AS v FROM sales.orders o",
+]
+
+
+@pytest.mark.parametrize("engine", sorted(_VIEWS))
+@pytest.mark.parametrize("shape", _SHADOWS)
+def test_a_catalog_view_s_alias_cannot_reach_an_outer_model_table(engine, shape):
+    for view in _VIEWS[engine]:
+        sql = shape.format(view=view)
+        res = _gates(sql, _org(engine), build_profile=True)
+        assert res is not None and res.rule == guardrail.RULE_UNSCOPABLE, sql
+        # Without the flag the catalog view itself is what is refused, or the LATERAL ahead of it.
+        res = _gates(sql, _org(engine))
+        assert res is not None and res.rule in (guardrail.RULE_TABLE_SCOPE, guardrail.RULE_UNSCOPABLE), sql
+
+
+def test_a_cte_named_like_a_catalog_view_is_judged_as_what_it_reads():
+    sql = "WITH sqlite_master AS (SELECT o.secret AS v FROM sales.orders o) SELECT m.v FROM sqlite_master m"
+    res = _gates(sql, _org("SQLite"), build_profile=True)
+    assert res is not None and res.rule == guardrail.RULE_COLUMN_SCOPE
+
+
+@pytest.mark.parametrize(("engine", "sql"), [
+    ("SQLite", "SELECT s.name, s.sql FROM sqlite_master s WHERE s.type = 'table'"),
+    ("SQLite", "SELECT name FROM sqlite_master WHERE type = 'table'"),
+    ("SQLite", "SELECT m.name, m.tbl_name FROM main.sqlite_schema m"),
+    ("MySQL", "SELECT c.column_name, c.column_type FROM information_schema.columns c"),
+    ("MySQL", "SELECT k.constraint_name, k.referenced_table_name FROM information_schema.key_column_usage k"),
+    ("DuckDB", "SELECT t.table_name, t.table_type FROM information_schema.tables t"),
+    ("DuckDB", "WITH c AS (SELECT y.column_name AS a FROM information_schema.columns y) SELECT c.a FROM c"),
+    ("DuckDB", "SELECT u.x, COUNT(*) AS n FROM sales.orders o, unnest(o.tags) AS u(x) GROUP BY u.x"),
+    ("PostgreSQL", "SELECT a.attname FROM pg_catalog.pg_attribute a "
+                   "JOIN pg_catalog.pg_class c ON c.oid = a.attrelid WHERE c.relname = 'orders'"),
+    ("PostgreSQL", "SELECT o.id FROM sales.orders o"),
+])
+def test_a_catalog_read_on_its_own_and_an_expansion_still_run(engine, sql):
+    assert _gates(sql, _org(engine), build_profile=True) is None
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT info.x FROM sales.orders o",
+    "SELECT o.info.x FROM sales.orders o",
+    "SELECT o.info.x.y FROM sales.orders o",
+    "SELECT u.x FROM sales.orders o, unnest(o.tags) AS u(x) WHERE info.x = 'a'",
+    "SELECT o.info.x FROM sales.orders o, unnest(o.tags) AS u(z)",
+    # A source of that name that lacks the column does not take it.
+    "SELECT (SELECT info.x FROM unnest(o.tags) AS info(y) LIMIT 1) AS v FROM sales.orders o",
+    "SELECT (SELECT info.x FROM (SELECT c.id AS a FROM sales.customers c) info LIMIT 1) AS v FROM sales.orders o",
+    "WITH info AS (SELECT c.id AS a FROM sales.customers c) SELECT (SELECT info.x FROM info LIMIT 1) AS v "
+    "FROM sales.orders o",
+    "SELECT COLUMNS('sec.*') FROM sales.orders",
+    "SELECT COLUMNS('sec.*') FROM sales.orders o, unnest(o.tags) AS u(z)",
+    "SELECT k.v FROM (SELECT COLUMNS(c -> c LIKE 'sec%') AS v FROM sales.orders) k",
+])
+def test_a_duckdb_struct_field_or_columns_pattern_is_refused_under_build_profile(sql):
+    res = _gates(sql, _org("DuckDB"), build_profile=True)
+    assert res is not None and res.rule == guardrail.RULE_UNSCOPABLE, sql
+
+
+@pytest.mark.parametrize(("engine", "sql"), [
+    ("DuckDB", "SELECT d.a FROM (SELECT c.id AS a FROM sales.customers c) d, sales.orders o"),
+    ("DuckDB", "WITH c AS (SELECT y.id AS a FROM sales.customers y) SELECT c.a, o.id FROM c, sales.orders o"),
+    ("DuckDB", "SELECT sales.orders.id FROM sales.orders"),
+    ("BigQuery", "SELECT tag.x FROM sales.orders o, UNNEST(o.tags) AS tag"),
+])
+def test_a_source_that_supplies_the_dotted_name_still_runs(engine, sql):
+    assert _gates(sql, _org(engine), build_profile=True) is None
+
+
+# ------------------------------------------------- the same shapes against real engines
+
+
+def _real_model(root: Path, engine: str, connection: list[str]) -> None:
+    """orders(id, status, payload) and customers(id) in the model, over a file with hidden columns."""
+    (root / "local").mkdir(parents=True)
+    creds = root / "local" / "credentials"
+    creds.write_text("\n".join([f"[{PROFILE}]", *connection]) + "\n")
+    creds.chmod(0o600)
+    area = root / PROFILE / "subject_areas" / "sales"
+    (area / "tables").mkdir(parents=True)
+    (root / PROFILE / "datasource.yaml").write_text(yaml.safe_dump({
+        "datasource": "Shop", "version": 1, "storage_connections": [{"name": "c", "storage_type": engine}],
+        "subject_areas": ["subject_areas/sales"]}))
+    (area / "subject_area.yaml").write_text(yaml.safe_dump({"name": "sales", "tables": [
+        {"storage_connection": "c", "schema": "main", "table": t} for t in ("orders", "customers")]}))
+    for table, cols in (("orders", ["id", "status", "payload"]), ("customers", ["id"])):
+        (area / "tables" / f"{table}.yaml").write_text(yaml.safe_dump({
+            "name": table, "schema": "main", "storage_connection": "c", "grain": ["id"], "description": table,
+            "columns": [{"name": c, "type": "string"} for c in cols]}))
+
+
+def _seed(run, extra_columns: str = "", extra_values: str = "") -> None:  # noqa: ANN001
+    run(f"CREATE TABLE orders (id INT, status VARCHAR, payload VARCHAR, secret VARCHAR, name VARCHAR{extra_columns})")
+    run("CREATE TABLE customers (id INT)")
+    run(f"""INSERT INTO orders VALUES (1, 'open', '{{"a": 1}}', 'HIDDEN', 'HIDDEN'{extra_values})""")
+    run("INSERT INTO customers VALUES (1)")
+
+
+@pytest.fixture(params=["SQLite", "DuckDB"])
+def real_engine(request, tmp_path, monkeypatch):
+    """The real database behind `execute_guarded`: its catalog view, and a column that view has."""
+    db = tmp_path / "shop.db"
+    if request.param == "SQLite":
+        import sqlite3
+
+        conn = sqlite3.connect(db)
+        _seed(conn.execute)
+        conn.commit()
+        conn.close()
+        _real_model(tmp_path, "SQLite", ["type = sqlite", f"path = {db}"])
+        view, known = "sqlite_master", "name"
+    else:
+        duckdb = pytest.importorskip("duckdb")
+        conn = duckdb.connect(str(db))
+        _seed(conn.execute, ", info STRUCT(x VARCHAR)", ", {'x': 'HIDDEN'}")
+        conn.close()
+        _real_model(tmp_path, "DuckDB", ["type = duckdb", f"path = {db}"])
+        view, known = "information_schema.columns", "column_name"
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path))
+    monkeypatch.setattr(execute_sql, "CREDENTIALS_PATH", tmp_path / "local" / "credentials")
+    for var in ("AGAMI_DB_URL", "APP_DATABASE_URL", "DATASOURCE_URL", f"DATASOURCE_URL__{PROFILE.upper()}",
+                execute_sql.SERVED_CHILD_ENV):
+        monkeypatch.delenv(var, raising=False)
+    return request.param, view, known
+
+
+def _on_engine(sql: str, **kw):
+    return execute_sql.execute_guarded(sql, PROFILE, None, executor=execute_sql.BUILTIN_EXECUTOR,
+                                       **(kw or {"build_profile": True}))
+
+
+@pytest.mark.parametrize("shape", [
+    "SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM orders o",
+    "SELECT (SELECT O.SECRET FROM {view} o LIMIT 1) AS v FROM orders o",
+    'SELECT (SELECT o.secret FROM {view} "O" LIMIT 1) AS v FROM orders o',
+    "SELECT (SELECT secret FROM {view} LIMIT 1) AS v FROM orders",
+    "SELECT (SELECT (SELECT o.secret FROM {view} o LIMIT 1) FROM customers c LIMIT 1) AS v FROM orders o",
+    "SELECT (WITH c AS (SELECT o.secret AS v FROM {view} o LIMIT 1) SELECT c.v FROM c) AS v FROM orders o",
+    "SELECT d.v FROM (SELECT (SELECT o.secret FROM {view} o LIMIT 1) AS v FROM orders o) d",
+    "SELECT (SELECT o.secret FROM ({view} a CROSS JOIN {view} b) o LIMIT 1) AS v FROM orders o",
+    "SELECT (SELECT orders.secret FROM {view} AS orders LIMIT 1) AS v FROM orders",
+])
+def test_a_real_engine_never_returns_the_hidden_column(real_engine, shape):
+    _, view, _ = real_engine
+    sql = shape.format(view=view)
+    # The shape does reach the value when nothing stands in the way, or this test proves nothing.
+    assert "HIDDEN" in str(_on_engine(sql, no_safety=True).data.rows), sql
+    assert _on_engine(sql).status == "refused", sql
+
+
+def test_a_real_engine_still_runs_profiling_reads(real_engine):
+    _, view, known = real_engine
+    assert _on_engine(f"SELECT x.{known} FROM {view} x").status == "ok"
+    assert _on_engine("SELECT o.id, o.status FROM orders o LIMIT 5").data.rows == [(1, "open")]
+
+
+def test_a_real_engine_s_table_function_cannot_reach_the_hidden_column(real_engine):
+    engine, _, _ = real_engine
+    fn = "json_each(o.payload)" if engine == "SQLite" else "unnest(['a'])"
+    for sql in (f"SELECT (SELECT o.secret FROM {fn} AS o LIMIT 1) AS v FROM orders o",
+                f"SELECT (SELECT secret FROM {fn} AS k LIMIT 1) AS v FROM orders o"):
+        assert "HIDDEN" not in str(_on_engine(sql))
+
+
+def test_duckdb_s_struct_field_and_columns_pattern_are_refused_on_the_real_engine(real_engine):
+    if real_engine[0] != "DuckDB":
+        pytest.skip("DuckDB only")
+    for sql in ("SELECT info.x FROM orders o", "SELECT o.info.x FROM orders o",
+                "SELECT COLUMNS('sec.*') FROM orders"):
+        assert "HIDDEN" in str(_on_engine(sql, no_safety=True).data.rows), sql
+        assert _on_engine(sql).status == "refused", sql
+
+
+def test_duckdb_s_columns_pattern_is_refused_as_a_star_off_the_build_profile(real_engine):
+    if real_engine[0] != "DuckDB":
+        pytest.skip("DuckDB only")
+    for sql in ("SELECT COLUMNS('.*') FROM orders", "SELECT COLUMNS('sec.*') FROM orders",
+                "SELECT max(COLUMNS('sec.*')) FROM orders"):
+        assert "HIDDEN" in str(_on_engine(sql, build_profile=False, no_safety=True).data.rows), sql
+        res = _on_engine(sql, build_profile=False)
+        assert res.status == "refused" and res.refusal.rule == guardrail.RULE_SELECT_STAR, sql
+    assert _on_engine("SELECT o.id, o.status FROM orders o", build_profile=False).status == "ok"
