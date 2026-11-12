@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 ACTIONS = {"keep", "drop", "fix", "note"}
@@ -60,7 +61,7 @@ def _problem(d: object, items: dict[int, dict], seen: set[int]) -> str | None:
         return "n is not a number"
     if n in seen:
         return "decided twice"
-    if action not in ACTIONS:
+    if not isinstance(action, str) or action not in ACTIONS:
         return f"action {action!r} is not one of {', '.join(sorted(ACTIONS))}"
     for act, field in _NEEDS.items():
         value = d.get(field)
@@ -134,8 +135,11 @@ def parse(
 
 
 def _write(out_dir: Path, data: dict) -> dict:
+    """Each area's keeps and fixes as `sm add-example --file` inputs, in a new private folder under
+    `out_dir`, so another save checked at the same time can never overwrite the files this one returns."""
     files: dict = {"keep": {}, "fix": {}}
     out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(tempfile.mkdtemp(dir=out_dir, prefix="agami-page-examples-"))
     for kind in ("keep", "fix"):
         for area, examples in data[kind].items():
             path = out_dir / f"agami-page-{kind}.{area}.json"

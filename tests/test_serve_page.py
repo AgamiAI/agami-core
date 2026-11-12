@@ -622,3 +622,43 @@ def test_connections_past_the_cap_are_closed(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_a_page_written_with_crlf_is_hashed_as_the_browser_hashes_it():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    lf = "<html><body><script>\n  a();\n  b();\n</script></body></html>"
+    assert serve_page.script_hashes(lf.replace("\n", "\r\n")) == serve_page.script_hashes(lf)
+    assert serve_page.script_hashes(lf.replace("\n", "\r")) == serve_page.script_hashes(lf)
+
+
+def test_a_link_at_the_decisions_path_is_replaced_not_written_through(tmp_path, capsys):
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    link = tmp_path / "d.json"
+    link.symlink_to(victim)
+    rc: list[int] = []
+    t = threading.Thread(
+        target=lambda: rc.append(serve_page.main([str(page), "--decisions", str(link)]))
+    )
+    t.start()
+    url = ""
+    for _ in range(100):
+        got = capsys.readouterr().out
+        if got:
+            url = json.loads(got.splitlines()[0])["url"]
+            break
+        threading.Event().wait(0.05)
+    assert _post(url + "save", b'{"a": 1}')[0] == 200
+    t.join(timeout=10)
+    assert rc == [0]
+    assert victim.read_text() == "keep me"
+    assert not link.is_symlink() and json.loads(link.read_text()) == {"a": 1}

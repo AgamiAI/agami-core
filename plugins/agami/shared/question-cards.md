@@ -163,7 +163,8 @@ Read that first line from the background task's output and give the person the U
    the saved `reviewer_email` / `reviewer_role` from `<artifacts_dir>/local/.config`, which the page
    shows and cannot change. A page that will take approvals needs that identity first: when it is
    missing, ask the identity card before rendering.
-3. **Start the helper in the background** with `run_in_background`, writing to a new decisions file:
+3. **Start the helper in the background** with `run_in_background`, writing to a new decisions file
+   whose `<ts>` is the time plus a random part, so two pages never share one:
 
    ```
    bash "<plugin_root>/scripts/py" serve_page.py <file.html> --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
