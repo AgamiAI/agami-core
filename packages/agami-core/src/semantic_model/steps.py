@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -108,10 +108,12 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
 class _Replay:
     """What the timeline says once replayed: the marks that still stand; whether a restart is in
     effect (a step before the build was marked `in_progress` after the last build mark, or with no
-    build mark at all); and when the standing `build=in_progress` mark was written."""
+    build mark at all); when the standing `build=in_progress` mark was written; and each step's
+    standing attempt as (first `in_progress` time, last `done` time), for `sm timing`."""
     marks: dict[str, str]
     restarted: bool
     build_started_at: Optional[float]
+    spans: dict[str, tuple[Optional[float], Optional[float]]] = field(default_factory=dict)
 
 
 def _mark_time(doc: dict) -> Optional[float]:
@@ -127,12 +129,17 @@ def _replay_marks(root: Path) -> _Replay:
     Marking a step `in_progress` restarts the run from there: every later step's earlier
     `in_progress`/`done` mark is dropped (a `skipped` one is kept), so a reintrospect after a
     finished onboarding doesn't show a finished list. A line that doesn't parse (a write cut short)
-    is skipped, not fatal: the list is a view, and one bad line shouldn't hide the rest."""
+    is skipped, not fatal: the list is a view, and one bad line shouldn't hide the rest.
+
+    Spans follow the same rule: a restart clears every later step's times, and a finished step
+    marked `in_progress` again starts a new attempt, so a step is timed from the first
+    `in_progress` of the attempt that stands to its last `done`."""
     try:
         text = _timeline(root).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return _Replay({}, False, None)
     marks: dict[str, str] = {}
+    spans: dict[str, tuple[Optional[float], Optional[float]]] = {}
     build_at = STEP_IDS.index("build")
     restarted = False
     build_started_at: Optional[float] = None
@@ -146,17 +153,32 @@ def _replay_marks(root: Path) -> _Replay:
             continue
         step_id, status = doc["id"], doc["status"]
         at = STEP_IDS.index(step_id)
+        when = _mark_time(doc)
         if status == "in_progress":
             for later in STEP_IDS[at + 1:]:
+                spans.pop(later, None)
                 if marks.get(later) in ("in_progress", "done"):
                     del marks[later]
             if at < build_at:
                 restarted = True
+            if marks.get(step_id) == "done":
+                spans.pop(step_id, None)
+        start, end = spans.get(step_id, (None, None))
+        if status == "in_progress" and start is None:
+            spans[step_id] = (when, end)
+        elif status == "done" and when is not None:
+            spans[step_id] = (start, when)
         if step_id == "build" and status == "in_progress":
             # Read only while this mark still stands (see onboarding_steps), so no reset is needed.
-            build_started_at = _mark_time(doc)
+            build_started_at = when
         marks[step_id] = status
-    return _Replay(marks, restarted, build_started_at)
+    return _Replay(marks, restarted, build_started_at, spans)
+
+
+def step_spans(root: Path) -> dict[str, tuple[Optional[float], Optional[float]]]:
+    """Each step's standing attempt as (first `in_progress`, last `done`) epoch seconds, either
+    None when that mark is missing; steps with no timed mark are left out."""
+    return _replay_marks(Path(root).expanduser()).spans
 
 
 def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:

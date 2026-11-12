@@ -727,6 +727,14 @@ def cmd_steps(args) -> int:
     return 0
 
 
+def cmd_timing(args) -> int:
+    """How long onboarding took, from the step marks: per step, in total, and the line to show.
+    No timeline is not an error: every number is 0 and the line is empty."""
+    from . import timing
+    _print_json(timing.onboarding_timing(Path(args.root)))
+    return 0
+
+
 def cmd_overview(args) -> int:
     """The numbers an overview card shows: per subject area its tables, columns described, metrics
     and joins (and how many await sign-off) and examples, plus totals. One call, so a card never
@@ -2489,6 +2497,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mark", action="append", default=[], metavar="ID=STATUS",
                     help="mark a step in_progress, done or skipped (repeatable, applied in order)")
     sp.set_defaults(func=cmd_steps)
+
+    sp = sub.add_parser("timing", help="how long onboarding took, from the step marks: seconds per step, the total, and a 'Set up in …' line")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.set_defaults(func=cmd_timing)
 
     sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
     sp.add_argument("root")
