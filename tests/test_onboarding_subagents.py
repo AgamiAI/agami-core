@@ -372,16 +372,18 @@ def test_apply_enrichment_tables_match_the_name_exactly(model, tmp_path, capsys)
     assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
 
 
-@pytest.mark.parametrize("name", ["../tables/customers", "../../other/tables/t", "..\\x", 7])
-def test_a_path_shaped_name_is_refused_by_both_commands(model, tmp_path, capsys, name):
-    # curate joins area and name into a file path: `..` would reach past the area check
-    bad = {**_edit("agami-example"), "name": name}
+@pytest.mark.parametrize("over", [{"name": "../tables/customers"}, {"name": "../../other/tables/t"},
+                                  {"name": "..\\x"}, {"name": 7}, {"area": "../other"}])
+def test_a_path_shaped_name_is_refused_by_both_commands(model, tmp_path, capsys, over):
+    # curate joins area and a table's name into a file path: `..` would reach past the area check
+    bad = {**_edit("agami-example"), **over}
     before = sorted(p.read_text() for p in model.rglob("*.yaml"))
     rc, out = _apply(model, tmp_path, _result("agami-example", curate_ops=[bad]), "agami-example",
                      capsys)
-    assert rc == 1 and out["applied"] is False and "not a plain name" in out["refused"][0]
-    rc, out = _curate(model, tmp_path, [bad], capsys, "--allow", ENRICH_FIELDS, "--area",
-                      "agami-example")
+    assert rc == 1 and out["applied"] is False
+    if "name" in over:  # a bad area is already refused as another area, before the name check
+        assert "not a plain name" in out["refused"][0]
+    rc, out = _curate(model, tmp_path, [bad], capsys, "--allow", ENRICH_FIELDS)
     assert rc == 1 and out["applied"] == 0 and "not a plain name" in out["refused"][0]
     assert sorted(p.read_text() for p in model.rglob("*.yaml")) == before
 
@@ -390,3 +392,40 @@ def test_curate_allow_without_area_refuses_a_path_shaped_area(model, tmp_path, c
     bad = {**_edit("agami-example"), "area": "agami-example/../agami-example"}
     rc, out = _curate(model, tmp_path, [bad], capsys, "--allow", ENRICH_FIELDS)
     assert rc == 1 and "area" in out["refused"][0]
+
+
+def _with_column(model: Path, table: str, column: str) -> None:
+    f = next((model / "subject_areas").glob(f"*/tables/{table}.yaml"))
+    doc = yaml.safe_load(f.read_text())
+    doc["columns"].append({"name": column, "type": "string", "description": ""})
+    f.write_text(yaml.safe_dump(doc, sort_keys=False))
+
+
+@pytest.mark.parametrize("column", ["price/unit", "in..out", "a\\b"])
+def test_a_column_name_with_a_slash_or_dots_is_described(model, tmp_path, capsys, column):
+    # a column is only compared, never part of a path, so a real name like `price/unit` is fine
+    _with_column(model, "orders", column)
+    op = {**_edit("agami-example"), "column": column, "value": "Price per unit, in dollars."}
+    # the TSV addresses a column as area.table.column, so a dotted column name can only come as an op
+    tsv = "" if "." in column else f"agami-example.orders.{column}\tPrice per unit, in dollars.\n"
+    rc, out = _apply_tables(model, tmp_path,
+                            _result("agami-example", column_descriptions=tsv, curate_ops=[op]),
+                            "orders", capsys)
+    assert rc == 0 and out["applied"] is True and out["edited"] == 1, out
+    assert out["described"] == (0 if "." in column else 1)
+    doc = yaml.safe_load(next((model / "subject_areas").glob("*/tables/orders.yaml")).read_text())
+    assert next(c for c in doc["columns"] if c["name"] == column)["description"] == (
+        "Price per unit, in dollars.")
+
+
+def test_a_metric_named_with_a_slash_passes_allow(model, tmp_path, capsys):
+    # entity and metric names are slugged before they reach a path
+    f = next((model / "subject_areas").glob("*/metrics/total_refunds.yaml"))
+    doc = yaml.safe_load(f.read_text())
+    doc["name"] = "active subscriptions / order"
+    f.unlink()
+    (f.parent / "active_subscriptions_order.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    op = {"op": "edit", "kind": "metric", "area": "agami-example", "name": "active subscriptions / order",
+          "field": "description", "value": "Active subscriptions per order."}
+    rc, out = _curate(model, tmp_path, [op], capsys, "--allow", "description", "--area", "agami-example")
+    assert rc == 0 and out["validated"] is True, out

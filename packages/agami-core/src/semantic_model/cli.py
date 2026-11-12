@@ -850,18 +850,26 @@ def _ops_outside(ops: Any, fields: set[str], area: Optional[str]) -> list[str]:
             out.append(f"op {i}: {json.dumps(op)[:120]}")
         elif area is not None and op.get("area") != area:
             out.append(f"op {i}: area {op.get('area')!r}, not {area!r}")
-        elif bad := [k for k in _OP_NAME_KEYS if k in op and not _plain_name(op[k])]:
+        elif bad := _path_keys(op):
             out.append(f"op {i}: {', '.join(bad)} is not a plain name: {json.dumps(op)[:120]}")
     return out
 
 
-# The op fields curate turns into file paths (subject_areas/<area>/tables/<name>.yaml) or looks up.
-_OP_NAME_KEYS = ("name", "area", "table", "column")
+# The kinds whose `name` curate puts into a file path as-is (subject_areas/<area>/tables/<name>.yaml).
+# Entity and metric names are slugged first, and a column is only compared, so a real name like
+# `price/unit` or `active subscriptions / order` stays allowed.
+_NAME_IS_PATH_KINDS = frozenset({"table", "placeholder"})
+
+
+def _path_keys(op: dict) -> list[str]:
+    """The fields of `op` that would reach a file path and are not plain names."""
+    keys = ["area"] + (["name"] if op.get("kind") in _NAME_IS_PATH_KINDS else [])
+    return [k for k in keys if k in op and not _plain_name(op[k])]
 
 
 def _plain_name(value: Any) -> bool:
-    """A model name, not a path: curate joins `area` and `name` into a file path, so `../tables/x`
-    would edit a file the area check never saw, in another area or outside the model."""
+    """A model name, not a path: curate joins `area` (and a table's `name`) into a file path, so
+    `../tables/x` would edit a file the area check never saw, in another area or outside the model."""
     return isinstance(value, str) and not any(s in value for s in ("/", "\\", ".."))
 
 
