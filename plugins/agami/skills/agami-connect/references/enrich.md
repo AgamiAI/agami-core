@@ -9,6 +9,8 @@ Mark the step started and refresh the task list ([task-list.md](../../../shared/
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark describe=in_progress
 ```
 
+**When 1.7 started the enrichers** (before the join cards), 2a.0 has already run: skip it and 2a's steps 0–2, and pick up at 2a step 3 (collect). Otherwise collect the document readers now (1.5) and start at 2a.0.
+
 The engine gives structure; you add meaning. Load the model with `cli bundle <root> --area <area>` (or read the YAMLs). After each enrichment pass, **re-validate** (`cli validate <root>`) and never persist a model that fails. `<root>` = `<artifacts_dir>/<profile>/`.
 
 **One progress line per step, no card.** After each step below, post one line with the numbers that step's command printed, and nothing invented: never a count you worked out by reading YAML, never a percentage you estimated. Leave out a step that didn't run.
@@ -52,13 +54,13 @@ The format comes from the extension (`--format csv|json|tsv` overrides it). CSV 
 
 ### 2a — Descriptions (describe coded columns; leave only self-evident ones empty)
 
-**A model of 2 or more chunks is described one chunk per subagent, in parallel.** The enrichers follow these same rules (they read this section and 2b), return what they found as data, and never write: you write it, one chunk at a time, and ask every question. How a batch runs in the background, is collected and is given up on is in [parallel-work.md](../../../shared/parallel-work.md). When 1.7 already started them ([build.md](build.md#17--run-the-introspection-engine-on-the-kept-tables), before the join cards), skip 2a.0 and steps 0–2 here and go to step 3.
+**A model of 2 or more chunks is described one chunk per subagent, in parallel.** The enrichers follow these same rules (they read this section and 2b), return what they found as data, and never write: you write it, one chunk at a time, and ask every question. How a batch runs in the background, is collected and is given up on is in [parallel-work.md](../../../shared/parallel-work.md). When 1.7 already started them ([build.md](build.md#17--run-the-introspection-engine-on-the-kept-tables), before the join cards), skip steps 0–2 here and go to step 3.
 
 0. **Find the chunks**, with one pre-approved call that reads no database and writes nothing:
    ```bash
    bash "<plugin_root>/scripts/sm" enrich-input "$ROOT" --chunks
    ```
-   It prints `chunks`, each `{chunk, area, tables}`: every area cut into runs of at most 12 tables. With **2 or more chunks**, give each chunk to an `agami-core:agami-enricher` subagent (steps 1–6). With one chunk, describe it yourself, as the rest of 2a says.
+   It prints `chunks`, each `{chunk, area, tables}`: every area cut into runs of at most 12 tables. With **2 or more chunks**, give each chunk to an `agami-core:agami-enricher` subagent (steps 1–6). With one chunk, describe it yourself, as the rest of 2a says; with no Agent tool, describe every chunk yourself, one after another, the same way.
 1. **Prepare each chunk's input first**, one pre-approved call per chunk, the chunk's tables comma-separated (never an empty list):
    ```bash
    bash "<plugin_root>/scripts/sm" enrich-input "$ROOT" --area <area> --tables <t1,t2,…> --profile <profile> \

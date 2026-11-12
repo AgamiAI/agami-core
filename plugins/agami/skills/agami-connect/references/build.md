@@ -74,9 +74,10 @@ Add **one finding** on the next line when the report has one worth a person's at
 
 **Start the enrichers now, before the join cards**, so the columns are described while the person decides joins. Do this once the model has validated (and the person didn't stop at the `Empty` card), unless a model spec was attached: 1.8 replaces the subject areas, so with a spec the enrichers start in Phase 2 instead.
 
-1. **Collect the document readers** started in 1.5 that have finished, and merge them into `$DATA_MODEL_DOC_TEXT` as 1.5 says, conflict cards included. If a reader is still running, ask the join cards first, then collect the readers and start the enrichers.
-2. **Run 2a.0's deterministic metadata step** ([enrich.md 2a.0](enrich.md#2a0--deterministic-metadata-first-run-before-any-hand-enrichment): `sm enrich-metadata`, and `sm describe-file` when the person gave a column dictionary), so the enrichers' input already carries what the database and the dictionary say.
-3. **Start the enrichers**: [enrich.md 2a](enrich.md#2a--descriptions-describe-coded-columns-leave-only-self-evident-ones-empty) steps 0–2 (find the chunks; with 2 or more, prepare each chunk's input and launch one `agami-enricher` per chunk in the background, per [parallel-work.md](../../../shared/parallel-work.md)). With one chunk nothing starts here: Phase 2 describes it inline.
+1. **Find the chunks** ([enrich.md 2a](enrich.md#2a--descriptions-describe-coded-columns-leave-only-self-evident-ones-empty) step 0, `sm enrich-input "$ROOT" --chunks`). With one chunk, or with no Agent tool, nothing starts here: go to the join cards, and Phase 2 describes the model inline.
+2. **Collect the document readers** started in 1.5 that have finished, and merge them into `$DATA_MODEL_DOC_TEXT` as 1.5 says, conflict cards included. If a reader is still running, ask the join cards first, then collect the readers and go on with steps 3 and 4.
+3. **Run 2a.0's deterministic metadata step** ([enrich.md 2a.0](enrich.md#2a0--deterministic-metadata-first-run-before-any-hand-enrichment): `sm enrich-metadata`, and `sm describe-file` when the person gave a column dictionary), so the enrichers' input already carries what the database and the dictionary say.
+4. **Start the enrichers**: enrich.md 2a steps 1–2, one `agami-enricher` per chunk in the background, per [parallel-work.md](../../../shared/parallel-work.md).
 
 Then ask the join cards below; the enrichers run meanwhile, so the turn stays open. Phase 2 picks the enrichers started here up at 2a's step 3 (collect). The build step's marks don't move: the task list shows "Read the tables and joins" until this file ends.
 
