@@ -9,7 +9,8 @@ script does the parse + the exclude/include → curate-op translation, so the sk
 just reads structured output and applies it via `sm curate` / `sm add` /
 `sm set-terminology`.
 
-Input (stdin or --block-file):
+Input (stdin or --block-file): the block below, or the decisions file a saving page wrote through
+`serve_page.py --decisions`, whose `block` holds the same text (#651).
 
     profile: <name>
     exclude tables:  <area>.<table>, <area>.<table>
@@ -181,11 +182,27 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
     return data, anomalies, needs
 
 
+def block_text(text: str) -> str:
+    """The feedback block in `text`: the text itself, or the `block` of the decisions file a saving
+    page posted to `serve_page.py --decisions` (`{"page": "model-explorer", "profile": .., "block": ..}`).
+    A pasted block never starts with `{`, so the two cannot be confused."""
+    if text.lstrip().startswith("{"):
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            return text
+        if isinstance(doc, dict) and isinstance(doc.get("block"), str):
+            return doc["block"]
+    return text
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Parse the agami-model back-channel feedback block.")
-    ap.add_argument("--block-file", help="path to the pasted block (else stdin)")
+    ap.add_argument("--block-file", help="path to the pasted block, or the decisions file a saving page "
+                                         "wrote through serve_page.py --decisions (else stdin)")
     args = ap.parse_args(argv)
     text = Path(args.block_file).read_text(encoding="utf-8") if args.block_file else sys.stdin.read()
+    text = block_text(text)
     data, anomalies, needs = parse(text)
     print(json.dumps({"ok": True, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
     return 0

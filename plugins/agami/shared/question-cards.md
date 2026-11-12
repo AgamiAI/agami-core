@@ -82,15 +82,24 @@ covers**, one per line (up to 15, then "and N more"), and the same items are in 
 the card: an option such as "Add all 16" or "Only 1–8" with nothing to show which items those are
 leaves the person nothing to decide by. When items must be decided one by one, ask up to 4 per
 card, one question each, and put "Approve all remaining" (or its equivalent) on every card so a long
-queue can be finished in one press.
+queue can be finished in a few presses.
+
+**A bulk sign-off never signs an item the person has not been shown.** A sign-off records that a
+named person checked that definition. So before applying "Approve all remaining", or an "Approve
+all" whose table stopped at 15 rows, list every item it would sign that no table in the chat has
+shown yet (name, meaning and SQL, one short row each, in tables of up to 15), then ask one question,
+header `Approve all`, *"Approve these <n>?"*: **Approve these <n>** / **Back to one by one** /
+**Review on a page** (rule 6a). Each approve op of a bulk sign-off carries `"bulk": true`, which
+`sm curate` writes to `curation_log.jsonl` with the op, so the log says it was signed many at once.
 
 ```json
 {"header": "Metric 1/9", "question": "Sign off Revenue?",
  "multiSelect": false,
  "options": [{"label": "Approve", "description": "Total of the order amounts",
               "preview": "-- revenue\nSUM(orders.amount)"},
-             {"label": "Approve all remaining", "description": "Sign off the other 8 as well"},
-             {"label": "Reject", "description": "Drop it from the model"}]}
+             {"label": "Reject", "description": "Drop it from the model"},
+             {"label": "Approve all remaining", "description": "Lists the other 8 first, then asks once"},
+             {"label": "Review on a page", "description": "Decide the whole list on one page; it saves itself"}]}
 ```
 
 ## 5. Free text goes in "Other"
@@ -119,21 +128,66 @@ Answers given to the card's other questions stand: apply them before asking agai
 
 ## 6. No page opens by default, and nothing is pasted back
 
-The HTML renderers stay as an optional **Show the full view** option, and it is an option: every
-review or sign-off card that has a page behind it offers **Show the full view** while it has room
-(a card holds 4 options), so nobody has to know to type it in "Other". After the page is served,
-give the URL and ask the same card again: the decision still happens on the card. When one is shown, serve it
-from `localhost`, never as a `file://` page: the Code tab's built-in browser shows a local file
-outside the project folder as a frozen snapshot. Run `serve_page.py` with `run_in_background`: it
-keeps serving until its time is up, so in the foreground it would hold the turn and the URL would
-never reach the person.
+The HTML pages are optional, and a page is an option on the card, never typed in "Other" to find.
+There are two kinds, and nothing comes back from either by copy and paste:
+
+- **A page that takes decisions saves them itself** (6a), the way the password page saves the
+  password. Every review or sign-off question that has such a page behind it offers
+  **Review on a page** (or the skill's wording for it, such as **Mark them on a page**), on every
+  question of the card, not only the first: the page opens on the list that question is about.
+- **A page that only shows something** is the **Show the full view** option, rendered `--read-only`:
+  it hides the page's change controls and copy-and-paste dialog and says in a banner that nothing on
+  it is saved. After the URL, ask the same card again: the decision still happens on the card.
+
+Either is served from `localhost`, never as a `file://` page: the Code tab's built-in browser shows a
+local file outside the project folder as a frozen snapshot. Run `serve_page.py` with
+`run_in_background`: it keeps serving until its time is up or the page is saved, so in the foreground
+it would hold the turn and the URL would never reach the person. A view-only page:
 
 ```
 bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30
 # run_in_background; its first line is {"url": "http://localhost:<port>/<name>"}, and it exits when the time is up
 ```
 
-Read that first line from the background task's output and give the person the URL. Render the page with `--read-only`: it hides the page's change controls and its copy-and-paste dialog and says to decide on the cards. Choices come back through a card, not a pasted block.
+Read that first line from the background task's output and give the person the URL.
+
+### 6a. A page that saves its decisions
+
+1. **Where a page can't reach this computer, use the cards.** In a remote or SSH session
+   (`SSH_CONNECTION` is set), the person's browser can't open this computer's `127.0.0.1`: say so in
+   one line ("pages open on this computer, which your browser can't reach from here") and carry on
+   with the cards.
+2. **Render the page with `--save-to-helper`** (and the skill's deep link), to a new timestamped
+   file. Its Save button posts the decisions to the helper serving it; approvals on it are signed as
+   the saved `reviewer_email` / `reviewer_role` from `<artifacts_dir>/local/.config`, which the page
+   shows and cannot change. A page that will take approvals needs that identity first: when it is
+   missing, ask the identity card before rendering.
+3. **Start the helper in the background** with `run_in_background`, writing to a new decisions file:
+
+   ```
+   bash "<plugin_root>/scripts/py" serve_page.py <file.html> --decisions "<artifacts_dir>/local/tmp/agami-page-<ts>.json" --minutes 30
+   ```
+
+   Wait for its first line with the Monitor tool (an until-loop on the task's output file that stops
+   at the first JSON line or when the task exits; never a foreground `sleep`), or, where Monitor isn't
+   available, re-read the output file at spaced intervals, each read its own tool call. The first line
+   is `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 1800}`, usually within a second. No
+   line within about 15 seconds, or the task exited: the helper couldn't start (a refused port, say);
+   say so in one line with its last stderr line, and carry on with the cards.
+4. **Post the link**, then a card so it isn't missed: *"[Review on a page](<url>). Mark your decisions
+   there and press Save decisions; they come straight back here. The link lasts 30 minutes."* Then
+   one question (header `Page`), *"Save your decisions on the page, then come back here."*:
+   **I've saved it** (or the skill's wording for its page) / **Back to the cards** (stop the helper
+   with TaskStop; nothing is saved; ask the card the page was picked on again). The helper's exit also brings you back while the card is open: go to step 5
+   and don't ask the card again. **I've saved it** with no final line yet: say the page hasn't been
+   saved, and ask the `Page` card again.
+5. **Read the helper's final line.** `{"status": "saved", "decisions": "<file>"}`: apply the file with
+   the skill's commands, the same ones a card uses (its parser, `sm curate`, `sm add-example`,
+   `sm remove-example`, with the saved identity as `--signer` / `--role`), never by hand-editing a
+   YAML. Then say back in one line what changed, counted from the commands' own output (*"Approved 18
+   metrics and hid 6 columns."*), list anything they skipped or refused, delete the decisions file,
+   and carry on where the skill says. `{"status": "expired"}`: *"The page expired before it was saved;
+   nothing changed."*, then the card it was picked on again.
 
 ## 7. Where AskUserQuestion is unavailable
 
