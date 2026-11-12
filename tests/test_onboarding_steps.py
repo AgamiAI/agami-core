@@ -89,6 +89,7 @@ def test_built_model_marks_build_done_with_counts(model):
 
 
 def test_describe_count_matches_overview(model):
+    steps.mark(model, "first_question", "done")  # a pending step shows no count (rule E)
     s = _by_id(steps.onboarding_steps(model))
     totals = _totals(model)
     assert s["describe"]["count"] == f"{totals['described_pct']}% described, {totals['metrics']} metrics"
@@ -105,6 +106,7 @@ def test_signoff_counts_only_signed_metrics(model):
     doc = yaml.safe_load(metric.read_text())
     doc["review_state"] = "unreviewed"
     metric.write_text(yaml.safe_dump(doc))
+    steps.mark(model, "signoff", "done")
     assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "7 of 8 signed"
 
 
@@ -217,6 +219,7 @@ def test_a_build_silent_for_30_minutes_is_not_running(model, tmp_path):
     assert result["problem"] == "The last rebuild stopped before it finished."
 
     root = _building(tmp_path)
+    steps.mark(root, "build", "in_progress")  # a pending build ignores its log (rule D6)
     first = steps.onboarding_steps(root, now=datetime.fromtimestamp(
         (root / ".introspect" / "progress.log").stat().st_mtime, timezone.utc) + timedelta(hours=1))
     assert _by_id(first)["build"]["status"] == "pending"
@@ -307,6 +310,7 @@ def test_a_finished_log_whose_model_never_lands_goes_stale(tmp_path):
     root = _building(tmp_path)
     log = root / ".introspect" / "progress.log"
     log.write_text("done: 34 tables, 7 relationships\n")
+    steps.mark(root, "build", "in_progress")
     at = datetime.fromtimestamp(log.stat().st_mtime, timezone.utc)
     soon = at + timedelta(seconds=steps.STALE_BUILD_SECONDS - 1)
     assert _by_id(steps.onboarding_steps(root, now=soon))["build"]["status"] == "in_progress"
@@ -466,3 +470,214 @@ def test_steps_refuses_an_empty_root(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err.strip()
     assert err and "\n" not in err
     assert not list(tmp_path.iterdir())
+
+
+# --- status rules v2: marks decide status; disk supplies counts and a few clamps on the build ---
+
+_LETTER = {"d": "done", "i": "in_progress", "p": "pending", "s": "skipped"}
+BUILT = "11 tables, 12 joins"
+
+
+def _sample(tmp_path: Path) -> Path:
+    root = tmp_path / "acme"
+    shutil.copytree(SAMPLE, root)
+    return root
+
+
+def _stale(log: Path):
+    from datetime import datetime, timedelta, timezone
+    return datetime.fromtimestamp(log.stat().st_mtime, timezone.utc) + timedelta(
+        seconds=steps.STALE_BUILD_SECONDS + 1)
+
+
+def _no_root(tmp_path):
+    return tmp_path / "acme", None
+
+
+def _no_marks(tmp_path):
+    return _sample(tmp_path), None
+
+
+def _forward_run(tmp_path):
+    root = _sample(tmp_path)
+    done: set[str] = set()
+    for i in steps.STEP_IDS:
+        steps.mark(root, i, "in_progress")
+        s = _by_id(steps.onboarding_steps(root))
+        assert all(s[d]["status"] == "done" for d in done), i  # never loses a done
+        assert s[i]["status"] == "in_progress", i
+        steps.mark(root, i, "done")
+        done.add(i)
+    return root, None
+
+
+def _done_mark_no_yaml(tmp_path):
+    root = tmp_path / "acme"
+    steps.mark(root, "build", "done")
+    return root, None
+
+
+def _running_first_build(tmp_path):
+    root = _building(tmp_path)
+    steps.mark(root, "build", "in_progress")
+    return root, None
+
+
+def _restart_build(tmp_path):  # I1
+    root = _sample(tmp_path)
+    _complete(root)
+    steps.mark(root, "build", "in_progress")
+    return root, None
+
+
+def _restart_build_running(tmp_path):
+    root, _ = _restart_build(tmp_path)
+    _rebuild_log(root, "columns+grain 5/11")
+    return root, None
+
+
+def _failed_first_build(tmp_path):
+    root = _building(tmp_path)
+    (root / ".introspect" / "progress.log").write_text("columns+grain 3/34\nfailed: boom\n")
+    steps.mark(root, "build", "in_progress")
+    return root, None
+
+
+def _failed_rebuild_marked(tmp_path):
+    root = _sample(tmp_path)
+    steps.mark(root, "build", "in_progress")
+    _rebuild_log(root, "failed: boom")
+    return root, None
+
+
+def _failed_rebuild_unmarked(tmp_path):
+    root = _sample(tmp_path)
+    _rebuild_log(root, "failed: boom")
+    return root, None
+
+
+def _restart_context_over_failed_log(tmp_path):  # I2
+    root = _sample(tmp_path)
+    _complete(root)
+    _rebuild_log(root, "failed: boom")
+    steps.mark(root, "context", "in_progress")
+    return root, None
+
+
+def _restart_tables(tmp_path):
+    root = _sample(tmp_path)
+    _complete(root)
+    steps.mark(root, "tables", "in_progress")
+    return root, None
+
+
+def _unloadable(tmp_path):
+    root = _sample(tmp_path)
+    ds = root / "datasource.yaml"
+    doc = yaml.safe_load(ds.read_text())
+    doc["subject_areas"].append("subject_areas/missing")
+    ds.write_text(yaml.safe_dump(doc))
+    steps.mark(root, "signoff", "in_progress")
+    return root, None
+
+
+def _stale_first_build(tmp_path):
+    root = _building(tmp_path)
+    steps.mark(root, "build", "in_progress")
+    return root, _stale(root / ".introspect" / "progress.log")
+
+
+def _done_log_no_yaml(tmp_path):
+    root = _building(tmp_path)
+    (root / ".introspect" / "progress.log").write_text("done: 34 tables, 7 relationships\n")
+    steps.mark(root, "build", "in_progress")
+    return root, None
+
+
+def _done_log_no_yaml_stale(tmp_path):
+    root, _ = _done_log_no_yaml(tmp_path)
+    return root, _stale(root / ".introspect" / "progress.log")
+
+
+def _skips_survive(tmp_path):
+    root = _sample(tmp_path)
+    _complete(root)
+    steps.mark(root, "reports", "skipped")
+    steps.mark(root, "tables", "in_progress")
+    _rebuild_log(root, "columns+grain 5/11")
+    return root, None
+
+
+def _behind_a_finished_step(tmp_path):
+    root = _sample(tmp_path)
+    steps.mark(root, "describe", "in_progress")
+    steps.mark(root, "signoff", "done")
+    return root, None
+
+
+def _describing(tmp_path):
+    root = _sample(tmp_path)
+    steps.mark(root, "describe", "in_progress")
+    return root, None
+
+
+def _restart_connect(tmp_path):
+    root = _sample(tmp_path)
+    _complete(root)
+    steps.mark(root, "connect", "in_progress")
+    return root, None
+
+
+DESCRIBED, SIGNED, EXAMPLES = "40% described, 8 metrics", "8 of 8 signed", "14 examples"
+ALL_COUNTS = {"build": BUILT, "describe": DESCRIBED, "signoff": SIGNED, "examples": EXAMPLES}
+
+# (setup, the nine statuses in order, current, counts that must be shown, problem)
+STATUS_RULES = {
+    "1-no-root": (_no_root, "ppppppppp", "connect", {}, None),
+    "2-no-marks-model-loads": (_no_marks, "ddddppppp", "describe", {"build": BUILT}, None),
+    "3-forward-first-run": (_forward_run, "ddddddddd", None, ALL_COUNTS, None),
+    "4-build-done-mark-no-yaml": (_done_mark_no_yaml, "dddippppp", "build", {}, None),
+    "5-running-first-build": (_running_first_build, "dddippppp", "build",
+                              {"build": "33 of 34 tables"}, None),
+    "6-restart-build-no-new-log": (_restart_build, "dddippppp", "build", {}, None),
+    "7-restart-build-running": (_restart_build_running, "dddippppp", "build",
+                                {"build": "5 of 11 tables"}, None),
+    "8-failed-first-build": (_failed_first_build, "dddpppppp", "build", {},
+                             "The build didn't finish: boom"),
+    "9-failed-rebuild-marked": (_failed_rebuild_marked, "dddpppppp", "build", {},
+                                "The rebuild didn't finish: boom"),
+    "10-failed-rebuild-unmarked": (_failed_rebuild_unmarked, "ddddppppp", "describe",
+                                   {"build": BUILT}, "The last rebuild didn't finish: boom"),
+    "11-restart-context-over-failed-log": (_restart_context_over_failed_log, "dippppppp",
+                                           "context", {}, None),
+    "12-restart-tables": (_restart_tables, "ddipppppp", "tables", {}, None),
+    "13-unloadable-model": (_unloadable, "dddddippp", "signoff", {}, "The model in "),
+    "14-stale-first-build": (_stale_first_build, "dddpppppp", "build", {},
+                             "The build stopped before it finished."),
+    "15a-done-log-no-yaml-fresh": (_done_log_no_yaml, "dddippppp", "build", {}, None),
+    "15b-done-log-no-yaml-stale": (_done_log_no_yaml_stale, "dddpppppp", "build", {},
+                                   "The build stopped before it finished."),
+    "16-skips-survive": (_skips_survive, "dddipppsp", "build", {"build": "5 of 11 tables"}, None),
+    "17-running-behind-a-finished-step": (_behind_a_finished_step, "ddddddppp", "examples",
+                                          {"build": BUILT, "describe": DESCRIBED,
+                                           "signoff": SIGNED}, None),
+    "18-pending-has-no-count": (_describing, "ddddipppp", "describe",
+                                {"build": BUILT, "describe": DESCRIBED}, None),
+    "19-restart-connect": (_restart_connect, "ipppppppp", "connect", {}, None),
+}
+
+
+@pytest.mark.parametrize("row", list(STATUS_RULES), ids=list(STATUS_RULES))
+def test_status_rules_v2(row, tmp_path):
+    setup, want, current, counts, problem = STATUS_RULES[row]
+    root, now = setup(tmp_path)
+    result = steps.onboarding_steps(root, now=now)
+    s = _by_id(result)
+    assert [s[i]["status"] for i in steps.STEP_IDS] == [_LETTER[c] for c in want]
+    assert result["current"] == current
+    for i in steps.STEP_IDS:
+        assert s[i]["count"] == counts.get(i), i  # every count shown, and only these
+    if problem is None:
+        assert result["problem"] is None
+    else:
+        assert result["problem"] and result["problem"].startswith(problem)

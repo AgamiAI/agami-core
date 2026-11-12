@@ -40,8 +40,8 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
    bash "<plugin_root>/scripts/sm" steps "$ROOT"
    ```
 
-   When `failed` is true, or `sm steps` prints a `problem` that is not null (a killed build writes no `failed` line; `sm steps` calls it stopped after 30 silent minutes), the build stopped: say the `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
-4. **The onboarding step's label** is the build step's `text` from that `sm steps` output, with the live count while it runs (*"Read the tables and joins — 12 of 34 tables"*) and the final numbers when it ends; never type the count yourself.
+   When `failed` is true, or `sm steps` prints a `problem` that is not null (a killed build writes no `failed` line; `sm steps` calls it stopped after 30 silent minutes), the build stopped (`sm steps` shows the build step pending again, with the `problem`): say the `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
+4. **The onboarding step's label** is the build step's `text` from that `sm steps` output, with the live count once the build's log has one (*"Read the tables and joins — 12 of 34 tables"*; right after the start mark it has none) and the final numbers when it ends; never type the count yourself.
 5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.
 
 **Where background commands aren't available, a batched build** keeps it legible instead:

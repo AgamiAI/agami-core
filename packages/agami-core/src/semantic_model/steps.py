@@ -101,23 +101,18 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
         fh.write(json.dumps({"id": step_id, "status": status, "at": at.isoformat()}) + "\n")
 
 
-def _replay_marks(root: Path) -> tuple[dict[str, str], bool]:
-    """The marks that still stand, replayed in order, and whether the build was reopened.
+def _replay_marks(root: Path) -> dict[str, str]:
+    """The marks that still stand, replayed in order (rule A).
 
     Marking a step `in_progress` restarts the run from there: every later step's earlier
     `in_progress`/`done` mark is dropped (a `skipped` one is kept), so a reintrospect after a
-    finished onboarding doesn't show a finished list. The build is reopened when the latest restart
-    is before it and it hasn't been marked since: a model on disk from the earlier run then no
-    longer finishes it. A line that doesn't parse (a write cut short) is skipped, not fatal: the
-    list is a view, and one bad line shouldn't hide the rest."""
+    finished onboarding doesn't show a finished list. A line that doesn't parse (a write cut short)
+    is skipped, not fatal: the list is a view, and one bad line shouldn't hide the rest."""
     try:
         text = _timeline(root).read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return {}, False
+        return {}
     marks: dict[str, str] = {}
-    build_at = STEP_IDS.index("build")
-    restart: Optional[int] = None
-    since_restart: set[str] = set()
     for line in text.splitlines():
         try:
             doc = json.loads(line)
@@ -128,15 +123,11 @@ def _replay_marks(root: Path) -> tuple[dict[str, str], bool]:
             continue
         step_id, status = doc["id"], doc["status"]
         if status == "in_progress":
-            restart = STEP_IDS.index(step_id)
-            since_restart = set()
-            for later in STEP_IDS[restart + 1:]:
+            for later in STEP_IDS[STEP_IDS.index(step_id) + 1:]:
                 if marks.get(later) in ("in_progress", "done"):
                     del marks[later]
         marks[step_id] = status
-        since_restart.add(step_id)
-    reopened = restart is not None and restart < build_at and "build" not in since_restart
-    return marks, reopened
+    return marks
 
 
 def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
@@ -153,37 +144,33 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         return None, f"The model in {root} couldn't be read: {first}"
 
 
-def _build_state(log: Path, model: Path, now: float) -> tuple[Optional[str], Optional[str]]:
+def _log_state(log: Path, model: Path, now: float) -> tuple[str, Optional[str]]:
     """(state, reason) of the build log that speaks for this model: "running", "failed" (with the
-    engine's reason), "stale" or "done"; (None, None) when no log is newer than the model. A file
-    that vanishes between the two stats (being replaced) reads as no log, never as running."""
+    engine's reason), "stopped", or "none" when no log is newer than datasource.yaml. A file that
+    vanishes between the two stats (being replaced) reads as no log, never as running."""
     try:
         log_at = log.stat().st_mtime
         model_at = model.stat().st_mtime if model.exists() else None
     except OSError:
-        return None, None
+        return "none", None
     if model_at is not None and log_at <= model_at:
-        return None, None
+        return "none", None
     last = last_progress_line(log)
-    stale = now - log_at > STALE_BUILD_SECONDS
-    if last.startswith("done:"):
-        # The engine logs `done:` before it writes the tree; a run killed in between (or a dry
-        # run) never writes it, so a finished log with no model goes stale like any other.
-        return ("stale" if model_at is None and stale else "done"), None
     if last.startswith("failed:"):
         return "failed", last[len("failed:"):].strip()
-    if stale:
-        return "stale", None
-    return "running", None
+    if last.startswith("done:") and model_at is not None:
+        # A rebuild that has logged its end and is writing the tree: the marks decide.
+        return "none", None
+    # Unfinished, or `done:` with no tree yet (the engine logs it before writing; a run killed in
+    # between, or a dry run, never writes it): live until it has been silent too long.
+    return ("stopped" if now - log_at > STALE_BUILD_SECONDS else "running"), None
 
 
-def _unfinished(state: Optional[str], reason: Optional[str], rebuild: bool) -> Optional[str]:
-    """The problem line for a build that ended without finishing, else None."""
+def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
+    """The problem line for a build that ended without finishing."""
     if state == "failed":
-        return f"The {'last rebuild' if rebuild else 'build'} didn't finish: {reason}"
-    if state == "stale":
-        return f"The {'last rebuild' if rebuild else 'build'} stopped before it finished."
-    return None
+        return f"The {noun} didn't finish: {reason}"
+    return f"The {noun} stopped before it finished."
 
 
 def _build_count(log: Path) -> Optional[str]:
@@ -203,70 +190,91 @@ def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
     }
 
 
+def _imply(status: dict[str, str]) -> None:
+    """Rule C: a step before the furthest one reached is done (a passed-over report check is
+    skipped), and only the furthest step reached can still be in progress."""
+    reached = [n for n, i in enumerate(STEP_IDS) if status[i] in ("in_progress", "done")]
+    if not reached:
+        return
+    for i in STEP_IDS[:reached[-1]]:
+        if status[i] == "pending":
+            status[i] = "skipped" if i == "reports" else "done"
+        elif status[i] == "in_progress":
+            status[i] = "done"
+
+
+def _reopen_from(status: dict[str, str], step_id: str, to: str) -> None:
+    """`step_id` set to `to`, every step before it finished, every later one back to pending (a
+    skip kept)."""
+    at = STEP_IDS.index(step_id)
+    status[step_id] = to
+    for i in STEP_IDS[:at]:
+        if status[i] in ("pending", "in_progress"):
+            status[i] = "done"
+    for i in STEP_IDS[at + 1:]:
+        if status[i] in ("in_progress", "done"):
+            status[i] = "pending"
+
+
 def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, Any]:
     """The nine steps with status, count and the label text to show, the current step, and a
-    one-line `problem` when the model on disk or the last build needs the person's attention."""
-    root = Path(root).expanduser()
-    status = {i: "pending" for i in STEP_IDS}
-    marks, reopened = _replay_marks(root)
-    status.update(marks)
-    counts: dict[str, Optional[str]] = {}
-    problem: Optional[str] = None
+    one-line `problem` when the model on disk or the last build needs the person's attention.
 
-    log = root / ".introspect" / "progress.log"
+    Marks decide status; disk supplies counts and a few clamps on the build: replay the marks (A),
+    let a loadable model finish an unmarked build (B), imply the steps behind the furthest one
+    reached (C), clamp the build to what its log and datasource.yaml say (D), then counts (E)."""
+    root = Path(root).expanduser()
     build_at = STEP_IDS.index("build")
     model = root / "datasource.yaml"
-    state, reason = _build_state(log, model, (now or datetime.now(timezone.utc)).timestamp())
-    if state == "running":
-        # The live count, not the numbers of a model this build will replace; and a half-written
-        # tree is not a problem to report.
-        status["build"] = "in_progress"
-        counts["build"] = _build_count(log)
-    elif model.exists() and not reopened:
-        # A model on disk is built even when it fails to load: a hand edit or a missing area later
-        # must show as a problem on a finished list, not send the list back to "building".
+    log = root / ".introspect" / "progress.log"
+
+    marks = _replay_marks(root)
+    status = {i: marks.get(i, "pending") for i in STEP_IDS}
+    totals, load_problem = _totals(root) if model.exists() else (None, None)
+    # B: resuming a profile with no marks, or the sample's copied model.
+    if ("build" not in marks and totals is not None
+            and not any(status[i] == "in_progress" for i in STEP_IDS[:build_at])):
         status["build"] = "done"
-        totals, problem = _totals(root)
-        if totals is not None:
-            counts = _later_counts(totals)
-        # The model's own failure to load says more than a rebuild that didn't land.
-        problem = problem or _unfinished(state, reason, rebuild=True)
-    elif state in ("failed", "stale"):
-        # The build was reached, so the steps before it are done; the list stops at the build.
-        status["build"] = "pending"
-        problem = _unfinished(state, reason, rebuild=model.exists())
-        for i in STEP_IDS[:build_at]:
-            if status[i] in ("pending", "in_progress"):
-                status[i] = "done"
-    elif reopened and model.exists():
-        # The earlier run's model: this run hasn't reached the build yet, and its numbers aren't
-        # this run's.
-        status["build"] = "pending"
-    elif log.exists():
-        # The engine logs `done:` before the tree is written, so the build runs on until it lands.
-        status["build"] = "in_progress"
-        counts["build"] = _build_count(log)
+    _imply(status)
+
+    state, reason = _log_state(log, model, (now or datetime.now(timezone.utc)).timestamp())
+    problem: Optional[str] = None
+    live = False
+    noun = "rebuild" if model.exists() else "build"
+    if state == "running":
+        # D1: a build running now wins over any mark, and a half-written tree is no problem.
+        _reopen_from(status, "build", "in_progress")
+        live = True
+    elif status["build"] == "in_progress" or (status["build"] == "done" and not model.exists()):
+        if state == "none":
+            # D2/D4: the build was started (or marked done) but no model of this run has landed:
+            # an earlier run's model must not finish it.
+            _reopen_from(status, "build", "in_progress")
+        else:
+            # D3/D4: it stopped. The list waits at the build with the reason.
+            _reopen_from(status, "build", "pending")
+            problem = _unfinished(state, reason, noun)
     elif status["build"] == "done":
-        # A mark can't finish the build: only a model that loads does.
-        status["build"] = "in_progress"
+        # D7 first: the model's own failure to load says more than a rebuild that didn't land.
+        # D5: a built model stays built when a later rebuild didn't finish.
+        problem = load_problem or (_unfinished(state, reason, "last rebuild")
+                                   if state in ("failed", "stopped") else None)
+    # D6: a pending build (an earlier step reopened) ignores the log.
     if status["build"] != "done":
         for i in STEP_IDS[build_at + 1:]:
             if status[i] in ("in_progress", "done"):
                 status[i] = "pending"
 
-    reached = [n for n, i in enumerate(STEP_IDS) if status[i] in ("in_progress", "done")]
-    if reached:
-        for i in STEP_IDS[:reached[-1]]:
-            if status[i] == "pending":
-                # A report check is optional: passed over, it was skipped, not done.
-                status[i] = "skipped" if i == "reports" else "done"
-            elif status[i] == "in_progress":
-                # Only the furthest step reached can still be running.
-                status[i] = "done"
+    # E: only a step that is done or under way carries a count.
+    counts: dict[str, Optional[str]] = {}
+    if live:
+        counts["build"] = _build_count(log)
+    elif status["build"] == "done" and totals is not None:
+        counts = _later_counts(totals)
 
     result = []
     for i in STEP_IDS:
-        count = counts.get(i)
+        count = counts.get(i) if status[i] in ("done", "in_progress") else None
         text = LABELS[i] if count is None else f"{LABELS[i]} — {count}"
         result.append({"id": i, "label": LABELS[i], "status": status[i], "count": count,
                        "text": text})
