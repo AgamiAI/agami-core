@@ -157,8 +157,8 @@ def test_a_composite_key_is_matched_on_all_its_columns(tmp_path):
 
 
 def test_a_join_to_a_table_too_large_to_read_is_not_checked():
-    assert PF.checkable(SQLITE, ORDERS, CUSTOMERS)
-    assert not PF.checkable(SQLITE, ORDERS, _t("huge", ["id"], PF.JOIN_TARGET_MAX_ROWS + 1))
+    assert PF.checkable(CUSTOMERS)
+    assert not PF.checkable(_t("huge", ["id"], PF.JOIN_TARGET_MAX_ROWS + 1))
 
 
 # --- one spread-out sample clause per engine that has one -------------------------------------

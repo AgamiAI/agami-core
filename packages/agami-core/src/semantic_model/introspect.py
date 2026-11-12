@@ -1784,7 +1784,7 @@ def _build_relationships(
             # inheritance-heavy schemas on an unenforcing warehouse from flooding review.
             check = None
             if (not dialect.fk_enforced and overlap_probes < FK_OVERLAP_PROBE_CAP and fobj is not None
-                    and tobj is not None and PF.checkable(dialect, fobj, tobj)):
+                    and tobj is not None and PF.checkable(tobj)):
                 overlap_probes += 1
                 check = PF.JoinCheck(fobj, fc, tobj, tc)
             keys.append((ft, tt, fc, tc, grouped, from_schema, to_schema, fobj, tobj, check))
@@ -2391,7 +2391,7 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
             col, key = (t.schema_name, t.name, c.name), (u.schema_name, u.name, k)
             if col in found or (key, col) in offered:
                 continue
-            if not PF.checkable(dialect, t, u):
+            if not PF.checkable(u):
                 too_big.add(_qualified(u))
                 continue
             if left <= 0:
@@ -2451,7 +2451,7 @@ def _check_joins(dialect: D.Dialect, runner: Runner, rels: list[Relationship], t
             continue
         ft = _endpoint(tables, r.from_table, r.from_schema)
         tt = _endpoint(tables, r.to_table, r.to_schema)
-        if ft is None or tt is None or not PF.checkable(dialect, ft, tt):
+        if ft is None or tt is None or not PF.checkable(tt):
             skipped += 1
             continue
         if len(checked) >= PF.JOIN_CHECK_CAP:

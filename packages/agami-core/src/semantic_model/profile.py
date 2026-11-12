@@ -141,7 +141,7 @@ class JoinCheck:
         return out
 
 
-def checkable(dialect: D.Dialect, ft: Table, tt: Table) -> bool:
+def checkable(tt: Table) -> bool:
     """A join can be checked unless the table it points at is too large to read its keys."""
     rows = _rows(tt)
     return rows is None or rows <= JOIN_TARGET_MAX_ROWS
@@ -253,7 +253,8 @@ PROFILE_MAX_COLUMNS = 80
 PROFILE_TOP_MAX_DISTINCT = 50
 PROFILE_TOP = 10
 _DATE_TYPES = ("date", "timestamp")
-_DISTINCT_TYPES = ("string", "integer", "decimal", "float", "boolean", "date", "timestamp", "uuid")
+# Not float: some warehouses refuse to group or count distinct floating-point values.
+_DISTINCT_TYPES = ("string", "integer", "decimal", "boolean", "date", "timestamp", "uuid")
 _RANGE_TYPES = ("integer", "decimal", "float", "date", "timestamp")
 _MAX_DATE_PAIRS_COLS = 6
 # Words that name when something happened, in the order a record usually goes through them. Two
