@@ -27,10 +27,10 @@ below corresponds to one such version.
   named for something that already happened, two dates in the reverse of their names' order, and a
   text column mixing date formats. Personal columns get counts only. The profile and the join
   checks are written to `.introspect/profile.json` (`sm profile <root> --table <t>` reads it), and
-  enrichment describes columns from it instead of five sample rows. The checks run several to a
-  statement and a few statements at once: on a 42-table Postgres over a cloud pooler the join
-  checks and candidate scan went from about 1,000 sequential statements' worth of round trips to a
-  few dozen (#448).
+  enrichment describes columns from it instead of five sample rows. The checks run eight to a
+  statement and four statements at once, and a join checked on the whole key needs no separate
+  uniqueness probe: on a 42-table Postgres behind a cloud pooler, checking its 73 joins took 2.2
+  seconds instead of 73 one at a time, and the join-candidate scan 15 seconds instead of 205.
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm

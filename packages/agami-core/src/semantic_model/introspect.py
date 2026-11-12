@@ -139,6 +139,9 @@ _NOT_A_REFERENCE_RE = re.compile(
     r"level|size|duration|version|position|sort|seq)s?($|_)", re.IGNORECASE)
 JOIN_CANDIDATES_FILE = "join_candidates.json"
 PROFILE_FILE = "profile.json"
+# Profile findings the report lists one line per table rather than one per column.
+_GROUPED_FINDINGS = {"empty": "empty on every row read", "mostly_blank": "blank on 90% or more of rows",
+                     "constant": "one value on every row"}
 
 
 def _progress(path: Optional[Path], msg: str) -> None:
@@ -231,21 +234,28 @@ class IntrospectReport:
         found = [(t, f) for t, p in self.profile_tables.items() for f in p.get("findings", [])]
         out = [f"## column profile ({len(self.profile_tables)} tables read; {len(found)} finding(s); "
                f"in .introspect/{PROFILE_FILE})"]
-        out += [f"  ! {t}: {f['detail']}" for t, f in found[:30]]
-        if len(found) > 30:
-            out.append(f"  … {len(found) - 30} more in the file")
+        # The common kinds one line per table, the rest one line each: a wide table can have dozens.
+        grouped: dict[tuple, list[str]] = {}
+        for t, f in found:
+            if f["kind"] in _GROUPED_FINDINGS:
+                grouped.setdefault((t, f["kind"]), []).append(f["column"])
+            else:
+                out.append(f"  ! {t}: {f['detail']}")
+        out += [f"  - {t}: {_GROUPED_FINDINGS[k]}: {', '.join(cols)}" for (t, k), cols in grouped.items()]
         return out
 
     def _render_join_checks(self) -> list[str]:
         if not self.join_checks:
             return []
-        ran = [c for c in self.join_checks if c["read"] != "not_run" and "match_rate" in c]
+        ran = [c for c in self.join_checks if c["read"] != "not_run"]
+        rated = [c for c in ran if "match_rate" in c]
         whole = sum(1 for c in ran if c["read"] == "whole")
         # Blank keys are an optional join's normal state; a value with no partner, or a key that
         # repeats on the side it points at, is not.
-        worth = [c for c in ran if c["match_rate"] < 1 or c["to_rows"] > c["to_keys"]]
+        worth = [c for c in rated if c["match_rate"] < 1 or c["to_rows"] > c["to_keys"]]
         out = [f"## joins checked on the data ({len(ran)} of {len(self.join_checks)}: {whole} on the whole "
-               f"table, {len(ran) - whole} on a sample; {len(worth)} worth a look)"]
+               f"table, {len(ran) - whole} on a sample; {len(ran) - len(rated)} with no values to compare; "
+               f"{len(worth)} worth a look)"]
         out += [f"  ! {c['join']}: {c['summary']}" for c in worth]
         return out
 

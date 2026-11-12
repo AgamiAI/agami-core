@@ -105,7 +105,7 @@ class JoinCheck:
         if not self.ran:
             return "the check could not compare the two columns"
         if not self.rows_read:
-            return f"no {self.ft.name} rows were read"
+            return f"{self.ft.name} has no rows" if self.read == "whole" else f"no {self.ft.name} rows were read"
         if not self.values:
             return f"{f} is blank on every row read"
         if self.read == "whole":
@@ -120,8 +120,9 @@ class JoinCheck:
         lost = self.rows_read - self.rows_matched
         if lost and self.read == "whole":
             blank = self.rows_read - self.rows_keyed
-            parts.append(f"{lost:,} of {self.rows_read:,} {self.ft.name} rows have no match"
-                         + (f" ({blank:,} blank)" if blank else "") + ": an inner join drops them")
+            what = (f"leave {self._name(self.ft, self.fc).split('.', 1)[-1]} blank" if blank == lost
+                    else "have no match" + (f" ({blank:,} blank)" if blank else ""))
+            parts.append(f"{lost:,} of {self.rows_read:,} {self.ft.name} rows {what}: an inner join drops them")
         unused = self.to_keys - self.values_matched
         if self.read == "whole" and unused > 0:
             parts.append(f"{unused:,} of {self.to_keys:,} {self.tt.name} keys have no {self.ft.name} row")

@@ -247,7 +247,8 @@ def test_every_join_of_a_build_is_checked_and_reported(tmp_path):
     [chk] = [c for c in report.join_checks if c["join"].startswith("orders")]
     assert chk["read"] == "whole" and chk["declared"] and chk["values"] == 3 and chk["values_matched"] == 1
     text = report.render()
-    assert "## joins checked on the data (1 of 1: 1 on the whole table, 0 on a sample; 1 worth a look)" in text
+    assert ("## joins checked on the data (1 of 1: 1 on the whole table, 0 on a sample; 0 with no values to "
+            "compare; 1 worth a look)") in text
     assert "! orders.customer_id -> customers.id: 1 of 3 values of orders.customer_id" in text
 
 
@@ -474,3 +475,29 @@ def test_text_holding_iso_dates_is_profiled_as_dates(tmp_path):
     prof = PF.profile_table(SQLITE, _runner(path), t, lambda c: False)
     assert prof["columns"]["placed_at"]["max"] == "2024-01-25 10:00:00"
     assert prof["date_order"] == [{"earlier": "placed_at", "later": "shipped_at", "share": 1.0, "rows": 25}]
+
+
+def _checked(**kw) -> PF.JoinCheck:
+    c = PF.JoinCheck(ORDERS, ["customer_id"], CUSTOMERS, ["id"], read="whole")
+    for k, v in kw.items():
+        setattr(c, k, v)
+    return c
+
+
+def test_keys_left_blank_are_named_as_such_and_an_empty_table_says_so():
+    c = _checked(rows_read=10, rows_keyed=4, rows_matched=4, values=2, values_matched=2, to_keys=2, to_rows=2)
+    assert c.summary() == ("all 2 values of orders.customer_id are found in customers.id (whole table checked); "
+                           "6 of 10 orders rows leave customer_id blank: an inner join drops them")
+    assert _checked().summary() == "orders has no rows"
+    assert _checked(read="sample").summary() == "no orders rows were read"
+
+
+def test_the_report_lists_common_findings_one_line_per_table(tmp_path):
+    rep = I.IntrospectReport(profile="p", db_type="sqlite", out_dir=str(tmp_path), dry_run=True)
+    rep.profile_tables = {"main.t": {"findings": [
+        {"column": "a", "kind": "empty", "detail": "a is empty on every row read"},
+        {"column": "b", "kind": "empty", "detail": "b is empty on every row read"},
+        {"column": "d", "kind": "date_range", "detail": "d has dates after today"}]}}
+    text = rep.render()
+    assert "## column profile (1 tables read; 3 finding(s)" in text
+    assert "  - main.t: empty on every row read: a, b" in text and "  ! main.t: d has dates after today" in text
