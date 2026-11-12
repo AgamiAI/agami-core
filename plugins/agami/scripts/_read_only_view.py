@@ -110,6 +110,7 @@ _SAVING_STYLE = (
     + ",\n".join(f"  body.agami-saves {s}" for s in SAVING_HIDDEN)
     + " { display: none !important; }\n"
     + """  body.agami-saved .sticky-footer { display: none !important; }
+  body.agami-save-over #btn-generate { pointer-events: none; opacity: 0.5; }
   .agami-save-banner { margin: 0 0 16px; padding: 10px 14px; border-radius: 8px;
     border: 1px solid #D2DBF1; background: #F4F6FD; color: #1B2240; font: 14px/1.4 system-ui, sans-serif; }
   .agami-save-status:empty { display: none; }
@@ -144,10 +145,12 @@ window.agamiSave = (function () {
       .then(function (res) {
         if (res.ok) {
           state = 'saved'; document.body.classList.add('agami-saved');
-          say('Saved. In the chat, agami applies your decisions and says what changed. You can close this page.', 'ok');
+          say(%(saved)s, 'ok');
           return;
         }
         state = (res.status === 409 || res.status === 410) ? 'over' : 'idle';
+        // A refusal that cannot change keeps the button off, even when the page redraws its footer.
+        if (state === 'over') document.body.classList.add('agami-save-over');
         buttons(state === 'over');
         say((res.b && res.b.message) || ('Not saved (' + res.status + ').'), 'bad');
       })
@@ -193,12 +196,20 @@ def saving_banner(signoff: dict) -> str:
     )
 
 
-def make_saving(html: str, signoff: dict) -> str:
-    """Return `html` as a page that posts its decisions to the helper serving it (`serve_page.py --decisions`)."""
+def make_saving(html: str, signoff: dict, back_label: str = "I've saved it") -> str:
+    """Return `html` as a page that posts its decisions to the helper serving it (`serve_page.py --decisions`).
+
+    `back_label` is the option on the chat's `Page` card that the person presses once the page is
+    saved: an open card is not interrupted when the helper exits, so the page says to press it."""
     if "<body>" not in html:
         raise ValueError("expected a plain <body> tag to mark the page as saving")
     signer = signoff if signoff.get("email") and signoff.get("role") else None
     config = json.dumps({"signer": signer}).replace("<", "\\u003c")  # nothing in it can close the script
-    script = _SAVING_SCRIPT % {"config": config, "label": json.dumps(SAVE_LABEL)}
+    saved = f"Saved. Go back to the chat and press {back_label}: agami applies your decisions there and says what changed."
+    script = _SAVING_SCRIPT % {
+        "config": config,
+        "label": json.dumps(SAVE_LABEL),
+        "saved": json.dumps(saved).replace("<", "\\u003c"),
+    }
     html = html.replace("</head>", _SAVING_STYLE + "\n" + script + "\n</head>", 1)
     return html.replace("<body>", f'<body class="agami-saves">\n{saving_banner(signoff)}', 1)

@@ -462,3 +462,163 @@ def test_view_only_mode_still_refuses_every_post(served):
     _, url = served
     port = url.split(":")[2].split("/")[0]
     assert _post(f"http://127.0.0.1:{port}/report.html")[0] == 405
+
+
+# --- review hardening (#651) ------------------------------------------------------------------
+
+
+def _here(tmp_path, html: str = "<p>x</p>", out_name: str = "d.json"):
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    page = tmp_path / "p.html"
+    page.write_text(html, encoding="utf-8")
+    server = serve_page._Server(page.resolve(), tmp_path / out_name)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return serve_page, server, f"http://127.0.0.1:{server.port}{server.base}"
+
+
+def test_the_policy_allows_the_pages_own_scripts_by_hash_and_nothing_else(tmp_path):
+    import base64
+    import hashlib
+
+    page = (
+        "<!-- a comment that says <script>evil()</script> -->"
+        "<html><head><script>var a = '<\\/b>';</script></head>"
+        '<body><script src="x.js"></script><script>\n  go();\n</script></body></html>'
+    )
+    serve_page, server, url = _here(tmp_path, page)
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            csp = r.headers["Content-Security-Policy"]
+        script_src = next(d for d in csp.split("; ") if d.startswith("script-src "))
+        assert "unsafe-inline" not in script_src
+
+        def h(text: str) -> str:
+            return (
+                "'sha256-" + base64.b64encode(hashlib.sha256(text.encode()).digest()).decode() + "'"
+            )
+
+        assert script_src.split()[1:] == [h("var a = '<\\/b>';"), h("\n  go();\n")]
+        assert h("evil()") not in csp  # a script inside a comment is not the page's
+        assert h("alert(1)") not in csp  # nor one added later
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    "template", ["model-explorer-template.html", "examples-validation-template.html"]
+)
+def test_every_inline_script_of_a_saving_page_is_hashed(template):
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+    from _read_only_view import make_saving
+
+    html = make_saving((SCRIPT.parent.parent / "shared" / template).read_text(), {})
+    assert html.count("<script") == len(serve_page.script_hashes(html)) >= 2
+    # No inline event handler attribute: a hash does not cover one, so it would not run.
+    assert not re.search(r"<[^>]+\son[a-z]+\s*=", html, re.I)
+
+
+def test_the_page_served_is_the_one_read_at_startup(tmp_path):
+    serve_page, server, url = _here(tmp_path, "<p>first</p>")
+    try:
+        (tmp_path / "p.html").write_text("<script>alert(1)</script>", encoding="utf-8")
+        assert _get(url) == (200, b"<p>first</p>")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_link_planted_beside_the_decisions_file_is_not_followed(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    for name in ("d.json.tmp", ".d.json.tmp"):
+        (tmp_path / name).symlink_to(victim)
+    serve_page, server, url = _here(tmp_path)
+    try:
+        assert _post(url + "save", b'{"a": 1}')[0] == 200
+        assert victim.read_text() == "keep me"
+        assert json.loads((tmp_path / "d.json").read_text()) == {"a": 1}
+        assert not (tmp_path / "d.json").is_symlink()
+        assert (tmp_path / "d.json").stat().st_mode & 0o777 == 0o600
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_json_nested_too_deep_is_a_400_not_a_dropped_connection(tmp_path):
+    serve_page, server, url = _here(tmp_path)
+    try:
+        deep = b'{"a": ' + b"[" * 100000 + b"]" * 100000 + b"}"
+        assert _post(url + "save", deep)[0] == 400
+        assert _post(url + "save", b'{"ok": 1}')[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_drip_fed_body_is_cut_off_at_the_deadline(tmp_path, monkeypatch):
+    import socket
+    import time
+
+    serve_page, server, url = _here(tmp_path)
+    monkeypatch.setattr(serve_page, "BODY_DEADLINE", 1.0)
+    try:
+        s = socket.create_connection(("127.0.0.1", server.port), timeout=10)
+        head = (
+            f"POST {server.base}save HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n"
+            f"Origin: http://127.0.0.1:{server.port}\r\nContent-Type: application/json\r\n"
+            "Content-Length: 50\r\n\r\n"
+        )
+        s.sendall(head.encode())
+        start = time.monotonic()
+        closed = False
+        while time.monotonic() - start < 6:
+            try:
+                s.sendall(b" ")
+                time.sleep(0.3)
+                s.settimeout(0.01)
+                if s.recv(1) == b"":
+                    closed = True
+                    break
+            except (BlockingIOError, socket.timeout):
+                continue
+            except OSError:
+                closed = True
+                break
+        assert closed and time.monotonic() - start < 4
+        assert not server.taken
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_connections_past_the_cap_are_closed(tmp_path, monkeypatch):
+    import socket
+    import threading
+
+    sys.path.insert(0, str(SCRIPT.parent))
+    import serve_page
+
+    monkeypatch.setattr(serve_page, "MAX_CONNECTIONS", 2)
+    page = tmp_path / "p.html"
+    page.write_text("x", encoding="utf-8")
+    server = serve_page._Server(page.resolve(), tmp_path / "d.json")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    idle = [socket.create_connection(("127.0.0.1", server.port), timeout=5) for _ in range(2)]
+    try:
+        threading.Event().wait(0.3)
+        extra = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+        assert extra.recv(1) == b""  # closed at once, not served
+        extra.close()
+        for s in idle:
+            s.close()
+        threading.Event().wait(0.3)
+        assert _get(f"http://127.0.0.1:{server.port}{server.base}")[0] == 200  # a slot came back
+    finally:
+        server.shutdown()
+        server.server_close()

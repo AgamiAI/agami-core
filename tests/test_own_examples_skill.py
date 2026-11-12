@@ -35,7 +35,7 @@ def test_the_examples_card_offers_add_my_own_every_time():
     assert "**Add my own** is on this card every time" in six
     assert "| Add my own |" in six and LINK in six
     # with four options already, the full view is what gives way, and typing still reaches it
-    assert "**Mark them on a page** gives way to it" in six
+    assert "**Drop the failing ones** gives way" in six
 
 
 def test_agami_model_and_agami_reconcile_reach_the_same_procedure():

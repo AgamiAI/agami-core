@@ -47,6 +47,7 @@ import re
 import secrets
 import signal
 import sys
+import tempfile
 import threading
 import urllib.parse
 from collections.abc import Callable, Iterator
@@ -266,12 +267,16 @@ def _remove_section(creds: Path, added: str) -> None:
 
 
 def _write_whole(creds: Path, text: str) -> None:
-    """Replace the file's contents in one step (a temp file at 0600, then a rename)."""
-    tmp = creds.with_name(creds.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-        fh.write(text)
-    os.replace(tmp, creds)
+    """Replace the file's contents in one step: a fresh temp file at 0600 beside it (mkstemp, so not a
+    fixed name a planted link could redirect), then a rename."""
+    fd, tmp = tempfile.mkstemp(dir=creds.parent, prefix=f".{creds.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, creds)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _replace_section(creds: Path, profile: str, section: str) -> tuple[str, str]:

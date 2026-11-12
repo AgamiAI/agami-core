@@ -37,6 +37,8 @@ LOGO_LIGHT_PATH = SHARED_DIR / "agami-logo-light.svg"
 
 
 VALID_STATES = {"unreviewed", "validated", "rejected"}
+# The option on agami-connect Phase 6's `Page` card that the person presses once the page is saved.
+EXAMPLES_BACK_LABEL = "I've marked them on the page"
 
 
 def _validate_item(item: dict, idx: int) -> None:
@@ -202,7 +204,8 @@ def main() -> int:
     if args.read_only:
         html = make_read_only(html)
     elif args.save_to_helper:
-        html = make_saving(html, saved_signoff(Path(os.path.expanduser(args.artifacts_dir))))
+        signoff = saved_signoff(Path(os.path.expanduser(args.artifacts_dir)))
+        html = make_saving(html, signoff, back_label=EXAMPLES_BACK_LABEL)
     out_path.write_text(html, encoding="utf-8")
     # render() normalized `n` to a stable global 1..N (in place). Persist it back so a later
     # apply pass ("edit N" -> the N-th example) resolves against the SAME numbering the dashboard

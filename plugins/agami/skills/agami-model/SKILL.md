@@ -119,7 +119,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 - **Approve**: sign it off as written.
 - **Reject**: drop it from the model (`{"op":"reject",…}`).
-- **Approve all remaining**: sign off this item and every item not yet decided. The ones not yet shown are listed first and confirmed with one more question ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for a definition the person hasn't seen. Answers given on the same card to the other questions still stand.
+- **Approve all remaining**: sign off this item and every item not yet decided. The ones not yet shown are listed first and confirmed with one more question ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for a definition the person hasn't seen. Each of its approve ops carries `"bulk": true`. Answers given on the same card to the other questions still stand.
 - **Review on a page**: the model explorer opened on this item's kind (Phase 5, `initial_tab=review` and `section` `metrics`, `entities` or `joins`), where the rest of the queue is decided at once and saved from the page. Offer it on every question of the card, not only the first. Answers given on the card's other questions are applied first; after the page, the next card holds only what is still undecided.
 
 After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
@@ -224,9 +224,9 @@ Run `serve_page.py` with `run_in_background` and wait for its first line as rule
 Post the link and the `Page` card (rule 6a step 4):
 
 ```
-[Review on a page](http://127.0.0.1:<port>/<token>/). Approve, reject, hide or edit there, then
-press Save decisions; they come straight back here. Approvals are signed as <reviewer_email>.
-The link lasts 30 minutes.
+[Review on a page](http://127.0.0.1:<port>/<token>/). Approve, reject, hide or edit there, press
+Save decisions, then come back here and press I've saved it. Approvals are signed as
+<reviewer_email>. The link lasts 30 minutes.
 ```
 
 ### 5b — Apply what the page saved
@@ -234,8 +234,11 @@ The link lasts 30 minutes.
 When the helper's final line is `saved`, its `decisions` file holds the page's feedback block. **Don't hand-parse it** — give the file to the parser, which reads the helper's file and a block pasted from an older page (one with a "Generate feedback for Claude" button, rendered before pages saved themselves) alike, handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file "<artifacts_dir>/local/tmp/agami-page-$ts.json"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file "<artifacts_dir>/local/tmp/agami-page-$ts.json" \
+  --expect-profile "$profile"
 ```
+
+`--expect-profile` is the profile the page was rendered for: a decisions file from another page or for another model is refused (`{"ok": false, "error"}`, exit 2; say the error in one line and apply nothing), and the parser drops the block's own `signed-off-by:` line, so the signer can only be `.config`'s.
 
 It prints `{data, anomalies, needs_judgment}`:
 - `data.profile` — the page's target model. **Use it, overriding the active-profile default** (a page was rendered for THAT model; never apply it to whatever's active).
@@ -245,7 +248,7 @@ It prints `{data, anomalies, needs_judgment}`:
 - An example the person wants dropped rather than edited → a `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` op in the same `sm curate` batch (Phase 6), or `sm remove-example "$ROOT" --question "<area>/<question>"` (repeat `--question`; with no `--area` one call covers every area, and a bare question found in more than one area is refused, not rejected everywhere).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
 - `data.datasource_md` — the full datasource.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/datasource.md` (overwrite; human narrative only).
-- `data.signer` / `data.role` — on the page path the signer is always the saved `reviewer_email` / `reviewer_role` from `.config`, the identity the page showed: apply with those, and if the block names someone else, apply with `.config`'s and say so in one line. For a block pasted from an older page, it is the curator identity for `--signer`/`--role` (recorded on every op; required on an approve): **persist** it into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the identity card (Phase 0).
+- `data.signer` / `data.role` — on the page path they are always null (the parser drops them) and the signer is the saved `reviewer_email` / `reviewer_role` from `.config`, the identity the page showed. For a block pasted from an older page, it is the curator identity for `--signer`/`--role` (recorded on every op; required on an approve): **persist** it into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the identity card (Phase 0).
 
 **If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a subject-area prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (that part of the page's save didn't read; nothing is applied, and **Review on a page** opens a fresh page). Don't apply a partial block.
 

@@ -235,7 +235,8 @@ def test_the_full_view_saves_through_the_helper_and_applies_with_the_same_comman
     for deep_link in ("`metrics`, `entities`, `joins`", "`pii` from the personal-data question"):
         assert deep_link in s, deep_link
     # who signs is the saved identity, never what a page sends
-    assert "the signer is always the saved `reviewer_email` / `reviewer_role`" in s
+    assert "the signer is the saved `reviewer_email` / `reviewer_role` from `.config`" in s
+    assert '--expect-profile "$profile"' in s and "drops the block's own `signed-off-by:` line" in s
     # the say-back counts what the commands applied, not what the page claimed
     assert "never from the page's own count" in s
 
@@ -257,3 +258,11 @@ def test_cards_name_tables_and_columns_in_words() -> None:
     assert "**Email on Customers**" in text and "`customers.email`, or" not in text
     assert "item's `plain_name`" in text
     assert "**Orders (5: Orders, Order items, …)**" in _hide()
+
+
+def test_the_page_link_says_to_come_back_and_press_ive_saved_it() -> None:
+    assert "then come back here and press I've saved it" in _full_view()
+
+
+def test_approve_all_remaining_marks_its_ops_bulk() -> None:
+    assert 'Each of its approve ops carries `"bulk": true`.' in _review()

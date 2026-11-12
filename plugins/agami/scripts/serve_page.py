@@ -30,13 +30,18 @@ under its own name). Stdlib only.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import html.parser
 import http.server
 import json
 import mimetypes
 import os
 import secrets
 import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -45,14 +50,53 @@ HOST = "127.0.0.1"
 # The page itself is always served; beside it, only the kinds of file a report page loads.
 _ALLOWED_SUFFIXES = {".html", ".css", ".js", ".svg", ".png", ".jpg", ".json"}
 _REQUEST_TIMEOUT = 10  # a client that stalls mid-request is dropped rather than held open
-MAX_DECISIONS = (
-    1024 * 1024
-)  # a whole review page's queue, edited descriptions included, is far smaller
-# A saving page runs its own inline script and posts back to this server, and loads nothing else.
+# A post has this long, in all, to send its body: the per-read timeout alone let a drip-fed body
+# hold its thread for as long as the client kept sending a byte at a time.
+BODY_DEADLINE = 10.0
+MAX_CONNECTIONS = 8  # one page needs one or two; more at once is not a browser
+# a whole review page's queue, edited descriptions included, is far smaller
+MAX_DECISIONS = 1024 * 1024
+# A saving page runs only its own inline scripts (each allowed by its hash, so a script that got
+# into the page some other way does not run) and posts back to this server; it loads nothing else.
 _SAVING_CSP = (
-    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; "
+    "default-src 'none'; script-src {hashes}; style-src 'unsafe-inline'; img-src data:; "
     "connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
 )
+_ALREADY_SAVED = "These decisions were already saved; this page saves once."
+_EXPIRED = "This page has expired; nothing was saved."
+
+
+class _Scripts(html.parser.HTMLParser):
+    """The text of each inline <script> in a page, as the browser hashes it (comments skipped)."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.blocks: list[str] = []
+        self._open: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script" and not any(k == "src" for k, _ in attrs):
+            self._open = []
+
+    def handle_data(self, data: str) -> None:
+        if self._open is not None:
+            self._open.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "script" and self._open is not None:
+            self.blocks.append("".join(self._open))
+            self._open = None
+
+
+def script_hashes(page: str) -> list[str]:
+    """The CSP source for each inline script of `page`: `'sha256-<base64>'`."""
+    parser = _Scripts()
+    parser.feed(page)
+    parser.close()
+    return [
+        "'sha256-" + base64.b64encode(hashlib.sha256(b.encode("utf-8")).digest()).decode() + "'"
+        for b in parser.blocks
+    ]
 
 
 class _Server(http.server.ThreadingHTTPServer):
@@ -73,6 +117,29 @@ class _Server(http.server.ThreadingHTTPServer):
         self.closed = False  # set under `lock` when the time is up; no post is taken after it
         self.lock = threading.Lock()
         self.done = threading.Event()  # set once the accepted post has had its answer
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+        # The saving page is read once, and its scripts hashed from those bytes, so the page served
+        # is the one the policy allows.
+        self.body = page.read_bytes() if decisions is not None else b""
+        hashes = " ".join(script_hashes(self.body.decode("utf-8"))) or "'none'"
+        self.csp = _SAVING_CSP.format(hashes=hashes)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # A thread per connection, but only so many at once: past the cap the connection is closed.
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         pass  # a dropped or timed-out connection is not news
@@ -92,7 +159,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         if self.server.decisions is not None:
-            self.send_header("Content-Security-Policy", _SAVING_CSP)
+            self.send_header("Content-Security-Policy", self.server.csp)
             # Not no-referrer: under that policy a browser sends `Origin: null` with the page's post,
             # which the Origin check refuses. Same-origin sends the token to no other site.
             self.send_header("Referrer-Policy", "same-origin")
@@ -139,7 +206,8 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
             ctype += "; charset=utf-8"
         try:
-            self._send(200, target.read_bytes(), ctype)
+            body = self.server.body if self.server.decisions is not None else target.read_bytes()
+            self._send(200, body, ctype)
         except OSError:
             self._send(404, b"Not found")
 
@@ -154,6 +222,25 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send(
             code, json.dumps({"ok": code == 200, "message": message}).encode(), "application/json"
         )
+
+    def _read_body(self, length: int) -> bytes | None:
+        """`length` bytes of body within BODY_DEADLINE in all, or None."""
+        deadline = time.monotonic() + BODY_DEADLINE
+        chunks, got = [], 0
+        try:
+            while got < length:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return None
+                self.connection.settimeout(left)
+                chunk = self.rfile.read1(min(65536, length - got))
+                if not chunk:
+                    return None
+                chunks.append(chunk)
+                got += len(chunk)
+        except OSError:
+            return None
+        return b"".join(chunks)
 
     def do_POST(self) -> None:  # noqa: N802
         srv = self.server
@@ -178,22 +265,27 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if length <= 0:
             return self._answer(400, "Nothing was sent.")
         if srv.taken or srv.closed:
-            return self._answer(409 if srv.taken else 410, _GONE[srv.taken])
-        try:
-            body = self.rfile.read(length)
-        except OSError:  # the client stopped sending before Content-Length bytes arrived
+            return self._answer(
+                409 if srv.taken else 410, (_ALREADY_SAVED if srv.taken else _EXPIRED)
+            )
+        body = self._read_body(length)
+        if (
+            body is None
+        ):  # the client stopped sending, or took too long, before Content-Length bytes
             self.close_connection = True
             return
         try:
             decisions = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):  # RecursionError: nested too deep
             decisions = None
         if not isinstance(decisions, dict):
             return self._answer(400, "The decisions are not a JSON object.")
         with srv.lock:
             # A second post that raced the first, or one that raced the expiry.
             if srv.taken or srv.closed:
-                return self._answer(409 if srv.taken else 410, _GONE[srv.taken])
+                return self._answer(
+                    409 if srv.taken else 410, (_ALREADY_SAVED if srv.taken else _EXPIRED)
+                )
             try:
                 _write_private(srv.decisions, json.dumps(decisions, indent=2))
             except OSError:
@@ -205,20 +297,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             srv.done.set()
 
 
-_GONE = {
-    True: "These decisions were already saved; this page saves once.",
-    False: "This page has expired; nothing was saved.",
-}
-
-
 def _write_private(path: Path, text: str) -> None:
-    """Write `text` to `path` at 0600 in one step (a temp file, then a rename)."""
+    """Write `text` to `path` at 0600 in one step: a fresh temp file beside it (never a name someone
+    could have planted a link at), then a rename."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _emit(obj: dict[str, Any]) -> None:

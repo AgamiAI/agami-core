@@ -727,8 +727,10 @@
     let piiSubTab = 'all';       // PII tab sub-view: all | flagged | suspected
     // Review tab: which kind-pile within the sub-tab (all | a REVIEW_GROUPS label | __unknown). A review
     // card's "Review on a page" opens on the pile it was asking about (`--section`).
-    let reviewKind = manifest.initial_section || 'all';
-    let sectionPlaced = !manifest.initial_section;   // set once the opening sub-tab has been picked for it
+    // `initial_section` lists the piles that section may be, first found first (the joins are two).
+    const SECTION_PILES = manifest.initial_section || [];
+    let reviewKind = SECTION_PILES[0] || 'all';
+    let sectionPlaced = !SECTION_PILES.length;   // set once the opening sub-tab and pile have been picked
     let joinTypeFilter = 'all';  // Joins tab: all | in | cross
     let inlineEditKey = null;    // "<qname>|<field>" currently being edited inline-in-place
 
@@ -2450,9 +2452,9 @@
       // Opened on a section: start on the first sub-tab that holds that kind of item.
       if (!sectionPlaced) {
         sectionPlaced = true;
-        const holds = k => groups[k] && reviewKindGroups(groups[k].items).some(kg => kg.key === reviewKind);
-        const k = ['eyes', 'looks', 'edited'].find(holds);
-        if (k) { reviewSubTab = k; reviewSubTabChosen = true; }
+        const pileIn = k => groups[k] && SECTION_PILES.find(pile => reviewKindGroups(groups[k].items).some(kg => kg.key === pile));
+        const k = ['eyes', 'looks', 'edited'].find(pileIn);
+        if (k) { reviewSubTab = k; reviewSubTabChosen = true; reviewKind = pileIn(k); }
       }
       const isEyes = reviewSubTab === 'eyes' || !groups[reviewSubTab];
 
@@ -3155,15 +3157,36 @@
     }
 
     // ---- Generate feedback ----
-    function generateFeedback() {
-      // Approvals must be signed — require a valid email + role before generating.
+    // On a saving page, why Save must wait, or null. The page saves once and its helper then exits,
+    // so text still in an open editor or form would be lost, and an approval needs the saved
+    // identity (the page cannot take one).
+    function saveBlocker() {
+      const open = [];
+      if (inlineEditKey !== null) open.push('an inline edit');
+      if (editOpen.size) open.push(editOpen.size === 1 ? 'an edit form' : editOpen.size + ' edit forms');
+      if (addMetricOpen) open.push('the new metric');
+      if (addJoinOpen) open.push('the new join');
+      if (addExampleOpen) open.push('the new example');
+      const glossaryTyped = typeof document !== 'undefined'
+        && Array.from(document.querySelectorAll('.glossary-add input')).some(i => (i.value || '').trim());
+      if (glossaryTyped) open.push('the new glossary term');
+      if (open.length) return '⚠ Press Save on the open edit first, or cancel it (' + open.join(', ') + ').';
       if (hasQueuedApprovals() && !validEmail(signOff.email)) {
-        if (SAVES) {
+        return '⚠ Approvals need a sign-off identity, set in the chat. Remove the approvals to save the rest.';
+      }
+      return null;
+    }
+    function generateFeedback() {
+      if (SAVES) {
+        const why = saveBlocker();
+        if (why) {
           const fv = document.getElementById('footer-validate');
-          fv.textContent = '⚠ Approvals need a sign-off identity, set in the chat. Remove the approvals to save the rest.';
-          fv.className = 'footer-validate bad';
+          fv.textContent = why; fv.className = 'footer-validate bad';
           return;
         }
+      }
+      // Approvals must be signed — require a valid email + role before generating.
+      if (hasQueuedApprovals() && !validEmail(signOff.email)) {
         signOff._invalid = true;
         if (activeTab !== 'review') { activeTab = 'review'; renderAll(); }  // the field lives on the Review tab
         const em = document.getElementById('signoff-email');

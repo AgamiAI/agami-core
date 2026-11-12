@@ -156,7 +156,8 @@ Read that first line from the background task's output and give the person the U
 1. **Where a page can't reach this computer, use the cards.** In a remote or SSH session
    (`SSH_CONNECTION` is set), the person's browser can't open this computer's `127.0.0.1`: say so in
    one line ("pages open on this computer, which your browser can't reach from here") and carry on
-   with the cards.
+   with the cards. A cloud or web session can be remote without setting it, so the link may still
+   not open there: **Back to the cards** (step 4) is the way out.
 2. **Render the page with `--save-to-helper`** (and the skill's deep link), to a new timestamped
    file. Its Save button posts the decisions to the helper serving it; approvals on it are signed as
    the saved `reviewer_email` / `reviewer_role` from `<artifacts_dir>/local/.config`, which the page
@@ -175,12 +176,19 @@ Read that first line from the background task's output and give the person the U
    line within about 15 seconds, or the task exited: the helper couldn't start (a refused port, say);
    say so in one line with its last stderr line, and carry on with the cards.
 4. **Post the link**, then a card so it isn't missed: *"[Review on a page](<url>). Mark your decisions
-   there and press Save decisions; they come straight back here. The link lasts 30 minutes."* Then
-   one question (header `Page`), *"Save your decisions on the page, then come back here."*:
-   **I've saved it** (or the skill's wording for its page) / **Back to the cards** (stop the helper
-   with TaskStop; nothing is saved; ask the card the page was picked on again). The helper's exit also brings you back while the card is open: go to step 5
-   and don't ask the card again. **I've saved it** with no final line yet: say the page hasn't been
-   saved, and ask the `Page` card again.
+   there, press Save decisions, then come back here and press I've saved it. The link lasts 30
+   minutes."* Then one question (header `Page`), *"Save your decisions on the page, then come back
+   here."*: **I've saved it** (or the skill's wording for its page; the saved page tells the person
+   to press it) / **Back to the cards**. Assume an open card is not interrupted when the helper
+   exits; if the exit does bring you back first, go to step 5 and don't ask the card again.
+   - **I've saved it** → read the helper's output. Its final line is there → step 5. None yet → say
+     the page hasn't been saved, and ask the `Page` card again.
+   - **Back to the cards** → read the helper's output **first**, before stopping anything. A `saved`
+     line means the page was saved before the person went back: say so, and ask one question (header
+     `Saved page`), *"The page was saved before you went back. Apply what it saved?"*: **Apply it**
+     (step 5) / **Discard it** (delete the decisions file; nothing changes). No final line yet →
+     stop the helper with TaskStop (nothing is saved after that), then ask the card the page was
+     picked on again.
 5. **Read the helper's final line.** `{"status": "saved", "decisions": "<file>"}`: apply the file with
    the skill's commands, the same ones a card uses (its parser, `sm curate`, `sm add-example`,
    `sm remove-example`, with the saved identity as `--signer` / `--role`), never by hand-editing a
