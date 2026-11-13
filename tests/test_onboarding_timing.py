@@ -1,6 +1,7 @@
 """`sm timing`: how long onboarding took, from the step marks `sm steps --mark` writes, so the
-summary's "Set up in …" line is measured, never estimated. Only the current run counts, the time
-between steps drops out, and a run with a long break in it shows no line."""
+summary's "Set up in …" line is measured, never estimated. Only the current run counts, the total
+is wall-clock from its first mark to its last (what the person waited), and a run with a long break
+in it shows no line."""
 
 from __future__ import annotations
 
@@ -52,9 +53,9 @@ def test_fixed_timeline(tmp_path):
     assert secs["describe"] == 0
     assert [s["id"] for s in result["steps"]] == list(steps.STEP_IDS)
     assert [s["label"] for s in result["steps"]] == [steps.LABELS[i] for i in steps.STEP_IDS]
-    # The sum of the steps: the gaps between them (10:00:30-10:01:00, and after the build) drop out.
-    assert result["total_seconds"] == 160
-    assert result["text"] == "Set up in 2 min 40 s"
+    # Wall-clock, first mark to last: the gaps between steps count, since the person waited them.
+    assert result["total_seconds"] == 400
+    assert result["text"] == "Set up in 6 min 40 s"
     assert result["paused"] is False
     assert result["started_at"] == "2026-11-12T10:00:00+00:00"
     assert result["finished_at"] == "2026-11-12T10:06:40+00:00"
@@ -102,8 +103,9 @@ def test_restart_counts_the_last_attempt(tmp_path):
     secs = _seconds(result)
     assert secs["build"] == 120
     assert secs["connect"] == 20
-    assert result["total_seconds"] == 140
-    assert result["text"] == "Set up in 2 min 20 s"
+    # From the restart's first mark (10:10:00) to the last (10:13:00); the first run drops out.
+    assert result["total_seconds"] == 180
+    assert result["text"] == "Set up in 3 min"
 
 
 def test_a_finished_step_started_again_is_a_new_attempt(tmp_path):
@@ -121,10 +123,12 @@ def test_a_reload_two_days_later_counts_only_the_reload(tmp_path, restart_at):
     result = timing.onboarding_timing(tmp_path)
     assert [s["id"] for s in result["steps"]] == list(later)  # steps before the reload not listed
     assert set(_seconds(result).values()) == {20}
-    assert result["total_seconds"] == 20 * len(later)
+    # 09:00:00 to 09:<n-1>:20 on day 3: the two days before the reload don't count.
+    total = 60 * (len(later) - 1) + 20
+    assert result["total_seconds"] == total
     assert result["paused"] is False
     assert result["started_at"] == "2026-11-03T09:00:00+00:00"
-    assert result["text"] == timing.duration_text(20 * len(later))
+    assert result["text"] == timing.duration_text(total)
 
 
 def test_a_run_resumed_next_morning_is_paused(tmp_path):
@@ -133,7 +137,7 @@ def test_a_run_resumed_next_morning_is_paused(tmp_path):
     result = timing.onboarding_timing(tmp_path)
     assert result["paused"] is True
     assert result["text"] == ""
-    assert result["total_seconds"] == 180
+    assert result["total_seconds"] == 16 * 3600 + 120  # wall-clock still reported; the line is not
     assert _seconds(result)["build"] == 120
 
 
@@ -142,7 +146,7 @@ def test_a_gap_just_under_two_hours_is_not_a_pause(tmp_path):
                       ("build", "in_progress", "12:01:00"), ("build", "done", "12:02:00")])
     result = timing.onboarding_timing(tmp_path)
     assert result["paused"] is False
-    assert result["text"] == "Set up in 2 min"
+    assert result["text"] == "Set up in 2 h 2 min"
 
 
 @pytest.mark.parametrize("done_at", ["10:00:00", "09:59:00"])
@@ -162,6 +166,16 @@ def test_no_timeline(tmp_path):
     assert result["started_at"] is None and result["finished_at"] is None
 
 
+def test_the_wait_between_steps_counts(tmp_path):
+    # A step done, a minute of the person reading, the next step: 3 min waited, not 2.
+    _write(tmp_path, [("connect", "in_progress", "10:00:00"), ("connect", "done", "10:01:00"),
+                      ("build", "in_progress", "10:02:00"), ("build", "done", "10:03:00")])
+    result = timing.onboarding_timing(tmp_path)
+    assert sum(_seconds(result).values()) == 120
+    assert result["total_seconds"] == 180
+    assert result["text"] == "Set up in 3 min"
+
+
 def test_started_but_nothing_done_is_untimed(tmp_path):
     _write(tmp_path, [("connect", "in_progress", "10:00:00")])
     result = timing.onboarding_timing(tmp_path)
@@ -177,7 +191,7 @@ def test_garbage_lines_ignored(tmp_path):
                     + "\n" + json.dumps({"id": "build", "status": "done", "at": "garbage"}) + "\n"
                     + '{"id": "reports", "status": "done"\n', encoding="utf-8")
     result = timing.onboarding_timing(tmp_path)
-    assert result["total_seconds"] == 160
+    assert result["total_seconds"] == 400
     assert _seconds(result)["build"] == 130
 
 

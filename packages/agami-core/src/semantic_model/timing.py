@@ -44,15 +44,17 @@ def _paused(times: list[float]) -> bool:
 def onboarding_timing(root: Path) -> dict[str, Any]:
     """The current run's steps (from the step it restarted at) with their seconds, first
     `in_progress` to last `done` of the attempt that stands, 0 when either is missing; the total as
-    the sum of those, so the time between steps drops out; and the line to show, `""` when the run
-    has nothing timed or was paused."""
+    wall-clock from the run's first mark to its last, since the person waited through the time
+    between steps too (a live run's sum of steps read 11 min 55 s against a 13 min wait); and the
+    line to show, `""` when the run has nothing timed or was paused."""
     run = steps.current_run(Path(root).expanduser())
     result = []
     for step_id in steps.STEP_IDS[steps.STEP_IDS.index(run.first_step):]:
         start, end = run.spans.get(step_id, (None, None))
         seconds = int(max(0.0, end - start)) if start is not None and end is not None else 0
         result.append({"id": step_id, "label": steps.LABELS[step_id], "seconds": seconds})
-    total = sum(s["seconds"] for s in result)
+    # File order, not min/max: a clock that stepped back reads as nothing timed, never as a span.
+    total = int(max(0.0, run.times[-1] - run.times[0])) if run.times else 0
     starts = [s for s, _ in run.spans.values() if s is not None]
     ends = [e for _, e in run.spans.values() if e is not None]
     paused = _paused(run.times)
