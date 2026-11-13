@@ -89,7 +89,7 @@ def test_the_build_runs_in_the_background_with_a_bar_from_the_log():
     build = (REFS / "build.md").read_text(encoding="utf-8")
     assert "on every server database (anything but SQLite and DuckDB" in build
     assert "`run_in_background: true`, and a `description` the person can read" in build
-    assert 'scripts/sm" progress "<artifacts_dir>/<profile>" --wait 20' in build
+    assert 'scripts/sm" progress "<root>" --wait 20' in build
     # a turn that ends loses the skill's pre-approvals (live run), so it loops on a pre-approved call
     assert "Use this, not `tail` or a watcher of your own: it is pre-approved" in build
     # a live run ended its turn mid-build twice: the app wakes it, but the turn must say so

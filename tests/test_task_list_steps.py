@@ -26,9 +26,9 @@ CONNECT = SKILLS_DIR / "agami-connect"
 REFS = CONNECT / "references"
 
 RULE = ("Run `sm steps` at the start of onboarding, when a step starts or ends, and after every "
-        "`sm progress --wait`. Replace the session's task list with its output: one item per step, "
-        "in order, using each step's `text` and `status`. Never write a step or a number `sm steps` "
-        "did not print.")
+        "`sm progress --wait`. Replace the session's task list with its `list`: one item per line, "
+        "in order, each line's mark giving the item's state. Never write a step or a number "
+        "`sm steps` did not print.")
 
 # Each phase file and the marks it carries, where its step really starts and ends. The report
 # check (`reports`) is 6b of the examples file: that is where the shared reports are checked.
@@ -61,10 +61,10 @@ def test_task_list_rule_is_stated_once():
     assert RULE in " ".join(text.split())
     body = text.split("\n", 1)[1].lstrip()
     assert " ".join(body.split("\n\n", 1)[0].split()) == RULE  # the opening paragraph
-    for form in ('bash "<plugin_root>/scripts/sm" steps "$ROOT"\n',
-                 'bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=in_progress',
-                 'bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=done',
-                 'bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=skipped'):
+    for form in ('bash "<plugin_root>/scripts/sm" steps "<root>"\n',
+                 'bash "<plugin_root>/scripts/sm" steps "<root>" --mark <id>=in_progress',
+                 'bash "<plugin_root>/scripts/sm" steps "<root>" --mark <id>=done',
+                 'bash "<plugin_root>/scripts/sm" steps "<root>" --mark <id>=skipped'):
         assert form in text, form
     assert len(text.splitlines()) < 60
 
@@ -110,7 +110,7 @@ def test_skill_steps_match_the_engine(tmp_path):
 def test_each_phase_marks_its_step(name, marks):
     text = _text(REFS / name)
     for mark in marks:
-        assert f'steps "$ROOT" --mark {mark}' in text, f"{name}: {mark}"
+        assert f'steps "<root>" --mark {mark}' in text, f"{name}: {mark}"
     assert "](../../../shared/task-list.md)" in text, name
 
 
@@ -121,7 +121,8 @@ def test_build_refreshes_the_list_after_each_wait():
     # the rest of the wait-loop item, up to the next item (well before the next heading)
     item = text[wait.end():].split("\n4. ", 1)[0]
     assert "\n#" not in item
-    assert 'steps "$ROOT"\n' in item  # plain `sm steps`, no mark
+    # the poll's own `list` refreshes the task list: one call per pass, no `sm steps` beside it
+    assert "Its output also carries `list`" in item and "No separate `sm steps` call per pass" in item
     # the loop stops on a failed build too, and the person is told why
     loop = text[:wait.start()].rsplit("\n", 3)[-3]
     assert "in a loop until it says `done` or `failed`" in loop
@@ -154,7 +155,8 @@ def test_the_last_step_is_done_before_the_turn_ends():
 
 def test_build_stops_waiting_on_a_problem():
     text = _text(REFS / "build.md")
-    assert "or `sm steps` (below) prints a `problem`" in text
+    assert "or the `list` shows the build step not started again (`·`" in text
+    assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, say its `problem`' in text
     assert '"The validator gates the write"' in text and "\nThe validator gates the write" in text
 
 

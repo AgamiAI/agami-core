@@ -105,8 +105,8 @@ def test_1_5_gives_each_document_its_own_reader_in_the_background():
 def test_2a_uses_enrichers_from_two_chunks_and_applies_with_tables():
     text = (REFS / "enrich.md").read_text(encoding="utf-8")
     assert "**`parallel: true`**" in text
-    assert 'scripts/sm" apply-enrichment "$ROOT" --area <area> --tables <t1,t2,…>' in text
-    assert 'scripts/sm" enrich-input "$ROOT" --area <area> --tables <t1,t2,…> --profile <profile>' in text
+    assert 'scripts/sm" apply-enrichment "<root>" --area <area> --tables <t1,t2,…>' in text
+    assert 'scripts/sm" enrich-input "<root>" --area <area> --tables <t1,t2,…> --profile <profile>' in text
     assert "parallel-work.md" in text
     assert "never split the file yourself" in text  # no glue script between agent and engine
     assert "never two writes at once" in text
