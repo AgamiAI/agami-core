@@ -956,7 +956,11 @@ def test_a_build_that_raises_ends_its_log_with_failed(tmp_path, monkeypatch):
     last = log.read_text().splitlines()[-1]
     assert last.startswith("failed: no tables discovered.")
     # sm progress posts it as a plain line, no bar, and says the build failed
-    assert cli._progress_line(last) == {"line": last, "done": False, "failed": True}
+    # posted as a `say`-like line: the reason quoted and capped at 80 characters
+    from semantic_model.say_text import quoted
+    reason = quoted(last[len("failed:"):].strip())
+    assert cli._progress_line(last) == {"line": f"The build didn't finish: {reason}",
+                                        "done": False, "failed": True}
 
 
 def test_a_multi_line_failure_logs_only_its_first_line(tmp_path):

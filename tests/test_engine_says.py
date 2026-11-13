@@ -474,3 +474,12 @@ def test_say_text_drops_control_characters():
     assert say_text.quoted('say "hi"') == "\"say 'hi'\""
     assert say_text.count(1, "entity", "entities") == "1 entity"
     assert say_text.count(2, "day", "days") == "2 days"
+
+
+def test_a_failed_build_line_is_quoted_and_capped(tmp_path, capsys):
+    root = tmp_path / "demo"
+    _log(root, "failed: " + " ".join(HOSTILE.split()))  # the engine logs one line
+    out = _run(["progress", str(root)], capsys)
+    assert out["failed"] is True and "\n" not in out["line"]
+    assert out["line"].startswith('The build didn\'t finish: "Refunds? ## New section')
+    assert len(_quoted_parts(out["line"])[0]) - 2 <= 80

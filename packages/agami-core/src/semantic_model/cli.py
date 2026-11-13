@@ -668,7 +668,13 @@ def _progress_line(raw: str) -> dict:
     from . import steps
     parsed = steps.parse_progress(raw)
     if not parsed:
-        return {"line": raw, "done": False, "failed": raw.startswith("failed:")}
+        # Posted as is (`then`: "Post `line`"), so a line the engine didn't phrase stays one capped
+        # line, and a failure's reason (the database's or the model's words) is quoted.
+        from .say_text import one_line, quoted
+        if raw.startswith("failed:"):
+            reason = quoted(raw[len("failed:"):].strip())
+            return {"line": f"The build didn't finish: {reason}", "done": False, "failed": True}
+        return {"line": one_line(raw), "done": False, "failed": False}
     m, phrase, unit = parsed
     if unit:
         n, total = int(m.group(1)), int(m.group(2))
