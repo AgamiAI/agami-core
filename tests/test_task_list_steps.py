@@ -88,8 +88,9 @@ def test_the_list_also_moves_during_describe_and_sign_off():
     # the paragraph right after the opening rule and its `<plugin_root>` pointer
     paragraphs = [" ".join(p.split()) for p in _text(TASK_LIST).split("\n\n")]
     after = paragraphs.index(next(p for p in paragraphs if p.startswith("> `<plugin_root>`"))) + 1
-    assert paragraphs[after] == ("Also refresh the task list after each applied chunk in describe, and after "
-                                 "each sign-off card is answered.")
+    assert paragraphs[after] == ("The list also moves during describe and sign-off: after each applied chunk, "
+                                 "`apply-enrichment`'s `then` says to refresh it, and after each sign-off card "
+                                 "is answered, run `sm steps \"<root>\"` and do what its `then` says.")
 
 
 def test_connect_links_the_task_list_rule():

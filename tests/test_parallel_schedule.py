@@ -190,8 +190,8 @@ def test_a_resume_restamps_every_batch():
 def test_describe_shows_no_chunk_count_of_its_own():
     enrich = _flat(_read(REFS / "enrich.md"))
     assert "of 9 chunks" not in enrich
-    assert '"✓ Sales 1 of 3: 8 tables described"' in enrich
-    assert 'After each applied chunk, run `sm steps "<root>"` and refresh the task list' in enrich
+    assert '"✓ Sales: 12 tables described, 96 columns, 5 entities."' in enrich
+    assert "post its `say` exactly and do its `then`, which says to refresh the task list" in enrich
     review = _flat(_read(REFS / "review.md"))
     assert 'run `sm steps "<root>"` and refresh the task list ([task-list.md]' in review
 
@@ -218,7 +218,7 @@ def test_entities_that_span_chunks_reach_step_6():
     assert "within 10 passes" not in enrich and "`applied`)" not in enrich
     enricher = _flat(_read(PLUGIN / "agents" / "agami-enricher.md"))
     assert "goes in `notes`, for the main chat" in enricher
-    assert '"tables_described": 8' in enricher
+    assert '"tables_described": 12' in enricher
 
 
 def test_no_agent_tool_means_inline():

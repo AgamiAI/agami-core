@@ -467,10 +467,10 @@ def test_root_is_defined_where_plugin_root_is():
 
 
 # Section 2: the task list
-def test_the_task_list_is_updated_after_every_steps_and_progress_call():
+def test_the_task_list_is_updated_when_then_says_so():
     text = _flat(_read(SHARED / "task-list.md"))
-    assert ("After every `sm steps` call and every `sm progress --wait` call, the very next thing is "
-            "the task-list update.") in text
+    assert ("After a `sm steps` or `sm progress` call whose `then` says to update the task list, update "
+            "it from `list` before anything else; when `changed` is false there is nothing to do.") in text
     assert "Never filter or shorten the output" in text
     assert "`✓` is done, `▶` is in progress, `·` is not started" in text
 
@@ -538,14 +538,14 @@ def test_the_currency_question_rides_on_the_decoding_card():
     assert "asks no currency question here" in text
 
 
-# Section 6: chunks of 8
-def test_chunks_are_8_tables_everywhere():
+# Section 6: chunks of 12 (were 8 for one round; tests/test_engine_says_skill.py pins the threshold)
+def test_chunks_are_12_tables_everywhere():
     for doc in DOCS:
         text = doc.read_text(encoding="utf-8")
-        assert not re.search(r"up to 12 tables|at most 12 tables|12 tables or fewer|tables \(12\)", text), \
+        assert not re.search(r"up to 8 tables|at most 8 tables|8 tables or fewer|tables \(8\)", text), \
             doc.name
-    assert "one per chunk of up to 8 tables" in _read(CONNECT / "SKILL.md")
-    assert "(up to 8 tables of one subject area)" in _read(PLUGIN / "agents" / "agami-enricher.md")
+    assert "one per chunk of up to 12 tables" in _read(CONNECT / "SKILL.md")
+    assert "(up to 12 tables of one subject area)" in _read(PLUGIN / "agents" / "agami-enricher.md")
 
 
 def test_the_checks_catch_the_live_runs_forms(art):

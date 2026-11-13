@@ -6,7 +6,7 @@ Refresh the session's task list from the `list` in `sm steps` output, or in `sm 
 >
 > `<root>` is the database's folder, `<artifacts_dir>/<profile>`, written out in full.
 
-Also refresh the task list after each applied chunk in describe, and after each sign-off card is answered.
+The list also moves during describe and sign-off: after each applied chunk, `apply-enrichment`'s `then` says to refresh it, and after each sign-off card is answered, run `sm steps "<root>"` and do what its `then` says.
 
 ```bash
 bash "<plugin_root>/scripts/sm" steps "<root>"
@@ -20,9 +20,10 @@ call both marks the step and gives the list to show. Each phase file says which 
 `sm progress --wait` prints the same `list`, so during the build its output refreshes the list with
 no `sm steps` call of its own.
 
-**After every `sm steps` call and every `sm progress --wait` call, the very next thing is the
-task-list update.** Never filter or shorten the output (no `grep`, `head`, `sed` or `jq`): copy the
-whole `list`.
+**After a `sm steps` or `sm progress` call whose `then` says to update the task list, update it
+from `list` before anything else; when `changed` is false there is nothing to do.** The output's
+`say` and `then` are followed as [engine-says.md](engine-says.md) says. Never filter or shorten the
+output (no `grep`, `head`, `sed` or `jq`): copy the whole `list`.
 
 **Marks.** `✓` is done, `▶` is in progress, `·` is not started. Drop the mark from the item's text
 and set the item's state from it. A skipped step is not in the list.
