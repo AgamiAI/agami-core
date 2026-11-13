@@ -27,12 +27,13 @@ PY = SCRIPTS / "py"
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell launcher tests")
 
 # Logs every call; the import probe (`-c`) fails, so the library reads as missing; `-m pip` and the
-# `-c` probe each run the REAL interpreter in the same folder, so a planted `pip.py` would run.
+# `-c` probe each run the REAL interpreter in the same folder, so a planted `pip.py` would run. Their
+# own results are ignored: the interpreter running the suite may have no pip at all.
 _SHIM = """#!/bin/sh
 printf '%s\\n' "$*" >> "$SM_SHIM_LOG"
 case "$1" in
-  -c) exec "$REAL_PY" -c 'import pip, sys; sys.exit(1)' ;;
-  -m) [ "$2" = pip ] && exec "$REAL_PY" -m pip --version >/dev/null; exit 0 ;;
+  -c) "$REAL_PY" -c 'import pip' >/dev/null 2>&1; exit 1 ;;
+  -m) [ "$2" = pip ] && "$REAL_PY" -m pip --version >/dev/null 2>&1; exit 0 ;;
   *) exit 0 ;;
 esac
 """
@@ -42,7 +43,8 @@ def _hostile_cwd(tmp_path: Path) -> tuple[Path, Path]:
     cwd = tmp_path / "cloned-repo"
     cwd.mkdir()
     marker = tmp_path / "pwned"
-    (cwd / "pip.py").write_text(f"open({str(marker)!r}, 'w').close()\nraise SystemExit(0)\n")
+    for planted in ("pip.py", "agami_planted.py"):
+        (cwd / planted).write_text(f"open({str(marker)!r}, 'w').close()\nraise SystemExit(0)\n")
     return cwd, marker
 
 
@@ -107,12 +109,13 @@ def test_the_import_probe_does_not_import_from_the_callers_folder(tmp_path):
     assert not (tmp_path / "pwned").exists()
 
 
-@pytest.mark.parametrize("args", [["-c", "import pip"], ["-m", "pip", "--version"]])
+@pytest.mark.parametrize("args", [["-c", "import agami_planted"], ["-m", "agami_planted"],
+                                  ["-m", "pip", "--version"]])
 def test_py_does_not_import_from_the_callers_folder(tmp_path, args):
     if sys.version_info < (3, 11):
         pytest.skip("PYTHONSAFEPATH needs Python 3.11")
-    proc, _, marker = _run(tmp_path, PY, *args, shim=False)
-    assert proc.returncode == 0, proc.stderr
+    # The planted module is not found (an error is fine); what must not happen is that it runs.
+    _, _, marker = _run(tmp_path, PY, *args, shim=False)
     assert not marker.exists()
 
 
