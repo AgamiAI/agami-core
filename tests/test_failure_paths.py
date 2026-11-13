@@ -30,9 +30,33 @@ from semantic_model import cli, steps  # noqa: E402
      "no tables discovered. If the catalog is locked down, try 1/2 of them"),
     ("connection refused", "connection refused"),
     ("/", "/"),
+    ("(/Users/jane/creds.yaml)", "(creds.yaml)"),
+    ("read local/tmp/a.txt, then /Users/jane/b.yaml", "read a.txt, then b.yaml"),
+    # not paths: a relative run with no file extension, a date
+    ("a/b/c failed", "a/b/c failed"),
+    ("stopped on 2026/11/13 at 10:00", "stopped on 2026/11/13 at 10:00"),
+    ("and / or", "and / or"),
+    # paths with spaces
+    ("/Users/jane doe/agami artifacts/creds.yaml not found", "creds.yaml not found"),
+    (r"C:\Users\Jane Doe\creds.yaml not found", "creds.yaml not found"),
+    ("~/jane doe/agami artifacts/creds.yaml: denied", "creds.yaml: denied"),
+    ("cannot open '/Users/jane doe/my creds.yaml': denied", "cannot open 'my creds.yaml': denied"),
+    ('cannot open "C:\\Users\\Jane Doe\\x.json"', 'cannot open "x.json"'),
+    ("/Users/jane doe/agami artifacts/local is missing", "a file"),
+    ("can't write to /Users/jane doe/agami artifacts/local", "can't write to a file"),
+    # connection URLs collapse to the database's name, never keep a password
+    ("could not connect to postgresql://admin:s3cret@db.example.com:5432/sales_db?sslmode=require",
+     "could not connect to sales_db"),
+    ("mysql://u:p@ss@host/db: timeout", "db: timeout"),
+    ("postgresql://admin:s3cret@db.example.com:5432 refused", "a database URL refused"),
+    ("snowflake://admin:s3cret@acct/DB/SCHEMA?warehouse=W", "SCHEMA"),
 ])
 def test_paths_in_a_failure_reason_keep_only_their_last_part(reason, scrubbed):
-    assert steps.strip_paths(reason) == scrubbed
+    out = steps.strip_paths(reason)
+    assert out == scrubbed
+    for secret in ("jane", "Jane", "Doe", "s3cret", "admin", "/Users", "Users\\"):
+        if secret not in scrubbed:
+            assert secret not in out, secret
 
 
 def _log(root: Path, line: str) -> None:

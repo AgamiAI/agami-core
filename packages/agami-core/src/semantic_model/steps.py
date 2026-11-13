@@ -282,33 +282,91 @@ def _own_log(log: Path, attempt_at: float) -> bool:
         return False
 
 
-_TOKEN = re.compile(r"\S+")
 _EDGE_BEFORE = "'\"(<["
 _EDGE_AFTER = "'\")>],;:.!?"
-_DRIVE = re.compile(r"[A-Za-z]:\\")
+# File extensions the engine's errors name: a relative run of folders counts as a path only when it
+# ends in one of these, so `a/b/c` and a date like `2026/11/13` are left alone.
+_FILE_EXT = (r"(?:ya?ml|json|txt|tsv|csv|md|sql|db|sqlite3?|duckdb|parquet|toml|ini|cfg|conf|env|pem"
+             r"|key|crt|log|py|sh)")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+")
+# Where a rooted path starts: `/x`, `~/x`, `C:\x` or `C:/x`, `\\x`, at the start or after a space,
+# quote or bracket (never mid-word, so `1/2` is not one).
+_ROOTED = re.compile(r"(?:(?<=^)|(?<=[\s'\"(<\[=]))(?:~?[/\\](?=[^\s/\\])|[A-Za-z]:[\\/]|\\\\(?=\S))")
+_RELATIVE = re.compile(r"(?:(?<=^)|(?<=[\s'\"(<\[=]))[^\s'\"(<\[=/\\]+(?:[/\\][^\s/\\'\"]+){2,}")
+_NAMED_FILE = re.compile(r"[^\s/\\'\"]+\." + _FILE_EXT + r"(?=$|[\s'\")\],;:!?]|\.(?:\s|$))")
+_SEP = re.compile(r"[/\\]")
+
+
+def _db_name(url: str) -> str:
+    """A connection URL as its database's name (its last path part, query dropped); with no path, a
+    neutral phrase. The user, password and host never survive."""
+    rest = url.split("://", 1)[1]
+    path = rest.split("/", 1)[1] if "/" in rest else ""
+    parts = [p for p in path.split("?", 1)[0].split("#", 1)[0].split("/") if p]
+    return parts[-1] if parts else "a database URL"
 
 
 def _last_part(token: str) -> str:
-    """A path-like token as its last component, the quotes and punctuation around it kept."""
+    """A path written with no spaces as its last component, the quotes and punctuation around it
+    kept."""
     start, end = 0, len(token)
     while start < end and token[start] in _EDGE_BEFORE:
         start += 1
     while end > start and token[end - 1] in _EDGE_AFTER:
         end -= 1
-    core = token[start:end]
-    seps = core.count("/") + core.count("\\")
-    if not (core.startswith(("/", "~")) or _DRIVE.match(core) or seps >= 2):
-        return token
-    parts = [p for p in re.split(r"[\\/]", core) if p]
+    parts = [p for p in _SEP.split(token[start:end]) if p]
     return token[:start] + parts[-1] + token[end:] if parts else token
 
 
+def _rooted(reason: str, at: int) -> tuple[str, int]:
+    """The rooted path starting at `at` cut to its last component, and where the text after it
+    resumes. A path that may hold spaces can't be told from the words after it, so:
+      - in quotes (the character before it is a quote that closes later): up to that quote;
+      - no separator anywhere after the first word: the first word is the whole path;
+      - else, if the text after the last separator starts with a file name with a known extension,
+        everything up to that separator goes (`/Users/jane doe/x/creds.yaml not found` →
+        `creds.yaml not found`); if not, the rest of the reason becomes "a file", since any word of
+        it could be a user's or a folder's name."""
+    quote = reason[at - 1] if at and reason[at - 1] in "'\"" else ""
+    close = reason.find(quote, at) if quote else -1
+    if close > at:
+        parts = [p for p in _SEP.split(reason[at:close]) if p]
+        return (parts[-1] if parts else reason[at:close]), close
+    word_end = at
+    while word_end < len(reason) and not reason[word_end].isspace():
+        word_end += 1
+    if not _SEP.search(reason, word_end):
+        return _last_part(reason[at:word_end]), word_end
+    last = max(m.end() for m in _SEP.finditer(reason, at))
+    if _NAMED_FILE.match(reason, last):
+        return "", last
+    return "a file", len(reason)
+
+
 def strip_paths(reason: str) -> str:
-    """`reason` with every path-like token (starting with `/`, `~` or a drive's `C:\\`, or holding two
-    or more path separators) cut to its last component: a failure reason is posted whole, and the
-    engine's errors name files by absolute path (`/Users/…/creds.yaml not found`), the home or temp
-    folder included. A token with one separator (`1/2`) is left alone."""
-    return _TOKEN.sub(lambda m: _last_part(m.group(0)), reason)
+    """`reason` with its paths cut to their last component: a failure reason is posted whole, and
+    the engine's errors name files by absolute path (`/Users/…/creds.yaml not found`), the home or
+    temp folder (and so the user's name) included. Connection URLs become their database's name
+    (never a password); rooted paths (`/`, `~/`, a drive) go as `_rooted` says; a relative run of two
+    or more folders goes only when it ends in a file name with a known extension."""
+    reason = _URL.sub(lambda m: _db_name(m.group(0)), reason)
+    out, i = [], 0
+    while True:
+        m = _ROOTED.search(reason, i)
+        if not m:
+            break
+        text, resume = _rooted(reason, m.start())
+        out.append(_relative(reason[i:m.start()]) + text)
+        i = resume
+    return "".join(out) + _relative(reason[i:])
+
+
+def _relative(text: str) -> str:
+    """Relative runs of folders in `text` that end in a known kind of file, as that file's name."""
+    def one(m: re.Match) -> str:
+        short = _last_part(m.group(0))
+        return short if _NAMED_FILE.fullmatch(short.rstrip(_EDGE_AFTER)) else m.group(0)
+    return _RELATIVE.sub(one, text)
 
 
 def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
