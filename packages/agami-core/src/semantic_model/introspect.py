@@ -2274,6 +2274,28 @@ def _name_hint(col: str, target: Table) -> bool:
     return len(word) >= 3 and target.name.lower().startswith(word)
 
 
+# What may follow the table's word in a column that references it: `store_ref`, `cust_no`.
+_REFERENCE_SUFFIXES = ("id", "ref", "key", "no", "num", "fk")
+
+
+def _reference_like(col: str, target: Table, key: str) -> bool:
+    """The column reads as a reference to `target`: its first word starts the table's name (as
+    `_name_hint`) and is the whole name, or is followed by one reference word (`store`, `store_ref`,
+    `cust_no`). `store_visits` and `seats_taken` are counts that start with the table's word.
+
+    `<word>_code` counts only when the key is itself a code (`region_code` against `regions.code`):
+    a code column matching an integer id (`status_code` against `statuses.id`) is a small number
+    that matches by chance as often as a count does, so it is left out."""
+    words = col.lower().split("_")
+    if not _name_hint(col, target) or len(words) > 2:
+        return False
+    if len(words) == 1:
+        return True
+    if words[1] == "code":
+        return "code" in key.lower()
+    return words[1] in _REFERENCE_SUFFIXES
+
+
 _UNSERVED = ("rejected", "stale")   # review states the loader never serves
 
 
@@ -2334,8 +2356,10 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
     The engine decides that, not the model: cards drawn without it carried no recommendation, the
     first answer ("Add it") was taken, and a seat count, a comment length and a stock quantity were
     joined to other tables' ids. Adding is recommended only when the data clears the match bar and
-    the column's name is for the key or starts the table's name (`cust_ref`, `customers`); a match
-    on the type alone is what small whole numbers do by chance."""
+    the column's name says it is a reference: named for the key (priority 0), or the table's word
+    plus at most one reference word (`_reference_like`: `cust_ref`, `customers`). Anything else, a
+    match on the type alone or a name that merely starts with the table's word (`store_visits`), is
+    what small whole numbers do by chance."""
     if hit is None:
         summary = "the probe could not compare the two columns"
     else:
@@ -2355,7 +2379,8 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
     if hit is not None:
         evidence.update(matched=hit[0], sampled=hit[1],
                         match_rate=round(hit[0] / hit[1], 4) if hit[1] else 0.0)
-    recommend = "add" if _offered(hit) and prio <= 1 else "leave_out"
+    named = prio == 0 or (prio == 1 and _reference_like(c.name, u, k))
+    recommend = "add" if _offered(hit) and named else "leave_out"
     return {"id": f"{_qualified_column(t, c.name)}->{_qualified_column(u, k)}", "op": op,
             "evidence": evidence, "recommend": recommend}
 

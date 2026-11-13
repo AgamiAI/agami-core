@@ -634,3 +634,53 @@ def test_every_listed_join_says_which_answer_is_recommended(tmp_path):
     _, _, out = _build(tmp_path, _CHANCE_SCHEMA)
     doc = _candidates(out)
     assert all(c["recommend"] in ("add", "leave_out") for c in doc["candidates"] + doc["low_overlap"])
+
+
+# A name hint (the column's first word starts the table's name) is not enough on its own: a count or
+# a code that happens to start with the table's word matches small ids by chance too.
+_HINT_SCHEMA = (
+    "CREATE TABLE seats(id INTEGER PRIMARY KEY, label TEXT);"
+    "CREATE TABLE stores(id INTEGER PRIMARY KEY, city TEXT);"
+    "CREATE TABLE statuses(id INTEGER PRIMARY KEY, label TEXT);"
+    "CREATE TABLE regions(id INTEGER PRIMARY KEY, code TEXT UNIQUE);"
+    "CREATE TABLE payments(id INTEGER PRIMARY KEY, seats_taken INTEGER, store_visits INTEGER,"
+    " status_code INTEGER, store_no INTEGER, region_code TEXT);"
+    "INSERT INTO seats VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+    "INSERT INTO stores VALUES (1, 'x'), (2, 'y'), (3, 'z');"
+    "INSERT INTO statuses VALUES (1, 'open'), (2, 'paid'), (3, 'void');"
+    "INSERT INTO regions VALUES (1, 'north'), (2, 'south');"
+    "INSERT INTO payments VALUES (1, 1, 2, 1, 1, 'north'), (2, 2, 3, 2, 2, 'south'), (3, 3, 1, 3, 3, 'north');"
+)
+
+
+def _recommended(tmp_path, schema: str) -> dict:
+    _, _, out = _build(tmp_path, schema)
+    return {c["id"]: c["recommend"] for c in _candidates(out)["candidates"]}
+
+
+@pytest.mark.parametrize("candidate", [
+    "main.payments.seats_taken->main.seats.id",     # a count of seats
+    "main.payments.store_visits->main.stores.id",   # a count of visits
+    "main.payments.status_code->main.statuses.id",  # a code, against an integer id
+])
+def test_a_name_hint_with_a_non_reference_word_is_left_out(tmp_path, candidate):
+    got = _recommended(tmp_path, _HINT_SCHEMA)
+    assert got[candidate] == "leave_out"
+
+
+@pytest.mark.parametrize("candidate", [
+    "main.payments.store_no->main.stores.id",            # the word, then a reference suffix
+    "main.payments.region_code->main.regions.code",      # a code against the table's own code
+])
+def test_a_name_hint_followed_by_a_reference_word_is_added(tmp_path, candidate):
+    assert _recommended(tmp_path, _HINT_SCHEMA)[candidate] == "add"
+
+
+def test_the_reference_rule_reads_the_name_and_the_key():
+    t = I.Table(name="stores", columns=[])
+    assert I._reference_like("store", t, "id") and I._reference_like("store_ref", t, "id")
+    assert I._reference_like("STORE_FK", t, "id") and I._reference_like("store_num", t, "id")
+    assert not I._reference_like("store_visits", t, "id")
+    assert not I._reference_like("store_code", t, "id") and I._reference_like("store_code", t, "store_code")
+    assert not I._reference_like("store_id_old", t, "id") and not I._reference_like("st_ref", t, "id")
+    assert not I._reference_like("", t, "id") and not I._reference_like("shop_ref", t, "id")

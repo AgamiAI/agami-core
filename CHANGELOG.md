@@ -323,8 +323,11 @@ below corresponds to one such version.
 
 - **Join cards recommend leaving a chance match out again.** Each join candidate in
   `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
-  95% bar and the column's name is for the key or starts the table's name (`cust_ref`,
-  `customers`), `leave_out` otherwise (a match on the column's type alone, or a near miss). The
+  95% bar and the column's name reads as a reference (named for the key, or the table's word alone
+  or followed by `_id`, `_ref`, `_key`, `_no`, `_num` or `_fk`: `cust_ref` for `customers`; a
+  `_code` only against a code key), `leave_out` otherwise (a match on the column's type alone, a
+  count like `store_visits`, a near miss). On the one-by-one cards, **Add the remaining
+  recommended** replaces **Add all remaining**, which would have added the chance matches too. The
   skill puts that answer first with "(Recommended)" (and the group card for more than four leads
   with the recommended joins, or with **Add none** when none is). Before, the skill named no
   recommended answer, so it depended on the model: a live run drew the cards with none, the first

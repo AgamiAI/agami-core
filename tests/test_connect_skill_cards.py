@@ -754,7 +754,8 @@ def test_join_candidate_group_options_preview_the_joins_they_add():
     s = _join_candidates()
     assert "each option's `preview` lists every join that option adds" in s
     assert "Never offer a numbered range" in s
-    assert "Add all remaining" in s and "Add none" in s
+    assert "Add the remaining recommended" in s and "Add none" in s
+    assert "Add all remaining" not in s   # it would add the chance matches the cards left out
 
 
 def test_join_cards_put_the_engines_recommendation_first():
@@ -766,6 +767,9 @@ def test_join_cards_put_the_engines_recommendation_first():
     assert "**Leave it out (Recommended)**" in one and "**Add it (Recommended)**" in one
     assert "first" in one
     assert "never the model's own guess" in one
+    # `leave_out` covers a type-only match and a name that merely starts with the table's word.
+    assert "only the column's type matched" not in one
+    assert "its name does not read as a reference to the table" in one
     many = s[s.index("**More than 4:**"):]
     assert "`recommend: add`" in many and "**Add none (Recommended)**" in many
     assert "full matches (Recommended)" not in many
