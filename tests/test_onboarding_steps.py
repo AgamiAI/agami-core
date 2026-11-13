@@ -434,12 +434,14 @@ def test_bad_mark_exits_2_and_writes_nothing(model, capsys):
 
 
 def test_cli_full_prints_the_same_dict(model, capsys):
+    said = {"changed", "then"}
     assert cli.main(["steps", str(model), "--full"]) == 0
-    assert json.loads(capsys.readouterr().out) == steps.onboarding_steps(model)
+    out = json.loads(capsys.readouterr().out)
+    assert {k: v for k, v in out.items() if k not in said} == steps.onboarding_steps(model)
     assert cli.main(["steps", str(model), "--full", "--mark", "describe=in_progress",
                      "--mark", "describe=done"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out == steps.onboarding_steps(model)
+    assert {k: v for k, v in out.items() if k not in said} == steps.onboarding_steps(model)
     assert _by_id(out)["describe"]["status"] == "done"
 
 
@@ -449,7 +451,7 @@ def test_cli_prints_a_compact_list_by_default(model, capsys):
     steps.mark(model, "describe", "in_progress")
     assert cli.main(["steps", str(model)]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert set(out) == {"list", "current", "problem"}
+    assert set(out) == {"list", "current", "problem", "changed", "then"}
     full = steps.onboarding_steps(model)
     shown = [s for s in full["steps"] if s["status"] != "skipped"]
     assert out["list"] == [{"done": "✓ ", "in_progress": "▶ ", "pending": "· "}[s["status"]] + s["text"]
@@ -466,7 +468,9 @@ def test_compact_list_of_a_fresh_folder(tmp_path, capsys):
     assert cli.main(["steps", str(tmp_path / "acme")]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out == {"list": ["· " + label for label in LABELS], "current": "connect",
-                   "problem": None}
+                   "problem": None, "changed": True,
+                   "then": "Update the task list from `list` now, before anything else."}
+    assert not (tmp_path / "acme").exists()  # a fresh profile gets no folder made for steps.last
 
 
 def test_compact_keeps_the_problem(tmp_path):

@@ -29,6 +29,9 @@ PY = str(PLUGIN / "scripts" / "py")
 _spec = importlib.util.spec_from_file_location("approve_own_calls_under_test", HOOK)
 HOOK_MOD = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(HOOK_MOD)
+# The package from this checkout, not an older one installed elsewhere: put at collection time,
+# before the suite's fixtures import it.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"))
 SYMLINKS = pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32",
                               reason="symlinks")
 
@@ -165,6 +168,30 @@ def test_a_model_root_that_does_not_exist_yet_is_allowed(art):
     # onboarding marks its first step before the build creates the folder
     assert _decision(_bash(f'bash "{SM}" steps {art / "newdb"} --mark connect=in_progress'),
                      art) == "allow"
+
+
+@pytest.mark.parametrize("args", ["steps {R}", "steps {R} --mark describe=in_progress",
+                                  "steps {R} --full", "progress {R}", "progress {R} --wait 0"])
+def test_an_approved_steps_or_progress_call_writes_only_inside_introspect(art, args):
+    # `steps` and `progress` keep the list they last printed in <root>/.introspect/steps.last; the
+    # hook approves them because that stays inside the model's own .introspect/ folder.
+    pytest.importorskip("pydantic")
+    from semantic_model import cli
+
+    assert _decision(_bash(_sm(art, args)), art) == "allow"
+    shutil.rmtree(art / "acme")
+    shutil.copytree(PLUGIN / "samples" / "store" / "model", art / "acme")
+
+    def snapshot() -> dict[Path, bytes]:
+        return {p: p.read_bytes() for p in art.parent.rglob("*") if p.is_file()}
+
+    before = snapshot()
+    filled = args.format(R=str(art / "acme")).split()
+    assert cli.main(filled) == 0
+    after = snapshot()
+    touched = {p for p in after if before.get(p) != after[p]} | (set(before) - set(after))
+    assert touched and all(p.parent == art / "acme" / ".introspect" for p in touched), touched
+    assert (art / "acme" / ".introspect" / "steps.last").is_file()
 
 
 def test_the_description_field_is_fine(art):

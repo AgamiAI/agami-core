@@ -700,13 +700,22 @@ def cmd_progress(args) -> int:
             and time.monotonic() < deadline:
         time.sleep(0.5)
         current = last()
-    # With --wait (the build loop), the compact step list too, so each poll is one call, not two.
-    listed = {"list": steps.compact(steps.onboarding_steps(Path(args.root)))["list"]} \
-        if args.wait else {}
-    if not current:
-        _print_json({"line": "", "done": False, "failed": False, "started": False, **listed})
-        return 0
-    _print_json({**_progress_line(current), "started": True, "changed": current != start, **listed})
+    # The compact step list rides along only when it moved since `sm steps` or `sm progress` last
+    # printed it, so each poll is one call, and `then` says whether to refresh the task list.
+    root = Path(args.root).expanduser()
+    listed = steps.compact(steps.onboarding_steps(root))["list"]
+    shown = _progress_line(current) if current else {"line": "", "done": False, "failed": False}
+    before = steps.remember_printed(root, list=listed, line=shown["line"])
+    list_changed = before.get("list") != listed
+    line_new = bool(shown["line"]) and before.get("line") != shown["line"]
+    out: dict[str, Any] = {**shown, "started": bool(current)}
+    if current:
+        out["changed"] = current != start
+    if list_changed:
+        out["list"] = listed
+    out["list_changed"] = list_changed
+    out["then"] = steps.progress_next(line_new, list_changed, shown["done"] or shown["failed"])
+    _print_json(out)
     return 0
 
 
@@ -781,9 +790,27 @@ def cmd_steps(args) -> int:
     except ValueError as exc:
         print(f"sm steps: {exc}", file=sys.stderr)
         return 2
-    result = steps.onboarding_steps(Path(args.root))
-    _print_json(result if args.full else steps.compact(result))
+    root = Path(args.root).expanduser()
+    result = steps.onboarding_steps(root)
+    listed = steps.compact(result)["list"]
+    changed = steps.remember_printed(root, list=listed).get("list") != listed
+    closing = None
+    if ("first_question", "in_progress") in marks:
+        closing = _closing_summary(root)
+    view = result if args.full else steps.compact(result)
+    _print_json({**view, "changed": changed, **steps.steps_next(changed, result["problem"], closing)})
     return 0
+
+
+def _closing_summary(root: Path) -> Optional[str]:
+    """`sm summary`'s text for the closing step's `say`, or None when the model can't be summed up
+    (the step list's `problem` then says why). Broad on purpose, as steps._totals: the list must
+    still print."""
+    from . import summary
+    try:
+        return summary.onboarding_summary(root)["markdown"]
+    except Exception:  # noqa: BLE001 — see docstring
+        return None
 
 
 def cmd_timing(args) -> int:

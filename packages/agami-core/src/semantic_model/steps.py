@@ -10,7 +10,9 @@ log); every count comes from the engine's own numbers, never an estimate.
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -397,3 +399,89 @@ def compact(result: dict[str, Any]) -> dict[str, Any]:
     return {"list": [LIST_MARKS[s["status"]] + s["text"] for s in result["steps"]
                      if s["status"] in LIST_MARKS],
             "current": result["current"], "problem": result["problem"]}
+
+
+# --- what the skill does next ------------------------------------------------------------------
+# A live run refreshed its task list after only about half of the `sm steps` / `sm progress` calls,
+# and computed the closing summary without posting it: an instruction in the skill text is read long
+# before the moment it applies. So the engine's own output carries, at that moment, the text to post
+# (`say`) and the next action (`then`).
+
+THEN_UPDATE = "Update the task list from `list` now, before anything else."
+THEN_UP_TO_DATE = "The task list is up to date."
+THEN_CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
+                "closing card in that same message.")
+THEN_PROBLEM = "Say this to the person before going on."
+THEN_LINE_AND_LIST = "Post `line` and update the task list from `list`."
+THEN_LINE = "Post `line`."
+THEN_NOTHING = "Nothing new: call this again."
+THEN_ENDED = "The build has ended: run `sm steps` and go on."
+
+
+def _last_path(root: Path) -> Path:
+    return root / ".introspect" / "steps.last"
+
+
+def _read_last(root: Path) -> dict[str, Any]:
+    """What `sm steps` / `sm progress` last printed for this root ({} when nothing was, or the file
+    can't be read: then everything reads as changed, which only costs one extra refresh)."""
+    path = _last_path(root)
+    try:
+        if not L.inside_model(root, path):
+            return {}
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def remember_printed(root: Path, **printed: Any) -> dict[str, Any]:
+    """Record what this call printed (`list`, `line`) in `<root>/.introspect/steps.last` and return
+    what was recorded before. Written atomically, so a reader never sees half a file, and only when
+    the model folder exists and the file stays inside it: a fresh profile gets no folder made for it,
+    and a link out of the folder is never written through."""
+    root = Path(root).expanduser()
+    before = _read_last(root)
+    path = _last_path(root)
+    if not root.is_dir():
+        return before
+    try:
+        path.parent.mkdir(exist_ok=True)
+        if not L.inside_model(root, path):
+            return before
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".steps.last.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump({**before, **printed}, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        pass  # a list that can't be remembered reads as changed next time: harmless
+    return before
+
+
+def steps_next(changed: bool, problem: Optional[str], closing: Optional[str]) -> dict[str, Any]:
+    """`say` and `then` for `sm steps`: the problem first (the person must hear it before anything
+    else), then the closing summary when the closing step starts, else whether the list moved."""
+    if problem:
+        return {"say": problem, "then": THEN_PROBLEM}
+    if closing:
+        return {"say": closing, "then": THEN_CLOSING}
+    return {"then": THEN_UPDATE if changed else THEN_UP_TO_DATE}
+
+
+def progress_next(line_new: bool, list_changed: bool, ended: bool) -> str:
+    """`then` for `sm progress`. A finished or failed log never moves on, so "call this again"
+    would loop for ever: the skill is sent to `sm steps` instead."""
+    if line_new and list_changed:
+        return THEN_LINE_AND_LIST
+    if line_new:
+        return THEN_LINE
+    if list_changed:
+        return THEN_UPDATE
+    return THEN_ENDED if ended else THEN_NOTHING

@@ -4,8 +4,9 @@ steering the model, and say nothing about anything else.
 A live onboarding run stopped for permission 71 times, 42 of them on agami's own commands. This
 hook fires in every session, every turn and every subagent, so it approves only what can do no
 harm whoever chose the arguments: no database connection, no credentials, no package install, no
-write outside agami's scratch folder and a model's own `.introspect/timeline.jsonl`, no read of a
-file the call names outside those, and no change to a model's content or trust state. Everything
+write outside agami's scratch folder and a model's own `.introspect/` (`timeline.jsonl`, and
+`steps.last`, the step list `steps` and `progress` last printed), no read of a file the call
+names outside those, and no change to a model's content or trust state. Everything
 else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
 its own turn). It never denies.
 
@@ -201,6 +202,8 @@ ROOT = (model_root,)
 
 # Every verb here only reads the model at <root> (and, for `steps --mark`, appends to its
 # .introspect/timeline.jsonl), or writes only to a scratch file named by --out. Read from cli.py.
+# `steps` and `progress` also keep the list they last printed in <root>/.introspect/steps.last,
+# replaced atomically and only inside that folder, so the rule above still holds.
 #
 # NOT approved, by design; do not add them: each connects to a database, uses credentials, installs
 # a package, reads a file the call names, writes elsewhere, or changes the model or its sign-off:
