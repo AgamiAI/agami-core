@@ -209,7 +209,7 @@ COMMANDS, SHORTHANDS, OTHERS, HELPER_USES, UNLABELLED = scan()
 
 def test_the_scan_finds_the_commands():
     assert len(COMMANDS) > 60 and len(SHORTHANDS) > 40
-    assert any('sm" summary "<root>"' in c for _, c in COMMANDS)
+    assert any('sm" steps "<root>" --mark first_question=in_progress' in c for _, c in COMMANDS)
     assert not any(w.startswith("agents/") for w, _ in COMMANDS)  # agents run no commands
     assert any("mkdir -m 700 -p" in c for _, c in OTHERS) and HELPER_USES
 
@@ -434,7 +434,8 @@ def test_the_hooks_read_only_verbs_are_approved_as_the_skill_writes_them(art):
         filled = _fill(command, art)
         assert _hook_allows(filled, art), f"{where}: the hook does not approve {filled}"
         checked.add(m.group(1))
-    assert {"steps", "progress", "summary", "wait-files", "batch-id", "bundle"} <= checked
+    # the closing summary is now the `say` of `sm steps`, so no phase file shows `sm summary`
+    assert {"steps", "progress", "wait-files", "batch-id", "bundle"} <= checked
 
 
 # --- the instructions this task added ----------------------------------------------------------
@@ -487,11 +488,11 @@ def test_the_build_loop_is_one_progress_call_per_pass():
 @pytest.mark.parametrize("name,card", [("summary.md", "Then **AskUserQuestion**: `Review what needs sign-off`"),
                                        ("sample.md", "**A card of starter questions")])
 def test_the_closing_card_comes_after_the_summary(name, card):
-    text = _read(REFS / name)
-    call = text.index('scripts/sm" summary "<root>"')
-    rule = text.index("The closing card is never asked in a message that does not begin with this summary.")
+    text = _flat(_read(REFS / name))
+    call = text.index('scripts/sm" steps "<root>" --mark first_question=in_progress')
+    rule = text.index("The closing card is never asked in a message that does not begin with the summary.")
     assert call < rule < text.index(card)
-    assert "Post its output exactly as printed" in text
+    assert "post its `say` exactly" in text
 
 
 def test_the_summary_is_not_assembled_by_hand():
