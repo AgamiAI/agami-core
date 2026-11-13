@@ -262,6 +262,34 @@ def test_the_person_speaking_since_the_refusal_says_nothing(art, tmp_path):
     assert _read_pending(art)[0]["resumed"] is False
 
 
+def _queued_command() -> str:
+    return json.dumps({"parentUuid": None, "isSidechain": False, "type": "attachment",
+                       "attachment": {"type": "queued_command", "prompt": "stop for now"}})
+
+
+def _enqueued() -> str:
+    return json.dumps({"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-11-13T09:00:01Z",
+                       "sessionId": "00000000-0000-4000-8000-000000000001", "content": "stop for now"})
+
+
+@pytest.mark.parametrize("typed", [_queued_command, _enqueued])
+def test_a_message_the_person_queued_since_the_refusal_says_nothing(art, tmp_path, typed):
+    # A message typed while the assistant works lands as a queued command, not yet a user line.
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, printed(), refused("toolu_c1"), typed(), text(SUMMARY))
+    assert _hook(_event(str(path)), art) == ""
+    assert _read_pending(art)[0]["resumed"] is False
+
+
+def test_a_queue_row_before_the_refusal_or_not_an_enqueue_does_not_count(art, tmp_path):
+    _write_pending(art, [_entry()])
+    dequeued = json.dumps({"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-11-13T09:00:01Z"})
+    other = json.dumps({"type": "attachment", "attachment": {"type": "hook_success"}})
+    path = _transcript(tmp_path, _enqueued(), _queued_command(), printed(), refused("toolu_c1"), dequeued, other,
+                       text(SUMMARY))
+    assert _blocked(_hook(_event(str(path)), art)) == REASON
+
+
 def test_a_meta_line_is_not_the_person(art, tmp_path):
     _write_pending(art, [_entry()])
     path = _transcript(tmp_path, printed(), refused("toolu_c1"), person("<reminder>", isMeta=True), text(SUMMARY))

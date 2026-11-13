@@ -17,7 +17,8 @@ of these hold:
   4. After that, an AskUserQuestion of the main thread got the gate's refusal for this text (its
      tool result holds the refusal's first sentence and the text's first line).
   5. Since the last such refusal there is no AskUserQuestion of the main thread and no message from
-     the person.
+     the person (a user line, or one queued while the assistant worked: an enqueue or a
+     `queued_command` attachment).
 
 Then it sets `resumed` on the entry, saves the file (a block it can't record is not made), and
 blocks with REASON, one fixed sentence: nothing from the pending file or the transcript is echoed.
@@ -95,7 +96,19 @@ def _turn_events(g: Any, rows: list) -> tuple:
         if (row.get("type") == "user" and row.get("isSidechain") is not True and row.get("isMeta") is not True
                 and isinstance(message, dict) and isinstance(message.get("content"), str)):
             spoke.append(n)
+        elif _queued(row):
+            spoke.append(n)
     return refusals, sorted(cards.values()), spoke
+
+
+def _queued(row: dict) -> bool:
+    """A message the person typed while the assistant was working: Claude Code records it as an
+    enqueue and a `queued_command` attachment before it becomes a user line."""
+    if row.get("type") == "queue-operation":
+        return row.get("operation") == "enqueue"
+    attachment = row.get("attachment")
+    return (row.get("type") == "attachment" and row.get("isSidechain") is not True
+            and isinstance(attachment, dict) and attachment.get("type") == "queued_command")
 
 
 def _left_unasked(g: Any, entry: dict, rows: list) -> bool:
