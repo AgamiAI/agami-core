@@ -817,6 +817,8 @@ def cmd_steps(args) -> int:
     built = next(s["status"] for s in result["steps"] if s["id"] == "build") == "done"
     said = steps.steps_next(changed, result["problem"], before.get("problem"), closing,
                             _closing_summary(root) if closing and built else None, built)
+    if said.get("then") == steps.THEN_CLOSING:
+        said = gate_say(said, "summary")
     # The problem is remembered as said: it is said once, not on every call while it lasts.
     steps.remember_printed(root, before, {"list": listed, "problem": result["problem"]})
     # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
@@ -2021,7 +2023,33 @@ def examples_say(printed: str, card: bool = True) -> dict[str, Any]:
 
 
 def _examples_out_say(printed: str, args) -> dict[str, Any]:
-    return examples_say(printed, card=not args.no_card)
+    said = examples_say(printed, card=not args.no_card)
+    # Only the table asked before the examples card is gated: with --no-card no card follows it.
+    return gate_say(said, "examples") if said and not args.no_card else said
+
+
+# A multi-line `say` printed right before a card was not posted in live runs (the wrap-up went into
+# a thinking block), so those two are recorded for the plugin's AskUserQuestion hook, which refuses
+# the card until the text is in the chat. The sentence is added only when the record was written:
+# with no record, no card will be refused.
+THEN_GATED = " The card is refused until this text has been posted."
+
+
+def gate_say(said: dict[str, Any], kind: str) -> dict[str, Any]:
+    """`said` with `say_id` and THEN_GATED when its `say` was registered as pending, else as is."""
+    from . import say_pending
+    if not said.get("say"):
+        return said
+    try:
+        import agami_paths
+        art = agami_paths.artifacts_dir()
+    except Exception:  # noqa: BLE001 — no artifacts folder: nothing to gate, nothing to change
+        return said
+    say_id = say_pending.register(art, kind, said["say"])
+    if say_id is None:
+        return said
+    return {"say": said["say"], "say_id": say_id, **{k: v for k, v in said.items() if k != "say"},
+            "then": said["then"] + THEN_GATED}
 
 
 # --- several subject areas per call (#544) -------------------------------------------------
