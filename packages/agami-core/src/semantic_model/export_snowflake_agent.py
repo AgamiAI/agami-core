@@ -62,6 +62,7 @@ from .export import (
     join_sentences,
     parses,
     rewrite_table_refs,
+    token_span,
     undeclared_reads,
 )
 from .export_snowflake import (
@@ -386,7 +387,7 @@ def embeddable_sql(view: ExportView, options: ExportOptions,
     # only a sole result column may go unnamed.
     if len(names) != len(set(names)) or (len(names) > 1 and not all(names)):
         return None, "two of its result columns share a name, or one has none: alias each"
-    order, words = result_order(tree)
+    order, words = result_order(tree, text)
     return Embedded(rewritten, order, words), ""
 
 
@@ -447,7 +448,7 @@ def _order_key(ordered: Any, items: list, refs: list[str]) -> Optional[str]:
     return refs[pos] + (" DESC" if ordered.args.get("desc") else "")
 
 
-def result_order(tree: Any) -> tuple[list[str], str]:
+def result_order(tree: Any, sql: str) -> tuple[list[str], str]:
     """How to list the golden SQL's result rows from outside it: ORDER BY items over its output
     columns, and which order that is (`_ORDER_WORDS`). Its own ORDER BY when every key is an
     output column (by name, expression or position), then each output column in turn, so a
@@ -458,7 +459,9 @@ def result_order(tree: Any) -> tuple[list[str], str]:
     idents = [_output_ident(i) for i in items]
     if not items or any(i is None for i in idents):
         return [], "text"
-    refs = [f"agami_golden.{i.sql(dialect='snowflake')}" for i in idents]
+    # Each name as the golden SQL spells it, quotes included, cut from its text by token position:
+    # SQL is never regenerated from a parsed tree (test_ace093_byte_identity).
+    refs = [f"agami_golden.{sql[slice(*token_span(i))]}" for i in idents]
     order = tree.args.get("order")
     keys = [_order_key(o, items, refs) for o in (order.expressions if order else [])]
     own = [k for k in keys if k] if keys and all(keys) else []
