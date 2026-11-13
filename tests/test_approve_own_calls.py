@@ -8,6 +8,8 @@ drives the script as Claude Code does, with the event as JSON on stdin.
 
 from __future__ import annotations
 
+import importlib.util
+import io
 import json
 import os
 import re
@@ -24,6 +26,9 @@ from skill_docs import PLUGIN, SKILLS_DIR
 HOOK = PLUGIN / "scripts" / "approve_own_calls.py"
 SM = str(PLUGIN / "scripts" / "sm")
 PY = str(PLUGIN / "scripts" / "py")
+_spec = importlib.util.spec_from_file_location("approve_own_calls_under_test", HOOK)
+HOOK_MOD = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(HOOK_MOD)
 SYMLINKS = pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32",
                               reason="symlinks")
 
@@ -44,12 +49,37 @@ def _run(event: object, art: Path, raw: bytes | None = None,
                           env=env, timeout=30)
 
 
+class _Stdin:
+    def __init__(self, data: bytes) -> None:
+        self.buffer = io.BytesIO(data)
+
+
+def _in_process(event: object, env: dict) -> str:
+    """The hook's main() in this process, with stdin and the environment swapped in: the same
+    JSON-in, JSON-out contract as a subprocess, and its lines are traced for coverage. A few tests
+    below still start it as a real process, the way Claude Code does."""
+    saved_env, saved_in, saved_out = dict(os.environ), sys.stdin, sys.stdout
+    os.environ.clear()
+    os.environ.update(env)
+    sys.stdin = _Stdin(json.dumps(event).encode("utf-8"))
+    sys.stdout = io.StringIO()
+    try:
+        assert HOOK_MOD.main() == 0
+        return sys.stdout.getvalue()
+    finally:
+        out = sys.stdout
+        sys.stdin, sys.stdout = saved_in, saved_out
+        os.environ.clear()
+        os.environ.update(saved_env)
+        del out
+
+
 def _decision(event: object, art: Path, env: dict | None = None) -> str | None:
-    proc = _run(event, art, env=env)
-    assert proc.returncode == 0, proc.stderr
-    if not proc.stdout.strip():
+    env = env or {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art), "HOME": str(art.parent)}
+    out = _in_process(event, env)
+    if not out.strip():
         return None
-    spec = json.loads(proc.stdout)["hookSpecificOutput"]
+    spec = json.loads(out)["hookSpecificOutput"]
     assert spec["hookEventName"] == "PreToolUse"
     assert spec["permissionDecision"] == "allow"  # the only decision it ever makes
     assert spec["permissionDecisionReason"].startswith("agami: ")
@@ -116,6 +146,19 @@ def test_with_or_without_bash_and_quotes(art, prefix):
     for command in (f'{prefix}"{SM}" steps "{root}"', f"{prefix}{SM} steps {root}",
                     f"{prefix}'{SM}' steps '{root}'"):
         assert _decision(_bash(command), art) == "allow", command
+
+
+def test_an_escaped_ordinary_character_is_read_as_the_shell_reads_it(art):
+    # `\a` is `a` to the shell, so the root is the same model folder
+    assert _decision(_bash(f'bash "{SM}" steps {art}/\\acme'), art) == "allow"
+
+
+def test_with_no_setting_the_default_artifacts_folder_is_used(tmp_path):
+    art = tmp_path / "agami-artifacts"
+    (art / "acme").mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if k != "AGAMI_ARTIFACTS_DIR"}
+    env["HOME"] = env["USERPROFILE"] = str(tmp_path)  # no ~/.config/agami/path here
+    assert _decision(_bash(f'bash "{SM}" steps {art / "acme"}'), art, env=env) == "allow"
 
 
 def test_a_model_root_that_does_not_exist_yet_is_allowed(art):
@@ -229,6 +272,7 @@ SHELL_REFUSED = [
     'bash bash "{S}" steps {R}', 'exec "{S}" steps {R}', 'bash -c "{S} steps {R}"',
     # grouping, globbing, comments
     '( {L} steps {R} )', '{L} steps {R}*', '{L} steps {R} # c', '{L} steps "unclosed',
+    "{L} steps 'unclosed", '{L} steps {R}\\ x', '{L} steps {R}\\', '{L} steps {R}\\$x',
 ]
 
 
@@ -311,7 +355,7 @@ def test_every_other_cli_verb_is_refused():
              "print(json.dumps(sorted(sub.choices)))")
     verbs = set(json.loads(subprocess.run([sys.executable, "-c", probe, str(src)], check=True,
                                           capture_output=True, text=True).stdout))
-    table = set(_hook_module().VERBS)
+    table = set(HOOK_MOD.VERBS)
     assert table <= verbs
     others = sorted(verbs - table)
     assert {"describe-file", "curate", "introspect", "seed-examples", "claims", "org-draft"} <= set(others)
@@ -323,14 +367,6 @@ def test_every_other_cli_verb_is_refused():
         for verb in [*others, "install"]:
             assert _decision(_bash(f'bash "{SM}" {verb} {art / "acme"}'), art) is None, verb
             assert _decision(_bash(f'bash "{SM}" {verb}'), art) is None, verb
-
-
-def _hook_module():
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("approve_own_calls_under_test", HOOK)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 # --- B. Write / Read of agami's scratch files ----------------------------------------------------------
@@ -460,6 +496,26 @@ def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
 
 
 # --- malformed input --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw", [b"not json", b"\xff", b"x" * (64 * 1024 * 1024 + 1)])
+def test_main_in_process_is_silent_on_bad_or_huge_input(raw):
+    saved_in, saved_out = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = _Stdin(raw), io.StringIO()
+    try:
+        assert HOOK_MOD.main() == 0
+        printed = sys.stdout.getvalue()
+    finally:
+        sys.stdin, sys.stdout = saved_in, saved_out
+    assert printed == ""
+
+
+def test_a_real_process_gives_the_same_answers(art):
+    allowed = _run(_bash(_sm(art, "steps {R}")), art)
+    assert allowed.returncode == 0
+    assert json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    refused = _run(_bash(_sm(art, "steps {R} --o x")), art)
+    assert refused.returncode == 0 and refused.stdout == b""
 
 
 @pytest.mark.parametrize("raw", [b"", b"not json", b"[1, 2]", b"null", b'"text"', b"\xff\xfe",
