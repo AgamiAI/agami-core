@@ -790,6 +790,22 @@ def test_synonyms_and_column_configs_past_genies_limits_are_reported(model, monk
     assert ("column", "customers.id", "target_limit") in losses  # the list past the item limit
 
 
+def test_column_configs_past_the_item_limit_are_cut_and_reported(model, monkeypatch):
+    monkeypatch.setattr(G, "MAX_ITEMS", 2)
+    view, opts = _view(model)
+    from semantic_model.models import Column
+
+    extra = [Column(name=f"note_{i}", type="string", description="A note.") for i in range(3)]
+    tables = tuple(dataclasses.replace(et, table=et.table.model_copy(
+        update={"columns": [*et.table.columns, *extra]})) if et.table.name == "orders" else et
+        for et in view.tables)
+    out = G.write_genie_space(dataclasses.replace(view, tables=tables), opts)
+    space = json.loads(out.files["sales.geniespace.json"])
+    orders = next(t for t in space["data_sources"]["tables"] if t["identifier"].endswith(".orders"))
+    assert len(orders["column_configs"]) == 2
+    assert ("table", "orders", "target_limit") in {(x.kind, x.name, x.reason) for x in out.losses}
+
+
 def test_two_identical_default_filters_on_one_table_get_two_ids(model):
     # Genie rejects a space whose instruction ids repeat; a filter's id is its positional name.
     view, opts = _view(model)

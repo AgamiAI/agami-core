@@ -670,6 +670,19 @@ def test_names_past_the_identifier_limit_are_reported_not_written(model, tmp_pat
     assert "m" * 256 not in "".join(files.values())
 
 
+def test_a_table_whose_name_passes_the_limit_is_neither_joined_nor_measured(model, tmp_path):
+    long = "t" * 256
+    _put(model, f"subject_areas/{AREA}/tables/long.yaml", {
+        "name": long, "schema": "SALES_DATA", "columns": [_col("qty", "integer")]})
+    _put(model, f"subject_areas/{AREA}/metrics/long_units.yaml",
+         _metric("long units", f"SUM({long}.qty)", [long]))
+    section, files = _export(model, tmp_path / "t")
+    losses = _losses(section)
+    assert ("degraded", "target_limit") in losses[("table", long)]
+    assert losses[("metric", "long units")] == [("dropped", "target_rule")]
+    assert long not in "".join(files.values())
+
+
 def test_a_table_or_column_named_with_a_reserved_word_is_back_quoted(model, tmp_path):
     _put(model, f"subject_areas/{AREA}/tables/order.yaml", {
         "name": "order", "schema": "SALES_DATA", "columns": [_col("from", "integer")]})

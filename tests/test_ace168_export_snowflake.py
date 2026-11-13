@@ -768,6 +768,29 @@ def test_the_data_database_flag_moves_only_the_base_tables(tmp_path):
     assert rc == 2 and "belongs to --target snowflake" in text
 
 
+def test_an_empty_data_database_is_refused(tmp_path):
+    rc, text = _sm(str(SAMPLE), "--target", "snowflake", "--location", "DEMO.SALES_DATA",
+                   "--snowflake-data-database", " ", "--out", str(tmp_path / "o"))
+    assert rc == 2 and "--snowflake-data-database takes the name" in text
+
+
+def test_a_relationship_whose_name_passes_the_limit_is_dropped():
+    from semantic_model.models import Relationship, Table
+
+    a, b = "a" * 130, "b" * 130
+    tables = tuple(X.ExportTable(Table(name=n, grain=["id"], columns=[{"name": "id", "type": "integer"},
+                                                                       {"name": "x", "type": "string"}]),
+                                 X.PhysicalName("DEMO", "S", n)) for n in (a, b))
+    rel = X.ExportRelationship(f"{a}->{b}", Relationship(
+        from_table=a, to_table=b, from_column="id", to_column="id", relationship="many_to_one"))
+    view = _fake_view("ops", tables=tables, relationships=(rel,))
+    opts = X.ExportOptions(targets=("snowflake",), location=X.Location("DEMO", "S"))
+    doc, losses = S.build_semantic_view(view, opts)
+    assert "relationships" not in doc
+    assert [(x.kind, x.reason) for x in losses if x.reason == "target_limit"] == [
+        ("relationship", "target_limit")]
+
+
 def test_an_empty_label_is_left_out_of_the_description():
     from semantic_model.models import Table
 

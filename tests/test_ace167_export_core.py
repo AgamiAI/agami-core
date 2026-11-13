@@ -1571,3 +1571,15 @@ def test_a_clean_model_reports_no_validation_error(tmp_path):
     assert rc == 0, text
     v = json.loads(text)["model_validation"]
     assert v["checked"] is True and v["errors"] == 0 and "detail" not in v
+
+
+def test_a_validation_check_that_cannot_run_is_said_so(model, tmp_path, monkeypatch):
+    from semantic_model import validator
+
+    def boom(_org):
+        raise RuntimeError("no")
+
+    monkeypatch.setattr(validator, "validate", boom)
+    report, _ = _export(model, tmp_path / "o")
+    assert report["model_validation"]["checked"] is False
+    assert "sm validate" in report["model_validation"]["detail"]
