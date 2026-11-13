@@ -752,6 +752,22 @@ def test_a_name_past_the_identifier_limit_is_dropped_and_reported():
     assert doc is None and [(x.kind, x.reason) for x in losses] == [("subject_area", "target_limit")]
 
 
+def test_the_data_database_flag_moves_only_the_base_tables(tmp_path):
+    out_a, out_b = tmp_path / "a", tmp_path / "b"
+    _export(SAMPLE, out_a)
+    _export(SAMPLE, out_b, "--snowflake-data-database", "RAW")
+    view_a, view_b = _view(out_a, "agami_example"), _view(out_b, "agami_example")
+    assert {t["base_table"]["database"] for t in view_a["tables"]} == {"DEMO"}
+    assert {t["base_table"]["database"] for t in view_b["tables"]} == {"RAW"}
+    # Only the database changes: each table keeps its schema, and the view stays at --location.
+    assert [t["base_table"]["schema"] for t in view_a["tables"]] == \
+        [t["base_table"]["schema"] for t in view_b["tables"]]
+    assert "'DEMO.SALES_DATA'" in (out_b / "snowflake" / "agami_example.sql").read_text("utf-8")
+    rc, text = _sm(str(SAMPLE), "--target", "ossie", "--location", "DEMO.SALES_DATA",
+                   "--snowflake-data-database", "RAW", "--out", str(tmp_path / "c"))
+    assert rc == 2 and "belongs to --target snowflake" in text
+
+
 def test_an_empty_label_is_left_out_of_the_description():
     from semantic_model.models import Table
 

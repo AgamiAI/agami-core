@@ -1525,3 +1525,49 @@ def test_a_flag_for_a_target_not_selected_is_refused_before_writing(model, tmp_p
     detail = json.loads(text)["detail"]
     assert flag in detail and f"--target {owner}" in detail
     assert not out.exists()
+
+
+def test_a_database_named_local_is_refused_with_its_cause(tmp_path):
+    # agami keeps its state in <artifacts dir>/local/, so a database named `local` is that folder
+    # and the export folder agami-export uses lies inside it.
+    model = _write_model(tmp_path / "art" / "local")
+    detail = _refused(model, model / "exports" / "context" / "local")
+    assert detail.startswith("the database is named local") and "rename the database" in detail
+    # It still exports to a folder outside it.
+    report, _ = _export(model, tmp_path / "elsewhere")
+    assert report["source"]["datasource"] == "acme"
+
+
+def test_the_report_opens_with_a_summary_and_the_models_validation(model, tmp_path):
+    rc, text = _sm(str(model), "--target", "dump", "--out", str(tmp_path / "o"))
+    assert rc == 0
+    report = json.loads(text)
+    assert list(report)[:3] == ["summary", "model_validation", "source"]
+    section = report["targets"]["dump"]
+    assert report["summary"] == {"dump": section["summary"]}
+    # The summary counts the entries, by reason and outcome; no entry is lost to it.
+    total = sum(n for counts in section["summary"].values() for n in counts.values())
+    assert total == len(section["losses"])
+    assert section["summary"]["not_approved"]["dropped"] == sum(
+        1 for x in section["losses"] if (x["reason"], x["outcome"]) == ("not_approved", "dropped"))
+    # The model has validation errors: the export still runs, and says so with codes only.
+    v = report["model_validation"]
+    assert v["checked"] is True and v["errors"] > 0 and "derived_metric" in v["error_codes"]
+    assert "sm validate" in v["detail"]
+    assert not SECRET_RE.search(json.dumps(v))
+
+
+def test_a_loss_reported_word_for_word_twice_is_one_entry_with_its_count():
+    a = X.dropped("sales", "metric", "revenue", "target_rule", "no home")
+    b = X.degraded("sales", "metric", "revenue", "target_rule", "no home")
+    entries = X.collapse_losses([a, b, a, a])
+    assert entries == [b.to_dict(), {**a.to_dict(), "repeats": 3}]   # degraded sorts first
+    assert X.loss_summary(entries) == {"target_rule": {"dropped": 1, "degraded": 1}}
+
+
+def test_a_clean_model_reports_no_validation_error(tmp_path):
+    out = tmp_path / "o"
+    rc, text = _sm(str(SAMPLE), "--target", "dump", "--out", str(out))
+    assert rc == 0, text
+    v = json.loads(text)["model_validation"]
+    assert v["checked"] is True and v["errors"] == 0 and "detail" not in v

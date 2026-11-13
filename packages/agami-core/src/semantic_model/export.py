@@ -30,6 +30,8 @@ from dataclasses import InitVar, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Literal, Mapping, NamedTuple, Optional, get_args, get_origin
 
+import agami_paths
+
 from . import derived as D
 from .golden import GoldenBounds, GoldenItem, load_golden_datasets
 from .loader import list_prompt_examples, load_datasource
@@ -1508,8 +1510,9 @@ def _export_target(t: Target, org: Datasource, areas: list[SubjectArea], engine:
         for kind, _ in {(x.kind, x.name) for x in out.losses if x.outcome == "dropped"}:
             if kind in carried:
                 carried[kind] = max(0, carried[kind] - 1)
+    entries = collapse_losses(losses)
     section = {"files": sorted(f"{t.name}/{p}" for p in files), "carried": carried,
-               "losses": [x.to_dict() for x in sorted(losses, key=_loss_key)],
+               "summary": loss_summary(entries), "losses": entries,
                "included_unreviewed": unreviewed}
     return files, section
 
@@ -1518,8 +1521,64 @@ def _loss_key(x: LossEntry) -> tuple[str, ...]:
     return (x.area, x.kind, x.name, x.reason, x.outcome, x.detail)
 
 
+def collapse_losses(losses: list[LossEntry]) -> list[dict[str, Any]]:
+    """The losses as report entries, ordered, each distinct entry once. An entry several of a
+    target's files report word for word carries `repeats`, how many times it was reported, so the
+    report stays readable without losing a count."""
+    out: list[dict[str, Any]] = []
+    last: Optional[LossEntry] = None
+    for x in sorted(losses, key=_loss_key):
+        if x == last:
+            out[-1]["repeats"] = out[-1].get("repeats", 1) + 1
+        else:
+            out.append(x.to_dict())
+            last = x
+    return out
+
+
+def loss_summary(entries: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """reason -> {outcome: how many distinct entries}: the report's account at a glance, before
+    the entries themselves."""
+    out: dict[str, dict[str, int]] = {}
+    for e in entries:
+        counts = out.setdefault(e["reason"], {})
+        counts[e["outcome"]] = counts.get(e["outcome"], 0) + 1
+    return out
+
+
+# The report's top-level keys in the order a reader needs them: the account at a glance first.
+_REPORT_ORDER = ("summary", "model_validation", "source", "options", "targets", "does_not_travel")
+
+
 def report_text(report: dict[str, Any]) -> str:
-    return json.dumps(report, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    """The report as JSON: its top-level keys in `_REPORT_ORDER`, every nested key sorted, so the
+    same run always gives the same bytes."""
+    nested = json.loads(json.dumps(report, sort_keys=True))
+    ordered = {k: nested[k] for k in (*_REPORT_ORDER, *sorted(nested)) if k in nested}
+    return json.dumps(ordered, indent=2, ensure_ascii=False) + "\n"
+
+
+def model_validation(root: Path) -> dict[str, Any]:
+    """What `sm validate` finds in the model, as counts and finding codes, never messages: a
+    message can quote a sensitive column, and the report is an emitted file. The export does not
+    refuse on an error, since it reports a binding that does not parse item by item; this says the
+    model has errors, and where to read them."""
+    from . import validator as V
+
+    try:
+        res = V.validate(load_datasource(root, include_rejected=True))
+    except Exception as exc:  # the export loaded the model already; a check that fails is said so
+        return {"checked": False, "detail": f"the check did not run ({type(exc).__name__}); "
+                f"run `sm validate {root}`"}
+    errors = sorted({f.code for f in res.findings if f.severity == "error"})
+    warnings = sorted({f.code for f in res.findings if f.severity == "warning"})
+    out: dict[str, Any] = {"checked": True, "errors": len(res.errors), "warnings": len(res.warnings),
+                           "error_codes": errors, "warning_codes": warnings}
+    if errors:
+        out["detail"] = (f"the model has {len(res.errors)} validation error(s); items they touch may "
+                         f"be missing or wrong in the files. Run `sm validate {root}` and fix them "
+                         "before applying the files")
+    return out
 
 
 def _overlap(a: Path, b: Path) -> Optional[str]:
@@ -1549,6 +1608,13 @@ def _check_out(root: Path, out: Path, tgts: list[Target]) -> None:
     for what, path in written.items():
         for read, home in model.items():
             relation = _overlap(path, home)
+            if relation and root.resolve().name == LOCAL_DIR and relation == "lies inside":
+                # agami keeps its own state in `<artifacts dir>/local/`, so a database named
+                # `local` is that folder, and every output path agami chooses lies inside it.
+                raise ExportRefused(
+                    f"the database is named {LOCAL_DIR}, which is also the name of agami's own "
+                    f"{LOCAL_DIR}/ folder, so {what} lies inside the semantic model ({home}); "
+                    f"pass an --out outside {home}, or rename the database")
             if relation:
                 raise ExportRefused(
                     f"{what} {relation} {read} ({home}); the export replaces <out>/<target>/ whole "
@@ -1561,6 +1627,7 @@ def _check_out(root: Path, out: Path, tgts: list[Target]) -> None:
 
 
 REPORT_FILE = "export-report.json"
+LOCAL_DIR = agami_paths.LOCAL_SUBDIR   # agami's per-user state folder in the artifacts dir
 
 
 def _stage(staging: Path, results: dict[str, dict[str, bytes]], report: str) -> None:
@@ -1681,6 +1748,8 @@ def run_export(root: Path, out: Path, options: ExportOptions) -> str:
         results[t.name], sections[t.name] = _export_target(t, org, areas, engine, options, examples,
                                                            golden, shared, excluded)
     report = report_text({
+        "summary": {name: sec["summary"] for name, sec in sections.items()},
+        "model_validation": model_validation(root),
         "source": {"datasource": org.datasource, "engine": engine, "areas": [sa.name for sa in areas]},
         "options": options.to_report(), "targets": sections, "does_not_travel": list(DOES_NOT_TRAVEL)})
     _write(out, results, report)

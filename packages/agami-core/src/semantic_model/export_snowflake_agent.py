@@ -69,6 +69,7 @@ from .export_snowflake import (
     SemanticView,
     _sql_string,
     ambiguity_handling,
+    base_database,
     execution_warehouse,
     file_stem,
     needs_quotes,
@@ -368,7 +369,7 @@ def embeddable_sql(view: ExportView, options: ExportOptions,
         return None, "it takes parameters"
     loc = view_location(options)
     tables = [et for et in view.tables if et.table.source_type != "sql"]
-    homes = {bare_name(et.table.name): PhysicalName(et.physical.database or loc.database,
+    homes = {bare_name(et.table.name): PhysicalName(base_database(et, options),
                                                     et.physical.schema or loc.schema,
                                                     et.physical.table) for et in tables}
     columns = {bare_name(et.table.name): [c.name for c in et.table.columns] for et in tables}

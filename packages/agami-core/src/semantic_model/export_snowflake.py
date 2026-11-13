@@ -173,6 +173,17 @@ def execution_warehouse(options: ExportOptions) -> Optional[str]:
     return name.upper()
 
 
+def base_database(et: ExportTable, options: ExportOptions) -> str:
+    """The database a base table is read from: `--snowflake-data-database` when given, else the
+    `--location` database. The model records no database, so without the flag every table is read
+    from the database the view is created in."""
+    data = options.target_args.get("snowflake_data_database")
+    if data is not None and not data.strip():
+        raise ExportRefused("--snowflake-data-database takes the name of the database the tables "
+                            "are in; got an empty name")
+    return data or et.physical.database or view_location(options).database
+
+
 def semantic_view_fqn(view: ExportView, options: ExportOptions) -> str:
     """`database.schema.view`, as an agent's `tool_resources.<tool>.semantic_view` names it."""
     loc = view_location(options)
@@ -195,7 +206,7 @@ class _Builder:
     """Builds one semantic view document; every loss it takes is recorded as it is taken."""
 
     def __init__(self, view: ExportView, options: ExportOptions) -> None:
-        self.view, self.loc = view, view_location(options)
+        self.view, self.loc, self.options = view, view_location(options), options
         self.certify = certification_tags(options)
         self.losses: list[LossEntry] = []
         self.tables: dict[str, dict] = {}       # logical name -> table document
@@ -304,7 +315,7 @@ class _Builder:
         if t.source_type == "sql":
             doc["base_table"] = {"definition": t.sql}
         else:
-            doc["base_table"] = {"database": et.physical.database or self.loc.database,
+            doc["base_table"] = {"database": base_database(et, self.options),
                                  "schema": et.physical.schema or self.loc.schema,
                                  "table": et.physical.table}
             self.bare_names("table", t.name, "base table name", list(doc["base_table"].values()))
@@ -1131,6 +1142,14 @@ def add_arguments(sp: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="warehouse the --target snowflake agent runs its SQL on; without it the agent uses "
         "the caller's default warehouse, and does not run for a caller with none",
+    )
+    sp.add_argument(
+        "--snowflake-data-database",
+        dest="snowflake_data_database",
+        metavar="NAME",
+        default=argparse.SUPPRESS,
+        help="the database the --target snowflake base tables are in, when it is not the "
+        "--location database the view is created in; each table keeps the schema the model names",
     )
     sp.add_argument(
         "--snowflake-certification-tags",
