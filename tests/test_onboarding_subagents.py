@@ -248,19 +248,20 @@ def _chunks(root: Path, capsys, *extra: str) -> dict:
     return json.loads(capsys.readouterr().out)
 
 
-def test_chunks_split_an_area_into_even_runs_of_at_most_eight(tmp_path, capsys):
+def test_chunks_split_an_area_into_even_runs_of_at_most_twelve(tmp_path, capsys):
     out = _chunks(_synthetic(tmp_path, {"demo": 14}), capsys)
-    assert cli.CHUNK_MAX_TABLES == 8
+    assert cli.CHUNK_MAX_TABLES == 12
     assert [c["chunk"] for c in out["chunks"]] == ["demo-1", "demo-2"]
     assert [len(c["tables"]) for c in out["chunks"]] == [7, 7]
     assert out["chunks"][0]["tables"][0] == "demo_t01" and out["chunks"][1]["tables"][0] == (
         "demo_t08")  # the model's order, consecutive
-    assert (out["tables"], out["max_tables"]) == (14, 8)
+    assert (out["tables"], out["max_tables"]) == (14, 12)
     assert {c["area"] for c in out["chunks"]} == {"demo"}
     assert out["parallel"] is True
 
 
-@pytest.mark.parametrize("size, runs", [(8, [8]), (9, [5, 4]), (16, [8, 8]), (17, [6, 6, 5])])
+@pytest.mark.parametrize("size, runs", [(8, [8]), (9, [5, 4]), (12, [6, 6]), (13, [7, 6]),
+                                        (16, [8, 8]), (25, [9, 8, 8])])
 def test_an_area_is_cut_into_the_fewest_runs_sized_evenly(tmp_path, capsys, size, runs):
     out = _chunks(_synthetic(tmp_path, {"demo": size}), capsys)
     assert [len(c["tables"]) for c in out["chunks"]] == runs
@@ -278,6 +279,29 @@ def test_an_eleven_table_area_goes_to_two_enrichers(tmp_path, capsys):
     out = _chunks(_synthetic(tmp_path, {"demo": 11}), capsys)
     assert [len(c["tables"]) for c in out["chunks"]] == [6, 5]
     assert out["parallel"] is True
+
+
+def test_eight_tables_are_one_chunk_not_parallel(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 8}), capsys)
+    assert [len(c["tables"]) for c in out["chunks"]] == [8] and out["parallel"] is False
+
+
+def test_thirteen_tables_are_seven_and_six(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 13}), capsys)
+    assert [len(c["tables"]) for c in out["chunks"]] == [7, 6] and out["parallel"] is True
+
+
+def test_thirty_four_tables_in_two_areas_are_four_chunks(tmp_path, capsys):
+    # The 34-table database: four enrichers, all running at once, not five with one queued.
+    out = _chunks(_synthetic(tmp_path, {"acme": 20, "demo": 14}), capsys)
+    assert [(c["area"], len(c["tables"])) for c in out["chunks"]] == [
+        ("acme", 10), ("acme", 10), ("demo", 7), ("demo", 7)]
+    assert out["parallel"] is True
+
+
+def test_areas_of_five_and_four_are_parallel(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"acme": 5, "demo": 4}), capsys)
+    assert [len(c["tables"]) for c in out["chunks"]] == [5, 4] and out["parallel"] is True
 
 
 def test_two_areas_of_eight_tables_or_fewer_in_all_are_not_parallel(tmp_path, capsys):
