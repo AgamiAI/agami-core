@@ -68,6 +68,7 @@ import argparse
 import configparser
 import contextlib
 import csv
+import importlib.util
 import io
 import ipaddress
 import json
@@ -3120,6 +3121,13 @@ def _receipt_for(sql: str, profile: str, *, bounded: bool) -> Receipt:
         # This is the same defect `_refusal_receipt` below already documents for the `PRE_MODEL_RULES`
         # gates, which is why `RECEIPT_BEFORE_MODEL` exists. Fifth reason, same lesson.
         return undetermined_receipt(RECEIPT_GOVERNANCE_DISABLED)
+    org = _guard_model.get()
+    if org is None:
+        # Before the runtime import, not after it. The model build sends hundreds of statements, each
+        # in its own `--no-safety` process that never resolves a model, and importing the runtime
+        # only to report "no model" was ~300 ms of each one's ~365 ms. The cause reported is still
+        # the one the import would have found, because the vendored mirror's "no runtime" is pinned.
+        return undetermined_receipt(_no_model_cause())
     try:
         from semantic_model import runtime as RT
     except ImportError:
@@ -3134,9 +3142,6 @@ def _receipt_for(sql: str, profile: str, *, bounded: bool) -> Receipt:
         # being reported as one.
         _LOG.error("the semantic-model runtime failed to import", exc_info=True)
         return undetermined_receipt(RECEIPT_BUILD_FAILED)
-    org = _guard_model.get()
-    if org is None:
-        return undetermined_receipt(RECEIPT_NO_MODEL)
     try:
         assemble = RT.assemble_refusal_receipt if bounded else RT.assemble_receipt
         return receipt_from_assembled(
@@ -3147,6 +3152,26 @@ def _receipt_for(sql: str, profile: str, *, bounded: bool) -> Receipt:
         # stack goes to the server log and the caller gets a receipt that says it has nothing.
         _LOG.error("could not assemble the receipt", exc_info=True)
         return undetermined_receipt(RECEIPT_BUILD_FAILED)
+
+
+def _no_model_cause() -> str:
+    """Why a call with no resolved model has no receipt, found by LOOKING the runtime up.
+
+    ``find_spec`` locates the module without executing it, so it costs nothing next to the import,
+    and it keeps the import's three answers apart: absent is ``RECEIPT_NO_RUNTIME``, anything that
+    raises other than an ImportError is a logged defect, and present is plain "no model". The package
+    is looked up on its own first because the import resolves it first: a blocked package hides a
+    runtime that is already in ``sys.modules``, and ``find_spec`` of the submodule alone would not.
+    """
+    find = importlib.util.find_spec
+    try:
+        found = find("semantic_model") is not None and find("semantic_model.runtime") is not None
+    except ImportError:
+        found = False
+    except Exception:
+        _LOG.error("the semantic-model runtime failed to import", exc_info=True)
+        return RECEIPT_BUILD_FAILED
+    return RECEIPT_NO_MODEL if found else RECEIPT_NO_RUNTIME
 
 
 def _refusal_receipt(refusal: Refusal, received_sql: str, profile: str) -> Receipt:
