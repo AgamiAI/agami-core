@@ -490,7 +490,8 @@ def test_the_build_loop_is_one_progress_call_per_pass():
 def test_the_closing_card_comes_after_the_summary(name, card):
     text = _flat(_read(REFS / name))
     call = text.index('scripts/sm" steps "<root>" --mark first_question=in_progress')
-    rule = text.index("The closing card is asked only in a message that begins with the summary.")
+    # summary.md opens the sentence with "The first time it is asked, the closing card…"
+    rule = text.index("losing card is asked only in a message that begins with the summary.")
     assert call < rule < text.index(card)
     assert "post its `say` exactly" in text
 

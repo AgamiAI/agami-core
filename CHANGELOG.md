@@ -27,6 +27,12 @@ below corresponds to one such version.
   applied. Model text in a `say` (a question, a result, a name, a loader error) is one line of at
   most 80 characters, inside a table cell or in double quotes, so it can never add a line, a heading
   or a table row; a problem is said once, and never hides the task-list refresh or the closing card.
+  A failed build's reason keeps up to 200 characters (the engine's own hints fit), and is said once,
+  by `sm steps`, not again by `sm progress`; a build killed without a word ends `sm progress`'s loop
+  too ("The build has ended: run `sm steps` and go on."). A log line the engine didn't phrase is
+  quoted, and a file the model can't open is named by its file name, never its path. The closing
+  mark with no model built yet (none on disk, or a build running) says why there is no summary.
+  `seed-validate --out --no-card` says the table with a `then` that asks no examples card.
   The summary's sign-off line and the step list's sign-off count now count what the
   sign-off card counts (`sm review-queue`'s metrics, entities and joins awaiting review: "23 definitions are waiting for
   sign-off: 11 metrics, 12 entities."), and a run that signs nothing still shows "0 of 23 signed".

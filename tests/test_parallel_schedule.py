@@ -190,7 +190,7 @@ def test_a_resume_restamps_every_batch():
 def test_describe_shows_no_chunk_count_of_its_own():
     enrich = _flat(_read(REFS / "enrich.md"))
     assert "of 9 chunks" not in enrich
-    assert '"✓ Sales: 12 tables described, 96 columns, 5 entities."' in enrich
+    assert '"✓ "Sales": 12 tables described, 96 columns, 5 entities."' in enrich
     assert "post its `say` exactly and do its `then`, which says to refresh the task list" in enrich
     review = _flat(_read(REFS / "review.md"))
     assert 'run `sm steps "<root>"` and do what its `then` says ([task-list.md]' in review
@@ -199,7 +199,7 @@ def test_describe_shows_no_chunk_count_of_its_own():
 def test_a_resumed_build_with_a_model_goes_to_the_join_cards():
     build = _flat(_read(REFS / "build.md"))
     assert "a model was written since this build was started" in build
-    assert "go to the join cards below; do not build again" in build
+    assert "go to the join cards below without marking; do not build again" in build
     raw = _read(REFS / "build.md")
     assert raw.index("**On a resume**") < raw.index('scripts/sm" introspect')  # top of 1.7
 

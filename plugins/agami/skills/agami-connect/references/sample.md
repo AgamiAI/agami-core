@@ -61,7 +61,11 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
        bash "<plugin_root>/scripts/sm" approve-queue "<artifacts_dir>/agami-example" --signer system --role system
        ```
        (This is only sanctioned for the curated sample; a real database keeps the human sign-off gate.)
-     - **The example run (Phase 6) posts its table and asks no card.** Post the `say` of `sm seed-validate … --out`, the table of the examples that ran, exactly as written. Its `then` also says to ask the examples card; the sample path asks none (its examples stay as written and ran, as its definitions were signed off without a card), so that part is skipped here and no other: go on to step 7.
+     - **The example run (Phase 6) posts its table and asks no card.** The sample path asks no examples card (its examples stay as written and ran, as its definitions were signed off without a card), so its run passes `--no-card`:
+       ```bash
+       bash "<plugin_root>/scripts/sm" seed-validate "<artifacts_dir>/agami-example" --profile agami-example --no-card --out "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json"
+       ```
+       Post its `say`, the table of the examples that ran, exactly as written, as its `then` says; then go on to step 7.
      - **When the model validates, what was built is shown by step 7's summary** (the `say` of the `first_question=in_progress` mark), at the top of the message that asks the starter questions: it is the whole point of "watch it build", and a wrap with no numbers would defeat it. Don't cede the turn before it. No page opens: the model explorer is the full view, rendered and served from localhost by `/agami-model` only when the person asks for it. (Do **not** render the NL→SQL examples-validation page either.)
 
    **6A** and **6B** → **step 7** (summary, describe, stop). Both end with a validated `<artifacts_dir>/agami-example/` model.

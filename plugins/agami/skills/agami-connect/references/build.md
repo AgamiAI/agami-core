@@ -4,12 +4,14 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
-Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+**On a resume** of `/agami-connect`, check before marking anything. On entering 1.7, run:
+```bash
+bash "<plugin_root>/scripts/sm" steps "<root>"
+```
+When the build step is in progress and a model was written since this build was started (`datasource.yaml` is newer than the build's start mark), go to the join cards below without marking; do not build again. Otherwise (an older model on disk, a reload, included), mark the step started, do what its `then` says ([task-list.md](../../../shared/task-list.md)), and build as below:
 ```bash
 bash "<plugin_root>/scripts/sm" steps "<root>" --mark build=in_progress
 ```
-
-**On a resume** of `/agami-connect`, when `sm steps` shows the build in progress, no build log is running, and a model was written since this build was started (`datasource.yaml` is newer than the build's start mark), go to the join cards below; do not build again. An older model on disk (a reload) is not that case: build as below.
 
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. Run it exactly as written, with the full quoted path (never `cd` into the scripts folder, never a shell variable for the path): that form is the one agami pre-approves, so it doesn't stop for permission.
 
@@ -31,11 +33,11 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect --profile <
    ```bash
    bash "<plugin_root>/scripts/sm" progress "<root>" --wait 20
    ```
-   It returns as soon as the build's log moves on (or after 20 seconds) with `line`, ready to post: *"Reading columns ▰▰▰▱▱▱▱▱ 12/34 tables"*, the bar drawn from the log's own counts and rounded down (never an estimate). Its `then` is one of: post `line`; post `line` and update the task list from `list`; update the task list from `list`; nothing new, call this again; or the build has ended, run `sm steps` and go on. Do exactly that, and nothing else, each pass. Use this, not `tail` or a watcher of your own: it is pre-approved, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later command would stop for permission. If you do end your turn while it runs, say so in that message (*"Still reading your tables; I'll carry on as soon as it finishes."*).
+   It returns as soon as the build's log moves on (or after 20 seconds) with `line`, ready to post: *"Reading columns ▰▰▱▱▱▱▱▱ 12/34 tables"*, the bar drawn from the log's own counts and rounded down (never an estimate). Its `then` is one of: post `line`; post `line` and update the task list from `list`; update the task list from `list`; nothing new, call this again; or the build has ended, run `sm steps` and go on. Do exactly that, and nothing else, each pass. Use this, not `tail` or a watcher of your own: it is pre-approved, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later command would stop for permission. If you do end your turn while it runs, say so in that message (*"Still reading your tables; I'll carry on as soon as it finishes."*).
 
    Its output also carries `list`, the same step list `sm steps` prints, when there is a new one to show: the task list is updated from it when `then` says so ([task-list.md](../../../shared/task-list.md)). No separate `sm steps` call per pass.
 
-   **When `then` says the build has ended** (also on a resume, when the log had already finished), leave the loop and run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, and do what its `then` says. A build that finished needs nothing more here: go on to step 5. **A build that failed or stopped**: that `sm steps` call prints the problem as its `say`, with a `then` that says to say it to the person before going on: post its `say`, then refresh the task list from its `list`, then handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
+   **When `then` says the build has ended** (also on a resume, when the log had already finished), leave the loop and run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, and do what its `then` says. A build that finished needs nothing more here: go on to step 5. **A build that failed or stopped**: that `sm steps` call prints the problem as its `say`, with a `then` that says to say it to the person before going on: post its `say`, do what its `then` says, then handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
    **After the last "Checking joins" line**, the build tests possible joins against the data, and that can take a minute or more: post each line `sm progress` prints for it (*"Testing possible joins: 120 probed"*) when its `then` says to, and if a pass brings no such line, post once that the joins are being checked against the data (*"Checking the remaining columns against your data for joins…"*), so the wait before the join cards is never silent.
 4. **The onboarding step's label** is the build step's line in that `list`, with the live count once the build's log has one (*"Read the tables and joins — 12 of 34 tables"*; right after the start mark it has none) and the final numbers when it ends; never type the count yourself.
 5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.

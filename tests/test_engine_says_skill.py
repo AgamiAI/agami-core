@@ -96,7 +96,9 @@ def test_the_closing_summary_is_posted_from_say():
         flat = _flat(text)
         mark = flat.index('steps "<root>" --mark first_question=in_progress')
         assert mark < flat.index("post its `say` exactly", mark), name
-        assert CLOSING_RULE in flat and CLOSING_AGAIN in flat, name
+        rule = CLOSING_RULE if name == "sample.md" else \
+            "The first time it is asked, t" + CLOSING_RULE[1:]
+        assert rule in flat and CLOSING_AGAIN in flat, name
         assert 'sm" summary' not in text and 'sm" timing' not in text, name
         assert "sm summary" not in text and "sm timing" not in text, name
         assert not _summary_sentence_instructions(flat), name
@@ -206,14 +208,40 @@ def test_the_build_loop_does_what_then_says():
     assert "doing what its `then` says after every pass" in loop
     assert "**When `then` says the build has ended** (also on a resume, when the log had already finished)" in loop
     assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, and do what its `then` says' in loop
-    assert "post its `say`, then refresh the task list from its `list`, then handle it" in loop
+    assert "post its `say`, do what its `then` says, then handle it" in loop
     assert not re.search(r"`(?:changed|list_changed|done|failed)`", loop), "the loop names an output flag"
 
 
 def test_sample_posts_the_examples_table_and_asks_no_examples_card():
     text = _flat(_read(REFS / "sample.md"))
     assert "**The example run (Phase 6) posts its table and asks no card.**" in text
-    assert "the sample path asks none" in text
+    assert "The sample path asks no examples card" in text
+    # the engine's `then` asks no card there, so no skill text has to skip part of a `then`
+    assert ('seed-validate "<artifacts_dir>/agami-example" --profile agami-example --no-card --out '
+            in text)
+    assert "that part is skipped" not in text
+    assert "Never skip either because a later instruction seems to cover it" in _flat(_read(ENGINE_SAYS))
+
+
+def test_the_examples_in_the_skill_match_the_engines_output():
+    # the engine quotes the area name and draws 12/34 as 2 filled cells of 8 (rounded down)
+    assert '*"✓ "Sales": 12 tables described, 96 columns, 5 entities."*' in _read(REFS / "enrich.md")
+    build = _read(REFS / "build.md")
+    assert "▰▰▱▱▱▱▱▱ 12/34 tables" in build and "▰▰▰▱▱▱▱▱" not in build
+
+
+def test_the_resume_check_comes_before_the_build_mark():
+    raw = _read(REFS / "build.md")
+    check = raw.index('scripts/sm" steps "<root>"\n```')
+    assert raw.index("**On a resume**") < check < raw.index('steps "<root>" --mark build=in_progress')
+    flat = _flat(raw)
+    assert "go to the join cards below without marking; do not build again" in flat
+
+
+def test_the_closing_card_re_asked_after_the_full_view_has_no_second_summary():
+    flat = _flat(_read(REFS / "summary.md"))
+    assert "The first time it is asked, the closing card is asked only in a message that begins with the summary." in flat
+    assert "the summary is not posted again when the same card is re-asked after the full view" in flat
 
 
 def test_parallel_false_means_every_chunk_inline():
