@@ -85,6 +85,26 @@ def test_py_resolves_like_sm_names_plugin_scripts_and_makes_the_scratch_folder(t
     assert (tmp_path / "art" / "local" / "tmp").is_dir()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+def test_the_launcher_makes_local_private_and_leaves_an_existing_one_alone(tmp_path):
+    # `local/` holds the credentials; `py` may create it (for local/tmp) before agami-connect's own
+    # `mkdir -m 700 -p`, which would then not re-mode it
+    real = _shim(tmp_path / "bin" / "python3")
+    for name, existing in (("fresh", None), ("kept", 0o755)):
+        art = tmp_path / name
+        art.mkdir()
+        if existing is not None:
+            (art / "local").mkdir()
+            (art / "local").chmod(existing)
+        env = {"HOME": str(tmp_path / "home"), "PATH": f"{real.parent}:/usr/bin:/bin",
+               "AGAMI_ARTIFACTS_DIR": str(art)}
+        subprocess.run(["bash", str(PLUGIN / "scripts" / "py"), "-c", "pass"], env=env,
+                       capture_output=True, check=False)
+        assert (art / "local" / "tmp").is_dir()
+        mode = (art / "local").stat().st_mode & 0o777
+        assert mode == (0o700 if existing is None else existing), (name, oct(mode))
+
+
 def test_sm_and_py_share_one_interpreter_rule():
     for name in ("sm", "py"):
         text = (PLUGIN / "scripts" / name).read_text(encoding="utf-8")

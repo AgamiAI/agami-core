@@ -69,7 +69,12 @@ agami_scratch_dir() {
   local art d
   art="$(agami_artifacts_dir)"
   d="$art/local/tmp"
-  [ -d "$art" ] && { mkdir -p "$d" 2>/dev/null || true; }
+  # `local/` holds the credentials, so a launcher that creates it first makes it private (700); an
+  # existing `local/` keeps its mode, since the person may have set it.
+  if [ -d "$art" ]; then
+    [ -d "$art/local" ] || mkdir -m 700 "$art/local" 2>/dev/null || true
+    mkdir -p "$d" 2>/dev/null || true
+  fi
   printf '%s\n' "$d"
 }
 

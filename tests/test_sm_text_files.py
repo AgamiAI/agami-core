@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import sys
 from pathlib import Path
 
@@ -116,3 +117,18 @@ def test_a_missing_file_is_a_json_error(tmp_path):
     with pytest.raises(SystemExit) as exc:
         _run(["set-description", str(tmp_path), "--description-file", str(tmp_path / "nope.txt")])
     assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("argv", [["set-description", "ROOT", "--description-file"],
+                                  ["set-org", "ART", "--name-file"],
+                                  ["remove-example", "ROOT", "--question-file"]])
+def test_a_file_that_is_not_utf8_is_a_json_error(tmp_path, capsys, argv):
+    _model(tmp_path)
+    bad = tmp_path / "agami-latin1.txt"
+    bad.write_bytes("Café".encode("latin-1"))
+    args = [str(tmp_path) if a in ("ROOT", "ART") else a for a in argv] + [str(bad)]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == 2
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"].startswith(f"could not read text from {bad.resolve()}")
