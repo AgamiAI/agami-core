@@ -588,7 +588,10 @@ def test_native_cli_sql_comes_from_a_scratch_file():
     assert "-c '<sql>'" not in text and "-e '<sql>'" not in text and "-q '<sql>'" not in text
     assert '-f "<artifacts_dir>/local/tmp/agami-query.txt"' in text
     assert "-e 'source <artifacts_dir>/local/tmp/agami-query.txt'" in text
-    assert "'.read <artifacts_dir>/local/tmp/agami-query.txt'" in text
+    assert "'.read \"<artifacts_dir>/local/tmp/agami-query.txt\"'" in text  # a space in the path survives
+    assert "must not contain an apostrophe" in text
+    assert "holds only SQL text, never a credential" in text
+    assert "holds only SQL text, never a credential" in _read(REFS / "enrich.md")
     assert "`<sslmode>` is the profile's `sslmode`, or `prefer` when it has none." in text
 
 

@@ -15,7 +15,7 @@ These are non-negotiable. Skills that read this document must follow them under 
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
    - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
    - For mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw`
-   The SQL goes in that file, written with the Write tool, never on the command line: a string literal (`WHERE status = 'paid'`) would end the shell's quoting.
+   The SQL goes in that file, written with the Write tool, never on the command line: a string literal (`WHERE status = 'paid'`) would end the shell's quoting. The file is overwritten by the next statement and holds only SQL text, never a credential; never put a secret in it.
    These auth files are chmod 600 in `<artifacts_dir>/local/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
 
 ## Contents
@@ -371,7 +371,7 @@ bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix=_<profile> -h "<host>" -P <port> "<database>" -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw
 ```
 
-`mysql` has no file option, so `-e 'source <file>'` runs the statement from the file. Write the file with the Write tool first.
+`mysql` has no file option, so `-e 'source <file>'` runs the statement from the file. Write the file with the Write tool first. `source` reads the file name to the end of the line, so a space in the path is fine; don't quote it inside `source`.
 
 The output is tab-separated, one row per line; read it as it is (no `tr` or other filter on the line).
 
@@ -379,10 +379,12 @@ The output is tab-separated, one row per line; read it as it is (no `tr` or othe
 
 ### SQLite
 ```bash
-sqlite3 -csv -header "<path>" '.read <artifacts_dir>/local/tmp/agami-query.txt'
+sqlite3 -csv -header "<path>" '.read "<artifacts_dir>/local/tmp/agami-query.txt"'
 ```
 
-`sqlite3` has no file option either; `.read <file>` runs the statement in the file.
+`sqlite3` has no file option either; `.read "<file>"` runs the statement in the file. Keep the double quotes inside the dot-command: without them a space in the path ends the file name (`Usage: .read FILE`).
+
+**For these two, the artifacts folder's path must not contain an apostrophe**: the whole dot-command or `source` line sits in single quotes on the command line, and an apostrophe would end them. When it does, run the statement through the Python driver instead, `bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.txt"`, whose path is double-quoted.
 
 ---
 
