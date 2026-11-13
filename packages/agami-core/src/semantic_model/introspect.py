@@ -175,6 +175,7 @@ def _logs_failure(fn: Callable) -> Callable:
     def run(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        # BaseException, not Exception: a Ctrl-C must also end the log with `failed:`; it is re-raised.
         except BaseException as exc:
             path = kwargs.get("progress_path")
             reason = (str(exc).strip().splitlines() or [type(exc).__name__])[0]

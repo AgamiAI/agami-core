@@ -53,7 +53,7 @@ Also run `bash "<plugin_root>/scripts/sm" sensitive "$ROOT"` every time: besides
    ```bash
    bash "<plugin_root>/scripts/sm" bundle "$ROOT" --area <area> > "<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.input.json"
    ```
-2. **Launch one `agami-example-writer` per area in one message**, in the background as [parallel-work.md](../../../shared/parallel-work.md) says (`subagent_type` `agami-core:agami-example-writer`, `run_in_background: true`, at most 4 running at once), each described in words, *"Draft example questions for Sales"*. Each prompt names `area`, `input_path` (the file above), `result_path` (`<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.candidates.json`), `plugin_root` (the absolute path), `dialect` (the database type), and `asked_questions`: the path of `<artifacts_dir>/local/tmp/agami-asked-questions.txt` if 1.5 saved one, else "none". Where the Agent tool doesn't list it, use a general-purpose subagent told to *"Read `<plugin_root>/agents/agami-example-writer.md` and follow it for this input: …"*.
+2. **Launch one `agami-example-writer` per area in one message**, in the background as [parallel-work.md](../../../shared/parallel-work.md) says (`subagent_type` `agami-core:agami-example-writer`, `run_in_background: true` where the Agent tool has that parameter, at most 4 running at once), each described in words, *"Draft example questions for Sales"*. Each prompt names `area`, `input_path` (the file above), `result_path` (`<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.candidates.json`), `plugin_root` (the absolute path), `dialect` (the database type), and `asked_questions`: the path of `<artifacts_dir>/local/tmp/agami-asked-questions.txt` if 1.5 saved one, else "none". Where the Agent tool doesn't list it, use a general-purpose subagent told to *"Read `<plugin_root>/agents/agami-example-writer.md` and follow it for this input: …"*.
 
 Then go on with the cards below; the turn stays open while the writers run. With no Agent tool, nothing starts here: Phase 5a drafts the examples inline.
 
@@ -78,7 +78,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 | Answer | Do |
 |---|---|
-| Approve all | The identity card first if needed (below), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
+| Approve all | The identity card first if needed (below), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`, then run `sm steps "$ROOT"` and refresh the task list. |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Go to 4b. |
 | Show the full view | The full view below, then this card again. |
@@ -90,7 +90,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 - **Approve all remaining**: sign off this item and every item not yet shown. Every card carries it, so a long queue finishes in one press. Answers given on the same card to the other questions still stand.
 - **Show the full view**: the model explorer page, served from localhost; nothing about this item is decided, and the same card is asked again after the URL. On a card with several questions, offer it on the first question only.
 
-After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
+After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), run `sm steps "$ROOT"` and refresh the task list ([task-list.md](../../../shared/task-list.md)), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
 
 **"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
 

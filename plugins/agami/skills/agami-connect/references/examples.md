@@ -9,7 +9,7 @@ Mark the step started and refresh the task list ([task-list.md](../../../shared/
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=in_progress
 ```
 
-**Surface a progress warning first** (second-longest phase): "Generating NL→SQL seeds (a spread across your tables, metrics, entities, and joins — including cross-schema ones) and EXPLAIN-validating each against the live DB. Expect 1–3 min (longer on cloud / a multi-schema DB). I'll narrate per-example progress."
+**Say in one line what happens now**, true to the path you are on: with example writers, *"Collecting the example questions drafted during sign-off, then checking each against your database."*; with none, *"Drafting example questions across your tables, metrics and joins, then checking each against your database. This takes a few minutes."*
 
 **5a — the candidates.** When Phase 4 started example writers, the candidates come from their files; you check and finish them:
 
@@ -55,7 +55,7 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 
 (Heads-up before you run it: on a large warehouse this executes every seed for real — some may be full-scan aggregates that take a few minutes and cost warehouse compute. It's a one-time onboarding step; surface a one-liner so the wait is expected.)
 
-**On a server database, run it in the background**, as the build is (1.7): Bash with `run_in_background: true` and a `description` in the person's words, *"Run the example questions (11)"*. It prints nothing until it is done, so post no bar; one line when it starts (*"Running the 11 example questions against your database…"*) and the result when it exits. Keep the turn open by blocking on its output file, repeated until `all_ready` is true:
+**On a server database, run it in the background**, as the build is (1.7): Bash with `run_in_background: true` and a `description` in the person's words, *"Run the example questions (11)"*. It prints nothing until it is done, so post no bar; one line when it starts (*"Running the 11 example questions against your database…"*) and the result when it exits. Keep the turn open by blocking on its output file, repeated until `all_ready` is true, and after each pass that is not ready post one line saying it is still running (*"Still running the example questions…"*, no number), so the wait is never silent:
 ```bash
 bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items.json" --wait 60
 ```
