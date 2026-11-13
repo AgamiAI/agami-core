@@ -744,8 +744,12 @@ def cmd_steps(args) -> int:
     except ValueError as exc:
         print(f"sm steps: {exc}", file=sys.stderr)
         return 2
-    for step_id, status in marks:
-        steps.mark(Path(args.root), step_id, status)
+    try:
+        for step_id, status in marks:
+            steps.mark(Path(args.root), step_id, status)
+    except ValueError as exc:
+        print(f"sm steps: {exc}", file=sys.stderr)
+        return 2
     result = steps.onboarding_steps(Path(args.root))
     _print_json(result if args.full else steps.compact(result))
     return 0

@@ -64,7 +64,10 @@ def parse_progress(raw: str) -> Optional[tuple[re.Match, str, Optional[str]]]:
 
 
 def last_progress_line(log: Path) -> str:
-    """The build log's latest non-blank line, or "" when there is none (yet)."""
+    """The build log's latest non-blank line, or "" when there is none (yet), or when the log is a
+    link out of its model folder (`<root>/.introspect/progress.log`): `sm progress` prints the line."""
+    if not L.inside_model(Path(log).parent.parent, log):
+        return ""
     try:
         text = log.read_text(encoding="utf-8", errors="replace")
         lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -98,7 +101,10 @@ def mark(root: Path, step_id: str, status: str, now: Optional[datetime] = None) 
     surfaces marking at once can't lose each other's line; the last mark per step wins on read."""
     _check(step_id, status)
     at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
-    path = _timeline(Path(root).expanduser())
+    root = Path(root).expanduser()
+    path = _timeline(root)
+    if not L.inside_model(root, path):
+        raise ValueError(f"{path} leads out of the model folder {root}; no mark was written")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({"id": step_id, "status": status, "at": at.isoformat()}) + "\n")
@@ -146,6 +152,8 @@ def _replay_marks(root: Path) -> _Replay:
     it, earlier steps' included, belong to an earlier run (a reload days later must not count the
     days between). A finished step marked `in_progress` again starts a new attempt of that step."""
     try:
+        if not L.inside_model(root, _timeline(root)):
+            raise OSError("timeline leads out of the model folder")
         text = _timeline(root).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return _Replay({}, False, None)

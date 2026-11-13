@@ -36,7 +36,7 @@ import yaml
 
 from . import validator as V
 from .loader import _read_yaml as _load
-from .loader import list_prompt_examples, load_datasource
+from .loader import inside_model, list_prompt_examples, load_datasource
 from .models import (
     CrossSubjectAreaRelationship,
     Datasource,
@@ -2599,6 +2599,8 @@ def _append_curation_log(root: Path, ops: list[dict], signer, role,
 
 def _read_log_lines(root: Path) -> list[Optional[dict]]:
     """Each line of the curation log, parsed; None for a line that isn't a JSON object."""
+    if not inside_model(root, root / CURATION_LOG):
+        return []  # a link out of the model folder: its lines would reach the review output
     try:
         # bytes, so one undecodable line is that line's problem, not the whole log's
         lines = (root / CURATION_LOG).read_bytes().splitlines()

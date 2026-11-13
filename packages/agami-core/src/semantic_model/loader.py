@@ -34,11 +34,13 @@ Nothing here imports Pydantic-free; the whole module is v2-only.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import yaml
+from pydantic import ValidationError
 
 from .models import (
     Column,
@@ -78,6 +80,63 @@ def _read_yaml(path: Path) -> Any:
         return yaml.safe_load(fh)
 
 
+class ModelFileError(ValueError):
+    """A model file that can't be loaded: one that points outside the model folder, or whose content
+    doesn't fit its schema. The message names the file and the reference or field, never a value
+    read from a file: a model folder can come from anyone (a cloned repository), and a value echoed
+    back from a file it pointed at would print that file."""
+
+
+def _contained(root: Path, path: Path, ref: str) -> Path:
+    """`path` with symlinks resolved, when that is inside `root` (also resolved); otherwise
+    ModelFileError naming `ref`, the reference as the model writes it. Every path the loader derives
+    from model content goes through here before it is opened: `..`, an absolute path and a symlinked
+    file each reached files outside the model, and a read verb printed parts of them."""
+    root_real = Path(os.path.realpath(root))
+    real = Path(os.path.realpath(path))
+    if real != root_real and root_real not in real.parents:
+        raise ModelFileError(f"{ref} points outside the model folder {root}; it was not read")
+    return real
+
+
+def inside_model(root: str | Path, path: str | Path) -> bool:
+    """Whether `path`, symlinks resolved, is inside the model folder `root`: the check for the
+    model's own logs (the step timeline, the build log, the curation log) before they are read or
+    appended to, so a link planted in a model folder can't make a read verb print, or a mark write,
+    a file elsewhere."""
+    root_real = Path(os.path.realpath(root))
+    real = Path(os.path.realpath(path))
+    return real == root_real or root_real in real.parents
+
+
+def _read_model_yaml(root: Path, path: Path, ref: Optional[str] = None) -> Any:
+    """`_read_yaml` of a file the model names, once `_contained` has passed."""
+    return _read_yaml(_contained(root, path, ref or _rel(root, path)))
+
+
+def _rel(root: Path, path: Path) -> str:
+    try:
+        return str(Path(path).relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def _build(cls: Any, doc: Any, root: Path, path: Path) -> Any:
+    """`cls(**doc)` for the document read from `path`, its validation errors reported as the file
+    (relative to root) and each field's location and message, with no input value."""
+    if not isinstance(doc, dict):
+        raise ModelFileError(f"{_rel(root, path)}: expected a mapping for a {cls.__name__}")
+    try:
+        return cls(**doc)
+    except ValidationError as exc:
+        raise ModelFileError(f"{_rel(root, path)}: {_errors(exc)}") from None
+
+
+def _errors(exc: ValidationError) -> str:
+    return "; ".join(f"{'.'.join(str(p) for p in e['loc']) or '(top)'}: {e['msg']}"
+                     for e in exc.errors(include_input=False, include_url=False))
+
+
 # The top-level keys `load_datasource` reads, which are exactly `Datasource`'s fields. Every other
 # key in datasource.yaml is dropped by that read, so a model written for a newer agami-core lost a
 # field it declared without a word, and a deploy fed by that load stored a model without it (#575).
@@ -110,34 +169,50 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
     datasource_path = root / "datasource.yaml"
     if not datasource_path.exists():
         raise FileNotFoundError(f"no datasource.yaml at {datasource_path}")
-    ds_doc: dict[str, Any] = _read_yaml(datasource_path) or {}
+    ds_doc: dict[str, Any] = _read_model_yaml(root, datasource_path) or {}
+    if not isinstance(ds_doc, dict):
+        raise ModelFileError("datasource.yaml: expected a mapping")
 
     # storage connections — inline list OR refs into datasources/<c>/storage.yaml
     connections: list[StorageConnection] = []
-    for sc in ds_doc.get("storage_connections", []) or []:
+    for n, sc in enumerate(ds_doc.get("storage_connections", []) or []):
+        where = f"datasource.yaml storage_connections[{n}]"
         if isinstance(sc, dict) and "ref" in sc:
-            ref_path = root / sc["ref"]
-            connections.append(StorageConnection(**(_read_yaml(ref_path) or {})))
+            ref_path = root / str(sc["ref"])
+            doc = _read_model_yaml(root, ref_path, f"{where}.ref {str(sc['ref'])!r}") or {}
+            connections.append(_build(StorageConnection, doc, root, ref_path))
         elif isinstance(sc, dict) and "storage_type" in sc:
-            connections.append(StorageConnection(**sc))
+            connections.append(_build(StorageConnection, sc, root, datasource_path))
         else:
             # {name, ref} where ref missing -> try datasources/<name>/storage.yaml
             name = sc.get("name") if isinstance(sc, dict) else str(sc)
             guess = root / "datasources" / str(name) / "storage.yaml"
             if guess.exists():
-                connections.append(StorageConnection(**(_read_yaml(guess) or {})))
+                doc = _read_model_yaml(root, guess, f"{where}.name {str(name)!r}") or {}
+                connections.append(_build(StorageConnection, doc, root, guess))
 
     # subject areas — each referenced by directory name
     subject_areas: list[SubjectArea] = []
     hidden = _Hidden()   # what is on disk but not served, by (schema, table)
-    for sa_ref in ds_doc.get("subject_areas", []) or []:
-        sa_dir = root / (sa_ref if isinstance(sa_ref, str) else sa_ref.get("path", ""))
+    for n, sa_ref in enumerate(ds_doc.get("subject_areas", []) or []):
+        written = sa_ref if isinstance(sa_ref, str) else (sa_ref or {}).get("path", "")
+        sa_dir = root / str(written)
         if not sa_dir.exists():
             # also accept a bare name under subject_areas/
             sa_dir = root / "subject_areas" / str(sa_ref)
-        subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected, hidden=hidden))
+        _contained(root, sa_dir, f"datasource.yaml subject_areas[{n}] {str(written)!r}")
+        subject_areas.append(_load_subject_area(sa_dir, include_rejected=include_rejected,
+                                                hidden=hidden, root=root))
 
-    org = Datasource(
+    try:
+        org = _datasource(root, ds_doc, connections, subject_areas)
+    except ValidationError as exc:
+        raise ModelFileError(f"datasource.yaml: {_errors(exc)}") from None
+    return _served(org, hidden, include_rejected)
+
+
+def _datasource(root: Path, ds_doc: dict, connections: list, subject_areas: list) -> Datasource:
+    return Datasource(
         org_id=ds_doc.get("org_id"),  # F14: minted uuid4 (None for pre-F14 files)
         datasource=ds_doc.get("datasource", root.name),
         version=ds_doc.get("version", 1),
@@ -151,6 +226,10 @@ def load_datasource(root: str | Path, *, include_rejected: bool = False) -> Data
         key_terminology=ds_doc.get("key_terminology", {}) or {},
         ambiguities=ds_doc.get("ambiguities", []) or [],
     )
+
+
+def _served(org: Datasource, hidden: "_Hidden", include_rejected: bool) -> Datasource:
+    """The runtime's view of a loaded model: what the curator excluded taken out (unless asked for)."""
     if not include_rejected:
         before = _metric_names(org)
         # The cross-area joins, entities and metrics need the same filter the per-area loader applies
@@ -469,14 +548,25 @@ def _reconcile_table_ref_exposes(refs: "list[TableRef]", tables_defined: "list[T
 
 
 def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
-                       hidden: Optional["_Hidden"] = None) -> SubjectArea:
-    sa_doc: dict[str, Any] = _read_yaml(sa_dir / "subject_area.yaml") or {}
+                       hidden: Optional["_Hidden"] = None,
+                       root: Optional[Path] = None) -> SubjectArea:
+    # Every file under the area is checked against the model folder (a symlinked table file or
+    # folder could point anywhere); a caller with no model folder checks against the area's own.
+    root = Path(root) if root is not None else sa_dir
+
+    def read(path: Path) -> Any:
+        return _read_model_yaml(root, path)
+
+    sa_path = sa_dir / "subject_area.yaml"
+    sa_doc: dict[str, Any] = read(sa_path) or {}
+    if not isinstance(sa_doc, dict):
+        raise ModelFileError(f"{_rel(root, sa_path)}: expected a mapping")
 
     tables_defined: list[Table] = []
     tdir = sa_dir / "tables"
     if tdir.exists():
         for tf in sorted(tdir.glob("*.yaml")):
-            t = Table(**(_read_yaml(tf) or {}))
+            t = _build(Table, read(tf) or {}, root, tf)
             if not include_rejected:
                 if _rejected(t) or t.review_state == "stale":
                     if hidden is not None:
@@ -507,7 +597,7 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
     edir = sa_dir / "entities"
     if edir.exists():
         for ef in sorted(edir.glob("*.yaml")):
-            e = Entity(**(_read_yaml(ef) or {}))
+            e = _build(Entity, read(ef) or {}, root, ef)
             if not include_rejected and _rejected(e):
                 continue
             entities.append(e)
@@ -516,7 +606,7 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
     mdir = sa_dir / "metrics"
     if mdir.exists():
         for mf in sorted(mdir.glob("*.yaml")):
-            mm = Metric(**(_read_yaml(mf) or {}))
+            mm = _build(Metric, read(mf) or {}, root, mf)
             if not include_rejected and _rejected(mm):
                 if hidden is not None:
                     hidden.metrics_removed.add(mm.name)
@@ -526,11 +616,11 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
     relationships: list[Relationship] = []
     rel_file = sa_dir / "relationships.yaml"
     if rel_file.exists():
-        rels_doc = _read_yaml(rel_file) or []
+        rels_doc = read(rel_file) or []
         if isinstance(rels_doc, dict):
             rels_doc = rels_doc.get("relationships", [])
         for r in rels_doc:
-            rel = Relationship(**r)
+            rel = _build(Relationship, r, root, rel_file)
             if not include_rejected:
                 # drop rejected joins, and joins whose endpoint table was excluded
                 if _rejected(rel):
@@ -542,12 +632,21 @@ def _load_subject_area(sa_dir: Path, include_rejected: bool = False,
 
     # TableRefs are kept as-is — they resolve org-wide (multi-membership), and a
     # ref to a rejected table simply won't resolve at runtime.
-    table_refs = [TableRef(**t) for t in (sa_doc.get("tables", []) or [])]
+    table_refs = [_build(TableRef, t, root, sa_path) for t in (sa_doc.get("tables", []) or [])]
     if not include_rejected:
         # a column-group that lost all its columns to exclusion was pruned above; drop any
         # TableRef.expose_column_groups still naming it, else `unknown_column_group` fails load.
         _reconcile_table_ref_exposes(table_refs, tables_defined)
 
+    try:
+        return _subject_area(sa_dir, sa_doc, table_refs, tables_defined, entities, metrics,
+                             relationships)
+    except ValidationError as exc:
+        raise ModelFileError(f"{_rel(root, sa_path)}: {_errors(exc)}") from None
+
+
+def _subject_area(sa_dir: Path, sa_doc: dict, table_refs: list, tables_defined: list,
+                  entities: list, metrics: list, relationships: list) -> SubjectArea:
     return SubjectArea(
         name=sa_doc.get("name", sa_dir.name),
         description=sa_doc.get("description", ""),
@@ -564,33 +663,35 @@ def _load_cross_rels(root: Path, ds_doc: dict) -> list[CrossSubjectAreaRelations
     out: list[CrossSubjectAreaRelationship] = []
     # inline on datasource.yaml
     for r in ds_doc.get("cross_subject_area_relationships", []) or []:
-        out.append(CrossSubjectAreaRelationship(**r))
+        out.append(_build(CrossSubjectAreaRelationship, r, root, root / "datasource.yaml"))
     # or a sidecar file
     f = root / "cross_subject_area_relationships.yaml"
     if f.exists():
-        doc = _read_yaml(f) or {}
-        for r in doc.get("edges", doc if isinstance(doc, list) else []):
-            out.append(CrossSubjectAreaRelationship(**r))
+        doc = _read_model_yaml(root, f) or {}
+        for r in (doc if isinstance(doc, list) else doc.get("edges", [])):
+            out.append(_build(CrossSubjectAreaRelationship, r, root, f))
     return out
 
 
 def _load_cross_entities(root: Path, ds_doc: dict) -> list[Entity]:
-    out = [Entity(**e) for e in (ds_doc.get("cross_subject_area_entities", []) or [])]
+    out = [_build(Entity, e, root, root / "datasource.yaml")
+           for e in (ds_doc.get("cross_subject_area_entities", []) or [])]
     f = root / "cross_subject_area_entities.yaml"
     if f.exists():
-        doc = _read_yaml(f) or {}
-        for e in doc.get("entities", doc if isinstance(doc, list) else []):
-            out.append(Entity(**e))
+        doc = _read_model_yaml(root, f) or {}
+        for e in (doc if isinstance(doc, list) else doc.get("entities", [])):
+            out.append(_build(Entity, e, root, f))
     return out
 
 
 def _load_cross_metrics(root: Path, ds_doc: dict) -> list[Metric]:
-    out = [Metric(**mm) for mm in (ds_doc.get("cross_subject_area_metrics", []) or [])]
+    out = [_build(Metric, mm, root, root / "datasource.yaml")
+           for mm in (ds_doc.get("cross_subject_area_metrics", []) or [])]
     f = root / "cross_subject_area_metrics.yaml"
     if f.exists():
-        doc = _read_yaml(f) or {}
-        for mm in doc.get("metrics", doc if isinstance(doc, list) else []):
-            out.append(Metric(**mm))
+        doc = _read_model_yaml(root, f) or {}
+        for mm in (doc if isinstance(doc, list) else doc.get("metrics", [])):
+            out.append(_build(Metric, mm, root, f))
     return out
 
 
@@ -1141,7 +1242,7 @@ def list_prompt_examples(root: str | Path, area: str,
     f = Path(root) / "prompt_examples" / area / "examples.yaml"
     if not f.exists():
         return []
-    doc = _read_yaml(f) or {}
+    doc = _read_model_yaml(Path(root), f, f"the examples of area {area!r}") or {}
     items = doc if isinstance(doc, list) else doc.get("examples", [])
     if include_rejected:
         return items
