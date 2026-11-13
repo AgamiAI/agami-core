@@ -13,7 +13,7 @@ bash "<plugin_root>/scripts/sm" steps "<root>" --mark build=in_progress
 
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. Run it exactly as written, with the full quoted path (never `cd` into the scripts folder, never a shell variable for the path): that form is the one agami pre-approves, so it doesn't stop for permission.
 
-First write the kept allowlist, one table per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-keep.txt` (1.6's `--keep` usually wrote it already). Then one call, on one line:
+Only if 1.6 did not already write the kept allowlist (its `--keep` writes it), write it yourself, one table per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-keep.txt`. Then one call, on one line:
 
 ```bash
 AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-keep.txt" --exclude-columns <schema.table.column> <schema.table.column>
@@ -27,7 +27,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect --profile <
 
 1. **One background call.** Bash with `run_in_background: true`, and a `description` the person can read in the app's Background tasks pane, in their words: *"Read the tables (Snowflake, 84 tables)"*.
 2. **Say once where to watch**, the first time a background step starts in a run: *"Reading your tables in the background. In the Desktop app, ⋮ → Background tasks shows it live."* (Leave out the second sentence outside the Desktop app.)
-3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done` or `failed`, one call per pass:
+3. **Keep the turn open and post progress with `sm progress`**, one call per pass, in a loop that stops when any of these happens: it says `done`; it says `failed`; or its `list` shows the build step not started again (`·`), which is how a killed build shows (it writes no `failed` line, and the steps call it stopped after 30 silent minutes):
    ```bash
    bash "<plugin_root>/scripts/sm" progress "<root>" --wait 20
    ```
@@ -35,7 +35,7 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect --profile <
 
    Its output also carries `list`, the same step list `sm steps` prints: after every pass, the next thing is to refresh the task list from that `list` ([task-list.md](../../../shared/task-list.md)). No separate `sm steps` call per pass.
 
-   When `failed` is true, or the `list` shows the build step not started again (`·`; a killed build writes no `failed` line, and the steps call it stopped after 30 silent minutes), the build stopped: run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, say its `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
+   On `failed`, or the `·`, the build stopped: run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, refresh the task list from its `list`, say its `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
    **After the last "Checking joins" line**, the build tests possible joins against the data, and that can take a minute or more: post the line `sm progress` prints for it (*"Testing possible joins: 120 probed"*) whenever `changed` is true, and if a pass brings no such line, post once that the joins are being checked against the data (*"Checking the remaining columns against your data for joins…"*), so the wait before the join cards is never silent.
 4. **The onboarding step's label** is the build step's line in that `list`, with the live count once the build's log has one (*"Read the tables and joins — 12 of 34 tables"*; right after the start mark it has none) and the final numbers when it ends; never type the count yourself.
 5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.

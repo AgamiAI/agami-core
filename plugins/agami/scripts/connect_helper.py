@@ -16,7 +16,7 @@ section to `<artifacts_dir>/local/credentials` with `password = keyring:agami/<p
                new password does not connect, the old section and password are put back.
 
 Stdout is JSON lines, nothing else:
-    {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}       once listening
+    {"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300, "pid": <this process>}  once listening
     {"status": "connected" | "connect_failed", "profile": ..., "detail": "<one line>"}
     {"status": "refused", "reason": <REASONS>, "profile": ..., "detail": "<one line>"}
     {"status": "missing_driver", "package": "<pip package(s)>", "profile": ..., "detail": "<one line>"}
@@ -642,7 +642,8 @@ def run(spec: Any, out: TextIO, *, expires_in: float = EXPIRES_IN, replace: bool
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
-        _emit(out, {"url": f"http://{HOST}:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in)})
+        _emit(out, {"url": f"http://{HOST}:{server.server_address[1]}{server.path_ok}", "expires_in": int(expires_in),
+                    "pid": os.getpid()})
         if not server.submitted.wait(expires_in):
             # Closed under the lock, so a submit either landed first (and is used) or gets 404 from now
             # on: never a "received" page for a password that is then dropped.

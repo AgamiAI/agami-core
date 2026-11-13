@@ -342,10 +342,12 @@ def test_subagent_passes_are_30_seconds():
 def test_the_currency_question_rides_on_the_decoding_card():
     text = _flat(_read(REFS / "enrich.md"))
     step6 = text.split("6. **After the last chunk:**", 1)[1].split("For each table fetch", 1)[0]
-    assert "**The currency question rides on these cards:**" in step6
+    assert "**The currency question rides on these cards.**" in step6
     assert 'sm" suggest-units "<root>"' in step6
-    assert "while enrichers are still running it waits for the card that asks their `questions`" in step6
+    assert "It is never asked before this point" in step6
+    assert "Currency is asked once per run" in step6
     assert "not on a card of its own" in text
+    assert "asks no currency question here" in text
 
 
 # Section 6: chunks of 8

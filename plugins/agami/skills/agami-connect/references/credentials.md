@@ -6,18 +6,15 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 **Runs when preflight step 1 returns `next: bootstrap` (no credentials for the profile) and the person picked "Connect a database", or when they picked "Connect another database".** If `<artifacts_dir>/local/credentials` already has the `[<profile>]` section for the database being connected, **skip Phase 0a entirely.**
 
-**Two paths, chosen by the operating system** (`uname -s`: `Darwin` is macOS; `MINGW*` / `MSYS*` / `CYGWIN*`, or `$OS` = `Windows_NT`, is Windows):
+**Two paths, chosen by the operating system**, which the session's environment already names (the platform: `darwin` is macOS, `win32` is Windows, `linux` is Linux); don't run a command to find it:
 
 - **macOS and Windows: the password page.** 0a.1 → 0a.2 → **0a.4c** (connection fields card) → 0a.3 (the name, offering the database's own name) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.4k** (the password page) → Phase 1. No file to edit and nothing to paste. The page needs the interpreter, agami-core (with `keyring`) and the artifacts folder in place, which is why 0a.5–0a.8 run before it.
 - **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
-Two calls:
+One call, which creates the folder with its private mode:
 ```bash
-mkdir -p "<artifacts_dir>/local"
-```
-```bash
-chmod 700 "<artifacts_dir>/local"
+mkdir -m 700 -p "<artifacts_dir>/local"
 ```
 If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line (Read it first; add the line with the Edit tool, or write the file with that one line when it doesn't exist).
 
@@ -101,7 +98,7 @@ bash "<plugin_root>/scripts/py" connect_helper.py --spec "<artifacts_dir>/local/
 Stdout is JSON lines and nothing else. **Wait for the helper's first line with the Monitor tool**: the Bash result names the task and its output file, so use the Monitor tool to watch the helper's output until its first line, or the task's exit (an until-loop on that output file that stops on the first JSON line, or when the task has exited). Never run a foreground `sleep`: the Desktop Code tab blocks it. As a fallback where Monitor isn't available, re-read the output file at spaced intervals, each read its own tool call, never a tight loop. Stop waiting when one of these happens:
 
 - **The first line has a `status`**: it is the final line. Every check that runs before the page (`missing_driver`, `name_taken`, `no_store`, `stale_install`, and the other refusals), and the whole `sso` path, prints that one line and exits. Skip step 3 and go to step 4 with it.
-- **The first line has a `url`** (`{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}`): the page is listening, usually within a second. Go to step 3.
+- **The first line has a `url`** (`{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300, "pid": <n>}`): the page is listening, usually within a second. Keep its `pid`: it is the helper's own process. Go to step 3.
 - **The background task has exited with no line, or, on the password path, about 15 seconds pass with no line**: the helper failed before it could print (an import error, say, which goes to stderr only). Stop the task if it is still running (below), show the last stderr line in one sentence, and ask a card, header `Next step`: `Try again` (step 2 again) / `Use a file instead (manual)` (0a.4).
 
 **With `"auth": "sso"` (`auth: sso`) there is no 15-second limit.** The helper tests the connection before it prints anything, and that test can open a browser sign-in (Snowflake's SSO, say) that waits for the person. So tell the person once, when you start the helper, that a browser sign-in may open and that you are waiting for it to finish, then wait until the helper exits, up to 5 minutes, with the same Monitor watch. Don't repeat the line while waiting. Past 5 minutes with no exit, stop the task (below) and ask the `Next step` card above.
@@ -118,7 +115,7 @@ Don't run the helper in the foreground: it would hold the turn until the page is
 - **New link** → stop the running helper (below) and start step 2 again with the same spec.
 - **Use a file instead (manual)** → stop the helper, then 0a.4.
 
-The helper exits when the page is submitted or the 5 minutes pass, and that exit also brings you back if the card is still open: go to step 4 and don't ask the card again. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id (the helper then takes back whatever it stored), and show the database-type card again. Where TaskStop isn't available, the helper stops by itself when its 5 minutes are up: say so, and wait for its exit before starting it again.
+The helper exits when the page is submitted or the 5 minutes pass, and that exit also brings you back if the card is still open: go to step 4 and don't ask the card again. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id (the helper then takes back whatever it stored), and show the database-type card again. Where TaskStop isn't available, `kill <pid>` with the `pid` from the helper's first line stops it the same way (it asks for permission; `kill` sends SIGTERM, and the helper takes back whatever it stored); without a `pid` (the `sso` path prints none), the helper stops by itself when its 5 minutes are up: say so, and wait for its exit before starting it again.
 
 **4. Read the final line** of the output when the helper exits, and act on it. The exit is what you wait for after the link is posted: the Monitor tool watching the task until it exits (or, as the fallback, spaced re-reads of the output file), never a foreground `sleep`; the background task's exit notice also brings you back. Exit code is 0 for every outcome; `status` (and a refusal's `reason`) says what happened, and `detail` is the one line to show the person. Each outcome gets one sentence plus the next card:
 
@@ -253,13 +250,7 @@ If the driver is missing, **confirm via AskUserQuestion**, then `"<python3>" -m 
 
 ### 0a.5b — Ensure the semantic-model dependencies
 
-The model (introspection, validation, traversal, curation — everything the `sm` wrapper drives) needs **`pydantic` + `sqlglot` + `pyyaml`** in the interpreter agami uses. Check the resolved interpreter (`$AGAMI_PYTHON` → `.config` `tool_paths.python3` → `python3`):
-
-```bash
-"<python3>" -c 'import pydantic, sqlglot, yaml'
-```
-
-Exit 0 means they are there; an `ImportError` names the one that is missing.
+The model (introspection, validation, traversal, curation — everything the `sm` wrapper drives) needs **`pydantic` + `sqlglot` + `pyyaml`** in the interpreter agami uses. The resolve step already checked the interpreter it picked: `data.interpreter.has_model_deps` in its output (re-run in 0a.5 with the database type) says whether they are there, so no command is needed here.
 
 If they're present, continue. If missing, **confirm via AskUserQuestion before installing** (same convention as the DB-driver install above — agami never installs silently):
 > agami needs the **agami-core** package (which pulls `pydantic`, `sqlglot`, `pyyaml`) to build and read the semantic model. Install it now? (one-time, user-site — `pip install --user`)
@@ -270,9 +261,9 @@ On **Yes**: `bash "<plugin_root>/scripts/sm" install` — the `sm` launcher is t
 
 ### 0a.6 — Ask for `<artifacts_dir>` (first run only)
 
-**The folder is chosen once, on the very first onboarding, and reused for every profile thereafter.** Before asking, check whether it's already set: if the pointer `~/.config/agami/path` exists (non-empty) **or** `AGAMI_ARTIFACTS_DIR` is set **or** `<artifacts_dir>/local/.config` already records `artifacts_dir`, **skip this question entirely** — reuse that path and continue to 0a.7. Only a brand-new install (none of those present) reaches the question below. This guarantees a second/third database lands as a sibling inside the same folder rather than re-prompting (and risking a fragmented, multi-folder setup).
+**The folder is chosen once, on the very first onboarding, and reused for every profile thereafter.** Whether it is already set is in the resolve step's output (preflight step 1): when `data.artifacts_dir_source` is `env` (`AGAMI_ARTIFACTS_DIR`) or `pointer` (the saved pointer), **or** `data.config.present` is true, **skip this question entirely** — reuse `data.artifacts_dir` and continue to 0a.7. Never read or list the pointer file yourself. Only a brand-new install (`artifacts_dir_source` is `default` and no `.config`) reaches the question below. This guarantees a second/third database lands as a sibling inside the same folder rather than re-prompting (and risking a fragmented, multi-folder setup).
 
-Detect the OS once so the options are platform-native — `uname -s` (`Darwin` = macOS, `Linux` = Linux) or treat `$OS == Windows_NT` / a `MINGW*`/`MSYS*` uname as Windows. Then **AskUserQuestion** with the two defaults for that OS as named options (Recommended first). The auto-provided **Other** lets the user type any absolute path — so this both gives sensible options *and* allows a full custom path:
+The options follow the operating system the session's environment names (as at the top of Phase 0a). Then **AskUserQuestion** with the two defaults for that OS as named options (Recommended first). The auto-provided **Other** lets the user type any absolute path — so this both gives sensible options *and* allows a full custom path:
 
 > Where should agami save your semantic model, examples, and preferences? This is the **parent** for ALL profiles — each lands in `<artifacts_dir>/<profile>/`. It's non-secret (no credentials) — point it inside a git repo to share the tuned model with your team. Credentials stay in `<artifacts_dir>/local/` regardless.
 
@@ -292,7 +283,7 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
   "active_profile": "<profile>",
   "artifacts_dir": "<resolved absolute path>",
   "tool_paths": { "psql": "...", "python3": "<python3>" },
-  "detected_at": "<ISO8601 UTC from `date -u +%Y-%m-%dT%H:%M:%SZ`>"
+  "detected_at": "<ISO8601 UTC, from the stamp `sm batch-id` prints>"
 }
 ```
 `python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 <artifacts_dir>/local/.config`.
@@ -303,7 +294,7 @@ bash "<plugin_root>/scripts/sm" steps "<root>" --mark connect=in_progress
 ```
 
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
-Create the parent (`mkdir -p`, then `chmod 755`, two calls) and write the default seed (per [`shared/user-memory-format.md`](../../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
+Write the default seed (per [`shared/user-memory-format.md`](../../../shared/user-memory-format.md)) with the Write tool, which makes the folder; the file comes out readable by others under the usual umask, as this non-secret file should, so it needs no `chmod`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
 ### 0a.9 — Hand-off, then a card that waits for the file
 

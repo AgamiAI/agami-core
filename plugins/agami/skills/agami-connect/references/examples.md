@@ -63,7 +63,7 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 ```bash
 bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json" --wait 30
 ```
-The file does not exist until the command writes it, in one go at the end, which counts as waiting. Once the file is ready, read it after the background task's exit notification (a large file can be caught mid-write); if the task exited with an error and the file stays empty, show its error. SQLite and DuckDB run in the foreground.
+With `--out` the file does not exist until the command has finished and written it whole, so a missing file counts as waiting, and a file that exists is complete. If the background task's exit notice arrives while the file is still missing, the command failed: stop waiting and show the error from the task's output. SQLite and DuckDB run in the foreground.
 
 **Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
 

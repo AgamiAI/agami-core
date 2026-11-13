@@ -15,6 +15,7 @@ Output (the standard refactor contract):
       "profile": "main" | null,   # null on a first-time bootstrap (no profile yet — don't invent a name)
       "profile_source": "explicit" | "env" | "active_profile" | "default",
       "artifacts_dir": "/Users/me/agami-artifacts",
+      "artifacts_dir_source": "env" | "pointer" | "default",  # where artifacts_dir came from
       "credentials": {"present": bool, "chmod_ok": bool, "type": "sqlite"|null,
                       "fields": {...}, "missing_fields": [...]},
       "example_present": bool,
@@ -287,6 +288,20 @@ def _env_profile_has_no_model(profile: str, art: Path) -> dict | None:
                        f"model: {', '.join(existing)}. Unset AGAMI_PROFILE or set it to one of them.")}
 
 
+def artifacts_dir_source() -> str:
+    """Where `agami_paths.artifacts_dir()` found the folder, in its own order: `env`
+    (AGAMI_ARTIFACTS_DIR), `pointer` (a non-empty ~/.config/agami/path) or `default`. The skill
+    asks for a folder only on `default`, so it never has to read the pointer file itself."""
+    if os.environ.get("AGAMI_ARTIFACTS_DIR"):
+        return "env"
+    try:
+        if agami_paths.POINTER_PATH.exists() and agami_paths.POINTER_PATH.read_text(encoding="utf-8").strip():
+            return "pointer"
+    except OSError:
+        pass
+    return "default"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Resolve agami env state + next-phase decision.")
     ap.add_argument("--db-type", default=None, help="bind the interpreter probe to this dialect's driver")
@@ -367,6 +382,7 @@ def main(argv=None) -> int:
         "profile": emitted_profile,
         "profile_source": profile_source,
         "artifacts_dir": str(art),
+        "artifacts_dir_source": artifacts_dir_source(),
         "credentials": creds,
         "example_present": example_present,
         "config": config,

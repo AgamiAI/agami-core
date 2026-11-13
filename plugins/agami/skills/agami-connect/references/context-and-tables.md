@@ -111,7 +111,7 @@ Options: **Generate one for me (Recommended)** / **Skip**.
 
 If `datasource.yaml` already has a non-empty `description` (a re-onboard), show it and ask `Keep it (Recommended)` / `Replace it` instead. **Keep it** → `$DATASOURCE_DESCRIPTION = keep`; nothing is written. **Replace it** → ask the card above and bind from that answer. Without a narrative from this card, Phase 2f writes a short per-database starter from the enriched model.
 
-`chmod 644` whatever you write — these are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy); never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
+These are **non-secret model files** and must stay readable (e.g. by the deploy container / a teammate reading a checked-in copy): the Write tool leaves them readable under the usual umask, so no `chmod` is needed; never `chmod 600` them (that's for `local/` secrets only). See [`shared/organization-context-format.md`](../../../shared/organization-context-format.md) for the content-routing rule (company-wide → root; per-database → the profile; per-column units → the structured model; personal → `USER_MEMORY.md`).
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 

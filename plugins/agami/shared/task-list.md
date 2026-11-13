@@ -1,6 +1,6 @@
 # The onboarding task list
 
-Run `sm steps` at the start of onboarding, when a step starts or ends, and after every `sm progress --wait`. Replace the session's task list with its `list`: one item per line, in order, each line's mark giving the item's state. Never write a step or a number `sm steps` did not print.
+Refresh the session's task list from the `list` in `sm steps` output, or in `sm progress --wait` output during the build. Run `sm steps` at the start of onboarding and when a step starts or ends. Replace the task list with that `list`: one item per line, in order, each line's mark giving the item's state. Never write a step or a number `sm steps` did not print.
 
 > `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
 >

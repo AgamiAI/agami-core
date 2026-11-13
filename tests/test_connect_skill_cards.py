@@ -251,6 +251,7 @@ def test_password_page_names_how_to_stop_the_helper():
     # TaskStop, or where there is none, the helper's own 5-minute limit: a PID needed a chained
     # `echo $$; exec` line, which no pre-approval matches
     assert "TaskStop" in s and "stops by itself when its 5 minutes are up" in s
+    assert "`kill <pid>` with the `pid` from the helper's first line" in s
     assert "agami-helper-pid" not in s and "$$" not in s
 
 
