@@ -207,6 +207,15 @@ REFUSED = {
     "root under local": "steps {A}/local/tmp",
     "root nested": "steps {R}/sub",
     "root hidden": "steps {A}/.git",
+    "root 'local '": "steps '{A}/local '",
+    "root local.": "steps {A}/local.",
+    "root full-width local": "steps {A}/\uff4cocal",
+    "root with a dot": "steps {A}/acme.yaml",
+    "root leading dash": "steps {A}/-x",
+    "root leading underscore": "steps {A}/_x",
+    "root nbsp": "steps '{A}/ac\u00a0me'",
+    "root space": "steps '{A}/ac me'",
+    "root LOCAL": "steps {A}/LOCAL",
     "root dotdot": "steps {R}/../acme",
     "root relative": "steps acme",
     "root tilde": "steps ~/agami-artifacts/acme",
@@ -257,7 +266,8 @@ def test_a_refused_form_says_nothing(art, args):
 
 
 SHELL_REFUSED = [
-    # chained, piped, redirected, substituted
+    # chained, piped, redirected, substituted; with and without spaces around the operator
+    '{L} steps {R};id', '{L} steps {R}|id', '{L} steps {R}&id', '{L} steps {R}>y', '{L} steps {R}<y',
     '{L} steps {R}; rm -rf x', '{L} steps {R} | grep text', '{L} steps {R} && echo done',
     '{L} steps {R} & echo bg', '{L} steps {R} || true', '{L} steps {R} > out.json',
     '{L} steps {R} 2>/dev/null', '{L} steps < /etc/passwd', '{L} steps "$(whoami)"',
@@ -304,6 +314,23 @@ def test_anything_but_this_plugins_sm_says_nothing(art, launcher):
                                   "prepare_deploy.py --target /tmp/x", "serve_page.py x --open"])
 def test_no_py_call_is_approved(art, args):
     assert _decision(_bash(f'bash "{PY}" {args}'), art) is None
+
+
+def test_the_forbidden_set_is_exactly_this():
+    assert set(HOOK_MOD.FORBIDDEN_ANYWHERE) == {";", "&", "|", "`", "$(", "<", ">", "\n", "\r"}
+
+
+@pytest.mark.parametrize("seq", sorted(HOOK_MOD.FORBIDDEN_ANYWHERE))
+def test_each_forbidden_sequence_alone_refuses_a_call(seq, monkeypatch):
+    """Mutation guard: with every later check made to pass, a command holding `seq` inside single
+    quotes (which the tokenizer accepts whatever they hold) is refused by FORBIDDEN_ANYWHERE alone,
+    and allowed once `seq` is dropped from it. So no entry can be removed with the suite still green."""
+    monkeypatch.setattr(HOOK_MOD, "args_allowed", lambda args: True)
+    command = f"bash '{SM}' 'x{seq}y'"
+    assert HOOK_MOD.bash_allowed(command) is False
+    monkeypatch.setattr(HOOK_MOD, "FORBIDDEN_ANYWHERE",
+                        tuple(c for c in HOOK_MOD.FORBIDDEN_ANYWHERE if c != seq))
+    assert HOOK_MOD.bash_allowed(command) is True
 
 
 def test_a_copy_or_link_of_the_launcher_says_nothing(art, tmp_path):
@@ -555,8 +582,10 @@ def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     assert entry["matcher"] == "Bash|Write|Read"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
-    script = '"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py"'
-    assert hook["command"] == f"python3 -I {script} || python -I {script} || true"
+    assert hook["command"] == (
+        "in=$(cat); for p in python3 python; do "
+        "out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" "
+        "2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true")
     assert "scripts/py" not in hook["command"] and ".config" not in hook["command"]
 
 
@@ -575,6 +604,39 @@ def test_the_hooks_json_command_works_and_never_exits_2(art, tmp_path):
     broken = subprocess.run(["sh", "-c", command.replace("${CLAUDE_PLUGIN_ROOT}", str(tmp_path / "gone"))],
                             input=event, capture_output=True, env=env, timeout=60)
     assert broken.returncode == 0 and broken.stdout == b""
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or sys.platform == "win32", reason="needs sh")
+@pytest.mark.parametrize("stub_exit", [1, 2, 9009 % 256])
+def test_a_failing_python3_stub_prints_nothing_and_python_answers(art, tmp_path, stub_exit):
+    """A `python3` that fails (the Windows Store stub, a broken install) after printing must not
+    reach the hook's stdout, and the event must still reach `python` intact."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stub = bin_dir / "python3"
+    stub.write_text(f'#!/bin/sh\ncat >/dev/null\necho \'{{"hookSpecificOutput": "garbage"}}\'\n'
+                    f"exit {stub_exit}\n")
+    stub.chmod(0o755)
+    real = bin_dir / "python"
+    real.symlink_to(sys.executable)
+    doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    command = doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"].replace(
+        "${CLAUDE_PLUGIN_ROOT}", str(PLUGIN))
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art), "HOME": str(art.parent),
+           "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin"}
+    allowed = subprocess.run(["sh", "-c", command], input=json.dumps(_bash(_sm(art, "steps {R}"))).encode(),
+                             capture_output=True, env=env, timeout=60)
+    assert allowed.returncode == 0
+    assert json.loads(allowed.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    refused = subprocess.run(["sh", "-c", command], input=json.dumps(_bash("rm -rf /")).encode(),
+                             capture_output=True, env=env, timeout=60)
+    assert refused.returncode == 0 and refused.stdout == b""
+    (bin_dir / "python").unlink()
+    (bin_dir / "python").write_text(stub.read_text())
+    (bin_dir / "python").chmod(0o755)
+    neither = subprocess.run(["sh", "-c", command], input=json.dumps(_bash(_sm(art, "steps {R}"))).encode(),
+                             capture_output=True, env=env, timeout=60)
+    assert neither.returncode == 0 and neither.stdout == b""
 
 
 def _allowed_tools(skill: str) -> list[str]:

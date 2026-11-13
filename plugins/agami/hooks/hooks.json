@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" || python -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" || true",
+            "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
             "timeout": 10
           }
         ]

@@ -133,9 +133,15 @@ def scratch_file(file_path: Any) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
 
 
+# A profile name as agami makes them. Anything looser let through `local ` and `local.` (which some
+# filesystems treat as `local`), a full-width `ｌocal`, `acme.yaml`, `-x` and names with odd spaces.
+ROOT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
 def model_root(value: str) -> bool:
-    """A model folder: a direct child of `<artifacts_dir>` (symlinks resolved), not `local` and not
-    hidden. It need not exist yet: onboarding marks its first step before the build makes it."""
+    """A model folder: a direct child of `<artifacts_dir>` (symlinks resolved) with a plain profile
+    name, not `local`. It need not exist yet: onboarding marks its first step before the build
+    makes it."""
     if not _plain_path(value):
         return False
     try:
@@ -144,10 +150,11 @@ def model_root(value: str) -> bool:
         return False
     real = os.path.realpath(value)
     name = os.path.basename(real)
-    if _norm(os.path.dirname(real)) != _norm(art) or not name or name.startswith("."):
+    if _norm(os.path.dirname(real)) != _norm(art) or not ROOT_NAME.fullmatch(name):
         return False
-    # Case-folded everywhere: on a case-insensitive disk `Local` is the same folder.
-    if name.lower() == "local":
+    # Both as written and resolved, and case-folded: on a case-insensitive disk `Local` is `local`.
+    written = re.split(r"[\\/]", value)[-1]
+    if not ROOT_NAME.fullmatch(written) or "local" in (name.lower(), written.lower()):
         return False
     return not os.path.exists(real) or os.path.isdir(real)
 
