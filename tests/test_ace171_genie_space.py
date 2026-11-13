@@ -809,7 +809,9 @@ def test_what_hangs_from_a_source_left_out_goes_with_it(model, monkeypatch):
     assert validate(space) == []
 
 
-def test_a_metric_view_ace170_does_not_create_is_not_listed(model):
+def test_a_metric_view_ace170_does_not_create_is_not_listed(model, monkeypatch):
+    real = DB.definition_body
+    monkeypatch.setattr(DB, "definition_body", lambda d: None if DB.dollar_fields(d) else real(d))
     path = model / f"subject_areas/{AREA}/metrics/closing_balance.yaml"
     doc = yaml.safe_load(path.read_text())
     doc["description"] = "Costs $$ to hold."

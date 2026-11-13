@@ -472,7 +472,9 @@ def test_nothing_unreviewed_is_certified_or_certifies_a_view(model, tmp_path):
     assert "drafts" in customers[2]
 
 
-def test_a_metric_view_the_export_did_not_write_is_not_certified(model, tmp_path):
+def test_a_metric_view_the_export_did_not_write_is_not_certified(model, tmp_path, monkeypatch):
+    real = DB.definition_body
+    monkeypatch.setattr(DB, "definition_body", lambda d: None if DB.dollar_fields(d) else real(d))
     path = model / f"subject_areas/{AREA}/metrics/revenue.yaml"
     path.write_text(yaml.safe_dump({**yaml.safe_load(path.read_text()), "description": "Costs $$."}))
     _, files = _export(model, tmp_path / "o", "--uc-certify")

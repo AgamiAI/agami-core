@@ -282,10 +282,8 @@ class _Space:
         out = []
         for p in plans:
             ident = DB.metric_view_identifier(self.view, self.options, p.table)
-            # write_metric_views leaves out a definition holding `$$`; it is not created, so it is
-            # not listed either.
-            if DB.create_statement(ident, p.definition).count("$$") != 2:
-                continue
+            if not DB.writable(self.view, self.options, p):
+                continue  # write_metric_views did not write it, so it is not created
             if not self._catalog_known(p.table):
                 self.drop("metric_view", p.name, "target_rule", "Genie names a metric view "
                           "catalog.schema.name and this one has no catalog; pass --location")

@@ -886,14 +886,46 @@ def test_the_run_statements_parse_and_stage_the_files_byte_for_byte(acme):
     assert sorted(staged.values()) == sorted(
         "\n" + _read(out, f) for f in (f"{AREA}.evaluation_config.yaml",
                                        f"{AREA}.analyst_evaluation_config.yaml"))
-    for call in ("CALL EXECUTE_AI_EVALUATION('START', OBJECT_CONSTRUCT('run_name', 'agami-run-1'), "
+    agent_run, analyst_run = _run_names(sql)
+    for call in ("CALL EXECUTE_AI_EVALUATION('START', OBJECT_CONSTRUCT('run_name', "
+                 f"'{agent_run}'), "
                  "'@DEMO.SALES_DATA.sales_evaluation_config/sales.evaluation_config.yaml');",
                  "SNOWFLAKE.LOCAL.GET_AI_EVALUATION_DATA(\n  'DEMO', 'SALES_DATA', 'SALES_AGENT', "
-                 "'CORTEX AGENT', 'agami-run-1')",
+                 f"'CORTEX AGENT', '{agent_run}')",
                  "SNOWFLAKE.LOCAL.GET_ANALYST_AI_EVALUATION_DATA(\n  'DEMO', 'SALES_DATA', 'SALES', "
-                 "'SEMANTIC VIEW', 'agami-analyst-run-1')"):
+                 f"'SEMANTIC VIEW', '{analyst_run}')"):
         assert call in sql
     assert "written, never run" in sql.splitlines()[0]
+
+
+def _run_names(sql: str) -> tuple[str, str]:
+    """The agent's and the view's run names, from their START statements."""
+    names = re.findall(r"'START', OBJECT_CONSTRUCT\('run_name', '([^']+)'\)", sql)
+    assert len(names) == 2, names
+    return names[0], names[1]
+
+
+def test_a_run_name_is_a_digest_of_what_it_scores_and_the_header_says_it_is_used_once(tmp_path):
+    root = _write_model(tmp_path / "art" / "acme")
+    a, b, c = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    _export(root, a), _export(root, b)
+    first = _read(a, f"{AREA}.evaluation_run.sql")
+    agent_run, analyst_run = _run_names(first)
+    assert re.fullmatch(r"agami-run-[0-9a-f]{12}", agent_run)
+    assert re.fullmatch(r"agami-analyst-run-[0-9a-f]{12}", analyst_run)
+    # The same export names the same runs; no clock or counter makes two exports differ.
+    assert _run_names(_read(b, f"{AREA}.evaluation_run.sql")) == (agent_run, analyst_run)
+    assert "can be used once per object evaluated" in first
+    assert "change the run name in its START, STATUS and" in first
+    assert first.count(agent_run) == 3 and first.count(analyst_run) == 3
+    # A changed export gets new names: here one more golden item changes what the agent run scores.
+    gold = root / "golden_datasets" / "core.yaml"
+    doc = yaml.safe_load(gold.read_text())
+    doc["test_cases"].append(dict(doc["test_cases"][0], id="extra", query="Revenue, again?"))
+    gold.write_text(yaml.safe_dump(doc, sort_keys=False))
+    _export(root, c)
+    changed = _run_names(_read(c, f"{AREA}.evaluation_run.sql"))
+    assert changed[0] != agent_run and changed[1] == analyst_run
 
 
 def test_two_runs_are_byte_identical(tmp_path):

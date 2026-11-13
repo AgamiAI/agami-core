@@ -43,6 +43,7 @@ tool. It is off by default because it opens an endpoint on the account.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from typing import Any, Optional
 
@@ -104,7 +105,20 @@ SYSTEM_METRICS = ("answer_correctness", "tool_selection_accuracy", "tool_executi
                   "logical_consistency")
 # The documented range semantics: min [low, high), median [low, high], max (low, high].
 SCORE_RANGES = {"min_score": [1, 4], "median_score": [4, 7], "max_score": [7, 10]}
-AGENT_RUN, ANALYST_RUN = "agami-run-1", "agami-analyst-run-1"
+# A run name is used once per object evaluated: Snowflake refuses a second START under it
+# ("Ingestion already executed for Run"). Each is the prefix and a digest of the files the run
+# scores, so a changed export gets a new name, and an unchanged one the same: the export stays
+# byte-identical from run to run, which a clock or a counter would break.
+AGENT_RUN, ANALYST_RUN = "agami-run", "agami-analyst-run"
+RUN_DIGEST = 12
+
+
+def run_name(prefix: str, *texts: str) -> str:
+    """`<prefix>-<12 hex>` from the texts the run scores, the same for the same texts."""
+    h = hashlib.sha256()
+    for text in texts:
+        h.update(text.encode("utf-8") + b"\0")
+    return f"{prefix}-{h.hexdigest()[:RUN_DIGEST]}"
 
 
 def tool_name(view: ExportView) -> str:
@@ -266,8 +280,23 @@ def agent_sql(view: ExportView, options: ExportOptions, spec_text: str) -> str:
             "replaces. It is bound to the semantic view\n"
             f"-- {semantic_view_fqn(view, options)}, which {file_stem(view)}.sql creates: run "
             f"that first.\n{_warehouse_note(view, options)}-- The orchestration model and budget "
-            f"are Snowflake's defaults.\nCREATE OR REPLACE AGENT {agent_fqn(view, options)} "
+            f"are Snowflake's defaults.\n{_agent_grants(view, options)}"
+            f"CREATE OR REPLACE AGENT {agent_fqn(view, options)} "
             f"COPY GRANTS\n  FROM SPECIFICATION\n  {_sql_string(spec_text)};\n")
+
+
+def _agent_grants(view: ExportView, options: ExportOptions) -> str:
+    """What creating and calling the agent take, as Snowflake documents them (CREATE AGENT, and
+    Cortex Agents' access control)."""
+    schema = ".".join(snowflake_ident(p) for p in view_location(options))
+    return ("-- Privileges. The role running this needs USAGE on the database and schema and "
+            f"CREATE AGENT\n-- on {schema} (and, to replace an agent another role owns, "
+            "OWNERSHIP or MODIFY on it).\n"
+            "-- A role that calls the agent needs the SNOWFLAKE.CORTEX_USER or "
+            "SNOWFLAKE.CORTEX_AGENT_USER\n-- database role, USAGE on the agent, SELECT on the "
+            f"semantic view {semantic_view_fqn(view, options)},\n-- SELECT on each table the "
+            "view reads (the SQL the agent writes reads them), and USAGE on\n"
+            "-- the warehouse that SQL runs on.\n")
 
 
 # ---------------------------------------------------------------------------
@@ -464,10 +493,12 @@ def evaluation_sql(view: ExportView, options: ExportOptions, rows: list[_Row]) -
         f"that file, and in\n-- the copy of that file {file_stem(view)}.evaluation_run.sql "
         "stages (its dataset_name line).\n"
         f"-- Expected answers: {computed} of {len(rows)} rows compute theirs from the golden SQL "
-        "when this file\n-- runs, from this account's data, so the role running it needs SELECT "
-        "on the tables the\n-- view reads. The answer goes stale when the data changes, and "
-        "the dataset keeps the answer\n-- it was registered with: run this again, under a new "
-        "dataset name, to refresh it.",
+        "when this file\n-- runs, from this account's data. The answer goes stale when the data "
+        "changes, and the dataset\n-- keeps the answer it was registered with: run this again, "
+        "under a new dataset name, to refresh it.\n"
+        "-- Privileges. The role running this needs USAGE on the database and schema, CREATE "
+        f"TABLE and\n-- CREATE DATASET on {'.'.join(snowflake_ident(p) for p in view_location(options))}"
+        ", and SELECT on each table a golden query reads.",
         f"CREATE OR REPLACE TABLE {table} (\n  {QUERY_COLUMN} VARCHAR,\n  {TRUTH_COLUMN} VARIANT\n);",
     ]
     lines += [_insert(table, r) for r in rows]
@@ -618,9 +649,11 @@ def _run_calls(stage: str, path: str, run: str, read: str) -> list[str]:
 
 
 def run_sql(view: ExportView, options: ExportOptions, agent_text: Optional[str],
-            analyst_text: Optional[str]) -> str:
+            analyst_text: Optional[str], runs: tuple[str, str] = (AGENT_RUN, ANALYST_RUN)) -> str:
     """The statements that stage each run configuration written and start its run: the agent's
-    when the area has golden items, the semantic view's when the view holds verified queries."""
+    when the area has golden items, the semantic view's when the view holds verified queries.
+    `runs` names the agent's run and the view's (`run_name`)."""
+    agent_run, analyst_run = runs
     stem = file_stem(view)
     loc = view_location(options)
     schema = ".".join(snowflake_ident(p) for p in loc)
@@ -632,11 +665,17 @@ def run_sql(view: ExportView, options: ExportOptions, agent_text: Optional[str],
         f"-- Run them after {', '.join(first)}. Each section names the privileges its run needs.\n"
         "-- Every name here is fully qualified. The USE SCHEMA statement is there because an\n"
         "-- evaluation started with SQL runs in the session's database and schema (Cortex Agent\n"
-        "-- evaluations), so it sets that to the view's schema. Every run needs CREATE TASK, CREATE\n"
-        "-- FILE FORMAT and CREATE STAGE on that schema and EXECUTE TASK ON ACCOUNT.\n"
-        "-- A run name is unique per object evaluated: change it for each run. The COPY INTO\n"
-        "-- statements stage the files beside this one; PUT them instead from a client if you edit\n"
-        "-- them.",
+        "-- evaluations), so it sets that to the view's schema.\n"
+        "-- Privileges for every run: USAGE on the database and schema, CREATE STAGE, CREATE TASK "
+        "and\n-- CREATE FILE FORMAT on the schema, EXECUTE TASK ON ACCOUNT, and the "
+        "SNOWFLAKE.CORTEX_USER\n-- database role. A run executes as a task, and a task ignores "
+        "secondary roles: every privilege\n-- an evaluation needs must be held by one role, the "
+        "session's primary role (USE ROLE).\n"
+        "-- A run name can be used once per object evaluated; Snowflake refuses a second START "
+        "under\n-- it. Each name below ends in a digest of the files the run scores, so an export "
+        "that changed\n-- gets new names. To run the same files again, change the run name in "
+        "its START, STATUS and\n-- results statements, all three alike. The COPY INTO statements "
+        "stage the files beside this\n-- one; PUT them instead from a client if you edit them.",
         f"USE SCHEMA {schema};",
         f"CREATE STAGE IF NOT EXISTS {stage}\n  FILE_FORMAT = (TYPE = 'CSV' FIELD_DELIMITER = NONE "
         "RECORD_DELIMITER = '\\n' SKIP_HEADER = 0\n  FIELD_OPTIONALLY_ENCLOSED_BY = NONE "
@@ -646,24 +685,26 @@ def run_sql(view: ExportView, options: ExportOptions, agent_text: Optional[str],
         agent = snowflake_literal(_stored(_parts(view, options, "_agent")[2]))
         out += [
             f"-- The agent {agent_fqn(view, options)}: {stem}.evaluation_config.yaml. Needs a\n"
-            "-- SNOWFLAKE.CORTEX_USER or CORTEX_AGENT_USER database role and USAGE and MONITOR on "
-            "the agent.\n-- The run reads the dataset the configuration names; "
+            "-- SNOWFLAKE.CORTEX_USER or CORTEX_AGENT_USER database role, USAGE on the agent, and "
+            "MONITOR on\n-- the agent to read its results (without MONITOR the results query "
+            "returns no rows). The run\n-- reads the dataset the configuration names; "
             f"{stem}.evaluation.sql says how to rename it.",
             _stage_statements(stage, f"{stem}.evaluation_config.yaml", agent_text),
-            *_run_calls(stage, f"{stem}.evaluation_config.yaml", AGENT_RUN,
+            *_run_calls(stage, f"{stem}.evaluation_config.yaml", agent_run,
                         f"SELECT * FROM TABLE(SNOWFLAKE.LOCAL.GET_AI_EVALUATION_DATA(\n  {db}, {sch}, "
-                        f"{agent}, 'CORTEX AGENT', {snowflake_literal(AGENT_RUN)}));"),
+                        f"{agent}, 'CORTEX AGENT', {snowflake_literal(agent_run)}));"),
         ]
     if analyst_text is not None:
         view_name = snowflake_literal(_stored(semantic_view_name(view)))
         out += [
             f"-- The semantic view, scored by result: {stem}.analyst_evaluation_config.yaml. "
-            "Needs SELECT and\n-- MONITOR on the view and CREATE DATASET on this schema.",
+            "Needs SELECT on\n-- the view and the tables it reads, CREATE DATASET on this schema, "
+            "and MONITOR on the view\n-- to read its results.",
             _stage_statements(stage, f"{stem}.analyst_evaluation_config.yaml", analyst_text),
-            *_run_calls(stage, f"{stem}.analyst_evaluation_config.yaml", ANALYST_RUN,
+            *_run_calls(stage, f"{stem}.analyst_evaluation_config.yaml", analyst_run,
                         "SELECT * FROM TABLE(SNOWFLAKE.LOCAL.GET_ANALYST_AI_EVALUATION_DATA(\n"
                         f"  {db}, {sch}, {view_name}, 'SEMANTIC VIEW', "
-                        f"{snowflake_literal(ANALYST_RUN)}));"),
+                        f"{snowflake_literal(analyst_run)}));"),
         ]
     return "\n".join(out) + "\n"
 
@@ -703,10 +744,14 @@ def mcp_sql(view: ExportView, options: ExportOptions, with_agent: bool) -> str:
                      "mcp-servers", _stored(_parts(view, options, "_mcp")[2])))
     agent = (f"\n-- GRANT USAGE ON AGENT {agent_fqn(view, options)} TO ROLE <mcp_access_role>;"
              if with_agent else "")
-    return (f"-- Snowflake-managed MCP server {server}, written by `sm export` (generally "
-            "available since\n-- 2025-11-04). Running this creates or replaces it; CREATE MCP "
-            "SERVER keeps no grants, so\n-- grant USAGE on it again after a replace. Run "
+    schema = ".".join(snowflake_ident(p) for p in loc)
+    return (f"-- Snowflake-managed MCP server {server}, written by `sm export`. Running this "
+            "creates or\n-- replaces it; CREATE MCP SERVER keeps no grants, so grant USAGE on it "
+            "again after a replace.\n-- Run "
             f"{file_stem(view)}.sql{' and the agent file' if with_agent else ''} first.\n"
+            "-- Privileges. The role running this needs USAGE on the database and schema and "
+            f"CREATE MCP SERVER\n-- on {schema} (and OWNERSHIP of the server to replace one "
+            "that exists).\n"
             f"-- An MCP client connects to https://<account_url>/api/v2/{path}\n"
             "-- and signs in with Snowflake OAuth (or External OAuth, or a programmatic access "
             "token);\n-- setting that up is yours. The role it connects with needs:\n"
@@ -760,8 +805,13 @@ def write_agent(view: ExportView, options: ExportOptions,
     if analyst_cfg is not None:
         files[f"{stem}.analyst_evaluation_config.yaml"] = analyst_cfg.encode("utf-8")
     if agent_cfg is not None or analyst_cfg is not None:
-        files[f"{stem}.evaluation_run.sql"] = run_sql(view, options, agent_cfg,
-                                                      analyst_cfg).encode("utf-8")
+        # Each run is named for what it scores: the agent, its data and its configuration; the
+        # view and its configuration.
+        runs = (run_name(AGENT_RUN, text or "", files.get(f"{stem}.evaluation.sql", b"").decode(),
+                         agent_cfg or ""),
+                run_name(ANALYST_RUN, render_yaml(built.doc or {}), analyst_cfg or ""))
+        files[f"{stem}.evaluation_run.sql"] = run_sql(view, options, agent_cfg, analyst_cfg,
+                                                      runs).encode("utf-8")
     if options.target_args.get("snowflake_mcp_server"):
         files[f"{stem}.mcp_server.sql"] = mcp_sql(view, options, text is not None).encode("utf-8")
     return WriterOutput(files, tuple(losses), carried)

@@ -289,8 +289,8 @@ class _Script:
         plans, _ = DB.plan_metric_views(self.view)  # their losses are write_metric_views' to report
         for p in plans:
             ident = DB.metric_view_identifier(self.view, self.options, p.table)
-            if DB.create_statement(ident, p.definition).count("$$") != 2:
-                continue  # write_metric_views did not write it
+            if not DB.writable(self.view, self.options, p):
+                continue  # write_metric_views did not write it, so it is not created
             pending = [m for m in p.measures if not self.view.approved("metric", m)]
             if pending or unreviewed:
                 self.degrade("metric_view", p.name, "not_approved", "not marked certified: it "

@@ -1053,7 +1053,10 @@ def create_call(view: ExportView, options: ExportOptions, yaml_text: str) -> str
             if certification_tags(options) else "")
     return (f"-- Snowflake semantic view {semantic_view_fqn(view, options)}, written by "
             "`sm export`. Running this\n-- creates or replaces it. To check it without creating "
-            f"it, add TRUE as a third argument\n-- (verify_only).\n{tags}"
+            f"it, add TRUE as a third argument\n-- (verify_only).\n"
+            "-- Privileges. The role running this needs USAGE on the database and schema, CREATE "
+            f"SEMANTIC VIEW\n-- on {schema}, and SELECT on each table the view reads. A role "
+            f"that queries the view needs\n-- SELECT on the view.\n{tags}"
             "CALL SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML(\n"
             f"  '{schema.replace(chr(39), chr(39) * 2)}',\n  {_sql_string(yaml_text)}\n);\n")
 

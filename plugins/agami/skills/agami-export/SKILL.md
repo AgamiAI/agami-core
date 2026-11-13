@@ -209,5 +209,6 @@ Every refusal prints `{"error": "export_refused", "detail": "…"}`, exits `2`, 
 | `the semantic model declares <n> storage engines` | An export writes SQL for one engine, and this model declares several. Pass the message on; the model needs one storage connection before it can be exported. |
 | `subject areas <a> and <b> both export to …` | Two subject areas get the same file name in that format. Rename one through `/agami-model`, or export each alone with `--area <a>`, after the `Run it?` card. |
 | `--out … lies inside …` / `… holds the semantic model` | The fixed output folder overlaps the model, which means the artifacts folder is laid out unusually. Pass the message on and stop; never pick another folder on your own. |
+| `could not write the export under …` | The files could not be written (often a subject area, table or metric name too long for a file name, or a full disk); nothing under the output folder changed. Pass the message on; a name too long is the model's to shorten through `/agami-model`. |
 | `--out …: … exists and is not a directory` | A file sits where the output folder goes. Say which, and ask the person to move it. |
 | Exit code other than `0` or `2` | The command failed to start (often a missing library): say so, show its last error line, and offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`. |

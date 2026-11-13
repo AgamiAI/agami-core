@@ -579,7 +579,7 @@ def test_a_join_tree_skips_tables_it_cannot_place_and_on_it_cannot_read():
     rel = X.ExportRelationship("a->b", type("R", (), {"on": "a.x = 'unterminated"})())
     assert not DB._on_reads_its_ends(rel.relationship, "a", "b")
     edge = DB._Edge("a", "b", rel, "x", "y")
-    tree = DB._join_tree("a", {"a": [edge]}, {"a"})
+    tree = DB._join_tree("a", {"a": [edge]}, {"a"}, {"a": "a", "b": "b"})
     assert tree.order == () and tree.skipped == ()
 
 
@@ -595,6 +595,46 @@ def test_names_follow_one_rule_and_collisions_are_reported(synthetic):
     revenue = _measures(files)["revenue"]
     assert revenue["synonyms"] == SYNONYMS[:10] and revenue["comment"].endswith("Unit: USD.")
     assert losses[("metric", "revenue")] == [("degraded", "target_limit")] * 2
+
+
+def _put(model: Path, rel: str, doc) -> None:
+    (model / rel).parent.mkdir(parents=True, exist_ok=True)
+    (model / rel).write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+def test_two_fact_tables_named_alike_keep_one_view_and_report_the_others_metrics(model, tmp_path):
+    for i, name in enumerate(("order items", "order-items")):
+        _put(model, f"subject_areas/{AREA}/tables/oi{i}.yaml", {
+            "name": name, "schema": "SALES_DATA", "columns": [_col("qty", "integer")]})
+        _put(model, f"subject_areas/{AREA}/metrics/oi{i}.yaml",
+             _metric(f"units {i}", f"SUM(`{name}`.qty)", [name]))
+    section, files = _export(model, tmp_path / "n", "--location", "DEMO.SALES_DATA")
+    # One file, holding the first table's metric by name order ("order items" < "order-items").
+    assert "sales__order_items.sql" in files
+    assert set(_measures({"x": files["sales__order_items.sql"]})) == {"units 0"}
+    losses = _losses(section)
+    assert losses[("metric", "units 1")] == [("dropped", "name_collision")]
+    detail = next(x["detail"] for x in section["losses"] if x["name"] == "units 1")
+    assert "sales__order_items" in detail and "order-items" in detail
+    # The Genie space lists that one view once.
+    space = json.loads((tmp_path / "n" / "databricks" / "sales.geniespace.json").read_text())
+    idents = [m["identifier"] for m in space["data_sources"].get("metric_views", [])]
+    assert len(idents) == len(set(idents)) and idents.count("DEMO.SALES_DATA.sales__order_items") == 1
+
+
+def test_two_joined_tables_named_alike_are_joined_once_and_the_other_join_reported(model, tmp_path):
+    for i, name in enumerate(("store groups", "store-groups")):
+        _put(model, f"subject_areas/{AREA}/tables/sg{i}.yaml", {
+            "name": name, "schema": "SALES_DATA", "columns": [_col("id", "integer")]})
+    rels = yaml.safe_load((model / f"subject_areas/{AREA}/relationships.yaml").read_text())
+    rels += [_rel("orders", "store groups", from_column="store_id", to_column="id"),
+             _rel("orders", "store-groups", from_column="store_id", to_column="id")]
+    _put(model, f"subject_areas/{AREA}/relationships.yaml", rels)
+    section, files = _export(model, tmp_path / "j")
+    doc = _definition(files["sales__orders.sql"])
+    names = [j["name"] for j in doc["joins"]]
+    assert names.count("store_groups") == 1 and _validate(doc) == []
+    assert ("degraded", "name_collision") in _losses(section)[("relationship", "orders->store-groups")]
 
 
 def test_the_naming_rule_and_identifier_are_public(model, tmp_path):
@@ -625,14 +665,32 @@ def test_a_sql_table_joins_as_its_query_only_in_databricks_sql(model, tmp_path):
     assert ("metric", "store revenue", "target_rule") in {(x.kind, x.name, x.reason) for x in out.losses}
 
 
-def test_a_definition_holding_dollar_quotes_is_not_written(model, tmp_path):
+def test_a_definition_holding_dollar_quotes_is_written_with_the_dollar_escaped(model, tmp_path):
     path = model / f"subject_areas/{AREA}/metrics/return_total.yaml"
     doc = yaml.safe_load(path.read_text())
-    doc["description"] = "Costs $$ to process."
+    doc["description"] = "Costs $$ to process, or $$$."
     path.write_text(yaml.safe_dump(doc))
     section, files = _export(model, tmp_path / "d")
+    sql = files["sales__returns.sql"]
+    # The body holds no `$$` of its own, so the dollar quotes around it are the only two.
+    assert sql.count("$$") == 2 and "\\x24" in sql
+    measure = _measures({"x": sql})["return total"]
+    assert measure["comment"].startswith("Costs $$ to process, or $$$.")
+    assert ("metric", "return total") not in _losses(section)
+    assert _validate(_definition(sql)) == []
+
+
+def test_a_definition_that_cannot_be_escaped_names_the_field_that_holds_dollar_quotes(
+        model, tmp_path, monkeypatch):
+    path = model / f"subject_areas/{AREA}/metrics/return_total.yaml"
+    path.write_text(yaml.safe_dump({**yaml.safe_load(path.read_text()), "description": "Costs $$."}))
+    real = DB.definition_body
+    monkeypatch.setattr(DB, "definition_body",
+                        lambda d: None if DB.dollar_fields(d) else real(d))
+    section, files = _export(model, tmp_path / "d")
     assert "sales__returns.sql" not in files
-    assert _losses(section)[("metric", "return total")] == [("dropped", "target_rule")]
+    loss = next(x for x in section["losses"] if x["name"] == "return total")
+    assert loss["reason"] == "target_rule" and "measures.return_total.comment" in loss["detail"]
 
 
 # ---------------------------------------------------------------------------

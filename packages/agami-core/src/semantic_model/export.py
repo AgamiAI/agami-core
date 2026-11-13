@@ -25,6 +25,7 @@ import importlib
 import json
 import re
 import shutil
+import tempfile
 from dataclasses import InitVar, dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Literal, Mapping, NamedTuple, Optional, get_args, get_origin
@@ -1524,20 +1525,68 @@ def _check_out(root: Path, out: Path, tgts: list[Target]) -> None:
                             "pass a directory, or a path that does not exist yet")
 
 
-def _write(out: Path, results: dict[str, dict[str, bytes]], report: str) -> None:
-    out.mkdir(parents=True, exist_ok=True)
+REPORT_FILE = "export-report.json"
+
+
+def _stage(staging: Path, results: dict[str, dict[str, bytes]], report: str) -> None:
     for name, files in results.items():
-        # Replaced whole: an item the model no longer has must not linger in old output.
-        tdir = out / name
-        if tdir.is_dir() and not tdir.is_symlink():
-            shutil.rmtree(tdir)
-        elif tdir.exists() or tdir.is_symlink():
-            tdir.unlink()
+        tdir = staging / name
         tdir.mkdir()
         for rel, data in sorted(files.items()):
             (tdir / rel).parent.mkdir(parents=True, exist_ok=True)
             (tdir / rel).write_bytes(data)
-    (out / "export-report.json").write_text(report, encoding="utf-8")
+    (staging / REPORT_FILE).write_text(report, encoding="utf-8")
+
+
+def _swap(out: Path, staging: Path, names: list[str]) -> None:
+    """Move each staged entry into `out`, setting aside what it replaces; on a failure put every
+    entry back as it was. A rename within one directory either happens or does not, so `out`
+    holds the old output or the new, never a mix."""
+    old = staging / ".replaced"
+    old.mkdir()
+    done: list[tuple[str, bool]] = []
+    try:
+        for name in names:
+            had = (out / name).exists() or (out / name).is_symlink()
+            if had:
+                (out / name).rename(old / name)
+            done.append((name, had))
+            (staging / name).rename(out / name)
+    except OSError:
+        for name, had in reversed(done):
+            if (out / name).exists() or (out / name).is_symlink():
+                (out / name).rename(staging / name)
+            if had:
+                (old / name).rename(out / name)
+        raise
+
+
+def _write(out: Path, results: dict[str, dict[str, bytes]], report: str) -> None:
+    """Write every target's directory and the report, all or nothing. Each `<out>/<target>/` is
+    replaced whole, so an item the model no longer has does not linger in old output. Everything
+    is written first into a directory beside them and only then moved in, so a write that fails
+    (a name the file system refuses, a full disk) leaves `--out` as it was and is refused like any
+    other problem, instead of leaving half a new export beside an old report."""
+    created = not out.exists()
+    staging: Optional[Path] = None
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".sm-export-", dir=out))
+        _stage(staging, results, report)
+        _swap(out, staging, [*results, REPORT_FILE])
+    except OSError as exc:
+        what = f"{exc.strerror or type(exc).__name__}"
+        name = Path(exc.filename).name if exc.filename else ""
+        where = f": {name[:60]}{'...' if len(name) > 60 else ''}" if name else ""
+        raise ExportRefused(f"could not write the export under {out} ({what}{where}); nothing "
+                            "under --out was changed. A file name too long for the file system "
+                            "comes from a long subject area, table or metric name: shorten it, or "
+                            "pass an --out on a file system that takes it") from exc
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        if created and out.is_dir() and not any(out.iterdir()):
+            out.rmdir()
 
 
 class _FlagRecorder:

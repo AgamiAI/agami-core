@@ -732,6 +732,49 @@ def test_refusals_leave_an_existing_out_untouched(model, tmp_path, monkeypatch):
         assert _tree(out) == before, flags
 
 
+def _two_files(view: X.ExportView, options: X.ExportOptions) -> X.WriterOutput:
+    # The second file's name is longer than any file system takes (255 bytes a name).
+    return X.WriterOutput({f"{view.area}.json": b"{}", view.area + "q" * 300 + ".json": b"{}"})
+
+
+def test_a_write_that_fails_part_way_is_refused_and_leaves_out_as_it_was(model, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    (out / "dump").mkdir(parents=True)
+    (out / "dump" / "old.json").write_text("{}")
+    (out / "export-report.json").write_text("old report")
+    before = _tree(out)
+    monkeypatch.setitem(X.TARGETS, "long", X.Target("long", ("SQLite",), _two_files))
+    detail = _refused(model, out, "--target", "dump", target="long")
+    assert detail.startswith("could not write the export under") and "nothing" in detail
+    assert _tree(out) == before
+    assert sorted(p.name for p in out.iterdir()) == ["dump", "export-report.json"]
+    # A new --out is not left behind empty either.
+    _refused(model, tmp_path / "fresh", target="long")
+    assert not (tmp_path / "fresh").exists()
+
+
+def test_a_failed_move_puts_every_target_back(model, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    _export(model, out)
+    before = _tree(out)
+    real = Path.rename
+    calls = {"n": 0}
+
+    def flaky(self, target):
+        calls["n"] += 1
+        if calls["n"] == 4:   # after the target's directory moved in, before the report did
+            raise OSError(28, "No space left on device", str(target))
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", flaky)
+    _edit(model / f"prompt_examples/{AREA}/examples.yaml",
+          lambda exs: exs + [{"question": "A new one?", "status": "confirmed"}])
+    detail = _refused(model, out)
+    assert "No space left on device" in detail
+    monkeypatch.setattr(Path, "rename", real)
+    assert _tree(out) == before
+
+
 def test_a_target_directory_that_is_a_link_is_replaced_not_followed(model, tmp_path):
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()

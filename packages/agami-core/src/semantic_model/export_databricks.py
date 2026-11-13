@@ -214,6 +214,9 @@ class _Tree:
     order: tuple[str, ...]          # joined tables, breadth first
     via: Mapping[str, _Edge]        # joined table -> the join that reaches it
     skipped: tuple[_Edge, ...]      # joins to a table already reached another way
+    # Joins to a table whose join name another joined table already has (`order items`,
+    # `order-items`): a metric view's joins are named, and one name cannot reach two tables.
+    clashed: tuple[_Edge, ...] = ()
 
     def path(self, table: str) -> list[str]:
         out = []
@@ -229,11 +232,14 @@ class _Tree:
         return refs
 
 
-def _join_tree(fact: str, edges: Mapping[str, list[_Edge]], placeable: set[str]) -> _Tree:
+def _join_tree(fact: str, edges: Mapping[str, list[_Edge]], placeable: set[str],
+               aliases: Mapping[str, str]) -> _Tree:
     """Breadth first, so each table is reached by its shortest path; a metric view joins a table
-    once, and a binding names a table, not a path, so a second path could not be chosen anyway."""
+    once, and a binding names a table, not a path, so a second path could not be chosen anyway. A
+    table whose join name an earlier joined table has is not joined, so the first keeps it."""
     via: dict[str, _Edge] = {}
-    order, skipped, queue = [], [], [fact]
+    order, skipped, clashed, queue = [], [], [], [fact]
+    names: set[str] = set()
     while queue:
         for e in edges.get(queue.pop(0), []):
             if e.child not in placeable:
@@ -241,10 +247,14 @@ def _join_tree(fact: str, edges: Mapping[str, list[_Edge]], placeable: set[str])
             if e.child == fact or e.child in via:
                 skipped.append(e)
                 continue
+            if aliases[e.child] in names:
+                clashed.append(e)
+                continue
+            names.add(aliases[e.child])
             via[e.child] = e
             order.append(e.child)
             queue.append(e.child)
-    return _Tree(fact, tuple(order), via, tuple(skipped))
+    return _Tree(fact, tuple(order), via, tuple(skipped), tuple(clashed))
 
 
 def _condition(e: _Edge, tree: _Tree, aliases: Mapping[str, str]) -> str:
@@ -309,7 +319,7 @@ class _Planner:
 
     def tree(self, fact: str) -> _Tree:
         if fact not in self.trees:
-            self.trees[fact] = _join_tree(fact, self.edges, set(self.sources))
+            self.trees[fact] = _join_tree(fact, self.edges, set(self.sources), self.aliases)
         return self.trees[fact]
 
     def drop(self, kind: str, name: str, reason: Any, detail: str) -> None:
@@ -382,7 +392,30 @@ class _Planner:
             fact = self.finer_home(em) if em.metric.inner_grain else self.home(em)
             if fact is not None:
                 by_fact.setdefault(fact, []).append(em)
-        return [p for fact in sorted(by_fact) if (p := self.plan(fact, by_fact[fact])) is not None]
+        out: list[MetricViewPlan] = []
+        named: dict[str, str] = {}   # metric view name -> the fact table that has it
+        for fact in sorted(by_fact):
+            if not self._own_name(fact, by_fact[fact], named):
+                continue
+            p = self.plan(fact, by_fact[fact])
+            if p is not None:
+                out.append(p)
+        return out
+
+    def _own_name(self, fact: str, metrics: list[ExportMetric], named: dict[str, str]) -> bool:
+        """Whether `fact`'s metric view gets a name no earlier fact table's has. Two tables the
+        naming rule maps alike (`order items`, `order-items`) would write one file and one view, the
+        second replacing the first; so the first by name keeps it and the other's metrics are
+        reported, never silently lost."""
+        table = self.tables[fact].table.name
+        name = metric_view_name(self.view.area, table)
+        if name in named:
+            for em in metrics:
+                self.drop("metric", em.metric.name, "name_collision", f"its metric view, on "
+                          f"{table}, would be named {name}, as the one on {named[name]} already is")
+            return False
+        named[name] = table
+        return True
 
     def plan(self, fact: str, metrics: list[ExportMetric]) -> Optional[MetricViewPlan]:
         tree = self.tree(fact)
@@ -557,6 +590,11 @@ class _Planner:
             self.degrade("relationship", e.rel.name, "target_rule",
                          f"metric view {metric_view_name(self.view.area, fact)} joins "
                          f"{e.child} once, by a shorter or earlier join")
+        for e in tree.clashed:
+            self.degrade("relationship", e.rel.name, "name_collision",
+                         f"left out of metric view {metric_view_name(self.view.area, fact)}: it "
+                         f"joins {e.child} under the name {self.aliases[e.child]}, which an "
+                         "earlier join of that view already has")
 
 
 def plan_metric_views(view: ExportView) -> tuple[list[MetricViewPlan], list[LossEntry]]:
@@ -571,11 +609,62 @@ def plan_metric_views(view: ExportView) -> tuple[list[MetricViewPlan], list[Loss
 # ---------------------------------------------------------------------------
 
 
-def create_statement(identifier: str, definition: Mapping[str, Any]) -> str:
-    """`CREATE OR REPLACE VIEW … WITH METRICS LANGUAGE YAML AS $$ … $$`."""
-    body = yaml.safe_dump(dict(definition), sort_keys=False, allow_unicode=True, width=10_000)
+class _DollarSafe(yaml.SafeDumper):
+    """Writes a string holding `$$` double-quoted, the one YAML style with escapes, so that
+    `definition_body` can spell its second `$` as the escape `\\x24`: the body sits between `$$`
+    quotes, and a literal `$$` inside it would end the definition early."""
+
+
+def _represent_str(dumper: yaml.SafeDumper, value: str) -> yaml.ScalarNode:
+    style = '"' if "$$" in value else None
+    return dumper.represent_scalar("tag:yaml.org,2002:str", value, style=style)
+
+
+_DollarSafe.add_representer(str, _represent_str)
+
+
+def definition_body(definition: Mapping[str, Any]) -> Optional[str]:
+    """The definition as YAML holding no `$$`, or None when that cannot be written. A `$$` can only
+    sit inside a string, which is then double-quoted, where `\\x24` is a `$`; the body is read back
+    to prove the escape changed no value."""
+    body = yaml.dump(dict(definition), Dumper=_DollarSafe, sort_keys=False, allow_unicode=True,
+                     width=10_000)
+    if "$$" not in body:
+        return body
+    safe = body.replace("$$", "$\\x24")
+    try:
+        same = yaml.safe_load(safe) == yaml.safe_load(body)
+    except yaml.YAMLError:
+        same = False
+    return safe if same and "$$" not in safe else None
+
+
+def dollar_fields(definition: Any, path: str = "") -> list[str]:
+    """Where in the definition a text holds `$$` (`measures.revenue.comment`), to name in a loss."""
+    if isinstance(definition, str):
+        return [path] if "$$" in definition else []
+    if isinstance(definition, Mapping):
+        return [f for k, v in definition.items() for f in dollar_fields(v, f"{path}.{k}" if path else str(k))]
+    if isinstance(definition, list):
+        return [f for i, v in enumerate(definition)
+                for f in dollar_fields(v, f"{path}.{v.get('name', i) if isinstance(v, Mapping) else i}")]
+    return []
+
+
+def create_statement(identifier: str, definition: Mapping[str, Any]) -> Optional[str]:
+    """`CREATE OR REPLACE VIEW … WITH METRICS LANGUAGE YAML AS $$ … $$`; None when the definition
+    cannot be written without a `$$` inside it (`definition_body`)."""
+    body = definition_body(definition)
+    if body is None:
+        return None
     return (f"CREATE OR REPLACE VIEW {identifier}\nWITH METRICS\nLANGUAGE YAML\nAS $$\n"
             f"{body}$$;\n")
+
+
+def writable(view: ExportView, options: ExportOptions, plan: MetricViewPlan) -> bool:
+    """Whether `write_metric_views` writes this plan's file: what a slice that lists or tags the
+    metric views asks, so it never names a view that is not created."""
+    return create_statement(metric_view_identifier(view, options, plan.table), plan.definition) is not None
 
 
 def write_metric_views(view: ExportView, options: ExportOptions) -> WriterOutput:
@@ -583,7 +672,13 @@ def write_metric_views(view: ExportView, options: ExportOptions) -> WriterOutput
     files = {}
     for p in plans:
         sql = create_statement(metric_view_identifier(view, options, p.table), p.definition)
-        body = sql.split("$$")[1] if sql.count("$$") == 2 else ""
+        if sql is None:
+            where = ", ".join(dollar_fields(p.definition))
+            losses += [dropped(view.area, "metric", m, "target_rule", f"its metric view's text holds "
+                               f"$$ ({where}), which would end the definition early, and it could "
+                               "not be escaped") for m in p.measures]
+            continue
+        body = sql.split("$$")[1]
         notes = "".join(note for note, holds in (
             (_FINER_NOTE, any("partition" in m for m in p.definition["measures"])),
             (_DOLLAR_NOTE, "$" in body)) if holds)
@@ -591,11 +686,6 @@ def write_metric_views(view: ExportView, options: ExportOptions) -> WriterOutput
             # Below the first line, which readers take as the statement's head and view name.
             head, _, rest = sql.partition("\n")
             sql = f"{head}\n{notes}{rest}"
-        if sql.count("$$") != 2:
-            # `$$` inside the definition would end it early.
-            losses += [dropped(view.area, "metric", m, "target_rule", "its metric view's text holds "
-                               "$$, which would end the definition early") for m in p.measures]
-            continue
         files[f"{METRIC_VIEW_DIR}/{p.name}.sql"] = sql.encode("utf-8")
     return WriterOutput(files, tuple(losses))
 
