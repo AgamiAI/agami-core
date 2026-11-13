@@ -1917,6 +1917,52 @@ def cmd_seed_validate(args) -> int:
     return 0
 
 
+# The examples table posted after `seed-validate --out`: a live run wrote the items to a file and
+# then had to assemble the table itself, so the engine builds it from the items it wrote.
+EXAMPLES_SHOWN = 15
+PREVIEW_CHARS = 60
+FAILED_NAMED = 5
+
+
+def _preview(item: dict) -> str:
+    """The first result row as one short cell: its values joined, cut to PREVIEW_CHARS."""
+    rows = item.get("row_preview") or []
+    if not rows:
+        return "no rows"
+    text = ", ".join(str(v) for v in rows[0])
+    return text if len(text) <= PREVIEW_CHARS else text[:PREVIEW_CHARS - 1] + "…"
+
+
+def examples_say(printed: str) -> dict[str, Any]:
+    """`say` (the examples table, ready to post) and `then` for `seed-validate --out`, from the JSON
+    it wrote: one area's item list, or several areas' `items`. {} for anything else (an error)."""
+    from .summary import _cell
+    try:
+        doc = json.loads(printed)
+    except ValueError:
+        return {}
+    items = doc.get("items") if isinstance(doc, dict) else doc
+    if not isinstance(items, list) or not all(isinstance(it, dict) for it in items):
+        return {}
+    ran = [it for it in items if not it.get("error")]
+    failed = [it for it in items if it.get("error")]
+    blocks = []
+    if ran:
+        table = ["| # | Example | Rows | Result |", "|---|---|---|---|"]
+        table += [f"| {n} | {_cell(str(it.get('question', '')))} | {it.get('row_count', 0)} | "
+                  f"{_cell(_preview(it))} |" for n, it in enumerate(ran[:EXAMPLES_SHOWN], 1)]
+        if len(ran) > EXAMPLES_SHOWN:
+            table.append(f"Showing {EXAMPLES_SHOWN} of {len(ran)}.")
+        blocks.append("\n".join(table))
+    line = f"{len(ran)} of {len(items)} examples ran."
+    if failed:
+        names = ", ".join(_cell(str(it.get("question", ""))) for it in failed[:FAILED_NAMED])
+        # a question ends in its own "?": a "." after it would read as a typo
+        line += f" {len(failed)} failed: {names}" + ("" if names.endswith(("?", ".", "!")) else ".")
+    blocks.append(line)
+    return {"say": "\n\n".join(blocks), "then": "Post `say`, then ask the examples card."}
+
+
 # --- several subject areas per call (#544) -------------------------------------------------
 # One `--area` runs the single-area command above untouched, so its output stays what skills
 # parse. Several `--area`, or none (every area), run that same command once per area and fold
@@ -2460,7 +2506,10 @@ def _run_to_out(args) -> int:
     data = buf.getvalue().encode("utf-8")
     out = Path(args.out_file).expanduser()
     write_atomically(out, data)
-    print(json.dumps({"out": str(out), "bytes": len(data)}))  # one line: the skill reads it at a glance
+    said = getattr(args, "out_say", None)
+    extra = said(buf.getvalue()) if said is not None else {}
+    # one line: the skill reads it at a glance
+    print(json.dumps({"out": str(out), "bytes": len(data), **extra}, ensure_ascii=False))
     return rc
 
 
@@ -2874,7 +2923,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
     _add_out(sp)
-    sp.set_defaults(func=cmd_seed_validate_areas)
+    sp.set_defaults(func=cmd_seed_validate_areas, out_say=examples_say)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)

@@ -195,3 +195,97 @@ def test_progress_before_the_build_starts(tmp_path, capsys):
     out = _run(["progress", str(tmp_path / "missing")], capsys)
     assert out["started"] is False and "changed" not in out
     assert out["then"] == UPDATE  # nothing remembered for a folder that doesn't exist
+
+
+# --- D. sm seed-validate --out -------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_db(monkeypatch):
+    """Stand in for execute_sql.py: every example returns three rows, and one about refunds fails,
+    so the table is pinned without a database."""
+    import subprocess
+
+    def fake_run(cmd, capture_output, text, env, encoding=None):
+        sql = cmd[cmd.index("--sql") + 1]
+        if "refund" in sql.lower():
+            return subprocess.CompletedProcess(cmd, 1, "", "no such column: refunds.amount")
+        return subprocess.CompletedProcess(cmd, 0, "label,total\nalpha,1234\nbeta,99\ngamma,7\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+
+def test_seed_validate_out_says_the_examples_table(model, tmp_path, capsys, fake_db):
+    target = tmp_path / "local" / "tmp" / "agami-examples.json"
+    out = _run(["seed-validate", str(model), "--profile", "acme", "--out", str(target)], capsys)
+    assert out["then"] == "Post `say`, then ask the examples card."
+    items = json.loads(target.read_text(encoding="utf-8"))
+    assert out["say"] == EXAMPLES_SAY
+    assert len(items["items"]) == 14  # no --area: every area, in one combined result
+
+
+def test_seed_validate_without_out_is_unchanged(model, capsys, fake_db):
+    out = _run(["seed-validate", str(model), "--profile", "acme", "--area", "agami-example"], capsys)
+    assert isinstance(out, list) and "say" not in out[0]
+    target = model.parent / "agami-one.json"
+    one = _run(["seed-validate", str(model), "--profile", "acme", "--area", "agami-example",
+                "--out", str(target)], capsys)
+    assert one["say"] == EXAMPLES_SAY  # one area's plain list gives the same table
+
+
+def _items(n: int, failed: int = 0) -> list[dict]:
+    ran = [{"question": f"Question {i}", "row_count": 2, "row_preview": [["a", str(i)]]}
+           for i in range(1, n + 1)]
+    return ran + [{"question": f"Broken {i}", "error": "boom"} for i in range(1, failed + 1)]
+
+
+def test_the_table_stops_at_fifteen_and_names_five_failures():
+    said = cli.examples_say(json.dumps({"items": _items(17, failed=6)}))["say"]
+    lines = said.splitlines()
+    assert lines[0] == "| # | Example | Rows | Result |"
+    assert lines[2] == "| 1 | Question 1 | 2 | a, 1 |"
+    assert lines[16] == "| 15 | Question 15 | 2 | a, 15 |"
+    assert lines[17] == "Showing 15 of 17."
+    assert lines[-1] == ("17 of 23 examples ran. 6 failed: Broken 1, Broken 2, Broken 3, Broken 4, "
+                         "Broken 5.")
+
+
+def test_a_long_first_row_is_cut_to_sixty_characters():
+    item = {"question": "q|x", "row_count": 1, "row_preview": [["x" * 80]]}
+    row = cli.examples_say(json.dumps([item]))["say"].splitlines()[2]
+    cell = row.split(" | ")[-1].removesuffix(" |")
+    assert len(cell) == 60 and cell.endswith("…")
+    assert "q\\|x" in row  # a pipe stays in its cell
+
+
+def test_no_rows_and_none_ran():
+    said = cli.examples_say(json.dumps([{"question": "q", "row_count": 0, "row_preview": []}]))["say"]
+    assert "| 1 | q | 0 | no rows |" in said
+    assert cli.examples_say(json.dumps([{"question": "q", "error": "x"}]))["say"] == (
+        "0 of 1 examples ran. 1 failed: q.")
+
+
+@pytest.mark.parametrize("printed", ["not json", '{"error": "unknown_area"}', "[1]"])
+def test_an_error_output_says_nothing(printed):
+    assert cli.examples_say(printed) == {}
+
+
+# The sample's 14 examples through the fake database above, pinned.
+EXAMPLES_SAY = """\
+| # | Example | Rows | Result |
+|---|---|---|---|
+| 1 | How many orders have been placed? | 3 | alpha, 1,234 |
+| 2 | What is our total revenue? | 3 | alpha, 1,234 |
+| 3 | What is the average order value? | 3 | alpha, 1,234 |
+| 4 | Who are the top 5 customers by total spend? | 3 | alpha, $1,234.00 |
+| 5 | What is revenue by product category? | 3 | alpha, $1,234.00 |
+| 6 | Show the monthly revenue trend over the last 12 months. | 3 | alpha, $1,234.00 |
+| 7 | Break down orders by status. | 3 | alpha, 1,234 |
+| 8 | How many orders come from each channel? | 3 | alpha, 1,234 |
+| 9 | What are the top 10 products by units sold? | 3 | alpha, 1,234 |
+| 10 | How many active subscriptions do we have? | 3 | alpha, 1,234 |
+| 11 | What is monthly recurring revenue by plan tier? | 3 | alpha, $1,234.00 |
+| 12 | How many customers have both placed an order and hold a subscription? | 3 | alpha, 1,234 |
+| 13 | Which product categories drive the most revenue in each sales channel? | 3 | alpha, 1234 |
+
+13 of 14 examples ran. 1 failed: What is the total amount refunded and how many refunds were issued?"""
