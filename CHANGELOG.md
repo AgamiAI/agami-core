@@ -14,6 +14,23 @@ below corresponds to one such version.
 
 ### Added
 
+- **The engine's output says what to post and what to do next, at the moment it applies.** A live
+  run computed the closing summary without posting it and refreshed its task list after only about
+  half of the step changes: the skill text that said to do so was read long before. Now `sm steps`,
+  `sm progress`, `sm seed-validate --out` and `sm apply-enrichment` may add `say` (markdown to post
+  exactly as given, before any card or further command) and `then` (one sentence: the next action).
+  `sm steps` adds `changed` (whether `list` differs from the one `steps` or `progress` last printed
+  for that model, kept in `<root>/.introspect/steps.last`), and on the mark that starts the closing
+  step its `say` is the whole `sm summary`. `sm progress` includes `list` only when it moved, with
+  `list_changed`. `seed-validate --out` says the examples table (`| # | Example | Rows | Result |`,
+  at most 15 rows, and how many ran or failed); `apply-enrichment` says one line of what it
+  applied. The summary's sign-off line and the step list's sign-off count now count what the
+  sign-off card counts (metrics, entities and joins awaiting review: "23 definitions are waiting for
+  sign-off: 11 metrics, 12 entities."), and a run that signs nothing still shows "0 of 23 signed".
+  `enrich-input --chunks` cuts each area into the fewest balanced chunks of at most 12 tables again,
+  and splits a model of more than 8 tables that came out as one chunk in two (the 11-table sample is
+  6 + 5): at 8 a 34-table database made five enrichers where only four ran at once.
+
 - **The plugin approves a few harmless agami calls itself, so onboarding asks less.** A live run
   stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a
   `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`, started with `python3` from
