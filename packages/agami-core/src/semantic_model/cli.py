@@ -1079,8 +1079,24 @@ def cmd_apply_enrichment(args) -> int:
     out["applied"] = True
     out["pass_on"] = {k: result.get(k) for k in ("metric_ideas", "terms", "questions",
                                                  "cross_area", "notes") if result.get(k)}
+    out.update(_enrichment_say(args.area, described["ops"] + ops, out["entities"]))
     _print_json(out)
     return 0
+
+
+def _enrichment_say(area: str, ops: list, entities: int) -> dict[str, str]:
+    """The one line to post once an enricher's result is applied, from the edits themselves: the
+    tables they touched, the columns they described, the entities added. The step list moves too,
+    so `then` sends the skill to `sm steps` (a live run refreshed its task list after only about
+    half of the step changes)."""
+    from .plain_names import plain_words
+    from .summary import _count
+    tables = {op.get("name") for op in ops if op.get("kind") == "table"}
+    columns = {(op.get("name"), op.get("column")) for op in ops
+               if op.get("kind") == "table" and op.get("column")}
+    return {"say": f"✓ {plain_words(area)}: {_count(len(tables), 'table')} described, "
+                   f"{_count(len(columns), 'column')}, {_count(entities, 'entity')}.",
+            "then": "Post `say`, then run `sm steps` and update the task list."}
 
 
 def cmd_approve_queue(args) -> int:

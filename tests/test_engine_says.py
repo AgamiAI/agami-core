@@ -289,3 +289,33 @@ EXAMPLES_SAY = """\
 | 13 | Which product categories drive the most revenue in each sales channel? | 3 | alpha, 1234 |
 
 13 of 14 examples ran. 1 failed: What is the total amount refunded and how many refunds were issued?"""
+
+
+# --- E. sm apply-enrichment ----------------------------------------------------------------------
+
+
+def test_apply_enrichment_says_what_it_applied(model, tmp_path, capsys):
+    result = {
+        "area": "agami-example",
+        "column_descriptions": ("agami-example.orders.status\tWhere the order stands.\n"
+                                "agami-example.orders.channel\tWhere the order came from.\n"
+                                "agami-example.customers.email\tThe customer's email.\n"),
+        "curate_ops": [{"op": "edit", "kind": "table", "area": "agami-example", "name": "products",
+                        "field": "description", "value": "One row per product."}],
+        "entities": [{"name": "buyer", "plural": "buyers", "other_names": [],
+                      "maps_to": [{"table": "customers", "column": "id", "primary": True}],
+                      "confidence": "inferred", "review_state": "unreviewed"}],
+    }
+    f = tmp_path / "agami-result.json"
+    f.write_text(json.dumps(result))
+    out = _run(["apply-enrichment", str(model), "--file", str(f), "--area", "agami-example"], capsys)
+    assert out["applied"] is True
+    assert out["say"] == "✓ Agami example: 3 tables described, 3 columns, 1 entity."
+    assert out["then"] == "Post `say`, then run `sm steps` and update the task list."
+
+
+def test_a_refused_enrichment_says_nothing(model, tmp_path, capsys):
+    f = tmp_path / "agami-result.json"
+    f.write_text(json.dumps({"area": "agami-example", "entities": {"not": "a list"}}))
+    assert cli.main(["apply-enrichment", str(model), "--file", str(f), "--area", "agami-example"]) == 1
+    assert "say" not in json.loads(capsys.readouterr().out)
