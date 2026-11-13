@@ -18,7 +18,7 @@ same numbers as the markdown table at the end of this file. Never open a page fo
 
 ## The numbers: from `sm overview`, never added up by you
 
-```
+```bash
 bash "<plugin_root>/scripts/sm" overview "<artifacts_dir>/<profile>"
 ```
 

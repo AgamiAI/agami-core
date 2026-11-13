@@ -136,7 +136,7 @@ The helper exits when the page is submitted or the 5 minutes pass, and that exit
 | `refused`, `not_replaceable` | `detail` (`--replace` was run for a profile that doesn't exist or doesn't keep its password in the OS store). | Connect it as a new profile: the name card (0a.3), then step 2 without `--replace`. |
 | `refused`, `store_error` or `write_failed` | `detail` (the store or the credentials file refused the write; nothing was kept). | Card `Next step`: `Try again` (step 2) / `Use a file instead (manual)`. |
 
-`Use a file instead (manual)` always means 0a.4 → 0a.9 → 0a.10, the same as Linux. A line that is not one of these, or no final line at all: show the last line of output and offer `Try again` / `Use a file instead (manual)`. Delete the spec file once the helper has exited.
+`Use a file instead (manual)` always means 0a.4 → 0a.9 → 0a.10, the same as Linux. A line that is not one of these, or no final line at all: show the last line of output and offer `Try again` / `Use a file instead (manual)`.
 
 On `connected` (the connection test passed), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)); `<root>` is `<artifacts_dir>/<profile>`:
 ```bash
@@ -286,7 +286,7 @@ The options follow the operating system the session's environment names (as at t
   "detected_at": "<ISO8601 UTC, from the stamp `sm batch-id` prints>"
 }
 ```
-`python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 <artifacts_dir>/local/.config`.
+`python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. It holds no secret, so it needs no `chmod`.
 
 The database's folder is known from here, `<root>` = `<artifacts_dir>/<profile>`: mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash

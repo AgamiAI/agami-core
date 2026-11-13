@@ -133,10 +133,11 @@ the Desktop app's narrow built-in pane, where a clicked link would land. Give th
 `"opened": true` say it opened in their browser (*"Opened in your browser: <url>"*); with `false` (a
 headless or remote machine) say to open the link (*"Open this in your browser: <url>"*).
 
+```bash
+bash "<plugin_root>/scripts/py" serve_page.py "<file.html>" --minutes 30 --open
 ```
-bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30 --open
-# run_in_background; its first line is {"url": "http://localhost:<port>/<name>", "opened": true}, and it exits when the time is up
-```
+
+Run it with `run_in_background`; its first line is `{"url": "http://localhost:<port>/<name>", "opened": true}`, and it exits when the time is up.
 
 Read that first line from the background task's output and give the person the URL. Render the page with `--read-only`: it hides the page's change controls and its copy-and-paste dialog and says to decide on the cards. Choices come back through a card, not a pasted block.
 

@@ -34,7 +34,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
    bash "<plugin_root>/scripts/py" promote_credentials.py
    ```
    `SECURED`/`APPENDED` → chmod 600, collision-safe. (No placeholders → never trips `PLACEHOLDERS_REMAIN`.)
-5. **Write `<artifacts_dir>/local/.config`** (same shape as 0a.7): `active_profile: agami-example`, `artifacts_dir`, `tool_paths.python3` = `<python3>` (+ `sqlite3` if found), `tier`. `chmod 600`.
+5. **Write `<artifacts_dir>/local/.config`** (same shape as 0a.7): `active_profile: agami-example`, `artifacts_dir`, `tool_paths.python3` = `<python3>` (+ `sqlite3` if found), `tier`.
 
    The sample database is ready: mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
    ```bash

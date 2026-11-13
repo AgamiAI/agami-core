@@ -76,12 +76,44 @@ FOLLOW_UP_FENCES = {
     ("shared/connection-reference.md", "# Postgres"): "a DuckDB heredoc; needs a one-profile attach",
     ("shared/connection-reference.md", "# MySQL"): "a DuckDB heredoc; needs a one-profile attach",
 }
-# First words that make a fenced line a shell command rather than JSON, SQL, INI or prose.
+# First words that mark a line in an unlabelled fence as a command (which must then be labelled).
 SHELL_WORDS = {"bash", "sh", "zsh", "sm", "python", "python3", "pip", "pip3", "mkdir", "chmod", "cp",
                "mv", "rm", "ls", "cat", "which", "uname", "date", "printf", "echo", "grep", "sed", "awk",
                "head", "tail", "jq", "tr", "curl", "split", "for", "if", "export", "cd", "kill", "stat",
                "case", "open", "xdg-open", "psql", "mysql", "sqlite3", "snowsql", "duckdb", "gcloud", "bq",
+               "git", "touch", "sudo", "node", "npm", "npx", "env", "source", "exec",
                "PGPASSFILE", "AGAMI_SQL_MAX_ROWS", "AGAMI_PROFILE", "AGAMI_PYTHON"}
+# Every line of a fence with one of these labels is a command (a `console` fence: every `$ ` line).
+SHELL_LABELS = {"bash", "sh", "zsh", "shell", "console"}
+# A code span in prose that starts with one of these words and has an argument is a helper command;
+# each such span must be one of HELPER_SPANS, with its reason.
+HELPER_SPAN_WORDS = {"chmod", "rm", "mkdir", "cp", "mv", "kill", "cat", "ls", "touch", "curl", "python3",
+                     "python", "pip", "pip3", "which", "uname", "date", "sudo", "git"}
+_CREDENTIAL = "protects a file that holds a credential (the credentials file, a key or token file)"
+_DRIVER = "the driver package the table names; installed only after the person agrees on a card"
+_NEVER = "named in a rule that forbids it"
+HELPER_SPANS = {
+    "chmod 600": _CREDENTIAL,
+    "chmod 600 <artifacts_dir>/local/credentials": _CREDENTIAL,
+    "ls /Applications": _NEVER,
+    "which <tool>": "the one probe the hard rule allows; the resolve step already runs it, so the skill does not",
+    "python3 -c '...'": _NEVER,
+    "python3 -c": _NEVER,
+    "python -m execute_sql": "names the module; every command runs it through the `py` launcher",
+    "python -m semantic_model.cli": "names the module; every command runs it through the `sm` launcher",
+    "pip install psycopg2-binary": _DRIVER, "pip install pymysql": _DRIVER,
+    "pip install snowflake-connector-python": _DRIVER, "pip install duckdb pytz": _DRIVER,
+    "pip install": _DRIVER, "pip install --user": _DRIVER,
+    'mkdir -m 700 -p "<artifacts_dir>/local"': "creates the private local/ folder in one call; no sm verb does",
+    'mkdir -m 700 -p "<new_artifacts_dir>/local"': "a second company's folder and its private local/, one call",
+    'mkdir -p "<artifacts_dir>/local/model-spec/<profile>"':
+        "only with a spec workbook: its parser does not create its output folder",
+    'mv "<artifacts_dir>/<profile>" "<artifacts_dir>/<profile>.partial-<timestamp>"':
+        "only after a failed spec apply: moves a partial model aside, never deletes it",
+    "kill <pid>": "only where the session has no stop tool, to stop the password helper",
+    'cp -R "<plugin_root>/samples/store/model/." "<artifacts_dir>/agami-example/"':
+        "the sample's ready-made model; no sm verb copies a model",
+}
 
 
 def _body(doc: Path) -> str:
@@ -97,49 +129,89 @@ def _first_word(line: str) -> str:
 
 
 def _is_shell_line(line: str) -> bool:
+    """Whether a line in an unlabelled fence reads as a command: a known program, the launcher, an
+    assignment, a path, or a bare lowercase word followed by an option. Display text (a table row, a
+    `✓` line, a sentence) does not."""
     word = _first_word(line)
     return (word in SHELL_WORDS or bool(LAUNCHER.search(line.split(" ", 1)[0]))
-            or word.startswith(("<python3>", "./", "/")) or bool(re.match(r"^[A-Za-z_]\w*=\S", line)))
+            or word.startswith(("<python3>", "./", "/")) or bool(re.match(r"^[A-Za-z_]\w*=\S", line))
+            or bool(re.match(r"^[a-z][\w.-]* -{1,2}[a-z]", line)))
 
 
-def scan(docs: list[Path] | None = None) -> tuple[list, list, list]:
-    """(launcher commands, `sm` shorthand spans, other fenced commands), each with `file:line`.
-    Every fence is read whatever its label: a `zsh` or `console` block is a command block too."""
-    launchers, shorthand, others = [], [], []
+def _fence_lines(lines: list[tuple[int, str]], label: str) -> list[tuple[int, str]]:
+    """The commands in a shell fence: comments and blank lines dropped, `\\` continuations joined, and
+    in a `console` fence only the `$ ` lines (the rest is output)."""
+    out: list[tuple[int, str]] = []
+    pending: tuple[int, str] | None = None
+    for n, raw in lines:
+        line = raw.strip()
+        if pending:
+            pending = (pending[0], pending[1] + " " + line.rstrip("\\").strip())
+            if not line.endswith("\\"):
+                out.append(pending)
+                pending = None
+            continue
+        if not line or line.startswith("#"):
+            continue
+        if label == "console":
+            if not line.startswith("$ "):
+                continue
+            line = line[2:]
+        if line.endswith("\\"):
+            pending = (n, line.rstrip("\\").strip())
+        else:
+            out.append((n, line))
+    if pending:
+        out.append(pending)
+    return out
+
+
+def scan(docs: list[Path] | None = None) -> tuple[list, list, list, list, list]:
+    """(launcher commands, `sm` shorthand spans, other fenced commands, helper spans in prose, command
+    lines in unlabelled fences), each with `file:line`. Every line of a bash, sh, zsh, shell or console
+    fence is a command; an unlabelled fence may hold none."""
+    launchers, shorthand, others, helpers, unlabelled = [], [], [], [], []
     for doc in docs or DOCS:
         rel = str(doc.relative_to(PLUGIN)) if doc.is_relative_to(PLUGIN) else doc.name
-        fence, fence_head, skip = None, None, False
+        fence, block = None, []
         for n, line in enumerate(_body(doc).splitlines(), 1):
             stripped = line.strip()
-            where = f"{rel}:{n}"
             if stripped.startswith("```"):
-                fence = None if fence is not None else stripped[3:].strip()
-                fence_head, skip = None, fence in NOT_COMMAND_LABELS
+                if fence is None:
+                    fence, block = stripped[3:].strip(), []
+                    continue
+                head = next((t.strip() for _, t in block if t.strip()), "")
+                follow_up = any(rel == f and head.startswith(h) for f, h in FOLLOW_UP_FENCES)
+                if fence in SHELL_LABELS and not follow_up:
+                    for m, cmd in _fence_lines(block, fence):
+                        (launchers if LAUNCHER.search(cmd) else others).append((f"{rel}:{m}", cmd))
+                elif fence == "":
+                    unlabelled += [(f"{rel}:{m}", t.strip()) for m, t in block
+                                   if t.strip() and not t.strip().startswith("#") and _is_shell_line(t.strip())]
+                fence = None
                 continue
             if fence is not None:
-                if fence_head is None and stripped:
-                    fence_head = stripped
-                    skip = skip or any(rel == f and stripped.startswith(h) for f, h in FOLLOW_UP_FENCES)
-                if skip or not stripped or stripped.startswith("#") or not _is_shell_line(stripped):
-                    continue
-                (launchers if LAUNCHER.search(stripped) else others).append((where, stripped))
+                block.append((n, line))
                 continue
+            where = f"{rel}:{n}"
             for span in re.findall(r"`([^`\n]+)`", line):
                 if LAUNCHER.search(span):
                     launchers.append((where, span))
                 elif SHORTHAND.match(span):
                     shorthand.append((where, span))
-    return launchers, shorthand, others
+                elif span.split(" ", 1)[0] in HELPER_SPAN_WORDS and " " in span.strip():
+                    helpers.append((where, span))
+    return launchers, shorthand, others, helpers, unlabelled
 
 
-COMMANDS, SHORTHANDS, OTHERS = scan()
+COMMANDS, SHORTHANDS, OTHERS, HELPER_USES, UNLABELLED = scan()
 
 
 def test_the_scan_finds_the_commands():
     assert len(COMMANDS) > 60 and len(SHORTHANDS) > 40
     assert any('sm" summary "<root>"' in c for _, c in COMMANDS)
     assert not any(w.startswith("agents/") for w, _ in COMMANDS)  # agents run no commands
-    assert any("mkdir -m 700 -p" in c for _, c in OTHERS)
+    assert any("mkdir -m 700 -p" in c for _, c in OTHERS) and HELPER_USES
 
 
 def _without_placeholders(command: str) -> str:
@@ -167,6 +239,19 @@ def test_no_shell_syntax_in_a_command(where, command):
 @pytest.mark.parametrize("where,span", SHORTHANDS)
 def test_no_shell_syntax_in_an_sm_shorthand(where, span):
     _check_syntax(where, _expand(span))
+
+
+@pytest.mark.parametrize("where,span", HELPER_USES)
+def test_helper_spans_in_prose_are_allowlisted(where, span):
+    """A `chmod …`, `rm …`, `mkdir …` or other helper named in a sentence is copied like a fenced one:
+    each that stays is listed with its reason; a leftover (`chmod 600 .config`) fails."""
+    assert span in HELPER_SPANS, f"{where}: {span!r} is not an allowed helper"
+
+
+def test_no_unlabelled_fence_holds_a_command():
+    """A command goes in a `bash` fence, where every line is checked; an unlabelled fence is display
+    text only."""
+    assert UNLABELLED == []
 
 
 @pytest.mark.parametrize("where,command", OTHERS)
@@ -538,9 +623,20 @@ def test_the_new_checks_catch_what_they_claim():
 
 def test_every_fence_label_is_scanned(tmp_path):
     doc = tmp_path / "x.md"
-    doc.write_text("```zsh\nchmod 700 x\n```\n```console\nbash \"<plugin_root>/scripts/sm\" steps \"$ROOT\"\n```\n"
-                   "```json\n{\"a\": 1}\n```\nRun `sm steps \"<root>\"` now.\n", encoding="utf-8")
-    launchers, shorthand, others = scan([doc])
-    assert [c for _, c in others] == ["chmod 700 x"]
+    doc.write_text("```zsh\nchmod 700 x\ngit status\n```\n"
+                   "```console\n$ bash \"<plugin_root>/scripts/sm\" steps \"$ROOT\"\n{\"list\": []}\n```\n"
+                   "```shell\ntouch a \\\n  b\nnode x.js\n```\n"
+                   "```\n| a | b |\n✓ Done\nsudo rm -rf x\n```\n"
+                   "```json\n{\"a\": 1}\n```\nRun `sm steps \"<root>\"` now, never `chmod 600 x`.\n",
+                   encoding="utf-8")
+    launchers, shorthand, others, helpers, unlabelled = scan([doc])
+    assert [c for _, c in others] == ["chmod 700 x", "git status", "touch a b", "node x.js"]
     assert [c for _, c in launchers] == ['bash "<plugin_root>/scripts/sm" steps "$ROOT"']
     assert [c for _, c in shorthand] == ['sm steps "<root>"']
+    assert [c for _, c in helpers] == ["chmod 600 x"]
+    assert [c for _, c in unlabelled] == ["sudo rm -rf x"]
+    for _, c in others:
+        with pytest.raises(AssertionError):
+            test_other_fenced_commands_are_allowlisted("example", c)
+    with pytest.raises(AssertionError):
+        test_helper_spans_in_prose_are_allowlisted("example", "chmod 600 x")
