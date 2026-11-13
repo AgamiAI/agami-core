@@ -1,6 +1,8 @@
 # Metric & Entity YAML shape — the canonical reference
 
 > `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+>
+> `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full.
 
 This is the **sanctioned source of truth** for the shape of a metric or entity
 YAML when building them during onboarding/enrichment. The data below is
@@ -219,7 +221,7 @@ Build a JSON array and apply it ONCE with the packaged command — never
 hand-author each YAML, never write a throwaway loop script:
 
 ```bash
-bash "<plugin_root>/scripts/sm" add "$ROOT" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-metrics.json"
+bash "<plugin_root>/scripts/sm" add "<root>" --kind metric --area <area> --file "<artifacts_dir>/local/tmp/agami-metrics.json"
 ```
 
 It validates each item against the schema, writes

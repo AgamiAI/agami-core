@@ -1,6 +1,6 @@
 # Running subagents in the background
 
-> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md). Each command here is its own Bash call, every path written out in full.
 
 agami-connect hands some reading and drafting to subagents so the person is never waiting on one
 thing while another could run. This is the one place that says how. The schedule (what runs while
@@ -19,7 +19,8 @@ the person is on which cards) is in agami-connect's SKILL.md, "What runs at the 
   rest wait in a queue (see 3). The one exception is the document readers (1.5): each starts as its
   document's path arrives, still at most 4 at once.
 - Each gets its `input_path` (or document) and a `result_path`, and a description in the person's
-  words: *"Describe the Sales tables (12)"*.
+  words: *"Describe the Sales tables (8)"*. Input and result files are named `agami-…` with a
+  `.json` ending.
 - Where the Agent tool doesn't list the agent by name (`agami-core:<agent>`), launch a
   general-purpose subagent told to *"Read `<plugin_root>/agents/<agent>.md` and follow it for this
   input: …"*.
@@ -38,10 +39,10 @@ alike) with a new stamp.
 When the paired work is done, block on the results with the pre-approved call:
 
 ```bash
-bash "<plugin_root>/scripts/sm" wait-files --file "<result 1>" --file "<result 2>" --wait 60
+bash "<plugin_root>/scripts/sm" wait-files --file "<result 1>" --file "<result 2>" --wait 30
 ```
 
-It prints `{"ready", "waiting", "all_ready"}`. Repeat it until `all_ready` is true. After each pass:
+It prints `{"ready", "waiting", "all_ready"}`. Repeat it, one call per pass, until `all_ready` is true. After each pass:
 
 - post one line naming what is still running, from its `waiting` list (*"Still describing: Sales 2,
   Billing 1"*); never a guess at how long is left;
@@ -53,7 +54,7 @@ It prints `{"ready", "waiting", "all_ready"}`. Repeat it until `all_ready` is tr
 
 ## 4. Give up cleanly
 
-The give-up limit is per subagent: 10 minutes of `--wait 60` passes spent waiting on that subagent,
+The give-up limit is per subagent: 10 minutes of `--wait 30` passes (20 passes) spent waiting on that subagent,
 counted from the first pass after it started (a reader started long before the first pass gets the
 full 10). Quick `--wait 0` checks after a card don't count. A result still missing after that, or a
 file that is not what it was asked for (not JSON, the wrong shape, another area's), is given up on.
