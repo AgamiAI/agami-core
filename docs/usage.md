@@ -139,12 +139,22 @@ You: review my model
 ```
 
 agami lists what needs sign-off in the chat, then asks on a card: **Approve all**,
-**Review one by one** or **Skip for now**. One by one, each card holds up to four
-items with **Approve** / **Reject** / **Approve all remaining**; type a change to a
-definition in "Other". agami applies each decision, runs the validator and commits
-to `<artifacts_dir>/<profile>/.git/`. The review page (the model explorer's Review
-tab) is the optional full view, served from `localhost` when you pick **Show the full
-view**.
+**Review one by one**, **Skip for now** or **Review on a page**. One by one, each card
+holds up to four items with **Approve** / **Reject** / **Approve all remaining** /
+**Review on a page**; type a change to a definition in "Other". **Approve all remaining**
+lists the items you haven't seen before it signs them. agami applies each decision, runs
+the validator and commits to `<artifacts_dir>/<profile>/.git/`.
+
+**Review on a page** opens the model explorer on the list the card was asking about
+(the metrics, the joins, or the personal-data columns), served from `127.0.0.1`. Approve,
+reject, hide or edit there and press **Save decisions**: the page sends your decisions
+straight back to the chat, which applies them through the same `sm curate` call as a card,
+signed as your saved sign-off identity (the page shows it), and says back what changed, e.g.
+*"Approved 18 metrics and hid 6 columns."* Nothing is copied or pasted. The seed examples
+step works the same way: **Mark them on a page**, then keep, drop or fix each one on the page.
+In a remote or SSH session, where your browser can't reach this computer's `127.0.0.1`, agami
+says so and stays on the cards. A page that only shows something (**Show the full view** on a
+chart, say) says in a banner that nothing on it is saved.
 
 ### Browse the model + exclude tables / columns
 

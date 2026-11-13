@@ -1065,6 +1065,7 @@ def discover_inventory(
     tables: Optional[list[str]] = None,
     schemas: Optional[list[str]] = None,
     bigquery_region: str = "region-us",
+    row_estimates: bool = False,
 ) -> dict:
     """Cheap first-pass discovery for the prune UI: every (schema, table) and its
     columns — and NOTHING expensive. No grain count-distincts, no FK-overlap probes,
@@ -1073,10 +1074,13 @@ def discover_inventory(
 
     `schemas` (optional) restricts discovery to those schemas (the user's 1.3 schema
     pick) so a 50-schema warehouse isn't fully enumerated just to prune.
+    `row_estimates` adds each table's `rows` from ONE catalog-statistics read where the dialect
+    keeps them (the table picker shows it, #654); never a count, and a table, or a dialect, with
+    no usable estimate simply has no `rows`.
 
     Returns a JSON-serializable inventory:
         {profile, db_type, schemas:[...], table_count, column_mode,
-         tables:[{schema, table, columns:[{name, type}]}, ...]}
+         tables:[{schema, table, columns:[{name, type}], rows?}, ...]}
     """
     dialect = D.get_dialect(db_type)
     if isinstance(dialect, D.BigQuery):
@@ -1121,6 +1125,8 @@ def discover_inventory(
             if not used_bulk:
                 column_mode = cmode
         inv_tables.append({"schema": schema, "table": table, "columns": cols})
+    if row_estimates and schemas:
+        _add_row_estimates(dialect, runner, schemas, inv_tables)
 
     return {
         "profile": profile,
@@ -1130,6 +1136,22 @@ def discover_inventory(
         "column_mode": column_mode,
         "tables": inv_tables,
     }
+
+
+def _add_row_estimates(dialect: D.Dialect, runner: Runner, schemas: list[str],
+                       tables: list[dict]) -> None:
+    """Set `rows` on each table the catalog keeps a positive estimate for. A refused read, or a 0
+    / -1 (an unanalysed table or a view on Postgres), leaves the size unknown rather than empty."""
+    q = dialect.sql_row_estimates_bulk(schemas)
+    rows = _try(runner, q) if q else None
+    by_tt = {(r.get("table_schema"), r.get("table_name")): r.get("estimated_rows") for r in rows or []}
+    for t in tables:
+        try:
+            n = int(float(by_tt.get((t["schema"], t["table"])) or 0))
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            t["rows"] = n
 
 
 # ---------------------------------------------------------------------------

@@ -402,7 +402,7 @@ def test_6_shows_a_table_of_seeds_then_the_four_option_card():
         "Keep all that ran (Recommended)",
         "Review one by one",
         "Drop the failing ones",
-        "Show the full view",
+        "Mark them on a page",
     ):
         assert f"- **{label}**" in s, label
     assert "Review the failing ones" not in s and "Review all one by one" not in s
@@ -710,12 +710,14 @@ def test_example_cards_show_the_sql_in_the_keep_preview():
 
 
 def test_review_cards_offer_the_full_view_as_an_option():
-    # "show the full view" worked only typed in Other, and no card said it existed.
+    # "show the full view" worked only typed in Other, and no card said it existed. #651: the page now
+    # saves its own decisions, so the option says what it does, on every question of a card.
     four, six = _phase_4(), _phase_6()
-    assert four.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
-    assert six.count("- **Show the full view**") == 1        # the Examples card
-    assert "and **Show the full view** (the page below" in six  # the example item cards
-    assert "| Show the full view |" in four and "| Show the full view |" in six
+    assert four.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
+    assert six.count("- **Mark them on a page**") == 1     # the Examples card
+    assert "and **Mark them on a page** (the page below, on every question of the card" in six  # item cards
+    assert "| Review on a page |" in four and "| Mark them on a page |" in six
+    assert "first question only" not in four + six
     phase_7 = _phase("## Phase 7", "## Phase 8")
     assert "`Show the full view`" in phase_7
 
@@ -746,3 +748,127 @@ def test_join_candidate_group_options_preview_the_joins_they_add():
     assert "each option's `preview` lists every join that option adds" in s
     assert "Never offer a numbered range" in s
     assert "Add all remaining" in s and "Add none" in s
+
+
+# --- pages that save their own decisions (#651) -------------------------------------------------
+
+
+def test_4a_full_view_saves_through_the_helper_and_applies_like_agami_model():
+    full = _phase_4().split("**Show the full view** (an option")[1]
+    assert "--save-to-helper" in full and "--decisions" in full and "--read-only" not in full
+    assert "question-cards.md#6a-a-page-that-saves-its-decisions" in full
+    assert "as `/agami-model` Phase 5b does" in full
+    assert "`--initial-tab pii` from the personal-data question" in full
+
+
+def test_4a_bulk_sign_off_lists_the_unseen_items_first():
+    s = _phase_4()
+    assert "a sign-off is never recorded for a definition the person hasn't seen" in s
+    assert '"bulk":true' in s
+
+
+def test_6_examples_page_saves_and_its_card_says_ive_marked_them():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "--save-to-helper --artifacts-dir" in full and "--decisions" in full
+    assert "**I've marked them on the page** and **Back to the cards**" in full
+    # what the page saved maps onto the old block's lines, applied by the same commands
+    for pair in ("`keep` is `validate N`", "`drop` is `reject N`", "`fix` (with its `sql`) is `edit N`", "`note_all` is `note all`"):
+        assert pair in full, pair
+    assert "is said back and not applied" in full
+
+
+def test_6_saved_examples_are_checked_by_the_parser_and_a_keep_needs_an_identity():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "parse_examples_decisions.py --decisions-file" in full and "--expect-profile <profile>" in full
+    assert "Never read it by hand" in full
+    assert "**A keep is a sign-off**" in full and "is not applied; say so" in full
+
+
+def test_6_with_add_my_own_drop_the_failing_ones_gives_way():
+    """With #649's Add my own on the card and some failures, five options would not fit."""
+    s = _phase_6()
+    rule = s[s.index("**When the card also offers Add my own**"):]
+    rule = rule[: rule.index("\n\n")]
+    assert "**Drop the failing ones** gives way" in rule
+    assert "**Keep all that ran** / **Review one by one** / **Add my own** / **Mark them on a page**" in rule
+
+
+def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
+    assert 'Each of its approve ops carries `"bulk": true`.' in _phase_4()
+
+
+def test_6_the_parser_gets_the_same_items_files_as_the_renderer():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "Give it the same `--items-file` arguments, in the same order, that rendered the page" in full
+
+
+# --- 1.6p: pick from a list, on a page that saves itself (#654) ---------------------------------
+
+
+def _section_16p() -> str:
+    return _between("### 1.6p ", "### 1.7 ")
+
+
+def _tables_card() -> list[str]:
+    s = _section_16()
+    i = s.index("Then call AskUserQuestion, one question (header `Tables`)")
+    lines = s[i:].splitlines()[2:]
+    return [ln for ln in lines[: next(n for n, ln in enumerate(lines) if not ln.startswith("- **"))]]
+
+
+def test_1_6_offers_pick_from_a_list_within_four_options():
+    options = _tables_card()
+    assert len(options) == 4
+    assert [o.split("**")[1] for o in options] == [
+        "Pick from a list", "Keep everything", "Drop staging and backups", "Only some schemas"]
+    assert "more than 10 tables" in options[0] and "(Recommended)" in options[0]
+    # one recommendation at a time: dropping the copies is recommended only on a small catalog
+    assert "With 10 tables or fewer, mark it **(Recommended)**" in options[2]
+
+
+def test_1_6_takes_typed_names_in_the_question_not_as_an_option():
+    s = _section_16()
+    card = s[s.index("(header `Tables`)"):]
+    assert card.splitlines()[0].endswith('Or type table names or patterns in Other, like orders, customers or all crm_*."*:')
+    assert "--keep pick:" in s and "there is no option for it" in s
+
+
+def test_1_6p_serves_the_picker_with_the_saving_helper_and_writes_through_keep():
+    s = _section_16p()
+    for step in ("SSH_CONNECTION", "render_table_picker.py", "serve_page.py", "--decisions",
+                 "run_in_background", "Monitor tool", "never a foreground sleep",
+                 "**I've saved it** / **Back to the cards**", "TaskStop",
+                 '--keep page:"<decisions file>"', "agami-keep.txt", '"Keeping <kept> of <N> tables."',
+                 '{"status": "expired"}', "never edit the file"):
+        assert step in s, step
+    assert s.index("reads the helper's output first") < s.index("TaskStop")
+
+
+def test_1_6p_falls_back_to_a_numbered_list_typed_in_other():
+    s = _section_16p()
+    fallback = s[s.index("**The numbered list**"):]
+    assert "--numbered" in fallback and "--keep pick:" in fallback
+    q = next(ln for ln in fallback.splitlines() if "(header `Table pick`)" in ln)
+    # what to type is in the question (rule 5), and the options are the alternatives to typing
+    assert "Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*." in q
+    assert "**Keep everything** / **Drop staging and backups**" in q and "Type" not in q.split(":", 1)[1].split("**")[1]
+    assert "Past 200 tables" in fallback and "the first 200 tables" in fallback
+    # numbers are read only up to the last one the list showed, and never on the main card
+    assert '--shown <shown>' in fallback
+    assert "--shown 0" in _section_16()
+
+
+def test_1_6p_headers_are_new_and_fit_a_card():
+    s = _section_16p()
+    for h in ("Table list", "Table pick"):
+        assert f"header `{h}`" in s and len(h) <= 12
+
+
+def test_1_6p_back_to_the_cards_goes_to_the_numbered_list():
+    """Copilot on #657: in a cloud or web session the page can be unreachable without
+    SSH_CONNECTION; going back to the Tables card offered Pick from a list, another dead page."""
+    s = _section_16p()
+    back = s[s.index("**Back to the cards** reads the helper's output first"):]
+    back = back[: back.index("\n")]
+    assert back.index("TaskStop") < back.index("**The numbered list**")
+    assert "`Tables` card again" not in back

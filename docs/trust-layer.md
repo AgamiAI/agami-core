@@ -132,17 +132,24 @@ and never blocks the path to first answer.
 short table: each metric, entity or guessed join with its one-line meaning. Then a question
 card asks **Approve all**, **Review one by one** or **Skip for now** (unsigned items still
 answer, with a warning). One by one, a card holds up to four items, each with **Approve** /
-**Reject** / **Approve all remaining**, and "Other" takes a change to the definition in your
-own words; agami edits it with `sm curate` and asks about that one again. Personal-data
-columns come up on one card, "Hide these from queries".
+**Reject** / **Approve all remaining** / **Review on a page**, and "Other" takes a change to the
+definition in your own words; agami edits it with `sm curate` and asks about that one again.
+**Approve all remaining** first lists the items you haven't been shown and asks once more: a
+sign-off is never recorded for a definition you didn't see, and a bulk sign-off is marked
+`"bulk": true` in `curation_log.jsonl`. Personal-data columns come up on one card, "Hide these
+from queries".
 
 Approving stamps the curator's email + role (asked once on a card and saved). agami applies
 each decision, runs the validator, and commits the result to `<artifacts_dir>/<profile>/.git/`.
 
-The model explorer page, with its **Review** tab, per-card Approve / Reject / Edit buttons
-and group-level "Approve all" / "Reject all", is the optional full view: `/agami-model`
-serves it from `localhost` when you pick **Show the full view**. Its "Generate feedback for
-Claude" block is still accepted when pasted into the chat.
+The model explorer page, with its **Review** tab, per-card Approve / Reject / Edit buttons,
+group-level "Approve all" / "Reject all", and a personal-data tab where each column can be
+hidden, is the optional full view: pick **Review on a page** on any review question and it opens
+on that list. You decide the whole list there and press **Save decisions**: the page sends them
+to a one-time helper on `127.0.0.1`, and agami applies them with the same `sm curate` call a card
+uses (the validator, the curation log, and your saved sign-off identity, which the page shows and
+cannot change), then says what changed in one line. Nothing is copied or pasted. A "Generate
+feedback for Claude" block from an older page is still accepted when pasted into the chat.
 
 ## Every answer ships a receipt
 
@@ -216,4 +223,6 @@ chat as a table (question, rows returned, or the error) with one card: keep all 
 review the failing ones, drop them, or review all one by one (Keep / Drop / Fix, with the fix
 described in "Other"). The examples-validation page
 (`<artifacts_dir>/local/examples-validation/<ts>.html`), with Validate / Reject / Edit /
-Add note buttons and an inline "Add example", is the optional full view.
+Add note buttons, is the optional full view: **Mark them on a page** on the card opens it, and
+its **Save decisions** sends your marks back to the chat, which keeps, drops and fixes them with
+the same commands the cards use.
