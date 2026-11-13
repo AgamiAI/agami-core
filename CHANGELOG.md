@@ -102,7 +102,10 @@ below corresponds to one such version.
   since, it keeps the turn going once, with one fixed sentence ("Ask that card now."), and records
   `resumed` on the entry so it never does so again for that text (the engine carries `resumed`
   over when it prints the same text again, as it does `refused`). It never blocks when
-  `stop_hook_active` is true, and on any doubt says nothing, so the turn ends as before.
+  `stop_hook_active` is true, and on any doubt says nothing, so the turn ends as before. When the
+  gate gives up on a text (the third ask, still not posted: live Opus runs put it into thinking
+  both times), it lets the card through with the text as a `systemMessage`, which Claude Code
+  shows the person, and no decision; once, as the entry is then removed.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With
   agami's library missing or older than the plugin, those 13 verbs stop with

@@ -18,9 +18,11 @@ tests/test_say_gate.py), and this hook, before a card, checks the session's tran
      assistant text after that tool result: text blocks only, never thinking. Satisfied ones go.
   5. If one that belongs is unsatisfied, the oldest is demanded: refused once more and saved, then
      a deny whose reason is REASON and the `say`. One refused MAX_REFUSALS times already is dropped
-     instead, silently: a card is never blocked for good.
+     instead and the card goes ahead (a card is never blocked for good); its `say` is then printed
+     as `systemMessage`, which Claude Code shows the person, with no decision of any kind: live
+     Opus runs put the text into thinking both times, so without it the text was never shown.
 
-It denies nothing but AskUserQuestion, never allows, reads only the pending file and the transcript
+It denies nothing but AskUserQuestion, never allows (the give-up message carries no decision), reads only the pending file and the transcript
 path it is handed, and writes only the pending file (through a temp file beside it, for an atomic
 replace). Every doubt prints nothing, so the card goes ahead: input it can't parse, a file it can't
 read or trust, a count it can't save, an exception. Like approve_own_calls.py it imports nothing of
@@ -30,7 +32,8 @@ Contract (https://code.claude.com/docs/en/hooks): stdin has `transcript_path`, `
 `tool_name` and `tool_input` ("Common input fields", "PreToolUse input"); a
 `hookSpecificOutput.permissionDecision` of "deny" prevents the call and its
 `permissionDecisionReason` is "shown to Claude" ("PreToolUse decision control"); exit 0 with no
-output is no decision. The transcript "is written asynchronously and may lag the in-memory
+output is no decision; a top-level `systemMessage` is a "Warning message shown to the user" ("JSON
+output"), and with no `permissionDecision` the call takes the normal permission flow. The transcript "is written asynchronously and may lag the in-memory
 conversation": in a live session the text posted right before a retried card was not on disk yet
 when the hook ran, and the card was refused a second time. Lines are appended in order, so the gate
 waits (at most CARD_WAIT seconds) until the card's own tool_use line (`tool_use_id`) is in the
@@ -344,8 +347,14 @@ def _sort(entries: list, rows: list) -> tuple:
     return kept, waiting
 
 
-def decide(event: Any, now: Optional[datetime] = None) -> Optional[str]:
-    """The deny reason for `event`, or None to say nothing. Updates the pending file as it goes."""
+def _deny(reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": reason}}
+
+
+def decide(event: Any, now: Optional[datetime] = None) -> Optional[dict]:
+    """The hook's output for `event` (a deny, or on giving up the text as `systemMessage` with no
+    decision), or None to say nothing. Updates the pending file as it goes."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PreToolUse" \
             or event.get("tool_name") != "AskUserQuestion":
         return None
@@ -376,11 +385,12 @@ def decide(event: Any, now: Optional[datetime] = None) -> Optional[str]:
     # File order is the order the engine registered them in; created_at to the second may tie.
     oldest = min(waiting, key=lambda e: (_created(e), kept.index(e)))
     if oldest["refused"] >= MAX_REFUSALS:
+        # Saved first, so the message is shown at most once: the entry is gone after this.
         save(path, [e for e in kept if e is not oldest])
-        return None
+        return {"systemMessage": oldest["say"]}
     oldest["refused"] += 1
     save(path, kept)  # before the deny: a count that can't be saved must not refuse again for ever
-    return f"{REASON}\n\n{oldest['say']}"
+    return _deny(f"{REASON}\n\n{oldest['say']}")
 
 
 def main() -> int:
@@ -388,15 +398,11 @@ def main() -> int:
         data = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
         if len(data) > MAX_INPUT_BYTES:
             return 0
-        reason = decide(json.loads(data.decode("utf-8")))
+        output = decide(json.loads(data.decode("utf-8")))
     except Exception:  # noqa: BLE001 — any doubt is silence, never a decision
         return 0
-    if reason:
-        sys.stdout.write(json.dumps({"hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }}) + "\n")
+    if output:
+        sys.stdout.write(json.dumps(output) + "\n")
     return 0
 
 
