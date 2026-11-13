@@ -18,8 +18,13 @@ HEADER = ("Subject area", "Tables", "Described", "Metrics", "Joins", "Examples")
 
 
 def _cell(text: str) -> str:
-    # A `|` in a name would split the row into an extra column.
-    return text.replace("|", "\\|")
+    """A name made safe for one table cell or the bold first line: a `|` would split the row into
+    an extra column, and a line break would end the row (or the bold) early."""
+    return " ".join(text.split()).replace("|", "\\|")
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
 
 
 def _row(name: str, numbers: dict[str, Any]) -> str:
@@ -40,8 +45,10 @@ def onboarding_summary(root: Path) -> dict[str, Any]:
     org = L.load_datasource(root, include_rejected=True)
     view = curate.overview(org, root)
     totals = view["totals"]
-    blocks = [f"**{org.datasource}: {totals['tables']} tables, {totals['joins']} joins, "
-              f"{totals['metrics']} metrics, {totals['examples']} examples.**"]
+    counts = ", ".join(_count(totals[k], noun) for k, noun in
+                       (("tables", "table"), ("joins", "join"), ("metrics", "metric"),
+                        ("examples", "example")))
+    blocks = [f"**{_cell(org.datasource)}: {counts}.**"]
     table = ["| " + " | ".join(HEADER) + " |", "|" + "---|" * len(HEADER)]
     table += [_row(_cell(a["plain_name"]), a) for a in view["areas"]]
     if len(view["areas"]) > 1:

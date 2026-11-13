@@ -161,3 +161,70 @@ def test_every_verb_the_skills_redirected_takes_out():
     for verb in ("seed-validate", "bundle", "model-tree", "org-draft", "claims"):
         assert "--out" in sub[verb].format_help(), verb
 
+
+
+def test_one_of_each_reads_singular(model, monkeypatch):
+    from semantic_model import curate
+    real = curate.overview
+
+    def one_of_each(org, root):
+        view = real(org, root)
+        view["totals"].update(tables=1, joins=1, metrics=1, examples=1)
+        return view
+
+    monkeypatch.setattr(curate, "overview", one_of_each)
+    first = summary.onboarding_summary(model)["markdown"].splitlines()[0]
+    assert first == "**agami-example: 1 table, 1 join, 1 metric, 1 example.**"
+
+
+def test_a_name_with_a_line_break_or_pipe_stays_on_its_line():
+    assert summary._cell("acme\n| evil") == "acme \\| evil"
+    assert summary._cell("a\r\nb\tc") == "a b c"
+
+
+def test_the_datasource_name_is_escaped(model):
+    ds = yaml.safe_load((model / "datasource.yaml").read_text())
+    ds["datasource"] = "acme|x\n**y"
+    (model / "datasource.yaml").write_text(yaml.safe_dump(ds))
+    first = summary.onboarding_summary(model)["markdown"].split("\n\n")[0]
+    assert "\n" not in first and first.startswith("**acme\\|x **y: ")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
+def test_out_file_mode_follows_the_umask_like_a_redirect(model, tmp_path, capsys):
+    import os
+    import stat
+    old = os.umask(0o022)
+    try:
+        target = tmp_path / "agami-tree.json"
+        assert cli.main(["model-tree", str(model), "--out", str(target)]) == 0
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+    finally:
+        os.umask(old)
+
+
+def _every_parser(parser):
+    import argparse
+    yield parser
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                yield from _every_parser(child)
+
+
+def test_no_parser_accepts_an_abbreviated_option():
+    parsers = list(_every_parser(cli.build_parser()))
+    assert len(parsers) > 50
+    assert all(p.allow_abbrev is False for p in parsers)
+
+
+@pytest.mark.parametrize("abbrev", ["--o", "--ou", "--o=x.json", "--ou=x.json"])
+@pytest.mark.parametrize("verb", ["model-tree", "bundle", "org-draft"])
+def test_the_cli_refuses_an_abbreviated_out(model, tmp_path, capsys, abbrev, verb):
+    target = tmp_path / "x.json"
+    extra = ["--area", "agami-example"] if verb == "bundle" else []
+    argv = [verb, str(model), *extra, abbrev] + ([] if "=" in abbrev else [str(target)])
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2
+    assert not target.exists() and not (Path.cwd() / "x.json").exists()

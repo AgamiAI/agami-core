@@ -2372,6 +2372,10 @@ def write_atomically(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+        # mkstemp makes the file 0600; a redirect would have made it 0666 less the umask.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, 0o666 & ~umask)
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -2391,6 +2395,17 @@ def _run_to_out(args) -> int:
     write_atomically(out, data)
     print(json.dumps({"out": str(out), "bytes": len(data)}))  # one line: the skill reads it at a glance
     return rc
+
+
+def _no_abbreviations(parser: argparse.ArgumentParser) -> None:
+    """`allow_abbrev=False` on `parser` and every subparser under it. With abbreviations on, `--o`
+    meant `--out`, so a check that looked for `--out` (a permission hook, a reviewer) could be
+    walked past by writing less of it; an option is now only ever its full name."""
+    parser.allow_abbrev = False
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                _no_abbreviations(child)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2838,6 +2853,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
     sp.set_defaults(func=cmd_discover)
 
+    _no_abbreviations(p)
     return p
 
 
