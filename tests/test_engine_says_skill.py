@@ -86,7 +86,7 @@ def test_the_closing_card_comes_after_the_mark_in_the_same_message():
 def test_the_examples_table_is_the_say_of_seed_validate():
     text = _read(REFS / "examples.md")
     flat = _flat(text)
-    show = flat.index("post its `say` exactly")
+    show = flat.lower().index("post its `say` exactly")
     card = flat.index("(header `Examples`)")
     assert show < card
     assert "| # | Question | Rows | Result |" not in text  # no table built by hand

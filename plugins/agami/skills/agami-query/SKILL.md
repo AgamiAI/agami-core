@@ -503,7 +503,7 @@ If row count == 0:
 
 The chat reply follows this **strict order**, with NO other content interleaved (no SQL, no Bash output, no "let me know if…" filler):
 
-  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
+  4a Approach → 4b Fetching → 4d Table → 4c Insight → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
 
 Each step is short. The whole reply should fit in a typical chat viewport without scrolling. **No page is rendered or opened on this path:** the chart page (4e) runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart"). Cards follow [`shared/question-cards.md`](../../shared/question-cards.md).
 
@@ -529,7 +529,7 @@ For multi-section: "Pulled data for 4 sections (12 + 5 + 6 + 3 rows)."
 
 ### 4c — Insight first
 
-One sentence stating the answer. Lead with the most surprising or actionable finding. Examples:
+One sentence stating the answer, right under the table (4d), never in its place. Lead with the most surprising or actionable finding. Examples:
 
 - "**Carol Chen** is the top spender at **$148.95** — about 3x the next customer."
 - "Revenue is up **12% MoM**; the surge came from EU customers."
@@ -539,7 +539,7 @@ For multi-section: a 1–3 sentence executive summary across all sections (the s
 
 ### 4d — Markdown table
 
-**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 15 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
+**The table is never left out**, even when the answer fits in one sentence: the result rows come first, at most 15 and then how many more, before any sentence about them and before the answer card ([question-cards rule 3](../../shared/question-cards.md#3-a-result-is-chat-output-before-the-card-that-acts-on-it)). A browser test showed a first answer of one sentence and no rows. **Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 15 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" format-table --csv-file "<artifacts_dir>/local/tmp/agami-result.csv" --units "$PREPARE_UNITS" --labels "$PREPARE_LABELS"
 ```

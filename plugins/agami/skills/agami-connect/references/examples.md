@@ -14,7 +14,7 @@ bash "<plugin_root>/scripts/sm" steps "<root>" --mark examples=in_progress
 **5a — the candidates.** When Phase 4 started example writers, the candidates come from their files; you check and finish them:
 
 1. **Collect** this batch's files, every area's `<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.candidates.json` with `sm wait-files --wait 30`, as [parallel-work.md](../../../shared/parallel-work.md) says. Before the first pass, post one line (*"Collecting the example questions drafted during sign-off…"*), and after each pass that is not ready, one line naming the areas still being drafted, from its `waiting` list (they have had the whole sign-off to run, so usually all are ready on the first pass). A writer given up on there: draft that area's candidates yourself, by the rules below.
-2. **Bring them up to date with sign-off**: (i) drop any candidate that uses a metric or entity rejected in sign-off, or a column hidden on the personal-data card; (ii) rewrite any that uses a definition the person changed in sign-off, to the definition as it now stands (`sm review-items` or `sm context` show it); (iii) write the cross-area candidates yourself, with the whole model in view (the writers each saw one area); (iv) write the person's own questions yourself if a writer could not (its reply line says which). Each writer had the person's questions, so one question can come back from two areas: keep one, the candidate in the area that holds its driving table.
+2. **Bring them up to date with sign-off**: (i) drop any candidate that uses a metric or entity rejected in sign-off, or a column hidden on the personal-data card; (ii) rewrite any that uses a definition the person changed in sign-off, to the definition as it now stands (`sm review-items` or `sm context` show it); (iii) write the cross-area candidates yourself, with the whole model in view (the writers each saw one area); (iv) write the person's own questions yourself if a writer could not (its reply line says which); (v) give a candidate whose tables moved area on the Areas card its new `area`. Each writer had the person's questions, so one question can come back from two areas: keep one, the candidate in the area that holds its driving table.
 3. **Write them all as one JSON array** to `<artifacts_dir>/local/tmp/agami-seeds.json` with the Write tool, each keeping its `area`, then go to 5b+5c. Nothing a writer drafted reaches the model unchecked: `seed-examples` validates every candidate and refuses until sign-off is done.
 
 With no writers (no Agent tool), you generate the candidates yourself, as follows. The writers follow these same rules.
@@ -53,7 +53,7 @@ First run `bash "<plugin_root>/scripts/sm" batch-id` and put its `batch` in the 
 bash "<plugin_root>/scripts/sm" seed-validate "<root>" --profile <profile> --out "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json"
 ```
 
-`--out` writes the output to that file in one go and prints only `{"out", "bytes"}`; read the items from the file.
+`--out` writes the output to that file in one go and prints only `{"out", "bytes", "say", "then"}`: the items are in the file, and `say` and `then` are for the chat (below).
 
 Without `--area` it runs every area's seeds (each through `execute_sql` scoped to its own area, with the same per-statement limits) and prints one object: `areas` (`{area, examples, errored}` each), `items` (the items above, each labelled `area`) and `totals` (`areas`, `examples`, `errored`). Repeat `--area` to run only those areas. One `--area` prints the bare items array, as before. An area the model doesn't have is refused with `error: unknown_area` and the `valid_areas`.
 
@@ -65,21 +65,14 @@ bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/aga
 ```
 With `--out` the file does not exist until the command has finished and written it whole, so a missing file counts as waiting, and a file that exists is complete. If the background task's exit notice arrives while the file is still missing, the command failed: stop waiting and show the error from the task's output. SQLite and DuckDB run in the foreground.
 
-**Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
-
-| # | Question | Rows | Result |
-|---|---|---|---|
-| 3 | Revenue by month this year | 12 | 2024-01 $41,200 · 2024-02 $39,850 · … |
-| 7 | Top 5 customers by orders | — | failed: `column "cust_id" does not exist` |
-
-`#` is the item's `n`, `Rows` its `row_count`, `Result` the first row or two of `row_preview` under `row_headers` (already unit-formatted), or `failed:` and its `error`. A result that looks wrong though it ran (a ratio far outside its range, a count of 0, a trend sorted by name) goes in one sentence under the table: that is 6a's case.
+**Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. When the run has finished, read the command's own printed output (on a server database, the background task's output): its `say` is a ready table of the examples that ran (`| # | Example | Rows | Result |`, up to 15 rows, then a line with how many ran and which failed), and its `then` says to post it and ask the examples card. Post its `say` exactly and do its `then` ([engine-says.md](../../../shared/engine-says.md)); never build that table yourself. A result that looks wrong though it ran (a ratio far outside its range, a count of 0, a trend sorted by name) goes in one sentence under the table: that is 6a's case.
 
 Then call AskUserQuestion, one question (header `Examples`), *"What should I do with these examples?"*:
 
 - **Keep all that ran (Recommended)**: sign off every example that returned rows. Drop the (Recommended) and put **Review one by one** first when a result that ran looks wrong (6a).
 - **Review one by one**: every example, 4 per card, the failing ones first.
 - **Drop the failing ones**: mark every failed example rejected. Leave it out when none failed.
-- **Show the full view**: the examples-validation page, every result with its SQL, served from localhost (below); then this card again.
+- **Show the full view**: the examples-validation page, every result with its SQL, served from localhost (below); then this card again. It is always on this card: the card has room for it ([question-cards rule 6](../../../shared/question-cards.md#6-no-page-opens-by-default-and-nothing-is-pasted-back)), and a live run that left it out gave the person no way to see the SQL.
 
 | Answer | Do |
 |---|---|
