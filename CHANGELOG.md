@@ -171,6 +171,19 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Onboarding posts what the engine says, asks fewer card rounds, and shows results as tables.**
+  A re-measure and a browser test found the closing summary run but never posted, the task list
+  refreshed after only half the step calls, no table before the examples card, a one-sentence first
+  answer, and three intake cards where one had done. A new shared rule, `shared/engine-says.md`:
+  when an agami command prints `say`, post it exactly as the next chat text, and do what `then`
+  says. The closing summary is the `say` of `sm steps --mark first_question=in_progress` (no
+  separate `sm summary` or `sm timing` call); the examples table is the `say` of `sm seed-validate
+  --out`, and the examples card always offers **Show the full view**; the task list is updated when
+  `then` says so. Company, context and about-it are one card again, and the Areas question rides on
+  the sign-off card. The build always runs in the background with `sm progress`, a SQLite file
+  included; describe runs no separate `sm validate` pass; chunks are 12 tables again (two or more
+  from 9 tables). Personal-data options name columns in words, with the identifier in `preview`.
+  agami-query's answer shows the result table before the sentence about it.
 - **agami-connect writes every agami command as one literal launcher call, refreshes its task list
   every time, always shows its closing summary, and never waits in silence.** Live runs stopped for
   permission on most of agami's own commands because the skill showed them with `"$ROOT"`, `"$PY"`,

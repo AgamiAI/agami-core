@@ -87,7 +87,8 @@ def test_overview_names_two_areas_that_read_the_same_apart():
 
 def test_the_build_runs_in_the_background_with_a_bar_from_the_log():
     build = (REFS / "build.md").read_text(encoding="utf-8")
-    assert "on every server database (anything but SQLite and DuckDB" in build
+    # a SQLite file included: the sample build ran 69 s in the foreground after "a few seconds"
+    assert "on every database, a SQLite or DuckDB file included" in " ".join(build.split())
     assert "`run_in_background: true`, and a `description` the person can read" in build
     assert 'scripts/sm" progress "<root>" --wait 20' in build
     # a turn that ends loses the skill's pre-approvals (live run), so it loops on a pre-approved call
