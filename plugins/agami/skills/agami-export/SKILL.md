@@ -73,15 +73,15 @@ One AskUserQuestion call, up to four questions. Leave a question off when it can
 
 | Option | Description | `preview` |
 |---|---|---|
-| **None — keep all off** | The files change nothing until you apply them, and publish nothing | — |
+| **None of the extras** | Nothing changes your catalog or shows content to others. Snowflake's evaluation file still copies up to 20 result rows per golden question into your account when you run it; Snowflake extras turn that off | Snowflake's expected answers stay on: running its evaluation file stores result rows in your account |
 | **Snowflake extras** | Certification tags, an MCP endpoint, or evaluation files without stored answers | `--snowflake-certification-tags`: marks objects certified for everyone who can see them<br>`--snowflake-mcp-server`: opens an endpoint MCP clients can call<br>`--snowflake-no-expected-answers`: keeps result rows out of your account |
 | **Databricks catalog changes** | Table and column comments, keys and certification tags in Unity Catalog | `--uc-comments`: replaces existing comments<br>`--uc-constraints`: adds keys and NOT NULL; fails on a NULL<br>`--uc-certify`: marks objects certified for everyone |
-| **Databricks sharing** | Published Pages, sensitive columns marked hidden in the Genie space, a page per metric | `--pages-publish`: every user of the domain sees the pages<br>`--genie-hide-sensitive`: writes sensitive column names into the space file<br>`--pages-metrics`: one more draft page per metric |
+| **Databricks sharing** | Published Pages, sensitive columns listed as hidden in the Genie space, a page per metric | `--pages-publish`: every user of the domain sees the pages<br>`--genie-hide-sensitive`: names each sensitive column of the space's tables in the space file, marked hidden there; not access control<br>`--pages-metrics`: one more draft page per metric |
 
 After the card:
 
 - A location answer of **Not needed** for a pick that requires one, or **Not sure yet**, is said back in one line (*"A Snowflake export needs the database and schema its view is created in."*), and the `Location` question is asked again on its own. Never guess a location, never take one from the credentials or the model, and never fill in an example such as `demo.sales_data`.
-- **None — keep all off** picked together with a group, or a group for a format not picked in `Targets`, is said back in one line and the `Opt-in` question asked again. A flag for a format the run does not write is never passed: the command refuses it.
+- **None of the extras** picked together with a group, or a group for a format not picked in `Targets`, is said back in one line and the `Opt-in` question asked again. When Snowflake is picked and **None of the extras** is the answer, say in one line that the evaluation file will still copy up to 20 result rows per golden question into their account when they run it, and that **Snowflake extras → Leave expected answers out** turns it off. A flag for a format the run does not write is never passed: the command refuses it.
 - A warehouse answer is used only when Snowflake is picked.
 
 ### 1b. The extras, one by one
@@ -111,13 +111,13 @@ header `Sharing`, *"What should the Databricks files show to others?"*
 | Option | Description | `preview` |
 |---|---|---|
 | **Publish the pages** | Approved Pages are written as published, not drafts | `--pages-publish`<br>Makes the pages visible to every user of the domain, and the assistant there uses them in every conversation. Without it a page is a draft only its owner sees. |
-| **Hide sensitive columns in the space** | The Genie space marks them hidden | `--genie-hide-sensitive`<br>Writes those columns' names into the Genie space file, the only place an export names one. Hiding is not access control: a query that names the column still reads it. |
+| **Hide sensitive columns in the space** | The space file lists each sensitive column of the tables the space shows, marked hidden (`exclude: true`) | `--genie-hide-sensitive`<br>Writes those columns' names into the Genie space file, the only file an export names one in. Hiding is not access control: a query that names the column still reads it; a Unity Catalog column mask restricts who can read it. |
 | **Add a page per metric** | One more Page for each metric | `--pages-metrics`<br>Draft pages unless published; the metric views already carry each definition. |
 | **None of these** | Keep all three off | — |
 
 **None of these** picked with another option is said back and that question asked again.
 
-**Only on request.** These are never on a card and never passed unless the person asks for them in their own words (in "Other" or a message): `--include-unreviewed` (carry the items not yet approved; they are never marked certified), `--include-sensitive` (sensitive column names, and the SQL and text that use them, go into every file: say so in one line before the `Run it?` card), `--area <subject area>` (one subject area only), and `--ossie-version <version>` (a format version other than the default, as the person names it).
+**Only on request.** These are never on a card and never passed unless the person asks for them in their own words (in "Other" or a message): `--include-unreviewed` (carry the items not yet approved; they are never marked certified), `--include-sensitive` (sensitive column names, and the SQL and text that use them, go into every file: say so in one line before the `Run it?` card), `--area <subject area>` (one subject area only), `--ossie-version <version>` (a format version other than the default, as the person names it), and `--snowflake-data-database <NAME>` (when the person says the tables are in another Snowflake database than the one the view goes in; it is no card question because the first card already holds four).
 
 ---
 
@@ -149,8 +149,9 @@ Read the exit code, then `Read` `<artifacts_dir>/local/tmp/agami-export.json`: o
 Post the summary in the chat, in this order. Every table is at most 15 rows; when there are more, say *"Showing 15 of <N>; <N−15> more in `export-report.json`."*
 
 1. **One line.** *"Wrote <formats> for <database> to `<out>`."*
-2. **What each target carries.** One row per target, from `targets.<target>.files` and `carried`: `Target | Files | Tables | Columns | Metrics | Joins | Examples | Golden`.
-3. **What stayed behind or travelled with less, grouped by reason.** Group `targets.<target>.losses` by `reason`; one row per reason, in plain words, with its count per target and whether the items were left out (`dropped`) or carried with less (`degraded`): `What happened | Snowflake | Databricks | Ossie`. Never one row per item. The words for each reason:
+2. **The model's checks.** When `model_validation.errors` is above 0, one line: *"The model has <n> validation errors (<codes>); items they touch may be missing or wrong. Run `sm validate` through `/agami-model` before applying the files."* Nothing when it is 0.
+3. **What each target carries.** One row per target, from `targets.<target>.files` and `carried`: `Target | Files | Tables | Columns | Metrics | Joins | Examples | Golden`.
+4. **What stayed behind or travelled with less, grouped by reason.** Read `summary.<target>` (entries per `reason` and `outcome`); one row per reason, in plain words, with its count per target and whether the items were left out (`dropped`) or carried with less (`degraded`): `What happened | Snowflake | Databricks | Ossie`. Never one row per item. The words for each reason:
 
 | `reason` | In the summary |
 |---|---|
@@ -168,11 +169,11 @@ Post the summary in the chat, in this order. Every table is at most 15 rows; whe
 | `name_collision` | Its name was already taken in the file |
 | `spans_subject_areas` | Belongs to more than one subject area |
 
-4. **Metrics that did not travel.** When any loss has reason `no_binding_for_target`, call it out under the table: *"Revenue and Refund rate did not travel to Snowflake: neither has SQL written for Snowflake, and SQL is never translated."* Name the metrics from the loss's `name` in words. Adding SQL for another engine is a change to the model: send the person to `/agami-model` for it, and never write or suggest the SQL here.
-5. **Counts the person may act on.** The number of `not_approved` losses: *"<n> items stayed behind because they are not approved. Say 'include the unreviewed items' if they should travel anyway."* The number of `sensitive` losses of kind `column`: *"<n> sensitive columns were left out; no file and not the report names them."* Under `--genie-hide-sensitive`, add only *"Their names are written into the Genie space file, which marks them hidden there."* Never print a name or an export id of a sensitive item.
-6. **Flags left off.** For each format written, the extras from Phase 1 that were not picked, one line each on what it would add (from the `preview` above), so the person knows what they declined.
-7. **What does not travel.** One line from `does_not_travel`: *"These stay in agami and never travel: pre-query checks, answer receipts, audit log rows, and who signed off an item."*
-8. **Where the files are.** The path of each target's folder and of `<out>/export-report.json`. A target folder this run did not write is left from an earlier run: say so when one is there, since `export-report.json` describes this run only.
+5. **Metrics that did not travel.** When any loss has reason `no_binding_for_target`, call it out under the table: *"Revenue and Refund rate did not travel to Snowflake: neither has SQL written for Snowflake, and SQL is never translated."* Name the metrics from the loss's `name` in words. Adding SQL for another engine is a change to the model: send the person to `/agami-model` for it, and never write or suggest the SQL here.
+6. **Counts the person may act on.** The number of `not_approved` losses: *"<n> items stayed behind because they are not approved. Say 'include the unreviewed items' if they should travel anyway."* The number of `sensitive` losses of kind `column`: *"<n> sensitive columns were left out; no file and not the report names them."* Under `--genie-hide-sensitive`, add only *"Their names are written into the Genie space file, which marks them hidden there."* Never print a name or an export id of a sensitive item.
+7. **Flags left off.** For each format written, the extras from Phase 1 that were not picked, one line each on what it would add (from the `preview` above), so the person knows what they declined.
+8. **What does not travel.** One line from `does_not_travel`: *"These stay in agami and never travel: pre-query checks, answer receipts, audit log rows, and who signed off an item."*
+9. **Where the files are.** The path of each target's folder and of `<out>/export-report.json`. A target folder this run did not write is left from an earlier run: say so when one is there, since `export-report.json` describes this run only.
 
 Then **what to do next**, in two sentences: the files change nothing until the person applies them in their own account, in the order `docs/context-export.md` gives under "Applying the files" (agami-core repository); and to approve what stayed behind, say "review my model" (`/agami-model`) and export again.
 
@@ -182,12 +183,12 @@ Then **what to do next**, in two sentences: the files change nothing until the p
 
 1. **Never apply the files.** No running a generated `.sql` file, no deploy, no upload, no API call. Applying them is the person's act, with their own credentials.
 2. **Never call a vendor or open a network connection.** `sm export` reads files and writes files; this skill runs nothing else against an account.
-3. **Never pass an extra the person did not pick on a card,** and never a flag for a format the run does not write. `--include-unreviewed`, `--include-sensitive`, `--area` and `--ossie-version` are passed only when the person asks for them in their own words.
+3. **Never pass an extra the person did not pick on a card,** and never a flag for a format the run does not write. `--include-unreviewed`, `--include-sensitive`, `--area`, `--ossie-version` and `--snowflake-data-database` are passed only when the person asks for them in their own words.
 4. **Never guess a location or a warehouse.** Not from the credentials, the model, an earlier export or an example; ask on the card and re-ask when it is missing.
 5. **Never print a sensitive column's name.** The report withholds them; keep it that way in every table and line, counts only. Under `--genie-hide-sensitive`, say only that the names are written into the Genie space file.
 6. **Pass an `export_refused` message on verbatim,** with its fix from the cheat sheet; never retry with a changed command the person did not confirm.
 7. **Never translate SQL or suggest a binding to make a metric travel.** A metric with no SQL for a target's engine is the model's to fix: send the person to `/agami-model`.
-8. **One closing pointer to `/agami-model`** for approving what stayed behind, and no more.
+8. **Point to `/agami-model` only where this skill names it:** once in the closing lines, for approving what stayed behind, and in the places above that send the person there to fix the model (a metric with no SQL for a target's engine, validation errors, a model that does not load, two subject areas named alike, a name too long). Never as a general suggestion elsewhere.
 
 ---
 
@@ -210,5 +211,7 @@ Every refusal prints `{"error": "export_refused", "detail": "…"}`, exits `2`, 
 | `subject areas <a> and <b> both export to …` | Two subject areas get the same file name in that format. Rename one through `/agami-model`, or export each alone with `--area <a>`, after the `Run it?` card. |
 | `--out … lies inside …` / `… holds the semantic model` | The fixed output folder overlaps the model, which means the artifacts folder is laid out unusually. Pass the message on and stop; never pick another folder on your own. |
 | `could not write the export under …` | The files could not be written (often a subject area, table or metric name too long for a file name, or a full disk); nothing under the output folder changed. Pass the message on; a name too long is the model's to shorten through `/agami-model`. |
+| `the database is named local` | The database shares its name with agami's own `local/` folder, where the export folder sits, so the files would land inside the model. Pass the message on: renaming the database (through `/agami-connect`) is the fix; never pick another folder on your own. |
+| `--snowflake-data-database takes the name` | The data database was given empty. Ask which database the tables are in. |
 | `--out …: … exists and is not a directory` | A file sits where the output folder goes. Say which, and ask the person to move it. |
 | Exit code other than `0` or `2` | The command failed to start (often a missing library): say so, show its last error line, and offer `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" install`. |

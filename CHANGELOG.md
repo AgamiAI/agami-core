@@ -26,6 +26,16 @@ below corresponds to one such version.
   apply them in, the report, and what does not carry over per target; `/agami-export` runs it
   from Claude Code. The bundled sample's eight metrics gain hand-written
   Snowflake and Databricks bindings, so the demo has metrics to carry.
+- **`sm export` writes all or nothing, and its report opens with a summary.** Every file and the
+  report are staged inside `--out` and moved in only when all are written, so a write the file
+  system refuses (a name too long, a full disk) is refused with exit 2 and leaves `--out` as it was.
+  The report starts with a per-target, per-reason `summary` and the model's `model_validation`
+  (finding counts and codes); an entry several files report word for word is written once with
+  `repeats`. A database named `local`, which shares its folder with agami's own `local/`, is refused
+  with that cause. `--snowflake-data-database NAME` reads the Snowflake base tables from another
+  database than the view's. Names past a target's 255-character identifier limit, names a target's
+  naming rule maps alike, and columns named alike in another case are reported instead of written
+  over one another; reserved-word names are quoted.
 - **What leaves agami, decided once for every target.** Only approved items travel unless
   `--include-unreviewed` is passed (the report lists each one it adds). A column flagged
   `sensitive` stays home with anything that names it, matched by name in any table: SQL that names

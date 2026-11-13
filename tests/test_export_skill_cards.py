@@ -105,54 +105,165 @@ def test_agami_model_only_points_here():
     assert "sm\" export" not in model
 
 
-def test_headers_are_short_and_unique():
-    headers = re.findall(r"header `([^`]+)`", _text())
-    assert set(headers) >= {"Targets", "Location", "Warehouse", "Opt-in", "Run it?"}
-    assert all(len(h) <= 12 for h in headers), headers
-    assert len(headers) == len(set(headers)), headers
+# The skill's cards as the export's spec decides them: each card's questions, each question's
+# options in order, and the flag each follow-up option passes. Parsed from the skill, so removing a
+# card, a question, an option or a flag from it fails here.
+CARDS = {
+    "### 1a.": ["Targets", "Location", "Warehouse", "Opt-in"],
+    "### 1b.": ["Snowflake", "Catalog", "Sharing"],
+    "## Phase 2:": ["Run it?"],
+}
+OPTIONS = {
+    "Targets": ["Snowflake", "Databricks", "Ossie"],
+    "Location": ["Not needed", "Not sure yet"],
+    "Warehouse": ["None", "Not sure yet"],
+    "Opt-in": ["None of the extras", "Snowflake extras", "Databricks catalog changes",
+               "Databricks sharing"],
+    "Snowflake": ["Mark approved items certified", "Add an MCP server",
+                  "Leave expected answers out", "None of these"],
+    "Catalog": ["Replace comments", "Add keys", "Tag approved items certified", "None of these"],
+    "Sharing": ["Publish the pages", "Hide sensitive columns in the space", "Add a page per metric",
+                "None of these"],
+    "Run it?": ["Write the files", "Change an answer", "Don't export"],
+}
+# Follow-up option -> the one flag it passes; the Opt-in group that leads to that follow-up.
+FLAG_OF = {
+    ("Snowflake", "Mark approved items certified"): "--snowflake-certification-tags",
+    ("Snowflake", "Add an MCP server"): "--snowflake-mcp-server",
+    ("Snowflake", "Leave expected answers out"): "--snowflake-no-expected-answers",
+    ("Catalog", "Replace comments"): "--uc-comments",
+    ("Catalog", "Add keys"): "--uc-constraints",
+    ("Catalog", "Tag approved items certified"): "--uc-certify",
+    ("Sharing", "Publish the pages"): "--pages-publish",
+    ("Sharing", "Hide sensitive columns in the space"): "--genie-hide-sensitive",
+    ("Sharing", "Add a page per metric"): "--pages-metrics",
+}
+GROUP_OF = {"Snowflake extras": "Snowflake", "Databricks catalog changes": "Catalog",
+            "Databricks sharing": "Sharing"}
+# The flag a typed answer passes, and the flags passed only on request.
+TYPED = {"Warehouse": "--snowflake-warehouse", "Location": "--location"}
+ON_REQUEST_TARGET_FLAGS = ("--ossie-version", "--snowflake-data-database")
+HARD_RULES = [
+    "Never apply the files.",
+    "Never call a vendor or open a network connection.",
+    "Never pass an extra the person did not pick on a card,",
+    "Never guess a location or a warehouse.",
+    "Never print a sensitive column's name.",
+    "Pass an `export_refused` message on verbatim,",
+    "Never translate SQL or suggest a binding to make a metric travel.",
+    "Point to `/agami-model` only where this skill names it:",
+]
+_FLAG = re.compile(r"`(--[a-z-]+)")
 
 
-def test_the_first_card_has_no_recommendation_on_environment_facts():
-    ask = _ask()
-    assert "AskUserQuestion" in ask
-    for header in ("Targets", "Location", "Warehouse"):
-        start = ask.index(f"header `{header}`")
-        question = ask[start : ask.index("\n- header", start)]
-        assert "(Recommended)" not in question, header
-    # A value to type is asked for in the question text (rule 5).
-    assert "Type it in Other as database.schema" in ask
-    assert "Type its name in Other." in ask
-    assert "Never guess a location" in ask
+def _question_blocks() -> dict[str, str]:
+    """header -> the skill's text of that question, up to the next question or section."""
+    text = _text()
+    starts = [(m.start(), m.group(1)) for m in re.finditer(r"header `([^`]+)`", text)]
+    out = {}
+    for i, (at, header) in enumerate(starts):
+        end = starts[i + 1][0] if i + 1 < len(starts) else len(text)
+        section = re.search(r"\n#{2,3} |\n\*\*None of these\*\* picked|\n\*\*Only on request"
+                            r"|\nAfter the card|\n```", text[at:end])
+        assert header not in out, f"two questions have the header {header}"
+        out[header] = text[at:end if section is None else at + section.start()]
+    return out
 
 
-def test_opt_in_starts_with_none_and_every_extra_is_its_own_option():
-    ask = _ask()
-    opt_in = ask[ask.index("header `Opt-in`") :]
-    assert _option_rows(opt_in)[0].startswith("| **None — keep all off** |")
-    rows = _option_rows(ask)
-    for flag in CHANGES_OR_SHOWS:
-        # The flag sits in the preview column of a row whose label is in words.
-        offering = [r for r in rows if flag in r.split("|")[3] and "--" not in r.split("|")[1]]
-        assert offering, flag
-    # Each follow-up question lets the person pick nothing.
+def _options(block: str) -> list[tuple[str, str]]:
+    """(label, preview) of each option: a table row's bold label and its third cell, or a
+    bullet's bold label and its text."""
+    rows = [(m.group(1), m.group(2)) for m in re.finditer(
+        r"^\| \*\*(.+?)\*\* \|[^|]*\|(.*)\|$", block, re.M)]
+    bullets = [(m.group(1), m.group(2)) for m in re.finditer(
+        r"^\s*- \*\*(.+?)\*\*:(.*)$", block, re.M)]
+    assert not (rows and bullets), "a question mixes a table and bullets"
+    return rows or bullets
+
+
+def test_every_card_holds_exactly_its_questions_within_the_card_limits():
+    blocks = _question_blocks()
+    text = _text()
+    for start, headers in CARDS.items():
+        i = text.index(start)
+        nxt = min(j for j in (text.find("\n## ", i + 1), text.find("\n### ", i + 1)) if j > 0)
+        found = re.findall(r"header `([^`]+)`", text[i:nxt])
+        assert found == headers, (start, found)
+        assert 1 <= len(found) <= 4, start          # AskUserQuestion: 1 to 4 questions a card
+    assert set(blocks) == {h for hs in CARDS.values() for h in hs}
+    for header in blocks:
+        assert len(header) <= 12, header            # a chip holds at most 12 characters
+
+
+def test_every_question_offers_exactly_its_options_within_the_limits():
+    for header, block in _question_blocks().items():
+        labels = [label for label, _ in _options(block)]
+        assert labels == OPTIONS[header], header
+        assert 2 <= len(labels) <= 4, header        # 2 to 4 options a question
+        assert len(set(labels)) == len(labels), header
+
+
+def test_each_extra_passes_exactly_its_flag_and_each_group_leads_to_its_follow_up():
+    blocks = _question_blocks()
     for header in ("Snowflake", "Catalog", "Sharing"):
-        section = ask[ask.index(f"header `{header}`") :]
-        following = section.find("\nheader `")
-        section = section if following < 0 else section[:following]
-        assert "| **None of these** |" in section, header
+        for label, preview in _options(blocks[header]):
+            flags = _FLAG.findall(preview)
+            if label == "None of these":
+                assert flags == [], header
+            else:
+                assert flags == [FLAG_OF[(header, label)]], (header, label, flags)
+    for label, preview in _options(blocks["Opt-in"]):
+        flags = set(_FLAG.findall(preview))
+        if label == "None of the extras":
+            assert flags == set()
+            continue
+        follow = GROUP_OF[label]
+        assert flags == {f for (h, _), f in FLAG_OF.items() if h == follow}, label
+    for header, flag in TYPED.items():
+        assert f"`{flag}`" in blocks[header], header
+
+
+def test_none_of_the_extras_says_expected_answers_stay_on():
+    (label, preview), *_ = _options(_question_blocks()["Opt-in"])
+    row = next(line for line in _ask().splitlines() if line.startswith(f"| **{label}** |"))
+    assert "20 result rows" in row and "stay on" in preview
+    assert "Leave expected answers out** turns it off" in _ask()
+
+
+def test_the_hide_sensitive_option_says_what_it_writes_and_that_it_is_no_access_control():
+    _, preview = next(o for o in _options(_question_blocks()["Sharing"])
+                      if o[0] == "Hide sensitive columns in the space")
+    assert "names into the Genie space file" in preview and "not access control" in preview
+    assert "column mask" in preview
+    row = next(line for line in _ask().splitlines() if "**Hide sensitive columns" in line)
+    assert "exclude: true" in row
 
 
 def test_every_target_flag_is_on_a_card_or_named_as_on_request():
     export = pytest.importorskip("semantic_model.export")
-    owners = export.flag_owners()
-    flags = {flag for _target, flag, _default in owners.values()}
-    assert set(CHANGES_OR_SHOWS) <= flags, set(CHANGES_OR_SHOWS) - flags
-    ask = _ask()
-    for flag in flags:
-        assert flag in ask, f"{flag} is a flag `sm export` takes but no card in the skill offers it"
-    on_request = ask[ask.index("**Only on request.**") :]
-    for flag in ON_REQUEST:
+    flags = {flag for _target, flag, _default in export.flag_owners().values()}
+    on_cards = set(FLAG_OF.values()) | {TYPED["Warehouse"]}
+    assert flags == on_cards | set(ON_REQUEST_TARGET_FLAGS), flags ^ (on_cards | set(ON_REQUEST_TARGET_FLAGS))
+    assert set(CHANGES_OR_SHOWS) <= on_cards
+    on_request = _ask()[_ask().index("**Only on request.**"):]
+    for flag in (*ON_REQUEST, *ON_REQUEST_TARGET_FLAGS):
         assert f"`{flag}" in on_request, flag
+
+
+def test_the_hard_rules_are_exactly_these_and_consistent_with_the_pointers():
+    rules = _between("## Hard rules", "## Error handling cheat sheet")
+    leads = re.findall(r"^\d+\. \*\*(.+?)\*\*", rules, re.M)
+    assert leads == HARD_RULES
+    assert re.findall(r"^(\d+)\. ", rules, re.M) == [str(i) for i in range(1, len(HARD_RULES) + 1)]
+    # Rule 8 names every place the skill sends the person to /agami-model, so no other line
+    # contradicts it: the summary's binding and validation lines and the refusals that need a
+    # model change.
+    rule8 = rules.split("8. ", 1)[1]
+    for place in ("no SQL for a target's engine", "validation errors", "does not load",
+                  "named alike", "name too long"):
+        assert place in rule8, place
+    pointers = [line for line in _text().splitlines() if "/agami-model" in line]
+    assert len(pointers) >= 5
 
 
 def test_the_confirm_card_comes_before_the_command_and_names_the_output():

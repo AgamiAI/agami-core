@@ -92,11 +92,12 @@ risk; "none" means it only changes what the files hold.
 | `--target T` | required | `snowflake`, `databricks` or `ossie`. Repeat for several targets in one run. Naming a target twice, or one that does not exist, is refused, and so is a flag below that belongs to a target the run does not name (`--genie-hide-sensitive` or any `--uc-*` or `--pages-*` flag without `--target databricks`, a `--snowflake-*` flag without `--target snowflake`, `--ossie-version` without `--target ossie`): the refusal names the flag and the target it needs. | none |
 | `--out DIR` | required | Where the files go. Each run replaces `DIR/<target>/` whole and writes `DIR/export-report.json`; nothing else under `DIR` is touched. A `DIR/<target>` that is a symbolic link is replaced, never followed. `DIR` must not be, hold, or lie inside the model (or its `golden_datasets` or `prompt_examples` directory, wherever a link points them), and must not be an existing file; such a run is refused, since the export never writes into the model. | Anything you keep in `DIR/<target>/` is deleted on the next run. |
 | `--area A` | every area | Export only this subject area. Repeat for several. | none |
-| `--location DATABASE.SCHEMA` | none | Where the tables live on the target: `database.schema` for Snowflake, `catalog.schema` for Databricks. Required for `snowflake` always (the view is created in a schema), and for any target whose engine differs from the model's. Without it, those runs are refused. When the model is written for the target's engine, a table keeps the schema the model names and takes only the database or catalog from `--location`. | none |
+| `--location DATABASE.SCHEMA` | none | Where the tables live on the target: `database.schema` for Snowflake, `catalog.schema` for Databricks. Required for `snowflake` always (the view is created in a schema), and for any target whose engine differs from the model's. Without it, those runs are refused. When the model is written for the target's engine, a table keeps the schema the model names and takes only the database or catalog from `--location`. The model records no database, so every base table is read from this one database unless `--snowflake-data-database` says otherwise. | none |
 | `--include-unreviewed` | off | Also carry items not yet approved. The report lists each one under `included_unreviewed`. | Definitions nobody signed off reach the target's AI. They are never marked certified (Snowflake tags them `TO BE REVIEWED`), and their Pages stay drafts. |
 | `--include-sensitive` | off | Also carry columns flagged `sensitive`, and whatever names them. | Sensitive column names, and the SQL and text that use them, go into every file. |
 | `--ossie-version V` | `0.1.1` | `0.1.1` or `0.3` (writes `0.3.0.dev0`, a development version whose shape may still change). | none |
 | `--snowflake-warehouse NAME` | none | The warehouse the Snowflake agent runs its SQL on, written as the tool's `execution_environment`. It must be a name an unquoted identifier reaches (letters, digits, `_` and `$`, not starting with a digit, all one case, not a keyword) and is written upper-case; any other name is refused. Without it no warehouse is written, and the agent does not run for a caller with no default warehouse. | none |
+| `--snowflake-data-database NAME` | the `--location` database | The database the Snowflake base tables are read from, when it is not the one the view is created in. Each table keeps the schema the model names; the view, agent and evaluation objects stay at `--location`. Only for `--target snowflake`. | none |
 | `--snowflake-certification-tags` | off | Tags the semantic view and its tables, dimensions, facts and metrics with `SNOWFLAKE.TAGS.CERTIFICATION_STATUS`: `CERTIFIED` for an approved item, `TO BE REVIEWED` for one `--include-unreviewed` carried. A table is `CERTIFIED` only when it and every column it carries are approved. The view is `CERTIFIED` only when every item carried for it is approved and it carries no key term or ambiguity: agami holds those with no review state, so no review of them is recorded, and the view is `TO BE REVIEWED`. A time dimension has no `tags` field and goes untagged. | Changes the catalog: the tags mark objects certified for everyone who can see them. Applying the view then needs the `SNOWFLAKE.OOB_TAG_APPLY` application role, which only ACCOUNTADMIN holds by default. |
 | `--snowflake-no-expected-answers` | off (answers are computed) | Writes the evaluation data without expected answers, except a golden item's `bounds`. | Turns off the one default that copies data: without this flag, running the evaluation file stores up to 20 rows of each golden query's result in a table and an evaluation dataset in your account. Only a query that reads columns the semantic view carries, and no `*`, is run that way. |
 | `--snowflake-mcp-server` | off | Also writes `<area>.mcp_server.sql`, a Snowflake-managed MCP server with a Cortex Analyst tool on the view and the agent as a tool. | Opens an endpoint on the account that MCP clients can call with the grants you give. |
@@ -105,12 +106,17 @@ risk; "none" means it only changes what the files hold.
 | `--pages-metrics` | off | Also writes a Page per metric. Off by default, since the metric views already give Genie each metric's definition. | none |
 | `--uc-comments` | off | With `--target databricks`, writes `unity_catalog/<area>.sql` (and `<area>_undo.sql`) with `COMMENT ON TABLE` and `COMMENT ON COLUMN` from descriptions, units and caveats. | Changes the catalog: each statement replaces the existing comment, including one a person or Databricks' AI-generated comments wrote. Undo sets a table comment to NULL and a column comment to an empty string; neither brings the old one back. |
 | `--uc-constraints` | off | Adds informational primary and foreign keys to that file, with the `NOT NULL` a primary key column needs. Every constraint is named `agami__<table>__…`, so a constraint of that name that existed before is implausible. | Changes the catalog: `SET NOT NULL` checks every existing row and fails on a NULL, and adding a constraint may upgrade a Delta table's writer protocol. Undo's `DROP NOT NULL` also relaxes a column that was `NOT NULL` before. A table can have at most one primary key, so on a table that already has one the `ADD … PRIMARY KEY` fails and can be skipped (its foreign keys still apply when the existing key is on the same columns; skip that table's undo lines); a commented-out query in the section lists the primary keys the tables already have. Once applied, the section cannot run again until its undo has run. |
-| `--uc-certify` | off | Adds `SET TAG … system.certification_status = certified` for each table approved with every column it carries, and for each of this export's metric views whose every measure, table, column and join is approved and that holds no level-of-detail measure (its file asks you to compare that measure with agami's answer first). | Changes the catalog: marks those objects certified for everyone who can see them. The section opens with a check per catalog and schema that stops it, naming the objects, when any object it tags already carries `system.certification_status`; to skip an object, delete its `SET TAG` line and its name in the check. The undo file's tag removals are commented out: enable the line of each object whose `SET TAG` succeeded. |
+| `--uc-certify` | off | Adds `SET TAG … system.certification_status = certified` for each table approved with every column it carries, and for each of this export's metric views whose every measure, table, column and join is approved and that holds no level-of-detail measure (its file asks you to compare that measure with agami's answer first). | Changes the catalog: marks those objects certified for everyone who can see them. Run it after the metric views exist, and run a view's `SET TAG` line again after that view is re-created. The section opens with a check per catalog and schema that raises an error naming the objects when any object it tags already carries `system.certification_status`, and returns one NULL row otherwise; the error stops the section only in a client that stops at the first failing statement. To skip an object, delete its `SET TAG` line and its name in the check. The undo file's tag removals are commented out: enable the line of each object whose `SET TAG` succeeded. |
 
 Every refusal (an `--out` that overlaps the model, two subject areas a target names alike, and
 every flag refused above) happens before anything is written or removed: the command prints
-`{"error": "export_refused", "detail": "…"}` and exits 2. A successful run prints the report and
-exits 0. The same model, target and options always give the same bytes, so exporting into a
+`{"error": "export_refused", "detail": "…"}` and exits 2. Writing is all or nothing: every file and
+the report are written first into a temporary directory inside `--out` and moved into place only
+when all of them are written, so a write the file system refuses (a name too long for it, a full
+disk) is refused the same way, with `--out` left as it was. A database named `local` shares its
+folder with agami's own `local/` folder, where `/agami-export` writes, so that export folder lies
+inside the model and the run is refused with that cause; rename the database, or pass an `--out`
+outside it. A successful run prints the report and exits 0. The same model, target and options always give the same bytes, so exporting into a
 directory under version control gives a readable diff.
 
 ## Flags that change your catalog or make content visible
@@ -170,14 +176,29 @@ agent may still choose to apply the filter.
 | `<area>.semantic_view.yaml` | always | The semantic view: logical tables with keys, dimensions, time dimensions and facts; metrics (their Snowflake binding); relationships; examples as verified queries when their SQL travels; ambiguities, the fiscal year and the area's default time window as Cortex Analyst instructions; entities folded into their tables' descriptions and synonyms; key terms in the view's description. A verified query carries `verified_at` from its sign-off time (never the signer), and the first five approved ones are flagged `use_as_onboarding_question`. A self-join becomes a second logical table on the same base table (a role-playing table), and a metric that reads tables no one table relates to becomes a view-level (derived) metric when each of its aggregates reads one table. |
 | `<area>.sql` | always | `CALL SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML('<database>.<schema>', $$…$$)`, carrying the YAML file byte for byte. Running it creates or replaces the view. With `--snowflake-certification-tags`, its header says what applying the tags needs, and that re-applying with CREATE OR ALTER semantics (`TRUE` as a fourth argument) does not add or change tags. |
 | `<area>.agent.sql` | always | `CREATE OR REPLACE AGENT <database>.<schema>.<view>_agent COPY GRANTS FROM SPECIFICATION $$…$$`: a Cortex Agent with one Cortex Analyst tool bound to the view. COPY GRANTS keeps the grants on an agent it replaces. Its instructions carry the descriptions, the fiscal year, the optional-filter rule, the ambiguities, and an instruction to name the view as the source of the tool's results; the example questions are its sample questions (cut from the end at the 100,000-byte specification limit). No model or budget is set. The warehouse is set only by `--snowflake-warehouse`; without it the header shows the lines to add. |
-| `<area>.evaluation.sql` | the area has approved golden items | A table of `input_query` / `ground_truth`, registered with `SYSTEM$CREATE_EVALUATION_DATASET` as a Cortex Agent evaluation dataset. Each row names the expected tool call and, when the golden SQL travels, that SQL as its expected output, rewritten onto the view's logical table and column names the way its verified queries are; where that rewrite is refused, the SQL stays as written and the report says so. Unless `--snowflake-no-expected-answers`, each row's expected answer (`ground_truth_output`) is computed inside your account when the file runs: the golden SQL runs as a subquery on the physical tables, and its row count and up to 20 of its rows go into a plain-language rubric. Each row is quoted as JSON with its keys in order, and each number is rounded to 6 decimal places and written in positional notation (no exponent, no trailing zeros); a number too large for `NUMBER(38, 6)` keeps its own text. Only SQL that reads columns the view carries, with no `*`, is run, and its result columns must have distinct names (one unnamed column alone is fine). A golden item's `bounds` become one more rubric sentence. |
+| `<area>.evaluation.sql` | the area has approved golden items | A table of `input_query` / `ground_truth`, registered with `SYSTEM$CREATE_EVALUATION_DATASET` as a Cortex Agent evaluation dataset. Each row names the expected tool call and, when the golden SQL travels, that SQL as its expected output, rewritten onto the view's logical table and column names the way its verified queries are; where that rewrite is refused, the SQL stays as written and the report says so. Unless `--snowflake-no-expected-answers`, each row's expected answer (`ground_truth_output`) is computed inside your account when the file runs: the golden SQL runs as a subquery on the physical tables, and its row count and up to 20 of its rows go into a plain-language rubric. Each row is quoted as JSON with its keys in order, and each number is rounded to 6 decimal places and written in positional notation (no exponent, no trailing zeros). The rows quoted are the first 20 in the golden SQL's own `ORDER BY` when every key of it is an output column (by name, expression or position), else the first 20 ordered by its output columns left to right, so numbers and dates sort as values; only a sole unnamed column is listed by its text. A row whose question a verified query also asks expects that query's SQL as its tool output, so the view and the evaluation agree. See "Expected answers: what the computed text can hold" below for the values it does not write exactly. Only SQL that reads columns the view carries, with no `*`, is run, and its result columns must have distinct names (one unnamed column alone is fine). A golden item's `bounds` become one more rubric sentence. |
 | `<area>.evaluation_config.yaml` | with the evaluation data | The agent evaluation run configuration: answer correctness (when some row has an expected answer), tool selection, tool execution and logical consistency, pinned to metric version `v3`; plus a custom metric for the area's ambiguity rules and one for its optional filters, when it has them. Each custom metric names its judge, `model: claude-sonnet-4-6`, the default judge of `v3`, since Snowflake's documentation says to set `model` explicitly. An account that does not allow Anthropic models changes each `model:` line to `openai-gpt-5.4`, the other `v3` judge; the header says so. |
 | `<area>.analyst_evaluation_config.yaml` | the view holds verified queries, with or without golden items | A Cortex Analyst evaluation of the view, named `<database>.<schema>.<view>`, which runs the SQL Cortex Analyst generates for its verified queries and compares results. `source_metadata.verified_queries` lists those queries by question, in the view's order; remove a line to leave a query out of the run. |
-| `<area>.evaluation_run.sql` | with either evaluation configuration | The statements that create a stage, copy the configurations written into it, start each run, check its status and read its results. Written, never run. Every name in it is fully qualified; it opens with `USE SCHEMA` because an evaluation started with SQL runs in the session's database and schema (Snowflake's Cortex Agent evaluations page). No other exported file sets a schema. |
+| `<area>.evaluation_run.sql` | with either evaluation configuration | The statements that create a stage, copy the configurations written into it, start each run, check its status and read its results. Written, never run. Every name in it is fully qualified; it opens with `USE SCHEMA` because an evaluation started with SQL runs in the session's database and schema (Snowflake's Cortex Agent evaluations page). No other exported file sets a schema. Each run is named `agami-run-<digest>` (the agent) or `agami-analyst-run-<digest>` (the view), the digest taken from the files the run scores: a run name can be used once per object evaluated, so an export that changed gets new names, while exporting the same model again writes the same bytes and the same names. To run the same files again, change the name in its START, STATUS and results statements alike. |
 | `<area>.mcp_server.sql` | `--snowflake-mcp-server` | `CREATE OR REPLACE MCP SERVER <database>.<schema>.<view>_mcp`: a Cortex Analyst tool on the view and the agent as a tool, annotated read-only (a hint to the client; the grants are what control access). Its header lists the grants a client's role needs and the URL a client connects to. |
 
 The bundled sample has no golden dataset and no example whose SQL becomes a verified query, so it
 writes the first three files (and the MCP server file with its flag).
+
+Each file's header names the privileges running it needs (see "Privileges" under "Applying the
+files").
+
+#### Expected answers: what the computed text can hold
+
+- NaN and the infinities are FLOAT values JSON has no number for; each is quoted as text (`"NaN"`,
+  `"inf"`, `"-inf"`).
+- A number whose integer part does not fit `NUMBER(38, 6)` (32 digits or more) keeps Snowflake's
+  own JSON text for it, which for a FLOAT can carry binary-fraction digits (`1.0000000000000001e+33`).
+  The judge compares values after rounding, so such a value is still read as the same number.
+- A GEOGRAPHY or GEOMETRY column in a golden query's result stops the evaluation file: the
+  statement that turns each result row into text cannot hold one, and the export cannot see a
+  result column's type, since the model holds no such type. Give such a query a text column instead
+  (`ST_ASWKT(geo) AS geo_wkt`), or export with `--snowflake-no-expected-answers`.
 
 Snowflake's documented rules are checked at export (no relationship cycle, a relationship points at
 a primary or unique key, a table-level metric aggregates and reads only tables it relates to,
@@ -194,7 +215,7 @@ would break one is left out and reported.
 | `pages/<area>__entity__<name>.json`, `pages/<area>__terminology__<name>.json` | per approved entity and key term | One Databricks Page request body: `domain`, `display_name`, `description`, `synonyms`, `body`, and `state: PUBLISHED` with `--pages-publish` (never on a key-term page, since agami records no review of a key term). The domain is a `{domain_id__…}` placeholder. No owner is set, so a page is owned by whoever submits it. Key terms belong to the whole datasource: they sit in one datasource domain, and every subject area's copy of a term page creates the same single page. |
 | `pages/<area>__metric__<name>.json` | `--pages-metrics` | One Page per metric, in the same shape. |
 | `pages/<area>__manifest.json` | when there are pages | How to submit them, as `steps` in order (governed tag policy, domain, page, asset link, certification), the `domains` to create, the `update` call for a re-export, the placeholders to `fill_in`, and per page: its file, domain, a stable `request_id` (so a re-submitted create returns the page already made), its state and `update_mask`, its related tables as asset links (with a `{metastore_id}` placeholder), and whether it is certified in agami: approved on a recorded review, which a key term never is. |
-| `unity_catalog/<area>.sql`, `unity_catalog/<area>_undo.sql` | any of `--uc-comments`, `--uc-constraints`, `--uc-certify` | The Unity Catalog statements for the sections asked for, each section headed by what it overwrites and the privileges it needs, and a script that reverses them statement by statement. A table two subject areas carry gets its statements once, in the file of the first area by name, since a second `ADD CONSTRAINT` or `SET TAG` on it would fail and either undo file would then remove what the other created; a foreign key goes with its child table, and a file whose foreign key references a key another area's file declares says to run that file first. Run an undo file's lines only for the statements whose apply succeeded. The certification section opens with a check that stops it when an object it tags already carries `system.certification_status`, and the undo's tag removals are commented out, since `UNSET TAG` removes the tag whoever set it. Keys are declared without `RELY`: RELY lets the optimizer trust a key to rewrite queries, and agami reviewed these keys but never checked the data against them, so a key the data breaks would return wrong results. Add RELY yourself once you have checked. |
+| `unity_catalog/<area>.sql`, `unity_catalog/<area>_undo.sql` | any of `--uc-comments`, `--uc-constraints`, `--uc-certify` | The Unity Catalog statements for the sections asked for, each section headed by what it overwrites and the privileges it needs, and a script that reverses them statement by statement. A table two subject areas carry gets its statements once, in the file of the first area by name, since a second `ADD CONSTRAINT` or `SET TAG` on it would fail and either undo file would then remove what the other created; a foreign key goes with its child table, and a file whose foreign key references a key another area's file declares says to run that file first. Run an undo file's lines only for the statements whose apply succeeded. The certification section opens with a check that raises an error, naming them, when an object it tags already carries `system.certification_status` (it returns one NULL row otherwise), and the undo's tag removals are commented out, since `UNSET TAG` removes the tag whoever set it. Keys are declared without `RELY`: RELY lets the optimizer trust a key to rewrite queries, and agami reviewed these keys but never checked the data against them, so a key the data breaks would return wrong results. Add RELY yourself once you have checked. |
 
 ### Ossie (`<out>/ossie/`)
 
@@ -203,7 +224,9 @@ would break one is left out and reported.
 | `<area>.ossie.yaml` | One Ossie semantic model: datasets (tables with their source, keys and fields), relationships (as from/to columns), metrics with their Snowflake and Databricks SQL each under its own dialect, and `ai_context` holding instructions, the example questions, and key terms and entity names as synonyms (at 0.1.1 as one text of labelled lines, see below). Default filters and review state travel in one agami extension block (`custom_extensions` under `COMMON` in 0.1.1, `nonportable_extensions` under `AGAMI` in 0.3), outside Ossie's portable semantics. |
 
 At 0.1.1 a field's expression is written under the `ANSI_SQL` dialect, and a metric carries only
-`SNOWFLAKE` and `DATABRICKS` expressions. A metric bound for neither is left out.
+`SNOWFLAKE` and `DATABRICKS` expressions. A metric bound for neither is left out. A column named
+with a reserved word (`from`, `select`, `qualify`) is written double-quoted as the model spells it,
+since bare it would read as a keyword; Databricks names likewise get back-quotes.
 
 At 0.1.1 every `ai_context` is one string: the instructions, then a `Synonyms:` line and an
 `Example questions:` line, each followed by one `- ` line per entry. Ossie allows a string or an
@@ -219,6 +242,17 @@ own credentials. Read a file before you run it.
 
 Run the files in this order; each names objects the one before creates.
 
+**Privileges.** As Snowflake documents them; each file's header names its own. Every file needs
+USAGE on the database and schema, and a warehouse to run on.
+
+| File | The role running it needs |
+|---|---|
+| `<area>.sql` | CREATE SEMANTIC VIEW on the schema, and SELECT on each table the view reads. With `--snowflake-certification-tags`, the `SNOWFLAKE.OOB_TAG_APPLY` application role. A role that queries the view needs SELECT on the view. |
+| `<area>.agent.sql` | CREATE AGENT on the schema (and OWNERSHIP or MODIFY on an agent another role owns, to replace it). A role that calls the agent needs the `SNOWFLAKE.CORTEX_USER` or `SNOWFLAKE.CORTEX_AGENT_USER` database role, USAGE on the agent, SELECT on the semantic view, SELECT on each table the view reads (the SQL the agent writes reads them), and USAGE on the warehouse that SQL runs on. |
+| `<area>.evaluation.sql` | CREATE TABLE and CREATE DATASET on the schema, and SELECT on each table a golden query reads. |
+| `<area>.evaluation_run.sql` | CREATE STAGE, CREATE TASK and CREATE FILE FORMAT on the schema, EXECUTE TASK on the account, and the `SNOWFLAKE.CORTEX_USER` database role (CORTEX_AGENT_USER for the agent run); MONITOR on the agent to read its results, and SELECT and MONITOR on the view for the view's run. A run executes as a task, and a task ignores secondary roles, so every privilege an evaluation needs must be held by one role: the session's primary role. |
+| `<area>.mcp_server.sql` | CREATE MCP SERVER on the schema (and OWNERSHIP of the server to replace one). A client's role needs USAGE on the server, SELECT on the view and USAGE on the agent. |
+
 1. **The view.** Open `<area>.sql`, add `TRUE` as a third argument to the call (its `verify_only`
    argument, which checks the view without creating it), and run it. Then run the file as written
    to create or replace the view in `<database>.<schema>`. With `--snowflake-certification-tags`,
@@ -227,8 +261,7 @@ Run the files in this order; each names objects the one before creates.
    warehouse its SQL runs on. Without it the agent uses the caller's default warehouse, so a caller
    needs one. The file's header shows the `execution_environment` lines to add under `tool_resources.<view>` if you edit
    it instead.
-3. **The evaluation data** (when the file exists). Run `<area>.evaluation.sql`. When it computes
-   expected answers, the role running it needs SELECT on the tables the view reads. Each answer is
+3. **The evaluation data** (when the file exists). Run `<area>.evaluation.sql`. Each answer is
    as old as the run: it goes stale when the data changes. A dataset name registers once, and
    Snowflake documents no statement that drops a dataset, so to refresh the answers give the
    dataset a new name in three places: `<area>.evaluation.sql`, `<area>.evaluation_config.yaml`,
@@ -246,7 +279,9 @@ Run the files in this order; each names objects the one before creates.
    the agent run (when the area has golden items) and the Cortex Analyst run (when the view holds
    verified queries), checks each run's status and reads its results; repeat the status call until
    it reads `COMPLETED`, then read the results again. Each section lists the privileges its run
-   needs. A run name is unique per object evaluated: change `agami-run-1` for each later run.
+   needs. A run name can be used once per object evaluated: each is named for the files it scores,
+   so a changed export starts new runs; to run unchanged files again, change the run name in its
+   three statements.
 5. **Optionally, the MCP server.** Run `<area>.mcp_server.sql` after the view and the agent, then
    grant `USAGE` on the server (and the grants its header lists) to the role a client connects
    with. A replace keeps no grants, so grant them again after re-running it.
@@ -295,12 +330,15 @@ categories, revenue by category counts it once in each, 200 across categories ag
    metric views exist, since its certification
    section tags them; comments and keys need only the base tables. Read each section's note first:
    it says what the section overwrites and which privileges it needs. If you re-create a metric
-   view later, check that its tag is still there. With several subject areas, run their files in
+   view later, run its `SET TAG` line again: `CREATE OR REPLACE VIEW` makes a new object without
+   the tag. With several subject areas, run their files in
    name order. `unity_catalog/<area>_undo.sql` reverses the script: run only the lines whose
    statement succeeded. Comments it clears cannot be restored, its `DROP NOT NULL` lines should be
    skipped for a column that was `NOT NULL` before, and its `UNSET TAG` lines are commented out:
-   enable the line of each object whose `SET TAG` succeeded. If the certification check stops the
-   section, it names the objects that already carry a status: delete each one's `SET TAG` line and
+   enable the line of each object whose `SET TAG` succeeded. The certification check's error stops
+   the section only in a client that stops at the first failing statement (a file run as one
+   script, a job task); in an editor that runs each statement on its own, read the check's result
+   before running the `SET TAG` lines. If it fails, it names the objects that already carry a status: delete each one's `SET TAG` line and
    its name in the check, then run the section again. The keys section runs once; to run it again,
    run the undo file's keys section first.
 
@@ -320,14 +358,21 @@ Write `--ossie-version 0.3` only for a tool that reads that development version.
 
 ## Reading the report
 
-`<out>/export-report.json` (also printed) has:
+`<out>/export-report.json` (also printed) has, in this order:
 
+- `summary`: per target, per `reason`, how many entries are `dropped` and how many `degraded`: the
+  account at a glance, the same counts as `targets.<target>.summary`;
+- `model_validation`: what `sm validate` finds in the model, as `errors` and `warnings` counts and
+  their finding codes (`error_codes`, `warning_codes`), never their messages, which can quote a
+  sensitive column. The export still runs on a model with errors, since it reports what they break
+  item by item; with errors, `detail` says to run `sm validate` and fix them before applying the
+  files. `checked` is false when the check itself could not run;
 - `source`: the datasource, the model's engine and the subject areas exported;
 - `options`: the flags the run used (a target's own flags appear under `target_args` only when
   given);
 - `does_not_travel`: the fixed list of what never travels (pre-query checks, receipts, audit log
   rows, who signed off an item);
-- `targets.<target>`: the `files` written, `carried`, `included_unreviewed` (items
+- `targets.<target>`: the `files` written, `carried`, `summary`, `included_unreviewed` (items
   `--include-unreviewed` added), and `losses`.
 
 `carried` counts, by kind, the items the eligibility rules let through to the target's writer,
@@ -338,7 +383,9 @@ there `carried` is a floor: the files hold at least that many. For example, with
 a metric the metric views drop is counted as not carried even though its Page (and often a Genie
 measure) holds it; the report's losses name each file that dropped it.
 
-Each loss is `{area, kind, name, outcome, reason, detail}`. `outcome` is `dropped` (left out) or
+Each loss is `{area, kind, name, outcome, reason, detail}`, each distinct entry once: one that
+several of a target's files report word for word carries `repeats`, the number of times it was
+reported. `outcome` is `dropped` (left out) or
 `degraded` (carried with less). `area` is empty for an item that belongs to no one area. `detail`
 says what happened in a sentence. Besides model items, `kind` can name a file-level note: `agent`,
 `evaluation`, `unity_catalog`, `ai_context`, `sign_off`, `subject_area`. `reason` is one of a
@@ -408,6 +455,8 @@ rows that apply to every target come first.
 | An example whose SQL does not parse, cannot be placed on the view's logical names for certain, reads a missing table or column or a table in another schema (or `"orders"` for the view's `ORDERS`), or maps to a taken name | degraded to an agent sample question · `unparseable_for_target`, `target_rule`, `no_home_in_target`, `name_collision` |
 | A sign-off time that is not an ISO 8601 time (no `verified_at`) | degraded · `detail_lost` |
 | An item, table, relationship or metric whose emitted name is taken | dropped · `name_collision` |
+| An item whose emitted name passes Snowflake's 255-character identifier limit; the whole area when its view name with the longest suffix the export adds (`_evaluation_config`) passes it | dropped · `target_limit` |
+| A blank `choice_field` label (left out of the description; the code stays a sample value) | not reported |
 | Ambiguities, the fiscal year start, the default time window | degraded · `carried_as_text` (instructions) |
 | An entity that maps to no table in the view | dropped · `no_home_in_target` |
 | A subject area with no dimension or metric left | dropped · `target_rule` |
@@ -432,8 +481,10 @@ rows that apply to every target come first.
 |---|---|
 | A metric no metric view can hold: it reads tables the views cannot reach by many-to-one joins, has a semi-additive rule other than first or last, or a non-additive dimension that is no field | dropped · `target_rule` |
 | A second-order metric that a level-of-detail measure would not state exactly: bound other than `OUTERAGG({base})`, an outer aggregate other than SUM, AVG, MIN, MAX, COUNT or MEDIAN, semi-additive too, a base not in the export or itself second-order or semi-additive, a base over several tables, or an inner grain that is no field of the source table | dropped · `target_rule` |
-| A metric whose metric view text would hold `$$` | dropped · `target_rule` |
+| A metric view text holding `$$`: written with the second `$` escaped (`\x24`) inside a double-quoted YAML string, so the view is created as it stands; only when that cannot be written is the view's every metric dropped, the detail naming the field that holds `$$` | dropped · `target_rule` (rare) |
 | A measure or field whose emitted name is taken | dropped or degraded · `name_collision` |
+| Two fact tables whose metric views the naming rule names alike (`order items`, `order-items`): the first by name keeps the view, the other's metrics are reported; two joined tables with one join name: the first is joined | dropped or degraded · `name_collision` |
+| A view, measure, field or table whose name passes the 255-character identifier limit | dropped or degraded · `target_limit` |
 | A join type other than LEFT (metric views join LEFT OUTER) | degraded · `detail_lost` |
 | A relationship whose `on:` names a third table; a table a view already joins by another path | degraded · `target_rule` |
 | More than 10 synonyms, or one over 255 characters | degraded · `target_limit` |
@@ -445,6 +496,10 @@ rows that apply to every target come first.
 | A table defined by SQL | dropped · `no_home_in_target` |
 | A table or metric view with no catalog (pass `--location`) | dropped · `target_rule` |
 | Past 50 data sources, 100 instructions, 200 snippets, 500 benchmarks, or 120 entity-matching columns | dropped or degraded · `target_limit` |
+| An example past the 100-instruction limit (the text instruction and each example SQL count one): offered as a sample question without its SQL | degraded · `target_limit` |
+| A part of the text instruction past its 10,000 strings (ambiguities, descriptions, key terms, in that order) | dropped · `target_limit` |
+| A synonym over 25,000 characters (left out, never cut); a column's synonyms or a table's column configs past 10,000 | degraded · `target_limit` |
+| A column whose name another column of its table has in another case (the first in the model's order is kept) | degraded · `name_collision` |
 | Ambiguities, the datasource description, the fiscal year start, the default time window, key terms | degraded · `carried_as_text` (the text instruction) |
 | A semi-additive measure | degraded · `carried_as_text` |
 | A join's type and the questions it is for (the join spec's instruction) | degraded · `carried_as_text` |
@@ -453,7 +508,7 @@ rows that apply to every target come first.
 | A golden item without Databricks SQL, or whose SQL cannot be rewritten so | dropped · `target_rule`, `depends_on_excluded` |
 | A question already asked; SQL that does not parse | dropped · `name_collision`, `unparseable_for_target` |
 | A self-join; a join or filter on a table the space does not list; a join condition reading other tables; a metric reading one | dropped · `target_rule`, `depends_on_excluded` |
-| A measure alias already taken | dropped · `name_collision` |
+| A measure alias already taken; one past 255 characters | dropped · `name_collision`, `target_limit` |
 | Sensitive columns of listed tables not marked hidden in the space, without `--genie-hide-sensitive` (a count) | degraded · `sensitive` |
 | A subject area with no table or metric view to list | dropped · `target_rule` |
 
@@ -465,7 +520,7 @@ rows that apply to every target come first.
 | An entity's columns (an asset link names a table) and parent entity | degraded · `carried_as_text` |
 | An entity's `value_pattern`, `clarification_strictness` | degraded · `detail_lost` |
 | A domain name a governed tag key refuses (it is renamed by the naming rule) | degraded · `target_rule` |
-| An asset link with no catalog | degraded · `target_rule` |
+| An asset link with no catalog, or to a table this subject area's export does not carry (the detail says which) | degraded · `target_rule` |
 | A mapping filter for another engine | degraded · `sql_not_for_target` |
 | A title over 200 characters; more than 50 synonyms or one over 200 characters; a domain description over 4,096 characters | dropped or degraded · `target_limit` |
 | A title its domain already has | dropped · `name_collision` |
@@ -496,7 +551,7 @@ rows that apply to every target come first.
 | Golden items (no Ossie construct) | dropped · `no_home_in_target` |
 | Entities (their mappings and key) | degraded · `detail_lost`, carried as synonyms |
 | Default filters, review state and sign-off time | degraded · `carried_as_text` (the agami extension block; Ossie does not apply a filter) |
-| Two items with one emitted name | dropped · `name_collision` |
+| Two items with one emitted name; a field whose name another field of its dataset has in another case | dropped · `name_collision` |
 | A subject area with no dataset left | dropped · `target_rule` |
 | At 0.1.1, `ai_context` written as text rather than lists (one entry per file, kind `ai_context`) | degraded · `carried_as_text` |
 
@@ -519,7 +574,10 @@ for the current status of the features the files use before you rely on them.
 
 To check the files on your own account or workspace (agami never does this for you):
 
-1. Load the tables the model describes into the schema you pass as `--location`, and export.
+1. Load the tables the model describes where the export reads them, and export. For a model written
+   for another engine, that is the `--location` schema. For a model written for the target's engine,
+   each table keeps the schema the model names and takes the database or catalog from
+   `--location` (on Snowflake, from `--snowflake-data-database` when given).
 2. Apply each view with the vendor's dry-run option first: for Snowflake, add `TRUE` as the third
    argument of the call in `<area>.sql` (`verify_only`), then run the file as written; for
    Databricks, run `databricks bundle validate` before `databricks bundle deploy`.
