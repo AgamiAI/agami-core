@@ -52,7 +52,7 @@ For chat replies, **prefer natural language over slash commands** — it reads b
 - **One question per turn unless they're truly bundled.**
 - **A decision is a card** ([`shared/question-cards.md`](../../shared/question-cards.md)): the answer card after every answer (Phase 4d.2), large-table HIGH-risk approval, the post-install GitHub-star ask. **Do NOT use AskUserQuestion for follow-up suggestions** — those are 5 plain numbered bullets per Phase 4f.
 - **No page opens by default.** The chart page is the answer's full view: rendered only when the person asks for a chart (Phase 4e), and served from localhost, never opened as a `file://` page.
-- **Insights, not narration** — lead with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
+- **Insights, not narration** — the sentence under the result table leads with the answer ("Carol Chen has the highest spend at $148.95"), not the SQL or the process.
 - **Round numbers in prose**, exact in the table.
 - **Don't echo the SQL in chat prose** — that's enforced as a hard rule in Phase 2. Don't paste the raw Bash CSV — Phase 3.
 
@@ -503,7 +503,7 @@ If row count == 0:
 
 The chat reply follows this **strict order**, with NO other content interleaved (no SQL, no Bash output, no "let me know if…" filler):
 
-  4a Approach → 4b Fetching → 4c Insight → 4d Table → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
+  4a Approach → 4b Fetching → 4d Table → 4c Insight → 4d.1 How this was answered → (log the query, Phase 5, silently) → 4d.2 Answer card → (4e.5 star ask, once) → 4f Numbered follow-ups → (optional 4g CSV path)
 
 Each step is short. The whole reply should fit in a typical chat viewport without scrolling. **No page is rendered or opened on this path:** the chart page (4e) runs only when the person picks **Show as a chart** on the answer card, passes `--chart`, or asks for a chart ("make that a chart"). Cards follow [`shared/question-cards.md`](../../shared/question-cards.md).
 
@@ -527,9 +527,9 @@ Right after the approach, one sentence about the data we just pulled, in counts 
 
 For multi-section: "Pulled data for 4 sections (12 + 5 + 6 + 3 rows)."
 
-### 4c — Insight first
+### 4c — Insight, under the table
 
-One sentence stating the answer. Lead with the most surprising or actionable finding. Examples:
+One sentence stating the answer, right under the table (4d), never in its place. Lead with the most surprising or actionable finding. Examples:
 
 - "**Carol Chen** is the top spender at **$148.95** — about 3x the next customer."
 - "Revenue is up **12% MoM**; the surge came from EU customers."
@@ -539,7 +539,7 @@ For multi-section: a 1–3 sentence executive summary across all sections (the s
 
 ### 4d — Markdown table
 
-**Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 15 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
+**The table is never left out when rows came back**, even when the answer fits in one sentence: the result rows come first, at most 15 and then how many more, before any sentence about them and before the answer card ([question-cards rule 3](../../shared/question-cards.md#3-a-result-is-chat-output-before-the-card-that-acts-on-it)). A browser test showed a first answer of one sentence and no rows. **Render the table deterministically — do NOT hand-type the number cells.** This is a verification surface; an exact number is mandatory (no rounding, no `1.2L`/`2.16Cr` abbreviation, no dropped decimals). Pass the result CSV (first 15 rows, headers sanitized per 3c) and the **`units` map that `sm prepare` already returned in 3a** through the packaged formatter, then **embed its output verbatim**:
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" format-table --csv-file "<artifacts_dir>/local/tmp/agami-result.csv" --units "$PREPARE_UNITS" --labels "$PREPARE_LABELS"
 ```
@@ -952,7 +952,7 @@ A one-time, low-friction ask after the user's first successful query: "if this w
 
 Sequence:
 
-1. Render the answer (Phase 4a–4d.2: approach, fetching, insight, table, how this was answered, and the answer card, handled).
+1. Render the answer (Phase 4a–4d.2: approach, fetching, table, insight, how this was answered, and the answer card, handled).
 2. If `<artifacts_dir>/local/.optins` does not exist AND the query just succeeded: **surface the GitHub-star ask NOW**, before Phase 4f's follow-up bullets. Use `AskUserQuestion`:
 
    > Quick one — first query worked. **If this was useful, would you star us on GitHub?**

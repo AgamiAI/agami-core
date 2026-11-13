@@ -53,7 +53,7 @@ First run `bash "<plugin_root>/scripts/sm" batch-id` and put its `batch` in the 
 bash "<plugin_root>/scripts/sm" seed-validate "<root>" --profile <profile> --out "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json"
 ```
 
-`--out` writes the output to that file in one go and prints only `{"out", "bytes"}`; read the items from the file.
+`--out` writes the output to that file in one go and prints only `{"out", "bytes", "say", "then"}`: the items are in the file, and `say` and `then` are for the chat (below).
 
 Without `--area` it runs every area's seeds (each through `execute_sql` scoped to its own area, with the same per-statement limits) and prints one object: `areas` (`{area, examples, errored}` each), `items` (the items above, each labelled `area`) and `totals` (`areas`, `examples`, `errored`). Repeat `--area` to run only those areas. One `--area` prints the bare items array, as before. An area the model doesn't have is refused with `error: unknown_area` and the `valid_areas`.
 
@@ -65,21 +65,14 @@ bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/aga
 ```
 With `--out` the file does not exist until the command has finished and written it whole, so a missing file counts as waiting, and a file that exists is complete. If the background task's exit notice arrives while the file is still missing, the command failed: stop waiting and show the error from the task's output. SQLite and DuckDB run in the foreground.
 
-**Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
-
-| # | Question | Rows | Result |
-|---|---|---|---|
-| 3 | Revenue by month this year | 12 | 2024-01 $41,200 · 2024-02 $39,850 · … |
-| 7 | Top 5 customers by orders | — | failed: `column "cust_id" does not exist` |
-
-`#` is the item's `n`, `Rows` its `row_count`, `Result` the first row or two of `row_preview` under `row_headers` (already unit-formatted), or `failed:` and its `error`. A result that looks wrong though it ran (a ratio far outside its range, a count of 0, a trend sorted by name) goes in one sentence under the table: that is 6a's case.
+**Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. When the run has finished, read the command's own printed output (on a server database, the background task's output): its `say` is a ready table of the examples that ran (`| # | Example | Rows | Result |`, up to 15 rows, then a line with how many ran and which failed), and its `then` says to post it and ask the examples card. Post its `say` exactly and do its `then` ([engine-says.md](../../../shared/engine-says.md)); never build that table yourself. A result that looks wrong though it ran (a ratio far outside its range, a count of 0, a trend sorted by name) goes in one sentence under the table: that is 6a's case.
 
 Then call AskUserQuestion, one question (header `Examples`), *"What should I do with these examples?"*:
 
 - **Keep all that ran (Recommended)**: sign off every example that returned rows. Drop the (Recommended) and put **Review one by one** first when a result that ran looks wrong (6a).
 - **Review one by one**: every example, 4 per card, the failing ones first.
 - **Drop the failing ones**: mark every failed example rejected. Leave it out when none failed.
-- **Show the full view**: the examples-validation page, every result with its SQL, served from localhost (below); then this card again.
+- **Show the full view**: the examples-validation page, every result with its SQL, served from localhost (below); then this card again. It is always on this card: the card has room for it ([question-cards rule 6](../../../shared/question-cards.md#6-no-page-opens-by-default-and-nothing-is-pasted-back)), and a live run that left it out gave the person no way to see the SQL.
 
 | Answer | Do |
 |---|---|

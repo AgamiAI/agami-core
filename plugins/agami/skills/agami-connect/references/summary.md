@@ -4,22 +4,17 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `<root>` is `<artifacts_dir>/<profile>`:
-```bash
-bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=in_progress
-```
-
 **Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered** (a full view page being open doesn't hold it: the page is read-only and its card is asked again) — wait for the person, don't summarize over them.
 
 Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved.
 
-**The summary comes from one command**, never assembled by hand:
+**The summary comes from the engine, never assembled by hand: it is the `say` of the step's start mark** ([engine-says.md](../../../shared/engine-says.md)). Mark the step started ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" summary "<root>"
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=in_progress
 ```
-It prints ready-to-post markdown: the headline counts, one row per subject area, how many definitions wait for sign-off, and how long setup took (*"Set up in 6 min 40 s"*, measured from the step marks; left out when there is nothing to time). Post its output exactly as printed, as the text of the same message that asks the closing card below, at the top of that message. Never count, time or round anything yourself.
+Its `say` normally holds the whole closing summary: the first line with the totals, the overview table (one row per subject area), the sign-off line, and how long setup took (*"Set up in 6 min 40 s"*, measured from the step marks). Its `then` says to post it, update the task list, and ask the closing card in that same message. So post its `say` exactly, as the first text of the message, with no closing sentence of your own before it or in its place; refresh the task list from its `list`; and ask the closing card below in that same message. Never count, time or round anything yourself.
 
-The closing card is never asked in a message that does not begin with this summary.
+The closing card is asked only in a message that begins with the summary. If the closing mark's `say` does not contain the summary table (a problem line in its place, or no `say` at all), deal with what it says, then run `sm steps "<root>" --mark first_question=in_progress` again.
 
 **Where the host can draw a visual in the chat, the overview card too** ([`shared/overview-card.md`](../../../shared/overview-card.md); how it is drawn, and its fallback: [`shared/native-elements.md`](../../../shared/native-elements.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. The tiles are drawn as well as the summary, not instead of it (the summary is the record in the transcript), and a click on a tile carries on in the chat.
 

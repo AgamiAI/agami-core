@@ -19,7 +19,7 @@ the person is on which cards) is in agami-connect's SKILL.md, "What runs at the 
   rest wait in a queue (see 3). The one exception is the document readers (1.5): each starts as its
   document's path arrives, still at most 4 at once.
 - Each gets its `input_path` (or document) and a `result_path`, and a description in the person's
-  words: *"Describe the Sales tables (8)"*. Input and result files are named `agami-…` with a
+  words: *"Describe the Sales tables (12)"*. Input and result files are named `agami-…` with a
   `.json` ending.
 - Where the Agent tool doesn't list the agent by name (`agami-core:<agent>`), launch a
   general-purpose subagent told to *"Read `<plugin_root>/agents/<agent>.md` and follow it for this

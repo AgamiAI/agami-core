@@ -68,7 +68,7 @@ Subagents read and draft in the background while the person answers cards, so no
 |---|---|
 | The context and table cards (1.5–1.6) | One `agami-doc-reader` per shared document, up to 4 |
 | The build (1.7) | Document readers still running; the build itself is a background task |
-| The join cards after the build (1.7) | `agami-enricher`s: one per chunk of up to 8 tables |
+| The join cards after the build (1.7) | `agami-enricher`s: one per chunk of up to 12 tables |
 | The sign-off cards (4) | `agami-example-writer`s: one per subject area, drafting example questions |
 | The wait for the example run (6) | `sm seed-validate` as a background task |
 
@@ -100,6 +100,7 @@ Non-negotiable. They override every other instruction here when they conflict.
 4. **If credentials are missing for the active profile, run Phase 0a.** It ends connected (the password page, 0a.4k) or with a card that waits for the filled-in file (0a.9). A person who closes the chat instead can come back later with any data question — `agami-query` auto-invokes us and 0a.10 picks the file up.
 5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `python -m execute_sql` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
 6. **Run each agami command as its own Bash call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <verb> …` with every path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, and never run two agami commands in one call. A line written any other way stops to ask the person for permission; written this way it is pre-approved while the skill is running. Read the whole output: the commands print only what you need. `<root>` in the phase files is the database's model folder, `<artifacts_dir>/<profile>`, written out in full; the artifacts folder is preflight step 1's `artifacts_dir`, never read from the pointer file; scratch files go only in `<artifacts_dir>/local/tmp/`, named `agami-…`, never `/tmp` ([`shared/invocation-conventions.md`](../../shared/invocation-conventions.md)).
+7. **Do what the engine says.** When an agami command's output has `say`, post it exactly as written as your next chat text; when it has `then`, do that next ([`shared/engine-says.md`](../../shared/engine-says.md)).
 
 If you reach for a command that doesn't fit, stop and re-read this section.
 

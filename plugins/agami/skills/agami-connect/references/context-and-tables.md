@@ -84,9 +84,9 @@ Example to say BEFORE introspecting: *"Found 70 tables across 18 schemas. I'll m
 
 ### 1.4 — Datasource context (MANDATORY — ALWAYS ASK)
 
-Three cards, asked right after the connection works and before tables are listed: the company (once per deployment), what the person can share (1.5), and this database's one line. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../../shared/question-cards.md). The sample path skips all three (its model is ready-made).
+One card, asked right after the connection works and before tables are listed, with up to three questions on one AskUserQuestion call: the company (once per deployment), what the person can share (1.5), and this database's one line. None of the three depends on another's answer, so they are never asked one card at a time (a live run that did took three card rounds where one had done); act on the answers after the card, in the order A, B, C. Only the follow-ups that an answer leads to (1.5's follow-up cards, a `Replace it` below) come on cards of their own. They are required state-gathering: "don't ask clarifying questions" does NOT cancel them, and the skill never decides skip for the person. Conventions: [`shared/question-cards.md`](../../../shared/question-cards.md). The sample path skips all of them (its model is ready-made).
 
-**A. Company card — ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise AskUserQuestion, one question, header `Company`:
+**A. Company question — ONCE, on the first onboard into this deployment.** Decide "already authored" by content, not by file existence: done only if the root `<artifacts_dir>/organization.md` exists **or** `<artifacts_dir>/organization.yaml` has a non-empty `name`/`description`. Otherwise the card carries this question, header `Company`:
 
 > *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
@@ -96,9 +96,9 @@ Options: **Skip for now** (no company context; say it can be added later in `/ag
 
 Then confirm both landed. On a **later** onboard (company context already there) don't ask: say *"Sharing the **`<company>`** context you set earlier."*
 
-**B. Context card — every onboard.** This is 1.5 below; ask it after A.
+**B. Context question — every onboard.** This is 1.5 below, the card's next question after A.
 
-**C. About-it card — every onboard.** The one line `list_datasources` shows an agent so it can pick the right datasource (an organization with several refuses a query that names none), and, when the person writes more, this database's narrative. AskUserQuestion, one question, header `About it`:
+**C. About-it question — every onboard.** The one line `list_datasources` shows an agent so it can pick the right datasource (an organization with several refuses a query that names none), and, when the person writes more, this database's narrative. The card's last question, header `About it`:
 
 > *"In one line, what does this database hold, and when would someone query it? Type it in Other, e.g. "Invoices, payments and products: use for revenue questions." Add more sentences if a term means something specific here."*
 
@@ -115,7 +115,7 @@ These are **non-secret model files** and must stay readable (e.g. by the deploy 
 
 ### 1.5 — Existing data model / semantic layer (MANDATORY — ALWAYS ASK)
 
-The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion, one question, header `Context`, **multiSelect**:
+The context question (1.4 B), on the intake card. Same "required state-gathering" rule. It has header `Context` and is **multiSelect**:
 
 > *"What can you share so answers match how your team works? Pick any that you have."*
 
@@ -124,9 +124,9 @@ The context card (1.4 B). Same "required state-gathering" rule. AskUserQuestion,
 | `Definitions or a semantic layer` | A data dictionary, metrics list, ERD, spec workbook, or a dbt / LookML / Cube repo | A follow-up card: *"Type the file or folder path in Other, or attach the file to your next message."*, options **Skip this one** / **I'll attach it** (wait for the attachment, then carry on; if a reader is already running, say once that a permission prompt may appear for agami's own commands, since the turn ended while it ran). Then read it as the sections below say: a doc, a column dictionary, a model spec workbook, or a semantic-layer repo by what the path holds. |
 | `Questions people ask` | Real questions from your team; they become checked examples | A follow-up card: *"Type them in Other, one per line, or a file path."*, options **Skip this one** / **I'll attach a file**. Save them with the Write tool to `<artifacts_dir>/local/tmp/agami-asked-questions.txt`, one per line; Phase 5 writes SQL for each and checks them with the rest. |
 | `Report SQL or dashboards` | SQL you trust, an export, or a screenshot; checked against the model after the build | A follow-up card: *"Type a path to a .sql or .csv file in Other, or attach a screenshot to your next message."*, options **Skip this one** / **I'll attach it**. Copy files or pasted SQL into `<artifacts_dir>/local/reconcile/inbox/` (SQL as `<ts>.sql`, a CSV as is; note a screenshot's path). Phase 6b hands them to `/agami-reconcile`. |
-| `Nothing to share` | Build from the database alone | Go to 1.6. Picked with another option: say it back and ask the card again. |
+| `Nothing to share` | Build from the database alone | Go to 1.6. Picked with another option: say it back and ask that question again. |
 
-**"Other" on the context card** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
+**"Other" on the context question** takes a named product ("it's ServiceNow", "this is our Salesforce") → the published-product-schema path below; or any of the above typed straight in (a path, questions, SQL), routed by what it is. A question about the options ("what's a semantic layer?") is answered first and the card asked again ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
 Ask the follow-up cards one at a time, in the table's order. Nothing here is required: every follow-up's **Skip this one** goes on to the next.
 
