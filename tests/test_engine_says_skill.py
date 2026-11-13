@@ -246,7 +246,7 @@ def test_the_closing_card_re_asked_after_the_full_view_has_no_second_summary():
 
 def test_parallel_false_means_every_chunk_inline():
     enrich = _flat(_read(REFS / "enrich.md"))
-    assert "true when there are two or more chunks and more than 8 tables" in enrich
+    assert "true when there are two or more chunks and more than 12 tables in all" in enrich
     assert "describe every chunk yourself, one after another" in enrich
 
 
@@ -265,12 +265,17 @@ def test_personal_data_options_put_the_identifier_in_preview():
     assert "never in the label or the description" in personal
 
 
-# 9. chunks of 12 again
-def test_chunks_are_12_tables_with_two_from_more_than_8():
+# 9. chunks of 12; enrichers in parallel only above 12 tables
+def test_chunks_are_12_tables_and_parallel_above_12():
     enrich = _flat(_read(REFS / "enrich.md"))
     assert "at most 12 tables" in enrich
-    assert "a model of more than 8 tables always gets at least two chunks" in enrich
-    assert "one per chunk of up to 12 tables" in _read(CONNECT / "SKILL.md")
+    assert "more than 8 tables" not in enrich
+    assert "`parallel: false` (a model of 12 tables or fewer" in enrich
+    assert "with its per-batch progress lines" in enrich
+    assert "one per chunk of up to 12 tables, on a model of more than 12 tables" in _read(CONNECT / "SKILL.md")
+    assert "(a model of 12 tables or fewer)" in _read(REFS / "build.md")
+    assert "which the 11-table sample never does" in _read(REFS / "sample.md")
+    assert "on a model of more than 12 tables" in _read(PLUGIN / "agents" / "agami-enricher.md")
     assert "(up to 12 tables of one subject area)" in _read(PLUGIN / "agents" / "agami-enricher.md")
     for doc in [CONNECT / "SKILL.md", *REFS.glob("*.md"), *(PLUGIN / "agents").glob("*.md")]:
         assert not re.search(r"up to 8 tables|at most 8 tables|8 tables or fewer|tables \(8\)",

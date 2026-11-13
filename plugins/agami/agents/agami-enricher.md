@@ -1,6 +1,6 @@
 ---
 name: agami-enricher
-description: "Describes ONE chunk of an agami semantic model during onboarding (up to 12 tables of one subject area): table and column descriptions from 5-row samples and the person's documents, entities, and metric ideas, returned as data. Launched by agami-connect, one per chunk, in parallel. Read-only: never writes the model and never asks the person anything."
+description: "Describes ONE chunk of an agami semantic model during onboarding (up to 12 tables of one subject area): table and column descriptions from 5-row samples and the person's documents, entities, and metric ideas, returned as data. Launched by agami-connect, one per chunk, in parallel, on a model of more than 12 tables. Read-only: never writes the model and never asks the person anything."
 tools: Read, Write
 ---
 

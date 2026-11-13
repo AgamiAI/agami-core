@@ -189,10 +189,10 @@ def _live_items(objs) -> list:
 # 34-table run made five enrichers where only four ran at once, so the fifth waited for a free slot.
 CHUNK_MAX_TABLES = 12
 
-# A model with more live tables than this is never described by one enricher: a live run described
-# an 11-table sample inline, 169 s with no progress line, where two would have run while the person
-# answered cards. At or below it, one chunk (or two small areas inline) is quicker than subagents.
-CHUNK_SPLIT_ABOVE = 8
+# Enrichers run in parallel only for a model with more live tables than this. Below it the main chat
+# describes the chunks itself: the 11-table sample got slower each time background enrichers were
+# added (338 s, then 487 s), since on a small model starting subagents costs more than it saves.
+CHUNK_PARALLEL_ABOVE = 12
 
 
 def _split_list(value: Optional[str]) -> list[str]:
@@ -217,12 +217,10 @@ def _even_runs(names: list[str], max_size: int) -> list[list[str]]:
 def _enrich_chunks(args) -> int:
     """The model split into enricher-sized chunks: each area in the model's order, cut into the
     fewest runs of at most `--max-tables` live tables, sized as evenly as possible (13 is 7 + 6, not
-    12 + 1, so no enricher is left with a scrap). A model of more than CHUNK_SPLIT_ABOVE live tables
-    that came out as one chunk is cut in two (the 11-table sample is 6 + 5), so it is never one
-    enricher's job. `parallel` is true when there are 2 or more chunks and the model has more than
-    CHUNK_SPLIT_ABOVE live tables: two small areas are quicker described inline than by two
-    subagents. It reads only the model, so the skill can plan the subagents before the database is
-    touched."""
+    12 + 1, so no enricher is left with a scrap). `parallel` is true when there are 2 or more chunks
+    and the model has more than CHUNK_PARALLEL_ABOVE live tables; a smaller model (the 11-table
+    sample is one chunk) is described inline by the main chat. It reads only the model, so the skill
+    can plan the subagents before the database is touched."""
     if args.area or args.out or args.tables is not None:
         _print_json({"error": "--chunks lists every area's chunks; it takes no --area, --out or --tables"})
         return 2
@@ -235,15 +233,12 @@ def _enrich_chunks(args) -> int:
         names = [t.name for t in _live_items(area.tables_defined)]
         runs += [(area.name, part) for part in _even_runs(names, args.max_tables)]
     total = sum(len(part) for _, part in runs)
-    if len(runs) == 1 and total > CHUNK_SPLIT_ABOVE:
-        area, part = runs[0]
-        runs = [(area, half) for half in _even_runs(part, -(-len(part) // 2))]
     chunks, seen = [], {}
     for area, part in runs:
         seen[area] = seen.get(area, 0) + 1
         chunks.append({"chunk": f"{area}-{seen[area]}", "area": area, "tables": part})
     _print_json({"chunks": chunks, "tables": total, "max_tables": args.max_tables,
-                 "parallel": len(chunks) >= 2 and total > CHUNK_SPLIT_ABOVE})
+                 "parallel": len(chunks) >= 2 and total > CHUNK_PARALLEL_ABOVE})
     return 0
 
 
@@ -2778,10 +2773,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rows", type=int, default=5)
     sp.add_argument("--tables", help="comma-separated: only these tables of the area (one chunk)")
     sp.add_argument("--chunks", action="store_true",
-                    help="print the model's chunks (each area cut into runs of --max-tables; a model of "
-                         f"more than {CHUNK_SPLIT_ABOVE} tables is never one chunk) and write nothing; "
-                         f"`parallel` is true for 2 or more chunks over more than "
-                         f"{CHUNK_SPLIT_ABOVE} tables in all")
+                    help="print the model's chunks (each area cut into runs of --max-tables) and write "
+                         f"nothing; `parallel` is true for 2 or more chunks over more than "
+                         f"{CHUNK_PARALLEL_ABOVE} tables in all")
     sp.add_argument("--max-tables", type=int, default=CHUNK_MAX_TABLES,
                     help=f"most tables in one chunk (default {CHUNK_MAX_TABLES})")
     sp.set_defaults(func=cmd_enrich_input)

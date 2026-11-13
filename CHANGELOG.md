@@ -36,9 +36,11 @@ below corresponds to one such version.
   The summary's sign-off line and the step list's sign-off count now count what the
   sign-off card counts (`sm review-queue`'s metrics, entities and joins awaiting review: "23 definitions are waiting for
   sign-off: 11 metrics, 12 entities."), and a run that signs nothing still shows "0 of 23 signed".
-  `enrich-input --chunks` cuts each area into the fewest balanced chunks of at most 12 tables again,
-  and splits a model of more than 8 tables that came out as one chunk in two (the 11-table sample is
-  6 + 5): at 8 a 34-table database made five enrichers where only four ran at once.
+  `enrich-input --chunks` cuts each area into the fewest balanced chunks of at most 12 tables again
+  (at 8 a 34-table database made five enrichers where only four ran at once), and prints
+  `parallel: true` only for a model of more than 12 tables: a smaller one, the 11-table sample
+  included, is described inline by the main chat, since the sample got slower each time background
+  enrichers were added (338 s, then 487 s).
 
 - **The plugin approves a few harmless agami calls itself, so onboarding asks less.** A live run
   stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a

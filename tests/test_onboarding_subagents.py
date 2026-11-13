@@ -260,7 +260,7 @@ def test_chunks_split_an_area_into_even_runs_of_at_most_twelve(tmp_path, capsys)
     assert out["parallel"] is True
 
 
-@pytest.mark.parametrize("size, runs", [(8, [8]), (9, [5, 4]), (12, [6, 6]), (13, [7, 6]),
+@pytest.mark.parametrize("size, runs", [(8, [8]), (9, [9]), (12, [12]), (13, [7, 6]),
                                         (16, [8, 8]), (25, [9, 8, 8])])
 def test_an_area_is_cut_into_the_fewest_runs_sized_evenly(tmp_path, capsys, size, runs):
     out = _chunks(_synthetic(tmp_path, {"demo": size}), capsys)
@@ -274,11 +274,12 @@ def test_two_small_areas_are_not_parallel(tmp_path, capsys):
     assert len(out["chunks"]) == 2 and out["parallel"] is False
 
 
-def test_an_eleven_table_area_goes_to_two_enrichers(tmp_path, capsys):
-    # The sample's size: described by two enrichers in the background, not inline.
+def test_an_eleven_table_area_is_one_chunk_described_inline(tmp_path, capsys):
+    # The sample's size: two background enrichers made it slower each round (338 s to 487 s), since
+    # starting subagents on a small model costs more than it saves.
     out = _chunks(_synthetic(tmp_path, {"demo": 11}), capsys)
-    assert [len(c["tables"]) for c in out["chunks"]] == [6, 5]
-    assert out["parallel"] is True
+    assert [len(c["tables"]) for c in out["chunks"]] == [11]
+    assert out["parallel"] is False
 
 
 def test_eight_tables_are_one_chunk_not_parallel(tmp_path, capsys):
@@ -299,9 +300,21 @@ def test_thirty_four_tables_in_two_areas_are_four_chunks(tmp_path, capsys):
     assert out["parallel"] is True
 
 
-def test_areas_of_five_and_four_are_parallel(tmp_path, capsys):
-    out = _chunks(_synthetic(tmp_path, {"acme": 5, "demo": 4}), capsys)
-    assert [len(c["tables"]) for c in out["chunks"]] == [5, 4] and out["parallel"] is True
+def test_areas_of_six_and_five_are_not_parallel(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"acme": 6, "demo": 5}), capsys)
+    assert [(c["area"], len(c["tables"])) for c in out["chunks"]] == [("acme", 6), ("demo", 5)]
+    assert out["parallel"] is False
+
+
+def test_twelve_tables_are_inline_and_thirteen_parallel(tmp_path, capsys):
+    assert cli.CHUNK_PARALLEL_ABOVE == 12
+    assert _chunks(_synthetic(tmp_path / "a", {"acme": 6, "demo": 6}), capsys)["parallel"] is False
+    assert _chunks(_synthetic(tmp_path / "b", {"acme": 7, "demo": 6}), capsys)["parallel"] is True
+
+
+def test_one_chunk_is_never_parallel(tmp_path, capsys):
+    out = _chunks(_synthetic(tmp_path, {"demo": 13}), capsys, "--max-tables", "20")
+    assert [len(c["tables"]) for c in out["chunks"]] == [13] and out["parallel"] is False
 
 
 def test_two_areas_of_eight_tables_or_fewer_in_all_are_not_parallel(tmp_path, capsys):
@@ -326,7 +339,7 @@ def test_chunks_leave_hidden_tables_out(tmp_path, capsys):
     out = _chunks(_synthetic(tmp_path, {"demo": 13}, hidden=("demo_t02",)), capsys)
     listed = [t for c in out["chunks"] for t in c["tables"]]
     assert "demo_t02" not in listed and len(listed) == out["tables"] == 12
-    assert [len(c["tables"]) for c in out["chunks"]] == [6, 6]
+    assert [len(c["tables"]) for c in out["chunks"]] == [12] and out["parallel"] is False
 
 
 def test_chunks_honour_max_tables(tmp_path, capsys):
