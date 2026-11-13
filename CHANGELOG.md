@@ -24,7 +24,8 @@ below corresponds to one such version.
     syntax at all) running `steps [--mark <id>=<status>]… [--full]`, `progress [--wait 0-600]`,
     `timing`, `summary [--json]`, `overview`, `areas`, `coverage`, `review-queue`,
     `review-items [--scope all|rule1|rule2|preseed]`, `model-tree [--out <scratch>]` or
-    `bundle --area <name> [--out <scratch>]` on a model folder directly under the artifacts folder,
+    `bundle --area <name> [--out <scratch>]` on a model folder directly under the artifacts folder
+    with a plain profile name (letters, digits, `_`, `-`; not `local`),
     or `batch-id`, or `wait-files --file <scratch>… [--wait 0-600]`. Options must be written in
     full and only once (`--mark` and `--file` may repeat); the Bash call may carry no
     `run_in_background` or `timeout`;
@@ -36,6 +37,16 @@ below corresponds to one such version.
   subagents, so an enricher's result write no longer prompts. The skills keep their
   `allowed-tools`, which cover every `sm` call in the turn a skill starts.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
+- **The verbs the hook approves never install, and no launcher imports from your folder.** With
+  agami's library missing or older than the plugin, those 13 verbs stop with
+  `agami's library needs installing or updating: run  bash "<plugin_root>/scripts/sm" install`
+  (exit 3) instead of installing; every other verb installs as before. `sm`, `py` and their probes
+  now start Python from `/` or with `PYTHONSAFEPATH`, so a `pip.py` in the folder Claude was started
+  in (a cloned repository) no longer runs on an install.
+- **A model folder can't make agami read files outside it.** Every path the loader takes from the
+  model (a storage `ref`, a subject-area path, a symlinked table file) must resolve inside the model
+  folder, and a model that fails to load is reported by file and field, never by value. The step
+  timeline, build log and curation log are not read or written through a link out of the folder.
 - **`sm steps` prints a short list to copy.** `{"list": ["✓ Connect your database", "▶ Read the
   tables and joins — 33 of 34 tables", "· Describe columns and add metrics", …], "current": …,
   "problem": …}`: one line per step that isn't skipped. `--full` prints the old dict. `sm progress
