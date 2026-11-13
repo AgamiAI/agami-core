@@ -107,7 +107,6 @@ def _table(org: m.Datasource, name: str) -> m.Table:
     ("oracle", ["all_constraints", "constraint_type = 'U'", "all_cons_columns",
                 "ac.status = 'ENABLED'", "ac.validated = 'VALIDATED'"]),
     ("duckdb", ["duckdb_constraints()", "constraint_type = 'UNIQUE'"]),
-    ("snowflake", ["information_schema.table_constraints", "constraint_type = 'UNIQUE'"]),
     ("redshift", ["information_schema.table_constraints", "constraint_type = 'UNIQUE'"]),
 ])
 def test_each_dialect_reads_unique_keys_from_its_catalog(db_type, needles):

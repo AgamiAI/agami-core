@@ -59,6 +59,9 @@ _DRIVER_ERRORS = [
     ("line 1:8: Column 'ssn' cannot be resolved", 5, "column_not_found"),       # Trino
     ("[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column with name `ssn` cannot be resolved.",
      5, "column_not_found"),                                                   # Databricks
+    ("[TABLE_OR_VIEW_NOT_FOUND] The table or view `sales_data`.`payroll` cannot be found. Verify the "
+     "spelling and correctness of the schema and catalog. SQLSTATE: 42P01; line 1 pos 15",
+     5, "table_not_found"),                                                    # Databricks
     ("400 Unrecognized name: ssn at [1:8]", 5, "column_not_found"),             # BigQuery
     # Authorization, which must not read as a credentials problem: the operator action is a
     # GRANT, and the skill stops on `auth` but auto-retries twice on `syntax`.

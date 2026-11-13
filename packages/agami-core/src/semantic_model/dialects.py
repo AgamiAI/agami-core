@@ -339,6 +339,22 @@ class Dialect:
             f"AND tc.table_schema = {self.quote_lit(schema)}"
         )
 
+    # --- canonical rows for key reads whose output columns the engine fixes ---
+    # A dialect whose key catalog is a command rather than a view (Snowflake's SHOW … KEYS) cannot
+    # alias its output, so it reshapes the rows here instead. Identity wherever the SQL aliases.
+
+    def primary_key_rows(self, rows: list[dict]) -> list[dict]:
+        """`sql_primary_keys`'s rows as `column_name`, in key order."""
+        return rows
+
+    def unique_key_rows(self, rows: list[dict]) -> list[dict]:
+        """`sql_unique_keys`'s rows as `constraint_name`, `column_name`, each key in key order."""
+        return rows
+
+    def foreign_key_rows(self, rows: list[dict], schema: str) -> list[dict]:
+        """`sql_foreign_keys(schema)`'s rows in the canonical foreign-key shape."""
+        return rows
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         # Fallback: an exact COUNT(*). Dialects with cheap estimates override.
         return self.sql_row_count(schema, table)
@@ -722,6 +738,7 @@ class Snowflake(Dialect):
     name = "Snowflake"
     folds_unquoted = "upper"
     backslash_escapes = True
+    fk_enforced = False      # nor foreign keys (only a hybrid table enforces them) -> confirm by overlap
     unique_enforced = False  # Snowflake declares unique keys but does not enforce them
     duration_rounds = True
     reserved_extra = frozenset({
@@ -742,6 +759,65 @@ class Snowflake(Dialect):
             f"WHERE table_schema = {self.quote_lit(schema)} "
             f"AND table_name = {self.quote_lit(table)}"
         )
+
+    # Snowflake's information_schema has no key_column_usage: which columns form a key is only
+    # listed by SHOW … KEYS, whose output columns are fixed (lower-case) and reshaped by the
+    # *_key_rows methods below. A schema-qualified TABLE resolves against the connection's
+    # database; IN SCHEMA would need the database spelled out, which a dialect does not know.
+
+    def sql_primary_keys(self, schema: str, table: str) -> str:
+        return f"SHOW PRIMARY KEYS IN TABLE {self.qualified(schema, table)}"
+
+    def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
+        return f"SHOW UNIQUE KEYS IN TABLE {self.qualified(schema, table)}"
+
+    def sql_foreign_keys(self, schema: str) -> str:
+        # The connection's database, filtered to `schema` in foreign_key_rows.
+        return "SHOW IMPORTED KEYS IN DATABASE"
+
+    def primary_key_rows(self, rows: list[dict]) -> list[dict]:
+        return [{"column_name": r.get("column_name")} for r in _by_key_sequence(rows)]
+
+    def unique_key_rows(self, rows: list[dict]) -> list[dict]:
+        ordered = sorted(_by_key_sequence(rows), key=lambda r: str(r.get("constraint_name")))
+        return [{"constraint_name": r.get("constraint_name"), "column_name": r.get("column_name")}
+                for r in ordered]
+
+    def foreign_key_rows(self, rows: list[dict], schema: str) -> list[dict]:
+        return [{
+            "from_table": r.get("fk_table_name"), "from_column": r.get("fk_column_name"),
+            "from_schema": r.get("fk_schema_name"),
+            "to_table": r.get("pk_table_name"), "to_column": r.get("pk_column_name"),
+            "to_schema": r.get("pk_schema_name"),
+            "constraint_name": r.get("fk_name"), "key_ordinal": r.get("key_sequence"),
+        } for r in _by_key_sequence(rows) if r.get("fk_schema_name") == schema]
+
+
+def _by_key_sequence(rows: list[dict]) -> list[dict]:
+    """SHOW … KEYS rows in key-column order (`key_sequence`, 1-based), which the output does not
+    promise; the sort is stable, so separate keys keep their relative order."""
+    def position(r: dict) -> float:
+        try:
+            return float(r.get("key_sequence"))
+        except (TypeError, ValueError):
+            return 0.0
+    return sorted(rows, key=position)
+
+
+# The catalog commands above, exactly as Snowflake.sql_* renders them. The read-only gate admits a
+# statement that is not a SELECT only when it matches this in full, under `--build-profile`
+# (`execute_sql._builtin_catalog_command`). An identifier is double-quoted, `""` its only escape,
+# and at most 255 characters, Snowflake's own limit.
+_QUOTED_IDENT = r'"(?:[^"]|""){1,255}"'
+_CATALOG_COMMAND_RE = re.compile(
+    rf"SHOW (?:PRIMARY|UNIQUE) KEYS IN TABLE {_QUOTED_IDENT}\.{_QUOTED_IDENT}"
+    r"|SHOW IMPORTED KEYS IN DATABASE"
+)
+
+
+def is_catalog_command(sql: str) -> bool:
+    """Whether `sql` is, character for character, one of agami's own catalog commands."""
+    return _CATALOG_COMMAND_RE.fullmatch(sql or "") is not None
 
 
 class DuckDB(Dialect):
@@ -771,8 +847,28 @@ class Databricks(Dialect):
     fk_enforced = False  # Unity Catalog constraints are informational
     duration_rounds = True
 
+    # information_schema.columns.data_type holds Spark's simple type names, and three of the integer
+    # ones say nothing the shared normalizer reads as a number: BYTE would even read as binary.
+    _SIMPLE_INTEGER_TYPES = frozenset({"long", "short", "byte"})
+
     def sql_unique_keys(self, schema: str, table: str) -> Optional[str]:
         return None  # Unity Catalog has no unique constraint
+
+    def sql_tables(self, schema: str) -> str:
+        # A metric view is a set of measure definitions queried through MEASURE(), not rows to
+        # model as a table; information_schema.tables lists it beside the tables all the same.
+        return (
+            "SELECT table_schema AS schema_name, table_name, table_type "
+            "FROM information_schema.tables "
+            f"WHERE table_schema = {self.quote_lit(schema)} "
+            "AND COALESCE(table_type, '') <> 'METRIC_VIEW' "
+            "ORDER BY table_name"
+        )
+
+    def map_type(self, raw: str, numeric_scale: Optional[int] = None) -> ColumnType:
+        if (raw or "").strip().lower() in self._SIMPLE_INTEGER_TYPES:
+            return "integer"
+        return normalize_type(raw, numeric_scale=numeric_scale)
 
     def quote_ident(self, name: str) -> str:
         return "`" + name.replace("`", "``") + "`"
@@ -1282,5 +1378,5 @@ __all__ = [
     "Dialect",
     "PostgreSQL", "Supabase", "Redshift", "MySQL", "Snowflake", "DuckDB",
     "Databricks", "Trino", "SQLServer", "BigQuery", "SQLite", "Oracle",
-    "get_dialect", "supported_db_types", "normalize_type", "catalog_function_queries",
+    "get_dialect", "supported_db_types", "normalize_type", "catalog_function_queries", "is_catalog_command",
 ]

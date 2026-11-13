@@ -597,8 +597,11 @@ def _classify_db_error(text: str, code: int) -> FailureKind:
         "unresolved_column",
     ) or ("column" in lowered and has("does not exist", "not found")):
         return "column_not_found"
+    # Databricks says "[TABLE_OR_VIEW_NOT_FOUND] The table or view `s`.`t` cannot be found", which
+    # no other needle reads.
     if has("no such table", "undefinedtable", "invalid object name") or (
-        has("relation", "table", "object") and has("does not exist", "doesn't exist", "not found")
+        has("relation", "table", "object")
+        and has("does not exist", "doesn't exist", "not found", "cannot be found")
     ):
         return "table_not_found"
     if has("syntax error", "syntaxerror", "compilation error", "error in your sql syntax"):
@@ -2755,6 +2758,21 @@ def _builtin_catalog_query(sql: str) -> bool:
     return fingerprint is not None and fingerprint in allowed
 
 
+def _builtin_catalog_command(sql: str) -> bool:
+    """Whether `sql` is one of agami's own catalog commands that is not a SELECT: Snowflake lists the
+    columns of its keys only through SHOW … KEYS, and has no view of them to select from.
+
+    Matched in full against the exact shapes `dialects` builds, quoted identifiers being the only
+    part that may vary, so nothing can ride along with one. False whenever the matcher cannot be
+    loaded, so the read-only gate stays shut."""
+    try:
+        from semantic_model.dialects import is_catalog_command
+
+        return is_catalog_command(sql)
+    except Exception:
+        return False
+
+
 def _model_safety(sql: str, profile: str, area: str | None, *,
                   build_profile: bool = False) -> tuple[str, Refusal | None]:
     """Semantic-model safety pass before execution: the scope gates, over a model resolved from the
@@ -3459,7 +3477,9 @@ def execute_guarded(
         import sql_guard
 
         refusal = sql_guard.check_read_only(sql)
-        if refusal is not None:
+        # The one exception is a build-time catalog command (Snowflake's SHOW … KEYS): read-only by
+        # nature, but not a SELECT, and matched in full so no other statement can pass as one.
+        if refusal is not None and not (build_profile and _builtin_catalog_command(sql)):
             return _envelope("refused", refusal=refusal,
                              receipt=_refusal_receipt(refusal, received_sql, profile))
         # Metadata / recon functions, ABOVE the `no_safety` branch on purpose. `no_safety` skips the

@@ -96,6 +96,18 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Snowflake introspection reads declared keys.** Snowflake's `information_schema` has no
+  `key_column_usage` view, so every primary, unique and foreign key read failed and the grain was
+  probed instead. Keys now come from `SHOW PRIMARY KEYS`, `SHOW UNIQUE KEYS` and `SHOW IMPORTED
+  KEYS`, whose rows the dialect reshapes. Under `--build-profile` only, the read-only gate admits
+  those three commands exactly as agami builds them; everything else that is not a SELECT is still
+  refused. Snowflake's foreign keys are also treated as unenforced, so a declared one is confirmed
+  on the data before it is approved.
+- **Databricks introspection types and tables.** `information_schema.columns` names BIGINT,
+  SMALLINT and TINYINT `LONG`, `SHORT` and `BYTE`, which were typed string or bytes; they are
+  integers now. Metric views are left out of the table listing, since they are not tables to model.
+- **A missing Databricks table is `table_not_found`.** `[TABLE_OR_VIEW_NOT_FOUND] … cannot be
+  found` was classified as an unknown failure rather than exit 8.
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those

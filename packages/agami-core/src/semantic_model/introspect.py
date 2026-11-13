@@ -1421,6 +1421,8 @@ def _grain(
 ) -> tuple[list[str], str]:
     pks = _try(runner, dialect.sql_primary_keys(schema, table))
     if pks:
+        pks = dialect.primary_key_rows(pks)
+    if pks:
         return [r["column_name"] for r in pks], "catalog"
     # Size guard: the probe below COUNT(DISTINCT)-scans the table once per candidate. On a
     # huge fact table with no catalog PK that's tens of minutes of scans yielding nothing —
@@ -1465,6 +1467,7 @@ def _unique_keys(
         return None
     if not rows:
         return []
+    rows = dialect.unique_key_rows(rows)
     by_lower = {c.name.lower(): c.name for c in cols}
     named: dict[str, list[str]] = {}
     for r in rows:
@@ -1660,6 +1663,8 @@ def _build_relationships(
         unpaired: list[str] = []
         for s in (schemas or {None}):
             rows = _try(runner, dialect.sql_foreign_keys(s)) if s else None
+            if rows:
+                rows = dialect.foreign_key_rows(rows, s)
             fallback = dialect.sql_foreign_keys_unpaired(s) if s and rows is None else None
             if fallback:
                 rows = _try(runner, fallback)

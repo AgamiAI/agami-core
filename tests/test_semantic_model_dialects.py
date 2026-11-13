@@ -215,3 +215,43 @@ def test_unenforced_fk_dialects_flagged():
 ])
 def test_type_normalization(raw, scale, expected):
     assert D.normalize_type(raw, numeric_scale=scale) == expected
+
+
+# --- Databricks: information_schema's simple type names, and metric views ---
+
+
+@pytest.mark.parametrize("raw,scale,expected", [
+    # information_schema.columns.data_type spells BIGINT / SMALLINT / TINYINT as LONG / SHORT / BYTE
+    ("LONG", None, "integer"), ("INT", None, "integer"), ("SHORT", None, "integer"),
+    ("BYTE", None, "integer"), ("long", None, "integer"),
+    ("DOUBLE", None, "float"), ("FLOAT", None, "float"),
+    ("DECIMAL", 18, "decimal"), ("DECIMAL", 0, "integer"),
+    ("STRING", None, "string"), ("BOOLEAN", None, "boolean"), ("DATE", None, "date"),
+    ("TIMESTAMP", None, "timestamp"), ("TIMESTAMP_NTZ", None, "timestamp"),
+    ("BINARY", None, "bytes"), ("ARRAY", None, "array"), ("MAP", None, "array"),
+    ("STRUCT", None, "array"), ("VARIANT", None, "json"),
+])
+def test_databricks_maps_its_simple_type_names(raw, scale, expected):
+    assert D.get_dialect("databricks").map_type(raw, numeric_scale=scale) == expected
+
+
+@pytest.mark.parametrize("key", ["oracle", "postgres", "bigquery"])
+def test_the_simple_integer_names_stay_databricks_own(key):
+    # Oracle's LONG is character data, and BYTES is BigQuery's binary type.
+    d = D.get_dialect(key)
+    assert d.map_type("LONG") == "string" and d.map_type("BYTES") == "bytes"
+
+
+def test_databricks_table_listing_leaves_out_metric_views():
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    con.execute("ATTACH ':memory:' AS information_schema")
+    con.execute("CREATE TABLE information_schema.tables (table_schema, table_name, table_type)")
+    con.executemany("INSERT INTO information_schema.tables VALUES (?, ?, ?)", [
+        ("sales_data", "orders", "MANAGED"), ("sales_data", "orders_metrics", "METRIC_VIEW"),
+        ("sales_data", "open_orders", "VIEW"), ("sales_data", "legacy", None),
+        ("other", "orders", "MANAGED"),
+    ])
+    rows = con.execute(D.get_dialect("databricks").sql_tables("sales_data")).fetchall()
+    assert [r[1] for r in rows] == ["legacy", "open_orders", "orders"]

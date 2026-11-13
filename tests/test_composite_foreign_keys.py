@@ -82,7 +82,8 @@ def _between(org: m.Datasource, ft: str, tt: str) -> list[m.Relationship]:
 # --- the catalog queries ----------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["postgres", "supabase", "redshift", "mysql", "snowflake", "duckdb",
+# Snowflake's is a SHOW command, whose rows its dialect reshapes (test_snowflake_keys.py).
+@pytest.mark.parametrize("key", ["postgres", "supabase", "redshift", "mysql", "duckdb",
                                  "databricks", "trino", "sqlserver", "bigquery", "oracle"])
 def test_every_fk_query_returns_the_key_name_and_column_position(key):
     sql = D.get_dialect(key).sql_foreign_keys("s")
@@ -200,13 +201,23 @@ def _fk_rows(named: bool) -> list[dict]:
             row("order_id", "order_lines", "order_id", "fk_lines", 1)]
 
 
+def _as_show_row(r: dict) -> dict:
+    """A canonical FK row as Snowflake's SHOW IMPORTED KEYS spells it."""
+    return {"pk_schema_name": r["to_schema"], "pk_table_name": r["to_table"], "pk_column_name": r["to_column"],
+            "fk_schema_name": r["from_schema"], "fk_table_name": r["from_table"],
+            "fk_column_name": r["from_column"], "fk_name": r.get("constraint_name"),
+            "key_sequence": r.get("key_ordinal")}
+
+
 def _build(key: str, rows: list[dict]) -> tuple[list[m.Relationship], I.IntrospectReport]:
     dialect = D.get_dialect(key)
     tables = _tables()
     fk_sql = {dialect.sql_foreign_keys_for_table("shipments") if key == "sqlite" else dialect.sql_foreign_keys("s")}
 
     def run(sql: str) -> list[dict]:
-        return [dict(r) for r in rows] if sql in fk_sql else []
+        if sql not in fk_sql:
+            return []
+        return [_as_show_row(r) if key == "snowflake" else dict(r) for r in rows]
 
     report = I.IntrospectReport(profile="p", db_type=key, out_dir="", dry_run=True)
     pairs = [("shipments", "shipments")] if key == "sqlite" else [("s", t.name) for t in tables]
@@ -296,7 +307,7 @@ def _build_old_catalog(key: str, rows: list[dict], *, paired_fails: bool = True)
     return rels, report, calls
 
 
-@pytest.mark.parametrize("key", ["redshift", "snowflake", "duckdb", "databricks"])
+@pytest.mark.parametrize("key", ["redshift", "duckdb", "databricks"])
 def test_a_failing_paired_query_falls_back_to_the_older_one_for_single_column_keys(key):
     rels, report, _ = _build_old_catalog(key, _unpaired_rows())
     assert report.mode_per_capability["relationships"] == "catalog"
