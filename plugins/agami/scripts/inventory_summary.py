@@ -27,7 +27,22 @@ Keep (writes the file, one `schema.table` per line, in inventory order):
 
     inventory_summary.py --inventory <inventory.json> --keep <choice> --tables-out <file>
     <choice> = all | drop_noise | schemas:<a,b> | names:<file of table names, one per line>
+             | page:<the table picker's decisions file> | pick:<file of what was typed in Other>
     -> {"tables_file": "<file>", "kept": n}
+
+`page:` reads what the table picker page saved through `serve_page.py --decisions` (#654):
+`{"page": "tables", "profile": <the inventory's profile>, "keep": ["schema.table", ...]}`. Nothing
+in it is trusted: any other key, another page or profile, or a name that is not a table of the
+inventory refuses the whole file (exit 1, nothing written).
+
+`pick:` reads the fallback list's answer, typed in Other after `--numbered`: numbers and ranges from
+that list (`1-12, 15`), patterns (`all crm_*`, `sales.*`), table or schema names, separated by commas,
+and an optional leading `everything except` (or `all except`, `all but`) that keeps the rest instead.
+
+Numbered (the fallback list, when the page can't open):
+
+    inventory_summary.py --inventory <inventory.json> --numbered
+    -> {"tables": n, "list": "<text: a line per schema, then one numbered line per table>"}
 
 Show (a list for the chat, when the person asks what is in a schema or a table):
 
@@ -254,10 +269,154 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
         if unmatched or ambiguous:
             return [], {"unmatched": unmatched, "ambiguous": ambiguous}
         return [q for q in qualified if q in picked], None
+    if choice.startswith("page:"):
+        return _from_page(inventory, choice[len("page:") :])
+    if choice.startswith("pick:"):
+        text = Path(choice[len("pick:") :]).expanduser().read_text(encoding="utf-8")
+        return pick(inventory, text)
     return [], {
         "unmatched": [choice],
-        "error": "choice must be all, drop_noise, schemas:<a,b> or names:<file>",
+        "error": "choice must be all, drop_noise, schemas:<a,b>, names:<file>, page:<file> or pick:<file>",
     }
+
+
+_PAGE_KEYS = {"page", "profile", "keep"}
+
+
+def _from_page(inventory: dict, path: str) -> tuple[list[str], dict | None]:
+    """The tables the picker page saved, checked against the inventory before anything is written."""
+    try:
+        doc = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        return [], {"error": "the page's decisions file can't be read as JSON"}
+    if not isinstance(doc, dict):
+        return [], {"error": "the page's decisions file is not a JSON object"}
+    if set(doc) != _PAGE_KEYS:
+        odd = sorted(set(doc) ^ _PAGE_KEYS)
+        return [], {"error": f"the page's decisions file has unexpected or missing keys: {odd}"}
+    if doc["page"] != "tables":
+        return [], {"error": f"this decisions file is from the {doc['page']!r} page, not the table picker"}
+    if doc["profile"] != inventory.get("profile"):
+        return [], {"error": "this decisions file is for another database's inventory"}
+    keep = doc["keep"]
+    if not isinstance(keep, list) or not all(isinstance(k, str) for k in keep):
+        return [], {"error": "keep is not a list of table names"}
+    qualified = [_qualified(t) for t in inventory.get("tables") or []]
+    known = set(qualified)
+    unmatched = list(dict.fromkeys(k for k in keep if k not in known))
+    if unmatched:
+        return [], {"unmatched": unmatched}
+    wanted = set(keep)
+    return [q for q in qualified if q in wanted], None
+
+
+_EXCEPT = re.compile(
+    r"^\s*(?:(?:keep\s+)?(?:everything|all(?:\s+tables)?)\s+)?(?:except|but\s+not|but)\b\s*", re.I
+)
+_RANGE = re.compile(r"^(\d+)\s*(?:-|\u2013|to)\s*(\d+)$", re.I)
+_EVERYTHING = {"everything", "all", "all tables"}
+
+
+def _glob(pattern: str) -> re.Pattern:
+    """`*` and `?` as wildcards, every other character as itself, without case."""
+    return re.compile(
+        "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern) + r"\Z",
+        re.I,
+    )
+
+
+def _token(tok: str, tables: list[dict]) -> tuple[list[str], list[str] | None]:
+    """→ (the `schema.table` names one typed token means, the tables it could mean when ambiguous)."""
+    qualified = [_qualified(t) for t in tables]
+    if tok.lower() in _EVERYTHING:
+        return qualified, None
+    if tok.isdigit():
+        n = int(tok)
+        return ([qualified[n - 1]] if 1 <= n <= len(qualified) else []), None
+    m = _RANGE.match(tok)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        return (qualified[a - 1 : b] if 1 <= a <= b <= len(qualified) else []), None
+    if tok.lower().startswith("all "):
+        tok = tok[4:].strip()
+    if "*" in tok or "?" in tok:
+        rx = _glob(tok)
+        return [q for t, q in zip(tables, qualified) if rx.match(q) or rx.match(t["table"])], None
+    full = [q for q in qualified if q.lower() == tok.lower()]
+    bare = [q for t, q in zip(tables, qualified) if t["table"].lower() == tok.lower()]
+    if full or len(bare) == 1:
+        return full or bare, None
+    if bare:
+        return [], bare
+    return [q for t, q in zip(tables, qualified) if (t.get("schema") or "").lower() == tok.lower()], None
+
+
+def pick(inventory: dict, text: str) -> tuple[list[str], dict | None]:
+    """What was typed against the numbered list → (kept names in inventory order, problem or None).
+    Every token must mean at least one table; one that means nothing, or several same-named tables,
+    is reported and nothing is kept."""
+    tables = inventory.get("tables") or []
+    m = _EXCEPT.match(text)
+    body = text[m.end() :] if m else text
+    hits: set[str] = set()
+    unmatched, ambiguous = [], {}
+    for raw in re.split(r"[,;\n]+", body):
+        tok = raw.strip().strip("\"'`").strip()
+        if not tok:
+            continue
+        got, could_be = _token(tok, tables)
+        if could_be:
+            ambiguous[tok] = could_be
+        elif not got:
+            unmatched.append(tok)
+        hits.update(got)
+    if unmatched or ambiguous:
+        return [], {"unmatched": unmatched, "ambiguous": ambiguous}
+    qualified = [_qualified(t) for t in tables]
+    return [q for q in qualified if (q in hits) != bool(m)], None
+
+
+def picker_rows(inventory: dict) -> list[dict]:
+    """Every table as the picker page and the numbered list show it, in inventory order: its name,
+    column count, row estimate (None when the catalog keeps none) and, for a likely copy, why."""
+    tables = inventory.get("tables") or []
+    names = {_norm(_words(t["table"])) for t in tables}
+    rows = []
+    for n, t in enumerate(tables, 1):
+        why = noise_reason(t["table"], t.get("schema") or "", names)
+        rows.append(
+            {
+                "n": n,
+                "schema": t.get("schema") or "",
+                "table": t["table"],
+                "name": _qualified(t),
+                "columns": len(t.get("columns") or []),
+                "rows": t.get("rows") if isinstance(t.get("rows"), int) else None,
+                "why": why,
+                "copy_of": copy_of(t, tables) if why else None,
+            }
+        )
+    return rows
+
+
+def numbered(inventory: dict) -> dict:
+    """The fallback list for the chat: a line per schema, then each of its tables with its number."""
+    lines, schema = [], None
+    rows = picker_rows(inventory)
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["schema"]] = counts.get(r["schema"], 0) + 1
+    width = len(str(len(rows)))
+    for r in rows:
+        if r["schema"] != schema:
+            schema = r["schema"]
+            lines.append(f"{schema or '(no schema)'}: {counts[schema]} tables")
+        size = f", about {r['rows']:,} rows" if r["rows"] is not None else ""
+        flag = ""
+        if r["why"]:
+            flag = f"  [likely copy of {r['copy_of']}]" if r["copy_of"] else f"  [{r['why']}]"
+        lines.append(f"  {r['n']:>{width}}. {r['table']} ({r['columns']} columns{size}){flag}")
+    return {"tables": len(rows), "list": "\n".join(lines)}
 
 
 MAX_SHOW_ROWS = 15
@@ -361,10 +520,15 @@ def main(argv: list[str] | None = None) -> int:
         description="Summarise a discover inventory; write the kept-tables file."
     )
     ap.add_argument("--inventory", required=True, help="inventory.json written by `sm discover`")
-    ap.add_argument("--keep", help="all | drop_noise | schemas:<a,b> | names:<file>")
+    ap.add_argument(
+        "--keep", help="all | drop_noise | schemas:<a,b> | names:<file> | page:<file> | pick:<file>"
+    )
     ap.add_argument("--tables-out", help="where --keep writes the kept schema.table list")
     ap.add_argument("--show", help="a schema (its tables) or a table (its columns), for the chat")
     ap.add_argument("--check-columns", help="file of schema.table.column names to leave out")
+    ap.add_argument(
+        "--numbered", action="store_true", help="every table, numbered, for the fallback list"
+    )
     ap.add_argument(
         "--used-by",
         action="append",
@@ -378,6 +542,9 @@ def main(argv: list[str] | None = None) -> int:
         result, ok = show(inventory, args.show)
         print(json.dumps(result, indent=2))
         return 0 if ok else 1
+    if args.numbered:
+        print(json.dumps(numbered(inventory), indent=2))
+        return 0
     if args.check_columns:
         found, unmatched = check_columns(inventory, _read_names(args.check_columns))
         print(json.dumps({"unmatched": unmatched} if unmatched else {"exclude_columns": found}))

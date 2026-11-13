@@ -1,0 +1,281 @@
+<!doctype html>
+<!-- The table picker (#654): rendered by scripts/render_table_picker.py and served once by
+     scripts/serve_page.py --decisions on 127.0.0.1. Self-contained on purpose: no fonts, images or
+     files from anywhere, and its scripts are allowed by their hash. Every table name is data in the
+     JSON block below and reaches the page only as text (textContent), never as markup. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>agami: pick the tables for {{PROFILE}}</title>
+<style>
+  :root {
+    color-scheme: light;
+    --brand: #0b57d0;
+    --brand-hover: #0a4ab1;
+    --tint: #eff4fc;
+    --tint-2: #dde8f7;
+    --ink: #262626;
+    --ink-2: #525252;
+    --ink-3: #737373;
+    --line: #e5e5e5;
+    --warn: #8a5a00;
+    --warn-bg: #fff6e0;
+    --ok: #1e6b3a;
+    --bad: #a12b2b;
+    --sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #ffffff; color: var(--ink); font: 15px/1.5 var(--sans); }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 24px 120px; }
+  .logo svg { display: block; height: 26px; width: auto; margin-bottom: 20px; }
+  h1 { font-size: 22px; line-height: 1.3; margin: 0 0 6px; }
+  .lede { margin: 0 0 18px; color: var(--ink-2); }
+  code, .name { font-family: var(--mono); font-size: 13.5px; }
+  .note { margin: 0 0 18px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--tint-2);
+          background: var(--tint); color: var(--ink); }
+  .note:empty { display: none; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0 0 18px; }
+  .tools input[type="search"] { flex: 1 1 260px; font: inherit; padding: 8px 12px; border: 1px solid #a3a3a3;
+          border-radius: 8px; }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; }
+  .quiet { background: #ffffff; color: var(--brand); border: 1px solid var(--tint-2); padding: 6px 12px; font-size: 14px; }
+  .quiet:hover { background: var(--tint); }
+  .quiet:disabled { color: var(--ink-3); cursor: default; background: #ffffff; }
+  section.schema { margin: 0 0 22px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  section.schema > header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 14px;
+          background: var(--tint); border-bottom: 1px solid var(--tint-2); }
+  section.schema h2 { font-size: 15px; margin: 0; flex: 1 1 auto; }
+  .count { color: var(--ink-2); font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12.5px; font-weight: 600; color: var(--ink-3); padding: 6px 14px;
+       border-bottom: 1px solid var(--line); }
+  th.num, td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; width: 1%; }
+  td { padding: 6px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td label { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+  td input { margin-top: 3px; accent-color: var(--brand); }
+  .unknown { color: var(--ink-3); }
+  .flag { display: inline-block; margin-top: 2px; font-size: 12.5px; color: var(--warn); background: var(--warn-bg);
+          border-radius: 6px; padding: 1px 7px; }
+  .none { color: var(--ink-3); margin: 8px 0 18px; }
+  footer { position: fixed; left: 0; right: 0; bottom: 0; background: #ffffff; border-top: 1px solid var(--line); }
+  footer .bar { max-width: 860px; margin: 0 auto; padding: 12px 24px; display: flex; gap: 16px;
+          align-items: center; flex-wrap: wrap; }
+  #total { flex: 1 1 auto; font-weight: 600; }
+  #save { color: #ffffff; background: var(--brand); border: 0; padding: 10px 18px; font-weight: 600; }
+  #save:hover { background: var(--brand-hover); }
+  #save:disabled { background: #a3a3a3; cursor: default; }
+  #status { flex-basis: 100%; margin: 0; font-weight: 600; }
+  #status:empty { display: none; }
+  #status.ok { color: var(--ok); }
+  #status.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <div class="logo" aria-label="agami">{{LOGO}}</div>
+  <h1>Which tables should agami model?</h1>
+  <p class="lede">Tick the tables to keep for <code>{{PROFILE}}</code>, then press <strong>Save tables</strong>.
+    Your pick goes straight to the chat, which builds the model from those tables only.
+    The page saves once, and stops working when its time is up.</p>
+  <p class="note" id="noise-note" role="note"></p>
+  <div class="tools">
+    <input type="search" id="search" placeholder="Search tables" aria-label="Search tables" autocomplete="off">
+    <button type="button" class="quiet" id="all-shown">Select all shown</button>
+    <button type="button" class="quiet" id="none-shown">Select none shown</button>
+  </div>
+  <p class="none" id="no-match" hidden>No table matches that search.</p>
+  <div id="schemas"></div>
+</main>
+<footer>
+  <div class="bar">
+    <span id="total" role="status" aria-live="polite"></span>
+    <button type="button" id="save">Save tables</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </div>
+</footer>
+<script type="application/json" id="agami-tables">{{DATA}}</script>
+<script>
+(function () {
+  var data = JSON.parse(document.getElementById('agami-tables').textContent);
+  var rows = [];      // {t, box, tr, section}
+  var sections = [];  // {name, el, count, rows}
+  var state = 'idle';
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = text;  // text only, never markup
+    return n;
+  }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : many); }
+
+  function flagText(t) {
+    return t.copy_of ? 'Likely a copy of ' + t.copy_of : 'Looks like staging or a backup: ' + t.why;
+  }
+
+  function build() {
+    var host = document.getElementById('schemas');
+    var bySchema = {};
+    data.tables.forEach(function (t) {
+      var s = bySchema[t.schema];
+      if (!s) {
+        s = { name: t.schema, rows: [] };
+        s.el = el('section', 'schema');
+        var head = el('header');
+        head.appendChild(el('h2', null, t.schema || 'Tables'));
+        s.count = el('span', 'count');
+        head.appendChild(s.count);
+        var all = el('button', 'quiet', 'Select all');
+        var none = el('button', 'quiet', 'Select none');
+        all.type = none.type = 'button';
+        all.setAttribute('aria-label', 'Select all shown tables in ' + (t.schema || 'this list'));
+        none.setAttribute('aria-label', 'Select none of the shown tables in ' + (t.schema || 'this list'));
+        all.addEventListener('click', function () { setShown(s.rows, true); });
+        none.addEventListener('click', function () { setShown(s.rows, false); });
+        head.appendChild(all);
+        head.appendChild(none);
+        s.el.appendChild(head);
+        var table = el('table');
+        var hr = el('tr');
+        hr.appendChild(el('th', null, 'Table'));
+        hr.appendChild(el('th', 'num', 'Rows'));
+        hr.appendChild(el('th', 'num', 'Columns'));
+        var thead = el('thead');
+        thead.appendChild(hr);
+        table.appendChild(thead);
+        s.body = el('tbody');
+        table.appendChild(s.body);
+        s.el.appendChild(table);
+        host.appendChild(s.el);
+        bySchema[t.schema] = s;
+        sections.push(s);
+      }
+      var tr = el('tr');
+      var td = el('td');
+      var label = el('label');
+      var box = el('input');
+      box.type = 'checkbox';
+      box.checked = !(t.why && data.noise_all_copies);
+      box.addEventListener('change', update);
+      label.appendChild(box);
+      var words = el('span');
+      words.appendChild(el('span', 'name', t.table));
+      if (t.why) {
+        words.appendChild(el('br'));
+        words.appendChild(el('span', 'flag', flagText(t)));
+      }
+      label.appendChild(words);
+      td.appendChild(label);
+      tr.appendChild(td);
+      var r = el('td', 'num' + (t.rows === null ? ' unknown' : ''),
+                 t.rows === null ? '—' : Number(t.rows).toLocaleString('en-US'));
+      if (t.rows === null) r.title = 'Not known: the database keeps no estimate for this table';
+      tr.appendChild(r);
+      tr.appendChild(el('td', 'num', String(t.columns)));
+      s.body.appendChild(tr);
+      var row = { t: t, box: box, tr: tr, section: s };
+      s.rows.push(row);
+      rows.push(row);
+    });
+    var flagged = data.tables.filter(function (t) { return t.why; }).length;
+    if (flagged) {
+      document.getElementById('noise-note').textContent = plural(flagged, 'table looks', 'tables look') +
+        ' like staging or backup copies and ' + (flagged === 1 ? 'is' : 'are') + ' marked below. ' +
+        (data.noise_all_copies
+          ? 'Each copies another table, so they start unticked.'
+          : 'Not every one has an original beside it, so they start ticked: untick the ones you don’t need.');
+    }
+  }
+
+  function shown(row) { return !row.tr.hidden; }
+
+  function setShown(list, on) {
+    if (state !== 'idle') return;
+    list.forEach(function (row) { if (shown(row)) row.box.checked = on; });
+    update();
+  }
+
+  function filter() {
+    var q = document.getElementById('search').value.trim().toLowerCase();
+    var any = false;
+    sections.forEach(function (s) {
+      var visible = 0;
+      s.rows.forEach(function (row) {
+        row.tr.hidden = !!q && row.t.name.toLowerCase().indexOf(q) === -1;
+        if (!row.tr.hidden) visible++;
+      });
+      s.el.hidden = visible === 0;
+      if (visible) any = true;
+    });
+    document.getElementById('no-match').hidden = any;
+    update();
+  }
+
+  function kept() { return rows.filter(function (row) { return row.box.checked; }); }
+
+  function update() {
+    sections.forEach(function (s) {
+      var k = s.rows.filter(function (row) { return row.box.checked; }).length;
+      s.count.textContent = k + ' of ' + plural(s.rows.length, 'table', 'tables') + ' kept';
+    });
+    var n = kept().length;
+    document.getElementById('total').textContent = 'Keeping ' + n + ' of ' + plural(rows.length, 'table', 'tables');
+    if (state === 'idle') {
+      document.getElementById('save').disabled = n === 0;
+      say(n === 0 ? 'Pick at least one table to save.' : '', n === 0 ? 'bad' : '');
+    }
+  }
+
+  function say(text, kind) {
+    var s = document.getElementById('status');
+    s.textContent = text;
+    s.className = kind || '';
+  }
+
+  function lock(on) {
+    rows.forEach(function (row) { row.box.disabled = on; });
+    document.querySelectorAll('button').forEach(function (b) { b.disabled = on; });
+  }
+
+  function save() {
+    var keep = kept().map(function (row) { return row.t.name; });
+    if (state !== 'idle' || keep.length === 0) return;
+    state = 'saving'; lock(true); say('Saving…');
+    fetch('save', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ page: 'tables', profile: data.profile, keep: keep }),
+                    cache: 'no-store', credentials: 'omit' })
+      .then(function (r) { return r.json().catch(function () { return {}; })
+        .then(function (b) { return { ok: r.ok, status: r.status, b: b }; }); })
+      .then(function (res) {
+        if (res.ok) {
+          state = 'saved';
+          say('Saved: keeping ' + keep.length + ' of ' + plural(rows.length, 'table', 'tables') +
+              '. Go back to the chat and press I’ve saved it.', 'ok');
+          return;
+        }
+        // Already saved or expired cannot change, so the page stays locked; anything else can be retried.
+        state = (res.status === 409 || res.status === 410) ? 'over' : 'idle';
+        if (state === 'idle') { lock(false); update(); }
+        say((res.b && res.b.message) || ('Not saved (' + res.status + ').'), 'bad');
+      })
+      .catch(function () {
+        state = 'idle'; lock(false); update();
+        say('Not saved: this page could not reach agami. If the chat has moved on, ask there for a new link.', 'bad');
+      });
+  }
+
+  build();
+  document.getElementById('search').addEventListener('input', filter);
+  document.getElementById('all-shown').addEventListener('click', function () { setShown(rows, true); });
+  document.getElementById('none-shown').addEventListener('click', function () { setShown(rows, false); });
+  document.getElementById('save').addEventListener('click', save);
+  update();
+})();
+</script>
+</body>
+</html>

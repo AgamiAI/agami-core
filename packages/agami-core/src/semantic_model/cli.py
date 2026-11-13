@@ -1925,6 +1925,7 @@ def cmd_discover(args) -> int:
         tables=args.tables,
         schemas=args.schemas,
         bigquery_region=args.bigquery_region,
+        row_estimates=args.row_estimates,
     )
 
     artifacts = Path(args.artifacts).expanduser()
@@ -2322,6 +2323,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--schemas", nargs="*", default=None,
                     help="restrict discovery to these schemas (the user's schema pick)")
     sp.add_argument("--bigquery-region", default="region-us", dest="bigquery_region")
+    sp.add_argument("--row-estimates", action="store_true", dest="row_estimates",
+                    help="add each table's row estimate from one catalog-statistics read, where the "
+                         "database keeps one (never a count) — for the table picker page")
     sp.set_defaults(func=cmd_discover)
 
     return p

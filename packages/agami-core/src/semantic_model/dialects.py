@@ -348,6 +348,22 @@ class Dialect:
         engine has never analysed). Read-only, and bounded like every other introspection read."""
         return f"SELECT COUNT(*) AS estimated_rows FROM {self.qualified(schema, table)}"
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        """Every table's row estimate across `schemas` from the catalog statistics, in ONE query
+        (`table_schema, table_name, estimated_rows`), for the table picker (#654). Never a count:
+        None where the catalog keeps no estimate, and the picker then shows the size as unknown."""
+        return None
+
+    def _row_estimates_from(self, source: str, rows: str, schema_col: str, table_col: str,
+                            schemas: list[str]) -> Optional[str]:
+        if not schemas:
+            return None
+        inlist = ", ".join(self.quote_lit(s) for s in schemas)
+        return (
+            f"SELECT {schema_col} AS table_schema, {table_col} AS table_name, "
+            f"{rows} AS estimated_rows FROM {source} WHERE {schema_col} IN ({inlist})"
+        )
+
     # --- declared value lists (#517) ---
 
     def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
@@ -503,6 +519,14 @@ class PostgreSQL(Dialect):
             f"AND c.relname = {self.quote_lit(table)}"
         )
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        # Tables, partitioned tables, materialized views and foreign tables; a view has no estimate.
+        q = self._row_estimates_from(
+            "pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace",
+            "c.reltuples::bigint", "n.nspname", "c.relname", schemas,
+        )
+        return q and q + " AND c.relkind IN ('r', 'p', 'm', 'f')"
+
     # From the pg_* catalog for the same reason as the keys: any role can read it.
     def sql_enum_values(self, schema: str, table: str) -> Optional[str]:
         return (
@@ -602,6 +626,10 @@ class Redshift(PostgreSQL):
                            end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        return self._row_estimates_from(
+            "svv_table_info", "tbl_rows", '"schema"', '"table"', schemas)
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT tbl_rows AS estimated_rows FROM svv_table_info "
@@ -673,6 +701,10 @@ class MySQL(Dialect):
             "ORDER BY table_name, constraint_name, ordinal_position"
         )
 
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        return self._row_estimates_from(
+            "information_schema.tables", "table_rows", "table_schema", "table_name", schemas)
+
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (
             "SELECT table_rows AS estimated_rows FROM information_schema.tables "
@@ -735,6 +767,10 @@ class Snowflake(Dialect):
     def duration_days_expr(self, start: str, end: str, *, start_type: str = "timestamp",
                            end_type: str = "timestamp") -> str:
         return f"DATEDIFF('day', {start}, {end})"
+
+    def sql_row_estimates_bulk(self, schemas: list[str]) -> Optional[str]:
+        return self._row_estimates_from(
+            "information_schema.tables", "row_count", "table_schema", "table_name", schemas)
 
     def sql_row_estimate(self, schema: str, table: str) -> Optional[str]:
         return (

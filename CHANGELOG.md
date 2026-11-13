@@ -14,6 +14,21 @@ below corresponds to one such version.
 
 ### Added
 
+- **Pick the tables to model from a list (#654).** Connecting a 46-table schema offered "keep
+  everything" or typing the names. The tables card now offers **Pick from a list** (recommended
+  past 10 tables): a one-time page on `127.0.0.1`, served by the same helper as the review pages,
+  listing every table by schema with its row estimate and column count, a search box, select all /
+  none per schema, and the likely staging and backup copies marked (unticked when each copies
+  another table). **Save tables** sends the pick to the helper; `inventory_summary.py --keep
+  page:<file>` checks it (the picker's page and database, no other keys, only tables the inventory
+  holds) and writes the same `agami-keep.txt` as the card's other answers, and the chat says
+  "Keeping N of M tables." Where a page can't open, `--numbered` lists the tables in the chat and
+  `--keep pick:<file>` reads numbers, ranges and patterns typed in Other (`1-12, 15`, `all crm_*`,
+  `everything except audit_*`); typed names on the main card go the same way. `sm discover
+  --row-estimates` reads every table's size from one catalog-statistics query on Postgres,
+  Supabase, Redshift, MySQL and Snowflake (never a count); elsewhere the size shows as unknown.
+  Every table name reaches the page as escaped data and is shown as text.
+
 - **Review pages save their own decisions, like the password page (#651).** Every review or
   sign-off question now offers **Review on a page** (the seed examples card: **Mark them on a
   page**), on every question of a card rather than the first. The model explorer opens on the list

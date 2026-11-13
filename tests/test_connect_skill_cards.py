@@ -795,3 +795,62 @@ def test_6_with_add_my_own_drop_the_failing_ones_gives_way():
 
 def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
     assert 'Each of its approve ops carries `"bulk": true`.' in _phase_4()
+
+
+# --- 1.6p: pick from a list, on a page that saves itself (#654) ---------------------------------
+
+
+def _section_16p() -> str:
+    return _between("### 1.6p ", "### 1.7 ")
+
+
+def _tables_card() -> list[str]:
+    s = _section_16()
+    i = s.index("Then call AskUserQuestion, one question (header `Tables`)")
+    lines = s[i:].splitlines()[2:]
+    return [ln for ln in lines[: next(n for n, ln in enumerate(lines) if not ln.startswith("- **"))]]
+
+
+def test_1_6_offers_pick_from_a_list_within_four_options():
+    options = _tables_card()
+    assert len(options) == 4
+    assert [o.split("**")[1] for o in options] == [
+        "Pick from a list", "Keep everything", "Drop staging and backups", "Only some schemas"]
+    assert "more than 10 tables" in options[0] and "(Recommended)" in options[0]
+    # one recommendation at a time: dropping the copies is recommended only on a small catalog
+    assert "With 10 tables or fewer, mark it **(Recommended)**" in options[2]
+
+
+def test_1_6_takes_typed_names_in_the_question_not_as_an_option():
+    s = _section_16()
+    card = s[s.index("(header `Tables`)"):]
+    assert card.splitlines()[0].endswith('Or type table names or patterns in Other, like orders, customers or all crm_*."*:')
+    assert "--keep pick:" in s and "there is no option for it" in s
+
+
+def test_1_6p_serves_the_picker_with_the_saving_helper_and_writes_through_keep():
+    s = _section_16p()
+    for step in ("SSH_CONNECTION", "render_table_picker.py", "serve_page.py", "--decisions",
+                 "run_in_background", "Monitor tool", "never a foreground sleep",
+                 "**I've saved it** / **Back to the cards**", "TaskStop",
+                 '--keep page:"<decisions file>"', "agami-keep.txt", '"Keeping <kept> of <N> tables."',
+                 '{"status": "expired"}', "never edit the file"):
+        assert step in s, step
+    assert s.index("reads the helper's output first") < s.index("TaskStop")
+
+
+def test_1_6p_falls_back_to_a_numbered_list_typed_in_other():
+    s = _section_16p()
+    fallback = s[s.index("**The numbered list**"):]
+    assert "--numbered" in fallback and "--keep pick:" in fallback
+    q = next(ln for ln in fallback.splitlines() if "(header `Table pick`)" in ln)
+    # what to type is in the question (rule 5), and the options are the alternatives to typing
+    assert "Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*." in q
+    assert "**Keep everything** / **Drop staging and backups**" in q and "Type" not in q.split(":", 1)[1].split("**")[1]
+    assert "Past 200 tables" in fallback
+
+
+def test_1_6p_headers_are_new_and_fit_a_card():
+    s = _section_16p()
+    for h in ("Table list", "Table pick"):
+        assert f"header `{h}`" in s and len(h) <= 12
