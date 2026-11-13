@@ -9,7 +9,8 @@ script does the parse + the exclude/include → curate-op translation, so the sk
 just reads structured output and applies it via `sm curate` / `sm add` /
 `sm set-terminology`.
 
-Input (stdin or --block-file):
+Input (stdin or --block-file): the block below, or the decisions file a saving page wrote through
+`serve_page.py --decisions`, whose `block` holds the same text (#651).
 
     profile: <name>
     exclude tables:  <area>.<table>, <area>.<table>
@@ -181,12 +182,54 @@ def parse(text: str) -> tuple[dict, list, dict | None]:
     return data, anomalies, needs
 
 
+def decisions_file(text: str) -> dict | None:
+    """The decisions file a saving page posted to `serve_page.py --decisions`
+    (`{"page": "model-explorer", "profile": .., "block": ..}`), or None for a pasted block, which never
+    starts with `{`."""
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    return doc if isinstance(doc, dict) and isinstance(doc.get("block"), str) else None
+
+
+def block_text(text: str) -> str:
+    """The feedback block in `text`: the text itself, or the `block` of a saving page's decisions file."""
+    doc = decisions_file(text)
+    return doc["block"] if doc else text
+
+
+def check_decisions(doc: dict, data: dict, expect_profile: str | None) -> str | None:
+    """Why a saving page's decisions file can't be applied to `expect_profile`, or None. A post names
+    its page and its model itself, so neither is trusted: both must be what the skill rendered."""
+    if not expect_profile:
+        return "a decisions file needs --expect-profile, the profile the page was rendered for"
+    if doc.get("page") != "model-explorer":
+        return f"this decisions file is from the {doc.get('page')!r} page, not the model explorer"
+    if doc.get("profile") != expect_profile or data.get("profile") != expect_profile:
+        return f"this decisions file is for another model than {expect_profile}"
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Parse the agami-model back-channel feedback block.")
-    ap.add_argument("--block-file", help="path to the pasted block (else stdin)")
+    ap.add_argument("--block-file", help="path to the pasted block, or the decisions file a saving page "
+                                         "wrote through serve_page.py --decisions (else stdin)")
+    ap.add_argument("--expect-profile", help="with a decisions file: the profile the page was rendered "
+                                             "for; a file naming another page or model is refused")
     args = ap.parse_args(argv)
     text = Path(args.block_file).read_text(encoding="utf-8") if args.block_file else sys.stdin.read()
-    data, anomalies, needs = parse(text)
+    doc = decisions_file(text)
+    data, anomalies, needs = parse(doc["block"] if doc else text)
+    if doc:
+        problem = check_decisions(doc, data, args.expect_profile)
+        if problem:
+            print(json.dumps({"ok": False, "error": problem}))
+            return 2
+        # A page signs as the identity saved in local/.config, never as one named in what it posted.
+        data["signer"] = data["role"] = None
     print(json.dumps({"ok": True, "data": data, "anomalies": anomalies, "needs_judgment": needs}, indent=2))
     return 0
 

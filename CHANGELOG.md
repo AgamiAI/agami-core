@@ -14,6 +14,25 @@ below corresponds to one such version.
 
 ### Added
 
+- **Review pages save their own decisions, like the password page (#651).** Every review or
+  sign-off question now offers **Review on a page** (the seed examples card: **Mark them on a
+  page**), on every question of a card rather than the first. The model explorer opens on the list
+  the card asked about (`--initial-tab review --section metrics|entities|joins`, or
+  `--initial-tab pii`, whose columns can now be hidden there); the person decides the whole list
+  and presses **Save decisions**. The page posts to `serve_page.py --decisions`, a one-time helper
+  on `127.0.0.1` (random port, a token in the URL, one JSON post of at most 1 MiB from the page's
+  own origin, 30 minutes), which writes the decisions to a file and exits; the chat applies them
+  with the same commands a card uses (`parse_model_feedback.py` and `sm curate` for the explorer,
+  `sm add-example` / `sm remove-example` / `sm seed-validate` for the examples), signed as the
+  saved sign-off identity, which the page shows and cannot change, and says back what changed in
+  one line. Nothing is copied or pasted. A remote or SSH session, or a helper that can't start,
+  stays on the cards and says why. A page that only shows something keeps its banner, which now
+  says nothing on it is saved. The helper allows only the page's own scripts (by hash), gives a
+  post 10 seconds in all and serves at most 8 connections; what a page saved is checked before it
+  is applied (`parse_model_feedback.py --expect-profile`, the new `parse_examples_decisions.py`),
+  and neither a page nor its post can choose the signer. The password helper's credentials rewrite
+  no longer follows a link planted at its temporary file's name.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
@@ -74,6 +93,11 @@ below corresponds to one such version.
   refused.
 
 ### Changed
+
+- **A bulk sign-off never signs an unseen item (#651).** "Approve all remaining", and "Approve
+  all" over more than the 15 rows its table shows, first list the items not yet shown and ask once
+  more. Each op of a bulk sign-off, on a card or the page's "Approve N", carries `"bulk": true`
+  into `curation_log.jsonl`.
 
 - **Every agami decision is a question card in the chat; no page opens on its own and nothing is
   pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and

@@ -215,12 +215,42 @@ def test_a_review_started_from_connect_returns_to_its_starter_questions():
     assert "agami-connect" in _review() and "Phase 8" in _review()
 
 
-def test_review_cards_offer_the_full_view_and_come_back_to_the_card() -> None:
-    # Tester feedback: the explorer opened only when "show the full view" was typed in Other.
+def test_review_cards_offer_a_page_that_saves_on_every_question() -> None:
+    # Tester feedback: the explorer opened only when "show the full view" was typed in Other. Then
+    # (#651): the page was offered on the first question of a card only, and could not take a decision.
     review = _review()
-    assert review.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
-    assert "| Show the full view | Phase 5, then this card again. |" in review
+    assert review.count("- **Review on a page**") == 2      # the Sign-off card and the item cards
+    assert "| Review on a page | Phase 5 with `initial_tab=review`, then this card again, recounted. |" in review
+    assert "Offer it on every question of the card, not only the first" in review
+    assert "first question only" not in _text()
     assert "Then ask again the card it was picked on" in _full_view()
+
+
+def test_the_full_view_saves_through_the_helper_and_applies_with_the_same_commands() -> None:
+    s = _full_view()
+    assert "--save-to-helper" in s and "--read-only" not in s
+    assert "serve_page.py" in s and "--decisions" in s
+    assert "question-cards.md#6a-a-page-that-saves-its-decisions" in s
+    assert "parse_model_feedback.py --block-file" in s
+    for deep_link in ("`metrics`, `entities`, `joins`", "`pii` from the personal-data question"):
+        assert deep_link in s, deep_link
+    # who signs is the saved identity, never what a page sends
+    assert "the signer is the saved `reviewer_email` / `reviewer_role` from `.config`" in s
+    assert '--expect-profile "$profile"' in s and "drops the block's own `signed-off-by:` line" in s
+    # the say-back counts what the commands applied, not what the page claimed
+    assert "never from the page's own count" in s
+
+
+def test_a_bulk_sign_off_lists_what_it_signs_first() -> None:
+    review = _review()
+    assert "a sign-off is never recorded for a definition the person hasn't seen" in review
+    assert '"bulk":true' in review
+    assert "list the ones the table above didn't show first" in review
+
+
+def test_the_personal_data_question_offers_the_page_when_the_list_is_long() -> None:
+    review = _review()
+    assert "**Review on a page** (Phase 5 with `initial_tab=pii`" in review
 
 
 def test_cards_name_tables_and_columns_in_words() -> None:
@@ -228,3 +258,11 @@ def test_cards_name_tables_and_columns_in_words() -> None:
     assert "**Email on Customers**" in text and "`customers.email`, or" not in text
     assert "item's `plain_name`" in text
     assert "**Orders (5: Orders, Order items, …)**" in _hide()
+
+
+def test_the_page_link_says_to_come_back_and_press_ive_saved_it() -> None:
+    assert "then come back here and press I've saved it" in _full_view()
+
+
+def test_approve_all_remaining_marks_its_ops_bulk() -> None:
+    assert 'Each of its approve ops carries `"bulk": true`.' in _review()

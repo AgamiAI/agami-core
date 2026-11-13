@@ -38,7 +38,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 
 - **Plan-mode check** — this skill writes YAMLs. If plan mode is active, refuse: *"I can't apply model edits in plan mode — switch to **Auto** or **Edit Automatically** mode (Shift+Tab to cycle) and re-invoke."* **Do NOT write a plan file. Do NOT call `ExitPlanMode`.**
 - **Resolve `<profile>` and `<artifacts_dir>`** via the standard chain (`AGAMI_PROFILE` → `<artifacts_dir>/local/.config.active_profile` → `default`; `AGAMI_ARTIFACTS_DIR` → `.config.artifacts_dir` → `~/agami-artifacts`). `ROOT="<artifacts_dir>/<profile>"`.
-  - **A pasted full-view block names its own target.** Its first line is `profile: <name>` — that page was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one page's approvals to whatever happens to be active (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named model, target it directly — don't fall back to `active_profile` or hunt with `find`.
+  - **A full-view block names its own target**, whether the page saved it (5b) or it was pasted from an older page. Its first line is `profile: <name>` — that page was rendered for THAT model, so **use it and override the active-profile default.** It prevents applying one page's approvals to whatever happens to be active (a *different* model). If `<artifacts_dir>/<profile>/datasource.yaml` exists for the named model, target it directly — don't fall back to `active_profile` or hunt with `find`.
 - **If `<artifacts_dir>/<profile>/datasource.yaml` doesn't exist**, invoke `agami-connect` and stop — there's no model yet. First rule out an `AGAMI_PROFILE` that names a database with no model ([`shared/file-layout.md`](../../shared/file-layout.md#when-agami_profile-names-a-database-with-no-model)): when it does, say so and stop instead.
 - **Verify Python + PyYAML are importable**: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import yaml'`. If not, surface the install hint and stop.
 
@@ -81,7 +81,7 @@ Then call AskUserQuestion, one question (header `Model`), *"What would you like 
 - **Review what needs sign-off**: approve or reject the definitions waiting (Phase 2). Mark it **(Recommended)** and put it first when anything needs sign-off; leave it out when nothing does.
 - **Hide tables or columns**: keep them out of every query (Phase 3).
 - **Look up a table or metric**: its description, columns and caveats, in the chat (Phase 4).
-- **Show the full view**: the model explorer page, served from localhost (Phase 5).
+- **Show the full view**: the model explorer page, served from localhost, where anything can also be changed and saved from the page (Phase 5).
 
 "Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), an edit ("add a metric: refund rate = refunds / captured payments", "describe orders.status as …"), or "done". Route it to the phase it asks for; an edit becomes `sm curate` edit ops, or `sm add --kind metric` for a new metric, applied as Phase 6 says, then shown back in one line; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
 
@@ -104,14 +104,14 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 - **Approve all**: sign off every item as listed. Mark it **(Recommended)** and put it first only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`. Otherwise put **Review one by one** first and mark that one (Recommended).
 - **Review one by one**: up to 4 items per card (below).
 - **Skip for now**: nothing is signed; they still work, and answers that use one carry a warning until it is signed off.
-- **Show the full view**: the model explorer page with every definition and its SQL, served from localhost (Phase 5); then this card again.
+- **Review on a page**: the model explorer's Review tab, where the whole list is decided at once and saved from the page (Phase 5); then this card again with what is left.
 
 | Answer | Do |
 |---|---|
-| Approve all | The identity card first if needed (Phase 0), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric or join), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
+| Approve all | The identity card first if needed (Phase 0). With more than 15 items, list the ones the table above didn't show first and confirm ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)). Then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>","bulk":true}` per item (leave `area` out when the item's `area` is null, a cross-area metric or join), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Back to the overview card. |
-| Show the full view | Phase 5, then this card again. |
+| Review on a page | Phase 5 with `initial_tab=review`, then this card again, recounted. |
 
 **Rule 1 guard.** A metric with an empty `Definition` can't be approved as it stands: on its card, ask for the definition in "Other" and apply it as an edit first.
 
@@ -119,8 +119,8 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 - **Approve**: sign it off as written.
 - **Reject**: drop it from the model (`{"op":"reject",…}`).
-- **Approve all remaining**: sign off this item and every item not yet shown. Every card carries it, so a long queue finishes in one press. Answers given on the same card to the other questions still stand.
-- **Show the full view**: the model explorer page, served from localhost (Phase 5); nothing about this item is decided, and the same card is asked again after the URL. On a card with several questions, offer it on the first question only.
+- **Approve all remaining**: sign off this item and every item not yet decided. The ones not yet shown are listed first and confirmed with one more question ([question-cards rule 4](../../shared/question-cards.md#4-lists-longer-than-a-card-holds-are-summarised)): a sign-off is never recorded for a definition the person hasn't seen. Each of its approve ops carries `"bulk": true`. Answers given on the same card to the other questions still stand.
+- **Review on a page**: the model explorer opened on this item's kind (Phase 5, `initial_tab=review` and `section` `metrics`, `entities` or `joins`), where the rest of the queue is decided at once and saved from the page. Offer it on every question of the card, not only the first. Answers given on the card's other questions are applied first; after the page, the next card holds only what is still undecided.
 
 After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
 
@@ -135,11 +135,11 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 Flagged and suspected columns are picked the same way:
 
 - 3 columns or fewer in all: one option per column, named by its `label`, **Email on Customers**, or **IP address on Customers (suspected)**; the identifier (`customers.email`) goes in the option's description.
-- More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns** and the 2 tables with the most listed columns.
+- More: grouped by table, one option per table with its count, the table and columns in words, **Customers (3: Email, Phone, IP address (suspected))**; picking a table hides every listed column in it, suspected ones included. With more than 3 tables, the options are **All <n> listed columns**, the table with the most listed columns, and **Review on a page** (Phase 5 with `initial_tab=pii`: every listed column on one page, each hidden, kept or marked there, saved from the page).
 - Always last: **Keep them all queryable**.
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** or **Review on a page** picked together with anything else, is said back and the same card asked again; never guess which column was meant.
 
 When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
 
@@ -199,67 +199,72 @@ Then back to the overview card.
 
 ## Phase 5: Show the full view
 
-The model explorer page, with every subject area, table, field, metric, entity, join and example, live search, the Review tab, edits, new metrics, and datasource.md. It is the only path that opens a page, and it is served from localhost, never as a `file://` page.
+The model explorer page, with every subject area, table, field, metric, entity, join and example, live search, the Review tab, the personal-data tab, edits, new metrics, and datasource.md. It is the only path that opens a page, and it saves its own decisions, the way the password page saves a password ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)): **Review on a page** on a review card, and **Show the full view** on the overview card, both come here. Nothing is pasted back.
 
-### 5a — Render and serve
+### 5a — Render, serve, and wait for the save
+
+First rule 6a's step 1 (a remote or SSH session uses the cards). Then, when the page will take approvals (it was picked on a review card, or nothing has needed sign-off yet this session) and `reviewer_email` / `reviewer_role` aren't saved, the identity card (Phase 0) first: the page signs approvals as that saved identity and can't change it. **Don't sign anything yet** there still opens the page, which then says approvals can't be saved from it.
 
 ```bash
-ts=$(date -u +%Y%m%d-%H%M%S)
+# The random part keeps two pages opened in the same second from sharing a decisions file.
+ts=$(date -u +%Y%m%d-%H%M%S)-$RANDOM
 # Per-model subdir so a person with several databases can tell renders apart.
 mkdir -p <artifacts_dir>/local/model/"$profile"
 out="<artifacts_dir>/local/model/$profile/$ts.html"
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_model_explorer.py \
   --profile "$profile" \
   --artifacts-dir "$artifacts_dir" \
-  ${initial_tab:+--initial-tab "$initial_tab"} \
-  --read-only --out "$out"
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" --minutes 30
+  ${initial_tab:+--initial-tab "$initial_tab"} ${section:+--section "$section"} \
+  --save-to-helper --out "$out"
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" \
+  --decisions "<artifacts_dir>/local/tmp/agami-page-$ts.json" --minutes 30
 ```
 
-Run `serve_page.py` with `run_in_background` and read its first line, `{"url": "http://localhost:<port>/<name>"}`. Set `initial_tab=review` when the person came from the review (or `$ARGUMENTS` was `review`/`preseed`/`rule1`); leave it empty otherwise, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Tables** when the model is clean.
+Run `serve_page.py` with `run_in_background` and wait for its first line as rule 6a says. `initial_tab` and `section` are the deep link from the card it was picked on: `review` and the item's kind (`metrics`, `entities`, `joins`) from an item card, `review` alone from the Sign-off card (or when `$ARGUMENTS` was `review`/`preseed`/`rule1`), `pii` from the personal-data question; from the overview card leave both empty, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Tables** when the model is clean.
 
-Post the link and what the page does, in a few lines:
+Post the link and the `Page` card (rule 6a step 4):
 
 ```
-Full view: http://localhost:<port>/<name> (open for 30 minutes)
-A read-only view of every table, metric, entity and join. Make changes on the card here:
-approve, hide, or type an edit in Other ("add a metric …", "describe orders.status as …").
+[Review on a page](http://127.0.0.1:<port>/<token>/). Approve, reject, hide or edit there, press
+Save decisions, then come back here and press I've saved it. Approvals are signed as
+<reviewer_email>. The link lasts 30 minutes.
 ```
 
-Then ask again the card it was picked on: the Sign-off or item card when picked there (Phase 2), the overview card otherwise. The page is read-only; a block pasted from an older, editable page is still applied (5b).
+### 5b — Apply what the page saved
 
-### 5b — The pasted block
-
-A "Generate feedback for Claude" block from an older, editable page (rendered without `--read-only`) is still accepted. **Don't hand-parse it** — pipe it to the parser, which handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
+When the helper's final line is `saved`, its `decisions` file holds the page's feedback block. **Don't hand-parse it** — give the file to the parser, which reads the helper's file and a block pasted from an older page (one with a "Generate feedback for Claude" button, rendered before pages saved themselves) alike, handles the whole grammar (the `profile:` line, the `exclude/include tables|columns:` lists, and the `curate-ops` / `new-metrics` / `new-examples` / `example-edits` / `key-terminology` / `datasource-md` JSON blocks) and translates the exclude/include lists into curate ops:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file <pasted>
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_model_feedback.py --block-file "<artifacts_dir>/local/tmp/agami-page-$ts.json" \
+  --expect-profile "$profile"
 ```
 
+`--expect-profile` is the profile the page was rendered for: a decisions file from another page or for another model is refused (`{"ok": false, "error"}`, exit 2; say the error in one line and apply nothing), and the parser drops the block's own `signed-off-by:` line, so the signer can only be `.config`'s.
+
 It prints `{data, anomalies, needs_judgment}`:
-- `data.profile` — the page's target model. **Use it, overriding the active-profile default** (a block was rendered for THAT model; never apply it to whatever's active).
+- `data.profile` — the page's target model. **Use it, overriding the active-profile default** (a page was rendered for THAT model; never apply it to whatever's active).
 - `data.ops` — the merged curate ops array (exclude/include for tables/columns, translated, **plus** the `curate-ops` approve/reject/edit/add/move verbatim, with `move` ops last). Apply in one `sm curate "$ROOT" --ops-file <json>` call (Phase 6).
 - `data.new_metrics_by_area` — `{area: [metric…]}` → one `sm add "$ROOT" --kind metric --area <area> --file <json>` per area.
 - `data.examples_by_area` — edited + new NL→SQL examples `{area: [example…]}` → one `sm add-example "$ROOT" --area <area> --file <json>` per area (dedups by question).
 - An example the person wants dropped rather than edited → a `{"op": "reject", "kind": "example", "area": "<area>", "question": "<question>"}` op in the same `sm curate` batch (Phase 6), or `sm remove-example "$ROOT" --question "<area>/<question>"` (repeat `--question`; with no `--area` one call covers every area, and a bare question found in more than one area is refused, not rejected everywhere).
 - `data.key_terminology` — the complete glossary object → `sm set-terminology "$ROOT" --file <json> --replace`.
 - `data.datasource_md` — the full datasource.md text (already decoded) → **Write** it to `<artifacts_dir>/<profile>/datasource.md` (overwrite; human narrative only).
-- `data.signer` / `data.role` — the curator identity for `--signer`/`--role` (recorded on every op; required on an approve). **Persist** them into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the identity card (Phase 0).
+- `data.signer` / `data.role` — on the page path they are always null (the parser drops them) and the signer is the saved `reviewer_email` / `reviewer_role` from `.config`, the identity the page showed. For a block pasted from an older page, it is the curator identity for `--signer`/`--role` (recorded on every op; required on an approve): **persist** it into `<artifacts_dir>/local/.config` (`reviewer_email`/`reviewer_role`; preserve other keys, `chmod 600`) so future sessions don't re-ask; if absent on an approve-bearing batch, fall back to `.config`, then the identity card (Phase 0).
 
-**If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a subject-area prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (re-copy that block from the page). Don't apply a partial block.
+**If `needs_judgment` is set, stop and ask** — `malformed_targets` (a table without its `<area>.` prefix → *"Tables need a subject-area prefix — `sales.STG_LEADS`, not `STG_LEADS`. Did you mean that?"*) or `unparseable_json` (that part of the page's save didn't read; nothing is applied, and **Review on a page** opens a fresh page). Don't apply a partial block.
 
-**Rule 1 guard (judgment):** before applying an `approve` on a metric, confirm its `calculation` is non-empty — for an introspected metric with an empty calculation, ask the person to fill it via an `edit` first. Show a one-line summary of what each block changed before applying.
+**Rule 1 guard (judgment):** before applying an `approve` on a metric, confirm its `calculation` is non-empty — for an introspected metric with an empty calculation, say it was left unapproved and ask for its definition on a card.
 
-### 5c — Re-render after a pasted block
+### 5c — Say back, then the card again
 
-Every successful apply of a pasted block renders a new page at a new timestamp and serves it again (5a), so the open page is never out of date without saying so. **Delete the previous timestamped file first** (`rm -f "<artifacts_dir>/local/model/$profile/$prev_ts.html"`); track `$prev_ts` across re-renders. Post the new link: *"Applied: 2 tables hidden, 2 columns hidden. Updated full view: http://localhost:<port>/<name> (the previous one can be closed)."*
+One line from what the commands returned, counted by kind from `sm curate`'s `applied` (`approve metric …`, `exclude table …/<table>.<column>`), never from the page's own count: *"Approved 18 metrics and hid 6 columns."* List `skipped[]` and `stale[]` on their own lines, and the validator's `errors` verbatim if it refused the batch (nothing was changed then). Delete the decisions file. Then ask again the card it was picked on, recounted with `sm review-items` (and `sm sensitive` for the personal-data question): an item decided on the page is not asked again, and when nothing is left, say so and go where that card's flow goes when it is done. The page served once; **Review on a page** again renders and serves a new one.
 
 ---
 
 ## Phase 6: Applying changes with `sm curate`
 
 
-Every write in this skill is one `sm curate` batch: the ops Claude builds from a card answer (Phases 2–4), or `data.ops` from a pasted full-view block (5b), which is already the merged ops array — exclude/include translated + the `curate-ops` approve/reject/edit verbatim. The shape, for reference:
+Every write in this skill is one `sm curate` batch: the ops Claude builds from a card answer (Phases 2–4), or `data.ops` from what the full view saved (5b), which is already the merged ops array — exclude/include translated + the `curate-ops` approve/reject/edit verbatim. The shape, for reference:
 
 ```json
 [
@@ -298,7 +303,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" \
 **Success** (`validated: true`):
 - Ack with the counts that apply, e.g. *"✓ Applied: approved 4, rejected 1, 2 columns excluded, 1 edit. Re-rendering…"*
 - List any `skipped[]` (bad target / not found) on their own lines.
-- Back to the overview card (Phase 1); after a pasted block, re-render the full view first (5c).
+- Back to the overview card (Phase 1); after the full view saved, the say-back and the card it was picked on (5c).
 
 **Failure** (`validated: false`):
 - The engine already reverted via git. Surface: *"⚠ Validator rejected the batch — all changes reverted. No files were modified."* Show `errors` verbatim. Stop; don't re-render.
