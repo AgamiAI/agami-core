@@ -9,6 +9,8 @@ Mark the step started and refresh the task list ([task-list.md](../../../shared/
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark build=in_progress
 ```
 
+**On a resume** of `/agami-connect`, when `sm steps` shows the build in progress, no build log is running, and a model was written since this build was started (`datasource.yaml` is newer than the build's start mark), go to the join cards below; do not build again. An older model on disk (a reload) is not that case: build as below.
+
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. Run it exactly as written, with the full quoted path (never `cd` into the scripts folder, never a shell variable for the path): that form is the one agami pre-approves, so it doesn't stop for permission.
 
 ```bash
@@ -80,8 +82,6 @@ Add **one finding** on the next line when the report has one worth a person's at
 4. **Start the enrichers**: enrich.md 2a steps 1–2, one `agami-enricher` per chunk in the background, per [parallel-work.md](../../../shared/parallel-work.md).
 
 Then ask the join cards below; the enrichers run meanwhile, so the turn stays open. Phase 2 picks the enrichers started here up at 2a's step 3 (collect). The build step's marks don't move: the task list shows "Read the tables and joins" until this file ends.
-
-**On a resume** of `/agami-connect`, when `sm steps` shows the build in progress, a model is already on disk and no build log is running, go to the join cards below; do not build again.
 
 **Join candidates (tested, not written).** After the joins are built, introspection tests every column no join covers against each other table's one-column key (primary or unique) when the column's name matches the key or its type does — `orders.cust_ref` against `customers.id`, say (a column with a value list, or one column of a key over several, needs its name to point at the table) — and also when the database declares some foreign keys, for the columns they don't cover. Each test is one read-only `SELECT` over a sample of at most 1,000 of the column's distinct values; a run makes **at most 300** of them, and a table over 3,000,000 rows is not probed, so a billed warehouse sees a bounded number of small queries. A column flagged sensitive, or whose sampled values look personal, is never tested at either end, and the report and the file carry only names and counts. None of these joins is written to the model. The report's `## join candidates` section lists each with its match rate (`+ orders.cust_ref->customers.id: 100.0% of sampled orders.cust_ref values found in customers.id`), and the near misses with a `-`; it says so when the 300-probe cap stopped the scan. The same list is in `<artifacts_dir>/<profile>/.introspect/join_candidates.json`, each candidate a ready `add` op with its evidence. Show the user the candidates and ask which are real joins; add each one they confirm with one call (written `unreviewed`, for sign-off in `/agami-model`).
 

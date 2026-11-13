@@ -56,7 +56,7 @@ questions"*. The main chat applies the file with one tested command, so it must 
 ```json
 {
   "area": "<area>",
-  "tables_described": 14,
+  "tables_described": 12,
   "column_descriptions": "<TSV, one line per column: area.table.column<TAB>description>",
   "curate_ops": [<the `edit` ops 2a writes, for your chunk's tables only>],
   "entities": [<the entity objects 2b describes, ready for `sm add --kind entity`>],

@@ -198,8 +198,10 @@ def test_describe_shows_no_chunk_count_of_its_own():
 
 def test_a_resumed_build_with_a_model_goes_to_the_join_cards():
     build = _flat(_read(REFS / "build.md"))
-    assert "a model is already on disk and no build log is running, go to the join cards below; " \
-        "do not build again" in build
+    assert "a model was written since this build was started" in build
+    assert "go to the join cards below; do not build again" in build
+    raw = _read(REFS / "build.md")
+    assert raw.index("**On a resume**") < raw.index('scripts/sm" introspect')  # top of 1.7
 
 
 def test_the_example_phase_says_what_is_true_and_never_waits_silently():
@@ -207,6 +209,16 @@ def test_the_example_phase_says_what_is_true_and_never_waits_silently():
     assert "Expect 1–3 min" not in examples
     assert "Collecting the example questions drafted during sign-off" in examples
     assert "post one line saying it is still running" in examples
+
+
+def test_entities_that_span_chunks_reach_step_6():
+    enrich = _flat(_read(REFS / "enrich.md"))
+    assert "`cross_area`, `notes`) for step 6" in enrich
+    assert "the entities that span chunks of one area from every chunk's `notes` and `cross_area`" in enrich
+    assert "within 10 passes" not in enrich and "`applied`)" not in enrich
+    enricher = _flat(_read(PLUGIN / "agents" / "agami-enricher.md"))
+    assert "goes in `notes`, for the main chat" in enricher
+    assert '"tables_described": 12' in enricher
 
 
 def test_no_agent_tool_means_inline():
