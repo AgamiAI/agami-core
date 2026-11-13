@@ -8130,7 +8130,8 @@ def _reduced_binding_cached(text: str, dialect: "str | None") -> "tuple | None":
     # Both reductions off ONE parse, indexed by `grouped`: the plain one and the one for an arm with
     # a plain GROUP BY (`_equivalent_form`). One cache entry per binding, as before.
     base = _strip_qualifiers(_fold_unquoted_identifiers(parsed))
-    return _equivalent_form(base.copy()), _equivalent_form(base, grouped=True)
+    big = _count_kind(dialect)
+    return _equivalent_form(base.copy(), False, big), _equivalent_form(base, True, big)
 
 
 def _reduced_projection(node: "exp.Expression", dialect: "str | None",
@@ -8145,16 +8146,33 @@ def _reduced_projection(node: "exp.Expression", dialect: "str | None",
     `dialect` is unused and deliberately in the signature: the node is already parsed, in that
     dialect, by the single parse `assemble_receipt` made. Taking the argument keeps the two halves
     reading as a pair and makes it a compile error rather than a silent divergence if this ever has
-    to re-parse. `grouped` is `_equivalent_form`'s, and the caller passes it only for an arm with a
+    to re-parse — and it now decides the type of a COUNT the normaliser builds (`_count_kind`).
+    `grouped` is `_equivalent_form`'s, and the caller passes it only for an arm with a
     plain GROUP BY (`_arm_is_grouped`).
     """
-    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), grouped)
+    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), grouped,
+                            _count_kind(dialect))
 
 
 # The aggregates for which `AGG(x) FILTER (WHERE p)` and `AGG(CASE WHEN p THEN x END)` are one value:
 # each ignores NULL inputs, so a row the CASE turns into NULL is the row FILTER drops, and on no
 # surviving row both return what that aggregate returns for nothing (NULL, or 0 for COUNT).
-_NULL_IGNORING_AGGS = (exp.Sum, exp.Avg, exp.Min, exp.Max, exp.Count) if _HAVE_SQLGLOT else ()
+# Not MIN, MAX or any DISTINCT: those COMPARE values, and a CASE result carries no column collation,
+# so over a `COLLATE NOCASE` text column SQLite gives a different MIN, MAX and distinct count for
+# the CASE form. Without knowing the column's collation, they are left as written.
+_NULL_IGNORING_AGGS = (exp.Sum, exp.Avg, exp.Count) if _HAVE_SQLGLOT else ()
+
+
+@functools.lru_cache(maxsize=32)
+def _count_kind(dialect: "str | None") -> Any:
+    """How this dialect's parse marks a plain COUNT's result type (`big_int`).
+
+    T-SQL is the one where it is a fact about the value: COUNT returns int and COUNT_BIG bigint, so
+    `COUNT_BIG(*) * 50000` and `COUNT(*) * 50000` differ once the product passes 2^31. A parsed COUNT
+    keeps its mark, and a COUNT the normaliser builds takes the dialect's plain one.
+    """
+    parsed = _parse_sql("COUNT(*)", dialect)
+    return parsed.args.get("big_int") if isinstance(parsed, exp.Count) else None
 
 
 def _is_int_literal(node: Any, value: str) -> bool:
@@ -8178,7 +8196,8 @@ def _conjuncts(node: "exp.Expression") -> list:
     return out
 
 
-def _equivalent_form(node: "exp.Expression", grouped: bool = False) -> "exp.Expression":
+def _equivalent_form(node: "exp.Expression", grouped: bool = False,
+                     count_kind: Any = None) -> "exp.Expression":
     """`node` with the equivalent spellings of one metric rewritten to a single form (#655).
 
     Every rule here returns the same value as the spelling it replaces ON EVERY INPUT — NULLs, no
@@ -8191,6 +8210,8 @@ def _equivalent_form(node: "exp.Expression", grouped: bool = False) -> "exp.Expr
         row matches. It is equal under a `COALESCE(…, 0)`, which is a rule below;
       * a numeric cast against `* 1.0` for division: SQLite keeps integer division under a
         NUMERIC cast, and Postgres gives a quotient past 10^16 one digit fewer;
+      * FILTER as CASE for MIN, MAX or a DISTINCT, and swapping the sides of `=` or `<>`: both
+        change which collation compares text on SQLite;
       * dropping `NULLIF(d, 0)` from a denominator: DuckDB divides by zero to infinity, not NULL.
 
     `grouped` adds the two rules that hold only where every group has at least one row, which a
@@ -8205,7 +8226,7 @@ def _equivalent_form(node: "exp.Expression", grouped: bool = False) -> "exp.Expr
     """
     root = node
     for sub in reversed(list(node.walk())):
-        new = _rewrite_one(sub, grouped)
+        new = _rewrite_one(sub, grouped, count_kind)
         if new is not sub:
             if sub is root:
                 root = new
@@ -8214,31 +8235,25 @@ def _equivalent_form(node: "exp.Expression", grouped: bool = False) -> "exp.Expr
     return root
 
 
-def _rewrite_one(node: "exp.Expression", grouped: bool) -> "exp.Expression":
-    """One node's rewrite under `_equivalent_form`'s rules, or the node itself."""
+def _rewrite_one(node: "exp.Expression", grouped: bool, count_kind: Any) -> "exp.Expression":
+    """One node's rewrite under `_equivalent_form`'s rules, or the node itself. A COUNT built here
+    takes `count_kind` (`_count_kind`) as its result type."""
     # FILTER (WHERE p) -> CASE WHEN p THEN x END; COUNT(*) counts rows, so its value is a literal 1.
     if isinstance(node, exp.Filter) and isinstance(node.this, _NULL_IGNORING_AGGS) \
             and isinstance(node.expression, exp.Where) and not node.this.expressions:
         agg, inner = node.this.copy(), node.this.this
-        distinct = isinstance(inner, exp.Distinct)
-        if distinct and len(inner.expressions) != 1:
+        if isinstance(inner, exp.Distinct):              # compares values: see above
             return node
-        value = inner.expressions[0] if distinct else inner
-        if isinstance(value, exp.Star):
-            value = exp.Literal.number(1)
-        case = exp.Case(ifs=[exp.If(this=node.expression.this, true=value)])
-        agg.set("this", exp.Distinct(expressions=[case]) if distinct else case)
+        value = exp.Literal.number(1) if isinstance(inner, exp.Star) else inner
+        agg.set("this", exp.Case(ifs=[exp.If(this=node.expression.this, true=value)]))
         # The rebuilt aggregate is detached, so it cannot tell whether it sits in a subquery or a
         # window: it gets only the rules that hold everywhere.
-        return _rewrite_one(agg, False)
+        return _rewrite_one(agg, False, count_kind)
     # CASE … ELSE NULL END is CASE … END.
     if isinstance(node, exp.Case) and isinstance(node.args.get("default"), exp.Null):
         node.set("default", None)
         return node
     if isinstance(node, exp.Count):
-        # A dialect's parse marks COUNT's result type (`big_int`); the value is the same, and a
-        # COUNT this function builds carries no such mark, so neither side keeps it.
-        node.set("big_int", None)
         # COUNT(<non-null literal>) counts rows; COUNT(CASE WHEN p THEN <literal> END) counts matches.
         if _is_non_null_literal(node.this):
             node.set("this", exp.Star())
@@ -8258,7 +8273,8 @@ def _rewrite_one(node: "exp.Expression", grouped: bool) -> "exp.Expression":
         if isinstance(inner, exp.Sum) and _single_branch_case(inner.this) \
                 and not inner.this.args.get("default") \
                 and _is_int_literal(inner.this.args["ifs"][0].args.get("true"), "1"):
-            return exp.Count(this=inner.this)            # a sum of 1s, 0 when none: a count
+            # A sum of 1s, 0 when none: a count.
+            return exp.Count(this=inner.this, big_int=count_kind)
         return node
     # Type first: `find_ancestor` walks to the root, and on every node of a deep AND chain that was
     # quadratic. A FILTER, like a subquery or a window frame, can leave a group's aggregate with no
@@ -8268,7 +8284,8 @@ def _rewrite_one(node: "exp.Expression", grouped: bool) -> "exp.Expression":
         if isinstance(node, exp.Sum) and _single_branch_case(node.this) \
                 and _is_int_literal(node.this.args.get("default"), "0") \
                 and _is_int_literal(node.this.args["ifs"][0].args.get("true"), "1"):
-            return exp.Count(this=exp.Case(ifs=[node.this.args["ifs"][0].copy()]))
+            return exp.Count(this=exp.Case(ifs=[node.this.args["ifs"][0].copy()]),
+                             big_int=count_kind)
         if isinstance(node, exp.Nullif) and isinstance(node.this, exp.Count) \
                 and isinstance(node.this.this, exp.Star) and _is_int_literal(node.expression, "0"):
             return node.this
@@ -8279,8 +8296,10 @@ def _rewrite_one(node: "exp.Expression", grouped: bool) -> "exp.Expression":
         for term in terms[1:]:
             out = exp.And(this=out, expression=term)
         return out
-    if isinstance(node, (exp.EQ, exp.NEQ, exp.Mul)) and repr(node.this) > repr(node.expression):
-        return node.__class__(this=node.expression, expression=node.this)
+    # Not `=` or `<>`: SQLite compares two columns of different collations with the LEFT one's, so
+    # `a = b` and `b = a` can select different rows. AND and multiplication have no such side.
+    if isinstance(node, exp.Mul) and repr(node.this) > repr(node.expression):
+        return exp.Mul(this=node.expression, expression=node.this)
     return node
 
 
@@ -8691,8 +8710,12 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         # declaring hundreds of metrics costs 50 hashes rather than their product.
         reduced = _reduced_projection(oc.expr, dialect)
         cands = _lookup(reduced, by_binding)
-        if not cands and by_binding_grouped and _arm_is_grouped(oc.sel):
-            cands = _lookup(_reduced_projection(oc.expr, dialect, grouped=True), by_binding_grouped)
+        if by_binding_grouped and _arm_is_grouped(oc.sel):
+            # Consulted even when the plain index matched: two metrics written differently can be one
+            # number under a GROUP BY, and then this column names neither of them.
+            grouped_cands = _lookup(_reduced_projection(oc.expr, dialect, grouped=True),
+                                    by_binding_grouped)
+            cands = cands + [c for c in grouped_cands if all(c is not d for d in cands)]
         if cands:
             if len(cands) == 1:
                 return MATCHED, cands[0]

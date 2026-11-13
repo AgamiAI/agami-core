@@ -104,6 +104,23 @@ def _postgres(rows):
 ENGINES = {"sqlite": _sqlite, "duckdb": _duckdb, "postgres": _postgres}
 
 
+def _sqlite_nocase(rows):
+    """SQLite with a text `x` declared COLLATE NOCASE beside a plain (BINARY) `p`."""
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (g INTEGER, p TEXT, x TEXT COLLATE NOCASE)")
+    conn.executemany("INSERT INTO t VALUES (?, ?, ?)", rows)
+    return conn
+
+
+# Engines and data a rejected rule's witness may use; the SAME battery never runs on these, because
+# its numeric aggregates assume the integer `x` of `_ROWS`.
+WITNESS_ENGINES = {**ENGINES, "sqlite_nocase": _sqlite_nocase}
+WITNESS_DATASETS = {
+    **DATASETS,
+    "nocase": [(1, "paid", "a"), (1, "paid", "A"), (1, "paid", "B"), (3, "A", "a")],
+}
+
+
 def _run(conn, sql: str):
     """Rows, or the error's class name: a statement that fails returns no number to compare."""
     cur = conn.cursor()
@@ -128,8 +145,9 @@ def _statement(expr: str, grouped: bool) -> str:
 # --- the receipt's view of the two spellings ----------------------------------
 
 
-def _org(tmp_path: Path, binding: str):
-    """A one-table model declaring one metric, `m`, whose binding is `binding`."""
+def _org(tmp_path: Path, binding: str, extra: dict[str, str] | None = None):
+    """A one-table model declaring one metric, `m`, whose binding is `binding`, plus any `extra`
+    metrics by name."""
     root = Path(tempfile.mkdtemp(dir=tmp_path)) / "p"  # one test may build several models
     (root / "subject_areas" / "s" / "tables").mkdir(parents=True)
     (root / "subject_areas" / "s" / "metrics").mkdir(parents=True)
@@ -164,19 +182,20 @@ def _org(tmp_path: Path, binding: str):
             }
         )
     )
-    (root / "subject_areas" / "s" / "metrics" / "m.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "name": "m",
-                "calculation": "m",
-                "description": "m",
-                "source_tables": ["t"],
-                "bindings": {"PostgreSQL": binding},
-                "confidence": "proposed",
-                "review_state": "unreviewed",
-            }
+    for name, text in {"m": binding, **(extra or {})}.items():
+        (root / "subject_areas" / "s" / "metrics" / f"{name}.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": name,
+                    "calculation": name,
+                    "description": name,
+                    "source_tables": ["t"],
+                    "bindings": {"PostgreSQL": text},
+                    "confidence": "proposed",
+                    "review_state": "unreviewed",
+                }
+            )
         )
-    )
     return L.load_datasource(root)
 
 
@@ -196,14 +215,7 @@ SAME = [
     # FILTER (WHERE p) <-> CASE WHEN p THEN x END, for the aggregates that ignore NULLs.
     ("SUM(x) FILTER (WHERE p = 'paid')", "SUM(CASE WHEN p = 'paid' THEN x END)", False),
     ("AVG(x) FILTER (WHERE p = 'paid')", "AVG(CASE WHEN p = 'paid' THEN x END)", False),
-    ("MIN(x) FILTER (WHERE p = 'paid')", "MIN(CASE WHEN p = 'paid' THEN x END)", False),
-    ("MAX(x) FILTER (WHERE p = 'paid')", "MAX(CASE WHEN p = 'paid' THEN x END)", False),
     ("COUNT(x) FILTER (WHERE p = 'paid')", "COUNT(CASE WHEN p = 'paid' THEN x END)", False),
-    (
-        "COUNT(DISTINCT x) FILTER (WHERE p = 'paid')",
-        "COUNT(DISTINCT CASE WHEN p = 'paid' THEN x END)",
-        False,
-    ),
     # ... and an explicit ELSE NULL is the same CASE.
     ("SUM(x) FILTER (WHERE p = 'paid')", "SUM(CASE WHEN p = 'paid' THEN x ELSE NULL END)", False),
     # Conditional counts: COUNT(*) FILTER <-> COUNT(CASE WHEN p THEN <any non-null literal> END).
@@ -231,10 +243,10 @@ SAME = [
     ("SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)", "COUNT(*) FILTER (WHERE p = 'paid')", True),
     # NULLIF(COUNT(*), 0) under a GROUP BY, where COUNT(*) is at least 1.
     ("SUM(x) * 1.0 / NULLIF(COUNT(*), 0)", "SUM(x) * 1.0 / COUNT(*)", True),
-    # Order that does not change a value: AND, `=`, and multiplication.
+    # Order that does not change a value: AND terms and multiplication (not `=`: see DIFFERENT).
     (
         "SUM(x) FILTER (WHERE p = 'paid' AND g > 1)",
-        "SUM(CASE WHEN g > 1 AND 'paid' = p THEN x END)",
+        "SUM(CASE WHEN g > 1 AND p = 'paid' THEN x END)",
         False,
     ),
     ("SUM(x) * 1.0 / COUNT(*)", "1.0 * SUM(x) / COUNT(*)", False),
@@ -303,6 +315,40 @@ DIFFERENT = [
         "a FILTER that empties group 1: NULL against 0",
         (("sqlite", "duckdb"), "full", True),
     ),
+    # A CASE result carries no column collation, so over a collated text column DISTINCT, MIN and
+    # MAX compare differently in the CASE form: SQLite, `x TEXT COLLATE NOCASE`.
+    (
+        "COUNT(DISTINCT x) FILTER (WHERE p = 'paid')",
+        "COUNT(DISTINCT CASE WHEN p = 'paid' THEN x END)",
+        "'a' and 'A' are one value under NOCASE, two in the CASE form",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "MIN(x) FILTER (WHERE p = 'paid')",
+        "MIN(CASE WHEN p = 'paid' THEN x END)",
+        "NOCASE orders 'a' first, BINARY orders 'A' first",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "MAX(x) FILTER (WHERE p = 'paid')",
+        "MAX(CASE WHEN p = 'paid' THEN x END)",
+        "NOCASE orders 'B' last, BINARY orders 'a' last",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    # SQLite compares two columns of different collations with the LEFT one's, so `=` and `<>` are
+    # not symmetric there.
+    (
+        "COUNT(*) FILTER (WHERE x = p)",
+        "COUNT(*) FILTER (WHERE p = x)",
+        "'a' = 'A' under the left column's NOCASE, not under BINARY",
+        ("sqlite_nocase", "nocase", False),
+    ),
+    (
+        "COUNT(*) FILTER (WHERE x <> p)",
+        "COUNT(*) FILTER (WHERE p <> x)",
+        "'a' <> 'A' only under the left column's BINARY",
+        ("sqlite_nocase", "nocase", False),
+    ),
     (
         "COUNT(*) FILTER (WHERE g > 1)",
         "NULLIF(COUNT(*) FILTER (WHERE g > 1), 0)",
@@ -353,7 +399,7 @@ def test_a_grouped_only_rule_does_not_match_a_global_aggregate(
 def test_a_spelling_that_can_differ_is_not_matched(tmp_path, binding, written, why, witness):
     engines, dataset, grouped = witness
     for engine in engines if isinstance(engines, tuple) else (engines,):
-        conn = ENGINES[engine](DATASETS[dataset])
+        conn = WITNESS_ENGINES[engine](WITNESS_DATASETS[dataset])
         try:
             assert _run(conn, _statement(binding, grouped)) != _run(
                 conn, _statement(written, grouped)
@@ -524,3 +570,44 @@ def test_a_different_aggregate_over_the_same_columns_reads_unmatched(tmp_path, w
 def test_the_same_aggregate_family_written_differently_is_not_compared(tmp_path, binding, written):
     """An average is a sum over a count, and a sum of 1s and 0s is a count."""
     assert _status(tmp_path, binding, written, False) == (rt.COMPUTED_DIFFERENTLY, None)
+
+
+def test_count_big_keeps_its_result_type():
+    """T-SQL's COUNT returns int and COUNT_BIG bigint, and sqlglot says which only in `big_int`:
+    `COUNT_BIG(*) * 50000` returns 2,500,000,000 over 50,000 rows where `COUNT(*) * 50000`
+    overflows. No SQL Server here to run it on; the two must simply not reduce alike."""
+    import sqlglot
+
+    def reduced(text: str):
+        return rt._reduced_projection(sqlglot.parse_one(text, read="tsql"), "tsql")
+
+    assert reduced("COUNT_BIG(*) * 50000") != reduced("COUNT(*) * 50000")
+    assert rt._reduced_binding("COUNT_BIG(*) * 50000", "tsql") != rt._reduced_binding(
+        "COUNT(*) * 50000", "tsql"
+    )
+    # A count the normaliser builds takes the dialect's own COUNT type.
+    assert rt._reduced_binding(
+        "COALESCE(SUM(CASE WHEN p = 1 THEN 1 END), 0)", "tsql"
+    ) == rt._reduced_binding("COUNT(CASE WHEN p = 1 THEN 1 END)", "tsql")
+    assert rt._reduced_binding(
+        "COALESCE(SUM(CASE WHEN p = 1 THEN 1 END), 0)", "postgres"
+    ) == rt._reduced_binding("COUNT(CASE WHEN p = 1 THEN 1 END)", "postgres")
+
+
+def test_two_metrics_equal_under_group_by_leave_a_grouped_column_undetermined(tmp_path):
+    """`COUNT(*) FILTER` and `SUM(CASE … 1 ELSE 0)` are one number under a GROUP BY, so a grouped
+    column computing either cannot name one of them — even though only one is equal everywhere."""
+    org = _org(
+        tmp_path,
+        "COUNT(*) FILTER (WHERE p = 'paid')",
+        extra={"m2": "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)"},
+    )
+    for written, grouped, want in [
+        ("COUNT(*) FILTER (WHERE p = 'paid')", True, (rt.UNDETERMINED, None)),
+        ("SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)", True, (rt.UNDETERMINED, None)),
+        ("COUNT(*) FILTER (WHERE p = 'paid')", False, (rt.MATCHED, "m")),
+        ("SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)", False, (rt.MATCHED, "m2")),
+    ]:
+        items = rt.assemble_receipt(org, _statement(written, grouped))["columns"]["items"]
+        item = next(i for i in items if i.get("column") == "v")
+        assert (item["status"], item["name"]) == want, (written, grouped)
