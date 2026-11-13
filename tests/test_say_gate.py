@@ -38,8 +38,10 @@ HOOK_MOD = importlib.util.module_from_spec(_spec2)
 _spec2.loader.exec_module(HOOK_MOD)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"))
 
-REASON = ("agami has text for the person that has not been shown yet. Post the text below as your "
-          "message, exactly as written, then ask this card again.")
+REASON = ("agami has text for the person that has not been shown yet. In this same reply, write the "
+          "text below as your visible message (not in a thinking block), exactly as written, then call "
+          "AskUserQuestion again with this same card. Do not end your turn before the card is asked: the "
+          "person needs it to answer.")
 SUMMARY = "**acme: 3 tables, 2 joins.**\n\nAsk away."
 EXAMPLES = "| # | Example | Rows | Result |\n|---|---|---|---|\n| 1 | Revenue | 3 | 12 |\n\n1 of 1 examples ran."
 
@@ -417,6 +419,7 @@ def test_a_pending_file_that_is_not_a_list_of_entries_says_nothing(art, tmp_path
     {"needle": 42}, {"say": 42}, {"say": "x" * (1024 * 1024)},
     {"id": "XYZ"}, {"id": "5ca1ab1e0"}, {"id": 5}, {"refused": "0"}, {"refused": -1}, {"refused": True},
     {"created_at": "yesterday"}, {"created_at": "2026-11-13T09:00:00"}, {"created_at": None},
+    {"resumed": 1}, {"resumed": "true"}, {"resumed": None}, {"other": 1},
 ])
 def test_an_edited_entry_says_nothing(art, tmp_path, change):
     entry = {**_entry(), **change}
@@ -538,7 +541,7 @@ def test_the_gate_reads_what_the_engine_writes(art, tmp_path):
     assert GATE_MOD.FILE_NAME == say_pending.FILE_NAME
     assert GATE_MOD.NEEDLE_CHARS == say_pending.NEEDLE_CHARS
     assert set(GATE_MOD.KINDS) == set(say_pending.KINDS)
-    assert set(GATE_MOD.FIELDS) == set(say_pending.FIELDS)
+    assert set(GATE_MOD.FIELDS) | set(GATE_MOD.OPTIONAL) == set(say_pending.FIELDS)
     path = _transcript(tmp_path, printed(say_id))
     assert _denied(_gate(_event(str(path)), art)) == f"{REASON}\n\n{SUMMARY}"
     (entry,) = say_pending.load(say_pending.pending_path(art))
@@ -762,3 +765,31 @@ def test_a_transcript_that_is_a_link_says_nothing(art, tmp_path):
     link = tmp_path / "link.jsonl"
     link.symlink_to(real)
     assert _gate(_event(str(link)), art) == ""
+
+
+# --- the refusal's wording: the first refusal should be the only one -------------------------------------
+
+
+def test_the_reason_keeps_its_first_sentence_for_the_stop_hook():
+    # say_resume.py recognises a refusal by this sentence in the card's tool result.
+    assert GATE_MOD.REASON.startswith(GATE_MOD.REFUSAL_MARK)
+    assert GATE_MOD.REFUSAL_MARK == "agami has text for the person that has not been shown yet."
+
+
+def test_the_reason_asks_for_visible_text_and_the_same_card_in_the_same_reply():
+    # Live runs: after the first refusal the text went into a thinking block; after the second it was
+    # posted and the turn ended with no card. The sentence names both failures.
+    reason = GATE_MOD.REASON
+    assert "In this same reply" in reason
+    assert "visible message (not in a thinking block)" in reason
+    assert "exactly as written" in reason
+    assert "call AskUserQuestion again with this same card" in reason
+    assert "Do not end your turn before the card is asked" in reason
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_an_entry_with_the_stop_hooks_mark_is_read_as_usual(art, tmp_path, resumed):
+    _write_pending(art, [_entry(resumed=resumed)])
+    path = _transcript(tmp_path, printed())
+    assert _denied(_gate(_event(str(path)), art)) == f"{REASON}\n\n{SUMMARY}"
+    assert _read_pending(art)[0]["resumed"] is resumed and _read_pending(art)[0]["refused"] == 1

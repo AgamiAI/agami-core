@@ -214,7 +214,7 @@ def test_register_stamps_the_time_in_utc(tmp_path):
     sid = say_pending.register(tmp_path, "summary", "hello", now=when)
     (entry,) = say_pending.load(say_pending.pending_path(tmp_path))
     assert entry == {"id": sid, "kind": "summary", "needle": "hello", "say": "hello",
-                     "created_at": "2026-11-13T09:30:15+00:00", "refused": 0}
+                     "created_at": "2026-11-13T09:30:15+00:00", "refused": 0, "resumed": False}
 
 
 @pytest.mark.parametrize("text", ["{}", "[1]", '"x"', "null"])
@@ -255,3 +255,29 @@ def test_re_registering_the_same_text_carries_its_refusals(tmp_path):
 def test_a_say_longer_than_the_cap_is_not_registered(tmp_path):
     assert say_pending.register(tmp_path, "summary", "x" * (say_pending.MAX_SAY_CHARS + 1)) is None
     assert say_pending.register(tmp_path, "summary", "x" * say_pending.MAX_SAY_CHARS) is not None
+
+
+def test_re_registering_the_same_text_carries_its_resume(tmp_path):
+    """The Stop hook (say_resume.py) keeps a turn going at most once per text, like the refusals:
+    the same text printed again keeps `resumed`, a different one starts without it."""
+    say_pending.register(tmp_path, "summary", "same text")
+    path = say_pending.pending_path(tmp_path)
+    entries = say_pending.load(path)
+    assert entries[0]["resumed"] is False
+    entries[0]["resumed"] = True
+    say_pending.save(path, entries)
+    say_pending.register(tmp_path, "summary", "same text")
+    assert say_pending.load(path)[0]["resumed"] is True
+    say_pending.register(tmp_path, "summary", "different text")
+    assert say_pending.load(path)[0]["resumed"] is False
+
+
+def test_an_entry_written_without_resume_is_read_as_not_resumed(tmp_path):
+    # A pending file an older engine wrote has no `resumed`; re-registering over it still works.
+    path = say_pending.pending_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    say_pending.save(path, [{"id": "5ca1ab1e", "kind": "summary", "needle": "same text", "say": "same text",
+                             "created_at": "2026-11-13T09:30:15+00:00", "refused": 1}])
+    say_pending.register(tmp_path, "summary", "same text")
+    (entry,) = say_pending.load(path)
+    assert entry["refused"] == 1 and entry["resumed"] is False

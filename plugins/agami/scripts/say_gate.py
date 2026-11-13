@@ -54,10 +54,19 @@ from typing import Any, Optional
 FILE_NAME = "say-pending.json"
 KINDS = ("summary", "examples")
 FIELDS = ("id", "kind", "needle", "say", "created_at", "refused")
+# Set by say_resume.py (the Stop hook) once it kept a turn going for the entry; an older engine wrote
+# entries without it, read as false.
+OPTIONAL = ("resumed",)
 NEEDLE_CHARS = 120
 
-REASON = ("agami has text for the person that has not been shown yet. Post the text below as your "
-          "message, exactly as written, then ask this card again.")
+# The first sentence is how say_resume.py tells a refusal in the transcript; keep it as it is.
+REFUSAL_MARK = "agami has text for the person that has not been shown yet."
+# Live runs, after the first refusal, put the text in a thinking block and asked again; after the
+# second they posted it and ended the turn with no card. So the sentence names both: visible text,
+# then the same card, in one reply.
+REASON = (f"{REFUSAL_MARK} In this same reply, write the text below as your visible message (not in a "
+          "thinking block), exactly as written, then call AskUserQuestion again with this same card. "
+          "Do not end your turn before the card is asked: the person needs it to answer.")
 MAX_REFUSALS = 2
 MAX_AGE = timedelta(minutes=30)
 # A clock that moved back a little must not hide a fresh entry; one far in the future is not ours.
@@ -139,8 +148,10 @@ def _created(entry: dict) -> datetime:
 
 def _check_entry(entry: Any) -> None:
     """Doubt unless `entry` is exactly what the engine writes."""
-    if not isinstance(entry, dict) or set(entry) != set(FIELDS):
+    if not isinstance(entry, dict) or set(entry) - set(OPTIONAL) != set(FIELDS):
         raise Doubt("fields")
+    if type(entry.get("resumed", False)) is not bool:
+        raise Doubt("resumed")
     if not isinstance(entry["id"], str) or not ID.fullmatch(entry["id"]):
         raise Doubt("id")
     if not isinstance(entry["needle"], str) or not isinstance(entry["say"], str):
