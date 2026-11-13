@@ -63,6 +63,25 @@ def _read_json_file(path: str) -> Any:
     raise SystemExit(2)
 
 
+def _read_text_file(path: str) -> str:
+    """A person's free text from a file the skill wrote with its Write tool, verbatim (UTF-8) minus one
+    trailing newline. Free text never goes on the command line: a quote, `$` or `;` in a company name
+    or a question would be read by the shell, and escaping it changed the person's words."""
+    p = Path(path).expanduser()
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        _print_json({"error": f"file not found: {p.resolve()}"})
+        raise SystemExit(2)
+    except (OSError, ValueError) as exc:
+        _print_json({"error": f"could not read text from {p.resolve()}: {exc}"})
+        raise SystemExit(2)
+    for end in ("\r\n", "\n"):
+        if text.endswith(end):
+            return text[: -len(end)]
+    return text
+
+
 def _utc_now_iso() -> str:
     """ISO-8601 UTC (`...Z`) — the sign-off timestamp format the validator expects."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -325,9 +344,9 @@ def cmd_set_org(args) -> int:
     # carries more than just its org_id. Only the flags passed are updated; others are left as-is.
     from . import org_record as OR
 
-    record = OR.set_org_fields(
-        args.artifacts_dir, name=args.name, description=args.description
-    )
+    name = _read_text_file(args.name_file) if args.name_file else args.name
+    description = _read_text_file(args.description_file) if args.description_file else args.description
+    record = OR.set_org_fields(args.artifacts_dir, name=name, description=description)
     _print_json(
         {"org_id": record.org_id, "name": record.name, "description": record.description}
     )
@@ -846,7 +865,8 @@ def cmd_set_description(args) -> int:
     question by (#327). Onboarding calls this with the user's line or one generated from the enriched
     model. Validated + committed."""
     from . import curate
-    res = curate.set_datasource_description(args.root, args.description)
+    description = _read_text_file(args.description_file) if args.description_file else args.description
+    res = curate.set_datasource_description(args.root, description)
     _print_json({"applied": res.applied, "validated": res.validated,
                  "committed": res.committed, **_commit_note(res), "errors": res.errors})
     return 0 if res.validated else 1
@@ -1980,6 +2000,10 @@ def _match_question(known: dict[str, set[str]], question: str) -> tuple[list[str
 
 
 def cmd_remove_example_areas(args) -> int:
+    if args.question_file:
+        # one question per line, each verbatim: the questions are the person's own words
+        lines = _read_text_file(args.question_file).splitlines()
+        args = argparse.Namespace(**{**vars(args), "question": [q for q in lines if q.strip()]})
     areas = _resolve_areas(args)
     if areas is None:
         return 1
@@ -2457,8 +2481,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("set-org", help="write the company name / description into the deployment organization record")
     sp.add_argument("artifacts_dir")
-    sp.add_argument("--name", default=None)
-    sp.add_argument("--description", default=None)
+    name = sp.add_mutually_exclusive_group()
+    name.add_argument("--name", default=None)
+    name.add_argument("--name-file", default=None,
+                      help="a UTF-8 file holding the name, used as written (one trailing newline dropped)")
+    desc = sp.add_mutually_exclusive_group()
+    desc.add_argument("--description", default=None)
+    desc.add_argument("--description-file", default=None,
+                      help="a UTF-8 file holding the description, used as written (one trailing newline "
+                           "dropped)")
     sp.set_defaults(func=cmd_set_org)
 
     sp = sub.add_parser("examples", help="rank prompt examples for a query")
@@ -2629,7 +2660,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("set-description", help="write the datasource's one-line description onto datasource.yaml (what list_datasources routes on)")
     sp.add_argument("root")
-    sp.add_argument("--description", required=True, help="one line: what this datasource holds and when to query it")
+    desc = sp.add_mutually_exclusive_group(required=True)
+    desc.add_argument("--description", help="one line: what this datasource holds and when to query it")
+    desc.add_argument("--description-file",
+                      help="a UTF-8 file holding that line, used as written (one trailing newline dropped)")
     sp.set_defaults(func=cmd_set_description)
 
     sp = sub.add_parser("curate", help="apply exclude/include/approve/reject/edit/move/add ops (validated)")
@@ -2716,9 +2750,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--area", action="append", default=None,
                     help="subject area (repeatable); omit for every area in the model. "
                          "Several or none print one combined result: per-area entries plus totals")
-    sp.add_argument("--question", required=True, action="append",
-                    help="exact question text of an example to reject (repeatable for several); "
-                         "across several areas name it <area>/<question> unless only one area has it")
+    questions = sp.add_mutually_exclusive_group(required=True)
+    questions.add_argument("--question", action="append",
+                           help="exact question text of an example to reject (repeatable for several); "
+                                "across several areas name it <area>/<question> unless only one area has it")
+    questions.add_argument("--question-file",
+                           help="a UTF-8 file with one such question per line, each used as written")
     sp.add_argument("--signer", default=None, help="who rejected it (recorded in the curation log)")
     sp.add_argument("--role", default=None)
     sp.set_defaults(func=cmd_remove_example_areas)
