@@ -1,5 +1,5 @@
 {
-  "description": "Approve a short list of read-only agami sm calls and agami's own scratch files under <artifacts_dir>/local/tmp; says nothing about anything else.",
+  "description": "Approve a short list of read-only agami sm calls and agami's own scratch files under <artifacts_dir>/local/tmp; refuse an AskUserQuestion card, at most twice per text, while text the engine handed over for the person has not been shown. Says nothing about anything else.",
   "hooks": {
     "PreToolUse": [
       {
@@ -8,6 +8,16 @@
           {
             "type": "command",
             "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/say_gate.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
             "timeout": 10
           }
         ]

@@ -8,7 +8,8 @@ write outside agami's scratch folder and a model's own `.introspect/` (`timeline
 `steps.last`, the step list `steps` and `progress` last printed), no read of a file the call
 names outside those, and no change to a model's content or trust state. Everything
 else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
-its own turn). It never denies.
+its own turn). It never denies: the plugin's hooks deny only `AskUserQuestion`
+(say_gate.py), at most twice per pending text, and only to have the engine's own text shown.
 
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
      it, no shell syntax at all) whose verb is in VERBS and whose every argument passes that

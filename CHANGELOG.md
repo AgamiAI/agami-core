@@ -45,7 +45,8 @@ below corresponds to one such version.
   `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`, started with `python3` from
   PATH) that answers "allow" only for calls that are harmless even if a document is steering the
   model, and says nothing about anything else, so the normal permission prompt applies. It never
-  denies. It approves exactly:
+  denies; the plugin's hooks deny only `AskUserQuestion`, at most twice per pending text, and only to
+  have the engine's own text shown (next entry). It approves exactly:
   - one call of this plugin's `scripts/sm` (an optional `bash ` before it, nothing else, no shell
     syntax at all) running `steps [--mark <id>=<status>]… [--full]`, `progress [--wait 0-600]`,
     `timing`, `summary [--json]`, `overview`, `areas`, `coverage`, `review-queue`,
@@ -62,6 +63,18 @@ below corresponds to one such version.
   or changes the model or its sign-off is approved, and no `scripts/py` call is. It also runs for
   subagents, so an enricher's result write no longer prompts. The skills keep their
   `allowed-tools`, which cover every `sm` call in the turn a skill starts.
+- **A card waits until the text before it has been shown.** Five live runs in a row never showed
+  the closing summary, and the last two not the examples table, although the engine handed both
+  over as `say`: the model wrote its wrap-up into a thinking block and asked the card. Now
+  `sm steps --mark first_question=in_progress` (when its `say` carries the summary) and
+  `sm seed-validate --out` (without `--no-card`) record their `say` in
+  `<artifacts_dir>/local/tmp/agami-say-pending.json`, print its `say_id` beside `say`, and end
+  `then` with "The card is refused until this text has been posted." A second `PreToolUse` hook
+  (`scripts/say_gate.py`, on `AskUserQuestion` only) refuses the card while a recorded text whose
+  `say_id` this session's transcript shows has not been posted as visible text after it, handing
+  the text back in the refusal; it refuses at most twice per text, forgets texts older than 30
+  minutes, and on any doubt says nothing, so the card goes ahead. When the scratch folder can't be
+  written, the commands print what they printed before, with no `say_id` and no extra sentence.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With
   agami's library missing or older than the plugin, those 13 verbs stop with

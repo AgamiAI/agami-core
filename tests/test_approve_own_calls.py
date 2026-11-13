@@ -605,7 +605,8 @@ def test_the_hook_imports_nothing_of_the_plugin_or_the_package():
 
 def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    (entry,) = doc["hooks"]["PreToolUse"]
+    # the second entry is say_gate.py on AskUserQuestion (tests/test_say_gate.py)
+    entry = doc["hooks"]["PreToolUse"][0]
     assert entry["matcher"] == "Bash|Write|Read"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
