@@ -1371,6 +1371,12 @@ UNDECLARABLE = "undeclarable"
 # it means exactly one thing: every candidate binding was read, and none of them is this column.
 MATCHED = "matched"
 UNMATCHED = "unmatched"
+# A declared metric reads exactly the columns this value reads, with the same kinds of aggregate
+# (`_shape`: a SUM of a 0/1 flag is a count, an AVG a sum over a count), and the two are still
+# written differently after the equivalent spellings are normalised (#655). They may be the same
+# number in a form `_equivalent_form` does not recognise, so the settled `unmatched` — "this is not
+# the agreed definition" — is not earned; neither is `matched`. Not compared, and said so.
+COMPUTED_DIFFERENTLY = "computed_differently"
 
 
 # Why the checks did not run, when they did not. `None` means they DID — the analysis reached the
@@ -3991,12 +3997,18 @@ def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
 
     All three clauses are bare COUNTS of the caller's own output columns and references, and none
     names anything, so the marker discloses nothing the items beside it do not already.
+
+    `computed_differently` counts too, in its own clause: it is not settled either way (#655).
     """
     unsettled = sum(1 for item in output_items if item["status"] == UNDETERMINED)
+    differently = sum(1 for item in output_items if item["status"] == COMPUTED_DIFFERENTLY)
     return " ".join(clause for clause in (
         (f"{unsettled} of the listed output column(s) could not be matched against the model's "
          "declared metrics, so which definition they compute is not established."
          if unsettled else ""),
+        (f"{differently} of the listed output column(s) read the same columns as a declared metric "
+         "but are computed differently, and the two were not compared, so whether they are the "
+         "same number is not established." if differently else ""),
         (f"{dropped_outputs} further output column(s) are not listed." if dropped_outputs else ""),
         (f"{dropped_refs} further column reference(s) are not listed." if dropped_refs else ""),
     ) if clause) or None
@@ -4291,6 +4303,8 @@ def assemble_receipt(
     metric_storage_type = _storage_type_of(org)
     candidates = _metric_candidates(org, metric_storage_type, metric_dialect)
     by_binding = _by_binding(candidates)
+    by_binding_grouped = _by_binding(candidates, grouped=True)
+    binding_shapes = _binding_shapes(candidates)
     # Computed ONCE: it is a property of the model and the engine, not of any one column.
     unread_declarations = _declarations_unread(org, metric_storage_type, candidates)
     output_columns = _output_columns(tree)
@@ -4301,7 +4315,8 @@ def assemble_receipt(
     own_alias_memo: dict[int, dict[str, str]] = {}
     for oc in output_columns[:_RECEIPT_MAX_REFS]:
         status, match = _match_output_column(oc, unread_declarations, by_binding, visible,
-                                             metric_dialect, own_alias_memo)
+                                             metric_dialect, own_alias_memo,
+                                             by_binding_grouped, binding_shapes)
         # Everything a MATCHED metric contributes, and null on every other status. An item that
         # matched nothing must assert nothing about a metric it did not match — ACE-059's review
         # found three false positives of exactly this shape in the joins section, two of them
@@ -4344,8 +4359,7 @@ def assemble_receipt(
             # Whether the projection aggregates (SUM, COUNT, AVG, ...). A plain column in a list
             # query computes nothing a metric could define, so a reader that grades "matches no
             # metric" reads this first and says nothing about such a column.
-            "aggregate": bool(oc.expr is not None and any(
-                agg.find_ancestor(exp.Window) is None for agg in oc.expr.find_all(exp.AggFunc))),
+            "aggregate": _is_aggregate(oc.expr),
             # The same scope label `tables` and `joins` carry, from the same composer, so a reader
             # can join the three sections on it for a column that appears in more than one.
             "scope": oc.scope,
@@ -8069,7 +8083,8 @@ def _strip_qualifiers(node: "exp.Expression") -> "exp.Expression":
     return stripped
 
 
-def _reduced_binding(text: str, dialect: "str | None") -> "exp.Expression | None":
+def _reduced_binding(text: str, dialect: "str | None",
+                     grouped: bool = False) -> "exp.Expression | None":
     """A metric binding parsed and normalized for comparison — None when it will not parse.
 
     THE PARSER CHECK IS OUTSIDE THE CACHE, and that placement is the whole reason this is two
@@ -8084,11 +8099,12 @@ def _reduced_binding(text: str, dialect: "str | None") -> "exp.Expression | None
     """
     if not _HAVE_SQLGLOT:
         return None
-    return _reduced_binding_cached(text, dialect)
+    forms = _reduced_binding_cached(text, dialect)
+    return None if forms is None else forms[grouped]
 
 
 @functools.lru_cache(maxsize=1024)
-def _reduced_binding_cached(text: str, dialect: "str | None") -> "exp.Expression | None":
+def _reduced_binding_cached(text: str, dialect: "str | None") -> "tuple | None":
     """The memoized half of `_reduced_binding`, reached only when the parser is present.
 
     Cached for the reason `_reduced_on` is: a pure function of MODEL-author text and the engine it
@@ -8111,13 +8127,18 @@ def _reduced_binding_cached(text: str, dialect: "str | None") -> "exp.Expression
     # the unwrap has to happen before the comparison and not after.
     if isinstance(parsed, exp.Select):
         return None
-    return _strip_qualifiers(_fold_unquoted_identifiers(parsed))
+    # Both reductions off ONE parse, indexed by `grouped`: the plain one and the one for an arm with
+    # a plain GROUP BY (`_equivalent_form`). One cache entry per binding, as before.
+    base = _strip_qualifiers(_fold_unquoted_identifiers(parsed))
+    big = _count_kind(dialect)
+    return _equivalent_form(base.copy(), False, big), _equivalent_form(base, True, big)
 
 
-def _reduced_projection(node: "exp.Expression", dialect: "str | None") -> "exp.Expression":
+def _reduced_projection(node: "exp.Expression", dialect: "str | None",
+                        grouped: bool = False) -> "exp.Expression":
     """One output column's expression, normalized the SAME way a binding is.
 
-    Same two steps in the same order, which is the whole contract of this pair: normalizing the two
+    Same steps in the same order, which is the whole contract of this pair: normalizing the two
     sides differently is how a comparison starts reporting differences that are not there. Not
     cached — this is the caller's own text and changes every request, so a cache keyed by it would
     grow without bound on a public server.
@@ -8125,9 +8146,161 @@ def _reduced_projection(node: "exp.Expression", dialect: "str | None") -> "exp.E
     `dialect` is unused and deliberately in the signature: the node is already parsed, in that
     dialect, by the single parse `assemble_receipt` made. Taking the argument keeps the two halves
     reading as a pair and makes it a compile error rather than a silent divergence if this ever has
-    to re-parse.
+    to re-parse — and it now decides the type of a COUNT the normaliser builds (`_count_kind`).
+    `grouped` is `_equivalent_form`'s, and the caller passes it only for an arm with a
+    plain GROUP BY (`_arm_is_grouped`).
     """
-    return _strip_qualifiers(_fold_unquoted_identifiers(node))
+    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), grouped,
+                            _count_kind(dialect))
+
+
+# The aggregates for which `AGG(x) FILTER (WHERE p)` and `AGG(CASE WHEN p THEN x END)` are one value:
+# each ignores NULL inputs, so a row the CASE turns into NULL is the row FILTER drops, and on no
+# surviving row both return what that aggregate returns for nothing (NULL, or 0 for COUNT).
+# Not MIN, MAX or any DISTINCT: those COMPARE values, and a CASE result carries no column collation,
+# so over a `COLLATE NOCASE` text column SQLite gives a different MIN, MAX and distinct count for
+# the CASE form. Without knowing the column's collation, they are left as written.
+_NULL_IGNORING_AGGS = (exp.Sum, exp.Avg, exp.Count) if _HAVE_SQLGLOT else ()
+
+
+@functools.lru_cache(maxsize=32)
+def _count_kind(dialect: "str | None") -> Any:
+    """How this dialect's parse marks a plain COUNT's result type (`big_int`).
+
+    T-SQL is the one where it is a fact about the value: COUNT returns int and COUNT_BIG bigint, so
+    `COUNT_BIG(*) * 50000` and `COUNT(*) * 50000` differ once the product passes 2^31. A parsed COUNT
+    keeps its mark, and a COUNT the normaliser builds takes the dialect's plain one.
+    """
+    parsed = _parse_sql("COUNT(*)", dialect)
+    return parsed.args.get("big_int") if isinstance(parsed, exp.Count) else None
+
+
+def _is_int_literal(node: Any, value: str) -> bool:
+    return isinstance(node, exp.Literal) and not node.is_string and node.this == value
+
+
+def _is_non_null_literal(node: Any) -> bool:
+    """A literal no engine reads as NULL. Not `''`: Oracle stores the empty string as NULL."""
+    return isinstance(node, exp.Literal) and not (node.is_string and node.this == "")
+
+
+def _single_branch_case(node: Any) -> bool:
+    return isinstance(node, exp.Case) and not node.args.get("this") and len(node.args["ifs"]) == 1
+
+
+def _conjuncts(node: "exp.Expression") -> list:
+    """The terms of an AND chain, through any parentheses: `(a AND b) AND c` is three terms."""
+    out: list = []
+    for term in node.flatten():
+        out.extend(_conjuncts(term) if isinstance(term, exp.And) else [term])
+    return out
+
+
+def _equivalent_form(node: "exp.Expression", grouped: bool = False,
+                     count_kind: Any = None) -> "exp.Expression":
+    """`node` with the equivalent spellings of one metric rewritten to a single form (#655).
+
+    Every rule here returns the same value as the spelling it replaces ON EVERY INPUT — NULLs, no
+    matching row, an empty table — and `tests/test_receipt_equivalent_spellings.py` executes both
+    sides of each on SQLite, DuckDB and Postgres to show it. A rule whose two forms can differ on
+    some data is not here, however close; the test file lists the ones considered and rejected,
+    each with a witness. In particular NOT here:
+
+      * `SUM(CASE WHEN p THEN x ELSE 0 END)` as `SUM(x) FILTER (WHERE p)`: 0 against NULL when no
+        row matches. It is equal under a `COALESCE(…, 0)`, which is a rule below;
+      * a numeric cast against `* 1.0` for division: SQLite keeps integer division under a
+        NUMERIC cast, and Postgres gives a quotient past 10^16 one digit fewer;
+      * FILTER as CASE for MIN, MAX or a DISTINCT, and swapping the sides of `=` or `<>`: both
+        change which collation compares text on SQLite;
+      * dropping `NULLIF(d, 0)` from a denominator: DuckDB divides by zero to infinity, not NULL.
+
+    `grouped` adds the two rules that hold only where every group has at least one row, which a
+    plain GROUP BY guarantees and a global aggregate does not (an empty table): there `SUM` of 1s
+    and 0s is never NULL, and `COUNT(*)` is never 0. They apply only to an aggregate of the arm
+    itself — not inside a subquery, whose aggregate runs over its own set, a window, whose frame
+    can be empty, or a FILTER, which can drop every row of a group.
+
+    Bottom-up, so a rule sees its operands already rewritten: `COALESCE(SUM(x) FILTER …, 0)` reaches
+    the COALESCE rule as `COALESCE(SUM(CASE …), 0)`. The node is the caller's copy (both reducers
+    copy first), so it is rewritten in place.
+    """
+    root = node
+    for sub in reversed(list(node.walk())):
+        new = _rewrite_one(sub, grouped, count_kind)
+        if new is not sub:
+            if sub is root:
+                root = new
+            else:
+                sub.replace(new)
+    return root
+
+
+def _rewrite_one(node: "exp.Expression", grouped: bool, count_kind: Any) -> "exp.Expression":
+    """One node's rewrite under `_equivalent_form`'s rules, or the node itself. A COUNT built here
+    takes `count_kind` (`_count_kind`) as its result type."""
+    # FILTER (WHERE p) -> CASE WHEN p THEN x END; COUNT(*) counts rows, so its value is a literal 1.
+    if isinstance(node, exp.Filter) and isinstance(node.this, _NULL_IGNORING_AGGS) \
+            and isinstance(node.expression, exp.Where) and not node.this.expressions:
+        agg, inner = node.this.copy(), node.this.this
+        if isinstance(inner, exp.Distinct):              # compares values: see above
+            return node
+        value = exp.Literal.number(1) if isinstance(inner, exp.Star) else inner
+        agg.set("this", exp.Case(ifs=[exp.If(this=node.expression.this, true=value)]))
+        # The rebuilt aggregate is detached, so it cannot tell whether it sits in a subquery or a
+        # window: it gets only the rules that hold everywhere.
+        return _rewrite_one(agg, False, count_kind)
+    # CASE … ELSE NULL END is CASE … END.
+    if isinstance(node, exp.Case) and isinstance(node.args.get("default"), exp.Null):
+        node.set("default", None)
+        return node
+    if isinstance(node, exp.Count):
+        # COUNT(<non-null literal>) counts rows; COUNT(CASE WHEN p THEN <literal> END) counts matches.
+        if _is_non_null_literal(node.this):
+            node.set("this", exp.Star())
+        elif _single_branch_case(node.this) and not node.this.args.get("default") \
+                and _is_non_null_literal(node.this.args["ifs"][0].args.get("true")):
+            node.this.args["ifs"][0].set("true", exp.Literal.number(1))
+        return node
+    if isinstance(node, exp.Coalesce) and len(node.expressions) == 1 \
+            and _is_int_literal(node.expressions[0], "0"):
+        inner = node.this
+        if isinstance(inner, exp.Count):                 # COUNT is never NULL
+            return inner
+        if isinstance(inner, exp.Sum) and isinstance(inner.this, exp.Case) \
+                and _is_int_literal(inner.this.args.get("default"), "0"):
+            # The zeros an ELSE 0 adds change a SUM only from NULL to 0, which COALESCE does anyway.
+            inner.this.set("default", None)
+        if isinstance(inner, exp.Sum) and _single_branch_case(inner.this) \
+                and not inner.this.args.get("default") \
+                and _is_int_literal(inner.this.args["ifs"][0].args.get("true"), "1"):
+            # A sum of 1s, 0 when none: a count.
+            return exp.Count(this=inner.this, big_int=count_kind)
+        return node
+    # Type first: `find_ancestor` walks to the root, and on every node of a deep AND chain that was
+    # quadratic. A FILTER, like a subquery or a window frame, can leave a group's aggregate with no
+    # input row at all, which is exactly where these rules stop holding.
+    if grouped and isinstance(node, (exp.Sum, exp.Nullif)) \
+            and node.find_ancestor(exp.Select, exp.Window, exp.Filter) is None:
+        if isinstance(node, exp.Sum) and _single_branch_case(node.this) \
+                and _is_int_literal(node.this.args.get("default"), "0") \
+                and _is_int_literal(node.this.args["ifs"][0].args.get("true"), "1"):
+            return exp.Count(this=exp.Case(ifs=[node.this.args["ifs"][0].copy()]),
+                             big_int=count_kind)
+        if isinstance(node, exp.Nullif) and isinstance(node.this, exp.Count) \
+                and isinstance(node.this.this, exp.Star) and _is_int_literal(node.expression, "0"):
+            return node.this
+    # Operand order that does not change a value. Sorted by the parsed form, never by `.sql()`.
+    if isinstance(node, exp.And) and not isinstance(node.parent, exp.And):
+        terms = sorted(_conjuncts(node), key=repr)
+        out = terms[0]
+        for term in terms[1:]:
+            out = exp.And(this=out, expression=term)
+        return out
+    # Not `=` or `<>`: SQLite compares two columns of different collations with the LEFT one's, so
+    # `a = b` and `b = a` can select different rows. AND and multiplication have no such side.
+    if isinstance(node, exp.Mul) and repr(node.this) > repr(node.expression):
+        return exp.Mul(this=node.expression, expression=node.this)
+    return node
 
 
 class MetricCandidate(NamedTuple):
@@ -8142,6 +8315,9 @@ class MetricCandidate(NamedTuple):
     area: Optional[str]        # the subject area's name; None for a cross-area metric
     binding: str               # the binding text as the model author wrote it, for the item
     reduced: "exp.Expression | None"
+    # The same binding reduced as if it stood in an arm with a plain GROUP BY, where two more
+    # spellings are equal (see `_equivalent_form`). None exactly when `reduced` is.
+    grouped: "exp.Expression | None" = None
 
 
 def _metric_candidates(org: Datasource, storage_type: "str | None",
@@ -8185,7 +8361,8 @@ def _metric_candidates(org: Datasource, storage_type: "str | None",
         text = (bindings or {}).get(storage_type)
         if not text or not text.strip():
             continue
-        out.append(MetricCandidate(mm, area, text, _reduced_binding(text, dialect)))
+        out.append(MetricCandidate(mm, area, text, _reduced_binding(text, dialect),
+                                   _reduced_binding(text, dialect, grouped=True)))
     return out
 
 
@@ -8312,7 +8489,7 @@ def _reads_only_visible(oc: OutputColumn, visible: set[str],
     return True
 
 
-def _by_binding(candidates: list[MetricCandidate]) -> dict:
+def _by_binding(candidates: list[MetricCandidate], grouped: bool = False) -> dict:
     """Candidates indexed by their reduced binding — EVERY candidate declaring it, in declaration
     order.
 
@@ -8335,11 +8512,14 @@ def _by_binding(candidates: list[MetricCandidate]) -> dict:
     Candidates whose binding could not be read carry `reduced is None` and are absent here. They are
     still in `candidates`, because whether ANY of them is unread is what decides between `unmatched`
     and `undetermined`.
+
+    `grouped` indexes each binding's grouped reduction instead, for an arm with a plain GROUP BY.
     """
     out: dict = {}
     for cand in candidates:
-        if cand.reduced is not None:
-            out.setdefault(cand.reduced, []).append(cand)
+        key = cand.grouped if grouped else cand.reduced
+        if key is not None:
+            out.setdefault(key, []).append(cand)
     return out
 
 
@@ -8419,9 +8599,83 @@ def _declarations_unread(org: Datasource, storage_type: "str | None",
     return False
 
 
+def _arm_is_grouped(sel: "exp.Select") -> bool:
+    """Whether every group this arm returns has at least one row: a plain, non-empty GROUP BY.
+
+    ROLLUP, CUBE, GROUPING SETS, `GROUP BY ()`, `GROUP BY ALL` and WITH TOTALS can each return a
+    row aggregated over nothing (a grand total on an empty table), which is exactly where the
+    grouped-only rules of `_equivalent_form` stop holding.
+    """
+    group = sel.args.get("group")
+    if group is None or not group.expressions:
+        return False
+    if any(group.args.get(k) for k in ("grouping_sets", "cube", "rollup", "totals", "all")):
+        return False
+    return not any(isinstance(e, (exp.Rollup, exp.Cube, exp.GroupingSets, exp.Tuple))
+                   for e in group.expressions)
+
+
+def _is_aggregate(expr: "exp.Expression | None") -> bool:
+    """Whether the projection aggregates (SUM, COUNT, AVG, ...) outside a window."""
+    return bool(expr is not None and any(
+        agg.find_ancestor(exp.Window) is None for agg in expr.find_all(exp.AggFunc)))
+
+
+def _column_names(node: "exp.Expression") -> frozenset:
+    """The (already folded, unqualified) column names a reduced expression reads."""
+    return frozenset(col.name for col in node.find_all(exp.Column))
+
+
+def _is_indicator(node: Any) -> bool:
+    """A 0/1 flag: the literal 0 or 1, NULL, or a CASE whose every branch is one. A SUM of it counts."""
+    if isinstance(node, exp.Null) or _is_int_literal(node, "0") or _is_int_literal(node, "1"):
+        return True
+    return isinstance(node, exp.Case) and all(
+        _is_indicator(branch.args.get("true")) for branch in node.args["ifs"]) and (
+        node.args.get("default") is None or _is_indicator(node.args["default"]))
+
+
+def _aggregate_families(node: "exp.Expression") -> frozenset:
+    """Which kinds of aggregate a reduced expression computes, so a MAX is never read as a way of
+    writing a SUM. A SUM of a 0/1 flag is a count, and an AVG is a sum over a count."""
+    out: set[str] = set()
+    for agg in node.find_all(exp.AggFunc):
+        if isinstance(agg, exp.Sum):
+            out.add("count" if _is_indicator(agg.this) else "sum")
+        elif isinstance(agg, exp.Avg):
+            out.update(("sum", "count"))
+        else:
+            out.add(type(agg).__name__.lower())
+    return frozenset(out)
+
+
+def _shape(node: "exp.Expression") -> tuple:
+    """The columns a reduced expression reads and the aggregate kinds it computes."""
+    return _column_names(node), _aggregate_families(node)
+
+
+def _binding_shapes(candidates: list[MetricCandidate]) -> set:
+    """Every shape a read binding has, for `COMPUTED_DIFFERENTLY`. Once per receipt."""
+    return {_shape(c.reduced) for c in candidates if c.reduced is not None}
+
+
+def _lookup(reduced: "exp.Expression", index: dict) -> list:
+    """The candidates declaring `reduced`, looking through one ROUND wrapper.
+
+    Rounding is presentation: `ROUND(<metric>, 1)` is still the metric, and a live run showed a
+    rounded rate reported as "not the agreed definition" beside the signed-off one it was.
+    """
+    cands = index.get(reduced)
+    if not cands and isinstance(reduced, exp.Round):
+        cands = index.get(reduced.this)
+    return cands or []
+
+
 def _match_output_column(oc: OutputColumn, unread: bool,
                          by_binding: dict, visible: set[str], dialect: "str | None",
-                         memo: dict[int, dict[str, str]]
+                         memo: dict[int, dict[str, str]],
+                         by_binding_grouped: Optional[dict] = None,
+                         binding_shapes: "set | frozenset" = frozenset(),
                          ) -> tuple[str, Optional[MetricCandidate]]:
     """One output column against every declared metric: `(status, matched candidate or None)`.
 
@@ -8441,6 +8695,13 @@ def _match_output_column(oc: OutputColumn, unread: bool,
     4. **`UNMATCHED`** — every candidate binding was read, the column was compared against all of
        them, and none is this value. That is a settled claim and it is the whole point of the
        section: it is the sentence "this number is not the organisation's agreed definition".
+       Not reached when a declared binding reads exactly the columns this aggregate reads with the
+       same kinds of aggregate (`_shape`): then the two are written differently and may still be
+       one number, so the answer is `COMPUTED_DIFFERENTLY` (#655). `binding_shapes` is
+       `_binding_shapes(candidates)`; left empty, that rung is skipped.
+
+    Equality is after `_equivalent_form` on both sides. In an arm with a plain GROUP BY the
+    projection is also compared, grouped-reduced, against `by_binding_grouped`.
     """
     if oc.expr is not None:
         # A DICT LOOKUP, not a scan of every candidate. sqlglot's `__hash__` is consistent with its
@@ -8448,11 +8709,13 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         # defined as is exactly what the lookup performs, and 50 output columns against a model
         # declaring hundreds of metrics costs 50 hashes rather than their product.
         reduced = _reduced_projection(oc.expr, dialect)
-        cands = by_binding.get(reduced)
-        # Rounding is presentation: `ROUND(<metric>, 1)` is still the metric, and a live run showed
-        # a rounded rate reported as "not the agreed definition" beside the signed-off one it was.
-        if not cands and isinstance(reduced, exp.Round):
-            cands = by_binding.get(reduced.this)
+        cands = _lookup(reduced, by_binding)
+        if by_binding_grouped and _arm_is_grouped(oc.sel):
+            # Consulted even when the plain index matched: two metrics written differently can be one
+            # number under a GROUP BY, and then this column names neither of them.
+            grouped_cands = _lookup(_reduced_projection(oc.expr, dialect, grouped=True),
+                                    by_binding_grouped)
+            cands = cands + [c for c in grouped_cands if all(c is not d for d in cands)]
         if cands:
             if len(cands) == 1:
                 return MATCHED, cands[0]
@@ -8463,6 +8726,8 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         return UNDETERMINED, None
     if unread:
         return UNDETERMINED, None
+    if _is_aggregate(oc.expr) and _shape(reduced) in binding_shapes:
+        return COMPUTED_DIFFERENTLY, None
     return UNMATCHED, None
 
 
