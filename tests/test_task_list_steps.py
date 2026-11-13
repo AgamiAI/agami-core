@@ -160,7 +160,7 @@ def test_build_stops_waiting_on_a_problem():
     text = _text(REFS / "build.md")
     assert "or when its `list` shows the build step not started again (`·`)" in text
     assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, and do what its `then` says' in text
-    assert "post its `say`, then refresh the task list from its `list`, then handle it" in " ".join(text.split())
+    assert "post its `say`, do what its `then` says, then handle it" in " ".join(text.split())
     assert '"The validator gates the write"' in text and "\nThe validator gates the write" in text
 
 

@@ -516,7 +516,7 @@ def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str]
 
 
 def progress_next(line_new: bool, list_changed: bool, ended: bool) -> str:
-    """`then` for `sm progress`. A finished or failed log never moves on, so "call this again"
+    """`then` for `sm progress`. A finished, failed or killed build's log never moves on, so "call this again"
     would loop for ever: the skill is sent to `sm steps` instead."""
     if line_new and list_changed:
         return THEN_LINE_AND_LIST

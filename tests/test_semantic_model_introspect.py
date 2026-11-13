@@ -956,9 +956,11 @@ def test_a_build_that_raises_ends_its_log_with_failed(tmp_path, monkeypatch):
     last = log.read_text().splitlines()[-1]
     assert last.startswith("failed: no tables discovered.")
     # sm progress posts it as a plain line, no bar, and says the build failed
-    # posted as a `say`-like line: the reason quoted and capped at 80 characters
+    # posted as a `say`-like line: the reason quoted and capped at the failure cap, 200 characters
+    from semantic_model import steps
     from semantic_model.say_text import quoted
-    reason = quoted(last[len("failed:"):].strip())
+    reason = quoted(last[len("failed:"):].strip(), steps.FAILURE_CAP)
+    assert "If the catalog is locked down" in reason  # the engine's hint survives the cap
     assert cli._progress_line(last) == {"line": f"The build didn't finish: {reason}",
                                         "done": False, "failed": True}
 
