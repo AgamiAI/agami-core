@@ -2,7 +2,8 @@
 """Check what the seed examples page saved, against the items it was rendered from (#651).
 
     parse_examples_decisions.py --decisions-file <agami-page-<ts>.json> \\
-        --items-file <agami-examples-items.json> --expect-profile <profile> [--area <area>] [--out-dir <dir>]
+        --items-file <agami-examples-items.json> [--items-file AREA=PATH ...] --expect-profile <profile> \\
+        [--area <area>] [--out-dir <dir>]
 
 The page (rendered `--save-to-helper`, served by `serve_page.py --decisions`) posts
 `{"page": "examples", "profile", "decisions": [{"n", "area", "question", "action", "sql"?, "note"?}],
@@ -32,17 +33,20 @@ _KEYS = {"n", "area", "question", "action", "sql", "note"}
 _NEEDS = {"fix": "sql", "note": "note"}
 
 
-def _items(path: Path, default_area: str | None) -> dict[int, dict]:
-    doc = json.loads(path.read_text(encoding="utf-8"))
-    items = doc.get("items") if isinstance(doc, dict) else doc
-    if not isinstance(items, list):
-        raise ValueError("the items file holds no items")
+def _items(args: list[str], default_area: str | None) -> dict[int, dict]:
+    """Every items file the page was rendered from, read and numbered exactly as the renderer does:
+    its own reader (repeated `--items-file`, `AREA=PATH` labels, a file given twice or several
+    unlabelled ones refused), then one global 1..N in the order given."""
+    from render_examples_validation import _read_files
+
+    rendered = [it for _, _, items in _read_files(list(args)) for it in items]
     out = {}
-    for it in items:
-        if isinstance(it, dict) and isinstance(it.get("n"), int):
+    for n, it in enumerate(rendered, 1):
+        if isinstance(it, dict):
             # `posted_area` is what the page showed (and posts back); `area` where the example lives
-            out[it["n"]] = {
+            out[n] = {
                 **it,
+                "n": n,
                 "posted_area": it.get("area"),
                 "area": it.get("area") or default_area,
             }
@@ -151,7 +155,13 @@ def _write(out_dir: Path, data: dict) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Check what the seed examples page saved.")
     ap.add_argument("--decisions-file", required=True)
-    ap.add_argument("--items-file", required=True, help="the items file the page was rendered from")
+    ap.add_argument(
+        "--items-file",
+        required=True,
+        action="append",
+        help="the items file(s) the page was rendered from, given exactly as to "
+        "render_examples_validation.py (repeatable; AREA=PATH labels a single area's file)",
+    )
     ap.add_argument("--expect-profile", required=True, help="the profile the page was rendered for")
     ap.add_argument("--area", help="the area of items that carry none (a single area's items file)")
     ap.add_argument(
@@ -160,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     try:
         doc = json.loads(Path(args.decisions_file).read_text(encoding="utf-8"))
-        items = _items(Path(args.items_file), args.area)
+        items = _items(args.items_file, args.area)
     except (OSError, ValueError, RecursionError) as e:
         print(json.dumps({"ok": False, "error": f"could not read the files: {e}"}))
         return 2

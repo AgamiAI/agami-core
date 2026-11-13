@@ -180,3 +180,74 @@ def test_each_check_writes_its_files_to_its_own_private_folder(tmp_path, capsys)
     assert json.loads(a.read_text())[0]["question"] == "How many orders?"
     assert json.loads(b.read_text())[0]["question"] == "Revenue?"
     assert a.parent.stat().st_mode & 0o777 == 0o700
+
+
+def test_every_items_file_the_page_was_rendered_from_counts_with_the_pages_numbering(
+    tmp_path, capsys
+):
+    """#657 review: the renderer takes --items-file repeatedly and numbers across all of them; the
+    parser kept only the last file, so a decision on an example in another file was refused."""
+    sales = tmp_path / "sales.json"
+    sales.write_text(json.dumps([{"n": 1, "question": "How many orders?", "sql": "SELECT 1"}]))
+    finance = tmp_path / "finance.json"
+    finance.write_text(json.dumps([{"n": 1, "question": "Total spend?", "sql": "SELECT 2"}]))
+    doc = _doc(
+        {"n": 1, "area": "sales", "question": "How many orders?", "action": "keep"},
+        {"n": 2, "area": "finance", "question": "Total spend?", "action": "drop"},
+    )
+    d = tmp_path / "decisions.json"
+    d.write_text(json.dumps(doc))
+    rc = P.main(
+        [
+            "--decisions-file",
+            str(d),
+            "--items-file",
+            f"sales={sales}",
+            "--items-file",
+            f"finance={finance}",
+            "--expect-profile",
+            "demo",
+        ]
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0 and out["refused"] == []
+    assert out["data"]["keep"] == {"sales": [{"question": "How many orders?", "sql": "SELECT 1"}]}
+    assert out["data"]["drop"] == ["finance/Total spend?"]
+
+
+def test_the_parser_numbers_items_exactly_as_the_renderer_does(tmp_path):
+    import render_examples_validation as R
+
+    files = []
+    for area in ("sales", "finance"):
+        f = tmp_path / f"{area}.json"
+        f.write_text(
+            json.dumps([{"n": 1, "question": f"{area} a"}, {"n": 2, "question": f"{area} b"}])
+        )
+        files.append(f"{area}={f}")
+    rendered = [it for _, _, items in R._read_files(list(files)) for it in items]
+    R.render(title="t", profile="demo", items=rendered)
+    parsed = P._items(list(files), None)
+    assert {n: (it["area"], it["question"]) for n, it in parsed.items()} == {
+        it["n"]: (it["area"], it["question"]) for it in rendered
+    }
+
+
+def test_two_unlabelled_items_files_are_refused_as_the_renderer_refuses_them(tmp_path, capsys):
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    for f in (a, b):
+        f.write_text(json.dumps([{"n": 1, "question": "q"}]))
+    (tmp_path / "d.json").write_text(json.dumps(_doc()))
+    rc = P.main(
+        [
+            "--decisions-file",
+            str(tmp_path / "d.json"),
+            "--items-file",
+            str(a),
+            "--items-file",
+            str(b),
+            "--expect-profile",
+            "demo",
+        ]
+    )
+    assert rc == 2 and "label a single area's file" in json.loads(capsys.readouterr().out)["error"]

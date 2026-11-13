@@ -681,13 +681,13 @@ Stash everything gathered (doc text + repo definitions) as `$DATA_MODEL_DOC_TEXT
 
 **Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) cuts the work to the tables that matter.
 
-**Run the discover pass** — it lists tables + columns only (no grain, FK, or row-count probes, so it's fast even over a tunnel):
+**Run the discover pass** — it lists tables + columns only (no grain, FK or count probes, so it's fast even over a tunnel); `--row-estimates` adds each table's size from one read of the catalog's statistics where the database keeps them, for the table picker, and never counts rows:
 
 ```bash
 ts=$(date -u +%Y%m%d-%H%M%S)
 AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
   --profile <profile> --db-type <db_type> \
-  --artifacts "<artifacts_dir>" \
+  --artifacts "<artifacts_dir>" --row-estimates \
   [--schemas <selected_schemas…>]   # the 1.3 pick, if you narrowed schemas
 ```
 
@@ -697,9 +697,9 @@ AGAMI_SQL_MAX_ROWS=200000 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" discover \
 > - **Never on `seed-examples` (Phase 5).** That command validates SQL which later runs as a real user query; validating under a raised cap green-lights examples that get refused in production.
 > - **Tell the user you did it**, once, with the real numbers the commands print — and say their query-time cap is unchanged. See 2a.0 for the wording.
 
-It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count` and `inventory_path`. No page is written: everything about picking tables happens in the chat.
+It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count` and `inventory_path`. Discover writes no page: the table picker page is rendered only when the person picks **Pick from a list** ([1.6p](#16p--pick-from-a-list-the-table-picker-page)), and it saves its own answer; nothing waits on a pasted block.
 
-**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)). No page opens and nothing waits on a pasted block.
+**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../shared/question-cards.md)).
 
 ```bash
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>"
@@ -708,15 +708,17 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inven
 It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Show:
 
 1. One sentence: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty).
-2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
+2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Don't list tables one by one here: **Pick from a list** shows every one. With 10 tables or fewer, name them all in the sentence instead, so the card can be answered without the page.
 3. The first 5 names in `likely_noise` with their `why` and, when it has one, the table it copies (`copy_of`), then "and N more", so the person sees what "Drop staging and backups" would remove (a real table that only looks like a copy shows up here before they press it). If they ask for the whole list, show up to 15 rows and "and N more".
 
-Then call AskUserQuestion, one question (header `Tables`):
+Then call AskUserQuestion, one question (header `Tables`), *"Which tables should I model? Or type table names or patterns in Other, like orders, customers or all crm_*."*:
 
+- **Pick from a list**: every table on a page, grouped by schema with its rows and columns, to tick; the page saves the pick itself ([1.6p](#16p--pick-from-a-list-the-table-picker-page)). With more than 10 tables, mark it **(Recommended)** and put it first: it is the one way to choose tables one by one, and it starts with the likely copies already unticked when `noise_all_copies` is true, so it covers what **Drop staging and backups** would do.
 - **Keep everything**: model all `<N>` tables.
-- **Drop staging and backups**: skip the `<M>` likely-noise tables. Offer it only when `likely_noise` is not empty and does not cover every table. Mark it **(Recommended)** and put it first only when `noise_all_copies` is true (every flagged table has a same-named counterpart, so dropping them loses no data); otherwise list it after **Keep everything** without "(Recommended)", since a flagged table with no counterpart may be real data. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
+- **Drop staging and backups**: skip the `<M>` likely-noise tables. Offer it only when `likely_noise` is not empty and does not cover every table. With 10 tables or fewer, mark it **(Recommended)** and put it first only when `noise_all_copies` is true (every flagged table has a same-named counterpart, so dropping them loses no data); otherwise list it after **Keep everything** without "(Recommended)", since a flagged table with no counterpart may be real data. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
 - **Only some schemas**: pick which schemas to model. Leave it out when there is a single schema.
-- **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
+
+Names or patterns typed in "Other" are the **Let me name them** answer below; there is no option for it, since an option that asks for typing gets pressed with nothing typed ([rule 5](../../shared/question-cards.md#5-free-text-goes-in-other)).
 
 Add one line before the card: *"Ask to see any schema's tables or any table's columns, or type columns to leave out in Other (`schema.table.column`)."*
 
@@ -727,7 +729,8 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 | Keep everything | Skip the file. Run 1.7 without `--tables-file`; columns typed in "Other" still go to `--exclude-columns` (below). |
 | Drop staging and backups | `inventory_summary.py --inventory "<inventory_path>" --keep drop_noise --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` |
 | Only some schemas | **When the person shared questions or report SQL in 1.5, lead with the schemas they use**: run the summary again with `--used-by <each shared file>` (`agami-asked-questions.txt`, the files in `local/reconcile/inbox/`, a semantic-layer folder's SQL), and when `used_schemas` is not empty make the first option `The <k> schemas your SQL uses (Recommended)`, naming them in its description; tell the person in one line before the card how much of their material a pick would leave out when it drops one of those schemas. Then ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Name each group option's `schema_count` and `tables`. Add a "None of these" option only when that leaves fewer than 4 options; at 4, "Other" is the way out (a card holds 2 to 4 options). Then `--keep schemas:<a,b,c>`. |
-| Let me name them | Write the names (one per line, `schema.table` or a bare table name) with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`, then `--keep names:<artifacts_dir>/local/tmp/agami-names.txt`. |
+| Pick from a list | [1.6p](#16p--pick-from-a-list-the-table-picker-page): the page, or the numbered list where a page can't open. It ends in the same `--keep` output, written to the same `agami-keep.txt`. |
+| Let me name them (names or patterns typed in Other) | Write what was typed, as typed, with the Write tool to `<artifacts_dir>/local/tmp/agami-pick.txt`, then `--keep pick:<artifacts_dir>/local/tmp/agami-pick.txt --shown 0` (this card shows no numbers, so a bare number names nothing). It reads table names (`schema.table` or a bare name), `all <schema>`, patterns with `*` (`all crm_*`, `sales.*`) and a leading `everything except`. A name that is both a schema and a table, or several tables that differ only in case, comes back `ambiguous`: ask which was meant. |
 
 `--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **`{"error": "no tables kept"}` (exit 1, nothing written) means the choice left no tables: say so and ask the same card again.** **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with exit 1 and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
 
@@ -760,6 +763,42 @@ When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.
 ```
 
 It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
+
+### 1.6p — Pick from a list: the table picker page
+
+The answer to 1.6's **Pick from a list**. A one-time page on `127.0.0.1` lists every table of the inventory, grouped by schema, with its row estimate and column count, a search box, select all / none per schema, and the likely staging and backup copies marked (unticked when `noise_all_copies` is true). Its **Save tables** button sends the pick to the helper waiting for it, the way the password page sends a password; nothing is pasted ([question-cards rule 6a](../../shared/question-cards.md#6a-a-page-that-saves-its-decisions)).
+
+1. **Where a page can't reach this computer, use the numbered list.** In a remote or SSH session (`SSH_CONNECTION` is set), say in one line that pages open on this computer, which their browser can't reach from here, and go to **The numbered list** below.
+2. **Render the page and start the helper in the background** (`run_in_background`), with a `<ts>` of the time plus a random part so two pages never share a file:
+
+   ```bash
+   ts=$(date -u +%Y%m%d-%H%M%S)-$RANDOM
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" render_table_picker.py --inventory "<inventory_path>" --save-to-helper \
+     --out "<artifacts_dir>/local/tmp/agami-tables-$ts.html"
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "<artifacts_dir>/local/tmp/agami-tables-$ts.html" \
+     --decisions "<artifacts_dir>/local/tmp/agami-page-$ts.json" --minutes 30
+   ```
+
+   Wait for the helper's first line as rule 6a step 3 says (the Monitor tool, never a foreground sleep): `{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 1800}`. If no line comes, or the task exits, say so in one line with its last stderr line and go to **The numbered list**.
+3. **Post the link, then a card**: *"[Pick the tables](<url>). Tick the tables to keep, press Save tables, then come back here and press I've saved it. The link lasts 30 minutes."* Then one question (header `Table list`), *"Save your pick on the page, then come back here."*: **I've saved it** / **Back to the cards**. Handle both as rule 6a step 4 does: **I've saved it** with no final line yet says the page hasn't been saved and asks this card again; **Back to the cards** reads the helper's output first, offers to apply a pick it finds saved (rule 6a's `Saved page` question), and otherwise stops the helper with TaskStop and goes to **The numbered list** below: the page may never have opened (a cloud or web session can be remote without `SSH_CONNECTION`), and 1.6's card would only offer another page.
+4. **The helper's final line.** `{"status": "saved", "decisions": "<file>"}` → write the kept set through the same command every other answer uses, which checks the file before it writes anything (the page and database it was rendered for, no other keys, and only names the inventory holds):
+
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" \
+     --keep page:"<decisions file>" --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"
+   ```
+
+   It prints `{"tables_file", "kept"}`: say *"Keeping <kept> of <N> tables."* (`<N>` is the summary's `tables`), delete the decisions file and the page, and run 1.7 with `--tables-file "<tables_file>"`. An `{"error"}` or `{"unmatched"}` (exit 1, nothing written) means the file isn't this inventory's pick: say so in one line and ask 1.6's `Tables` card again; never edit the file to make it pass. `{"status": "expired"}` → *"The page expired before it was saved; nothing changed."*, then 1.6's `Tables` card again.
+
+**The numbered list** (when a page can't open). Every table, numbered, in the chat:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" inventory_summary.py --inventory "<inventory_path>" --numbered
+```
+
+Show its `list` as it is, in a fenced text block: a line per schema, then one numbered line per table with its columns, its rows where known and a mark on a likely copy. This is the one place the chat lists tables one by one, because it is what the page would have shown. It lists the first 200 tables (`shown` is the last number in it, `more` how many it leaves out). Past 200 tables, say how many more there are, and that patterns and schema names reach every table; numbers stop at `shown`. Then one question (header `Table pick`), *"Which tables should I keep? Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*."*: **Keep everything** / **Drop staging and backups** (on the same terms as on 1.6's card) / **Back to the tables card**.
+
+What is typed in "Other" goes, as typed, with the Write tool to `<artifacts_dir>/local/tmp/agami-pick.txt`, then `--keep pick:<artifacts_dir>/local/tmp/agami-pick.txt --shown <shown> --tables-out "<artifacts_dir>/local/tmp/agami-keep.txt"` (`<shown>` from `--numbered`), and the say-back is the same *"Keeping <kept> of <N> tables."* The numbers are the list's own. `{"unmatched": [...], "ambiguous": {...}}` (exit 1, nothing written): say which numbers or patterns matched nothing, or list the tables a name could mean, and ask this card again. A question typed there is answered first, then this card asked again ([rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Columns typed as `schema.table.column` go to `--check-columns`, as on 1.6's card.
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
@@ -1358,6 +1397,8 @@ It takes the combined object or a single area's array; repeat `--items-file` to 
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" parse_examples_decisions.py --decisions-file "<artifacts_dir>/local/tmp/agami-page-<ts>.json" \
   --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" --expect-profile <profile> --out-dir "<artifacts_dir>/local/tmp"
 ```
+
+Give it the same `--items-file` arguments, in the same order, that rendered the page (repeated, with their `<area>=` labels, when several files went on one page): it numbers the examples exactly as the renderer did, so every decision on the page finds its example.
 
 `{"ok": false, "error"}` (exit 2; another page or model, or a malformed file): say the error in one line, apply nothing, and ask the Examples card again. Otherwise `data` holds each `action` as the old page's block line by another name: `keep` is `validate N`, `drop` is `reject N`, `fix` (with its `sql`) is `edit N`, `note` is `note N`, and `note_all` is `note all`. Apply them as below, with the saved `reviewer_email` / `reviewer_role` as `--signer` / `--role`: `sm add-example --area <area> --file <data.files.keep[area]>` for the keeps, the same with `data.files.fix[area]` then `sm seed-validate --area <area>` for the fixes, one `sm remove-example --question "<area>/<question>"` per `data.drop` entry, and `data.notes` / `data.note_all` as the notes below. Each of `refused` (a decision whose `n`, `question` or `area` is not that item's, a keep on an example that failed, a malformed one) is said back and not applied. **A keep is a sign-off**: with no saved `reviewer_email` / `reviewer_role` the page refuses to save one, and one that arrives anyway is not applied; say so. Then say back in one line what changed, from the commands' output (*"Kept 9 examples, dropped 2, fixed 1: it now returns 12 rows."*), show a fixed example's new result as one-by-one does, delete the decisions file, and ask the Examples card again over the examples still undecided, or go to Phase 7 when none are. A block pasted from an older page is still accepted: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
 - **`validate N`** → the example is a trusted anchor; if the block carries a `by <email>` clause, record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written).
