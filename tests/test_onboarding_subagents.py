@@ -88,7 +88,9 @@ def test_the_enricher_launch_prompt_names_the_chunks_tables():
     text = (REFS / "enrich.md").read_text(encoding="utf-8")
     launch = text[text.index("2. **Launch the enrichers"):text.index("3. **Collect**")]
     assert "Each prompt names `area`, `tables` (the chunk's tables" in launch
-    assert "**Two chunks of one area can return the same entity**" in text
+    assert ("Two chunks of one area may return the same entity; applying the later one replaces "
+            "the earlier, so nothing needs doing.") in text
+    assert "with the Edit tool" not in text  # a result file is applied as written, never edited
 
 
 def test_1_5_gives_each_document_its_own_reader_in_the_background():
