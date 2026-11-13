@@ -56,15 +56,22 @@ _GATE: Any = None
 
 
 def gate() -> Any:
-    """say_gate.py from this script's own folder, loaded once."""
+    """say_gate.py from this script's own folder, loaded once. The folder is the real one (a link to
+    this script loads the plugin's gate, not a file beside the link), and no bytecode is written:
+    the plugin folder is the installed plugin, not a cache."""
     global _GATE
     if _GATE is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), GATE_FILE)
-        spec = importlib.util.spec_from_file_location("agami_say_gate", path)
-        if spec is None or spec.loader is None:
-            raise ImportError(path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        path = os.path.join(os.path.dirname(os.path.realpath(__file__)), GATE_FILE)
+        saved = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec = importlib.util.spec_from_file_location("agami_say_gate", path)
+            if spec is None or spec.loader is None:
+                raise ImportError(path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = saved
         _GATE = module
     return _GATE
 

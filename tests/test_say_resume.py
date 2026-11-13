@@ -479,6 +479,50 @@ def test_a_real_process_blocks_and_stays_silent_the_same_way(art, tmp_path):
     assert again.returncode == 0 and again.stdout == b""
 
 
+def _blocking_case(art: Path, tmp_path: Path) -> bytes:
+    _write_pending(art, [_entry()])
+    return json.dumps(_event(str(_stopped_after_posting(tmp_path)))).encode()
+
+
+def test_a_run_leaves_no_bytecode_beside_the_scripts(art, tmp_path):
+    # The plugin folder is the installed plugin: loading the gate must not write __pycache__ into it.
+    scripts = tmp_path / "plugin" / "scripts"
+    scripts.mkdir(parents=True)
+    for name in ("say_resume.py", "say_gate.py"):
+        shutil.copy(PLUGIN / "scripts" / name, scripts / name)
+    proc = subprocess.run([sys.executable, "-I", str(scripts / "say_resume.py")], input=_blocking_case(art, tmp_path),
+                          capture_output=True, env={k: v for k, v in _env(art).items() if k != "PYTHONDONTWRITEBYTECODE"},
+                          timeout=30)
+    assert _blocked(proc.stdout.decode("utf-8")) == REASON
+    assert sorted(p.name for p in scripts.iterdir()) == ["say_gate.py", "say_resume.py"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs symlinks")
+def test_run_through_a_link_the_real_sibling_gate_is_loaded(art, tmp_path):
+    elsewhere = tmp_path / "bin"
+    elsewhere.mkdir()
+    (elsewhere / "say_resume.py").symlink_to(RESUME)
+    (elsewhere / "say_gate.py").write_text("raise SystemExit('the wrong gate')\n", encoding="utf-8")
+    proc = subprocess.run([sys.executable, "-I", str(elsewhere / "say_resume.py")], input=_blocking_case(art, tmp_path),
+                          capture_output=True, env=_env(art), timeout=30)
+    assert proc.returncode == 0 and _blocked(proc.stdout.decode("utf-8")) == REASON
+
+
+def test_loading_the_gate_leaves_the_bytecode_setting_as_it_was(monkeypatch):
+    monkeypatch.setattr(RESUME_MOD, "_GATE", None)
+    monkeypatch.setattr(sys, "dont_write_bytecode", False)
+    seen = []
+    real = importlib.util.spec_from_file_location
+
+    def spy(*a, **kw):
+        seen.append(sys.dont_write_bytecode)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(RESUME_MOD.importlib.util, "spec_from_file_location", spy)
+    assert RESUME_MOD.gate().__file__ == os.path.realpath(PLUGIN / "scripts" / "say_gate.py")
+    assert seen == [True] and sys.dont_write_bytecode is False
+
+
 def _resume_hook() -> dict:
     doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     (entry,) = doc["hooks"]["Stop"]
