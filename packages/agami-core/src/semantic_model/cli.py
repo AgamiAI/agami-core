@@ -759,6 +759,18 @@ def cmd_timing(args) -> int:
     return 0
 
 
+def cmd_summary(args) -> int:
+    """The onboarding's closing summary as markdown, ready to post as printed; `--json` wraps it
+    with the overview's totals."""
+    from . import summary
+    result = summary.onboarding_summary(Path(args.root))
+    if args.json:
+        _print_json(result)
+    else:
+        sys.stdout.write(result["markdown"])
+    return 0
+
+
 def cmd_overview(args) -> int:
     """The numbers an overview card shows: per subject area its tables, columns described, metrics
     and joins (and how many await sign-off) and examples, plus totals. One call, so a card never
@@ -2342,6 +2354,45 @@ def cmd_discover(args) -> int:
     return 0
 
 
+def _add_out(sp: argparse.ArgumentParser) -> None:
+    """`--out <path>` on a verb whose output a skill keeps in a file: a shell redirect after the
+    launcher made the call a compound command no permission rule matches, so it stopped for
+    permission every time."""
+    sp.add_argument("--out", dest="out_file", default=None, metavar="PATH",
+                    help='write the output to PATH (atomically) instead of stdout, and print '
+                         '{"out": PATH, "bytes": N}')
+
+
+def write_atomically(path: Path, data: bytes) -> None:
+    """`data` at `path` through a temp file in the same folder and a rename, so a reader polling
+    for the file (`sm wait-files`) never sees it half written."""
+    import tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _run_to_out(args) -> int:
+    """Run the verb with its stdout captured, then write those bytes to `--out`, whatever the exit
+    code, as the redirect it replaces did; the exit code passes through. A verb that raises writes
+    nothing, so no half answer lands where a poller looks."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = args.func(args)
+    data = buf.getvalue().encode("utf-8")
+    out = Path(args.out_file).expanduser()
+    write_atomically(out, data)
+    print(json.dumps({"out": str(out), "bytes": len(data)}))  # one line: the skill reads it at a glance
+    return rc
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="semantic_model", description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -2372,6 +2423,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("bundle", help="one-shot subject-area bundle")
     sp.add_argument("root")
+    _add_out(sp)
     sp.add_argument("--area", required=True)
     sp.set_defaults(func=cmd_bundle)
 
@@ -2381,6 +2433,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("org-draft", help="print a human-narrative STARTER for datasource.md (prompt only, no facts)")
     sp.add_argument("root")
+    _add_out(sp)
     sp.set_defaults(func=cmd_org_draft)
 
     sp = sub.add_parser("org-context", help="print the full domain context (human narrative + model-derived summary + glossary) for the LLM")
@@ -2426,6 +2479,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("claims", help="where two statements differ: the eight claims the golden runner compares, as a diff")
     sp.add_argument("root")
     sp.add_argument("--sql-file", required=True, dest="sql_file")
+    _add_out(sp)
     sp.add_argument("--against-sql-file", required=True, dest="against_sql_file")
     sp.set_defaults(func=cmd_claims)
 
@@ -2479,6 +2533,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("model-tree", help="browsable area→table→column tree (incl. rejected)")
     sp.add_argument("root")
+    _add_out(sp)
     sp.set_defaults(func=cmd_model_tree)
 
     sp = sub.add_parser("apply-enrichment", help="apply one agami-enricher subagent's result file for one area: descriptions, allowed edits and entities, checked before anything is written")
@@ -2528,6 +2583,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("timing", help="how long onboarding took, from the step marks: seconds per step, the total, and a 'Set up in …' line")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
     sp.set_defaults(func=cmd_timing)
+
+    sp = sub.add_parser("summary", help="the onboarding's closing summary as markdown, ready to post: totals, the per-area table, what waits for sign-off, and the 'Set up in …' line")
+    sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
+    sp.add_argument("--json", action="store_true",
+                    help='print {"markdown": <the same text>, "totals": {...}} instead')
+    sp.set_defaults(func=cmd_summary)
 
     sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
     sp.add_argument("root")
@@ -2717,6 +2778,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "Several or none print one combined result: per-area entries plus totals")
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
+    _add_out(sp)
     sp.set_defaults(func=cmd_seed_validate_areas)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
@@ -2838,6 +2900,8 @@ def main(argv=None) -> int:
     _enter_caller_cwd()
     args = _parse_args(argv)
     try:
+        if getattr(args, "out_file", None):
+            return _run_to_out(args)
         return args.func(args)
     except FileNotFoundError as e:
         # No model at this root yet. This is an expected, clean signal (not a crash):
