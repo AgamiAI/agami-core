@@ -1,5 +1,5 @@
 {
-  "description": "Approve agami's own launcher calls (scripts/sm, scripts/py on a plugin script) and its own scratch files under <artifacts_dir>/local/tmp; says nothing about anything else.",
+  "description": "Approve a short list of read-only agami sm calls and agami's own scratch files under <artifacts_dir>/local/tmp; says nothing about anything else.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/py\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\"",
+            "command": "python3 -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" || python -I \"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py\" || true",
             "timeout": 10
           }
         ]

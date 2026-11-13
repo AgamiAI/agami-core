@@ -1,14 +1,16 @@
-"""The PreToolUse hook that approves agami's own launcher calls and scratch files.
+"""The PreToolUse hook that approves a few read-only agami calls and agami's scratch files.
 
-It grants permission, so the refusals are tested harder than the approvals: anything but the exact
-shapes it knows prints nothing (the normal permission prompt then applies), and it never denies.
-Each case drives the script as Claude Code does, with the event as JSON on stdin.
+It grants permission in every session, turn and subagent, so it approves only what is harmless even
+if a hostile document is steering the model, and the refusals are tested harder than the approvals:
+anything but the table's exact shapes prints nothing (the normal prompt then applies). Each case
+drives the script as Claude Code does, with the event as JSON on stdin.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -22,29 +24,32 @@ from skill_docs import PLUGIN, SKILLS_DIR
 HOOK = PLUGIN / "scripts" / "approve_own_calls.py"
 SM = str(PLUGIN / "scripts" / "sm")
 PY = str(PLUGIN / "scripts" / "py")
+SYMLINKS = pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32",
+                              reason="symlinks")
 
 
 @pytest.fixture
 def art(tmp_path: Path) -> Path:
     root = tmp_path / "artifacts"
     (root / "local" / "tmp").mkdir(parents=True)
+    (root / "acme").mkdir()
     return root
 
 
-def _run(event: object, art: Path, raw: bytes | None = None) -> subprocess.CompletedProcess:
-    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art), "HOME": str(art.parent)}
+def _run(event: object, art: Path, raw: bytes | None = None,
+         env: dict | None = None) -> subprocess.CompletedProcess:
+    env = env or {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art), "HOME": str(art.parent)}
     data = raw if raw is not None else json.dumps(event).encode("utf-8")
     return subprocess.run([sys.executable, "-I", str(HOOK)], input=data, capture_output=True,
                           env=env, timeout=30)
 
 
-def _decision(event: object, art: Path) -> str | None:
-    proc = _run(event, art)
+def _decision(event: object, art: Path, env: dict | None = None) -> str | None:
+    proc = _run(event, art, env=env)
     assert proc.returncode == 0, proc.stderr
     if not proc.stdout.strip():
         return None
-    out = json.loads(proc.stdout)
-    spec = out["hookSpecificOutput"]
+    spec = json.loads(proc.stdout)["hookSpecificOutput"]
     assert spec["hookEventName"] == "PreToolUse"
     assert spec["permissionDecision"] == "allow"  # the only decision it ever makes
     assert spec["permissionDecisionReason"].startswith("agami: ")
@@ -63,174 +68,272 @@ def _file(tool: str, path: str, **extra: object) -> dict:
     return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
 
 
-# --- a. Bash: approved shapes ---------------------------------------------------------------------
+def _sm(art: Path, args: str, prefix: str = "bash ") -> str:
+    """`bash "<sm>" <args>` with {R} for the model root and {T} for the scratch folder."""
+    filled = args.format(R=str(art / "acme"), T=str(art / "local" / "tmp"), A=str(art))
+    return f'{prefix}"{SM}" {filled}'
 
-ALLOWED_COMMANDS = [
-    f'bash "{SM}" steps /data/acme',
-    f"bash {SM} steps /data/acme --mark build=done",
-    f'"{SM}" steps /data/acme',
-    f"{SM} overview /data/acme",
-    f"bash '{SM}' summary '/data/my acme'",
-    f'AGAMI_SQL_MAX_ROWS=500 bash "{SM}" seed-validate /data/acme --profile acme',
-    f'AGAMI_PROFILE=acme_2 bash "{PY}" connect_resolve.py --db-type postgres',
-    f'AGAMI_SQL_MAX_ROWS=10 AGAMI_PROFILE=acme bash "{SM}" areas /data/acme',
-    f'bash "{PY}" inventory_summary.py --inventory "/data/inv one.json"',
-    f'bash "{SM}" prepare /data/acme --sql "SELECT * FROM orders WHERE id = 1"',
-    f"bash \"{SM}\" curate /data/acme --ops '[{{\"op\": \"approve\"}}]'",
-    f'bash "{SM}" steps ~/agami-artifacts/acme',
-    f'bash   "{SM}"   steps   /data/acme  ',
+
+# --- A. approved sm forms ----------------------------------------------------------------------------
+
+APPROVED = [
+    "steps {R}",
+    "steps {R} --mark connect=in_progress",
+    "steps {R} --mark connect=done --mark reports=skipped --mark build=in_progress",
+    "steps {R} --full",
+    "steps --full {R} --mark describe=done",
+    "progress {R}",
+    "progress {R} --wait 20",
+    "progress {R} --wait 0",
+    "progress {R} --wait 600",
+    "timing {R}",
+    "summary {R}",
+    "summary {R} --json",
+    "overview {R}",
+    "areas {R}",
+    "coverage {R}",
+    "review-queue {R}",
+    "review-items {R}",
+    "review-items {R} --scope preseed",
+    "model-tree {R}",
+    "model-tree {R} --out {T}/agami-tree.json",
+    "bundle {R} --area sales",
+    "bundle {R} --area agami-example --out {T}/agami-examples-1-sales.input.json",
+    "batch-id",
+    "wait-files --file {T}/agami-a.result.json",
+    "wait-files --file {T}/agami-a.json --file {T}/agami-b.json --wait 60",
 ]
 
 
-@pytest.mark.parametrize("command", ALLOWED_COMMANDS)
-def test_a_lone_launcher_call_is_allowed(art, command):
-    assert _decision(_bash(command), art) == "allow"
+@pytest.mark.parametrize("args", APPROVED)
+def test_an_approved_form_is_allowed(art, args):
+    assert _decision(_bash(_sm(art, args)), art) == "allow"
 
 
-def test_bash_with_the_documented_optional_fields(art):
-    event = _bash(f'bash "{SM}" wait-files --file /x --wait 60', description="wait",
-                  timeout=600000, run_in_background=True)
-    assert _decision(event, art) == "allow"
+@pytest.mark.parametrize("prefix", ["bash ", ""])
+def test_with_or_without_bash_and_quotes(art, prefix):
+    root = art / "acme"
+    for command in (f'{prefix}"{SM}" steps "{root}"', f"{prefix}{SM} steps {root}",
+                    f"{prefix}'{SM}' steps '{root}'"):
+        assert _decision(_bash(command), art) == "allow", command
 
 
-def test_out_into_the_scratch_folder_is_allowed(art):
-    target = art / "local" / "tmp" / "agami-tree.json"
-    assert _decision(_bash(f'bash "{SM}" model-tree /data/acme --out "{target}"'), art) == "allow"
-    assert _decision(_bash(f'bash "{SM}" model-tree /data/acme --out={target}'), art) == "allow"
+def test_a_model_root_that_does_not_exist_yet_is_allowed(art):
+    # onboarding marks its first step before the build creates the folder
+    assert _decision(_bash(f'bash "{SM}" steps {art / "newdb"} --mark connect=in_progress'),
+                     art) == "allow"
 
 
-# --- a. Bash: refused shapes ----------------------------------------------------------------------
+def test_the_description_field_is_fine(art):
+    assert _decision(_bash(_sm(art, "steps {R}"), description="Show the steps"), art) == "allow"
 
-REFUSED_COMMANDS = [
+
+# --- A. refused sm forms: the reviewer's inputs and more ----------------------------------------------
+
+REFUSED = {
+    # abbreviated or `=` options, on every verb that has --out
+    "abbrev --o": "org-draft {R} --o {A}/../.zshrc",
+    "abbrev --o model-tree": "model-tree {R} --o {T}/agami-x.json",
+    "abbrev --ou model-tree": "model-tree {R} --ou {T}/agami-x.json",
+    "abbrev --o= model-tree": "model-tree {R} --o={T}/agami-x.json",
+    "abbrev --ou= model-tree": "model-tree {R} --ou={T}/agami-x.json",
+    "--out= model-tree": "model-tree {R} --out={T}/agami-x.json",
+    "abbrev --o bundle": "bundle {R} --area sales --o {T}/agami-x.json",
+    "abbrev --ou bundle": "bundle {R} --area sales --ou {T}/agami-x.json",
+    "abbrev --o= bundle": "bundle {R} --area sales --o={T}/agami-x.json",
+    "abbrev --ar bundle": "bundle {R} --ar sales",
+    "abbrev --f wait-files": "wait-files --f {T}/agami-a.json",
+    "abbrev --m steps": "steps {R} --m build=done",
+    "abbrev --fu steps": "steps {R} --fu",
+    "abbrev --wa progress": "progress {R} --wa 5",
+    # --out outside scratch
+    "--out home": "model-tree {R} --out {A}/../.zshrc",
+    "--out new dirs": "model-tree {R} --out {T}/new/dirs/agami-settings.json",
+    "--out not agami-": "model-tree {R} --out {T}/settings.json",
+    "--out local": "model-tree {R} --out {A}/local/agami-x.json",
+    "--out model": "bundle {R} --area sales --out {R}/agami-x.json",
+    "--out relative": "model-tree {R} --out agami-x.json",
+    "--out missing value": "model-tree {R} --out",
+    "--out twice": "model-tree {R} --out {T}/agami-a.json --out {T}/agami-b.json",
+    # roots
+    "root outside artifacts": "steps /tmp/elsewhere",
+    "root outside, mark": "steps /tmp/elsewhere --mark build=done",
+    "root is artifacts": "steps {A}",
+    "root is local": "steps {A}/local",
+    "root is Local": "steps {A}/Local",
+    "root under local": "steps {A}/local/tmp",
+    "root nested": "steps {R}/sub",
+    "root hidden": "steps {A}/.git",
+    "root dotdot": "steps {R}/../acme",
+    "root relative": "steps acme",
+    "root tilde": "steps ~/agami-artifacts/acme",
+    "root missing": "steps",
+    "two roots": "steps {R} {R}",
+    # option values
+    "mark bad status": "steps {R} --mark build=finished",
+    "mark bad id": "steps {R} --mark Build=done",
+    "mark no value": "steps {R} --mark",
+    "mark option value": "steps {R} --mark --full",
+    "full twice": "steps {R} --full --full",
+    "wait negative": "progress {R} --wait -1",
+    "wait float": "progress {R} --wait 2.5",
+    "wait too long": "progress {R} --wait 601",
+    "wait twice": "progress {R} --wait 1 --wait 2",
+    "scope bad": "review-items {R} --scope everything",
+    "area slash": "bundle {R} --area ../x",
+    "area dots": "bundle {R} --area ..",
+    "area missing": "bundle {R}",
+    "area twice": "bundle {R} --area a --area b",
+    "wait-files outside": "wait-files --file /tmp/agami-a.json",
+    "wait-files none": "wait-files --wait 5",
+    "batch-id arg": "batch-id {R}",
+    "unknown option": "steps {R} --verbose",
+    "double dash": "steps -- {R}",
+    "help": "steps {R} -h",
+    "json on steps": "steps {R} --json",
+    # verbs that are not approved
+    "describe-file": "describe-file {R} --file /etc/passwd",
+    "curate": "curate {R} --ops-file {T}/agami-ops.json",
+    "claims": "claims {R} --sql-file /etc/passwd --against-sql-file /etc/hosts",
+    "introspect": "introspect --profile prod --db-type postgres --artifacts /tmp/x --progress /tmp/p",
+    "seed-examples": "seed-examples {R} --profile prod --file {T}/agami-seeds.json",
+    "seed-validate": "seed-validate {R} --profile prod",
+    "install": "install",
+    "bare sm": "",
+    "org-draft": "org-draft {R}",
+    "enrich-input": "enrich-input {R} --chunks",
+    "apply-enrichment": "apply-enrichment {R} --file {T}/agami-x.json --area sales",
+    "context": "context {R} --tables orders",
+    "unknown verb": "frobnicate {R}",
+}
+
+
+@pytest.mark.parametrize("args", REFUSED.values(), ids=REFUSED.keys())
+def test_a_refused_form_says_nothing(art, args):
+    assert _decision(_bash(_sm(art, args)), art) is None
+
+
+SHELL_REFUSED = [
     # chained, piped, redirected, substituted
-    f'bash "{SM}" steps /x; rm -rf x',
-    f'bash "{SM}" steps /x ;rm -rf x',
-    f'bash "{SM}" steps /x | grep text',
-    f'bash "{SM}" steps /x && echo done',
-    f'bash "{SM}" steps /x & echo bg',
-    f'bash "{SM}" steps /x || true',
-    f'bash "{SM}" steps /x > out.json',
-    f'bash "{SM}" steps /x >> out.json',
-    f'bash "{SM}" steps /x 2>/dev/null',
-    f'bash "{SM}" steps < /etc/passwd',
-    f'bash "{SM}" steps "$(whoami)"',
-    f'bash "{SM}" steps $(whoami)',
-    f'bash "{SM}" steps `whoami`',
-    f'bash "{SM}" steps "`whoami`"',
-    f'bash "{SM}" steps <(cat /etc/passwd)',
-    f'bash "{SM}" steps /x\nrm -rf x',
-    f'bash "{SM}" steps /x\rrm -rf x',
-    # variables, in any quoting the shell still expands
-    f'bash "{SM}" steps $HOME',
-    f'bash "{SM}" steps "$HOME"',
-    f'bash "{SM}" steps "${{HOME}}"',
-    f'bash "{SM}" steps ${{HOME}}',
-    f'bash "{SM}" steps "a\\$b"',
-    # assignments and prefixes other than the two documented ones
-    f'A=1; bash "{SM}" steps /x',
-    f'A=1 bash "{SM}" steps /x',
-    f'P=/x bash "{SM}" steps /x',
-    f'AGAMI_SQL_MAX_ROWS=abc bash "{SM}" steps /x',
-    f'AGAMI_SQL_MAX_ROWS="5" bash "{SM}" steps /x',
-    f'AGAMI_SQL_MAX_ROWS=5 AGAMI_SQL_MAX_ROWS=6 bash "{SM}" steps /x',
-    f'AGAMI_PROFILE=a-b bash "{SM}" steps /x',
-    f'AGAMI_PROFILE= bash "{SM}" steps /x',
-    f'PATH=/tmp bash "{SM}" steps /x',
-    f'BASH_ENV=/tmp/x bash "{SM}" steps /x',
-    f'env bash "{SM}" steps /x',
-    f'sudo bash "{SM}" steps /x',
-    f'bash -x "{SM}" steps /x',
-    f'bash -c "{SM} steps /x"',
-    f'sh "{SM}" steps /x',
-    f'bash bash "{SM}" steps /x',
-    f'exec "{SM}" steps /x',
-    # grouping, globbing, comments, history
-    f'( bash "{SM}" steps /x )',
-    f'{{ bash "{SM}" steps /x }}',
-    f'bash "{SM}" steps /x*',
-    f'bash "{SM}" steps /x?',
-    f'bash "{SM}" steps /x[ab]',
-    f'bash "{SM}" steps /x # comment',
-    f'bash "{SM}" steps !!',
-    f'bash "{SM}" steps \\;',
-    f'bash "{SM}" steps "unclosed',
-    f"bash \"{SM}\" steps 'unclosed",
-    f'bash "{SM}" steps /x\t\x00',
-    # the launcher itself
-    f'bash "{PLUGIN}/scripts/connect_helper.py" --spec x',
-    f'bash "{PLUGIN}/scripts/open_in_browser" x',
-    f'bash "{PLUGIN}/scripts/_python.sh"',
-    f'bash "{PLUGIN}-evil/scripts/sm" steps /x',
-    f'bash "{PLUGIN}/scripts/sm-evil" steps /x',
-    f'bash "{PLUGIN}/scripts/../scripts/sm" steps /x',
-    f'bash "{PLUGIN}/scripts/./sm" steps /x',
-    f'bash "{PLUGIN}//scripts/sm" steps /x',
-    f'bash "{PLUGIN}/../agami/scripts/sm" steps /x',
-    "bash scripts/sm steps /x",
-    "bash ./sm steps /x",
-    "bash sm steps /x",
-    "bash ~/agami/scripts/sm steps /x",
-    f'bash "{SM}/" steps /x',
-    f"bash {SM.upper()} steps /x" if sys.platform != "win32" else "bash x",
-    # py running anything that isn't one of the plugin's own scripts by bare name
-    f'bash "{PY}" -c "import os"',
-    f'bash "{PY}" -m execute_sql --profile acme',
-    f'bash "{PY}" -m pip install x',
-    f'bash "{PY}" /tmp/evil.py',
-    f'bash "{PY}" evil.py',
-    f'bash "{PY}" ../scripts/connect_helper.py',
-    f'bash "{PY}" scripts/connect_helper.py',
-    f'bash "{PY}" _python.sh',
-    f'bash "{PY}"',
-    f'bash "{PY}" -I connect_helper.py',
-    # --out anywhere but an agami scratch file
-    f'bash "{SM}" model-tree /x --out /etc/agami-x.json',
-    f'bash "{SM}" model-tree /x --out ~/.zshrc',
-    f'bash "{SM}" model-tree /x --out=/tmp/agami-x.json',
-    f'bash "{SM}" model-tree /x --out',
-    # nothing to run
-    "",
-    "   ",
-    "bash",
-    "AGAMI_PROFILE=acme",
+    '{L} steps {R}; rm -rf x', '{L} steps {R} | grep text', '{L} steps {R} && echo done',
+    '{L} steps {R} & echo bg', '{L} steps {R} || true', '{L} steps {R} > out.json',
+    '{L} steps {R} 2>/dev/null', '{L} steps < /etc/passwd', '{L} steps "$(whoami)"',
+    '{L} steps `whoami`', '{L} steps {R}\nrm -rf x', '{L} steps {R}\rrm -rf x',
+    # variables in any quoting the shell still expands
+    '{L} steps $HOME', '{L} steps "$HOME"', '{L} steps "${{HOME}}"', '{L} steps "a\\$b"',
+    # env prefixes are not approved any more
+    'AGAMI_SQL_MAX_ROWS=50 {L} steps {R}', 'AGAMI_PROFILE=acme {L} steps {R}',
+    'A=1; {L} steps {R}', 'A=1 {L} steps {R}', 'PATH=/tmp {L} steps {R}',
+    # other runners
+    'env {L} steps {R}', 'sudo {L} steps {R}', 'bash -x "{S}" steps {R}', 'sh "{S}" steps {R}',
+    'bash bash "{S}" steps {R}', 'exec "{S}" steps {R}', 'bash -c "{S} steps {R}"',
+    # grouping, globbing, comments
+    '( {L} steps {R} )', '{L} steps {R}*', '{L} steps {R} # c', '{L} steps "unclosed',
 ]
 
 
-@pytest.mark.parametrize("command", REFUSED_COMMANDS)
-def test_anything_else_says_nothing(art, command):
+@pytest.mark.parametrize("template", SHELL_REFUSED)
+def test_shell_syntax_says_nothing(art, template):
+    command = template.format(L=f'bash "{SM}"', S=SM, R=str(art / "acme"))
     assert _decision(_bash(command), art) is None
 
 
-def test_a_copy_of_the_launcher_outside_the_plugin_says_nothing(art, tmp_path):
+@pytest.mark.parametrize("launcher", [
+    f"{PLUGIN}/scripts/py",
+    f"{PLUGIN}/scripts/connect_helper.py",
+    f"{PLUGIN}/scripts/_python.sh",
+    f"{PLUGIN}-evil/scripts/sm",
+    f"{PLUGIN}/scripts/sm-evil",
+    f"{PLUGIN}/scripts/../scripts/sm",
+    f"{PLUGIN}/scripts/./sm",
+    f"{PLUGIN}//scripts/sm",
+    f"{PLUGIN}/scripts/SM",
+    "scripts/sm",
+    "~/agami/scripts/sm",
+])
+def test_anything_but_this_plugins_sm_says_nothing(art, launcher):
+    assert _decision(_bash(f'bash "{launcher}" steps {art / "acme"}'), art) is None
+
+
+@pytest.mark.parametrize("args", ["connect_resolve.py --db-type postgres", "-c 'import os'",
+                                  "-m execute_sql --profile acme", "setup_desktop_mcp.py --dry-run",
+                                  "prepare_deploy.py --target /tmp/x", "serve_page.py x --open"])
+def test_no_py_call_is_approved(art, args):
+    assert _decision(_bash(f'bash "{PY}" {args}'), art) is None
+
+
+def test_a_copy_or_link_of_the_launcher_says_nothing(art, tmp_path):
     copy = tmp_path / "elsewhere" / "scripts"
     copy.mkdir(parents=True)
     shutil.copy(SM, copy / "sm")
-    assert _decision(_bash(f'bash "{copy / "sm"}" steps /x'), art) is None
+    assert _decision(_bash(f'bash "{copy / "sm"}" steps {art / "acme"}'), art) is None
+    if hasattr(os, "symlink") and sys.platform != "win32":
+        (tmp_path / "sm").symlink_to(SM)
+        assert _decision(_bash(f'bash "{tmp_path / "sm"}" steps {art / "acme"}'), art) is None
 
 
-@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks")
-def test_a_link_to_the_launcher_from_elsewhere_says_nothing(art, tmp_path):
-    # `bash <link>` would source the _python.sh beside the link, not the plugin's
-    link = tmp_path / "sm"
-    link.symlink_to(SM)
-    assert _decision(_bash(f'bash "{link}" steps /x'), art) is None
-    plugin_link = tmp_path / "plugin"
-    plugin_link.symlink_to(PLUGIN)
-    assert _decision(_bash(f'bash "{plugin_link}/scripts/sm" steps /x'), art) is None
+@pytest.mark.parametrize("extra", [{"run_in_background": True}, {"timeout": 600000},
+                                   {"run_in_background": False}, {"dangerouslyDisableSandbox": True}])
+def test_a_bash_field_beyond_command_and_description_says_nothing(art, extra):
+    assert _decision(_bash(_sm(art, "steps {R}"), **extra), art) is None
 
 
-def test_an_unknown_bash_field_says_nothing(art):
-    assert _decision(_bash(f'bash "{SM}" steps /x', dangerouslyDisableSandbox=True), art) is None
+@SYMLINKS
+def test_a_root_that_is_a_link_out_says_nothing(art, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (art / "linked").symlink_to(outside)
+    assert _decision(_bash(f'bash "{SM}" steps {art / "linked"} --mark build=done'), art) is None
+    (art / "tolocal").symlink_to(art / "local")
+    assert _decision(_bash(f'bash "{SM}" steps {art / "tolocal"}'), art) is None
 
 
-def test_a_command_that_is_not_text_says_nothing(art):
-    for command in (None, 1, [f"bash {SM}"], {"c": 1}):
-        event = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                 "tool_input": {"command": command}}
-        assert _decision(event, art) is None
+def test_no_artifacts_folder_says_nothing(tmp_path):
+    art = tmp_path / "nothing-here"
+    assert _decision(_bash(f'bash "{SM}" steps {art / "acme"}'), art) is None
 
 
-# --- b. Write / Read of agami's scratch files ------------------------------------------------------
+def test_a_relative_artifacts_setting_says_nothing(art):
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": "artifacts", "HOME": str(art.parent)}
+    assert _decision(_bash(f'bash "{SM}" steps {art / "acme"}'), art, env=env) is None
+
+
+def test_every_other_cli_verb_is_refused():
+    """A verb added to cli.py later is not approved by accident: a plain call of every verb the
+    hook's table doesn't list says nothing, and the table names only real verbs."""
+    pytest.importorskip("pydantic")
+    # In a child, so this checkout's cli.py is the one read, whatever another test imported first.
+    src = Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"
+    probe = ("import argparse, json, sys; sys.path.insert(0, sys.argv[1]); "
+             "from semantic_model import cli; "
+             "sub = next(a for a in cli.build_parser()._actions "
+             "if isinstance(a, argparse._SubParsersAction)); "
+             "print(json.dumps(sorted(sub.choices)))")
+    verbs = set(json.loads(subprocess.run([sys.executable, "-c", probe, str(src)], check=True,
+                                          capture_output=True, text=True).stdout))
+    table = set(_hook_module().VERBS)
+    assert table <= verbs
+    others = sorted(verbs - table)
+    assert {"describe-file", "curate", "introspect", "seed-examples", "claims", "org-draft"} <= set(others)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        art = Path(d) / "artifacts"
+        (art / "local" / "tmp").mkdir(parents=True)
+        (art / "acme").mkdir()
+        for verb in [*others, "install"]:
+            assert _decision(_bash(f'bash "{SM}" {verb} {art / "acme"}'), art) is None, verb
+            assert _decision(_bash(f'bash "{SM}" {verb}'), art) is None, verb
+
+
+def _hook_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("approve_own_calls_under_test", HOOK)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# --- B. Write / Read of agami's scratch files ----------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", ["agami-x.json", "agami-enrich-20261112-ab12-sales-1.result.json",
@@ -240,39 +343,31 @@ def test_a_scratch_file_is_allowed(art, tool, name):
     assert _decision(_file(tool, str(art / "local" / "tmp" / name)), art) == "allow"
 
 
+def test_an_existing_scratch_file_is_allowed(art):
+    target = art / "local" / "tmp" / "agami-x.json"
+    target.write_text("{}")
+    assert _decision(_file("Write", str(target)), art) == "allow"
+    assert _decision(_file("Read", str(target), offset=1, limit=10), art) == "allow"
+
+
 def test_the_scratch_folder_comes_from_the_pointer_file(tmp_path):
     other = tmp_path / "chosen"
     (other / "local" / "tmp").mkdir(parents=True)
     (tmp_path / ".config" / "agami").mkdir(parents=True)
     (tmp_path / ".config" / "agami" / "path").write_text(f"{other}\n")
     env = {k: v for k, v in os.environ.items() if k != "AGAMI_ARTIFACTS_DIR"}
-    env["HOME"] = str(tmp_path)
-    if sys.platform == "win32":
-        env["USERPROFILE"] = str(tmp_path)
+    env["HOME"] = env["USERPROFILE"] = str(tmp_path)
     event = _file("Write", str(other / "local" / "tmp" / "agami-x.json"))
-    proc = subprocess.run([sys.executable, "-I", str(HOOK)], input=json.dumps(event).encode(),
-                          capture_output=True, env=env, timeout=30)
-    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert _decision(event, other, env=env) == "allow"
 
 
 @pytest.mark.parametrize("rel", [
-    "local/tmp/../../x.json",
-    "local/tmp/../agami-x.json",
-    "local/tmp/./agami-x.json",
-    "local/tmp/sub/agami-x.json",
-    "local/tmp/x.json",
-    "local/tmp/agami-.json",
-    "local/tmp/agami-x.py",
-    "local/tmp/agami-x.json.sh",
-    "local/tmp/agami-x",
-    "local/tmp/AGAMI-x.json",
-    "local/tmp/agami-x y.json",
-    "local/tmp/agami-x;y.json",
-    "local/tmp",
-    "local/agami-x.json",
-    "local/credentials",
-    "local/.config",
-    "agami-x.json",
+    "local/tmp/../../x.json", "local/tmp/../agami-x.json", "local/tmp/./agami-x.json",
+    "local/tmp/sub/agami-x.json", "local/tmp/x.json", "local/tmp/agami-.json",
+    "local/tmp/agami-x.py", "local/tmp/agami-x.json.sh", "local/tmp/agami-x",
+    "local/tmp/AGAMI-x.json", "local/tmp/Agami-x.json", "local/tmp/agami-x.JSON",
+    "local/tmp/agami-x y.json", "local/tmp/agami-x;y.json", "local/tmp", "local/agami-x.json",
+    "local/credentials", "local/.config", "agami-x.json",
 ])
 @pytest.mark.parametrize("tool", ["Write", "Read"])
 def test_other_artifact_paths_say_nothing(art, tool, rel):
@@ -284,7 +379,17 @@ def test_relative_and_tilde_paths_say_nothing(art):
         assert _decision(_file("Write", path), art) is None
 
 
-@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks")
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
+@pytest.mark.parametrize("tool", ["Write", "Read"])
+def test_a_hard_linked_scratch_file_says_nothing(art, tmp_path, tool):
+    outside = tmp_path / "settings.json"
+    outside.write_text("{}")
+    target = art / "local" / "tmp" / "agami-x.json"
+    os.link(outside, target)
+    assert _decision(_file(tool, str(target)), art) is None
+
+
+@SYMLINKS
 def test_a_link_out_of_the_scratch_folder_says_nothing(art, tmp_path):
     outside = tmp_path / "outside.json"
     outside.write_text("{}")
@@ -300,7 +405,7 @@ def test_a_link_out_of_the_scratch_folder_says_nothing(art, tmp_path):
     assert _decision(_file("Write", str(folder)), art) is None
 
 
-@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks")
+@SYMLINKS
 def test_a_scratch_folder_that_is_itself_a_link_says_nothing(tmp_path):
     art = tmp_path / "artifacts"
     (art / "local").mkdir(parents=True)
@@ -316,12 +421,12 @@ def test_no_scratch_folder_says_nothing(tmp_path):
     assert _decision(_file("Write", str(art / "local" / "tmp" / "agami-x.json")), art) is None
 
 
-def test_an_unknown_write_field_says_nothing(art):
-    event = _file("Write", str(art / "local" / "tmp" / "agami-x.json"), mode="append")
-    assert _decision(event, art) is None
+@pytest.mark.parametrize("tool, extra", [("Write", {"mode": "append"}), ("Read", {"pages": "1"})])
+def test_an_unknown_file_field_says_nothing(art, tool, extra):
+    assert _decision(_file(tool, str(art / "local" / "tmp" / "agami-x.json"), **extra), art) is None
 
 
-# --- c. Read of the plugin's own files -------------------------------------------------------------
+# --- C. Read of the plugin's own files ------------------------------------------------------------------
 
 
 def test_reading_a_plugin_file_is_allowed(art):
@@ -334,19 +439,15 @@ def test_writing_a_plugin_file_says_nothing(art):
 
 
 @pytest.mark.parametrize("path", [
-    f"{PLUGIN}-evil/skills/x.md",
-    f"{PLUGIN}/../agami/skills/agami-connect/SKILL.md",
-    f"{PLUGIN}/skills/../../../README.md",
-    f"{PLUGIN}",
-    f"{PLUGIN}/skills",
-    f"{PLUGIN}/no-such-file.md",
-    "/etc/passwd",
+    f"{PLUGIN}-evil/skills/x.md", f"{PLUGIN}/../agami/skills/agami-connect/SKILL.md",
+    f"{PLUGIN}/skills/../../../README.md", f"{PLUGIN}", f"{PLUGIN}/skills",
+    f"{PLUGIN}/no-such-file.md", "/etc/passwd",
 ])
 def test_reading_outside_the_plugin_says_nothing(art, path):
     assert _decision(_file("Read", path), art) is None
 
 
-@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks")
+@SYMLINKS
 def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
     outside = tmp_path / "secret.txt"
     outside.write_text("x")
@@ -358,45 +459,66 @@ def test_a_link_inside_the_plugin_pointing_out_says_nothing(art, tmp_path):
         link.unlink()
 
 
-# --- malformed input -------------------------------------------------------------------------------
+# --- malformed input --------------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("raw", [b"", b"not json", b"[1, 2]", b"null", b'"text"', b"\xff\xfe",
                                  b'{"tool_name": "Bash"}', b'{"hook_event_name": "PreToolUse"}'])
 def test_malformed_stdin_prints_nothing_and_exits_0(art, raw):
     proc = _run(None, art, raw=raw)
-    assert proc.returncode == 0
-    assert proc.stdout == b""
+    assert proc.returncode == 0 and proc.stdout == b""
 
 
 @pytest.mark.parametrize("event", [
-    {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": f"bash {SM} x"}},
-    {"tool_name": "Bash", "tool_input": {"command": f"bash {SM} x"}},
+    {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": f"bash {SM} batch-id"}},
+    {"tool_name": "Bash", "tool_input": {"command": f"bash {SM} batch-id"}},
     {"hook_event_name": "PreToolUse", "tool_name": "Edit",
      "tool_input": {"file_path": "/x/local/tmp/agami-x.json"}},
-    {"hook_event_name": "PreToolUse", "tool_name": "bash", "tool_input": {"command": f"bash {SM} x"}},
-    {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": f"bash {SM} x"},
+    {"hook_event_name": "PreToolUse", "tool_name": "bash", "tool_input": {"command": f"bash {SM} batch-id"}},
+    {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": f"bash {SM} batch-id"},
+    {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": None}},
 ])
 def test_other_events_and_tools_say_nothing(art, event):
     assert _decision(event, art) is None
 
 
-def test_the_hook_imports_nothing_of_the_engine():
-    text = HOOK.read_text(encoding="utf-8")
-    assert "semantic_model" not in text and "import yaml" not in text
+def test_the_hook_imports_nothing_of_the_plugin_or_the_package():
+    imports = re.findall(r"^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))", HOOK.read_text(encoding="utf-8"),
+                         re.MULTILINE)
+    modules = {(a or b).split(".")[0] for a, b in imports}
+    assert modules <= {"__future__", "json", "ntpath", "os", "re", "stat", "sys", "typing"}, modules
+    assert "spec_from_file_location" not in HOOK.read_text(encoding="utf-8")
 
 
-# --- hooks.json and allowed-tools agree ------------------------------------------------------------
+# --- hooks.json, and agreement with allowed-tools ---------------------------------------------------------
 
 
-def test_hooks_json_runs_the_hook_through_the_plugin_launcher():
+def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     (entry,) = doc["hooks"]["PreToolUse"]
     assert entry["matcher"] == "Bash|Write|Read"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
-    assert hook["command"] == ('bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -I '
-                               '"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py"')
+    script = '"${CLAUDE_PLUGIN_ROOT}/scripts/approve_own_calls.py"'
+    assert hook["command"] == f"python3 -I {script} || python -I {script} || true"
+    assert "scripts/py" not in hook["command"] and ".config" not in hook["command"]
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or sys.platform == "win32", reason="needs sh")
+def test_the_hooks_json_command_works_and_never_exits_2(art, tmp_path):
+    """As Claude Code runs it (`sh -c`). Exit 2 would block every tool call, so a broken path must
+    end in `true`, not in Python's own exit 2 for a script it can't open."""
+    doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    command = doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art), "HOME": str(art.parent)}
+    event = json.dumps(_bash(_sm(art, "steps {R}"))).encode()
+    proc = subprocess.run(["sh", "-c", command.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN))],
+                          input=event, capture_output=True, env=env, timeout=60)
+    assert proc.returncode == 0
+    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    broken = subprocess.run(["sh", "-c", command.replace("${CLAUDE_PLUGIN_ROOT}", str(tmp_path / "gone"))],
+                            input=event, capture_output=True, env=env, timeout=60)
+    assert broken.returncode == 0 and broken.stdout == b""
 
 
 def _allowed_tools(skill: str) -> list[str]:
@@ -404,36 +526,16 @@ def _allowed_tools(skill: str) -> list[str]:
     return yaml.safe_load(head.removeprefix("---\n"))["allowed-tools"]
 
 
-def test_the_hook_and_agami_connects_allowed_tools_cover_the_same_launchers(art):
-    """Each Bash rule in agami-connect's allowed-tools, filled in with this plugin's root and a
-    typical argument, is a call the hook approves too, and the launchers named agree. allowed-tools
-    stays: it still helps where hooks don't run."""
-    import re
-    rules = [r for r in _allowed_tools("agami-connect") if r.startswith("Bash(")]
-    named = {re.search(r"scripts/(\w+)", r).group(1) for r in rules}
-    assert named == {"sm", "py"}
-    for rule in rules:
-        pattern = rule[len("Bash("):-1]
-        script_arg = "connect_resolve.py" if "scripts/py" in pattern else "steps /data/acme"
-        command = (pattern.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN))
-                   .replace("AGAMI_SQL_MAX_ROWS=*", "AGAMI_SQL_MAX_ROWS=50")
-                   .replace("AGAMI_PROFILE=*", "AGAMI_PROFILE=acme")
-                   .replace(" *", " " + script_arg))
-        assert _decision(_bash(command), art) == "allow", rule
-    reads = [r for r in _allowed_tools("agami-connect") if r.startswith("Read(")]
-    assert reads == ["Read(/${CLAUDE_PLUGIN_ROOT}/**)"]
-
-
-@pytest.mark.skipif(shutil.which("bash") is None or sys.platform == "win32", reason="needs bash")
-def test_the_hooks_json_command_works_through_the_launcher(art):
-    """As hooks.json runs it: through `scripts/py`, which picks the interpreter and never installs."""
-    env = {**os.environ, "AGAMI_ARTIFACTS_DIR": str(art), "AGAMI_PYTHON": sys.executable}
-    event = json.dumps(_bash(f'bash "{SM}" steps /data/acme')).encode()
-    proc = subprocess.run(["bash", PY, "-I", str(HOOK)], input=event, capture_output=True,
-                          env=env, timeout=60)
-    assert proc.returncode == 0
-    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
-    refused = json.dumps(_bash(f'bash "{SM}" steps /x | sh')).encode()
-    proc = subprocess.run(["bash", PY, "-I", str(HOOK)], input=refused, capture_output=True,
-                          env=env, timeout=60)
-    assert proc.returncode == 0 and proc.stdout == b""
+def test_every_form_the_hook_approves_is_one_allowed_tools_already_covers(art):
+    """The hook's forms are a subset of what agami-connect's allowed-tools cover, so it widens when
+    an approval applies (every turn, every subagent), never what is approved. allowed-tools stays:
+    it still helps where hooks don't run."""
+    rules = [r[len("Bash("):-1] for r in _allowed_tools("agami-connect") if r.startswith("Bash(")]
+    patterns = [re.compile(re.escape(r.replace("${CLAUDE_PLUGIN_ROOT}", str(PLUGIN)))
+                           .replace(r"\*", ".*") + r"\Z") for r in rules]
+    forms = [f'bash "{SM}" steps {art / "acme"}', f"bash {SM} steps {art / 'acme'}",
+             f'"{SM}" steps {art / "acme"}', f"{SM} steps {art / 'acme'}"]
+    for form in forms:
+        assert _decision(_bash(form), art) == "allow", form
+        assert any(p.match(form) for p in patterns), form
+    assert "Read(/${CLAUDE_PLUGIN_ROOT}/**)" in _allowed_tools("agami-connect")
