@@ -45,8 +45,43 @@ def _linked_shared() -> list[Path]:
 
 DOCS = sorted([CONNECT / "SKILL.md", *REFS.glob("*.md"), *_linked_shared(),
                *(PLUGIN / "agents").glob("*.md")])
-LAUNCHER = re.compile(r'scripts/(?:sm|py)"')
 PLACEHOLDER = re.compile(r"<[^<>\n]+>")
+# Any mention of the launcher as a path, quoted or not; a command must use the quoted form below.
+LAUNCHER = re.compile(r'(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)(?![\w.-])')
+QUOTED_LAUNCHER = re.compile(
+    r'^(?:AGAMI_[A-Z_]+=\S+ )?bash "(?:\$\{CLAUDE_PLUGIN_ROOT\}|<plugin_root>)/scripts/(?:sm|py)"(?: |$)')
+SHORTHAND = re.compile(r"^sm ([a-z][a-z-]*)(?: (.*))?$")
+
+# Commands other than agami's launchers that a fence may still show, each with the reason it stays.
+# A fenced command whose first word is not here (and not the launcher) fails the allowlist test.
+ALLOWED_HELPERS = {
+    "mkdir": "0a.1 creates the private local/ folder in one call (`mkdir -m 700 -p`); no sm verb does",
+    "psql": "the native-CLI query tier: password-free through PGPASSFILE, SQL read from a scratch file",
+    "PGPASSFILE": "the env prefix of that psql call (the auth file, never the password)",
+    "mysql": "the native-CLI query tier: password-free through --defaults-file, SQL read with `source`",
+    "snowsql": "the native-CLI query tier: password-free through its config, SQL read with -f",
+    "sqlite3": "the native-CLI query tier for a file database, SQL read with `.read`",
+    "duckdb": "the native-CLI query tier, credentials in an init file, never on the line",
+    "pip": "the driver package a card names; installed only after the person agrees",
+    "gcloud": "a read-only grant for the person's admin to run, never run by Claude",
+    "bq": "a read-only grant for the person's admin to run, never run by Claude",
+    "AGAMI_PROFILE": "a setting the person types in their own shell to switch databases",
+}
+# Fences with these labels hold data, usage lines or pseudocode, never a command to run.
+NOT_COMMAND_LABELS = {"text", "json", "yaml", "ini", "sql", "markdown", "md", "html", "csv", "tsv"}
+# Whole fences left for a follow-up (not agami launcher calls; replacing them needs a new entry point).
+FOLLOW_UP_FENCES = {
+    ("shared/version-check.md", "# Read the installed plugin's own version"): "a curl probe; follow-up",
+    ("shared/connection-reference.md", "# Refuse to read if too permissive"): "the perms check; follow-up",
+    ("shared/connection-reference.md", "# Postgres"): "a DuckDB heredoc; needs a one-profile attach",
+    ("shared/connection-reference.md", "# MySQL"): "a DuckDB heredoc; needs a one-profile attach",
+}
+# First words that make a fenced line a shell command rather than JSON, SQL, INI or prose.
+SHELL_WORDS = {"bash", "sh", "zsh", "sm", "python", "python3", "pip", "pip3", "mkdir", "chmod", "cp",
+               "mv", "rm", "ls", "cat", "which", "uname", "date", "printf", "echo", "grep", "sed", "awk",
+               "head", "tail", "jq", "tr", "curl", "split", "for", "if", "export", "cd", "kill", "stat",
+               "case", "open", "xdg-open", "psql", "mysql", "sqlite3", "snowsql", "duckdb", "gcloud", "bq",
+               "PGPASSFILE", "AGAMI_SQL_MAX_ROWS", "AGAMI_PROFILE", "AGAMI_PYTHON"}
 
 
 def _body(doc: Path) -> str:
@@ -56,48 +91,92 @@ def _body(doc: Path) -> str:
     return text
 
 
-def commands() -> list[tuple[str, str]]:
-    """(`file:line`, command) for every command in a bash (or unlabelled) fence or an inline code
-    span that runs agami's `sm` or `py` launcher."""
-    found = []
-    for doc in DOCS:
-        fence = None
+def _first_word(line: str) -> str:
+    word = line.split(" ", 1)[0].strip('"')
+    return word.split("=", 1)[0] if "=" in word else word
+
+
+def _is_shell_line(line: str) -> bool:
+    word = _first_word(line)
+    return (word in SHELL_WORDS or bool(LAUNCHER.search(line.split(" ", 1)[0]))
+            or word.startswith(("<python3>", "./", "/")) or bool(re.match(r"^[A-Za-z_]\w*=\S", line)))
+
+
+def scan(docs: list[Path] | None = None) -> tuple[list, list, list]:
+    """(launcher commands, `sm` shorthand spans, other fenced commands), each with `file:line`.
+    Every fence is read whatever its label: a `zsh` or `console` block is a command block too."""
+    launchers, shorthand, others = [], [], []
+    for doc in docs or DOCS:
+        rel = str(doc.relative_to(PLUGIN)) if doc.is_relative_to(PLUGIN) else doc.name
+        fence, fence_head, skip = None, None, False
         for n, line in enumerate(_body(doc).splitlines(), 1):
             stripped = line.strip()
+            where = f"{rel}:{n}"
             if stripped.startswith("```"):
                 fence = None if fence is not None else stripped[3:].strip()
+                fence_head, skip = None, fence in NOT_COMMAND_LABELS
                 continue
-            where = f"{doc.relative_to(PLUGIN)}:{n}"
             if fence is not None:
-                if fence in ("bash", "sh", "") and LAUNCHER.search(stripped):
-                    found.append((where, stripped))
+                if fence_head is None and stripped:
+                    fence_head = stripped
+                    skip = skip or any(rel == f and stripped.startswith(h) for f, h in FOLLOW_UP_FENCES)
+                if skip or not stripped or stripped.startswith("#") or not _is_shell_line(stripped):
+                    continue
+                (launchers if LAUNCHER.search(stripped) else others).append((where, stripped))
                 continue
             for span in re.findall(r"`([^`\n]+)`", line):
                 if LAUNCHER.search(span):
-                    found.append((where, span))
-    return found
+                    launchers.append((where, span))
+                elif SHORTHAND.match(span):
+                    shorthand.append((where, span))
+    return launchers, shorthand, others
 
 
-COMMANDS = commands()
+COMMANDS, SHORTHANDS, OTHERS = scan()
 
 
 def test_the_scan_finds_the_commands():
-    assert len(COMMANDS) > 60
+    assert len(COMMANDS) > 60 and len(SHORTHANDS) > 40
     assert any('sm" summary "<root>"' in c for _, c in COMMANDS)
-    assert any(w.startswith("agents/") for w, _ in COMMANDS) is False  # agents run no commands
+    assert not any(w.startswith("agents/") for w, _ in COMMANDS)  # agents run no commands
+    assert any("mkdir -m 700 -p" in c for _, c in OTHERS)
 
 
 def _without_placeholders(command: str) -> str:
     return PLACEHOLDER.sub("P", command.replace("${CLAUDE_PLUGIN_ROOT}", "/plugin"))
 
 
-@pytest.mark.parametrize("where,command", COMMANDS)
-def test_no_shell_syntax_in_a_command(where, command):
+def _check_syntax(where: str, command: str) -> None:
     bare = _without_placeholders(command)
     for token in ("$", "|", ";", "&&", ">", "<", "`"):
         assert token not in bare, f"{where}: {token!r} in {command}"
     assert not bare.rstrip().endswith("\\"), f"{where}: continued over lines: {command}"
     assert " #" not in bare, f"{where}: a trailing comment: {command}"
+
+
+def _expand(span: str) -> str:
+    return 'bash "<plugin_root>/scripts/sm" ' + span[len("sm "):]
+
+
+@pytest.mark.parametrize("where,command", COMMANDS)
+def test_no_shell_syntax_in_a_command(where, command):
+    _check_syntax(where, command)
+    assert QUOTED_LAUNCHER.match(command), f"{where}: write the launcher as bash \"<plugin_root>/scripts/…\": {command}"
+
+
+@pytest.mark.parametrize("where,span", SHORTHANDS)
+def test_no_shell_syntax_in_an_sm_shorthand(where, span):
+    _check_syntax(where, _expand(span))
+
+
+@pytest.mark.parametrize("where,command", OTHERS)
+def test_other_fenced_commands_are_allowlisted(where, command):
+    """Each command a fence shows that is not agami's launcher is named here with its reason; a
+    `python3 …`, `"<python3>" -c`, `chmod`, `cp`, `which`, `uname` or `date` line fails."""
+    word = _first_word(command)
+    assert word in ALLOWED_HELPERS, f"{where}: {word!r} is not an allowed helper: {command}"
+    if word not in ("gcloud", "bq"):  # an admin's multi-line grant, shown for the person to copy
+        _check_syntax(where, command)
 
 
 def test_no_root_or_interpreter_variable_anywhere():
@@ -205,6 +284,30 @@ def test_every_sm_command_parses(art):
     run = subprocess.run([sys.executable, "-c", probe, str(SRC)], input=json.dumps(calls),
                          capture_output=True, text=True, check=True)
     assert json.loads(run.stdout.strip().splitlines()[-1]) == []
+
+
+def test_every_sm_shorthand_names_a_real_verb_and_real_options():
+    """`sm suggest-metrics … --flag-rates` in a sentence is copied as much as a fenced command: its
+    verb must exist and every option it names must be one of that verb's, in full (no abbreviation)."""
+    pytest.importorskip("pydantic")
+    probe = ("import argparse, json, sys; sys.path.insert(0, sys.argv[1]); from semantic_model import cli\n"
+             "sub = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction))\n"
+             "print(json.dumps({v: sorted(o for a in p._actions for o in a.option_strings)"
+             " for v, p in sub.choices.items()}))\n")
+    run = subprocess.run([sys.executable, "-c", probe, str(SRC)], capture_output=True, text=True, check=True)
+    options = json.loads(run.stdout.strip().splitlines()[-1])
+    bad = []
+    for where, span in SHORTHANDS:
+        verb, rest = SHORTHAND.match(span).groups()
+        if verb == "install":
+            continue
+        if verb not in options:
+            bad.append((where, span, "no such verb"))
+            continue
+        for opt in re.findall(r"(?<![\w-])--[a-z][a-z-]*", PLACEHOLDER.sub("", rest or "")):
+            if opt not in options[verb]:
+                bad.append((where, span, opt))
+    assert bad == []
 
 
 _spec = importlib.util.spec_from_file_location("approve_own_calls_for_forms", HOOK)
@@ -370,3 +473,74 @@ def test_the_checks_catch_the_live_runs_forms(art):
             test_no_shell_syntax_in_a_command("example", bad)
     assert not any(p.match(_fill('R=x bash "<plugin_root>/scripts/sm" steps "<root>"', art)) for p in ALLOWED)
     assert not _hook_allows(_fill('bash "<plugin_root>/scripts/sm" steps "/elsewhere/acme"', art), art)
+
+
+def test_no_skill_file_tells_claude_to_change_the_persons_characters():
+    """The person's text goes to `sm` through a file, as written: no instruction to swap, replace or
+    escape an apostrophe or a quote (a company called "Macy's" must be stored as typed)."""
+    pattern = re.compile(r"`'`[^.\n]{0,60}(?:as|into|with|to) `[’‘\\]"
+                         r"|(?:replace|swap|escape|turn)[^.\n]{0,40}(?:apostrophe|`'`|quote)", re.I)
+    docs = [*SKILLS_DIR.glob("*/SKILL.md"), *SKILLS_DIR.glob("*/references/*.md"),
+            *SHARED.glob("*.md"), *(PLUGIN / "agents").glob("*.md")]
+    found = [f"{d.relative_to(PLUGIN)}: {m.group(0)}" for d in docs
+             for m in pattern.finditer(d.read_text(encoding="utf-8"))]
+    assert found == []
+    # and the check catches the instruction it exists for
+    assert pattern.search("each value in single quotes (a `'` inside it written as `’`)")
+    assert pattern.search("with every `'` in it written as `’`")
+
+
+def test_free_text_goes_through_a_file():
+    for name, option in (("context-and-tables.md", "--name-file"), ("context-and-tables.md", "--description-file"),
+                         ("enrich.md", "--description-file"), ("examples.md", "--question-file")):
+        assert option in _read(REFS / name), (name, option)
+    for _, command in COMMANDS:
+        assert not re.search(r"--(?:name|description|question) [\"']", command), command
+
+
+def test_native_cli_sql_comes_from_a_scratch_file():
+    text = _read(SHARED / "connection-reference.md")
+    assert "-c '<sql>'" not in text and "-e '<sql>'" not in text and "-q '<sql>'" not in text
+    assert '-f "<artifacts_dir>/local/tmp/agami-query.txt"' in text
+    assert "-e 'source <artifacts_dir>/local/tmp/agami-query.txt'" in text
+    assert "'.read <artifacts_dir>/local/tmp/agami-query.txt'" in text
+    assert "`<sslmode>` is the profile's `sslmode`, or `prefer` when it has none." in text
+
+
+def test_the_resolve_step_names_the_artifacts_folder_and_interpreter():
+    creds = _flat(_read(REFS / "credentials.md"))
+    assert "`data.artifacts_dir_source` is `env`" in creds and "~/.config/agami/path` exists" not in creds
+    sample = _flat(_read(REFS / "sample.md"))
+    first = sample.index("1. **Resolve the environment first**")
+    assert sample.index("connect_resolve.py --db-type sqlite --profile agami-example") > first
+    assert "`<python3>`" in sample[first:first + 900] and "`<artifacts_dir>`" in sample[first:first + 900]
+    for doc in DOCS:
+        assert not re.search(r"(?:cat|ls|head) [^`\n]*\.config/agami/path", doc.read_text(encoding="utf-8"))
+
+
+def test_the_new_checks_catch_what_they_claim():
+    # an unquoted launcher path, which the hook and the shell treat differently
+    with pytest.raises(AssertionError):
+        test_no_shell_syntax_in_a_command("example", 'bash <plugin_root>/scripts/sm steps "<root>"')
+    # helpers that are not on the allowlist, whatever the fence's label
+    for line in ('python3 "<plugin_root>/scripts/x.py"', "\"<python3>\" -c 'import yaml'",
+                 'chmod 700 "<artifacts_dir>/local"', "uname -s", "date -u", "which sqlite3",
+                 'cp -R "<a>" "<b>"'):
+        assert _is_shell_line(line), line
+        with pytest.raises(AssertionError):
+            test_other_fenced_commands_are_allowlisted("example", line)
+    # a shorthand span with a shell variable or a redirect
+    with pytest.raises(AssertionError):
+        test_no_shell_syntax_in_an_sm_shorthand("example", 'sm steps "$ROOT"')
+    with pytest.raises(AssertionError):
+        test_no_shell_syntax_in_an_sm_shorthand("example", "sm bundle x --area a > out.json")
+
+
+def test_every_fence_label_is_scanned(tmp_path):
+    doc = tmp_path / "x.md"
+    doc.write_text("```zsh\nchmod 700 x\n```\n```console\nbash \"<plugin_root>/scripts/sm\" steps \"$ROOT\"\n```\n"
+                   "```json\n{\"a\": 1}\n```\nRun `sm steps \"<root>\"` now.\n", encoding="utf-8")
+    launchers, shorthand, others = scan([doc])
+    assert [c for _, c in others] == ["chmod 700 x"]
+    assert [c for _, c in launchers] == ['bash "<plugin_root>/scripts/sm" steps "$ROOT"']
+    assert [c for _, c in shorthand] == ['sm steps "<root>"']

@@ -216,10 +216,10 @@ The agami-connect Phase 0a sets the right permissions automatically when it writ
 
 ## Profile selection
 
-The active profile is the one `init` recorded in `<artifacts_dir>/local/.config.active_profile` when you first set up. Override per shell session with:
+The active profile is the one `init` recorded in `<artifacts_dir>/local/.config.active_profile` when you first set up. Override per shell session with (this uses the `[staging]` section):
 
 ```bash
-AGAMI_PROFILE=staging   # uses [staging] section
+AGAMI_PROFILE=staging
 ```
 
 To permanently change the active profile, edit `<artifacts_dir>/local/.config` and update `active_profile` (or re-run `/agami-connect` and pick again).
