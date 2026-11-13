@@ -1478,6 +1478,15 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"({exc.error_count()} problem(s)) — agami-connect can rebuild it"
         )
         return _CANNOT_START
+    except loader.ModelFileError:
+        # The loader's own load error (a file that doesn't fit, or a reference out of the model
+        # folder). Its text names the file and field, but a field message can still carry a name
+        # from the tenant's model, so it is withheld here like pydantic's.
+        _stop(
+            f"the semantic model for profile {args.profile!r} does not parse "
+            "— agami-connect can rebuild it"
+        )
+        return _CANNOT_START
     except DialectUnresolved as exc:
         # This one's message is value-free by contract, so it is relayed as the preflight reason.
         _stop(f"cannot run this profile — {exc}")
