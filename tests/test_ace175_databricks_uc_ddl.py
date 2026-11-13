@@ -195,12 +195,12 @@ NAME = rf"{IDENT}(?:\.{IDENT}){{0,3}}"
 LITERAL = r"'(?:[^'\\\n]|\\.)*'"
 CONSTRAINT = r"[a-z_][a-z0-9_]*"
 GUARD = re.compile(
-    r"SELECT raise_error\(concat\((?P<msg>'(?:[^'\\]|\\.)*'), "
-    r"array_join\(sort_array\(collect_set\(table_name\)\), ', '\)\)\) "
+    r"SELECT CASE WHEN count\(\*\) > 0 THEN raise_error\(concat\((?P<msg>'(?:[^'\\]|\\.)*'), "
+    r"array_join\(sort_array\(collect_set\(table_name\)\), ', '\)\)\) END AS agami_check "
     r"FROM (?:(?P<catalog>[^ ]+)\.)?information_schema\.table_tags "
     r"WHERE lower\(schema_name\) = (?P<schema>'[^']*'|lower\(current_schema\(\)\)) "
     r"AND tag_name = 'system\.certification_status' "
-    r"AND lower\(table_name\) IN \((?P<tables>'[^']*'(?:, '[^']*')*)\) HAVING count\(\*\) > 0;")
+    r"AND lower\(table_name\) IN \((?P<tables>'[^']*'(?:, '[^']*')*)\);")
 SHAPES = {
     "comment": re.compile(rf"COMMENT ON (TABLE|COLUMN) ({NAME}) IS {LITERAL};"),
     "uncomment": re.compile(rf"COMMENT ON (TABLE|COLUMN) ({NAME}) IS NULL;"),
@@ -712,7 +712,12 @@ def test_certification_starts_with_a_guard_per_schema_naming_every_object_it_tag
     assert guard.group("schema") == "'sales_data'" and guard.group("catalog") is None
     assert "system.certification_status" in guard.group("msg")
     tree = _parse(guard.group(0).removesuffix(";"))
-    assert tree.find(exp.Having) is not None and not isinstance(tree, exp.Command)
+    # The error sits inside a CASE over the count: with no tagged object the statement returns one
+    # NULL row, and raise_error is never called (a HAVING would still call it once, on NULL).
+    assert tree.find(exp.Having) is None and not isinstance(tree, exp.Command)
+    case = tree.find(exp.Case)
+    assert case is not None and case.find(exp.Count) is not None
+    assert case.args["ifs"][0].args["true"].find(exp.Anonymous, exp.Func) is not None
     # With a location the metric views are created in another schema: one guard per catalog and
     # schema.
     _, files = _export(model, tmp_path / "l", "--location", "acme.METRICS",
@@ -729,6 +734,9 @@ def test_the_certification_header_promises_only_what_the_guard_does(everything):
     note = _note(_uc(files)["sales.sql"], "Certification")
     assert "never overwrites" not in note and "SET TAG fails where" not in note
     assert "stops the section" in note and "already carries" in note
+    # It stops the section only where the client stops on an error, and the views come first.
+    assert "only in a client that stops" in note and "returns one NULL" in note
+    assert "after the metric views it tags exist" in note and "re-created" in note
     assert "delete its SET TAG line and its name in the check" in note
     undo = _uc(files)["sales_undo.sql"]
     assert undo.count("-- UNSET TAG ON TABLE") == len(_sections(_uc(files)["sales.sql"])[

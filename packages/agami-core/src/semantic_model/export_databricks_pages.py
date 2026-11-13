@@ -171,12 +171,20 @@ class _Pages:
         for table in tables:
             fqn = self.fqn(table)
             if fqn is None:
-                self.degrade(kind, name, "target_rule", f"no asset link to {table}: an asset link "
-                             "needs catalog.schema.table, and this export knows no catalog for it "
-                             "(--location gives one)")
+                self.degrade(kind, name, "target_rule", f"no asset link to {table}: "
+                             + self._no_link_why(table))
             elif fqn not in out:
                 out.append(fqn)
         return out
+
+    def _no_link_why(self, table: str) -> str:
+        # A table this area's export does not carry has no place to link to whatever --location
+        # says, so the flag is named only when the missing catalog is the reason.
+        if bare_name(table).casefold() not in self.physical:
+            return ("this subject area's export does not carry that table (it belongs to another "
+                    "subject area, or stayed behind), so the page cannot name where it lives")
+        return ("an asset link needs catalog.schema.table, and this export knows no catalog for "
+                "it (--location gives one)")
 
     def add(self, kind: str, name: str, description: str, synonyms: list[str], body: str,
             tables: list[str], domain: str) -> None:

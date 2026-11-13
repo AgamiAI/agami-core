@@ -345,15 +345,18 @@ def _where(catalog: Optional[str], schema: Optional[str], schema_column: str,
 
 def certification_guards(objects: list[tuple[Optional[str], Optional[str], str]]) -> list[str]:
     """One statement per catalog and schema that raises an error, naming them, when any of
-    `objects` already carries the certification tag; it returns no row otherwise."""
+    `objects` already carries the certification tag; it returns one NULL row otherwise. The
+    error is raised inside a CASE over the aggregate, never as an aggregate's own select item:
+    with no row to aggregate, `SELECT raise_error(…) … HAVING count(*) > 0` still evaluates the
+    call once, on NULL, and fails the section that nothing should stop."""
     out = []
     for (catalog, schema), names in _by_schema(objects).items():
         home, on_schema, on_names = _where(catalog, schema, "schema_name", names)
-        out.append(f"SELECT raise_error(concat({sql_string(_GUARD_MESSAGE)}, "
-                   "array_join(sort_array(collect_set(table_name)), ', '))) "
+        out.append(f"SELECT CASE WHEN count(*) > 0 THEN raise_error(concat("
+                   f"{sql_string(_GUARD_MESSAGE)}, array_join(sort_array(collect_set(table_name)), "
+                   "', '))) END AS agami_check "
                    f"FROM {home}.table_tags WHERE {on_schema} "
-                   f"AND tag_name = 'system.certification_status' AND {on_names} "
-                   "HAVING count(*) > 0;")
+                   f"AND tag_name = 'system.certification_status' AND {on_names};")
     return out
 
 
@@ -415,11 +418,16 @@ _SECTION_NOTES = {
 -- Certification (--uc-certify). Sets the governed tag system.certification_status to certified
 -- on tables approved in agami and on this export's metric views whose every measure is
 -- approved. Needs ASSIGN on the system.certification_status governed tag, and APPLY TAG on the
--- object with USE SCHEMA and USE CATALOG (or ownership). In the apply file the section opens
--- with a check, one per schema, that reads information_schema.table_tags: if any object listed
--- in it already carries system.certification_status, it stops the section with an error naming
--- those objects, before any SET TAG runs. To skip an object, delete its SET TAG line and its
--- name in the check.
+-- object with USE SCHEMA and USE CATALOG (or ownership). Run this section after the metric
+-- views it tags exist (their metric_views/ files), and run each metric view's SET TAG line
+-- again after its view is re-created: CREATE OR REPLACE VIEW makes a new object without the tag.
+-- In the apply file the section opens with a check, one per schema, that reads
+-- information_schema.table_tags: if any object listed in it already carries
+-- system.certification_status, it raises an error naming those objects, and returns one NULL
+-- row otherwise. The error stops the section before any SET TAG runs only in a client that stops
+-- at the first failing statement (a SQL file run as one script, a job task); in an editor that
+-- runs each statement on its own, read the check's result before running the SET TAG lines. To
+-- skip an object, delete its SET TAG line and its name in the check.
 -- Undo: UNSET TAG removes the tag whoever set it, and Databricks SQL has no form that unsets a
 -- tag only when it holds a given value, so the undo lines are commented out. Remove the `-- `
 -- from the line of each object whose SET TAG succeeded, and leave the others.""",

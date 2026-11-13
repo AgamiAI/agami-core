@@ -765,6 +765,19 @@ def test_names_and_column_references():
         assert sqlglot.parse_one(f"SELECT {O.column_ref(word)} FROM t").selects[0].name == word
 
 
+def test_fields_named_alike_in_any_case_are_written_once(model, tmp_path):
+    path = model / "subject_areas" / "sales" / "tables" / "orders.yaml"
+    doc = yaml.safe_load(path.read_text())
+    doc["columns"].append({"name": "AMOUNT", "type": "decimal"})
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    report = _export(model, tmp_path / "a", "0.1.1")
+    (old,) = _docs(tmp_path / "a").values()
+    orders = next(d for d in _model(old)["datasets"] if d["name"] == "orders")
+    names = [f["name"] for f in orders["fields"]]
+    assert "amount" in names and "AMOUNT" not in names
+    assert _loss(report, "column", "orders.AMOUNT") == [("dropped", "name_collision")]
+
+
 def test_a_blank_label_leaves_its_code_bare():
     from semantic_model.models import Column
 

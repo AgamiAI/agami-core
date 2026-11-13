@@ -52,6 +52,7 @@ from .export import (
     PhysicalName,
     WriterOutput,
     degraded,
+    distinct_columns,
     dropped,
     parses,
     rewrite_table_refs,
@@ -231,14 +232,23 @@ class _Space:
             else:
                 self.degrade("table", t.name, "target_limit", "its description is left out: a "
                              f"Genie space holds at most {MAX_SNIPPETS} knowledge-store snippets")
-        configs = [self._column(t, c, synonyms) for c in sorted(t.columns, key=lambda c: c.name)]
+        columns = distinct_columns(t.columns, lambda c: self.degrade(
+            "column", f"{t.name}.{c.name}", "name_collision", "left out of the space's column "
+            "configs: another column of its table has the same name in another case, and Genie "
+            "matches column names in any case"))
+        configs = [self._column(t, c, synonyms) for c in sorted(columns, key=lambda c: c.name)]
         configs = [c for c in configs if len(c) > 1]
         if self.hide_sensitive:
             # The flag's whole purpose: the space lists the whole table, so a column left out of
             # this file is marked hidden in the space only by naming it here.
             configs += [{"column_name": n, "exclude": True} for n in et.withheld_columns]
+        configs = sorted(configs, key=lambda c: c["column_name"])
+        if len(configs) > MAX_ITEMS:
+            self.degrade("table", t.name, "target_limit", f"carries the first {MAX_ITEMS} of its "
+                         f"{len(configs)} column configs, by column name: a Genie array holds at "
+                         f"most {MAX_ITEMS} items")
         if configs:
-            item["column_configs"] = sorted(configs, key=lambda c: c["column_name"])[:MAX_ITEMS]
+            item["column_configs"] = configs[:MAX_ITEMS]
         return item
 
     def _column(self, t: Any, c: Any, synonyms: dict[tuple[str, str], list[str]]) -> dict[str, Any]:
@@ -268,14 +278,30 @@ class _Space:
 
     def _entity_synonyms(self) -> dict[tuple[str, str], list[str]]:
         """The words people use for a column: the names of each entity mapped to it. Entities
-        themselves travel to Pages (ACE-172); here they only name columns."""
+        themselves travel to Pages (ACE-172); here they only name columns. A word past the string
+        limit is left out, never cut, since a cut word is no word anyone uses; each one left out
+        is reported against its entity."""
         out: dict[tuple[str, str], list[str]] = {}
         for e in self.view.entities:
-            words = [e.name, *([e.plural] if e.plural else []), *e.other_names]
+            words = self.fitting_synonyms(
+                "entity", e.name, [e.name, *([e.plural] if e.plural else []), *e.other_names])
             for m in e.maps_to:
                 key = (bare_name(m.table).casefold(), m.column.casefold())
                 out[key] = _unique([*out.get(key, []), *words])
-        return {k: [w[:MAX_STRING] for w in v][:MAX_ITEMS] for k, v in out.items()}
+        for (table, column), words in out.items():
+            if len(words) > MAX_ITEMS:
+                self.degrade("column", f"{table}.{column}", "target_limit", f"carries the first "
+                             f"{MAX_ITEMS} of its {len(words)} synonyms: a Genie array holds at "
+                             f"most {MAX_ITEMS} items")
+        return {k: v[:MAX_ITEMS] for k, v in out.items()}
+
+    def fitting_synonyms(self, kind: str, name: str, words: list[str]) -> list[str]:
+        """`words` without those past the string limit, each one left out reported."""
+        long = [w for w in words if len(w) > MAX_STRING]
+        if long:
+            self.degrade(kind, name, "target_limit", f"{len(long)} synonym(s) over {MAX_STRING:,} "
+                         "characters left out: a Genie string holds at most that many")
+        return [w for w in words if len(w) <= MAX_STRING]
 
     def _metric_views(self) -> list[tuple[str, str, tuple[Any, dict[str, Any]]]]:
         plans, _ = DB.plan_metric_views(self.view)  # their losses are write_metric_views' to report
@@ -301,45 +327,55 @@ class _Space:
 
     def text_instruction(self) -> list[dict[str, Any]]:
         """Ambiguities, the datasource description and terminology, in that order, as the one text
-        instruction Genie allows. Each is guidance there, not a rule, so each is reported."""
+        instruction Genie allows. Each is guidance there, not a rule, so each is reported: as
+        carried as text when its words are in the instruction, and as past the limit when the
+        instruction's string count cut them off."""
         v = self.view
-        parts: list[str] = []
+        parts: list[tuple[str, str, str, str]] = []   # (kind, name, text, where it is said)
         for a in v.ambiguities:
             options = "; ".join(f"{o.label}{' (default)' if o.default else ''}: {o.how}"
                                 for o in a.options)
-            parts.append(f"{a.name}: when {a.when}, {_BEHAVIOUR[a.behaviour]}. Options: {options}.\n")
-            self.degrade("ambiguity", a.name, "carried_as_text", "in the space's text instruction")
+            parts.append(("ambiguity", a.name, f"{a.name}: when {a.when}, {_BEHAVIOUR[a.behaviour]}. "
+                          f"Options: {options}.\n", "in the space's text instruction"))
         if v.description:
-            parts.append(f"About {v.datasource}: {v.description}\n")
-            self.degrade("datasource", v.datasource, "carried_as_text",
-                         "its description is in the space's text instruction")
+            parts.append(("datasource", v.datasource, f"About {v.datasource}: {v.description}\n",
+                          "its description is in the space's text instruction"))
         if v.fiscal_year_start_month != 1:
             month = MONTH_NAMES[v.fiscal_year_start_month - 1]
-            parts.append(f"Fiscal year: the fiscal year starts in {month}; count fiscal years, "
-                         "fiscal quarters and fiscal year to date from then.\n")
-            self.degrade("datasource", v.datasource, "carried_as_text",
-                         "its fiscal-year start is in the space's text instruction")
+            parts.append(("datasource", v.datasource, f"Fiscal year: the fiscal year starts in "
+                          f"{month}; count fiscal years, fiscal quarters and fiscal year to date "
+                          "from then.\n", "its fiscal-year start is in the space's text instruction"))
         if v.default_time_window:
-            parts.append("Default time window: when a question names no time range, use "
-                         f"{v.default_time_window}, and say so in the answer.\n")
-            self.degrade("subject_area", v.area, "carried_as_text",
-                         "its default time window is in the space's text instruction")
+            parts.append(("subject_area", v.area, "Default time window: when a question names no "
+                          f"time range, use {v.default_time_window}, and say so in the answer.\n",
+                          "its default time window is in the space's text instruction"))
         for term, meaning in v.terminology:
-            parts.append(f"{term}: {meaning}\n")
-            self.degrade("terminology", term, "carried_as_text", "in the space's text instruction")
-        content = text_field("".join(parts))
+            parts.append(("terminology", term, f"{term}: {meaning}\n", "in the space's text instruction"))
+        content: list[str] = []
+        for kind, name, text, where in parts:
+            # Each part ends a line, so its strings never merge with the next part's.
+            strings = text_field(text)
+            if len(content) + len(strings) > MAX_ITEMS:
+                self.drop(kind, name, "target_limit", "left out of the space's text instruction: "
+                          f"it holds at most {MAX_ITEMS} strings, and earlier text filled them")
+                continue
+            content += strings
+            self.degrade(kind, name, "carried_as_text", where)
         if not content:
             return []
-        if len(content) > MAX_ITEMS:
-            self.degrade("datasource", v.datasource, "target_limit", "the text instruction is cut "
-                         f"at {MAX_ITEMS} strings")
-        return [{"id": v.id("text_instruction", v.area), "content": content[:MAX_ITEMS]}]
+        return [{"id": v.id("text_instruction", v.area), "content": content}]
 
     def example_sqls(self, examples: list[ExportQuestion], budget: int) -> list[dict[str, Any]]:
-        items = [("example", q.name, {"id": self.view.id("example", q.name),
-                                      "question": text_field(q.question), "sql": text_field(q.sql)})
-                 for q in examples if q.sql is not None]
-        return self.capped(items, budget, "instructions")
+        """Each example with SQL as an example SQL instruction, within `budget`: what the
+        instruction limit leaves after the text instruction. One past it keeps its question as a
+        sample question (`sample_questions`), so it loses only its SQL."""
+        items = [q for q in examples if q.sql is not None]
+        for q in items[budget:]:
+            self.degrade("example", q.name, "target_limit", "carried as a sample question without "
+                         f"its SQL: a Genie space holds at most {MAX_INSTRUCTIONS} instructions, the "
+                         "text instruction and each example SQL counting one")
+        return [{"id": self.view.id("example", q.name), "question": text_field(q.question),
+                 "sql": text_field(q.sql)} for q in items[:budget]]
 
     def qualify_examples(self, examples: list[ExportQuestion]) -> list[ExportQuestion]:
         """`examples` with their SQL qualified; one whose SQL cannot be keeps its question only,
@@ -367,18 +403,14 @@ class _Space:
         return "target_rule", ("each table in Genie SQL is written catalog.schema.table, as the "
                                "space lists it, and this SQL could not be rewritten for certain")
 
-    def sample_questions(self, examples: list[ExportQuestion],
-                         with_sql: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def sample_questions(self, examples: list[ExportQuestion]) -> list[dict[str, Any]]:
         """Every example question the space carries, with or without its SQL: the Genie UI offers
         only these, so a space whose examples all have SQL would offer none. An example and its
         sample question share an id; sample questions and benchmarks are the id space that must
-        not repeat. An example cut at the instruction limit stays out of both."""
-        kept = {e["id"] for e in with_sql}
-        items = []
-        for q in examples:
-            qid = self.view.id("example", q.name)
-            if q.sql is None or qid in kept:
-                items.append(("example", q.name, {"id": qid, "question": text_field(q.question)}))
+        not repeat. Sample questions have their own limit, so an example whose SQL the
+        instruction limit cut is still offered here."""
+        items = [("example", q.name, {"id": self.view.id("example", q.name),
+                                      "question": text_field(q.question)}) for q in examples]
         return self.capped(items, MAX_ITEMS, "sample questions")
 
     def benchmarks(self) -> list[dict[str, Any]]:
@@ -522,7 +554,11 @@ class _Space:
                          "semi-additive rule; it is in the snippet's instruction")
         item: dict[str, Any] = {"id": self.view.id("metric", m.name), "alias": alias,
                                 "sql": text_field(sql), "display_name": m.name}
-        synonyms = _unique([s[:MAX_STRING] for s in m.other_names])[:MAX_ITEMS]
+        synonyms = _unique(self.fitting_synonyms("metric", m.name, list(m.other_names)))
+        if len(synonyms) > MAX_ITEMS:
+            self.degrade("metric", m.name, "target_limit", f"carries the first {MAX_ITEMS} of its "
+                         f"{len(synonyms)} synonyms: a Genie array holds at most {MAX_ITEMS} items")
+        synonyms = synonyms[:MAX_ITEMS]
         if synonyms:
             item["synonyms"] = synonyms
         item["instruction"] = lines_field(notes)
@@ -565,7 +601,7 @@ class _Space:
         if snippets:
             instructions["sql_snippets"] = snippets
         space: dict[str, Any] = {"version": VERSION}
-        samples = self.sample_questions(questions, examples)
+        samples = self.sample_questions(questions)
         if samples:
             space["config"] = {"sample_questions": _by_id(samples)}
         space["data_sources"] = sources

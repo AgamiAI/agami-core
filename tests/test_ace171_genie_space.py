@@ -737,11 +737,57 @@ def test_instructions_stop_at_one_hundred_counting_the_text_block(model):
     out = G.write_genie_space(dataclasses.replace(view, examples=_questions("example", 120)), opts)
     space = json.loads(out.files["sales.geniespace.json"])
     assert len(space["instructions"]["example_question_sqls"]) == 99
-    # An example cut here is not offered as a sample question either: the report says dropped.
-    assert len(space["config"]["sample_questions"]) == 99
-    limited = sorted(x.name for x in out.losses if x.reason == "target_limit")
-    assert limited == [f"q{i:03}" for i in range(99, 120)]
+    # Deliberately changed: sample questions have a limit of their own, so an example whose SQL
+    # the instruction limit cut is still offered as a sample question, and loses only its SQL.
+    assert len(space["config"]["sample_questions"]) == 120
+    limited = sorted((x.name, x.outcome) for x in out.losses if x.reason == "target_limit")
+    assert limited == [(f"q{i:03}", "degraded") for i in range(99, 120)]
+    detail = next(x.detail for x in out.losses if x.reason == "target_limit")
+    assert "at most 100 instructions" in detail and "99" not in detail
     assert validate(space) == []
+
+
+def test_columns_named_alike_in_any_case_are_configured_once(model):
+    view, opts = _view(model)
+    from semantic_model.models import Column
+
+    extra = [Column(name="Status", type="string", description="Shadow."),
+             Column(name="AMOUNT", type="decimal", description="Shadow too.")]
+    tables = tuple(dataclasses.replace(et, table=et.table.model_copy(
+        update={"columns": [*et.table.columns, *extra]})) if et.table.name == "orders" else et
+        for et in view.tables)
+    out = G.write_genie_space(dataclasses.replace(view, tables=tables), opts)
+    space = json.loads(out.files["sales.geniespace.json"])
+    orders = next(t for t in space["data_sources"]["tables"] if t["identifier"].endswith(".orders"))
+    names = [c["column_name"].casefold() for c in orders["column_configs"]]
+    assert len(names) == len(set(names)) and validate(space) == []
+    # The first in the model's order is kept; the other is reported.
+    amount = next(c for c in orders["column_configs"] if c["column_name"].casefold() == "amount")
+    assert amount["column_name"] == "amount" and "Shadow" not in "".join(amount["description"])
+    got = {(x.name, x.reason) for x in out.losses if x.kind == "column"}
+    assert {("orders.Status", "name_collision"), ("orders.AMOUNT", "name_collision")} <= got
+
+
+def test_synonyms_and_column_configs_past_genies_limits_are_reported(model, monkeypatch):
+    monkeypatch.setattr(G, "MAX_ITEMS", 3)
+    monkeypatch.setattr(G, "MAX_STRING", 40)
+    view, opts = _view(model)
+    from semantic_model.models import Entity
+
+    words = ["buyer", "client", "patron", "shopper", "x" * 41]
+    entity = Entity(name="customer", other_names=words, review_state="approved",
+                    maps_to=[{"table": "customers", "column": "id", "primary": True}])
+    out = G.write_genie_space(dataclasses.replace(view, entities=(entity,)), opts)
+    space = json.loads(out.files["sales.geniespace.json"])
+    customers = next(t for t in space["data_sources"]["tables"]
+                     if t["identifier"].endswith(".customers"))
+    configs = customers["column_configs"]
+    assert len(configs) <= 3
+    syn = next(c for c in configs if c["column_name"] == "id")["synonyms"]
+    assert syn == ["customer", "buyer", "client"]           # the long one left out, never cut
+    losses = {(x.kind, x.name, x.reason) for x in out.losses}
+    assert ("entity", "customer", "target_limit") in losses      # the word past the string limit
+    assert ("column", "customers.id", "target_limit") in losses  # the list past the item limit
 
 
 def test_two_identical_default_filters_on_one_table_get_two_ids(model):
@@ -800,12 +846,16 @@ def test_what_hangs_from_a_source_left_out_goes_with_it(model, monkeypatch):
     space = json.loads(out.files["sales.geniespace.json"])
     assert [t["identifier"] for t in space["data_sources"]["tables"]] == ["DEMO.SALES_DATA.balances"]
     assert "metric_views" not in space
-    assert len(space["instructions"]["text_instructions"][0]["content"]) == 2
+    assert len(space["instructions"]["text_instructions"][0]["content"]) <= 2
     losses = {(x.kind, x.name): (x.outcome, x.reason) for x in out.losses}
+    # What the cut left out is reported past the limit, never as carried in the text.
+    cut = {k for k, v in losses.items() if v == ("dropped", "target_limit")
+           and k[0] in ("ambiguity", "terminology", "datasource", "subject_area")}
+    carried = {(x.kind, x.name) for x in out.losses if x.reason == "carried_as_text"}
+    assert cut and not cut & carried
     assert losses[("default_filter", "orders#1")] == ("dropped", "depends_on_excluded")
     assert losses[("metric", "revenue")] == ("dropped", "depends_on_excluded")
     assert losses[("metric_view", "sales__orders")] == ("dropped", "target_limit")
-    assert losses[("datasource", "acme")] == ("degraded", "target_limit")
     assert validate(space) == []
 
 

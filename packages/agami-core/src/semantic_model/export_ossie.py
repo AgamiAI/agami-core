@@ -34,6 +34,7 @@ from .export import (
     Target,
     WriterOutput,
     degraded,
+    distinct_columns,
     dropped,
     put_nonempty,
     register,
@@ -224,7 +225,12 @@ def _entity_synonyms(view: ExportView) -> dict[str, list[str]]:
 
 
 def _dataset(
-    version: str, view: ExportView, et: ExportTable, source: str, synonyms: list[str]
+    version: str,
+    view: ExportView,
+    et: ExportTable,
+    source: str,
+    synonyms: list[str],
+    losses: list[LossEntry],
 ) -> dict:
     t = et.table
     out: dict[str, Any] = {"name": bare_name(t.name), "source": source}
@@ -233,7 +239,11 @@ def _dataset(
     put_nonempty(out, "unique_keys", [list(k) for k in t.unique_keys])
     put_nonempty(out, "description", t.description)
     put_nonempty(out, "ai_context", _context(version, list(t.caveats), synonyms))
-    out["fields"] = [_field(version, c) for c in t.columns]
+    # Two fields named alike in any case would be one name to a reader that folds case.
+    columns = distinct_columns(t.columns, lambda c: losses.append(dropped(
+        view.area, "column", f"{t.name}.{c.name}", "name_collision",
+        _COLLISION.format(kind="field of its dataset", name=f"{c.name} in another case"))))
+    out["fields"] = [_field(version, c) for c in columns]
     return out
 
 
@@ -252,7 +262,8 @@ def _datasets(
             losses.append(dropped(view.area, "table", et.table.name, "sql_not_for_target", detail))
             continue
         kept.add(("table", et.table.name))
-        out.append(_dataset(version, view, et, source, synonyms.get(bare_name(et.table.name), [])))
+        out.append(_dataset(version, view, et, source, synonyms.get(bare_name(et.table.name), []),
+                            losses))
     return out
 
 

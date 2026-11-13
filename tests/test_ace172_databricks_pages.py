@@ -441,6 +441,23 @@ def test_without_a_catalog_no_asset_link_is_written(model, tmp_path):
     assert "`customers.id` (primary)" in _pages(docs)["sales__entity__customer.json"]["body"]
 
 
+def test_a_link_to_a_table_this_area_does_not_carry_says_so_not_to_pass_a_location(model):
+    from semantic_model.models import Metric
+
+    metric = Metric(name="ghost total", calculation="Sum.", source_tables=["ghosts"],
+                    review_state="approved")
+    view, opts = _view(model, metrics=(X.ExportMetric(metric, {"Databricks": "SUM(ghosts.x)"}),))
+    out = P.write_pages(view, X.ExportOptions(("databricks",), location=opts.location,
+                                              target_args={"pages_metrics": True}))
+    (loss,) = [x for x in out.losses if x.name == "ghost total" and x.reason == "target_rule"]
+    assert "does not carry that table" in loss.detail and "--location" not in loss.detail
+    # Without a catalog, the flag that gives one is still named.
+    section, docs, _ = _export(model, model.parent.parent / "n")
+    detail = next(x["detail"] for x in section["losses"]
+                  if x["name"] == "customer" and x["reason"] == "target_rule")
+    assert "--location gives one" in detail
+
+
 def test_no_identity_and_no_api_call_reaches_a_file(synthetic, model, tmp_path):
     _, docs, raw = synthetic
     _, _, unrev = _export(model, tmp_path / "u", "--location", "ACME.SALES_DATA", "--include-unreviewed")

@@ -768,6 +768,21 @@ def parses(sql: str, engine: str, as_expression: bool = False,
         return False
 
 
+def distinct_columns(columns: list[Any], collided: Callable[[Any], None]) -> list[Any]:
+    """`columns` less each whose name another earlier in the list has in another case (`Region`,
+    `region`), for a target that matches column names in any case; `collided` is called with each
+    one left out, so the writer reports it. The first in the model's order is kept."""
+    seen: set[str] = set()
+    out = []
+    for c in columns:
+        if c.name.casefold() in seen:
+            collided(c)
+        else:
+            seen.add(c.name.casefold())
+            out.append(c)
+    return out
+
+
 def join_sentences(*parts: Optional[str]) -> str:
     """The non-blank `parts`, stripped, as one text separated by single spaces."""
     return " ".join(p.strip() for p in parts if p and p.strip())
