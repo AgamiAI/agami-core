@@ -303,7 +303,7 @@ bash "<plugin_root>/scripts/sm" steps "<root>" --mark connect=in_progress
 ```
 
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
-Create the parent (`mkdir -p && chmod 755`) and write the default seed (per [`shared/user-memory-format.md`](../../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
+Create the parent (`mkdir -p`, then `chmod 755`, two calls) and write the default seed (per [`shared/user-memory-format.md`](../../../shared/user-memory-format.md)), `chmod 644`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
 ### 0a.9 — Hand-off, then a card that waits for the file
 
