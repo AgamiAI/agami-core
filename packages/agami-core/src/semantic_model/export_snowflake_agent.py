@@ -45,7 +45,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from typing import Any, Optional
+import re
+from typing import Any, NamedTuple, Optional
 
 from .export import (
     DEFAULT_FILTER_NOTE,
@@ -330,8 +331,16 @@ def bounds_rubric(q: ExportQuestion) -> str:
     return " ".join(f"{p}." for p in parts)
 
 
+class Embedded(NamedTuple):
+    """The golden SQL as a subquery on the physical tables, and how its rows are listed."""
+
+    sql: str
+    order: list[str]   # ORDER BY items over its output columns; empty: by the rows' text
+    order_words: str   # a key of `_ORDER_WORDS`
+
+
 def embeddable_sql(view: ExportView, options: ExportOptions,
-                   q: ExportQuestion) -> tuple[Optional[str], str]:
+                   q: ExportQuestion) -> tuple[Optional[Embedded], str]:
     """The golden SQL as a subquery that runs on the physical tables, or None and why not.
 
     Its result rows are written into the evaluation table, so it is embedded only when every
@@ -376,7 +385,8 @@ def embeddable_sql(view: ExportView, options: ExportOptions,
     # only a sole result column may go unnamed.
     if len(names) != len(set(names)) or (len(names) > 1 and not all(names)):
         return None, "two of its result columns share a name, or one has none: alias each"
-    return rewritten, ""
+    order, words = result_order(tree)
+    return Embedded(rewritten, order, words), ""
 
 
 _LEAD = ("The correct answer is the result of the SQL confirmed for this question in agami, "
@@ -385,17 +395,74 @@ _HOW = ("Values that match after rounding are correct, and the row order matters
         "question asks for one.")
 
 
-def answer_expression(tail: str) -> str:
+# What the rubric says the rows it quotes are, by how `result_order` lists them.
+_ORDER_WORDS = {"query": "the first {n} in the order its ORDER BY gives",
+                "columns": "the first {n} ordered by its columns, left to right",
+                "text": "the first {n} by their text"}
+
+
+def answer_expression(tail: str, order: str = "text") -> str:
     """The rubric, as a Snowflake expression over `agami_result`: `n`, the golden SQL's row count,
-    and `r`, the JSON text of at most `ANSWER_ROWS` of its rows."""
+    and `r`, the JSON text of at most `ANSWER_ROWS` of its rows, listed as `order` says."""
+    which = _ORDER_WORDS[order].format(n=ANSWER_ROWS)
     return (f"{snowflake_literal(_LEAD + ' ')}\n    || CASE WHEN agami_result.n = 0 THEN 'It "
             "returns no "
             "rows, so a correct response says that no data matches.'\n"
             f"       ELSE 'It returns ' || agami_result.n || IFF(agami_result.n > {ANSWER_ROWS}, "
-            f"' rows; {ANSWER_ROWS} of them, chosen by their text, are: ', ' row(s), listed in no "
-            f"particular order: ')\n         || LEFT(agami_result.r, {ANSWER_CHARS}) || "
+            f"' rows; {which}, are: ', ' row(s): ')\n         || LEFT(agami_result.r, "
+            f"{ANSWER_CHARS}) || "
             f"IFF(LEN(agami_result.r) > {ANSWER_CHARS}, ' (cut at {ANSWER_CHARS:,} characters)', "
             f"'') || '.' END\n    || {snowflake_literal(' ' + join_sentences(_HOW, tail))}")
+
+
+def _output_ident(item: Any) -> Any:
+    """The identifier naming one output column of a query, or None when it has none to reach."""
+    from sqlglot import exp
+
+    if isinstance(item, exp.Alias):
+        return item.args.get("alias")
+    if isinstance(item, exp.Column) and isinstance(item.this, exp.Identifier):
+        return item.this
+    return None
+
+
+def _order_key(ordered: Any, items: list, refs: list[str]) -> Optional[str]:
+    """One ORDER BY item of the golden SQL as a key over its output columns, or None."""
+    from sqlglot import exp
+
+    key, pos = ordered.this, None
+    if isinstance(key, exp.Literal) and not key.is_string and key.this.isdigit():
+        pos = int(key.this) - 1
+    else:
+        for i, item in enumerate(items):
+            inner = item.this if isinstance(item, exp.Alias) else item
+            named = isinstance(key, exp.Column) and not key.table and \
+                _output_ident(item) is not None and key.name.casefold() == item.alias_or_name.casefold()
+            if key == inner or named:
+                pos = i
+                break
+    if pos is None or not 0 <= pos < len(refs):
+        return None
+    return refs[pos] + (" DESC" if ordered.args.get("desc") else "")
+
+
+def result_order(tree: Any) -> tuple[list[str], str]:
+    """How to list the golden SQL's result rows from outside it: ORDER BY items over its output
+    columns, and which order that is (`_ORDER_WORDS`). Its own ORDER BY when every key is an
+    output column (by name, expression or position), then each output column in turn, so a
+    number or date sorts as a value (2 before 10), not as text; none when an output column has no
+    name to reach it by, and the rows are then listed by their text."""
+
+    items = list(tree.selects)
+    idents = [_output_ident(i) for i in items]
+    if not items or any(i is None for i in idents):
+        return [], "text"
+    refs = [f"agami_golden.{i.sql(dialect='snowflake')}" for i in idents]
+    order = tree.args.get("order")
+    keys = [_order_key(o, items, refs) for o in (order.expressions if order else [])]
+    own = [k for k in keys if k] if keys and all(keys) else []
+    rest = [r for r in refs if not any(k.split(" DESC")[0] == r for k in own)]
+    return own + rest, "query" if own else "columns"
 
 
 # ---------------------------------------------------------------------------
@@ -409,10 +476,15 @@ def ground_truth(view: ExportView, q: ExportQuestion,
     expected output when that SQL travels and parses. `tool_input` is the question the call should
     answer. The tool writes SQL on the view's logical names, so the expected output is the golden
     SQL rewritten onto them the way the view's verified queries are; where that rewrite is refused,
-    the golden SQL as written, reported."""
+    the golden SQL as written, reported. When the view holds a verified query asking the same
+    question, its SQL is the expected output, so the view and the evaluation agree."""
     call = {"tool_name": tool_name(view), "tool_input": q.question}
     loss = None
-    if q.sql is not None and parses(q.sql, ENGINE):
+    verified = built.verified_sql(q.question)
+    if q.sql is not None and verified is not None:
+        # The view already says what SQL answers this question; the row expects the same.
+        call["tool_output"] = verified
+    elif q.sql is not None and parses(q.sql, ENGINE):
         sql, reason, why = built.logical_sql(q.sql)
         call["tool_output"] = q.sql if sql is None else sql
         if sql is None:
@@ -432,21 +504,31 @@ def ground_truth(view: ExportView, q: ExportQuestion,
 # number test and its magnitude use only functions that return NULL rather than fail (IS_DOUBLE,
 # AS_DOUBLE, AS_DECIMAL), and TO_DECIMAL sees only a number in range or NULL, whatever order the
 # engine evaluates the branches in.
+# NaN and the infinities are FLOAT values JSON has no number for, so each is quoted as a string
+# ("NaN", "inf", "-inf"); left to TO_JSON they would make the row's text invalid JSON.
 _FIT = f"1e{38 - ANSWER_DECIMALS}"
 _VALUE_TEXT = (
+    "CASE WHEN IS_DOUBLE(f.value) AND (AS_DOUBLE(f.value) = 'NaN'::FLOAT\n"
+    "                                  OR ABS(AS_DOUBLE(f.value)) = 'inf'::FLOAT)\n"
+    "                               THEN TO_JSON(TO_VARIANT(TO_VARCHAR(AS_DOUBLE(f.value))))\n"
+    "                               ELSE "
     "COALESCE(RTRIM(RTRIM(TO_VARCHAR(TO_DECIMAL(IFF(IS_DOUBLE(f.value)\n"
     "                               AND ABS(COALESCE(AS_DOUBLE(f.value),"
     f" AS_DECIMAL(f.value, 38, 0))) < {_FIT},\n"
     f"                               f.value, NULL), 38, {ANSWER_DECIMALS})), '0'), '.'),\n"
-    "                               TO_JSON(f.value))")
+    "                               TO_JSON(f.value)) END")
 
 
 class _Row:
     """One evaluation row: its question, static ground truth, and, when its answer is computed at
     load time, the subquery that computes it."""
 
-    def __init__(self, question: str, truth: dict, subquery: Optional[str], tail: str) -> None:
-        self.question, self.truth, self.subquery, self.tail = question, truth, subquery, tail
+    def __init__(self, question: str, truth: dict, embedded: Optional[Embedded], tail: str) -> None:
+        self.question, self.truth, self.embedded, self.tail = question, truth, embedded, tail
+
+    @property
+    def subquery(self) -> Optional[str]:
+        return self.embedded.sql if self.embedded else None
 
     @property
     def has_answer(self) -> bool:
@@ -457,26 +539,33 @@ def _insert(table: str, row: _Row) -> str:
     head = (f"INSERT INTO {table} ({QUERY_COLUMN}, {TRUTH_COLUMN})\n"
             f"  SELECT {snowflake_literal(row.question)}, ")
     text = snowflake_literal(json.dumps(row.truth, ensure_ascii=False))
-    if row.subquery is None:
+    if row.embedded is None:
         return f"{head}PARSE_JSON({text});"
+    sub = row.embedded
+    # Each row's place in the golden SQL's own order (or its columns' order), numbered before
+    # the row becomes text, since text sorts 10 before 2. Ties fall back to the text, so the same
+    # data always gives the same answer text.
+    rank = (f"ROW_NUMBER() OVER (ORDER BY {', '.join(sub.order)})" if sub.order else "0")
     # The golden SQL stands on lines of its own, so a trailing line comment ends before the `)`.
     # Each result row becomes one JSON text, its keys in order (TO_JSON leaves an object's key
-    # order unspecified); only the first rows by that text are kept before aggregating, so a large
-    # result builds no oversized array, and the same data always gives the same answer text.
+    # order unspecified); only the first rows are kept before aggregating, so a large result
+    # builds no oversized array.
     return (f"{head}TO_VARIANT(OBJECT_INSERT(TO_OBJECT(PARSE_JSON({text})), 'ground_truth_output',\n"
-            f"    {answer_expression(row.tail)}))\n"
+            f"    {answer_expression(row.tail, sub.order_words)}))\n"
             "  FROM (SELECT COALESCE(MAX(n), 0) AS n,\n"
-            "          '[' || ARRAY_TO_STRING(ARRAY_AGG(j) WITHIN GROUP (ORDER BY j), ', ') || ']' AS r\n"
-            "        FROM (SELECT j, COUNT(*) OVER () AS n\n"
+            "          '[' || ARRAY_TO_STRING(ARRAY_AGG(j) WITHIN GROUP (ORDER BY k, j), ', ') || ']'"
+            " AS r\n"
+            "        FROM (SELECT j, k, COUNT(*) OVER () AS n\n"
             "              FROM (SELECT '{' || LISTAGG(TO_JSON(TO_VARIANT(f.key)) || ':' ||\n"
             f"                             {_VALUE_TEXT}, ',')\n"
-            "                             WITHIN GROUP (ORDER BY f.key) || '}' AS j\n"
-            "                    FROM (SELECT OBJECT_CONSTRUCT_KEEP_NULL(*) AS o\n"
-            f"                    FROM (\n{row.subquery}\n"
+            "                             WITHIN GROUP (ORDER BY f.key) || '}' AS j,\n"
+            "                           MIN(agami_object.k) AS k\n"
+            f"                    FROM (SELECT OBJECT_CONSTRUCT_KEEP_NULL(*) AS o, {rank} AS k\n"
+            f"                    FROM (\n{sub.sql}\n"
             "                    ) AS agami_golden) AS agami_object,\n"
             "                    LATERAL FLATTEN(INPUT => agami_object.o) AS f\n"
             "                    GROUP BY f.seq) AS agami_json\n"
-            f"              QUALIFY ROW_NUMBER() OVER (ORDER BY j) <= {ANSWER_ROWS}) AS agami_rows"
+            f"              QUALIFY ROW_NUMBER() OVER (ORDER BY k, j) <= {ANSWER_ROWS}) AS agami_rows"
             ") AS agami_result;")
 
 
@@ -519,7 +608,8 @@ def _rows(view: ExportView, options: ExportOptions,
         tail = bounds_rubric(q)
         if tail:
             carried[q.name] = frozenset({"bounds"})
-        sub, why = None, ""
+        sub: Optional[Embedded] = None
+        why = ""
         if compute and "tool_output" in truth["ground_truth_invocations"][0]:
             sub, why = embeddable_sql(view, options, q)
         elif compute:
@@ -542,10 +632,16 @@ def _rows(view: ExportView, options: ExportOptions,
 # ---------------------------------------------------------------------------
 
 
+def inert(text: str) -> str:
+    """Model text as it may stand in a custom metric's prompt: a judge's prompt reads `{{name}}` as
+    a placeholder it fills in, so each `{{` and `}}` of the model's own is spaced apart (`{ {`)."""
+    return re.sub(r"\}(?=\})", "} ", re.sub(r"\{(?=\{)", "{ ", text))
+
+
 def _ambiguity_metric(view: ExportView) -> Optional[dict]:
     if not view.ambiguities:
         return None
-    rules = "\n".join(f"- {ambiguity_handling(a)}" for a in view.ambiguities)
+    rules = "\n".join(f"- {inert(ambiguity_handling(a))}" for a in view.ambiguities)
     return {"name": "agami_ambiguity_handling", "model": JUDGE_MODEL, "score_ranges": SCORE_RANGES,
             "prompt": (
         "Score from 1 to 10 how the agent handled a question that can mean more than one thing, "
@@ -560,7 +656,8 @@ def _ambiguity_metric(view: ExportView) -> Optional[dict]:
 
 
 def _filter_metric(view: ExportView) -> Optional[dict]:
-    filters = [f"- {bare_name(et.table.name)}: {f.replace('{alias}', bare_name(et.table.name))}"
+    filters = [inert(f"- {bare_name(et.table.name)}: "
+                     f"{f.replace('{alias}', bare_name(et.table.name))}")
                for et in view.tables for f in et.table.default_filters]
     if not filters:
         return None

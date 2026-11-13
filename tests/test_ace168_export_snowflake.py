@@ -730,6 +730,41 @@ def _fake_view(area: str, **kw) -> X.ExportView:
     return X.ExportView(**{**base, **kw})
 
 
+def test_a_name_past_the_identifier_limit_is_dropped_and_reported():
+    from semantic_model.models import Metric, Table
+
+    long = "m" * 256
+    table = Table(name="orders", columns=[{"name": "amount", "type": "decimal"},
+                                          {"name": "c" * 256, "type": "string"}])
+    metrics = tuple(X.ExportMetric(Metric(name=n, calculation="Sum.", source_tables=["orders"]),
+                                   {"Snowflake": "SUM(orders.amount)"}) for n in (long, "revenue"))
+    view = _fake_view("ops", tables=(X.ExportTable(table, X.PhysicalName("DEMO", "S", "orders")),),
+                      metrics=metrics)
+    opts = X.ExportOptions(targets=("snowflake",), location=X.Location("DEMO", "S"))
+    doc, losses = S.build_semantic_view(view, opts)
+    names = {m["name"] for t in doc["tables"] for s in ("metrics", "dimensions", "facts")
+             for m in t.get(s, [])}
+    assert names == {"revenue", "amount"}
+    got = {(x.kind, x.name[:3], x.reason) for x in losses if x.reason == "target_limit"}
+    assert got == {("metric", "mmm", "target_limit"), ("column", "ord", "target_limit")}
+    # A view whose name, with the longest suffix the export adds, is past the limit is not written.
+    doc, losses = S.build_semantic_view(_fake_view("a" * 240, tables=view.tables), opts)
+    assert doc is None and [(x.kind, x.reason) for x in losses] == [("subject_area", "target_limit")]
+
+
+def test_an_empty_label_is_left_out_of_the_description():
+    from semantic_model.models import Table
+
+    table = Table(name="stores", columns=[{"name": "country", "type": "string",
+                                           "choice_field": {"AU": "", "CA": " ", "NZ": "New Zealand"}}])
+    view = _fake_view("ops", tables=(X.ExportTable(table, X.PhysicalName("DEMO", "S", "stores")),))
+    opts = X.ExportOptions(targets=("snowflake",), location=X.Location("DEMO", "S"))
+    doc, _ = S.build_semantic_view(view, opts)
+    (col,) = doc["tables"][0]["dimensions"]
+    assert col["description"] == "Labels: NZ = New Zealand."
+    assert col["sample_values"] == ["AU", "CA", "NZ"]
+
+
 @pytest.mark.parametrize("text,name", [("agami-example", "agami_example"), ("Order Count", "order_count"),
                                        ("2024 sales", "_2024_sales"), ("--", "unnamed")])
 def test_the_naming_rule(text, name):

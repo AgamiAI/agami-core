@@ -472,6 +472,20 @@ def test_nothing_unreviewed_is_certified_or_certifies_a_view(model, tmp_path):
     assert "drafts" in customers[2]
 
 
+def test_reserved_word_names_are_back_quoted_in_every_statement(model, tmp_path):
+    p = model / f"subject_areas/{AREA}/tables/order.yaml"
+    p.write_text(yaml.safe_dump({"name": "order", "schema": "SALES_DATA", "grain": ["from"],
+                                 "description": "Orders.",
+                                 "columns": [{"name": "from", "type": "integer",
+                                              "description": "Where from."}]}))
+    _, files = _export(model, tmp_path / "o", "--uc-comments", "--uc-constraints")
+    text = _uc(files)["sales.sql"]
+    assert "COMMENT ON TABLE SALES_DATA.`order` IS 'Orders.';" in text
+    assert "COMMENT ON COLUMN SALES_DATA.`order`.`from` IS 'Where from.';" in text
+    assert "ALTER TABLE SALES_DATA.`order` ALTER COLUMN `from` SET NOT NULL;" in text
+    assert "PRIMARY KEY (`from`);" in text
+
+
 def test_a_metric_view_the_export_did_not_write_is_not_certified(model, tmp_path, monkeypatch):
     real = DB.definition_body
     monkeypatch.setattr(DB, "definition_body", lambda d: None if DB.dollar_fields(d) else real(d))

@@ -416,9 +416,15 @@ def validate_mcp_spec(text: str) -> list[str]:
 
 
 def mcp_spec_text(sql: str) -> str:
+    """The specification: dollar-quoted, or the single-quoted constant the writer uses when the
+    text holds `$$`, which a dollar-quoted constant cannot."""
     body = sql.split("FROM SPECIFICATION ", 1)[1].strip()
-    assert body.startswith("$$") and body.endswith("$$;")
-    return body[2:-3].lstrip("\n")
+    assert body.endswith(";")
+    body = body[:-1]
+    if body.startswith("$$"):
+        assert body.endswith("$$")
+        return body[2:-2].lstrip("\n")
+    return _parse(f"SELECT {body}").expressions[0].this
 
 
 # ---------------------------------------------------------------------------
@@ -700,16 +706,19 @@ def test_the_golden_sql_runs_on_the_physical_tables_inside_the_insert(acme):
         assert _parse(sub) is not None
 
 
-def test_the_computed_answer_is_capped_and_ordered_by_text(acme):
+def test_the_computed_answer_is_capped_and_ordered_by_rank_then_text(acme):
     out, _ = acme
     sql = _read(out, f"{AREA}.evaluation.sql")
     ins = _statements(sql)[1]
     windows = [w for w in ins.find_all(exp.Window) if isinstance(w.this, exp.RowNumber)]
-    assert len(windows) == 1 and windows[0].args["order"].expressions[0].this.name == "j"
+    assert len(windows) == 1
+    assert [o.this.name for o in windows[0].args["order"].expressions] == ["k", "j"]
     qualify = ins.find(exp.Qualify)
     assert qualify.this.expression.this == str(A.ANSWER_ROWS)
     assert f"LEFT(agami_result.r, {A.ANSWER_CHARS})" in sql
-    assert "ARRAY_AGG(j) WITHIN GROUP (ORDER BY j)" in sql
+    assert "ARRAY_AGG(j) WITHIN GROUP (ORDER BY k, j)" in sql
+    # A sole unnamed column has no name to order by, so its rank is one constant.
+    assert "OBJECT_CONSTRUCT_KEEP_NULL(*) AS o, 0 AS k" in sql
 
 
 def test_bounds_become_a_rubric_sentence_and_are_declared_carried(acme):
@@ -754,7 +763,7 @@ def test_golden_sql_that_cannot_run_as_a_subquery_gets_no_answer(sql, why):
 ])
 def test_a_trailing_semicolon_and_ctes_still_embed(sql, want):
     sub, _ = A.embeddable_sql(_acme_view(), OPTS, X.ExportQuestion("golden", "core:x", "Q?", sql))
-    assert sub == want
+    assert sub.sql == want
 
 
 def _table(name: str, sql: str | None = None, *more: str) -> X.ExportTable:
@@ -853,6 +862,41 @@ def test_default_filters_add_the_optional_filter_metric(tmp_path):
     assert "{{tool_info}}" in m["prompt"]
 
 
+def test_model_text_never_reaches_a_judge_prompt_as_a_placeholder(tmp_path):
+    root = _write_model(tmp_path / "acme", filters=("{alias}.note != '{{draft}}'",))
+    doc = yaml.safe_load((root / "datasource.yaml").read_text())
+    doc["ambiguities"][0]["when"] = "a question says {{output}} or {{{input}}}"
+    (root / "datasource.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    _export(root, tmp_path / "out")
+    cfg = yaml.safe_load(_read(tmp_path / "out", f"{AREA}.evaluation_config.yaml"))
+    prompts = {m["name"]: m["prompt"] for m in cfg["metrics"] if "prompt" in m}
+    # Only the export's own placeholders remain, each once.
+    found = {n: re.findall(r"\{\{(\w+)\}\}", p) for n, p in prompts.items()}
+    assert found == {"agami_ambiguity_handling": ["input", "output"],
+                     "agami_optional_filters": ["input", "tool_info"]}
+    assert "a question says { {output} } or { { {input} } }" in prompts["agami_ambiguity_handling"]
+    assert "orders.note != '{ {draft} }'" in prompts["agami_optional_filters"]
+    assert A.inert("{{a}} {b} }}}") == "{ {a} } {b} } } }"
+
+
+def test_a_golden_question_a_verified_query_also_asks_expects_the_verified_sql(tmp_path):
+    root = _write_model(tmp_path / "acme")
+    examples = root / f"prompt_examples/{AREA}/examples.yaml"
+    exs = yaml.safe_load(examples.read_text())
+    exs.append({"question": "total revenue", "status": "confirmed",
+                "sql": "SELECT SUM(o.amount) AS total FROM orders AS o"})
+    examples.write_text(yaml.safe_dump(exs, sort_keys=False))
+    _export(root, tmp_path / "out")
+    view = yaml.safe_load(_read(tmp_path / "out", f"{AREA}.semantic_view.yaml"))
+    verified = next(q["sql"] for q in view["verified_queries"] if q["question"] == "total revenue")
+    _, rows = validate_evaluation(_read(tmp_path / "out", f"{AREA}.evaluation.sql"), "sales")
+    truth = dict((q, d) for q, d in rows)["Total revenue"]
+    assert truth["ground_truth_invocations"][0]["tool_output"] == verified
+    # A golden question no verified query asks keeps its own SQL, on the view's names.
+    other = dict((q, d) for q, d in rows)["Average order value"]
+    assert other["ground_truth_invocations"][0]["tool_output"] == "SELECT AVG(amount) AS aov FROM __orders;"
+
+
 def test_the_analyst_configuration_scores_verified_queries_by_result(acme):
     out, _ = acme
     doc = yaml.safe_load(_read(out, f"{AREA}.analyst_evaluation_config.yaml"))
@@ -863,6 +907,26 @@ def test_the_analyst_configuration_scores_verified_queries_by_result(acme):
                                   "source_metadata": {"type": "verified_queries",
                                                       "verified_queries": ["Revenue by region?"]}},
                    "metrics": [{"name": "sql_correctness", "version": "v3"}]}
+
+
+def test_the_analyst_configuration_lists_every_verified_query_once_in_the_views_order(tmp_path):
+    root = _write_model(tmp_path / "acme")
+    examples = root / f"prompt_examples/{AREA}/examples.yaml"
+    exs = yaml.safe_load(examples.read_text())
+    exs += [{"question": "Orders per customer?", "status": "confirmed",
+             "sql": "SELECT customer_id, COUNT(*) AS n FROM orders GROUP BY customer_id"},
+            {"question": "Biggest order?", "status": "confirmed",
+             "sql": "SELECT MAX(amount) AS biggest FROM orders"}]
+    examples.write_text(yaml.safe_dump(exs, sort_keys=False))
+    _export(root, tmp_path / "out")
+    view = yaml.safe_load(_read(tmp_path / "out", f"{AREA}.semantic_view.yaml"))
+    questions = [q["question"] for q in view["verified_queries"]]
+    assert len(questions) == 3
+    doc = yaml.safe_load(_read(tmp_path / "out", f"{AREA}.analyst_evaluation_config.yaml"))
+    assert validate_analyst_config(doc) == []
+    assert doc["evaluation"]["analyst_params"] == {"analyst_name": "DEMO.SALES_DATA.SALES",
+                                                   "analyst_type": "SEMANTIC VIEW"}
+    assert doc["evaluation"]["source_metadata"]["verified_queries"] == questions
 
 
 def test_no_example_sql_means_no_analyst_configuration():
@@ -959,6 +1023,17 @@ def test_the_mcp_server_exposes_the_view_and_the_agent():
             in head)
     assert "GRANT USAGE ON MCP SERVER DEMO.SALES_DATA.sales_mcp" in head
     assert "CREATE OR REPLACE MCP SERVER DEMO.SALES_DATA.sales_mcp\n  FROM SPECIFICATION $$" in sql
+
+
+def test_an_mcp_specification_holding_dollar_quotes_is_single_quoted_and_still_valid():
+    view = _fake_view(area_description="Costs $$ to run.")
+    sql = A.write_agent(view, _opts(snowflake_mcp_server=True)).files[f"{AREA}.mcp_server.sql"].decode()
+    assert "FROM SPECIFICATION '" in sql
+    text = mcp_spec_text(sql)
+    assert validate_mcp_spec(text) == [] and "Costs $$ to run." in text
+    # The header names what creating the server takes, and no release state or date.
+    head = sql.split("CREATE OR REPLACE MCP SERVER", 1)[0]
+    assert "CREATE MCP SERVER\n-- on DEMO.SALES_DATA" in head and "generally available" not in head
 
 
 def test_without_an_agent_the_mcp_server_has_only_the_analyst_tool():
@@ -1257,7 +1332,34 @@ def test_golden_sql_that_could_copy_undeclared_values_gets_no_computed_answer(sq
 def test_a_sole_unnamed_result_column_still_embeds():
     sub, _ = A.embeddable_sql(_acme_view(), OPTS,
                               X.ExportQuestion("golden", "core:x", "Q?", "SELECT COUNT(*) FROM orders"))
-    assert sub == "SELECT COUNT(*) FROM DEMO.SALES_DATA.orders"
+    assert sub.sql == "SELECT COUNT(*) FROM DEMO.SALES_DATA.orders"
+    # With no name to reach its column by, the rows are listed by their text.
+    assert sub.order == [] and sub.order_words == "text"
+
+
+@pytest.mark.parametrize("sql,order,words", [
+    # Its own ORDER BY, by alias, by expression and by position, then the other columns.
+    ("SELECT id AS n, amount FROM orders ORDER BY amount DESC",
+     ["agami_golden.amount DESC", "agami_golden.n"], "query"),
+    ("SELECT id, SUM(amount) AS total FROM orders GROUP BY id ORDER BY SUM(amount)",
+     ["agami_golden.total", "agami_golden.id"], "query"),
+    ("SELECT id, amount FROM orders ORDER BY 2 DESC, 1",
+     ["agami_golden.amount DESC", "agami_golden.id"], "query"),
+    ('SELECT id AS "Row Id", amount FROM orders',
+     ['agami_golden."Row Id"', "agami_golden.amount"], "columns"),
+    # A key that is no output column cannot be repeated outside: the columns' order stands.
+    ("SELECT id FROM orders ORDER BY amount", ["agami_golden.id"], "columns"),
+])
+def test_the_quoted_rows_follow_the_golden_sqls_own_order_or_its_columns(sql, order, words):
+    sub, _ = A.embeddable_sql(_acme_view(), OPTS, X.ExportQuestion("golden", "core:x", "Q?", sql))
+    assert (sub.order, sub.order_words) == (order, words)
+    view = dataclasses.replace(_acme_view(), golden=(X.ExportQuestion("golden", "core:x", "Q?", sql),))
+    text = A.write_agent(view, OPTS).files[f"{AREA}.evaluation.sql"].decode()
+    ins = _statements(text)[1]
+    rank = next(w for w in ins.find_all(exp.Window) if isinstance(w.this, exp.RowNumber)
+                and w.args["order"].expressions[0].this.name != "k")
+    assert [o.sql(dialect="snowflake") for o in rank.args["order"].expressions] == order
+    assert A._ORDER_WORDS[words].format(n=A.ANSWER_ROWS) in text
 
 
 def test_a_refused_computed_answer_is_reported_with_its_reason():
@@ -1408,6 +1510,9 @@ def test_the_computed_answer_rounds_non_integer_numbers_to_plain_decimals(acme):
     assert "ABS(COALESCE(AS_DOUBLE(f.value), AS_DECIMAL(f.value, 38, 0))) < 1e32" in text
     assert "RTRIM(RTRIM(TO_VARCHAR(" in text and "'0'), '.')" in text
     assert "TO_JSON(f.value)" in text and "TO_JSON(TO_VARIANT(f.key))" in text
+    # NaN and the infinities have no JSON number, so they are quoted as text.
+    assert "AS_DOUBLE(f.value) = 'NaN'::FLOAT" in text and "= 'inf'::FLOAT" in text
+    assert "THEN TO_JSON(TO_VARIANT(TO_VARCHAR(AS_DOUBLE(f.value))))" in text
     # The row's text no longer depends on TO_JSON's key order, which Snowflake does not fix.
     assert "LISTAGG(" in text and "WITHIN GROUP (ORDER BY f.key)" in text
     assert "TO_JSON(OBJECT_CONSTRUCT_KEEP_NULL(*))" not in text

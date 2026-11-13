@@ -24,6 +24,7 @@ from typing import Any, Optional, Sequence
 import yaml
 
 from .export import (
+    ANSI_RESERVED,
     DEFAULT_FILTER_NOTE,
     ExportOptions,
     ExportRefused,
@@ -108,8 +109,9 @@ def ossie_name(name: str) -> str:
 
 
 def column_ref(column: str) -> str:
-    """A column as an ANSI SQL expression: bare when it is a plain identifier, else double-quoted."""
-    if _PLAIN_IDENT.fullmatch(column):
+    """A column as an ANSI SQL expression: bare when it is a plain identifier and no reserved word
+    (`from`, `select`, `qualify` would read as a keyword), else double-quoted."""
+    if _PLAIN_IDENT.fullmatch(column) and column.upper() not in ANSI_RESERVED:
         return column
     return '"' + column.replace('"', '""') + '"'
 
@@ -188,7 +190,9 @@ def _field(version: str, column: Any) -> dict:
     if version == V03:
         out["datatype"] = _DATATYPE[column.type]
     codes = column.choice_field or {}
-    coded = "Coded values: " + ", ".join(f"{k} = {v}" for k, v in codes.items()) if codes else ""
+    # A blank label is left off its code: `AU = ` would read as a label that is empty on purpose.
+    coded = "Coded values: " + ", ".join(f"{k} = {v}" if str(v).strip() else str(k)
+                                         for k, v in codes.items()) if codes else ""
     put_nonempty(out, "ai_context", _context(version, [*column.caveats, coded]))
     return out
 

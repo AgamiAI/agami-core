@@ -490,3 +490,28 @@ def test_an_exported_measure_computes_on_open_source_spark(run, tmp_path):
             assert got == spark.sql(f"SELECT {expr} FROM src").collect()[0][0], name
     finally:
         spark.stop()
+
+
+# A release state or a date it began is the vendor's to state and goes stale; the export's files and
+# docs name what a statement does and what it needs, never when a feature became available.
+_RELEASE_CLAIM = re.compile(
+    r"(?i)\b(?:generally available|general availability|public preview|private preview|"
+    r"in preview|beta)\b|\b(?:available|released|launched)\s+(?:since|on|as of)\s+\d{4}")
+
+
+def test_no_exported_file_or_doc_claims_a_release_state_or_date(tmp_path):
+    out = tmp_path / "out"
+    rc, text = _sm(str(SAMPLE), "--target", "snowflake", "--target", "databricks", "--target",
+                   "ossie", "--location", "DEMO.SALES_DATA", "--out", str(out),
+                   "--snowflake-mcp-server", "--uc-comments", "--uc-constraints", "--uc-certify",
+                   "--pages-publish", "--pages-metrics", "--snowflake-certification-tags")
+    assert rc == 0, text
+    texts = {str(p.relative_to(out)): p.read_text(encoding="utf-8")
+             for p in sorted(out.rglob("*")) if p.is_file()}
+    texts["docs/context-export.md"] = (REPO / "docs" / "context-export.md").read_text("utf-8")
+    texts["SKILL.md"] = (REPO / "plugins/agami/skills/agami-export/SKILL.md").read_text("utf-8")
+    for path in sorted((REPO / "packages/agami-core/src/semantic_model").glob("export*.py")):
+        texts[path.name] = path.read_text(encoding="utf-8")
+    hits = {k: m.group(0) for k, v in texts.items() if (m := _RELEASE_CLAIM.search(v))}
+    assert hits == {}
+    assert _RELEASE_CLAIM.search("written by `sm export` (generally available since 2025-11-04)")

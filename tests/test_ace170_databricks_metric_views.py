@@ -113,6 +113,21 @@ def _texts(item: dict) -> list[str]:
     return errs
 
 
+# Databricks' ANSI-mode reserved words that a definition here might hold as a name; written bare,
+# each reads as a keyword.
+RESERVED = {"FROM", "SELECT", "ORDER", "GROUP", "JOIN", "WHERE", "CASE", "TABLE", "QUALIFY", "USER"}
+
+
+def _bare_reserved(expr: str) -> list[str]:
+    """The names in `expr` that are reserved words written without back-quotes."""
+    from sqlglot.dialects.dialect import Dialect
+    from sqlglot.tokens import TokenType
+
+    tokens = Dialect.get_or_raise("databricks").tokenize(expr)
+    return [t.text for i, t in enumerate(tokens) if t.text.upper() in RESERVED
+            and t.token_type != TokenType.IDENTIFIER and i > 0 and tokens[i - 1].token_type == TokenType.DOT]
+
+
 def _refs_ok(expr: str, paths: set[str]) -> bool:
     for col in _parse(expr).find_all(exp.Column):
         qual = ".".join(p for p in (col.catalog, col.db, col.table) if p)
@@ -182,6 +197,9 @@ def _validate(doc: dict) -> list[str]:
                 errs.append("semiadditive is first or last")
             finer.add(m["name"].casefold())
         earlier.add(m["name"].casefold())
+    for text in [doc.get("source", ""), *_expressions(doc)]:
+        if _bare_reserved(str(text)):
+            errs.append(f"reserved word {', '.join(_bare_reserved(str(text)))} written bare")
     for item in [*fields, *measures]:
         key = str(item.get("name", "")).casefold()
         if key in names:
@@ -208,7 +226,7 @@ def _definition(sql: str) -> dict:
 
 
 def _join_conditions(joins: list[dict]) -> list[str]:
-    return [c for j in joins for c in [j["on"], *_join_conditions(j.get("joins", []))]]
+    return [c for j in joins for c in [j.get("on", ""), *_join_conditions(j.get("joins", []))]]
 
 
 def _expressions(doc: dict) -> list[str]:
@@ -635,6 +653,36 @@ def test_two_joined_tables_named_alike_are_joined_once_and_the_other_join_report
     names = [j["name"] for j in doc["joins"]]
     assert names.count("store_groups") == 1 and _validate(doc) == []
     assert ("degraded", "name_collision") in _losses(section)[("relationship", "orders->store-groups")]
+
+
+def test_names_past_the_identifier_limit_are_reported_not_written(model, tmp_path):
+    _put(model, f"subject_areas/{AREA}/metrics/long.yaml",
+         _metric("m" * 256, "SUM(orders.amount)", ["orders"]))
+    _put(model, f"subject_areas/{AREA}/tables/wide.yaml", {
+        "name": "w" * 250, "schema": "SALES_DATA", "columns": [_col("qty", "integer")]})
+    _put(model, f"subject_areas/{AREA}/metrics/wide.yaml",
+         _metric("wide units", f"SUM({'w' * 250}.qty)", ["w" * 250]))
+    section, files = _export(model, tmp_path / "l")
+    assert all(len(n) <= 255 + 4 for n in files)
+    losses = _losses(section)
+    assert losses[("metric", "m" * 256)] == [("dropped", "target_limit")]
+    assert losses[("metric", "wide units")] == [("dropped", "target_limit")]
+    assert "m" * 256 not in "".join(files.values())
+
+
+def test_a_table_or_column_named_with_a_reserved_word_is_back_quoted(model, tmp_path):
+    _put(model, f"subject_areas/{AREA}/tables/order.yaml", {
+        "name": "order", "schema": "SALES_DATA", "columns": [_col("from", "integer")]})
+    _put(model, f"subject_areas/{AREA}/metrics/froms.yaml",
+         _metric("froms", "SUM(`order`.`from`)", ["order"]))
+    _, files = _export(model, tmp_path / "r")
+    doc = _definition(files["sales__order.sql"])
+    assert doc["source"] == "SALES_DATA.`order`"
+    assert {f["expr"] for f in doc["fields"]} == {"source.`from`"}
+    assert _validate(doc) == []
+    assert DB._quote("select") == "`select`" and DB._quote("selection") == "selection"
+    bare = dict(doc, fields=[{"name": "f", "expr": "source.from"}])
+    assert any("reserved word" in e for e in _validate(bare))
 
 
 def test_the_naming_rule_and_identifier_are_public(model, tmp_path):

@@ -759,6 +759,17 @@ def test_names_and_column_references():
     assert O.ossie_name("Average Order-Value") == "average_order_value"
     assert O.ossie_name("!!") == "unnamed"
     assert O.column_ref("amount") == "amount" and O.column_ref('a "b"') == '"a ""b"""'
+    # A reserved word would read as a keyword in an ANSI expression, so it is quoted as written.
+    for word in ("from", "select", "join", "qualify", "case", "Order"):
+        assert O.column_ref(word) == f'"{word}"'
+        assert sqlglot.parse_one(f"SELECT {O.column_ref(word)} FROM t").selects[0].name == word
+
+
+def test_a_blank_label_leaves_its_code_bare():
+    from semantic_model.models import Column
+
+    col = Column(name="country", type="string", choice_field={"AU": "", "NZ": "New Zealand"})
+    assert O._field(O.V011, col)["ai_context"] == "Coded values: AU, NZ = New Zealand"
 
 
 def test_the_privacy_scan_covers_the_ossie_module():

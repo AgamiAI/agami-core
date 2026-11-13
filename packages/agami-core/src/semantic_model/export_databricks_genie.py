@@ -501,6 +501,9 @@ class _Space:
             elif not tables <= self.in_space:
                 self.drop("metric", m.name, "depends_on_excluded", "reads a table the space does "
                           "not list")
+            elif len(alias) > DB.MAX_NAME:
+                self.drop("metric", m.name, "target_limit", f"its alias is {len(alias)} characters, "
+                          f"past the {DB.MAX_NAME}-character identifier limit")
             elif alias in aliases:
                 self.drop("metric", m.name, "name_collision", f"its alias {alias} is already taken")
             elif self._fits("metric", m.name):

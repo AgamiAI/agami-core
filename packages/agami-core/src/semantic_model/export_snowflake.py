@@ -83,6 +83,10 @@ _NUMERIC_TYPES = frozenset({"integer", "decimal", "float"})
 # agami's "period end" is ascending and "period start" descending; nothing else has a counterpart.
 _SORT = {"last": "ascending", "first": "descending"}
 _PLAIN_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
+# "Identifiers … must be at most 255 characters" (identifier requirements). Every name the view
+# holds is checked, and so is the longest the export makes from the view's own name.
+MAX_NAME = 255
+_LONGEST_SUFFIX = "_evaluation_config"
 
 # Snowflake-provided tags (user-guide/object-tagging/snowflake-provided-tags): CERTIFICATION_STATUS
 # takes a fixed set of values that no account can change. agami's "not yet reviewed" is the
@@ -236,7 +240,17 @@ class _Builder:
                         catalog=col.args.get("catalog"))
         return logical if logical is not None and self.names_base_table(ref, logical) else None
 
+    def too_long(self, kind: str, agami: str, name: str) -> bool:
+        """Whether `name` is past Snowflake's identifier limit; the item is then dropped."""
+        if len(name) <= MAX_NAME:
+            return False
+        self.drop(kind, agami, "target_limit", f"its name in the view is {len(name)} characters, "
+                  f"past the {MAX_NAME}-character identifier limit")
+        return True
+
     def add_member(self, table: str, section: str, item: dict, kind: str, agami: str) -> bool:
+        if self.too_long(kind, agami, item["name"]):
+            return False
         if item["name"] in self.members[table]:
             self.drop(kind, agami, "name_collision",
                       f"maps to {table}.{item['name']}, which an earlier item already has")
@@ -276,6 +290,8 @@ class _Builder:
             self.drop("table", t.name, "sql_not_for_target",
                       f"defined by a query written for {self.view.source_engine}; SQL is never "
                       "translated")
+            return
+        if self.too_long("table", t.name, name):
             return
         if name in self.tables:
             self.drop("table", t.name, "name_collision", f"maps to {name}, as an earlier table does")
@@ -317,8 +333,9 @@ class _Builder:
             section = "facts"
         else:
             section = "dimensions"
+        # A label that is blank, or only repeats its code, tells the agent nothing.
         labels = [f"{k} = {v}" for k, v in (c.choice_field or {}).items()
-                  if v.casefold() != k.casefold()]
+                  if v.strip() and v.casefold() != k.casefold()]
         item: dict[str, Any] = {"name": snowflake_name(c.name)}
         put_nonempty(item, "description", join_sentences(
             c.description, f"Unit: {c.unit}." if c.unit else "",
@@ -383,6 +400,8 @@ class _Builder:
                       "no circular relationships, transitive ones included")
             return
         rel_name = snowflake_name(name.replace("->", "_to_"))
+        if self.too_long("relationship", name, rel_name):
+            return
         if any(x["name"] == rel_name for x in self.relationships):
             self.drop("relationship", name, "name_collision", f"maps to {rel_name}, already used")
             return
@@ -409,6 +428,8 @@ class _Builder:
         `employees` joined on `manager_id` gives `employees_manager`."""
         role = re.sub(r"(?<=.)_id$", "", snowflake_name("_".join(fk)))
         name = snowflake_name(f"{table}_{role}")
+        if self.too_long("relationship", rel, name):
+            return None
         if name in self.tables:
             self.drop("relationship", rel, "name_collision", f"its second logical table on "
                       f"{table} maps to {name}, as a table already does")
@@ -535,6 +556,8 @@ class _Builder:
             parts = (c.args.get("catalog"), c.args.get("db"), c.args["table"], c.this)
             spans[token_span(*parts)] = f"{table}.{member}"
         item = _metric_item(m)
+        if self.too_long("metric", m.name, item["name"]):
+            return True
         taken = {n for t in self.members.values() for n, s in t.items() if s == "metrics"}
         if item["name"] in taken | {x["name"] for x in self.view_metrics}:
             # "You cannot use the same name for a derived metric and a regular metric."
@@ -640,6 +663,10 @@ class _Builder:
             self.degrade(q.kind, q.name, reason, f"{_VQ_LOST} {why}")
             return None
         name = snowflake_name(q.name)
+        if len(name) > MAX_NAME:
+            self.degrade(q.kind, q.name, "target_limit", f"{_VQ_LOST} its name would be "
+                         f"{len(name)} characters, past the {MAX_NAME}-character identifier limit")
+            return None
         if name in names:
             self.degrade(q.kind, q.name, "name_collision", f"{_VQ_LOST} it maps to {name}, "
                          "already used")
@@ -706,6 +733,13 @@ class _Builder:
 
     def build(self) -> Optional[dict]:
         v = self.view
+        longest = semantic_view_name(v) + _LONGEST_SUFFIX
+        if len(longest) > MAX_NAME:
+            # The view and every object named from it (its agent, evaluation table, stage).
+            self.drop("subject_area", v.area, "target_limit", f"its view name is "
+                      f"{len(semantic_view_name(v))} characters; with the longest suffix the export "
+                      f"adds ({_LONGEST_SUFFIX}) it passes the {MAX_NAME}-character identifier limit")
+            return None
         entities = self._entity_homes()
         for et in v.tables:
             self.table(et, entities)
@@ -1009,6 +1043,14 @@ class SemanticView(NamedTuple):
         """The `question` of each verified query the view holds, in its order, each once."""
         queries = (self.doc or {}).get("verified_queries", [])
         return list(dict.fromkeys(q["question"] for q in queries))
+
+    def verified_sql(self, question: str) -> Optional[str]:
+        """The SQL of the first verified query asking `question` (compared trimmed, in any case),
+        or None. An evaluation row expecting another SQL for the same question would score the
+        agent against two answers the export calls correct."""
+        key = question.strip().casefold()
+        return next((q["sql"] for q in (self.doc or {}).get("verified_queries", [])
+                     if q["question"].strip().casefold() == key), None)
 
 
 def semantic_view(view: ExportView, options: ExportOptions) -> SemanticView:

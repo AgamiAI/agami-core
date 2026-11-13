@@ -78,6 +78,26 @@ MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July", "
 NO_REVIEW_STATE = ("ambiguity", "terminology")
 _BLANKED = "mentioned a column or table this export leaves out, so it travels blank"
 
+# Words an ANSI SQL parser reads as keywords rather than names, so a column or table so named is
+# written quoted wherever the export writes it bare otherwise: the reserved words of Databricks'
+# ANSI mode (the SQL:2016 list as Spark keeps it), and QUALIFY, which Snowflake, Databricks and
+# DuckDB reserve. Quoting an ordinary name would change what it matches on an engine that folds
+# case, so only these are quoted.
+ANSI_RESERVED = frozenset({
+    "ALL", "ALTER", "AND", "ANY", "ARRAY", "AS", "AT", "AUTHORIZATION", "BETWEEN", "BOTH", "BY",
+    "CASE", "CAST", "CHECK", "COLLATE", "COLUMN", "COMMIT", "CONSTRAINT", "CREATE", "CROSS", "CUBE",
+    "CURRENT", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "DELETE",
+    "DESCRIBE", "DISTINCT", "DROP", "ELSE", "END", "ESCAPE", "EXCEPT", "EXISTS", "EXTERNAL",
+    "EXTRACT", "FALSE", "FETCH", "FILTER", "FOR", "FOREIGN", "FROM", "FULL", "FUNCTION", "GLOBAL",
+    "GRANT", "GROUP", "GROUPING", "HAVING", "IN", "INNER", "INSERT", "INTERSECT", "INTERVAL", "INTO",
+    "IS", "JOIN", "LATERAL", "LEADING", "LEFT", "LIKE", "LOCAL", "NATURAL", "NO", "NOT", "NULL",
+    "OF", "ON", "ONLY", "OR", "ORDER", "OUT", "OUTER", "OVERLAPS", "PARTITION", "POSITION",
+    "PRIMARY", "QUALIFY", "RANGE", "REFERENCES", "REVOKE", "RIGHT", "ROLLBACK", "ROLLUP", "ROW",
+    "ROWS", "SELECT", "SESSION_USER", "SET", "SOME", "START", "TABLE", "TABLESAMPLE", "THEN",
+    "TIME", "TO", "TRAILING", "TRUE", "TRUNCATE", "UNION", "UNIQUE", "UNKNOWN", "UPDATE", "USER",
+    "USING", "VALUES", "WHEN", "WHERE", "WINDOW", "WITH",
+})
+
 # Each writer slice adds its module name here; importing the module registers its target.
 _TARGET_MODULES: tuple[str, ...] = (
     "export_snowflake",

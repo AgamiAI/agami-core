@@ -30,6 +30,7 @@ import yaml
 
 from .derived import SECOND_ORDER_RE
 from .export import (
+    ANSI_RESERVED,
     ExportMetric,
     ExportOptions,
     ExportTable,
@@ -53,6 +54,7 @@ METRIC_VIEW_DIR = "metric_views"
 YAML_VERSION = 1.1
 MAX_SYNONYMS = 10
 MAX_TEXT = 255   # a synonym's or a display_name's length limit
+MAX_NAME = 255   # an identifier's length limit: a view, a measure, a field, a join
 # Databricks' `semiadditive` takes only these; agami's `average`, `min` and `max` have no home.
 _SEMIADDITIVE = ("first", "last")
 # What a finer level-of-detail measure's `outer_aggregate` takes, from "Use level of detail (LOD)
@@ -93,7 +95,11 @@ def metric_view_name(area: str, table: str) -> str:
 
 
 def _quote(part: str) -> str:
-    return part if _SIMPLE.fullmatch(part) else "`" + part.replace("`", "``") + "`"
+    """A name as Databricks SQL reaches it: bare when it is a plain name and no reserved word,
+    else back-quoted. A table or column named `order` or `from` written bare would not parse."""
+    if _SIMPLE.fullmatch(part) and part.upper() not in ANSI_RESERVED:
+        return part
+    return "`" + part.replace("`", "``") + "`"
 
 
 def _dotted(*parts: Optional[str]) -> str:
@@ -300,8 +306,9 @@ class _Planner:
 
     def __post_init__(self) -> None:
         self.tables = {bare_name(t.table.name).casefold(): t for t in self.view.tables}
-        self.sources = {k: s for k, t in self.tables.items() if (s := self._source(t)) is not None}
         self.aliases = {k: databricks_name(k) for k in self.tables}
+        self.sources = {k: s for k, t in self.tables.items()
+                        if (s := self._source(t)) is not None and self._short(t)}
         self.edges, unusable = _edges(self.view)
         self.trees: dict[str, _Tree] = {}
         # A second-order metric's name -> (its base metric, its outer aggregate), once placed.
@@ -309,6 +316,17 @@ class _Planner:
         for er in unusable:
             self.degrade("relationship", er.name, "target_rule", "left out of every metric view: "
                          "its on: names a table besides the two it joins")
+
+    def _short(self, t: ExportTable) -> bool:
+        """Whether a table's join name fits Databricks' identifier limit; one past it is reported
+        and neither joined nor measured, since every name made from it would be past it too."""
+        alias = self.aliases[bare_name(t.table.name).casefold()]
+        if len(alias) <= MAX_NAME:
+            return True
+        self.degrade("table", t.table.name, "target_limit", "left out of every metric view: its "
+                     f"name as Databricks writes it is {len(alias)} characters, past the "
+                     f"{MAX_NAME}-character identifier limit")
+        return False
 
     def _source(self, t: ExportTable) -> Optional[str]:
         # A table defined by SQL is joined as that query, which only Databricks SQL can be.
@@ -409,6 +427,12 @@ class _Planner:
         reported, never silently lost."""
         table = self.tables[fact].table.name
         name = metric_view_name(self.view.area, table)
+        if len(name) > MAX_NAME:
+            for em in metrics:
+                self.drop("metric", em.metric.name, "target_limit", f"its metric view, on {table}, "
+                          f"would be named with {len(name)} characters, past the {MAX_NAME}-"
+                          "character identifier limit")
+            return False
         if name in named:
             for em in metrics:
                 self.drop("metric", em.metric.name, "name_collision", f"its metric view, on "
@@ -444,6 +468,10 @@ class _Planner:
 
     def _claim(self, taken: set[str], agami_name: str) -> Optional[str]:
         name = databricks_name(agami_name)
+        if len(name) > MAX_NAME:
+            self.drop("metric", agami_name, "target_limit", f"its measure name is {len(name)} "
+                      f"characters, past the {MAX_NAME}-character identifier limit")
+            return None
         if name in taken:
             self.drop("metric", agami_name, "name_collision", f"its metric view name {name} is "
                       "already taken by an earlier measure")
@@ -461,6 +489,12 @@ class _Planner:
             for c in et.table.columns:
                 base = c.name if t == tree.fact else f"{self.aliases[t]}_{c.name}"
                 name = databricks_name(base)
+                if len(name) > MAX_NAME:
+                    self.degrade("column", f"{et.table.name}.{c.name}", "target_limit",
+                                 f"left out of metric view {metric_view_name(self.view.area, tree.fact)}"
+                                 f": its field name is past the {MAX_NAME}-character identifier "
+                                 "limit")
+                    continue
                 if name in taken:
                     self.degrade("column", f"{et.table.name}.{c.name}", "name_collision",
                                  f"left out of metric view {metric_view_name(self.view.area, tree.fact)}"
