@@ -126,7 +126,8 @@ def test_build_refreshes_the_list_after_each_wait():
     assert "Its output also carries `list`" in item and "No separate `sm steps` call per pass" in item
     # the loop stops on a failed build too, and the person is told why
     loop = text[:wait.start()].rsplit("\n", 3)[-3]
-    assert "in a loop until it says `done` or `failed`" in loop
+    assert "in a loop that stops when any of these happens: it says `done`; it says `failed`; or its `list` " \
+        "shows the build step not started again (`·`)" in " ".join(text.split())
     assert "`failed`" in item and "`problem`" in item
 
 
@@ -156,8 +157,8 @@ def test_the_last_step_is_done_before_the_turn_ends():
 
 def test_build_stops_waiting_on_a_problem():
     text = _text(REFS / "build.md")
-    assert "or the `list` shows the build step not started again (`·`" in text
-    assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, say its `problem`' in text
+    assert "or its `list` shows the build step not started again (`·`)" in text
+    assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, refresh the task list from its `list`, say its `problem`' in text
     assert '"The validator gates the write"' in text and "\nThe validator gates the write" in text
 
 
