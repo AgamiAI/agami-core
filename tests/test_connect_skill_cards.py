@@ -795,3 +795,8 @@ def test_6_with_add_my_own_drop_the_failing_ones_gives_way():
 
 def test_approve_all_remaining_marks_its_ops_bulk_in_connect():
     assert 'Each of its approve ops carries `"bulk": true`.' in _phase_4()
+
+
+def test_6_the_parser_gets_the_same_items_files_as_the_renderer():
+    full = _phase_6().split("**Show the full view** (an option")[1]
+    assert "Give it the same `--items-file` arguments, in the same order, that rendered the page" in full
