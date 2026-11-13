@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import loader as L
+from .say_text import quoted
 
 STEP_IDS = ("connect", "context", "tables", "build", "describe", "signoff", "examples", "reports",
             "first_question")
@@ -219,10 +220,13 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     from . import curate
     try:
         org = L.load_datasource(root, include_rejected=True)
-        return {**curate.overview(org, root)["totals"], "signoff": curate.signoff_counts(org)}, None
+        return {**curate.overview(org, root)["totals"],
+                "signoff": curate.model_signoff_counts(root)}, None
     except Exception as exc:  # noqa: BLE001 — see docstring
         first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
-        return None, f"The model in {root} couldn't be read: {first}"
+        # Posted as a `say`: the engine's words first, the folder by name (no absolute path), and
+        # the loader's message, which can quote the model's own files, capped and in quotes.
+        return None, f"The model in {quoted(root.name)} couldn't be read: {quoted(first)}"
 
 
 def _log_state(log: Path, model: Path, now: float,
@@ -264,7 +268,8 @@ def _own_log(log: Path, attempt_at: float) -> bool:
 def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
     """The problem line for a build that ended without finishing."""
     if state == "failed":
-        return f"The {noun} didn't finish: {reason}"
+        # the reason is the build's error text, which can quote the database or the model
+        return f"The {noun} didn't finish: {quoted(reason or '')}"
     return f"The {noun} stopped before it finished."
 
 
@@ -405,13 +410,17 @@ def compact(result: dict[str, Any]) -> dict[str, Any]:
 # A live run refreshed its task list after only about half of the `sm steps` / `sm progress` calls,
 # and computed the closing summary without posting it: an instruction in the skill text is read long
 # before the moment it applies. So the engine's own output carries, at that moment, the text to post
-# (`say`) and the next action (`then`).
+# (`say`) and the next action (`then`). Every `then` the engine prints is one of these.
 
 THEN_UPDATE = "Update the task list from `list` now, before anything else."
 THEN_UP_TO_DATE = "The task list is up to date."
 THEN_CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
                 "closing card in that same message.")
 THEN_PROBLEM = "Say this to the person before going on."
+THEN_PROBLEM_AND_UPDATE = ("Say this to the person before going on. Then update the task list from "
+                           "`list`.")
+THEN_NO_SUMMARY = ("Say this to the person. The summary could not be built, so do not ask the "
+                   "closing card; fix the problem and run this command again.")
 THEN_LINE_AND_LIST = "Post `line` and update the task list from `list`."
 THEN_LINE = "Post `line`."
 THEN_NOTHING = "Nothing new: call this again."
@@ -422,9 +431,11 @@ def _last_path(root: Path) -> Path:
     return root / ".introspect" / "steps.last"
 
 
-def _read_last(root: Path) -> dict[str, Any]:
-    """What `sm steps` / `sm progress` last printed for this root ({} when nothing was, or the file
-    can't be read: then everything reads as changed, which only costs one extra refresh)."""
+def read_printed(root: Path) -> dict[str, Any]:
+    """What `sm steps` / `sm progress` last printed for this root: `list`, `line` and `problem` (the
+    last problem said). {} when nothing was, or the file can't be read: then everything reads as
+    new, which only costs one extra refresh."""
+    root = Path(root).expanduser()
     path = _last_path(root)
     try:
         if not L.inside_model(root, path):
@@ -435,20 +446,19 @@ def _read_last(root: Path) -> dict[str, Any]:
     return doc if isinstance(doc, dict) else {}
 
 
-def remember_printed(root: Path, **printed: Any) -> dict[str, Any]:
-    """Record what this call printed (`list`, `line`) in `<root>/.introspect/steps.last` and return
-    what was recorded before. Written atomically, so a reader never sees half a file, and only when
-    the model folder exists and the file stays inside it: a fresh profile gets no folder made for it,
-    and a link out of the folder is never written through."""
+def remember_printed(root: Path, before: dict[str, Any], **printed: Any) -> None:
+    """Record what this call printed over `before` (what `read_printed` returned) in
+    `<root>/.introspect/steps.last`. Written atomically, so a reader never sees half a file, and
+    only when the model folder exists and the file stays inside it: a fresh profile gets no folder
+    made for it, and a link out of the folder is never written through."""
     root = Path(root).expanduser()
-    before = _read_last(root)
     path = _last_path(root)
     if not root.is_dir():
-        return before
+        return
     try:
         path.parent.mkdir(exist_ok=True)
         if not L.inside_model(root, path):
-            return before
+            return
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".steps.last.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -462,16 +472,23 @@ def remember_printed(root: Path, **printed: Any) -> dict[str, Any]:
             raise
     except OSError:
         pass  # a list that can't be remembered reads as changed next time: harmless
-    return before
 
 
-def steps_next(changed: bool, problem: Optional[str], closing: Optional[str]) -> dict[str, Any]:
-    """`say` and `then` for `sm steps`: the problem first (the person must hear it before anything
-    else), then the closing summary when the closing step starts, else whether the list moved."""
-    if problem:
-        return {"say": problem, "then": THEN_PROBLEM}
-    if closing:
-        return {"say": closing, "then": THEN_CLOSING}
+def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str],
+               closing: bool, summary: Optional[str]) -> dict[str, Any]:
+    """`say` and `then` for `sm steps`.
+
+    A problem is said once: the same problem already said (`said_before`) is left out of `say`, but
+    still in `problem`. It never hides the refresh or the closing card: with a changed list, `then`
+    asks for both; on the closing mark the summary follows it in the same `say`. When the closing
+    summary can't be built, the person hears the problem and no closing card is asked."""
+    fresh = problem if problem and problem != said_before else None
+    if closing and summary is not None:
+        return {"say": f"{fresh}\n\n{summary}" if fresh else summary, "then": THEN_CLOSING}
+    if closing and problem:
+        return {"say": problem, "then": THEN_NO_SUMMARY}
+    if fresh:
+        return {"say": fresh, "then": THEN_PROBLEM_AND_UPDATE if changed else THEN_PROBLEM}
     return {"then": THEN_UPDATE if changed else THEN_UP_TO_DATE}
 
 

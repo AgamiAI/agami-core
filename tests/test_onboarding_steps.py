@@ -151,6 +151,31 @@ def test_signoff_counts_entities_and_joins_like_the_card(model):
     assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "0 of 17 signed"
 
 
+def _hide_invoices_with_everything_unsigned(model: Path) -> None:
+    _unsign_all(model, "metrics")
+    _unsign_all(model, "entities")
+    rel = model / "subject_areas" / "agami-example" / "relationships.yaml"
+    doc = yaml.safe_load(rel.read_text())
+    doc["relationships"][0].update(review_state="unreviewed", signed_off_by=None,
+                                   signed_off_at=None, signed_off_role=None)
+    rel.write_text(yaml.safe_dump(doc))
+    table = model / "subject_areas" / "agami-example" / "tables" / "invoices.yaml"
+    t = yaml.safe_load(table.read_text())
+    t["review_state"] = "rejected"
+    table.write_text(yaml.safe_dump(t))
+
+
+def test_signoff_count_is_the_review_queues_with_a_hidden_table(model, capsys):
+    # Hiding a table drops what hangs off it from the queue; the step must count the same items.
+    _hide_invoices_with_everything_unsigned(model)
+    assert cli.main(["review-queue", str(model)]) == 0
+    counts = json.loads(capsys.readouterr().out)["counts"]
+    queued = counts["rule_1"] + counts["rule_2"]
+    assert queued == 14
+    steps.mark(model, "signoff", "in_progress")
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == f"0 of {queued} signed"
+
+
 def test_describe_shows_its_percentage_before_any_metric(model):
     for f in (model / "subject_areas").glob("*/metrics/*.yaml"):
         f.unlink()
@@ -178,7 +203,9 @@ def test_a_model_that_stops_loading_does_not_regress_the_list(model):
                              "text": "Describe columns and add metrics"}
     assert s["signoff"]["status"] == "in_progress" and s["signoff"]["count"] is None
     assert result["current"] == "signoff"
-    assert result["problem"].startswith(f"The model in {model} couldn't be read: ")
+    # the folder by name, never its absolute path; the loader's words quoted
+    assert result["problem"].startswith('The model in "acme" couldn\'t be read: "')
+    assert str(model) not in result["problem"]
     assert "\n" not in result["problem"]
 
 
@@ -238,7 +265,7 @@ def test_a_failed_rebuild_keeps_the_built_model_and_says_why(model):
     s = _by_id(result)
     assert s["build"]["status"] == "done" and s["build"]["count"] == "11 tables, 12 joins"
     assert s["describe"]["status"] == "in_progress"
-    assert result["problem"] == "The last rebuild didn't finish: could not connect to server"
+    assert result["problem"] == 'The last rebuild didn\'t finish: "could not connect to server"'
 
 
 def test_a_failed_first_build_is_pending_with_the_reason(tmp_path):
@@ -254,7 +281,7 @@ def test_a_failed_first_build_is_pending_with_the_reason(tmp_path):
     # the build was reached, so the steps before it are done and the list stops at the build
     assert [s[i]["status"] for i in ("connect", "context", "tables")] == ["done"] * 3
     assert result["current"] == "build"
-    assert result["problem"] == "The build didn't finish: permission denied for schema demo"
+    assert result["problem"] == 'The build didn\'t finish: "permission denied for schema demo"'
 
 
 def test_a_build_silent_for_30_minutes_is_not_running(model, tmp_path):
@@ -434,7 +461,7 @@ def test_bad_mark_exits_2_and_writes_nothing(model, capsys):
 
 
 def test_cli_full_prints_the_same_dict(model, capsys):
-    said = {"changed", "then"}
+    said = {"changed", "then", "list"}
     assert cli.main(["steps", str(model), "--full"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert {k: v for k, v in out.items() if k not in said} == steps.onboarding_steps(model)
@@ -862,11 +889,11 @@ STATUS_RULES = {
     "7-restart-build-running": (_restart_build_running, "dddippppp", "build",
                                 {"build": "5 of 11 tables"}, None),
     "8-failed-first-build": (_failed_first_build, "dddpppppp", "build", {},
-                             "The build didn't finish: boom"),
+                             "The build didn't finish: \"boom\""),
     "9-failed-rebuild-marked": (_failed_rebuild_marked, "dddpppppp", "build", {},
-                                "The rebuild didn't finish: boom"),
+                                "The rebuild didn't finish: \"boom\""),
     "10-failed-rebuild-unmarked": (_failed_rebuild_unmarked, "ddddppppp", "describe",
-                                   {"build": BUILT}, "The last rebuild didn't finish: boom"),
+                                   {"build": BUILT}, "The last rebuild didn't finish: \"boom\""),
     "11-restart-context-over-failed-log": (_restart_context_over_failed_log, "dippppppp",
                                            "context", {}, None),
     "12-restart-tables": (_restart_tables, "ddipppppp", "tables", {}, None),
@@ -889,11 +916,11 @@ STATUS_RULES = {
     "B-reintrospect-context-done": (_reintrospect_context_done, "ddppppppp", "tables", {}, None),
     "B-reintrospect-tables-done": (_reintrospect_tables_done, "dddpppppp", "build", {}, None),
     "D5-build-done-mark-failed-rebuild": (_built_then_failed_rebuild, "ddddppppp", "describe",
-                                          {"build": BUILT}, "The last rebuild didn't finish: boom"),
+                                          {"build": BUILT}, "The last rebuild didn't finish: \"boom\""),
     "D7-unloadable-beats-failed-rebuild": (_unloadable_then_failed_rebuild, "ddddppppp",
                                            "describe", {}, "The model in "),
     "D-stale-failed-log-stays-failed": (_stale_failed_first_build, "dddpppppp", "build", {},
-                                        "The build didn't finish: boom"),
+                                        "The build didn't finish: \"boom\""),
     "D-log-older-than-model-is-none": (_log_older_than_model, "ddddppppp", "describe",
                                        {"build": BUILT}, None),
     "D-done-log-with-model-is-none": (_done_log_with_model, "ddddppppp", "describe",

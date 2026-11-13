@@ -168,14 +168,11 @@ def test_progress_waits_for_the_log_to_move_on(tmp_path, capsys):
     # one call per poll: the step list `sm steps` prints rides along with --wait
     from semantic_model import steps
     assert out["list"] == steps.compact(steps.onboarding_steps(tmp_path / "acme"))["list"]
-    def waited_list():
-        return steps.compact(steps.onboarding_steps(tmp_path / "missing"))["list"]
     missing = _run(["progress", str(tmp_path / "missing")], capsys)
     assert missing == {"line": "", "done": False, "failed": False, "started": False,
-                       "list": waited_list(), "list_changed": True,
-                       "then": "Update the task list from `list` now, before anything else."}
+                       "list_changed": False, "then": "Nothing new: call this again."}
     waited = _run(["progress", str(tmp_path / "missing"), "--wait", "0.1"], capsys)
-    assert waited["started"] is False and waited["list"][0] == "· Connect your database"
+    assert waited["started"] is False and "list" not in waited
 
 
 def test_progress_wait_returns_at_once_on_a_failed_log(tmp_path, capsys):

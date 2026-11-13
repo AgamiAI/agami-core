@@ -468,6 +468,12 @@ def signoff_counts(org: Datasource) -> dict[str, int]:
     return out
 
 
+def model_signoff_counts(root: str | Path) -> dict[str, int]:
+    """`signoff_counts` of the model at `root`, loaded as `sm review-queue` loads it (hidden tables
+    and what hangs off them left out), so the step list and the summary say the queue's own total."""
+    return signoff_counts(load_datasource(root))
+
+
 def _live(objs: list) -> list:
     return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
 

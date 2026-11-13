@@ -705,8 +705,11 @@ def cmd_progress(args) -> int:
     root = Path(args.root).expanduser()
     listed = steps.compact(steps.onboarding_steps(root))["list"]
     shown = _progress_line(current) if current else {"line": "", "done": False, "failed": False}
-    before = steps.remember_printed(root, list=listed, line=shown["line"])
-    list_changed = before.get("list") != listed
+    before = steps.read_printed(root)
+    steps.remember_printed(root, before, list=listed, line=shown["line"])
+    # Nothing is remembered for a folder that doesn't exist yet, and its list is the fresh one every
+    # time (`sm steps` prints it): reporting it as moved would ask for a refresh on every poll.
+    list_changed = root.is_dir() and before.get("list") != listed
     line_new = bool(shown["line"]) and before.get("line") != shown["line"]
     out: dict[str, Any] = {**shown, "started": bool(current)}
     if current:
@@ -793,12 +796,16 @@ def cmd_steps(args) -> int:
     root = Path(args.root).expanduser()
     result = steps.onboarding_steps(root)
     listed = steps.compact(result)["list"]
-    changed = steps.remember_printed(root, list=listed).get("list") != listed
-    closing = None
-    if ("first_question", "in_progress") in marks:
-        closing = _closing_summary(root)
-    view = result if args.full else steps.compact(result)
-    _print_json({**view, "changed": changed, **steps.steps_next(changed, result["problem"], closing)})
+    before = steps.read_printed(root)
+    changed = before.get("list") != listed
+    closing = ("first_question", "in_progress") in marks
+    said = steps.steps_next(changed, result["problem"], before.get("problem"), closing,
+                            _closing_summary(root) if closing else None)
+    # The problem is remembered as said: it is said once, not on every call while it lasts.
+    steps.remember_printed(root, before, list=listed, problem=result["problem"])
+    # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
+    view = {**result, "list": listed} if args.full else steps.compact(result)
+    _print_json({**view, "changed": changed, **said})
     return 0
 
 
@@ -1040,6 +1047,10 @@ def cmd_apply_enrichment(args) -> int:
         _print_json({"applied": False, "error": f"not an enricher result for area {args.area!r}"})
         return 2
     root = Path(args.root).expanduser()
+    area_name = _area_plain_name(root, args.area)
+    if area_name is None:
+        _print_json({"applied": False, "error": f"no subject area named {args.area!r} in the model"})
+        return 2
     tsv = result.get("column_descriptions") or ""
     try:
         rows = DD.parse(tsv, "tsv") if tsv.strip() else []
@@ -1079,24 +1090,34 @@ def cmd_apply_enrichment(args) -> int:
     out["applied"] = True
     out["pass_on"] = {k: result.get(k) for k in ("metric_ideas", "terms", "questions",
                                                  "cross_area", "notes") if result.get(k)}
-    out.update(_enrichment_say(args.area, described["ops"] + ops, out["entities"]))
+    out.update(_enrichment_say(area_name, described["ops"] + ops, out["entities"]))
     _print_json(out)
     return 0
 
 
-def _enrichment_say(area: str, ops: list, entities: int) -> dict[str, str]:
+def _area_plain_name(root: Path, area: str) -> Optional[str]:
+    """The area's name as `sm overview` shows it (its plain words, told apart from a look-alike),
+    or None when the model has no such area."""
+    from . import curate
+    org = L.load_datasource(root, include_rejected=True)
+    if area not in {sa.name for sa in org.subject_areas}:
+        return None
+    return next(a["plain_name"] for a in curate.overview(org, root)["areas"] if a["area"] == area)
+
+
+def _enrichment_say(area_name: str, ops: list, entities: int) -> dict[str, str]:
     """The one line to post once an enricher's result is applied, from the edits themselves: the
     tables they touched, the columns they described, the entities added. The step list moves too,
     so `then` sends the skill to `sm steps` (a live run refreshed its task list after only about
-    half of the step changes)."""
-    from .plain_names import plain_words
-    from .summary import _count
+    half of the step changes). The area's name is model text, so it is quoted and capped."""
+    from .say_text import count, quoted
     tables = {op.get("name") for op in ops if op.get("kind") == "table"}
     columns = {(op.get("name"), op.get("column")) for op in ops
                if op.get("kind") == "table" and op.get("column")}
-    return {"say": f"✓ {plain_words(area)}: {_count(len(tables), 'table')} described, "
-                   f"{_count(len(columns), 'column')}, {_count(entities, 'entity')}.",
-            "then": "Post `say`, then run `sm steps` and update the task list."}
+    return {"say": f"✓ {quoted(area_name)}: {count(len(tables), 'table', 'tables')} described, "
+                   f"{count(len(columns), 'column', 'columns')}, "
+                   f"{count(entities, 'entity', 'entities')}.",
+            "then": THEN_ENRICHED}
 
 
 def cmd_approve_queue(args) -> int:
@@ -1933,6 +1954,9 @@ def cmd_seed_validate(args) -> int:
     return 0
 
 
+THEN_ENRICHED = "Post `say`, then run `sm steps` and update the task list."
+THEN_EXAMPLES = "Post `say`, then ask the examples card."
+
 # The examples table posted after `seed-validate --out`: a live run wrote the items to a file and
 # then had to assemble the table itself, so the engine builds it from the items it wrote.
 EXAMPLES_SHOWN = 15
@@ -1941,18 +1965,17 @@ FAILED_NAMED = 5
 
 
 def _preview(item: dict) -> str:
-    """The first result row as one short cell: its values joined, cut to PREVIEW_CHARS."""
+    """The first result row's values joined, as one short cell (cut to PREVIEW_CHARS)."""
+    from .say_text import cell
     rows = item.get("row_preview") or []
-    if not rows:
-        return "no rows"
-    text = ", ".join(str(v) for v in rows[0])
-    return text if len(text) <= PREVIEW_CHARS else text[:PREVIEW_CHARS - 1] + "…"
+    return cell(", ".join(str(v) for v in rows[0]), PREVIEW_CHARS) if rows else "no rows"
 
 
 def examples_say(printed: str) -> dict[str, Any]:
     """`say` (the examples table, ready to post) and `then` for `seed-validate --out`, from the JSON
-    it wrote: one area's item list, or several areas' `items`. {} for anything else (an error)."""
-    from .summary import _cell
+    it wrote: one area's item list, or several areas' `items`. {} for anything else (an error).
+    Questions and results are model and database text: in cells, or quoted, never bare prose."""
+    from .say_text import cell, quoted
     try:
         doc = json.loads(printed)
     except ValueError:
@@ -1965,18 +1988,18 @@ def examples_say(printed: str) -> dict[str, Any]:
     blocks = []
     if ran:
         table = ["| # | Example | Rows | Result |", "|---|---|---|---|"]
-        table += [f"| {n} | {_cell(str(it.get('question', '')))} | {it.get('row_count', 0)} | "
-                  f"{_cell(_preview(it))} |" for n, it in enumerate(ran[:EXAMPLES_SHOWN], 1)]
-        if len(ran) > EXAMPLES_SHOWN:
-            table.append(f"Showing {EXAMPLES_SHOWN} of {len(ran)}.")
+        table += [f"| {n} | {cell(str(it.get('question', '')))} | {cell(str(it.get('row_count', 0)))} | "
+                  f"{_preview(it)} |" for n, it in enumerate(ran[:EXAMPLES_SHOWN], 1)]
         blocks.append("\n".join(table))
+        if len(ran) > EXAMPLES_SHOWN:
+            # its own paragraph: a line straight under the table would render as one more row
+            blocks.append(f"Showing {EXAMPLES_SHOWN} of {len(ran)}.")
     line = f"{len(ran)} of {len(items)} examples ran."
     if failed:
-        names = ", ".join(_cell(str(it.get("question", ""))) for it in failed[:FAILED_NAMED])
-        # a question ends in its own "?": a "." after it would read as a typo
-        line += f" {len(failed)} failed: {names}" + ("" if names.endswith(("?", ".", "!")) else ".")
+        names = ", ".join(quoted(str(it.get("question", ""))) for it in failed[:FAILED_NAMED])
+        line += f" {len(failed)} failed: {names}."
     blocks.append(line)
-    return {"say": "\n\n".join(blocks), "then": "Post `say`, then ask the examples card."}
+    return {"say": "\n\n".join(blocks), "then": THEN_EXAMPLES}
 
 
 # --- several subject areas per call (#544) -------------------------------------------------
@@ -2705,7 +2728,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--rows", type=int, default=5)
     sp.add_argument("--tables", help="comma-separated: only these tables of the area (one chunk)")
     sp.add_argument("--chunks", action="store_true",
-                    help="print the model's chunks (each area cut into runs of --max-tables) and write nothing")
+                    help="print the model's chunks (each area cut into runs of --max-tables; a model of "
+                         f"more than {CHUNK_SPLIT_ABOVE} tables is never one chunk) and write nothing; "
+                         f"`parallel` is true for 2 or more chunks over more than "
+                         f"{CHUNK_SPLIT_ABOVE} tables in all")
     sp.add_argument("--max-tables", type=int, default=CHUNK_MAX_TABLES,
                     help=f"most tables in one chunk (default {CHUNK_MAX_TABLES})")
     sp.set_defaults(func=cmd_enrich_input)

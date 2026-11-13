@@ -92,7 +92,8 @@ def test_steps_problem_line_carries_nothing_of_the_outside_file(model, outside, 
     rc, printed = _run(["steps", str(model)], capsys)
     assert rc == 0
     problem = json.loads(printed)["problem"]
-    assert "outside the model folder" in problem
+    # the loader's words are capped at 80 characters in the problem line, so only their start shows
+    assert "points outside" in problem
     assert SECRET not in printed and "oauth_token" not in printed
 
 

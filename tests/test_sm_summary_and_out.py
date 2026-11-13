@@ -15,7 +15,7 @@ import yaml
 pytest.importorskip("pydantic")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "packages" / "agami-core" / "src"))
 
-from semantic_model import cli, summary  # noqa: E402
+from semantic_model import cli, say_text, summary  # noqa: E402
 
 from skill_docs import PLUGIN  # noqa: E402
 
@@ -112,6 +112,16 @@ def test_summary_counts_what_the_sign_off_card_counts(model, capsys):
     assert text.startswith("**agami-example: 11 tables, 12 joins, 11 metrics, 14 examples.**")
 
 
+def test_summary_counts_the_review_queue_with_a_hidden_table(model, capsys):
+    from test_onboarding_steps import _hide_invoices_with_everything_unsigned
+    _hide_invoices_with_everything_unsigned(model)
+    assert cli.main(["review-queue", str(model)]) == 0
+    counts = json.loads(capsys.readouterr().out)["counts"]
+    assert (counts["rule_1"], counts["rule_2"]) == (7, 7)
+    text = summary.onboarding_summary(model)["markdown"]
+    assert text.endswith("\n\n14 definitions are waiting for sign-off: 7 metrics, 7 entities.\n")
+
+
 def test_the_sign_off_line_names_joins_too():
     from semantic_model import summary as S
     assert S._signoff_line({"metrics": 0, "entities": 1, "joins": 2, "waiting": 3, "signed": 0}) == (
@@ -140,7 +150,13 @@ def test_summary_without_a_model_is_no_model(tmp_path, capsys):
 
 
 def test_a_pipe_in_an_area_name_stays_in_its_cell():
-    assert summary._cell("a|b") == "a\\|b"
+    assert say_text.cell("a|b") == "a\\|b"
+
+
+@pytest.mark.parametrize("raw, want", [(r"a\| b | c", r"a\\\| b \| c"), (r"a\|b", r"a\\\|b")])
+def test_a_backslash_cannot_undo_an_escaped_pipe(raw, want):
+    # `a\|` escaped as `a\\|` would read as an escaped backslash, then a column break
+    assert say_text.cell(raw) == want
 
 
 # --- --out -----------------------------------------------------------------------------------
@@ -213,8 +229,8 @@ def test_one_of_each_reads_singular(model, monkeypatch):
 
 
 def test_a_name_with_a_line_break_or_pipe_stays_on_its_line():
-    assert summary._cell("acme\n| evil") == "acme \\| evil"
-    assert summary._cell("a\r\nb\tc") == "a b c"
+    assert say_text.cell("acme\n| evil") == "acme \\| evil"
+    assert say_text.cell("a\r\nb\tc") == "a b c"
 
 
 def test_the_datasource_name_is_escaped(model):
@@ -222,7 +238,7 @@ def test_the_datasource_name_is_escaped(model):
     ds["datasource"] = "acme|x\n**y"
     (model / "datasource.yaml").write_text(yaml.safe_dump(ds))
     first = summary.onboarding_summary(model)["markdown"].split("\n\n")[0]
-    assert "\n" not in first and first.startswith("**acme\\|x **y: ")
+    assert "\n" not in first and first.startswith("**acme\\|x \\*\\*y: ")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes")
