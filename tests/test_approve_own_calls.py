@@ -685,3 +685,12 @@ def test_every_form_the_hook_approves_is_one_allowed_tools_already_covers(art):
         assert _decision(_bash(form), art) == "allow", form
         assert any(p.match(form) for p in patterns), form
     assert "Read(/${CLAUDE_PLUGIN_ROOT}/**)" in _allowed_tools("agami-connect")
+
+
+@pytest.mark.parametrize("name", ["say-pending.json", "agami-say-pending.json"])
+@pytest.mark.parametrize("tool", ["Write", "Read"])
+def test_the_say_gates_pending_file_is_never_approved(art, tool, name):
+    """A subagent with Write could otherwise plant text the say gate then has the assistant post
+    verbatim. Excluded by name, so a wider scratch pattern later still leaves it out."""
+    assert _decision(_file(tool, str(art / "local" / "tmp" / name)), art) is None
+    assert name in HOOK_MOD.NEVER_APPROVED

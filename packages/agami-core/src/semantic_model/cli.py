@@ -2044,8 +2044,8 @@ def gate_say(said: dict[str, Any], kind: str) -> dict[str, Any]:
     say_id = say_pending.register(art, kind, said["say"])
     if say_id is None:
         return said
-    return {"say": said["say"], "say_id": say_id, **{k: v for k, v in said.items() if k != "say"},
-            "then": said["then"] + THEN_GATED}
+    # `say_id` first: a preview that cuts a long output short still carries it.
+    return {"say_id": say_id, **said, "then": said["then"] + THEN_GATED}
 
 
 # --- several subject areas per call (#544) -------------------------------------------------

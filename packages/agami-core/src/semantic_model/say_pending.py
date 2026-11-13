@@ -6,7 +6,7 @@ the skill text said. So the command that prints such a `say` also records it her
 `AskUserQuestion` hook (`plugins/agami/scripts/say_gate.py`) refuses the card, at most twice, until
 the text has been posted.
 
-The file is `<artifacts_dir>/local/tmp/agami-say-pending.json`: a JSON list of
+The file is `<artifacts_dir>/local/tmp/say-pending.json`: a JSON list of
 `{"id", "kind", "needle", "say", "created_at", "refused"}`. This module owns that format. It imports
 only the stdlib because the hook, which never imports the engine, keeps a copy of the reader; a test
 keeps the two in step. Registering is best effort: any failure is silent and leaves the command's
@@ -23,9 +23,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-FILE_NAME = "agami-say-pending.json"
+# Not `agami-…`: the plugin's approve hook lets Write and Read of `agami-*` scratch files through
+# without a prompt, and a subagent able to write this file could plant text for the assistant to post.
+FILE_NAME = "say-pending.json"
 KINDS = ("summary", "examples")
 NEEDLE_CHARS = 120
+# The longest `say` registered (the gate drops longer entries as forged). The examples table is at
+# most about 5,000 characters (15 rows of capped cells and a line naming at most 5 failures); the
+# summary is about 1,000 fixed characters plus about 140 per subject area (80-character names), so
+# 32,000 covers some 200 areas. A longer summary is still printed, just not gated.
+MAX_SAY_CHARS = 32_000
 FIELDS = ("id", "kind", "needle", "say", "created_at", "refused")
 
 
@@ -91,7 +98,7 @@ def register(artifacts_dir: Path, kind: str, say: str, now: Optional[datetime] =
     an empty `say`). Never raises: the command printing `say` must not change because of this."""
     try:
         needle = needle_of(say)
-        if kind not in KINDS or not needle:
+        if kind not in KINDS or not needle or len(say) > MAX_SAY_CHARS:
             return None
         tmp = _scratch(artifacts_dir)
         if tmp is None:
@@ -105,9 +112,14 @@ def register(artifacts_dir: Path, kind: str, say: str, now: Optional[datetime] =
             entries = []  # a damaged file is replaced: the hook gives no opinion on it meanwhile
         entry_id = secrets.token_hex(4)
         at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+        # The same text printed again (a new id each time) keeps its count: the gate refuses a text
+        # at most twice in all, not twice per printing.
+        refused = max([e.get("refused", 0) for e in entries
+                       if e.get("kind") == kind and e.get("say") == say
+                       and type(e.get("refused")) is int] or [0])
         entries = [e for e in entries if e.get("kind") != kind]
         entries.append({"id": entry_id, "kind": kind, "needle": needle, "say": say,
-                        "created_at": at.isoformat(), "refused": 0})
+                        "created_at": at.isoformat(), "refused": refused})
         save(path, entries)
         return entry_id
     except Exception:  # noqa: BLE001 — best effort, see docstring

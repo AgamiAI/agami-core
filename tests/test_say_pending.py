@@ -1,5 +1,5 @@
 """The engine records the two `say`s that must be shown before a card (the closing summary and the
-examples table) in `<artifacts_dir>/local/tmp/agami-say-pending.json`, for the plugin's
+examples table) in `<artifacts_dir>/local/tmp/say-pending.json`, for the plugin's
 AskUserQuestion hook. Recording is best effort: when it can't be done, the command prints what it
 printed before, less the `say_id`.
 """
@@ -72,7 +72,7 @@ def test_the_closing_mark_registers_its_summary(art, capsys):
     assert entry["kind"] == "summary" and entry["say"] == out["say"] and entry["refused"] == 0
     assert entry["needle"] == out["say"].splitlines()[0].strip()
     assert datetime.fromisoformat(entry["created_at"]).tzinfo is not None
-    assert list(out).index("say_id") == list(out).index("say") + 1  # beside `say`
+    assert list(out).index("say_id") == list(out).index("say") - 1  # just before `say`: a cut preview keeps it
 
 
 def test_a_second_closing_mark_replaces_the_first(art, capsys):
@@ -227,3 +227,31 @@ def test_load_rejects_anything_but_a_list_of_entries(tmp_path, text):
 
 def test_load_of_a_missing_file_is_empty(tmp_path):
     assert say_pending.load(tmp_path / "none.json") == []
+
+
+def test_the_file_is_outside_the_auto_approved_scratch_names():
+    assert say_pending.FILE_NAME == "say-pending.json"
+    assert not say_pending.FILE_NAME.startswith("agami-")
+
+
+def test_re_registering_the_same_text_carries_its_refusals(tmp_path):
+    """The deny bound is per text: printing the same summary again (a new id each time) must not
+    reset its count, so the same text is refused at most twice in all."""
+    first = say_pending.register(tmp_path, "summary", "same text")
+    path = say_pending.pending_path(tmp_path)
+    entries = say_pending.load(path)
+    entries[0]["refused"] = 2
+    say_pending.save(path, entries)
+    ids = [first]
+    for _ in range(3):
+        ids.append(say_pending.register(tmp_path, "summary", "same text"))
+        (entry,) = say_pending.load(path)
+        assert entry["id"] == ids[-1] and entry["refused"] == 2
+    assert len(set(ids)) == 4
+    say_pending.register(tmp_path, "summary", "different text")
+    assert say_pending.load(path)[0]["refused"] == 0
+
+
+def test_a_say_longer_than_the_cap_is_not_registered(tmp_path):
+    assert say_pending.register(tmp_path, "summary", "x" * (say_pending.MAX_SAY_CHARS + 1)) is None
+    assert say_pending.register(tmp_path, "summary", "x" * say_pending.MAX_SAY_CHARS) is not None

@@ -51,6 +51,9 @@ FORBIDDEN_ANYWHERE = (";", "&", "|", "`", "$(", "<", ">", "\n", "\r")
 UNQUOTED_SPECIAL = set("$*?[]{}()!#")
 
 TMP_NAME = re.compile(r"agami-[A-Za-z0-9._-]+\.(json|txt|tsv|md)")
+# The say gate's pending file (say_gate.py): text in it is handed to the assistant to post verbatim,
+# so a Write of it is never waved through, whatever TMP_NAME becomes. The old name is listed too.
+NEVER_APPROVED = {"say-pending.json", "agami-say-pending.json"}
 MARK = re.compile(r"[a-z_]+=(in_progress|done|skipped)")
 AREA = re.compile(r"[A-Za-z0-9_.-]+")
 SECONDS = re.compile(r"[0-9]{1,3}")
@@ -117,14 +120,16 @@ def scratch_file(file_path: Any) -> bool:
     not a hard link (whose other name could be anywhere)."""
     if not isinstance(file_path, str) or not _plain_path(file_path):
         return False
-    if not TMP_NAME.fullmatch(re.split(r"[\\/]", file_path)[-1]):
+    name = re.split(r"[\\/]", file_path)[-1]
+    if not TMP_NAME.fullmatch(name) or name.lower() in NEVER_APPROVED:
         return False
     try:
         tmp = scratch_dir()
     except Doubt:
         return False
     real = os.path.realpath(file_path)
-    if _norm(os.path.dirname(real)) != _norm(tmp) or not TMP_NAME.fullmatch(os.path.basename(real)):
+    if _norm(os.path.dirname(real)) != _norm(tmp) or not TMP_NAME.fullmatch(os.path.basename(real)) \
+            or os.path.basename(real).lower() in NEVER_APPROVED:
         return False
     try:
         st = os.stat(real)
