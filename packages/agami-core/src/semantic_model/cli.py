@@ -166,8 +166,10 @@ def _live_items(objs) -> list:
 
 
 # One enricher describes at most this many tables: past it, one subagent's input and answer grow
-# long enough that the person waits on it while smaller ones have finished.
-CHUNK_MAX_TABLES = 12
+# long enough that the person waits on it while smaller ones have finished. 8, not 12: a live run
+# described an 11-table sample inline, 169 s with no progress line, where two enrichers would have
+# run while the person answered cards.
+CHUNK_MAX_TABLES = 8
 
 
 def _split_list(value: Optional[str]) -> list[str]:
@@ -191,10 +193,10 @@ def _even_runs(names: list[str], max_size: int) -> list[list[str]]:
 
 def _enrich_chunks(args) -> int:
     """The model split into enricher-sized chunks: each area in the model's order, cut into the
-    fewest runs of at most `--max-tables` live tables, sized as evenly as possible (13 is 7 + 6, not
-    12 + 1, so no enricher is left with a scrap). `parallel` is true only when there are 2 or more
-    chunks and the model is larger than one chunk: two small areas are quicker described inline than
-    by two subagents. It reads only the model, so the skill can plan the subagents before the
+    fewest runs of at most `--max-tables` live tables, sized as evenly as possible (9 is 5 + 4, not
+    8 + 1, so no enricher is left with a scrap). `parallel` is true only when there are 2 or more
+    chunks and the model is larger than one chunk (more than 8 live tables at the default): two
+    small areas are quicker described inline than by two subagents. It reads only the model, so the skill can plan the subagents before the
     database is touched."""
     if args.area or args.out or args.tables is not None:
         _print_json({"error": "--chunks lists every area's chunks; it takes no --area, --out or --tables"})
