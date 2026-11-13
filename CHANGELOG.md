@@ -24,10 +24,14 @@ below corresponds to one such version.
   holds) and writes the same `agami-keep.txt` as the card's other answers, and the chat says
   "Keeping N of M tables." Where a page can't open, `--numbered` lists the tables in the chat and
   `--keep pick:<file>` reads numbers, ranges and patterns typed in Other (`1-12, 15`, `all crm_*`,
-  `everything except audit_*`); typed names on the main card go the same way. `sm discover
-  --row-estimates` reads every table's size from one catalog-statistics query on Postgres,
-  Supabase, Redshift, MySQL and Snowflake (never a count); elsewhere the size shows as unknown.
-  Every table name reaches the page as escaped data and is shown as text.
+  `everything except audit_*`); numbers are read only up to the last one the list showed, so none
+  on the main card, where typed names go the same way. A name that is both a schema and a table, or
+  several tables that differ only in case, is asked about rather than guessed; `all <name>` means the
+  schema. `sm discover --row-estimates` reads every table's size from one catalog-statistics query
+  on Postgres, Supabase, Redshift, MySQL and Snowflake (never a count); elsewhere the size shows as
+  unknown. On Redshift, `svv_table_info` lists only tables the login can see in it, so a login
+  without that access sees sizes as unknown. A pick is one post under the helper's 1 MiB cap, about
+  20,000 table names. Every table name reaches the page as escaped data and is shown as text.
 
 - **Review pages save their own decisions, like the password page (#651).** Every review or
   sign-off question now offers **Review on a page** (the seed examples card: **Mark them on a

@@ -400,7 +400,7 @@ def _many() -> dict:
 )
 def test_numbers_ranges_and_patterns_pick_tables(typed, kept):
     inv = _many()
-    got, problem = IS.pick(inv, typed)
+    got, problem = IS.pick(inv, typed, shown=7)
     assert problem is None
     assert got == (kept if kept is not None else _names(inv))
 
@@ -416,10 +416,13 @@ def test_numbers_ranges_and_patterns_pick_tables(typed, kept):
             "everything except nothing_like_this",
             {"unmatched": ["nothing_like_this"], "ambiguous": {}},
         ),
+        # an except with nothing after it would keep everything without anyone choosing that
+        ("everything except", {"unmatched": ["everything except"], "ambiguous": {}}),
+        ("except ,", {"unmatched": ["except ,"], "ambiguous": {}}),
     ],
 )
 def test_what_matches_nothing_or_several_is_said_back_not_guessed(typed, problem):
-    assert IS.pick(_many(), typed) == ([], problem)
+    assert IS.pick(_many(), typed, shown=7) == ([], problem)
 
 
 def test_a_pattern_is_a_wildcard_only_where_it_has_a_star():
@@ -449,13 +452,14 @@ def test_the_numbered_list_numbers_what_pick_reads(tmp_path, capsys):
     got = json.loads(capsys.readouterr().out)
     lines = got["list"].splitlines()
     assert got["tables"] == 10
+    assert got["shown"] == 10 and got["more"] == 0
     assert lines[0] == "sales: 3 tables"
-    assert lines[1] == "   1. orders (1 columns, about 1,200 rows)"
+    assert lines[1] == "   1. orders (1 column, about 1,200 rows)"
     assert lines[3] == "   3. orders_bak (3 columns)  [likely copy of sales.orders]"
-    assert lines[4] == "staging: 1 tables"
+    assert lines[4] == "staging: 1 table"
     # the number a line shows is the one pick reads
     n = int(re.search(r"(\d+)\. orders_bak", got["list"]).group(1))
-    assert IS.pick(inv, str(n))[0] == ["sales.orders_bak"]
+    assert IS.pick(inv, str(n), shown=got["shown"])[0] == ["sales.orders_bak"]
 
 
 # --- in a real browser, where Playwright is installed --------------------------------------------
@@ -531,3 +535,131 @@ def test_hostile_names_show_as_text_in_a_real_browser(tmp_path):
     assert got["status"].startswith("Saved: keeping 8 of 10 tables.")
     code, out, kept = _keep(tmp_path, inv, f"page:{decisions}")
     assert code == 0 and out["kept"] == 8 and HOSTILE[0] in kept.read_text()
+
+
+# --- review fixes: a name that is a schema and a table, case, numbers never shown, empty except ----
+
+
+def _same_name() -> dict:
+    spec = {"sales": ["sales", "orders", "returns"], "crm": ["leads"]}
+    return {
+        "profile": "demo",
+        "tables": [
+            {"schema": sc, "table": t, "columns": []} for sc, ts in spec.items() for t in ts
+        ],
+    }
+
+
+@pytest.mark.parametrize("typed", ["sales", "everything except sales", "SALES"])
+def test_a_name_that_is_both_a_schema_and_a_table_is_asked_not_guessed(typed):
+    kept, problem = IS.pick(_same_name(), typed)
+    assert kept == [] and problem["unmatched"] == []
+    (could_be,) = problem["ambiguous"].values()
+    assert could_be == ["sales.sales", "sales.*"]
+
+
+def test_all_before_a_name_means_the_schema():
+    assert IS.pick(_same_name(), "all sales") == (
+        ["sales.sales", "sales.orders", "sales.returns"],
+        None,
+    )
+    assert IS.pick(_same_name(), "everything except all sales") == (["crm.leads"], None)
+    # a qualified name is the table, never the schema
+    assert IS.pick(_same_name(), "sales.sales") == (["sales.sales"], None)
+
+
+def _cased() -> dict:
+    return {
+        "profile": "demo",
+        "tables": [
+            {"schema": "sales", "table": t, "columns": []} for t in ("Orders", "orders", "Items")
+        ],
+    }
+
+
+def test_an_exact_case_match_wins_over_a_case_only_one():
+    assert IS.pick(_cased(), "sales.orders") == (["sales.orders"], None)
+    assert IS.pick(_cased(), "Orders") == (["sales.Orders"], None)
+    assert IS.pick(_cased(), "items") == (["sales.Items"], None)  # no exact one: case is ignored
+
+
+@pytest.mark.parametrize("typed", ["SALES.ORDERS", "ORDERS"])
+def test_several_case_only_matches_are_asked_not_all_kept(typed):
+    kept, problem = IS.pick(_cased(), typed)
+    assert kept == [] and problem["ambiguous"] == {typed: ["sales.Orders", "sales.orders"]}
+
+
+def _big(n: int = 250) -> dict:
+    return {
+        "profile": "demo",
+        "tables": [{"schema": "s", "table": f"t{i:03d}", "columns": []} for i in range(1, n + 1)],
+    }
+
+
+def test_only_the_numbers_the_list_showed_are_read(tmp_path, capsys):
+    inv = _big()
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps(inv))
+    assert IS.main(["--inventory", str(path), "--numbered"]) == 0
+    got = json.loads(capsys.readouterr().out)
+    assert (got["tables"], got["shown"], got["more"]) == (250, 200, 50)
+    assert got["list"].splitlines()[-1].strip() == "200. t200 (0 columns)"
+    assert IS.pick(inv, "199-200", shown=200) == (["s.t199", "s.t200"], None)
+    assert IS.pick(inv, "1-250", shown=200) == ([], {"unmatched": ["1-250"], "ambiguous": {}})
+    assert IS.pick(inv, "201", shown=200) == ([], {"unmatched": ["201"], "ambiguous": {}})
+    assert IS.pick(inv, "t2*", shown=200)[0][-1] == "s.t250"  # a pattern still reaches every table
+
+
+def test_numbers_mean_nothing_where_no_list_was_shown(tmp_path):
+    # the main tables card shows no numbers, so a bare number there names nothing
+    assert IS.pick(_many(), "3") == ([], {"unmatched": ["3"], "ambiguous": {}})
+    typed = tmp_path / "agami-pick.txt"
+    typed.write_text("1-2\n")
+    path = tmp_path / "inventory.json"
+    path.write_text(json.dumps(_many()))
+    out = tmp_path / "agami-keep.txt"
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        assert (
+            IS.main(
+                [
+                    "--inventory",
+                    str(path),
+                    "--keep",
+                    f"pick:{typed}",
+                    "--shown",
+                    "2",
+                    "--tables-out",
+                    str(out),
+                ]
+            )
+            == 0
+        )
+    assert out.read_text() == "crm.crm_accounts\ncrm.crm_leads\n"
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert (
+            IS.main(["--inventory", str(path), "--keep", f"pick:{typed}", "--tables-out", str(out)])
+            == 1
+        )
+
+
+def test_the_list_numbers_schemas_together_even_when_the_inventory_interleaves_them():
+    inv = {
+        "profile": "demo",
+        "tables": [
+            {"schema": "a", "table": "x", "columns": []},
+            {"schema": "b", "table": "y", "columns": []},
+            {"schema": "a", "table": "z", "columns": []},
+        ],
+    }
+    got = IS.numbered(inv)
+    assert got["list"].splitlines() == [
+        "a: 2 tables",
+        "  1. x (0 columns)",
+        "  2. z (0 columns)",
+        "b: 1 table",
+        "  3. y (0 columns)",
+    ]
+    assert IS.pick(inv, "2", shown=got["shown"])[0] == ["a.z"]
+    # the kept file stays in inventory order, whatever the numbering
+    assert IS.pick(inv, "1-3", shown=3)[0] == ["a.x", "b.y", "a.z"]

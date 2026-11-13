@@ -847,7 +847,10 @@ def test_1_6p_falls_back_to_a_numbered_list_typed_in_other():
     # what to type is in the question (rule 5), and the options are the alternatives to typing
     assert "Type numbers, ranges or patterns in Other, like 1-12, 15 or all crm_* or everything except audit_*." in q
     assert "**Keep everything** / **Drop staging and backups**" in q and "Type" not in q.split(":", 1)[1].split("**")[1]
-    assert "Past 200 tables" in fallback
+    assert "Past 200 tables" in fallback and "the first 200 tables" in fallback
+    # numbers are read only up to the last one the list showed, and never on the main card
+    assert '--shown <shown>' in fallback
+    assert "--shown 0" in _section_16()
 
 
 def test_1_6p_headers_are_new_and_fit_a_card():

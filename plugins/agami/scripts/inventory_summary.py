@@ -35,14 +35,17 @@ Keep (writes the file, one `schema.table` per line, in inventory order):
 in it is trusted: any other key, another page or profile, or a name that is not a table of the
 inventory refuses the whole file (exit 1, nothing written).
 
-`pick:` reads the fallback list's answer, typed in Other after `--numbered`: numbers and ranges from
-that list (`1-12, 15`), patterns (`all crm_*`, `sales.*`), table or schema names, separated by commas,
-and an optional leading `everything except` (or `all except`, `all but`) that keeps the rest instead.
+`pick:` reads what was typed in Other: numbers and ranges from the `--numbered` list (`1-12, 15`; only
+up to `--shown`, the last number that list showed, so none at all on the main card), patterns
+(`all crm_*`, `sales.*`), table names, `all <schema>`, separated by commas, and an optional leading
+`everything except` (or `all except`, `all but`) that keeps the rest instead. A bare name that is
+both a schema and a table, or several tables differing only in case, comes back `ambiguous`.
 
 Numbered (the fallback list, when the page can't open):
 
     inventory_summary.py --inventory <inventory.json> --numbered
-    -> {"tables": n, "list": "<text: a line per schema, then one numbered line per table>"}
+    -> {"tables": n, "shown": k, "more": n - k,
+        "list": "<a line per schema, then one numbered line per table, the first 200 tables>"}
 
 Show (a list for the chat, when the person asks what is in a schema or a table):
 
@@ -229,7 +232,7 @@ def _read_names(path: str) -> list[str]:
     return [ln.strip().strip(",").strip("\"'`").strip() for ln in lines if ln.strip()]
 
 
-def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
+def choose(inventory: dict, choice: str, shown: int = 0) -> tuple[list[str], dict | None]:
     """→ (kept `schema.table` names in inventory order, problem dict or None)."""
     tables = inventory.get("tables") or []
     if choice == "all":
@@ -273,7 +276,7 @@ def choose(inventory: dict, choice: str) -> tuple[list[str], dict | None]:
         return _from_page(inventory, choice[len("page:") :])
     if choice.startswith("pick:"):
         text = Path(choice[len("pick:") :]).expanduser().read_text(encoding="utf-8")
-        return pick(inventory, text)
+        return pick(inventory, text, shown)
     return [], {
         "unmatched": [choice],
         "error": "choice must be all, drop_noise, schemas:<a,b>, names:<file>, page:<file> or pick:<file>",
@@ -325,46 +328,88 @@ def _glob(pattern: str) -> re.Pattern:
     )
 
 
-def _token(tok: str, tables: list[dict]) -> tuple[list[str], list[str] | None]:
-    """→ (the `schema.table` names one typed token means, the tables it could mean when ambiguous)."""
+def _in_list_order(tables: list[dict]) -> list[dict]:
+    """The tables in the numbered list's order: each schema's tables together, schemas in the order
+    they first appear, tables in inventory order within each. The page and the list share it, so a
+    number always means the table that line showed, however the catalog interleaved its schemas."""
+    first: dict[str, int] = {}
+    for t in tables:
+        first.setdefault(t.get("schema") or "", len(first))
+    return sorted(tables, key=lambda t: first[t.get("schema") or ""])
+
+
+def _one_or_ask(hits: list[str]) -> tuple[list[str], list[str] | None]:
+    return (hits, None) if len(hits) == 1 else ([], hits)
+
+
+def _table_named(tok: str, tables: list[dict]) -> tuple[list[str], list[str] | None]:
+    """A typed table name, `schema.table` before a bare name, and the exact spelling before one that
+    differs only in case. Several tables at the same step are asked about, never all kept."""
+    for key in (_qualified, lambda t: t["table"]):
+        for same in (lambda a: a == tok, lambda a: a.lower() == tok.lower()):
+            hits = [_qualified(t) for t in tables if same(key(t))]
+            if hits:
+                return _one_or_ask(hits)
+    return [], None
+
+
+def _schema_named(tok: str, tables: list[dict]) -> list[str]:
+    """The schemas a typed name means: the exact spelling, else any that differ only in case."""
+    schemas = list(dict.fromkeys(t.get("schema") or "" for t in tables if t.get("schema")))
+    return [x for x in schemas if x == tok] or [x for x in schemas if x.lower() == tok.lower()]
+
+
+def _token(
+    tok: str, tables: list[dict], shown: int
+) -> tuple[list[str], list[str] | None]:
+    """→ (the `schema.table` names one typed token means, what it could mean when that's unclear).
+    Numbers are read only up to `shown`, the last number the chat's list showed (0: none shown)."""
     qualified = [_qualified(t) for t in tables]
     if tok.lower() in _EVERYTHING:
         return qualified, None
+    order = [_qualified(t) for t in _in_list_order(tables)]
     if tok.isdigit():
         n = int(tok)
-        return ([qualified[n - 1]] if 1 <= n <= len(qualified) else []), None
+        return ([order[n - 1]] if 1 <= n <= min(shown, len(order)) else []), None
     m = _RANGE.match(tok)
     if m:
         a, b = int(m.group(1)), int(m.group(2))
-        return (qualified[a - 1 : b] if 1 <= a <= b <= len(qualified) else []), None
-    if tok.lower().startswith("all "):
+        return (order[a - 1 : b] if 1 <= a <= b <= min(shown, len(order)) else []), None
+    # "all <name>" asks for a schema; a bare name could be either, and is asked about when it is both
+    schema_wanted = tok.lower().startswith("all ")
+    if schema_wanted:
         tok = tok[4:].strip()
     if "*" in tok or "?" in tok:
         rx = _glob(tok)
         return [q for t, q in zip(tables, qualified) if rx.match(q) or rx.match(t["table"])], None
-    full = [q for q in qualified if q.lower() == tok.lower()]
-    bare = [q for t, q in zip(tables, qualified) if t["table"].lower() == tok.lower()]
-    if full or len(bare) == 1:
-        return full or bare, None
-    if bare:
-        return [], bare
-    return [q for t, q in zip(tables, qualified) if (t.get("schema") or "").lower() == tok.lower()], None
+    schemas = _schema_named(tok, tables)
+    in_schemas = [q for t, q in zip(tables, qualified) if (t.get("schema") or "") in schemas]
+    if schema_wanted and len(schemas) == 1:
+        return in_schemas, None
+    named, could_be = _table_named(tok, tables)
+    if could_be:
+        return [], could_be + [f"{x}.*" for x in schemas]
+    if schemas and (named or len(schemas) > 1):
+        return [], named + [f"{x}.*" for x in schemas]
+    return named or in_schemas, None
 
 
-def pick(inventory: dict, text: str) -> tuple[list[str], dict | None]:
-    """What was typed against the numbered list → (kept names in inventory order, problem or None).
-    Every token must mean at least one table; one that means nothing, or several same-named tables,
-    is reported and nothing is kept."""
+def pick(inventory: dict, text: str, shown: int = 0) -> tuple[list[str], dict | None]:
+    """What was typed in Other → (kept names in inventory order, problem or None). Every token must
+    mean at least one table; one that means nothing, or could mean several things, is reported and
+    nothing is kept. `shown` is the last number the numbered list showed: 0 on the main tables card,
+    which shows no numbers, so a bare number there names nothing."""
     tables = inventory.get("tables") or []
     m = _EXCEPT.match(text)
     body = text[m.end() :] if m else text
+    tokens = [t for t in (raw.strip().strip("\"'`").strip() for raw in re.split(r"[,;\n]+", body)) if t]
+    if m and not tokens:
+        # "everything except" with nothing after it would keep everything without anyone choosing that
+        return [], {"unmatched": [text.strip()], "ambiguous": {}}
     hits: set[str] = set()
     unmatched, ambiguous = [], {}
-    for raw in re.split(r"[,;\n]+", body):
-        tok = raw.strip().strip("\"'`").strip()
-        if not tok:
-            continue
-        got, could_be = _token(tok, tables)
+    for tok in tokens:
+        got, could_be = _token(tok, tables, shown)
         if could_be:
             ambiguous[tok] = could_be
         elif not got:
@@ -376,13 +421,17 @@ def pick(inventory: dict, text: str) -> tuple[list[str], dict | None]:
     return [q for q in qualified if (q in hits) != bool(m)], None
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n:,} {word}" + ("" if n == 1 else "s")
+
+
 def picker_rows(inventory: dict) -> list[dict]:
-    """Every table as the picker page and the numbered list show it, in inventory order: its name,
+    """Every table as the picker page and the numbered list show it, in list order: its number, name,
     column count, row estimate (None when the catalog keeps none) and, for a likely copy, why."""
     tables = inventory.get("tables") or []
     names = {_norm(_words(t["table"])) for t in tables}
     rows = []
-    for n, t in enumerate(tables, 1):
+    for n, t in enumerate(_in_list_order(tables), 1):
         why = noise_reason(t["table"], t.get("schema") or "", names)
         rows.append(
             {
@@ -399,24 +448,29 @@ def picker_rows(inventory: dict) -> list[dict]:
     return rows
 
 
-def numbered(inventory: dict) -> dict:
-    """The fallback list for the chat: a line per schema, then each of its tables with its number."""
-    lines, schema = [], None
+MAX_LISTED = 200
+
+
+def numbered(inventory: dict, limit: int = MAX_LISTED) -> dict:
+    """The fallback list for the chat: a line per schema, then each of its tables with its number, up
+    to `limit` tables. `shown` is the last number listed; `pick` reads no number past it."""
     rows = picker_rows(inventory)
     counts: dict[str, int] = {}
     for r in rows:
         counts[r["schema"]] = counts.get(r["schema"], 0) + 1
-    width = len(str(len(rows)))
-    for r in rows:
+    listed = rows[:limit]
+    width = len(str(len(listed)))
+    lines, schema = [], None
+    for r in listed:
         if r["schema"] != schema:
             schema = r["schema"]
-            lines.append(f"{schema or '(no schema)'}: {counts[schema]} tables")
-        size = f", about {r['rows']:,} rows" if r["rows"] is not None else ""
+            lines.append(f"{schema or '(no schema)'}: {_plural(counts[schema], 'table')}")
+        size = f", about {_plural(r['rows'], 'row')}" if r["rows"] is not None else ""
         flag = ""
         if r["why"]:
             flag = f"  [likely copy of {r['copy_of']}]" if r["copy_of"] else f"  [{r['why']}]"
-        lines.append(f"  {r['n']:>{width}}. {r['table']} ({r['columns']} columns{size}){flag}")
-    return {"tables": len(rows), "list": "\n".join(lines)}
+        lines.append(f"  {r['n']:>{width}}. {r['table']} ({_plural(r['columns'], 'column')}{size}){flag}")
+    return {"tables": len(rows), "shown": len(listed), "more": len(rows) - len(listed), "list": "\n".join(lines)}
 
 
 MAX_SHOW_ROWS = 15
@@ -530,6 +584,13 @@ def main(argv: list[str] | None = None) -> int:
         "--numbered", action="store_true", help="every table, numbered, for the fallback list"
     )
     ap.add_argument(
+        "--shown",
+        type=int,
+        default=0,
+        help="with --keep pick: the last number --numbered showed (its `shown`); numbers past it, "
+        "and every number when it is 0 (the main card, which shows none), match nothing",
+    )
+    ap.add_argument(
         "--used-by",
         action="append",
         default=[],
@@ -562,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.tables_out:
         print(json.dumps({"error": "--keep needs --tables-out"}))
         return 2
-    kept, problem = choose(inventory, args.keep)
+    kept, problem = choose(inventory, args.keep, args.shown)
     if problem:
         print(json.dumps(problem))
         return 1
