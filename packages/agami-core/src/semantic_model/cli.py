@@ -712,7 +712,7 @@ def cmd_progress(args) -> int:
     listed = steps.compact(steps.onboarding_steps(root))["list"]
     shown = _progress_line(current) if current else {"line": "", "done": False, "failed": False}
     before = steps.read_printed(root)
-    steps.remember_printed(root, before, list=listed, line=shown["line"])
+    steps.remember_printed(root, before, {"list": listed, "line": shown["line"]})
     # Nothing is remembered for a folder that doesn't exist yet, and its list is the fresh one every
     # time (`sm steps` prints it): reporting it as moved would ask for a refresh on every poll.
     list_changed = root.is_dir() and before.get("list") != listed
@@ -808,7 +808,7 @@ def cmd_steps(args) -> int:
     said = steps.steps_next(changed, result["problem"], before.get("problem"), closing,
                             _closing_summary(root) if closing else None)
     # The problem is remembered as said: it is said once, not on every call while it lasts.
-    steps.remember_printed(root, before, list=listed, problem=result["problem"])
+    steps.remember_printed(root, before, {"list": listed, "problem": result["problem"]})
     # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
     view = {**result, "list": listed} if args.full else steps.compact(result)
     _print_json({**view, "changed": changed, **said})

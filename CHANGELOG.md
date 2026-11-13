@@ -24,8 +24,11 @@ below corresponds to one such version.
   step its `say` is the whole `sm summary`. `sm progress` includes `list` only when it moved, with
   `list_changed`. `seed-validate --out` says the examples table (`| # | Example | Rows | Result |`,
   at most 15 rows, and how many ran or failed); `apply-enrichment` says one line of what it
-  applied. The summary's sign-off line and the step list's sign-off count now count what the
-  sign-off card counts (metrics, entities and joins awaiting review: "23 definitions are waiting for
+  applied. Model text in a `say` (a question, a result, a name, a loader error) is one line of at
+  most 80 characters, inside a table cell or in double quotes, so it can never add a line, a heading
+  or a table row; a problem is said once, and never hides the task-list refresh or the closing card.
+  The summary's sign-off line and the step list's sign-off count now count what the
+  sign-off card counts (`sm review-queue`'s metrics, entities and joins awaiting review: "23 definitions are waiting for
   sign-off: 11 metrics, 12 entities."), and a run that signs nothing still shows "0 of 23 signed".
   `enrich-input --chunks` cuts each area into the fewest balanced chunks of at most 12 tables again,
   and splits a model of more than 8 tables that came out as one chunk in two (the 11-table sample is

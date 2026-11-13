@@ -446,8 +446,9 @@ def read_printed(root: Path) -> dict[str, Any]:
     return doc if isinstance(doc, dict) else {}
 
 
-def remember_printed(root: Path, before: dict[str, Any], **printed: Any) -> None:
-    """Record what this call printed over `before` (what `read_printed` returned) in
+def remember_printed(root: Path, before: dict[str, Any], printed: dict[str, Any]) -> None:
+    """Record what this call printed (`printed`: any of `list`, `line`, `problem`) over `before`
+    (what `read_printed` returned) in
     `<root>/.introspect/steps.last`. Written atomically, so a reader never sees half a file, and
     only when the model folder exists and the file stays inside it: a fresh profile gets no folder
     made for it, and a link out of the folder is never written through."""
