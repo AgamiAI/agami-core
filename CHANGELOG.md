@@ -77,13 +77,17 @@ below corresponds to one such version.
   over as `say`: the model wrote its wrap-up into a thinking block and asked the card. Now
   `sm steps --mark first_question=in_progress` (when its `say` carries the summary) and
   `sm seed-validate --out` (without `--no-card`) record their `say` in
-  `<artifacts_dir>/local/tmp/agami-say-pending.json`, print its `say_id` beside `say`, and end
+  `<artifacts_dir>/local/tmp/say-pending.json` (a name the approve hook never waves through, so a
+  subagent can't plant text in it), print its `say_id` just before `say`, and end
   `then` with "The card is refused until this text has been posted." A second `PreToolUse` hook
   (`scripts/say_gate.py`, on `AskUserQuestion` only) refuses the card while a recorded text whose
   `say_id` this session's transcript shows has not been posted as visible text after it, handing
-  the text back in the refusal; it refuses at most twice per text, forgets texts older than 30
-  minutes, and on any doubt says nothing, so the card goes ahead. The transcript is written
-  asynchronously, so it first waits (up to 3 s) for the card's own line to reach it: without that, a
+  the text back in the refusal; it refuses at most twice per text (the same text printed again
+  keeps its count), forgets texts older than 30 minutes, drops an entry not shaped as the engine
+  writes it (needle not the text's first line, a control character, longer than 32,000
+  characters, an unknown kind), and on any doubt says nothing, so the card goes ahead. The transcript is written
+  asynchronously, so when text of this session is still unshown it first waits (up to 3 s) for the
+  card's own line to reach it: without that, a
   live session refused the retried card although the text had just been posted. When the scratch folder can't be
   written, the commands print what they printed before, with no `say_id` and no extra sentence.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.

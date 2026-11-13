@@ -4,12 +4,14 @@ for the person has not been shown.
 Live onboarding runs never posted the closing summary, and lately not the examples table, although
 the engine printed both as `say` with a `then` saying to post it before the card: the model wrote its
 wrap-up into a thinking block the person never sees, then asked the card. Instructions did not fix
-it. So the engine records those two `say`s in `<artifacts_dir>/local/tmp/agami-say-pending.json`
+it. So the engine records those two `say`s in `<artifacts_dir>/local/tmp/say-pending.json`
 (format owned by `semantic_model/say_pending.py`; the reader below is a copy, kept in step by
 tests/test_say_gate.py), and this hook, before a card, checks the session's transcript:
 
   1. Not AskUserQuestion, no pending file, or nothing in it: no opinion.
-  2. Entries older than MAX_AGE are dropped (the file is rewritten).
+  2. Entries older than MAX_AGE, and entries not shaped as the engine writes them (the needle not
+     the say's first line, a control character, longer than the engine registers, an unknown
+     kind: forged, since the file's text is posted verbatim), are dropped (the file is rewritten).
   3. An entry belongs to this session only if its id is in a tool result in the transcript's tail
      (the engine printed it as `say_id`). Others are left alone.
   4. One that belongs is satisfied once its needle (the first line of its `say`) is in visible
@@ -44,10 +46,12 @@ import stat
 import sys
 import tempfile
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-FILE_NAME = "agami-say-pending.json"
+# Not `agami-…`: approve_own_calls.py lets Write and Read of `agami-*` scratch files through.
+FILE_NAME = "say-pending.json"
 KINDS = ("summary", "examples")
 FIELDS = ("id", "kind", "needle", "say", "created_at", "refused")
 NEEDLE_CHARS = 120
@@ -63,7 +67,9 @@ MAX_SKEW = timedelta(minutes=5)
 # larger has been tampered with or is not ours: no opinion.
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_PENDING_BYTES = 256 * 1024
-MAX_SAY_CHARS = 64 * 1024
+# The longest `say` the engine registers (say_pending.MAX_SAY_CHARS, where the number is derived;
+# a test keeps the two equal). An entry longer than that was not written by the engine.
+MAX_SAY_CHARS = 32_000
 TAIL_LINES = 400
 TAIL_BYTES = 2 * 1024 * 1024
 # How long to wait for the transcript to catch up with the card, well inside the hook's 10 s timeout.
@@ -137,22 +143,56 @@ def _check_entry(entry: Any) -> None:
         raise Doubt("fields")
     if not isinstance(entry["id"], str) or not ID.fullmatch(entry["id"]):
         raise Doubt("id")
-    if entry["kind"] not in KINDS:
-        raise Doubt("kind")
-    needle, say = entry["needle"], entry["say"]
-    if not isinstance(needle, str) or not needle.strip() or len(needle) > NEEDLE_CHARS:
-        raise Doubt("needle")
-    if not isinstance(say, str) or not say.strip() or len(say) > MAX_SAY_CHARS:
-        raise Doubt("say")
+    if not isinstance(entry["needle"], str) or not isinstance(entry["say"], str):
+        raise Doubt("needle or say")
     refused = entry["refused"]
     if type(refused) is not int or refused < 0:
         raise Doubt("refused")
     _created(entry)
 
 
+def _first_line(say: str) -> str:
+    """The engine's needle for `say` (say_pending.needle_of): its first non-empty line, trimmed and
+    cut to NEEDLE_CHARS."""
+    return next((line.strip()[:NEEDLE_CHARS] for line in say.splitlines() if line.strip()), "")
+
+
+def well_formed(entry: dict) -> bool:
+    """Whether `entry` is shaped as the engine writes it. Its `say` is handed to the assistant to
+    post verbatim, so anything else is taken for forged and dropped: an unknown kind, a needle that
+    isn't the say's first line (text hidden below a harmless first line would be demanded anyway), a
+    control or format character (the engine's say_text drops them; only its own line breaks and a
+    tab remain), or a say longer than the engine ever registers."""
+    say = entry["say"]
+    if entry["kind"] not in KINDS or not say.strip() or len(say) > MAX_SAY_CHARS:
+        return False
+    if any(unicodedata.category(c) in ("Cc", "Cf") and c not in "\n\t" for c in say):
+        return False
+    needle = _squash(entry["needle"])
+    return bool(needle) and needle == _squash(_first_line(say))
+
+
+def _open_regular(path: str):
+    """`path` opened for reading only when it is a regular file, checked before opening (a FIFO
+    would block the open) and again on the open file, never through a symlink where the platform
+    can refuse one (O_NOFOLLOW)."""
+    if not stat.S_ISREG(os.lstat(path).st_mode):
+        raise Doubt("not a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) \
+        | getattr(os, "O_BINARY", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Doubt("not a regular file")
+        return os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def load(path: str) -> list:
-    with open(path, encoding="utf-8") as fh:
-        doc = json.loads(fh.read(MAX_PENDING_BYTES + 1))
+    with _open_regular(path) as fh:
+        doc = json.loads(fh.read(MAX_PENDING_BYTES + 1).decode("utf-8"))
     if not isinstance(doc, list):
         raise Doubt("not a list")
     for entry in doc:
@@ -183,9 +223,7 @@ def transcript_tail(path: Any) -> list:
     aren't JSON objects are skipped. Doubt when the path isn't an absolute path to a regular file."""
     if not isinstance(path, str) or not path or not os.path.isabs(path):
         raise Doubt("transcript path")
-    with open(path, "rb") as fh:
-        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
-            raise Doubt("transcript is not a file")
+    with _open_regular(path) as fh:
         size = fh.seek(0, os.SEEK_END)
         start = max(0, size - TAIL_BYTES)
         fh.seek(start)
@@ -239,20 +277,24 @@ def read_events(rows: list) -> tuple:
     return results, texts
 
 
-def card_rows(path: Any, tool_use_id: Any) -> list:
-    """The transcript tail once it holds the card's own tool_use line (so the text written before
-    the card is there too), polling for up to CARD_WAIT seconds. Doubt when it never does."""
+def _has_card(rows: list, tool_use_id: str) -> bool:
+    return any(b.get("type") == "tool_use" and b.get("id") == tool_use_id
+               for row in rows for b in _blocks(row, "assistant", "assistant"))
+
+
+def card_rows(path: Any, tool_use_id: Any, rows: list) -> list:
+    """`rows` (the tail already read) if it holds the card's own tool_use line, so that the text
+    written before the card is there too; else the tail read again until it does, for up to
+    CARD_WAIT seconds. Doubt when it never does."""
     if not isinstance(tool_use_id, str) or not tool_use_id:
         raise Doubt("no tool_use_id")
     deadline = time.monotonic() + CARD_WAIT
-    while True:
-        rows = transcript_tail(path)
-        if any(b.get("type") == "tool_use" and b.get("id") == tool_use_id
-               for row in rows for b in _blocks(row, "assistant", "assistant")):
-            return rows
+    while not _has_card(rows, tool_use_id):
         if time.monotonic() >= deadline:
             raise Doubt("the transcript has not caught up with the card")
         time.sleep(CARD_POLL)
+        rows = transcript_tail(path)
+    return rows
 
 
 def _squash(text: str) -> str:
@@ -275,6 +317,22 @@ def shown_after(needle: str, position: int, texts: list) -> bool:
 # --- the decision ---------------------------------------------------------------------------------
 
 
+def _sort(entries: list, rows: list) -> tuple:
+    """(entries to keep, the kept ones of this session not yet shown), given the transcript tail:
+    an entry shown after the output carrying its id is done with; one whose id isn't there is
+    another session's, kept and ignored."""
+    results, texts = read_events(rows)
+    kept, waiting = [], []
+    for entry in entries:
+        at = printed_at(entry["id"], results)
+        if at is not None and shown_after(entry["needle"], at, texts):
+            continue
+        kept.append(entry)
+        if at is not None:
+            waiting.append(entry)
+    return kept, waiting
+
+
 def decide(event: Any, now: Optional[datetime] = None) -> Optional[str]:
     """The deny reason for `event`, or None to say nothing. Updates the pending file as it goes."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PreToolUse" \
@@ -289,20 +347,17 @@ def decide(event: Any, now: Optional[datetime] = None) -> Optional[str]:
     now = now or datetime.now(timezone.utc)
     if any(_created(e) - now > MAX_SKEW for e in entries):
         raise Doubt("an entry from the future")
-    fresh = [e for e in entries if now - _created(e) <= MAX_AGE]
+    fresh = [e for e in entries if now - _created(e) <= MAX_AGE and well_formed(e)]
     if len(fresh) != len(entries):
         save(path, fresh)
         entries = fresh
-    results, texts = read_events(card_rows(event.get("transcript_path"), event.get("tool_use_id")))
-    waiting = []
-    kept = []
-    for entry in entries:
-        at = printed_at(entry["id"], results)
-        if at is not None and shown_after(entry["needle"], at, texts):
-            continue  # shown: done with
-        kept.append(entry)
-        if at is not None:
-            waiting.append(entry)
+    transcript = event.get("transcript_path")
+    rows = transcript_tail(transcript)
+    kept, waiting = _sort(entries, rows)
+    if waiting:
+        # Only now, with text of this session still unshown, is the lag worth waiting out (see the
+        # module docstring); another session's entry or a shown one costs no wait.
+        kept, waiting = _sort(entries, card_rows(transcript, event.get("tool_use_id"), rows))
     if not waiting:
         if len(kept) != len(entries):
             save(path, kept)
