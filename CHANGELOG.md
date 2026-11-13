@@ -14,6 +14,29 @@ below corresponds to one such version.
 
 ### Added
 
+- **The plugin approves its own commands and scratch files, so onboarding stops asking.** A live
+  run stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a
+  `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`) that answers "allow" for
+  exactly three shapes and says nothing about anything else, so the normal permission prompt still
+  applies to it. It never denies. It allows: a Bash command that is one call of this plugin's
+  `scripts/sm`, or of `scripts/py` running one of the plugin's own scripts by bare name, optionally
+  after `bash ` and `AGAMI_SQL_MAX_ROWS=<digits>` / `AGAMI_PROFILE=<name>`, with no shell syntax at
+  all (no `;`, `&`, `|`, `$`, backtick, redirect, newline, glob or grouping; an `--out` only into
+  the scratch folder); a Write or Read of `<artifacts_dir>/local/tmp/agami-*.json|txt|tsv|md`,
+  symlinks resolved; and a Read of a file under the plugin's folder. `py -c`, `py -m` and a script
+  path are not approved. It also runs for subagents, so an enricher's one result write no longer
+  prompts. The skills keep their `allowed-tools` for hosts without hooks.
+- **`sm steps` prints a short list to copy.** `{"list": ["✓ Connect your database", "▶ Read the
+  tables and joins — 33 of 34 tables", "· Describe columns and add metrics", …], "current": …,
+  "problem": …}`: one line per step that isn't skipped. `--full` prints the old dict. `sm progress
+  --wait N` carries the same `list`, so a build poll is one call.
+- **`sm summary <root>`: the onboarding's closing summary, ready to post.** Markdown built only
+  from the model: a totals line, the per-area table (Tables, Described, Metrics, Joins, Examples,
+  with a total row for more than one area), how many definitions wait for sign-off, and the
+  "Set up in …" line. `--json` wraps it with the totals.
+- **`--out <path>` on `bundle`, `model-tree`, `org-draft`, `claims` and `seed-validate`.** The
+  output goes to the file through a temp file and a rename (so `sm wait-files` never sees half of
+  it) and the command prints `{"out": …, "bytes": …}`; a skill no longer needs a `>` redirect.
 - **One rule for which native element a skill uses, with a fallback for each.**
   `shared/native-elements.md` is the table every skill follows: a question card for a decision,
   the session's task list for onboarding progress, a background task for a wait over 10 seconds, a
@@ -22,15 +45,17 @@ below corresponds to one such version.
   shows an overview, serves a page or runs work in the background links it, and the inline visual
   tool is named only there and in `shared/overview-card.md`.
 - **The onboarding summary says how long setup took.** `sm timing <root>` reads the step marks
-  `sm steps --mark` writes and prints each step's seconds, the total (the sum of the steps, so
-  time between them drops out) and a line such as *"Set up in 6 min 40 s"*. Only the current run
+  `sm steps --mark` writes and prints each step's seconds, the total (wall-clock from the run's
+  first mark to its last, so the time between steps counts: the person waited it too) and a line
+  such as *"Set up in 6 min 40 s"*. Only the current run
   counts: a reload starts a new one. A run with a break of more than 2 hours in it is `paused`
   and shows no line. agami-connect shows the line right under the overview.
 - **Onboarding runs its subagents in the background while the person answers cards.**
   agami-connect's SKILL.md gains a schedule, "What runs at the same time", and
   `shared/parallel-work.md` says how a batch starts, is collected with `sm wait-files` and is given
-  up on. Column descriptions go to one `agami-enricher` per chunk of up to 12 tables whenever the
-  model's chunks print `parallel: true` (it was 2+ areas and more than 30 tables), started right after the
+  up on. Column descriptions go to one `agami-enricher` per chunk of up to 8 tables whenever the
+  model's chunks print `parallel: true`: 2 or more chunks and more than 8 tables, so the 11-table
+  sample goes to two enrichers (it was 2+ areas and more than 30 tables), started right after the
   build so they run during the join cards. A new `agami-example-writer` agent drafts example
   questions for one subject area while the person signs off definitions; the main chat drops or
   rewrites what sign-off changed, adds the cross-area examples, and `seed-examples` checks every
