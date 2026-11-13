@@ -288,6 +288,14 @@ def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
     return f"The {noun} stopped before it finished."
 
 
+def _written_since(model: Path, attempt_at: float) -> bool:
+    """Whether datasource.yaml was written during this attempt (same second-stamp rule as _log_state)."""
+    try:
+        return int(model.stat().st_mtime) >= attempt_at
+    except OSError:
+        return False
+
+
 def _build_count(log: Path) -> Optional[str]:
     parsed = parse_progress(last_progress_line(log))
     if parsed and parsed[2] == "tables":
@@ -359,8 +367,14 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     attempt_at = replay.build_started_at if marks.get("build") == "in_progress" else None
     now_at = (now or datetime.now(timezone.utc)).timestamp()
     state, reason = _log_state(log, model, now_at, attempt_at)
+    # A resume after this attempt's build wrote its model (no log running, the model loads): the
+    # skill goes on to the join cards instead of building again, which it could only have told by
+    # comparing file times itself. Checked before the staleness rule: a build that finished long ago
+    # did not die.
+    landed = (state == "none" and attempt_at is not None and totals is not None
+              and _written_since(model, attempt_at))
     if state == "none" and attempt_at is not None and now_at - attempt_at > STALE_BUILD_SECONDS \
-            and not _own_log(log, attempt_at):
+            and not _own_log(log, attempt_at) and not landed:
         # A mark left by a session that ended before the build wrote a line: nothing is building.
         state = "stopped"
     problem: Optional[str] = None
@@ -394,6 +408,8 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
         counts["build"] = _build_count(log)
     elif status["build"] == "done" and totals is not None:
         counts = _later_counts(totals)
+    elif landed and status["build"] == "in_progress":
+        counts["build"] = _later_counts(totals)["build"]
 
     result = []
     for i in STEP_IDS:
@@ -404,7 +420,7 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     current = next((i for i in STEP_IDS if status[i] == "in_progress"),
                    next((i for i in STEP_IDS if status[i] == "pending"), None))
     return {"steps": result, "current": current, "timeline": str(_timeline(root)),
-            "problem": problem}
+            "problem": problem, "model_written": landed and status["build"] == "in_progress"}
 
 
 # The mark in front of each line of the compact list. A `skipped` step has none: it isn't listed.
@@ -443,6 +459,7 @@ THEN_ENDED = "The build has ended: run `sm steps` and go on."
 THEN_NOT_BUILT = ("The model is not built yet, so there is no summary: do not ask the closing "
                   "card.")
 THEN_AND_UPDATE = " Update the task list from `list`."
+THEN_MODEL_WRITTEN = "The model is already written: go to the join cards without building again."
 
 
 def _last_path(root: Path) -> Path:
@@ -494,7 +511,8 @@ def remember_printed(root: Path, before: dict[str, Any], printed: dict[str, Any]
 
 
 def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str],
-               closing: bool, summary: Optional[str], built: bool = True) -> dict[str, Any]:
+               closing: bool, summary: Optional[str], built: bool = True,
+               model_written: bool = False) -> dict[str, Any]:
     """`say` and `then` for `sm steps`.
 
     A problem is said once: the same problem already said (`said_before`) is left out of `say`, but
@@ -502,7 +520,8 @@ def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str]
     asks for both; on the closing mark the summary follows it in the same `say`. When the closing
     summary can't be built, the person hears the problem and no closing card is asked; when that is
     because the model isn't built (none on disk, or a build running), `then` says so, since nothing
-    else would tell why the summary is missing."""
+    else would tell why the summary is missing. `model_written` (a plain call on a resume whose build
+    already wrote this run's model) sends the skill on to the join cards."""
     fresh = problem if problem and problem != said_before else None
     if closing and summary is not None:
         return {"say": f"{fresh}\n\n{summary}" if fresh else summary, "then": THEN_CLOSING}
@@ -512,6 +531,8 @@ def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str]
         return {"then": THEN_NOT_BUILT + (THEN_AND_UPDATE if changed else "")}
     if fresh:
         return {"say": fresh, "then": THEN_PROBLEM_AND_UPDATE if changed else THEN_PROBLEM}
+    if model_written:
+        return {"then": THEN_MODEL_WRITTEN + (THEN_AND_UPDATE if changed else "")}
     return {"then": THEN_UPDATE if changed else THEN_UP_TO_DATE}
 
 

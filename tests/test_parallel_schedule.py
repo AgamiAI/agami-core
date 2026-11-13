@@ -117,7 +117,7 @@ def test_with_a_model_spec_the_enrichers_wait_for_phase_2():
     build = _read(REFS / "build.md")
     start = build[build.index("**Start the enrichers now"):build.index("**Join candidates")]
     assert "unless a model spec was attached" in start
-    assert "With `parallel: false` (one chunk, or a small model), or with no Agent tool, nothing starts" \
+    assert "With `parallel: false` (a model of 12 tables or fewer), or with no Agent tool, nothing starts" \
         in start
     enrich = _read(REFS / "enrich.md")
     assert "**When 1.7 started the enrichers**" in enrich
@@ -197,11 +197,13 @@ def test_describe_shows_no_chunk_count_of_its_own():
 
 
 def test_a_resumed_build_with_a_model_goes_to_the_join_cards():
+    # The engine tells it (`sm steps`' then, tests/test_steps_resume.py): no file times compared here.
     build = _flat(_read(REFS / "build.md"))
-    assert "a model was written since this build was started" in build
-    assert "go to the join cards below without marking; do not build again" in build
+    assert "On entering 1.7, run:" in build
+    assert "If it does not say the model is already written, mark the step started" in build
+    assert "newer than the build's start mark" not in build and "older model on disk" not in build
     raw = _read(REFS / "build.md")
-    assert raw.index("**On a resume**") < raw.index('scripts/sm" introspect')  # top of 1.7
+    assert raw.index("On entering 1.7") < raw.index('scripts/sm" introspect')  # top of 1.7
 
 
 def test_the_example_phase_says_what_is_true_and_never_waits_silently():

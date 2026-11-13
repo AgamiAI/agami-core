@@ -33,6 +33,10 @@ below corresponds to one such version.
   quoted, and a file the model can't open is named by its file name, never its path. The closing
   mark with no model built yet (none on disk, or a build running) says why there is no summary.
   `seed-validate --out --no-card` says the table with a `then` that asks no examples card.
+  On a resume whose build already wrote this run's model (the build step in progress by its mark,
+  no build log running, `datasource.yaml` written at or after that mark), plain `sm steps` says
+  "The model is already written: go to the join cards without building again." and counts the
+  model's tables and joins, so the skill no longer compares file times itself.
   The summary's sign-off line and the step list's sign-off count now count what the
   sign-off card counts (`sm review-queue`'s metrics, entities and joins awaiting review: "23 definitions are waiting for
   sign-off: 11 metrics, 12 entities."), and a run that signs nothing still shows "0 of 23 signed".

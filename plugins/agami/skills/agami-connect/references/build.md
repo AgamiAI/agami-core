@@ -4,11 +4,11 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
-**On a resume** of `/agami-connect`, check before marking anything. On entering 1.7, run:
+On entering 1.7, run:
 ```bash
 bash "<plugin_root>/scripts/sm" steps "<root>"
 ```
-When the build step is in progress and a model was written since this build was started (`datasource.yaml` is newer than the build's start mark), go to the join cards below without marking; do not build again. Otherwise (an older model on disk, a reload, included), mark the step started, do what its `then` says ([task-list.md](../../../shared/task-list.md)), and build as below:
+and do what its `then` says. If it does not say the model is already written, mark the step started, do what that call's `then` says ([task-list.md](../../../shared/task-list.md)), and build as below:
 ```bash
 bash "<plugin_root>/scripts/sm" steps "<root>" --mark build=in_progress
 ```

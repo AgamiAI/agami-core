@@ -811,7 +811,8 @@ def cmd_steps(args) -> int:
     # model's summary would not be this run's.
     built = next(s["status"] for s in result["steps"] if s["id"] == "build") == "done"
     said = steps.steps_next(changed, result["problem"], before.get("problem"), closing,
-                            _closing_summary(root) if closing and built else None, built)
+                            _closing_summary(root) if closing and built else None, built,
+                            model_written=result["model_written"] and not marks)
     if said.get("then") == steps.THEN_CLOSING:
         said = gate_say(said, "summary")
     # The problem is remembered as said: it is said once, not on every call while it lasts.

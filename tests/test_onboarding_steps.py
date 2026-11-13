@@ -859,6 +859,9 @@ def _stale_mark_older_log(tmp_path):  # a rebuild's mark; the only log is the la
     root = _sample(tmp_path)
     log = _rebuild_log(root, "failed: boom", newer=False)
     os.utime(log, (1_000_000, 1_000_000))
+    # the model is the earlier run's, older than the mark (a model written after it is this
+    # attempt's, which tests/test_steps_resume.py covers)
+    os.utime(root / "datasource.yaml", (2_000_000, 2_000_000))
     return root, _stale_mark(root)
 
 

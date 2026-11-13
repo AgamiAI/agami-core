@@ -233,9 +233,9 @@ def test_the_examples_in_the_skill_match_the_engines_output():
 def test_the_resume_check_comes_before_the_build_mark():
     raw = _read(REFS / "build.md")
     check = raw.index('scripts/sm" steps "<root>"\n```')
-    assert raw.index("**On a resume**") < check < raw.index('steps "<root>" --mark build=in_progress')
+    assert raw.index("On entering 1.7") < check < raw.index('steps "<root>" --mark build=in_progress')
     flat = _flat(raw)
-    assert "go to the join cards below without marking; do not build again" in flat
+    assert "If it does not say the model is already written, mark the step started" in flat
 
 
 def test_the_closing_card_re_asked_after_the_full_view_has_no_second_summary():
