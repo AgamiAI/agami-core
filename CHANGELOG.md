@@ -96,6 +96,17 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **The receipt no longer calls a metric written another way "not the agreed definition" (#655).**
+  `SUM(CASE WHEN p THEN x END)` beside a binding `SUM(x) FILTER (WHERE p)` was reported
+  `unmatched`. Spellings that give the same number on every input now match: FILTER and
+  `CASE WHEN … END` for SUM, AVG and COUNT (not MIN, MAX or DISTINCT, which compare text by
+  collation); `COUNT(*)`, `COUNT(1)` and `COUNT(CASE WHEN p THEN 1 END)`; an `ELSE 0` under
+  `COALESCE(…, 0)`; under a plain `GROUP BY`, `SUM(CASE WHEN p THEN 1 ELSE 0 END)` as a count and
+  `NULLIF(COUNT(*), 0)` as `COUNT(*)`; and the order of `AND` terms and `*` operands. Each was run
+  both ways on SQLite, DuckDB and Postgres. When a declared metric reads the same columns with the
+  same kind of aggregate but is still written differently, the column's status is the new
+  `computed_differently` ("not compared") instead of `unmatched`.
+
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those

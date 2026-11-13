@@ -1045,6 +1045,12 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
             # the output aggregates; an older receipt without the key is read through the
             # pre-flight, which lists the statement's aggregates.
             continue
+        elif status == "computed_differently":
+            # A declared metric reads the same columns and is written differently (#655). Neither a
+            # match nor a gap: the two were not compared, so it is not judged either way.
+            rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "status": status},
+                              note="computed differently from a declared metric that reads the same columns; "
+                                   "the two were not compared"))
         elif only_bare_counts:
             rows.append(_part(f"metric:{column}", CONFIRMED,
                               note="a bare count matches no metric by design"))
