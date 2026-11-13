@@ -669,10 +669,13 @@ def cmd_progress(args) -> int:
             and time.monotonic() < deadline:
         time.sleep(0.5)
         current = last()
+    # With --wait (the build loop), the compact step list too, so each poll is one call, not two.
+    listed = {"list": steps.compact(steps.onboarding_steps(Path(args.root)))["list"]} \
+        if args.wait else {}
     if not current:
-        _print_json({"line": "", "done": False, "failed": False, "started": False})
+        _print_json({"line": "", "done": False, "failed": False, "started": False, **listed})
         return 0
-    _print_json({**_progress_line(current), "started": True, "changed": current != start})
+    _print_json({**_progress_line(current), "started": True, "changed": current != start, **listed})
     return 0
 
 
@@ -727,7 +730,8 @@ def cmd_wait_files(args) -> int:
 
 
 def cmd_steps(args) -> int:
-    """The onboarding step list with status and counts read from disk, after applying any --mark.
+    """The onboarding step list read from disk, after applying any --mark: by default the compact
+    list the skill copies as is, `--full` the whole dict (ids, labels, counts, timeline path).
     Every mark is checked before any is written, so a bad one leaves the timeline as it was."""
     from . import steps
     if not str(args.root).strip():
@@ -742,7 +746,8 @@ def cmd_steps(args) -> int:
         return 2
     for step_id, status in marks:
         steps.mark(Path(args.root), step_id, status)
-    _print_json(steps.onboarding_steps(Path(args.root)))
+    result = steps.onboarding_steps(Path(args.root))
+    _print_json(result if args.full else steps.compact(result))
     return 0
 
 
@@ -2508,11 +2513,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("progress", help="the build's latest progress line, ready to post, with a bar from its own counts; --wait N returns when the log moves on")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
     sp.add_argument("--wait", type=float, default=0.0,
-                    help="wait up to this many seconds for the next line (default 0: answer now)")
+                    help="wait up to this many seconds for the next line (default 0: answer now); "
+                         "adds `list`, the step list `sm steps` prints")
     sp.set_defaults(func=cmd_progress)
 
-    sp = sub.add_parser("steps", help="the onboarding step list, status and counts read from disk; --mark <id>=<status> records a step first")
+    sp = sub.add_parser("steps", help="the onboarding step list, status and counts read from disk, as a short list to copy; --mark <id>=<status> records a step first")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile> (need not exist yet)")
+    sp.add_argument("--full", action="store_true",
+                    help="print every step's id, label, status and count and the timeline path, not the short list")
     sp.add_argument("--mark", action="append", default=[], metavar="ID=STATUS",
                     help="mark a step in_progress, done or skipped (repeatable, applied in order)")
     sp.set_defaults(func=cmd_steps)

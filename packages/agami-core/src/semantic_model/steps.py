@@ -372,3 +372,17 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
                    next((i for i in STEP_IDS if status[i] == "pending"), None))
     return {"steps": result, "current": current, "timeline": str(_timeline(root)),
             "problem": problem}
+
+
+# The mark in front of each line of the compact list. A `skipped` step has none: it isn't listed.
+LIST_MARKS = {"done": "✓ ", "in_progress": "▶ ", "pending": "· "}
+
+
+def compact(result: dict[str, Any]) -> dict[str, Any]:
+    """`onboarding_steps`' result as the list the skill copies into its task list, one string per
+    step that isn't skipped, in order (`✓ ` done, `▶ ` in progress, `· ` pending, then the step's
+    text), with `current` and `problem` unchanged. Short on purpose: a live run's full output was
+    long enough that the skill filtered it with grep and sed, and never had the whole list to copy."""
+    return {"list": [LIST_MARKS[s["status"]] + s["text"] for s in result["steps"]
+                     if s["status"] in LIST_MARKS],
+            "current": result["current"], "problem": result["problem"]}

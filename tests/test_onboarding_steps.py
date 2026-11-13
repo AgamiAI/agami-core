@@ -241,7 +241,7 @@ def test_a_build_silent_for_30_minutes_is_not_running(model, tmp_path):
 def test_a_bad_byte_in_the_build_log_does_not_crash(tmp_path, capsys):
     root = _building(tmp_path)
     (root / ".introspect" / "progress.log").write_bytes(b"\xff\xfe\ncolumns+grain 2/9\n")
-    assert cli.main(["steps", str(root)]) == 0
+    assert cli.main(["steps", str(root), "--full"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert _by_id(out)["build"]["count"] == "2 of 9 tables"
 
@@ -394,14 +394,47 @@ def test_bad_mark_exits_2_and_writes_nothing(model, capsys):
     assert not (model / ".introspect" / "timeline.jsonl").exists()
 
 
-def test_cli_prints_the_same_dict(model, capsys):
-    assert cli.main(["steps", str(model)]) == 0
+def test_cli_full_prints_the_same_dict(model, capsys):
+    assert cli.main(["steps", str(model), "--full"]) == 0
     assert json.loads(capsys.readouterr().out) == steps.onboarding_steps(model)
-    assert cli.main(["steps", str(model), "--mark", "describe=in_progress",
+    assert cli.main(["steps", str(model), "--full", "--mark", "describe=in_progress",
                      "--mark", "describe=done"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out == steps.onboarding_steps(model)
     assert _by_id(out)["describe"]["status"] == "done"
+
+
+def test_cli_prints_a_compact_list_by_default(model, capsys):
+    steps.mark(model, "connect", "done")
+    steps.mark(model, "reports", "skipped")
+    steps.mark(model, "describe", "in_progress")
+    assert cli.main(["steps", str(model)]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert set(out) == {"list", "current", "problem"}
+    full = steps.onboarding_steps(model)
+    shown = [s for s in full["steps"] if s["status"] != "skipped"]
+    assert out["list"] == [{"done": "✓ ", "in_progress": "▶ ", "pending": "· "}[s["status"]] + s["text"]
+                           for s in shown]
+    assert len(out["list"]) == 8  # reports skipped: not listed
+    assert out["list"][0] == "✓ Connect your database"
+    assert out["list"][3].startswith("✓ Read the tables and joins — ")
+    assert out["list"][4].startswith("▶ Describe columns and add metrics")
+    assert out["list"][-1] == "· Summary and first question"
+    assert (out["current"], out["problem"]) == ("describe", None)
+
+
+def test_compact_list_of_a_fresh_folder(tmp_path, capsys):
+    assert cli.main(["steps", str(tmp_path / "acme")]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out == {"list": ["· " + label for label in LABELS], "current": "connect",
+                   "problem": None}
+
+
+def test_compact_keeps_the_problem(tmp_path):
+    full = {"steps": [{"id": "build", "status": "pending", "text": "Read the tables and joins"}],
+            "current": "build", "problem": "The build stopped before it finished."}
+    assert steps.compact(full) == {"list": ["· Read the tables and joins"], "current": "build",
+                                   "problem": "The build stopped before it finished."}
 
 
 def test_unreadable_timeline_lines_are_ignored(model):
