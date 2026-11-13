@@ -14,18 +14,28 @@ below corresponds to one such version.
 
 ### Added
 
-- **The plugin approves its own commands and scratch files, so onboarding stops asking.** A live
-  run stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a
-  `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`) that answers "allow" for
-  exactly three shapes and says nothing about anything else, so the normal permission prompt still
-  applies to it. It never denies. It allows: a Bash command that is one call of this plugin's
-  `scripts/sm`, or of `scripts/py` running one of the plugin's own scripts by bare name, optionally
-  after `bash ` and `AGAMI_SQL_MAX_ROWS=<digits>` / `AGAMI_PROFILE=<name>`, with no shell syntax at
-  all (no `;`, `&`, `|`, `$`, backtick, redirect, newline, glob or grouping; an `--out` only into
-  the scratch folder); a Write or Read of `<artifacts_dir>/local/tmp/agami-*.json|txt|tsv|md`,
-  symlinks resolved; and a Read of a file under the plugin's folder. `py -c`, `py -m` and a script
-  path are not approved. It also runs for subagents, so an enricher's one result write no longer
-  prompts. The skills keep their `allowed-tools` for hosts without hooks.
+- **The plugin approves a few harmless agami calls itself, so onboarding asks less.** A live run
+  stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a
+  `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`, started with `python3` from
+  PATH) that answers "allow" only for calls that are harmless even if a document is steering the
+  model, and says nothing about anything else, so the normal permission prompt applies. It never
+  denies. It approves exactly:
+  - one call of this plugin's `scripts/sm` (an optional `bash ` before it, nothing else, no shell
+    syntax at all) running `steps [--mark <id>=<status>]… [--full]`, `progress [--wait 0-600]`,
+    `timing`, `summary [--json]`, `overview`, `areas`, `coverage`, `review-queue`,
+    `review-items [--scope all|rule1|rule2|preseed]`, `model-tree [--out <scratch>]` or
+    `bundle --area <name> [--out <scratch>]` on a model folder directly under the artifacts folder,
+    or `batch-id`, or `wait-files --file <scratch>… [--wait 0-600]`. Options must be written in
+    full and only once (`--mark` and `--file` may repeat); the Bash call may carry no
+    `run_in_background` or `timeout`;
+  - a Write or Read of `<artifacts_dir>/local/tmp/agami-*.json|txt|tsv|md` (case-sensitive,
+    symlinks resolved, not a hard link);
+  - a Read of a file under the plugin's folder.
+  Nothing that connects to a database, uses credentials, installs, reads a file the call names,
+  or changes the model or its sign-off is approved, and no `scripts/py` call is. It also runs for
+  subagents, so an enricher's result write no longer prompts. The skills keep their
+  `allowed-tools`, which cover every `sm` call in the turn a skill starts.
+- **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **`sm steps` prints a short list to copy.** `{"list": ["✓ Connect your database", "▶ Read the
   tables and joins — 33 of 34 tables", "· Describe columns and add metrics", …], "current": …,
   "problem": …}`: one line per step that isn't skipped. `--full` prints the old dict. `sm progress
