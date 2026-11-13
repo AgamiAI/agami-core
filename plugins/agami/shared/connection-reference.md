@@ -1,6 +1,6 @@
 # Database Connection Reference
 
-> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
+> `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md). Every value in the commands below is written out in full: a `<placeholder>` is filled in, never a shell variable.
 
 How `agami` connects to your database. Used by the `connect`, `query-database`, and `agami-save-correction` skills.
 
@@ -13,8 +13,9 @@ These are non-negotiable. Skills that read this document must follow them under 
 3. **Never scan or guess.** Tool detection is `which <tool>` and `bash "<plugin_root>/scripts/py" -c 'import <module>'`. Nothing else. No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, port scanning, or hostname guessing. Tool paths are cached in `<artifacts_dir>/local/.config.tool_paths` so subsequent skill invocations don't even re-probe — they read the cached path and use it.
 4. **If the cached tool path is broken** (binary moved or uninstalled), surface the failure cleanly and offer to re-detect. Do not silently fall through to localhost-probing or any other discovery technique.
 5. **NEVER put the password (or any credential field) in a Bash command line.** Hosts render Bash tool calls in their UI — anything in the command, env-var assignment, or stdin is visible to anyone scrolling the chat. Use the provider-native auth files written by `scripts/setup_pgauth.py`:
-   - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
-   - For mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
+   - For postgres: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
+   - For mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw`
+   The SQL goes in that file, written with the Write tool, never on the command line: a string literal (`WHERE status = 'paid'`) would end the shell's quoting.
    These auth files are chmod 600 in `<artifacts_dir>/local/`. The visible Bash command contains NO password — psql / mysql read the password from the auth file silently. **Patterns that are FORBIDDEN**: `export PGPASSWORD='<literal>'`, `export MYSQL_PWD='<literal>'`, `psql -W <password>`, `mysql -p<password>`, or anything else where the password appears in the command, env assignment, or stdin.
 
 ## Contents
@@ -42,12 +43,12 @@ Reference this table whenever a skill needs to verify a connection works. Don't 
 | `cli` snowflake | `snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "<profile>" -q 'SELECT 1' -o output_format=csv -o friendly=false` |
 | `python` bigquery | `AGAMI_PROFILE="<profile>" bash "<plugin_root>/scripts/py" -m execute_sql --sql 'SELECT 1'` (BigQuery is Python-only — there's no native CLI tier today) |
 | `cli` sqlite | `sqlite3 -header -csv "<path>" 'SELECT 1'` — **always pass `-header`** so result CSVs carry column names (without it `format-table` treats row 1 as the header). |
-| `duckdb` | `duckdb -init "$init_file" -c 'SELECT 1' --csv` |
+| `duckdb` | `duckdb -init "<init_file>" -c 'SELECT 1' --csv` (`<init_file>` is the path `build_duckdb_attach.py` prints) |
 | `python` | `AGAMI_PROFILE="<profile>" bash "<plugin_root>/scripts/py" -m execute_sql --sql 'SELECT 1'` |
 
-**`python -m execute_sql` CLI surface** — exhaustive, read before invoking:
+**`python -m execute_sql` CLI surface** — exhaustive, read before invoking (a usage line, not a command to run):
 
-```
+```text
 bash "<plugin_root>/scripts/py" -m execute_sql [-h] [--profile PROFILE] (--sql SQL | --sql-file SQL_FILE | --batch PLAN) [--manifest PATH] [--area AREA] [--build-profile]
 ```
 
@@ -96,14 +97,14 @@ tool_paths := {
   snowsql: which("snowsql"),
   sqlite3: which("sqlite3"),
   duckdb:  which("duckdb"),
-  python3: $PY,    # AGAMI_PYTHON → existing .config → which("python3"); the DB driver is
+  python3: <python3>,    # AGAMI_PYTHON → existing .config → which("python3"); the DB driver is
                    # installed into THIS interpreter (0a.5) and execute_sql.py runs under it
 }
-# Probe driver imports in $PY (not bare python3 — they can differ):
+# Probe driver imports in <python3> (not bare python3 — they can differ):
 tool_imports := {
-  psycopg2:                    py_import_ok($PY, "psycopg2"),
-  pymysql:                     py_import_ok($PY, "pymysql"),
-  snowflake_connector_python:  py_import_ok($PY, "snowflake.connector"),
+  psycopg2:                    py_import_ok(<python3>, "psycopg2"),
+  pymysql:                     py_import_ok(<python3>, "pymysql"),
+  snowflake_connector_python:  py_import_ok(<python3>, "snowflake.connector"),
 }
 
 # Pick the first available method for db_type.
@@ -200,16 +201,12 @@ CSV output: append `-csv` or wrap in `COPY (<query>) TO '/dev/stdout' (FORMAT CS
 
 Used when neither the native CLI nor DuckDB is available, but Python with the right driver is. The agami skill ships a runtime helper for this.
 
-**Always invoke it with `$PY` — the interpreter recorded in `<artifacts_dir>/local/.config` — never bare `python3`.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; **read it from there — the user never sets an environment variable**:
-
-```bash
-PY="$(bash "<plugin_root>/scripts/py" -c 'import sys; print(sys.executable)' | tr -d '\r')"   # Windows Python ends lines \r\n
-```
+**Always invoke it through agami's `py` launcher, which runs the interpreter recorded in `<artifacts_dir>/local/.config` — never bare `python3`, and never by capturing the interpreter's path into a variable.** Bare `python3` on `PATH` often differs from the one with the driver, which is the #1 cause of "driver not found" at query time. agami-connect already discovered the right interpreter (the one with the DB driver + model deps) and wrote it to `.config`; the user never sets an environment variable.
 
 (`py` resolves it the way the `sm` wrapper does — `$AGAMI_PYTHON`, then `.config`'s `tool_paths.python3`, then `python3`/`python` on PATH, never the Windows Store stub — with no Python needed to find it. Same interpreter the introspection engine uses. Keeping them identical means the driver is present wherever a DB connection is opened.)
 
 ```bash
-bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.txt"
 ```
 
 `execute_sql.py` reads `<artifacts_dir>/local/credentials` itself, opens a connection via `psycopg2` / `pymysql` / `sqlite3` based on the profile's `type` field, runs the SQL, emits RFC 4180 CSV on stdout. Exit codes communicate the failure category (config, driver missing, connect error, execution error). See [`plugins/agami/scripts/README.md`](../scripts/README.md) for full usage.
@@ -245,17 +242,15 @@ Supported end-to-end: Postgres + Redshift + MySQL + Snowflake + SQLite + **BigQu
 # Ensure the auth file exists for the active profile (idempotent, fast).
 # Generates <artifacts_dir>/local/.pgpass from credentials. Bash command line contains
 # NO password.
-bash "<plugin_root>/scripts/py" setup_pgauth.py --profile "$PROFILE"
+bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 
-# Execute a query and return CSV. PGPASSFILE points at the auth file;
+# Execute a query and return CSV. Write the statement with the Write tool to
+# <artifacts_dir>/local/tmp/agami-query.txt first. PGPASSFILE points at the auth file;
 # psql reads the password silently. The bash command itself is password-free.
-PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
-  psql -h "$host" -p "$port" -U "$user" -d "$database" -c "$SQL" --csv
-
-# Execute from a file
-PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="${sslmode:-prefer}" \
-  psql -h "$host" -p "$port" -U "$user" -d "$database" -f query.sql --csv
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE=<sslmode> psql -h "<host>" -p <port> -U "<user>" -d "<database>" -f "<artifacts_dir>/local/tmp/agami-query.txt" --csv
 ```
+
+`<sslmode>` is the profile's `sslmode`, or `prefer` when it has none.
 
 **Security / SSL**:
 - **Never** pass the password on the command line, in `export PGPASSWORD='...'`, or via `-W <password>`. Always use `PGPASSFILE` pointing at `<artifacts_dir>/local/.pgpass` (chmod 600, generated by `scripts/setup_pgauth.py`). The visible Bash command must be password-free.
@@ -275,8 +270,7 @@ Redshift speaks the PostgreSQL wire protocol, so **psql works as-is**. The only 
 
 ```bash
 # Same invocation as postgres, just with the Redshift host/port and sslmode=require.
-PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE="require" \
-  psql -h "$host" -p 5439 -U "$user" -d "$database" -c "$SQL" --csv
+PGPASSFILE="<artifacts_dir>/local/.pgpass" PGSSLMODE=require psql -h "<host>" -p 5439 -U "<user>" -d "<database>" -f "<artifacts_dir>/local/tmp/agami-query.txt" --csv
 ```
 
 `type = redshift` in the credentials profile (or a `redshift://` DSN) sets the right defaults. For the Python driver path the connection params are identical to postgres; agami's `execute_sql.py` routes `type=redshift` through the postgres execution path.
@@ -291,11 +285,10 @@ Snowflake doesn't speak the Postgres wire protocol. It needs its own native CLI 
 
 ```bash
 # Ensure the snowsql config exists (idempotent).
-bash "<plugin_root>/scripts/py" setup_pgauth.py --profile "$PROFILE"
+bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 
 # Run a query — snowsql reads the password from the config silently.
-snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c "$PROFILE" \
-        -q "$SQL" -o output_format=csv -o header=true -o friendly=false -o timing=false
+snowsql --config "<artifacts_dir>/local/.snowsql.cnf" -c <profile> -f "<artifacts_dir>/local/tmp/agami-query.txt" -o output_format=csv -o header=true -o friendly=false -o timing=false
 ```
 
 The `-o output_format=csv -o header=true` flags produce parseable output. `-o friendly=false -o timing=false` strips the human-friendly banner and timing line so the CSV is clean.
@@ -306,7 +299,7 @@ Install snowsql: see <https://docs.snowflake.com/en/user-guide/snowsql-install-c
 
 ```bash
 pip install snowflake-connector-python
-bash "<plugin_root>/scripts/py" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.txt"
 ```
 
 `execute_sql.py` handles Snowflake natively when `type=snowflake`. Connection params: `account`, `user`, `password` (or `authenticator` for SSO), `warehouse`, `database`, `schema`, `role`. All optional except `account` and `user`; either `password` or `authenticator` is required.
@@ -333,7 +326,7 @@ pip install google-cloud-bigquery
 
 # Run a query — execute_sql.py loads the service-account JSON itself and
 # never puts credentials on the Bash command line.
-bash "<plugin_root>/scripts/py" -m execute_sql --profile "$PROFILE" --sql-file "<artifacts_dir>/local/tmp/agami-q.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --profile <profile> --sql-file "<artifacts_dir>/local/tmp/agami-query.txt"
 ```
 
 `execute_sql.py` handles BigQuery natively when `type=bigquery`. Connection params (read from the credentials profile):
@@ -371,28 +364,25 @@ These are sufficient for SELECT-only workloads, which is all agami issues.
 # Ensure the auth file exists for the active profile (idempotent, fast).
 # Generates <artifacts_dir>/local/.mysql.cnf with [client_<profile>] sections. Bash
 # command line contains NO password.
-bash "<plugin_root>/scripts/py" setup_pgauth.py --profile "$PROFILE"
+bash "<plugin_root>/scripts/py" setup_pgauth.py --profile <profile>
 
 # Execute a query — mysql reads creds from the auth file via --defaults-file
 # + --defaults-group-suffix=_<profile>. Visible bash command is password-free.
-mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" \
-      --defaults-group-suffix="_$PROFILE" \
-      -h "$host" -P "$port" "$database" \
-      -e "$SQL" --batch --raw
-
-# CSV-like output
-mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" \
-      --defaults-group-suffix="_$PROFILE" \
-      -h "$host" -P "$port" "$database" \
-      -e "$SQL" --batch --raw | tr '\t' ','
+mysql --defaults-file="<artifacts_dir>/local/.mysql.cnf" --defaults-group-suffix=_<profile> -h "<host>" -P <port> "<database>" -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw
 ```
+
+`mysql` has no file option, so `-e 'source <file>'` runs the statement from the file. Write the file with the Write tool first.
+
+The output is tab-separated, one row per line; read it as it is (no `tr` or other filter on the line).
 
 **Security**: Never use `-p<password>`, `--password=...`, or `export MYSQL_PWD='...'` — all of those leak the password into Bash command-line / process listings / chat transcripts. Always use `--defaults-file=<artifacts_dir>/local/.mysql.cnf` (chmod 600, generated by `scripts/setup_pgauth.py`).
 
 ### SQLite
 ```bash
-sqlite3 "$path" "$SQL" -csv -header
+sqlite3 -csv -header "<path>" '.read <artifacts_dir>/local/tmp/agami-query.txt'
 ```
+
+`sqlite3` has no file option either; `.read <file>` runs the statement in the file.
 
 ---
 
@@ -405,7 +395,7 @@ When CLI tools are not available, use the bundled runtime helper:
 bash "<plugin_root>/scripts/py" -m execute_sql --sql "SELECT COUNT(*) FROM orders"
 
 # Multi-line / quote-heavy SQL via --sql-file (preferred)
-bash "<plugin_root>/scripts/py" -m execute_sql --sql-file "<artifacts_dir>/local/tmp/agami-query.sql"
+bash "<plugin_root>/scripts/py" -m execute_sql --sql-file "<artifacts_dir>/local/tmp/agami-query.txt"
 ```
 
 `execute_sql.py` reads `<artifacts_dir>/local/credentials` itself (with chmod check) and connects via `psycopg2` / `pymysql` / `sqlite3`. The visible Bash command contains no credentials. SQL is passed via `--sql-file` (preferred for non-trivial queries) so single quotes, backticks, `$`, and `\` in the SQL don't get mangled by the shell.
@@ -466,8 +456,8 @@ When introspecting databases, exclude system schemas:
 ## Security Rules
 
 - **NEVER** put passwords in any visible Bash command — not in `export PGPASSWORD='...'`, not in `mysql -p<password>`, not in stdin heredocs that interpolate the password. Hosts render Bash tool calls in their UI; the password leaks into the chat. Use the auth files generated by `scripts/setup_pgauth.py`:
-  - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -c "$SQL" --csv`
-  - mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e "$SQL" --batch --raw`
+  - psql: `PGPASSFILE=<artifacts_dir>/local/.pgpass psql -h <host> -p <port> -U <user> -d <db> -f <artifacts_dir>/local/tmp/agami-query.txt --csv`
+  - mysql: `mysql --defaults-file=<artifacts_dir>/local/.mysql.cnf --defaults-group-suffix=_<profile> -h <host> -P <port> <db> -e 'source <artifacts_dir>/local/tmp/agami-query.txt' --batch --raw`
   - Python driver: `bash "<plugin_root>/scripts/py" -m execute_sql --sql-file ...` (reads creds internally; never echoes them)
 - Use `--csv` or `--batch` output modes (not interactive) for predictable parsing
 - **Result-set size policy** — chat preview shows the first **30 rows**; for results > 30 the full set auto-exports to `<artifacts_dir>/local/exports/<ts>.csv` alongside the HTML report (CSV opens natively in Excel / Numbers / Sheets). User can override per-query with "top N" or "limit N" framing.

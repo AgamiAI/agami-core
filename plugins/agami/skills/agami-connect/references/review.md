@@ -1,12 +1,12 @@
 # agami-connect · Phase 3–4: areas and sign-off
 
-Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash.
+Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full the same way. Each command below is its own Bash call, with no variable, pipe, `;`, `&&` or redirect on the line ([invocation-conventions.md](../../../shared/invocation-conventions.md)).
 
 ## Phase 3: Review the subject-area split
 
 Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark signoff=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark signoff=in_progress
 ```
 
 The engine **proposes** the split (one area for small DBs; for large single-schema ones, tables grouped where they join each other most densely — no target number of areas, none past the size limit, a hub table doesn't pull everything into one area — with tables that have no joins grouped by their whole first name word; each table owned once, cross-area joins as `cross_subject_area_relationships`). Area names keep the table's plural (`suppliers`, `status`). For a multi-area split, **surface it for the user to adjust** — boundaries are a curation decision, not a fact:
@@ -23,9 +23,9 @@ Show the split as above (at most 15 areas; say how many more), then one **AskUse
 If they adjust, move tables with the curate `move` op — never by editing the `subject_areas/` tree: `{"op":"move","kind":"table","area":"<from>","name":"<table>","to_area":"<to>"}` (add `"schema"` when two schemas share the table name; a `to_area` the model doesn't have yet is created). Its joins follow it — a join that now spans two areas becomes a cross-area join and the reverse — and metrics and entities move with it once every table they read is in the new area; the result's `notes` list what it moved and what stayed because it also reads another table. The whole batch is validated and undone on failure (sizing warns at 25 tables, errors at 30).
 
 **Replace each area's auto-proposed description with a real one** — the engine seeds `"Auto-proposed subject area covering: <tables>"`, which is boilerplate, but the **subject-area description is load-bearing**: it's what the MCP shows in its first pass so the LLM can ROUTE a question to the right area (`get_datasource_schema` returns name + description per area). A blank/boilerplate description means the router is guessing. So write one business line per area — what domain it covers and when you'd query it — grounded in its tables/columns (NOT product memory). Apply through the validated path, one batch (no generator script):
+The ops file holds one `{op:edit, kind:subject_area, area:<name>, name:<name>, field:description, value:"<line>"}` per area:
 ```bash
-# one {op:edit, kind:subject_area, area:<name>, name:<name>, field:description, value:"<line>"} per area
-bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-area-desc.json"
+bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-area-desc.json"
 ```
 
 ---
@@ -37,21 +37,21 @@ Seeds reference **columns, tables, metrics, and entities** — so settle those *
 **4a — What needs a decision, asked on cards.** One call returns the counts (turn-boundary-safe — same answer on a fresh run or a resume):
 
 ```bash
-bash "<plugin_root>/scripts/sm" curate-gate "$ROOT"
+bash "<plugin_root>/scripts/sm" curate-gate "<root>"
 ```
 → `{pii_count, preseed_count, should_open_explorer}`. **PII count** = columns flagged `sensitive` still queryable (an excluded column, or any column under an excluded table, isn't counted — so once the person hides them it drops to 0). **preseed count** = metrics + named-filters + entities needing sign-off (relationships are NOT gated — FK joins are engine-approved, inferred joins self-approve as you query). `should_open_explorer` only means "something to decide": nothing opens on this path.
 
 > **PII is advisory, not a seed blocker.** A non-zero `pii_count` is a *review nudge* (the person's call to hide or keep), **not** a gate on seed generation. Only a non-zero `preseed_count` (unreviewed metrics/entities) blocks `seed-examples`. Don't tell the person personal data is stopping their seeds; it isn't.
 
-Also run `bash "<plugin_root>/scripts/sm" sensitive "$ROOT"` every time: besides the flagged columns it prints `suspected` and `suspected_count`, columns that look personal but aren't flagged (`pii_count` doesn't count them).
+Also run `bash "<plugin_root>/scripts/sm" sensitive "<root>"` every time: besides the flagged columns it prints `suspected` and `suspected_count`, columns that look personal but aren't flagged (`pii_count` doesn't count them).
 
-**Guessed joins: one line, no card.** Read them with `bash "<plugin_root>/scripts/sm" review-items "$ROOT" --scope rule2` and keep the items whose `kind` is `relationship` (that scope also returns entities, which the Sign-off step covers). When there are any, post: *"<N> joins were guessed from names and data; they're used as you query and flagged on the answer until confirmed. Review them any time in agami-model."* With 5 or fewer, a short table under it (`Join | Kind`, the item's `title` and `cardinality`); more, just the line. They are not put on a card.
+**Guessed joins: one line, no card.** Read them with `bash "<plugin_root>/scripts/sm" review-items "<root>" --scope rule2` and keep the items whose `kind` is `relationship` (that scope also returns entities, which the Sign-off step covers). When there are any, post: *"<N> joins were guessed from names and data; they're used as you query and flagged on the answer until confirmed. Review them any time in agami-model."* With 5 or fewer, a short table under it (`Join | Kind`, the item's `title` and `cardinality`); more, just the line. They are not put on a card.
 
 **Start the example writers now, before the first card** (on a resumed run too, with a new batch stamp), so example questions are drafted while the person signs off and hides columns ([parallel-work.md](../../../shared/parallel-work.md); Phase 5a collects them). With the Agent tool, every model gets them, one area or many: they run while the cards are answered.
 
-1. **Stamp the batch, then prepare each area's input**: run `bash "<plugin_root>/scripts/sm" batch-id` once and use its `batch` in every file name below ([parallel-work.md](../../../shared/parallel-work.md)); then one pre-approved call per area (`sm areas "$ROOT"` lists them), the area's bundle with its tables, columns, metrics, entities and joins:
+1. **Stamp the batch, then prepare each area's input**: run `bash "<plugin_root>/scripts/sm" batch-id` once and use its `batch` in every file name below ([parallel-work.md](../../../shared/parallel-work.md)); then one pre-approved call per area (`sm areas "<root>"` lists them), the area's bundle with its tables, columns, metrics, entities and joins:
    ```bash
-   bash "<plugin_root>/scripts/sm" bundle "$ROOT" --area <area> > "<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.input.json"
+   bash "<plugin_root>/scripts/sm" bundle "<root>" --area <area> --out "<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.input.json"
    ```
 2. **Launch one `agami-example-writer` per area in one message**, in the background as [parallel-work.md](../../../shared/parallel-work.md) says (`subagent_type` `agami-core:agami-example-writer`, `run_in_background: true` where the Agent tool has that parameter, at most 4 running at once), each described in words, *"Draft example questions for Sales"*. Each prompt names `area`, `input_path` (the file above), `result_path` (`<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.candidates.json`), `plugin_root` (the absolute path), `dialect` (the database type), and `asked_questions`: the path of `<artifacts_dir>/local/tmp/agami-asked-questions.txt` if 1.5 saved one, else "none". Where the Agent tool doesn't list it, use a general-purpose subagent told to *"Read `<plugin_root>/agents/agami-example-writer.md` and follow it for this input: …"*.
 
@@ -61,10 +61,10 @@ Then go on with the cards below; the turn stays open while the writers run. With
 
 Otherwise run the two steps below that apply (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). When both apply, the review question and the personal-data question can go on the same card, two questions on one AskUserQuestion call.
 
-**Sign-offs (when `preseed_count` > 0).** Read the queue from the engine:
+**Sign-offs (when `preseed_count` > 0).** Before the queue is read and the table and cards are put together, post one line (*"Gathering the definitions that need your sign-off…"*). Then read the queue from the engine:
 
 ```bash
-bash "<plugin_root>/scripts/sm" review-items "$ROOT" --scope preseed
+bash "<plugin_root>/scripts/sm" review-items "<root>" --scope preseed
 ```
 
 Each item is `{kind, area, name, extra_lines:[{label,text}], bindings, review_state, …}`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set). An item with `changes_since_approval` was signed off before and has changed since: say so on its row. Show a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a).
@@ -78,7 +78,7 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 
 | Answer | Do |
 |---|---|
-| Approve all | The identity card first if needed (below), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`, then run `sm steps "$ROOT"` and refresh the task list. |
+| Approve all | The identity card first if needed (below), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric), applied with `bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`, then run `sm steps "<root>"` and refresh the task list. |
 | Review one by one | The one-by-one cards below. |
 | Skip for now | Nothing is written. Go to 4b. |
 | Show the full view | The full view below, then this card again. |
@@ -90,9 +90,9 @@ Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do 
 - **Approve all remaining**: sign off this item and every item not yet shown. Every card carries it, so a long queue finishes in one press. Answers given on the same card to the other questions still stand.
 - **Show the full view**: the model explorer page, served from localhost; nothing about this item is decided, and the same card is asked again after the URL. On a card with several questions, offer it on the first question only.
 
-After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), run `sm steps "$ROOT"` and refresh the task list ([task-list.md](../../../shared/task-list.md)), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
+After each card, apply its answers in one `sm curate` batch (approvals with `--signer`/`--role`), run `sm steps "<root>"` and refresh the task list ([task-list.md](../../../shared/task-list.md)), then ask the next card. Every approval goes through that one command with the person's identity; never mark an item approved any other way.
 
-**"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
+**"Other" on an item is a change, in the person's words** ("revenue should exclude cancelled orders"). Turn it into `sm curate` edit ops on the field the change names (`calculation`, `bindings`, `description` or `other_names` on a metric; `maps_to`, `description` or `other_names` on an entity), e.g. `{"op":"edit","kind":"metric","area":"<area>","name":"<name>","field":"calculation","value":"<new definition>"}` plus the matching `bindings` edit when the SQL changes, and apply them with `bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-edit.json"`. Never hand-edit the YAML and never a generator script. Then ask about that item again, on the next card, showing its new meaning: an edit is not a sign-off.
 
 **An "Other" that asks to stop is a stop, not a change.** When the words on an item card ask to stop, pause or finish later ("stop here", "I'll do the rest later", "pause") rather than change that item, apply the card's other answers, approve or change nothing more, and go to 4b's Continue / Pause card.
 
@@ -114,7 +114,7 @@ Flagged and suspected columns are picked the same way:
 - Always last: **Keep them all queryable**.
 - "Other" takes `table.column` names to hide, flagged, suspected or any other column in the model.
 
-Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "<plugin_root>/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
+Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
 
 **Show the full view** (an option on the Sign-off and item cards, or asked for in words). The model explorer, with every metric, entity, join and column: render it the way `/agami-model preseed` does (`render_model_explorer.py … --initial-tab review --read-only`) and serve it from localhost, giving the person the URL:
 
@@ -126,7 +126,7 @@ Run it with `run_in_background` and read its first line, `{"url": …}`, for the
 
 The page is read-only; decisions stay on the cards, so after the URL ask the card it was picked on again. A "Generate feedback for Claude" block from an older, editable page is still accepted: apply it as `/agami-model` does, then continue at 4b.
 
-**4b — after the cards:** **recount the sign-offs** with `bash "<plugin_root>/scripts/sm" review-items "$ROOT" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
+**4b — after the cards:** **recount the sign-offs** with `bash "<plugin_root>/scripts/sm" review-items "<root>" --scope preseed` (`review-items`, not `review-queue`, which takes no scope). If **0** → Phase 5 (the seed command runs clean). If **> 0**:
 
 - the person picked **Skip for now** or **Don't sign anything yet** → that is their decision to continue: say in one line that <n> definitions are unsigned and answers using them carry a warning, and go to Phase 5.
 - they stopped part-way (an "Other" on an item card asked to stop, pause or finish later) → AskUserQuestion: `Continue (Recommended)` (seeds run against the current state; answers warn) / `Pause — I'll finish review first` (stop here; resume via `/agami-connect`). **At a Pause, with example writers running:** leave them; don't wait for them or draft their examples yourself ([parallel-work.md](../../../shared/parallel-work.md) names this as the one turn that closes with subagents running). **On resume**, the writers are always started again with a new batch stamp when Phase 4 is reached, so their bundles reflect the sign-off so far; files from before the Pause are not used.
@@ -137,7 +137,7 @@ On `reintrospect` with nothing flagged sensitive and nothing unreviewed, skip si
 
 When the sign-off cards are finished (items left for later included, and when 4a found nothing to review; not on Pause), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark signoff=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark signoff=done
 ```
 
 ---

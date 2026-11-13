@@ -76,9 +76,11 @@ def test_links_to_the_ladder_resolve():
 
 
 def test_summary_shows_the_measured_setup_time():
+    # `sm summary` carries the "Set up in …" line, measured from the step marks; a live run computed
+    # it with `sm timing` and never showed it
     text = (SKILLS_DIR / "agami-connect" / "references" / "summary.md").read_text(encoding="utf-8")
-    assert 'sm" timing' in text
-    assert "`text`" in text
+    assert 'sm" summary "<root>"' in text
+    assert "Set up in 6 min 40 s" in text
     assert "native-elements.md" in text
 
 

@@ -248,7 +248,11 @@ def test_password_page_wait_is_bounded_and_checks_for_exit():
 
 def test_password_page_names_how_to_stop_the_helper():
     s = _password_page()
-    assert "TaskStop" in s and "PID" in s
+    # TaskStop, or where there is none, the helper's own 5-minute limit: a PID needed a chained
+    # `echo $$; exec` line, which no pre-approval matches
+    assert "TaskStop" in s and "stops by itself when its 5 minutes are up" in s
+    assert "`kill <pid>` with the `pid` from the helper's first line" in s
+    assert "agami-helper-pid" not in s and "$$" not in s
 
 
 def test_returning_card_reloads_the_schema_instead_of_review():
@@ -326,8 +330,8 @@ def test_4a_default_path_opens_no_explorer_and_waits_for_no_paste():
 
 def test_4a_reads_the_queue_and_the_personal_data_columns_from_the_engine():
     s = _phase_4()
-    assert 'sm" review-items "$ROOT" --scope preseed' in s
-    assert 'sm" sensitive "$ROOT"' in s
+    assert 'sm" review-items "<root>" --scope preseed' in s
+    assert 'sm" sensitive "<root>"' in s
     assert "extra_lines" in s
 
 
@@ -454,7 +458,7 @@ def test_an_other_that_asks_to_stop_goes_to_the_continue_or_pause_card():
 
 def test_review_summary_mentions_guessed_joins_without_a_card():
     s = _phase_4()
-    assert 'review-items "$ROOT" --scope rule2' in s
+    assert 'review-items "<root>" --scope rule2' in s
     assert "joins were guessed from names and data" in s
     assert "Review them any time in agami-model" in s
     assert "not put on a card" in s

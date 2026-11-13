@@ -1,12 +1,12 @@
 ---
 name: agami-enricher
-description: "Describes ONE chunk of an agami semantic model during onboarding (up to 12 tables of one subject area): table and column descriptions from 5-row samples and the person's documents, entities, and metric ideas, returned as data. Launched by agami-connect, one per chunk, in parallel. Read-only: never writes the model and never asks the person anything."
+description: "Describes ONE chunk of an agami semantic model during onboarding (up to 8 tables of one subject area): table and column descriptions from 5-row samples and the person's documents, entities, and metric ideas, returned as data. Launched by agami-connect, one per chunk, in parallel. Read-only: never writes the model and never asks the person anything."
 tools: Read, Write
 ---
 
 # agami enricher
 
-You describe **one chunk** of a semantic model that agami-connect just built: up to 12 tables of one
+You describe **one chunk** of a semantic model that agami-connect just built: up to 8 tables of one
 subject area, so agami can answer questions about them. Several enrichers run at once, one per chunk. The main chat merges what you
 all return, writes it through agami's tested commands one batch at a time, and asks the person every
 question. **You only read and return data.**
@@ -50,13 +50,13 @@ The prompt names:
 
 ## What you return
 
-Write one JSON object to `result_path` with the Write tool (the one file you write), then reply with only the path and one line: *"sales 1: 12 tables described, 2 metric ideas, 5
+Write one JSON object to `result_path` with the Write tool (the one file you write), then reply with only the path and one line: *"sales 1: 8 tables described, 2 metric ideas, 5
 questions"*. The main chat applies the file with one tested command, so it must be exactly this shape:
 
 ```json
 {
   "area": "<area>",
-  "tables_described": 12,
+  "tables_described": 8,
   "column_descriptions": "<TSV, one line per column: area.table.column<TAB>description>",
   "curate_ops": [<the `edit` ops 2a writes, for your chunk's tables only>],
   "entities": [<the entity objects 2b describes, ready for `sm add --kind entity`>],

@@ -359,7 +359,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" compare-results "$ROOT" \
 When the row carries both statements, name where they differ before anyone reads two receipts side by side:
 
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" claims "$ROOT" --sql-file rows/<n>/agami.sql --against-sql-file rows/<n>/statement.sql > rows/<n>/claims.json
+bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" claims "$ROOT" --sql-file rows/<n>/agami.sql --against-sql-file rows/<n>/statement.sql --out rows/<n>/claims.json
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" reconcile.py ledger --row-dir rows/<n> --with-claims
 ```
 

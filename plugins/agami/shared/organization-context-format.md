@@ -37,7 +37,7 @@ Local-only. Never sent in telemetry.
 | **Glossary** — term → meaning (e.g. `MRR` → "monthly recurring revenue") | `key_terminology` field on `datasource.yaml` (structured) | written by enrichment / `set-terminology`; surfaced read-only |
 | **Summary** — shape, subject areas, conventions (units/currency) | derived from the model each time | computed, never stored |
 
-`cli org-context "$ROOT"` assembles all three for a reader: the narrative (HTML comments stripped) + a `## Model summary (auto-generated from your schema)` block with the subject areas, conventions, and glossary. The model explorer shows the narrative as an **editable** field and the derived summary as a **read-only** field beneath it.
+`sm org-context "<root>"` (`<root>` is the database's model folder, `<artifacts_dir>/<profile>`) assembles all three for a reader: the narrative (HTML comments stripped) + a `## Model summary (auto-generated from your schema)` block with the subject areas, conventions, and glossary. The model explorer shows the narrative as an **editable** field and the derived summary as a **read-only** field beneath it.
 
 ## Why it's separate from `USER_MEMORY.md`
 

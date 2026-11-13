@@ -344,3 +344,18 @@ def test_no_model_anomaly_only_for_an_env_profile_without_a_model(tmp_path, monk
             CR.main(["--profile", "main"])
         anomalies = json.loads(buf.getvalue())["anomalies"]
     assert _no_model_anomalies(anomalies) == []
+
+
+def test_artifacts_dir_source_names_where_the_folder_came_from(tmp_path, monkeypatch):
+    # 0a.6 asks for a folder only on `default`, so the skill never reads the pointer file itself.
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["artifacts_dir_source"] == "env"
+    pointer = tmp_path / "home" / ".config" / "agami" / "path"
+    monkeypatch.delenv("AGAMI_ARTIFACTS_DIR")
+    monkeypatch.setattr(CR.agami_paths, "POINTER_PATH", pointer)
+    assert CR.artifacts_dir_source() == "default"
+    pointer.parent.mkdir(parents=True)
+    pointer.write_text("  \n", encoding="utf-8")
+    assert CR.artifacts_dir_source() == "default"  # an empty pointer is no pointer
+    pointer.write_text(str(tmp_path / "art") + "\n", encoding="utf-8")
+    assert CR.artifacts_dir_source() == "pointer"

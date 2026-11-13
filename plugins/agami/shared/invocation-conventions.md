@@ -6,6 +6,15 @@ Code fills `${CLAUDE_PLUGIN_ROOT}` in when a skill loads; it does not do so for 
 afterward, and no `AGAMI_PLUGIN_ROOT` variable exists in your shell). Write that absolute path into the
 command, quoted: never paste `<plugin_root>` or an unset variable into Bash.**
 
+`<root>` is the database's model folder, `<artifacts_dir>/<profile>`. Write it out in full too, the
+same way.
+
+**Run each agami command as its own Bash call: `bash "<plugin_root>/scripts/sm" <verb> …` with every
+path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a
+filter on the line, and never run two agami commands in one call. A line written any other way stops
+to ask the person for permission; written this way it is pre-approved while the skill is running.
+Read the whole output: the commands print only what you need.
+
 agami ships nine skills, all prefixed `agami-` to avoid colliding with Claude Code's built-in slash commands (e.g. `/init`) and with other plugins:
 
 | Skill | Slash command | Natural-language triggers (via `when_to_use`) |
@@ -70,7 +79,7 @@ and JSON `null` / `true` / `false` are not valid Python — pasting a review-ite
 quotes and `null` survive. Keep ops minimal (the locator + action), not whole items.
 A relative path resolves from the folder `sm` is run in, like any other command's; the skills
 pass absolute `<artifacts_dir>/local/tmp/…` paths, which work from anywhere. `curate` also takes the
-ops file as a second plain argument: `sm curate "$ROOT" ops.json`.
+ops file as a second plain argument: `sm curate "<root>" ops.json`.
 
 ## Commands that work on macOS, Linux and Windows
 
@@ -80,15 +89,16 @@ command working there too:
 - **Run Python through `py`, never bare `python3`:** `bash "<plugin_root>/scripts/py" <script>.py …`
   (a plugin script by name) or `… py -c '…'`. On Windows `python3` is often the Microsoft Store stub,
   which runs nothing; `py` finds the interpreter agami-connect configured, exactly as `sm` does.
-  Where a step already resolved `$PY` (agami-connect's `connect_resolve.py`), `"$PY"` is fine.
-- **Scratch files go in `<artifacts_dir>/local/tmp/`, never `/tmp`.** On Windows, Claude's Write and
-  Read tools and Git Bash disagree about where `/tmp` is, so a file written by one isn't found by the
-  other. `sm` and `py` create the folder; it is git-ignored with the rest of `local/`. When a skill's
-  very first command writes there with `>`, it starts with `mkdir -p "<artifacts_dir>/local/tmp"`, since
-  the shell opens that file before the script runs. Inside a JSON file, write such a path with forward
-  slashes (`C:/Users/…`), never backslashes: `\U` is not a valid JSON escape.
-- **Strip `\r` from Python output you capture into a variable:** `x="$(… py … | tr -d '\r')"`. Windows
-  Python ends its lines with `\r\n`; `$(…)` drops only the `\n`, and a path ending in `\r` names no file.
+- **Scratch files go in `<artifacts_dir>/local/tmp/`, never `/tmp`, and are named `agami-…`.** On
+  Windows, Claude's Write and Read tools and Git Bash disagree about where `/tmp` is, so a file
+  written by one isn't found by the other. `sm` and `py` create the folder; it is git-ignored with the
+  rest of `local/`. Write a scratch file with the Write tool, or with the command's own `--out`; never
+  with a redirect. The artifacts folder comes from the resolve step's output (`connect_resolve.py`'s
+  `artifacts_dir`), never from reading the pointer file. Inside a JSON file, write such a path with
+  forward slashes (`C:/Users/…`), never backslashes: `\U` is not a valid JSON escape.
+- **Never capture Python output into a shell variable.** Read the command's output in the tool
+  result instead: a capture needs `$(…)` on the line, which stops for permission, and on Windows its
+  value ends in `\r`, so a path read that way names no file.
 - **Show an agami page only as the full view, served from localhost:**
   `bash "<plugin_root>/scripts/py" serve_page.py <file.html> --minutes 30 --open`, run with
   `run_in_background` (it serves until its time is up), then read its first line and give the person the

@@ -1,19 +1,19 @@
 # agami-connect · Phase 5–6: example questions
 
-Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash.
+Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full the same way. Each command below is its own Bash call, with no variable, pipe, `;`, `&&` or redirect on the line ([invocation-conventions.md](../../../shared/invocation-conventions.md)).
 
 ## Phase 5: Seed prompt examples
 
 Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark examples=in_progress
 ```
 
 **Say in one line what happens now**, true to the path you are on: with example writers, *"Collecting the example questions drafted during sign-off, then checking each against your database."*; with none, *"Drafting example questions across your tables, metrics and joins, then checking each against your database. This takes a few minutes."*
 
 **5a — the candidates.** When Phase 4 started example writers, the candidates come from their files; you check and finish them:
 
-1. **Collect** this batch's files, every area's `<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.candidates.json` with `sm wait-files`, as [parallel-work.md](../../../shared/parallel-work.md) says (they have had the whole sign-off to run, so usually all are ready on the first pass). A writer given up on there: draft that area's candidates yourself, by the rules below.
+1. **Collect** this batch's files, every area's `<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.candidates.json` with `sm wait-files --wait 30`, as [parallel-work.md](../../../shared/parallel-work.md) says. Before the first pass, post one line (*"Collecting the example questions drafted during sign-off…"*), and after each pass that is not ready, one line naming the areas still being drafted, from its `waiting` list (they have had the whole sign-off to run, so usually all are ready on the first pass). A writer given up on there: draft that area's candidates yourself, by the rules below.
 2. **Bring them up to date with sign-off**: (i) drop any candidate that uses a metric or entity rejected in sign-off, or a column hidden on the personal-data card; (ii) rewrite any that uses a definition the person changed in sign-off, to the definition as it now stands (`sm review-items` or `sm context` show it); (iii) write the cross-area candidates yourself, with the whole model in view (the writers each saw one area); (iv) write the person's own questions yourself if a writer could not (its reply line says which). Each writer had the person's questions, so one question can come back from two areas: keep one, the candidate in the area that holds its driving table.
 3. **Write them all as one JSON array** to `<artifacts_dir>/local/tmp/agami-seeds.json` with the Write tool, each keeping its `area`, then go to 5b+5c. Nothing a writer drafted reaches the model unchecked: `seed-examples` validates every candidate and refuses until sign-off is done.
 
@@ -23,7 +23,7 @@ With no writers (no Agent tool), you generate the candidates yourself, as follow
 
 - **Shapes:** a count, a top-N, a time-bucketed trend, a breakdown, a recency filter. Anchor time filters to each table's `data_range` MAX (not `NOW()`) so seeds don't return 0 rows on a stale dataset.
 - **Spread:** across the whole set, touch each major table/family, exercise **every approved metric at least once**, use the key **entities** by their real names/synonyms, and cover **representative joins** — intra-area *and* cross-schema.
-- **Get every join from the model through `bash "<plugin_root>/scripts/sm" context "$ROOT" --tables <t1> <t2> …`** — it returns the joins touching those tables exactly as a question will be answered (area and cross-area alike), each with its role label and full condition (a `current_flag = 'Y'` included), so a seed writes the join the model declares. Never read the model's YAML to find joins.
+- **Get every join from the model through `bash "<plugin_root>/scripts/sm" context "<root>" --tables <t1> <t2> …`** — it returns the joins touching those tables exactly as a question will be answered (area and cross-area alike), each with its role label and full condition (a `current_flag = 'Y'` included), so a seed writes the join the model declares. Never read the model's YAML to find joins.
 - **Cross-schema seeds — the highest-value few-shots, include them deliberately.** The cross-schema / cross-area joins are in that same output (and in `cross_subject_area_relationships`). For the most meaningful ones, write a question a user would actually ask that **spans both schemas** — a fact/metric in one schema joined to the entity it references in another. Use the relationship's declared join (`on:` / from→to columns) and **schema-qualified** table names (it's one database — ordinary cross-schema SQL, fully EXPLAIN-able). Include **2–4** of these and make **1–2 genuinely complex** (3+ tables across two schemas, with an aggregation + a filter) — cross-schema SQL is exactly what NL→SQL gets wrong unaided, so a worked example pays off most here. (Cross-*profile* / federation seeds are out of scope — those need DuckDB ATTACH; this is cross-*schema* within one DB.)
 - **Count scales with the model:** a single-schema DB is fine at ~10–12; a multi-schema one wants ~2–3 per subject area **plus** the 2–4 cross-schema seeds — don't undersample a 5-schema DB at a flat 12.
 
@@ -33,7 +33,7 @@ Tag each with its `tables` (list **all** tables it touches — both schemas for 
 
 **5b+5c — validate + write in ONE packaged call.** **Do NOT write a script to loop EXPLAIN over the seeds and don't hand-write the YAML.** `seed-examples` validates every candidate against the live DB (wraps each as a zero-row query — dialect-agnostic, scans nothing), writes the passing ones (appends, dedups by `question`, commits), and returns the rejects with their DB error. Post one progress line from its output (`totals`, or `added` and `rejected` for one area): *"✓ Wrote <added> examples; <rejected> failed the dry run."*
 ```bash
-bash "<plugin_root>/scripts/sm" seed-examples "$ROOT" --profile <profile> --file "<artifacts_dir>/local/tmp/agami-seeds.json"
+bash "<plugin_root>/scripts/sm" seed-examples "<root>" --profile <profile> --file "<artifacts_dir>/local/tmp/agami-seeds.json"
 ```
 **Write every area's seeds in this one call:** give each seed an `area` (the subject area it is stored under) and leave out `--area`, or repeat `--area` to limit the call to those areas. A seed with no `area`, or one outside the call's areas, stops the call before anything is written. With exactly one `--area` the seeds need no `area` and the output is the single-area shape `{added, written, committed, rejected:[{question, error}]}`; with several or none it is that shape with each `rejected` entry labelled `area`, plus `areas` (one such result per area, labelled `area`) and `totals` (`areas`, `added`, `rejected`). For each `rejected`, optionally regenerate once and re-run with just those; don't block the flow on a few drops. Corrections later append via `/agami-save-correction` (same `add-example` path).
 
@@ -47,9 +47,13 @@ bash "<plugin_root>/scripts/sm" seed-examples "$ROOT" --profile <profile> --file
 
 **Run every seed with ONE packaged call — `sm seed-validate` — never a hand-rolled "run all the seeds" script.** It executes each written seed against the live DB **through `execute_sql`** (the same path agami-query uses), so the **fan-trap / chasm-trap pre-flight and the scope/PII gates always apply** — a raw-connection driver could skip that safety and let a fan-out scan the whole table. It emits the examples-validation items (`{n, question, sql, row_headers, row_preview, row_count, state}`); a seed the pre-flight refuses or that errors comes back with its `error`, not a faked result:
 
+First run `bash "<plugin_root>/scripts/sm" batch-id` and put its `batch` in the file's name, so a file left by an earlier run never reads as this run's:
+
 ```bash
-bash "<plugin_root>/scripts/sm" seed-validate "$ROOT" --profile <profile> > "<artifacts_dir>/local/tmp/agami-examples-items.json"
+bash "<plugin_root>/scripts/sm" seed-validate "<root>" --profile <profile> --out "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json"
 ```
+
+`--out` writes the output to that file in one go and prints only `{"out", "bytes"}`; read the items from the file.
 
 Without `--area` it runs every area's seeds (each through `execute_sql` scoped to its own area, with the same per-statement limits) and prints one object: `areas` (`{area, examples, errored}` each), `items` (the items above, each labelled `area`) and `totals` (`areas`, `examples`, `errored`). Repeat `--area` to run only those areas. One `--area` prints the bare items array, as before. An area the model doesn't have is refused with `error: unknown_area` and the `valid_areas`.
 
@@ -57,9 +61,9 @@ Without `--area` it runs every area's seeds (each through `execute_sql` scoped t
 
 **On a server database, run it in the background**, as the build is (1.7): Bash with `run_in_background: true` and a `description` in the person's words, *"Run the example questions (11)"*. It prints nothing until it is done, so post no bar; one line when it starts (*"Running the 11 example questions against your database…"*) and the result when it exits. Keep the turn open by blocking on its output file, repeated until `all_ready` is true, and after each pass that is not ready post one line saying it is still running (*"Still running the example questions…"*, no number), so the wait is never silent:
 ```bash
-bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items.json" --wait 60
+bash "<plugin_root>/scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json" --wait 30
 ```
-The redirect creates the file empty, which counts as waiting; the command writes its JSON in one go at the end. Once the file is ready, read it after the background task's exit notification (a large file can be caught mid-write); if the task exited with an error and the file stays empty, show its error. SQLite and DuckDB run in the foreground.
+With `--out` the file does not exist until the command has finished and written it whole, so a missing file counts as waiting, and a file that exists is complete. If the background task's exit notice arrives while the file is still missing, the command failed: stop waiting and show the error from the task's output. SQLite and DuckDB run in the foreground.
 
 **Show what ran, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens on this path, and no reply block is waited for. Post one progress line from `totals` (or the bare array's length and its items with an `error`): *"✓ Ran <examples> examples: <examples − errored> returned rows, <errored> failed."* Then a markdown table from the items, failing ones first, at most 15 rows, then *"Showing 15 of <n>; <n−15> more."* when there are more:
 
@@ -79,22 +83,21 @@ Then call AskUserQuestion, one question (header `Examples`), *"What should I do 
 
 | Answer | Do |
 |---|---|
-| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "<plugin_root>/scripts/sm" add-example "$ROOT" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
-| Drop the failing ones | `bash "<plugin_root>/scripts/sm" remove-example "$ROOT" --question "<area>/<question>" …` (one `--question` per failed item, `--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
+| Keep all that ran | The identity card from Phase 4a if `reviewer_email`/`reviewer_role` aren't saved yet; here **Don't sign anything yet** leaves every example written but unsigned and goes on to Phase 7 (not 4b). Then, per area, write the examples that ran back with their own `question` and `sql` (same SQL, so it is a sign-off, not a change; their tags are kept): `bash "<plugin_root>/scripts/sm" add-example "<root>" --area <area> --file "<artifacts_dir>/local/tmp/agami-keep-examples.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. The sign-off is recorded in `curation_log.jsonl`, not on the example. Failed ones are left as they are; say how many. |
+| Drop the failing ones | Write the failed items' questions, one per line as `<area>/<question>` with each question exactly as stored, with the Write tool to `<artifacts_dir>/local/tmp/agami-reject.txt`, then `bash "<plugin_root>/scripts/sm" remove-example "<root>" --question-file "<artifacts_dir>/local/tmp/agami-reject.txt"` (`--signer`/`--role` when known). They are marked rejected and kept for audit, not deleted: say so. |
 | Review one by one | The one-by-one cards over every item, failed ones first; **Keep all remaining** on each card ends the review once the failures are dealt with. |
 | Show the full view | The full view below, then this card again. |
 
-**One by one.** Ask up to 4 examples per card, one question each, header `Example 3/9` (at most 12 characters; past 9/99 use `Ex 12/40`). The question is the example's question and what it returned, *"Revenue by month this year: 12 rows, 2024-01 $41,200"* (or *"failed: <error>"*). **The SQL goes in the `Keep` option's `preview`**, as a metric's does on its sign-off card: the item's `sql`, laid out over lines with a short comment on each filter, then the first rows of `row_preview` under `row_headers` (or the `error` for a failed one), so the person checks the statement without asking for it ([question-cards rule 3a](../../../shared/question-cards.md#3a-detail-goes-in-an-options-preview-not-the-question)). Options: **Keep** (the `add-example` sign-off above, for that one), **Drop** (`remove-example` for that one), **Keep all remaining** (keep this one and every remaining one that ran), and **Show the full view** (the page below; nothing is decided, and the same card is asked again after the URL; on a card with several questions, on the first question only). "Other" describes a fix in the person's words ("should only count paid orders"): rewrite that example's SQL, write it with `sm add-example` (same question, so it replaces), re-run its area with `sm seed-validate "$ROOT" --profile <profile> --area <area>`, and ask about it again showing the new result. A fix that touches a column or metric beyond this one example is 6a's: fix it everywhere, as 6a says. A question ("show me the SQL", "show me the rows") is answered first, then the same card asked again ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). **An "Other" you can't act on is re-asked, never guessed**: an empty fix, or one naming a column the model doesn't have, is said back and you ask the same card again.
+**One by one.** Ask up to 4 examples per card, one question each, header `Example 3/9` (at most 12 characters; past 9/99 use `Ex 12/40`). The question is the example's question and what it returned, *"Revenue by month this year: 12 rows, 2024-01 $41,200"* (or *"failed: <error>"*). **The SQL goes in the `Keep` option's `preview`**, as a metric's does on its sign-off card: the item's `sql`, laid out over lines with a short comment on each filter, then the first rows of `row_preview` under `row_headers` (or the `error` for a failed one), so the person checks the statement without asking for it ([question-cards rule 3a](../../../shared/question-cards.md#3a-detail-goes-in-an-options-preview-not-the-question)). Options: **Keep** (the `add-example` sign-off above, for that one), **Drop** (`remove-example` for that one), **Keep all remaining** (keep this one and every remaining one that ran), and **Show the full view** (the page below; nothing is decided, and the same card is asked again after the URL; on a card with several questions, on the first question only). "Other" describes a fix in the person's words ("should only count paid orders"): rewrite that example's SQL, write it with `sm add-example` (same question, so it replaces), re-run its area with `sm seed-validate "<root>" --profile <profile> --area <area>`, and ask about it again showing the new result. A fix that touches a column or metric beyond this one example is 6a's: fix it everywhere, as 6a says. A question ("show me the SQL", "show me the rows") is answered first, then the same card asked again ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). **An "Other" you can't act on is re-asked, never guessed**: an empty fix, or one naming a column the model doesn't have, is said back and you ask the same card again.
 
 When every example has an answer, go to Phase 7.
 
 **Show the full view** (an option on the Examples and one-by-one cards, or asked for in words). The examples-validation page, with every result and its SQL. Render it from the items and serve it from localhost, giving the person the URL:
 
 ```bash
-bash "<plugin_root>/scripts/py" render_examples_validation.py \
-  --title "Seed examples · <profile>" --profile <profile> \
-  --items-file "<artifacts_dir>/local/tmp/agami-examples-items.json" \
-  --read-only --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
+bash "<plugin_root>/scripts/py" render_examples_validation.py --title "Seed examples · <profile>" --profile <profile> --items-file "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json" --read-only --out "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html"
+```
+```bash
 bash "<plugin_root>/scripts/py" serve_page.py "<artifacts_dir>/local/examples-validation/<profile>/<ts>.html" --minutes 30 --open
 ```
 
@@ -104,7 +107,7 @@ It takes the combined object or a single area's array; repeat `--items-file` to 
 
 The page is read-only; decisions stay on the cards, so after the URL ask the card it was picked on again. A block pasted from an older, editable page is still accepted: `validate N` / `reject N` / `edit N` / `add example` / `note N` / `note all`. Apply each through the **packaged commands**, never by hand-rewriting `examples.yaml`. **`N` is the page's global example number (1..N across every area, assigned in render order).** `render_examples_validation.py` normalizes the items file to this same numbering, so resolve `N` → its example by reading that file back:
 - **`validate N`** → the example is a trusted anchor; if the block carries a `by <email>` clause, record the sign-off via `sm add-example` (re-write the same example with `--signer`/`--role`). It reports `applied` (one line per example re-written).
-- **`reject N`** → **`sm remove-example "$ROOT" --area <area> --question "<that example's exact question>"`** (`--signer`/`--role` to record who). To reject several across areas in one call, leave out `--area` and name each as `--question "<area>/<question>"` (looked up in that area only); a bare question is matched in whichever area has it, and one that more than one area has is refused (`refused: ambiguous_question`, with the areas) and nothing is rejected. That call adds `areas` and `totals` to the output. It marks the example `status: rejected`: kept in `examples.yaml` for audit (not deleted), dropped from the runtime ranker. Tell the person it's rejected and kept, not deleted.
+- **`reject N`** → write that example's exact question with the Write tool to `<artifacts_dir>/local/tmp/agami-reject.txt`, then **`sm remove-example "<root>" --area <area> --question-file "<artifacts_dir>/local/tmp/agami-reject.txt"`** (`--signer`/`--role` to record who). To reject several across areas in one call, leave out `--area` and write each on its own line as `<area>/<question>` (looked up in that area only); a bare question is matched in whichever area has it, and one that more than one area has is refused (`refused: ambiguous_question`, with the areas) and nothing is rejected. That call adds `areas` and `totals` to the output. It marks the example `status: rejected`: kept in `examples.yaml` for audit (not deleted), dropped from the runtime ranker. Tell the person it's rejected and kept, not deleted.
 - **`edit N`** that fixes *that example's* SQL → re-write it with `sm add-example` (dedups by question, so it replaces). Re-run the new SQL to capture its number.
 
 When the user gives a **cross-cutting display/formatting rule** (currency, units, number formatting — applies to many examples, not one), classify it like any correction (see [`agami-save-correction`](../../agami-save-correction/SKILL.md) → "DISPLAY / FORMATTING preference"): a currency/unit fact attaches to the **column** (a `caveat`/`value_transform` in the shared model — org-wide by construction); a cross-cutting presentation convention → `datasource.md`; a personal tic → `USER_MEMORY.md`. Don't reflexively file to USER_MEMORY, and don't reflexively ask — only ask if personal-vs-org is genuinely unclear. **Display rounding is a convention, not SQL** — a "show fewer decimals" rule → `datasource.md`, never `ROUND()` baked into the example's SQL (that corrupts the exact-number verification anchor; the system formats numbers in full via `units.py`).
@@ -139,7 +142,7 @@ Validation often surfaces a result that's *obviously wrong* — a bounded ratio 
 
 When every example has its answer on a card (and any bad number above is settled), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark examples=done
 ```
 
 ---
@@ -148,18 +151,18 @@ bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark examples=done
 
 When 1.5 saved nothing, mark the step skipped and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=skipped
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark reports=skipped
 ```
 
 When it saved some, mark the step started and refresh the task list:
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark reports=in_progress
 ```
 
 When `<artifacts_dir>/local/reconcile/inbox/` has files (or a screenshot path) from 1.5, say in one line what was shared, then AskUserQuestion, one question, header `Reports`: *"Check your <n> reports against the new model now?"* Options: **Check them now (Recommended)** / **Later** (say they can run `/agami-reconcile` any time; the files stay in the inbox). **Check them now** hands the files to [agami-reconcile](../../agami-reconcile/SKILL.md), which grades any SQL part by part, compares the numbers, and asks about each mismatch on cards; come back to Phase 7 when it is done.
 
 When agami-reconcile is done, mark the step done and refresh the task list (on **Later**, mark it `reports=skipped` instead):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark reports=done
 ```
 

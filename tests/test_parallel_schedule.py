@@ -57,7 +57,7 @@ def test_parallel_work_rules():
     text = _read(PARALLEL)
     assert len(text.splitlines()) < 90
     assert "run_in_background: true" in text
-    assert "wait-files" in text and "--wait 60" in text and "all_ready" in text
+    assert "wait-files" in text and "--wait 30" in text and "all_ready" in text
     assert "at most 4" in text
     assert "no Agent tool at all" in text and "inline" in text
     never = _flat(text[text.index("## 6. Never"):])
@@ -70,7 +70,7 @@ def test_parallel_work_rules():
 def test_the_give_up_limit_counts_per_subagent():
     text = _flat(_read(PARALLEL))
     give_up = text[text.index("## 4. Give up cleanly"):text.index("## 5.")]
-    assert "10 minutes of `--wait 60` passes spent waiting on that subagent" in give_up
+    assert "10 minutes of `--wait 30` passes (20 passes) spent waiting on that subagent" in give_up
     assert "Quick `--wait 0` checks after a card don't count" in give_up
     assert "do that piece yourself, inline" in give_up
 
@@ -131,11 +131,11 @@ def test_one_asked_question_is_kept_once():
 
 def test_enrichers_start_from_two_chunks():
     text = _read(REFS / "enrich.md")
-    assert 'enrich-input "$ROOT" --chunks' in text
+    assert 'enrich-input "<root>" --chunks' in text
     assert "`parallel: true`" in text and "2 or more chunks" not in text
     assert "more than 30 tables" not in text
-    assert re.search(r'enrich-input "\$ROOT" --area <area> --tables <t1,t2,…>', text)
-    assert re.search(r'apply-enrichment "\$ROOT" --area <area> --tables <t1,t2,…>', text)
+    assert re.search(r'enrich-input "<root>" --area <area> --tables <t1,t2,…>', text)
+    assert re.search(r'apply-enrichment "<root>" --area <area> --tables <t1,t2,…>', text)
 
 
 def test_enrichers_start_before_the_join_cards():
@@ -154,13 +154,13 @@ def test_example_writers_start_with_sign_off_and_never_write():
     first_card = review.index("**Sign-offs (when `preseed_count` > 0).**")
     assert launch < first_card
     assert "agami-examples-<batch>-<area>.candidates.json" in review
-    assert 'sm" bundle "$ROOT" --area <area> >' in review
+    assert 'sm" bundle "<root>" --area <area> --out "<artifacts_dir>/local/tmp/agami-examples-<batch>-<area>.input.json"' in review
     examples = _read(REFS / "examples.md")
     five_a = _section(examples, "**5a", "**5b+5c")
     assert "wait-files" in five_a
     assert "rejected in sign-off" in five_a
     after = examples[examples.index("**5b+5c"):]
-    assert after.count('sm" seed-examples "$ROOT"') == 1
+    assert after.count('sm" seed-examples "<root>"') == 1
 
 
 def test_an_agent_call_that_returns_at_once_is_a_background_run():
@@ -190,10 +190,10 @@ def test_a_resume_restamps_every_batch():
 def test_describe_shows_no_chunk_count_of_its_own():
     enrich = _flat(_read(REFS / "enrich.md"))
     assert "of 9 chunks" not in enrich
-    assert '"✓ Sales 1 of 3: 12 tables described"' in enrich
-    assert 'After each applied chunk, run `sm steps "$ROOT"` and refresh the task list' in enrich
+    assert '"✓ Sales 1 of 3: 8 tables described"' in enrich
+    assert 'After each applied chunk, run `sm steps "<root>"` and refresh the task list' in enrich
     review = _flat(_read(REFS / "review.md"))
-    assert 'run `sm steps "$ROOT"` and refresh the task list ([task-list.md]' in review
+    assert 'run `sm steps "<root>"` and refresh the task list ([task-list.md]' in review
 
 
 def test_a_resumed_build_with_a_model_goes_to_the_join_cards():
@@ -218,7 +218,7 @@ def test_entities_that_span_chunks_reach_step_6():
     assert "within 10 passes" not in enrich and "`applied`)" not in enrich
     enricher = _flat(_read(PLUGIN / "agents" / "agami-enricher.md"))
     assert "goes in `notes`, for the main chat" in enricher
-    assert '"tables_described": 12' in enricher
+    assert '"tables_described": 8' in enricher
 
 
 def test_no_agent_tool_means_inline():
@@ -233,7 +233,7 @@ def test_connect_skill_stays_under_500_lines():
 def test_the_sample_copy_marks_the_build_done():
     text = _read(REFS / "sample.md")
     six_a = _section(text, "**6A (copy", "**6B")
-    assert 'steps "$ROOT" --mark build=done' in six_a
+    assert 'steps "<root>" --mark build=done' in six_a
 
 
 def test_readers_start_as_each_path_arrives():
@@ -246,6 +246,6 @@ def test_the_example_run_is_waited_on_without_ending_the_turn():
     phase6 = text[text.index("## Phase 6"):]
     run = phase6[phase6.index("**On a server database, run it in the background**"):]
     run = run[:run.index("SQLite and DuckDB run in the foreground")]
-    assert ('scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items.json" '
-            "--wait 60") in run
+    assert ('scripts/sm" wait-files --file "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json" '
+            "--wait 30") in run
     assert "if you end your turn while it runs" not in run

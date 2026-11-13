@@ -1,25 +1,31 @@
 # The onboarding task list
 
-Run `sm steps` at the start of onboarding, when a step starts or ends, and after every `sm progress --wait`. Replace the session's task list with its output: one item per step, in order, using each step's `text` and `status`. Never write a step or a number `sm steps` did not print.
+Refresh the session's task list from the `list` in `sm steps` output, or in `sm progress --wait` output during the build. Run `sm steps` at the start of onboarding and when a step starts or ends. Replace the task list with that `list`: one item per line, in order, each line's mark giving the item's state. Never write a step or a number `sm steps` did not print.
 
 > `<plugin_root>`: the plugin's absolute path, see [invocation-conventions.md](invocation-conventions.md).
 >
-> `$ROOT` is the database's folder, `<artifacts_dir>/<profile>`.
+> `<root>` is the database's folder, `<artifacts_dir>/<profile>`, written out in full.
 
 Also refresh the task list after each applied chunk in describe, and after each sign-off card is answered.
 
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT"
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=in_progress
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=done
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=skipped
+bash "<plugin_root>/scripts/sm" steps "<root>"
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark <id>=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark <id>=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark <id>=skipped
 ```
 
-A mark is written first, then the whole list is printed, so one call both marks the step and gives
-the list to show. Each phase file says which mark to run where.
+Each line above is its own Bash call. A mark is written first, then the list is printed, so one
+call both marks the step and gives the list to show. Each phase file says which mark to run where.
+`sm progress --wait` prints the same `list`, so during the build its output refreshes the list with
+no `sm steps` call of its own.
 
-**Statuses.** `pending` is not started, `in_progress` is in progress, `done` is completed. A
-`skipped` step is left out of the list.
+**After every `sm steps` call and every `sm progress --wait` call, the very next thing is the
+task-list update.** Never filter or shorten the output (no `grep`, `head`, `sed` or `jq`): copy the
+whole `list`.
+
+**Marks.** `✓` is done, `▶` is in progress, `·` is not started. Drop the mark from the item's text
+and set the item's state from it. A skipped step is not in the list.
 
 **Where the list goes.** Use the task-list tool the host gives the session (`TodoWrite`,
 `TaskCreate`, or the app's own task list, such as the one shown under the message in the Desktop
@@ -28,9 +34,9 @@ current step marked whenever a step finishes.
 
 **Before the database's folder exists** (the first cards of a first run), show the nine steps from
 agami-connect's SKILL.md, all not started except the first. Switch to `sm steps` output as soon as
-`$ROOT` exists.
+`<root>` exists.
 
-**Resuming** (after a hand-off, a password page or a file wait): run `sm steps "$ROOT"` first and
+**Resuming** (after a hand-off, a password page or a file wait): run `sm steps "<root>"` first and
 show what it prints. Don't seed the list again from memory.
 
 **A `problem`.** When `sm steps` prints a `problem` that is not null, the model on disk couldn't be

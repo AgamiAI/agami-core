@@ -171,6 +171,19 @@ below corresponds to one such version.
 
 ### Changed
 
+- **agami-connect writes every agami command as one literal launcher call, refreshes its task list
+  every time, always shows its closing summary, and never waits in silence.** Live runs stopped for
+  permission on most of agami's own commands because the skill showed them with `"$ROOT"`, `"$PY"`,
+  pipes, redirects and chains, which no `allowed-tools` rule matches. Every command in agami-connect,
+  the shared files it links and its agents is now `bash "<plugin_root>/scripts/sm" <verb> …` with
+  every path written out (`<root>` is the model folder), redirects became `--out`, and a hard rule
+  says so; `tests/test_agami_command_forms.py` checks each command against the skill's
+  `allowed-tools`, the real `sm` parser and the hook. The task list is copied from `sm steps`' (and
+  `sm progress --wait`'s) `list` after every call; Phase 7 and the sample path post `sm summary`
+  as printed at the top of the closing card's message; waits post a line per pass (`--wait 30`);
+  the currency question rides on the decoding card again; chunks are 8 tables. agami-reconcile's
+  `sm claims` uses `--out` in place of its redirect.
+
 - **Join candidates are tested four at a time, and the build log says how far the test has got.**
   On a warehouse each of the up to 300 probes that look for joins no key declares is a round trip,
   so the scan ran as one long silent wait. It now runs four at a time (one at a time on SQLite and
