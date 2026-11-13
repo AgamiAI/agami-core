@@ -82,7 +82,9 @@ below corresponds to one such version.
   (`scripts/say_gate.py`, on `AskUserQuestion` only) refuses the card while a recorded text whose
   `say_id` this session's transcript shows has not been posted as visible text after it, handing
   the text back in the refusal; it refuses at most twice per text, forgets texts older than 30
-  minutes, and on any doubt says nothing, so the card goes ahead. When the scratch folder can't be
+  minutes, and on any doubt says nothing, so the card goes ahead. The transcript is written
+  asynchronously, so it first waits (up to 3 s) for the card's own line to reach it: without that, a
+  live session refused the retried card although the text had just been posted. When the scratch folder can't be
   written, the commands print what they printed before, with no `say_id` and no extra sentence.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With

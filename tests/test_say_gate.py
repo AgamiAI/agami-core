@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -96,9 +97,18 @@ def thinking(t: str) -> str:
                                "content": [{"type": "thinking", "thinking": t, "signature": "x"}]})
 
 
-def tool_use(name: str = "Bash") -> str:
+def tool_use(name: str = "Bash", use_id: str = "toolu_1", **extra: object) -> str:
     return _line("assistant", {"role": "assistant", "type": "message", "id": "msg_1",
-                               "content": [{"type": "tool_use", "id": "toolu_1", "name": name, "input": {}}]})
+                               "content": [{"type": "tool_use", "id": use_id, "name": name, "input": {}}]},
+                 **extra)
+
+
+CARD_ID = "toolu_2"
+
+
+def card(use_id: str = CARD_ID) -> str:
+    """The card's own tool_use line: the gate waits until the transcript holds it."""
+    return tool_use("AskUserQuestion", use_id)
 
 
 def result(content: object) -> str:
@@ -111,16 +121,24 @@ def printed(say_id: str = "5ca1ab1e", say: str = SUMMARY) -> str:
     return result(json.dumps({"say": say, "say_id": say_id, "then": "Post `say`."}, indent=2))
 
 
-def _transcript(tmp_path: Path, *lines: str) -> Path:
+def _transcript(tmp_path: Path, *lines: str, with_card: bool = True) -> Path:
+    """A transcript of `lines`, ending with the card being asked (CARD_ID) unless `with_card` is off."""
     path = tmp_path / "session.jsonl"
+    lines = (*lines, card()) if with_card else lines
     path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _short_wait(monkeypatch):
+    # A transcript that never shows the card is waited on for CARD_WAIT; tests needn't wait 3 s.
+    monkeypatch.setattr(GATE_MOD, "CARD_WAIT", 0.3)
 
 
 def _event(transcript: object, tool: str = "AskUserQuestion", **extra: object) -> dict:
     return {"session_id": "00000000-0000-4000-8000-000000000001", "transcript_path": transcript,
             "cwd": "/", "permission_mode": "default", "hook_event_name": "PreToolUse",
-            "tool_name": tool, "tool_input": {"questions": []}, "tool_use_id": "toolu_2", **extra}
+            "tool_name": tool, "tool_input": {"questions": []}, "tool_use_id": CARD_ID, **extra}
 
 
 class _Stdin:
@@ -166,8 +184,7 @@ def _run(event: object, art: Path, raw: bytes | None = None) -> subprocess.Compl
 
 def test_text_not_posted_is_demanded_twice_then_let_go(art, tmp_path):
     _write_pending(art, [_entry()])
-    path = _transcript(tmp_path, tool_use(), printed(), tool_use("TaskUpdate"), result("ok"),
-                       tool_use("AskUserQuestion"))
+    path = _transcript(tmp_path, tool_use(), printed(), tool_use("TaskUpdate"), result("ok"))
     assert _denied(_gate(_event(str(path)), art)) == f"{REASON}\n\n{SUMMARY}"
     assert _read_pending(art)[0]["refused"] == 1
     assert _denied(_gate(_event(str(path)), art)) == f"{REASON}\n\n{SUMMARY}"
@@ -182,28 +199,28 @@ def test_the_real_format_sample_is_read(art, tmp_path):
     _write_pending(art, [_entry("5ca1ab1e")])
     copy = tmp_path / "sample.jsonl"
     shutil.copy(SAMPLE, copy)
-    assert _denied(_gate(_event(str(copy)), art)).startswith(REASON)
+    assert _denied(_gate(_event(str(copy), tool_use_id="toolu_02"), art)).startswith(REASON)
     with copy.open("a", encoding="utf-8") as fh:
-        fh.write(text("**acme: 3 tables, 2 joins.**\n\nAsk away.") + "\n")
-    assert _gate(_event(str(copy)), art) == "" and _read_pending(art) == []
+        fh.write(text("**acme: 3 tables, 2 joins.**\n\nAsk away.") + "\n" + card("toolu_03") + "\n")
+    assert _gate(_event(str(copy), tool_use_id="toolu_03"), art) == "" and _read_pending(art) == []
 
 
 def test_text_posted_after_the_result_lets_the_card_through_and_clears_it(art, tmp_path):
     _write_pending(art, [_entry()])
-    path = _transcript(tmp_path, printed(), text(SUMMARY), tool_use("AskUserQuestion"))
+    path = _transcript(tmp_path, printed(), text(SUMMARY))
     assert _gate(_event(str(path)), art) == ""
     assert _read_pending(art) == []
 
 
 def test_text_only_in_a_thinking_block_is_not_shown(art, tmp_path):
     _write_pending(art, [_entry()])
-    path = _transcript(tmp_path, printed(), thinking(SUMMARY), tool_use("AskUserQuestion"))
+    path = _transcript(tmp_path, printed(), thinking(SUMMARY))
     assert _denied(_gate(_event(str(path)), art)).startswith(REASON)
 
 
 def test_an_identical_text_posted_before_the_result_does_not_count(art, tmp_path):
     _write_pending(art, [_entry()])
-    path = _transcript(tmp_path, text(SUMMARY), printed(), tool_use("AskUserQuestion"))
+    path = _transcript(tmp_path, text(SUMMARY), printed())
     assert _denied(_gate(_event(str(path)), art)).startswith(REASON)
 
 
@@ -218,7 +235,7 @@ def test_a_request_copy_or_a_subagent_line_does_not_count(art, tmp_path):
 def test_the_id_in_a_list_shaped_tool_result_counts(art, tmp_path):
     _write_pending(art, [_entry()])
     block = [{"type": "text", "text": json.dumps({"say_id": "5ca1ab1e"})}]
-    path = _transcript(tmp_path, result(block), tool_use("AskUserQuestion"))
+    path = _transcript(tmp_path, result(block))
     assert _denied(_gate(_event(str(path)), art)).startswith(REASON)
 
 
@@ -298,7 +315,7 @@ def test_another_event_says_nothing(art, tmp_path):
 def test_an_id_not_in_this_transcript_says_nothing_and_is_kept(art, tmp_path):
     entries = [_entry("0ff1ce00")]
     _write_pending(art, entries)
-    path = _transcript(tmp_path, printed("5ca1ab1e"), tool_use("AskUserQuestion"))
+    path = _transcript(tmp_path, printed("5ca1ab1e"))
     assert _gate(_event(str(path)), art) == ""
     assert _read_pending(art) == entries
 
@@ -555,7 +572,7 @@ def test_the_gate_imports_nothing_of_the_plugin_or_the_package():
     source = GATE.read_text(encoding="utf-8")
     imports = re.findall(r"^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))", source, re.MULTILINE)
     modules = {(a or b).split(".")[0] for a, b in imports}
-    assert modules <= {"__future__", "datetime", "json", "os", "re", "stat", "sys", "tempfile",
+    assert modules <= {"__future__", "datetime", "json", "os", "re", "stat", "sys", "tempfile", "time",
                        "typing"}, modules
     assert "spec_from_file_location" not in source
 
@@ -604,3 +621,58 @@ def test_the_hooks_json_command_denies_and_never_exits_2(art, tmp_path):
     broken = subprocess.run(["sh", "-c", command.replace("${CLAUDE_PLUGIN_ROOT}", str(tmp_path / "gone"))],
                             input=event, capture_output=True, env=_env(art), timeout=60)
     assert broken.returncode == 0 and broken.stdout == b""
+
+
+# --- the transcript lags: the gate waits for the card's own line -----------------------------------------
+
+
+def test_a_transcript_without_the_cards_line_says_nothing(art, tmp_path):
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, printed(), with_card=False)
+    assert _gate(_event(str(path)), art) == ""
+    assert _read_pending(art)[0]["refused"] == 0
+
+
+@pytest.mark.parametrize("extra", [{"tool_use_id": None}, {"tool_use_id": ""}, {"tool_use_id": 7}])
+def test_no_tool_use_id_says_nothing(art, tmp_path, extra):
+    _write_pending(art, [_entry()])
+    assert _gate(_event(str(_transcript(tmp_path, printed())), **extra), art) == ""
+
+
+def test_the_cards_line_from_a_subagent_or_another_card_does_not_count(art, tmp_path):
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, printed(), card("toolu_9"),
+                       tool_use("AskUserQuestion", CARD_ID, isSidechain=True), with_card=False)
+    assert _gate(_event(str(path)), art) == ""
+
+
+def test_text_that_lands_while_the_gate_waits_counts(art, tmp_path, monkeypatch):
+    """As in a live session: the text posted before a retried card reached the file after the hook
+    had started. The gate reads again until the card's own line is there, and lets the card go."""
+    import threading
+
+    monkeypatch.setattr(GATE_MOD, "CARD_WAIT", 5.0)
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, printed(), with_card=False)
+
+    def catch_up() -> None:
+        time.sleep(0.4)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text(SUMMARY) + "\n" + card() + "\n")
+
+    writer = threading.Thread(target=catch_up)
+    writer.start()
+    try:
+        assert _gate(_event(str(path)), art) == ""
+    finally:
+        writer.join()
+    assert _read_pending(art) == []
+
+
+def test_the_wait_is_bounded_well_inside_the_hook_timeout():
+    doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    timeout = doc["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"]
+    import importlib
+    fresh = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(fresh)
+    assert fresh.CARD_WAIT <= timeout / 2

@@ -29,8 +29,10 @@ Contract (https://code.claude.com/docs/en/hooks): stdin has `transcript_path`, `
 `hookSpecificOutput.permissionDecision` of "deny" prevents the call and its
 `permissionDecisionReason` is "shown to Claude" ("PreToolUse decision control"); exit 0 with no
 output is no decision. The transcript "is written asynchronously and may lag the in-memory
-conversation", so text written just before the card may not be there yet: that costs at most a
-re-post, and the count still ends the refusals.
+conversation": in a live session the text posted right before a retried card was not on disk yet
+when the hook ran, and the card was refused a second time. Lines are appended in order, so the gate
+waits (at most CARD_WAIT seconds) until the card's own tool_use line (`tool_use_id`) is in the
+transcript, which puts everything before it there too; if it never appears, no opinion.
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ import re
 import stat
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -63,6 +66,9 @@ MAX_PENDING_BYTES = 256 * 1024
 MAX_SAY_CHARS = 64 * 1024
 TAIL_LINES = 400
 TAIL_BYTES = 2 * 1024 * 1024
+# How long to wait for the transcript to catch up with the card, well inside the hook's 10 s timeout.
+CARD_WAIT = 3.0
+CARD_POLL = 0.1
 
 ID = re.compile(r"[0-9a-f]{8}")
 WHITESPACE = re.compile(r"\s+")
@@ -233,6 +239,22 @@ def read_events(rows: list) -> tuple:
     return results, texts
 
 
+def card_rows(path: Any, tool_use_id: Any) -> list:
+    """The transcript tail once it holds the card's own tool_use line (so the text written before
+    the card is there too), polling for up to CARD_WAIT seconds. Doubt when it never does."""
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        raise Doubt("no tool_use_id")
+    deadline = time.monotonic() + CARD_WAIT
+    while True:
+        rows = transcript_tail(path)
+        if any(b.get("type") == "tool_use" and b.get("id") == tool_use_id
+               for row in rows for b in _blocks(row, "assistant", "assistant")):
+            return rows
+        if time.monotonic() >= deadline:
+            raise Doubt("the transcript has not caught up with the card")
+        time.sleep(CARD_POLL)
+
+
 def _squash(text: str) -> str:
     """Runs of whitespace (wrapped lines and non-breaking spaces included) as one space."""
     return WHITESPACE.sub(" ", text).strip()
@@ -271,7 +293,7 @@ def decide(event: Any, now: Optional[datetime] = None) -> Optional[str]:
     if len(fresh) != len(entries):
         save(path, fresh)
         entries = fresh
-    results, texts = read_events(transcript_tail(event.get("transcript_path")))
+    results, texts = read_events(card_rows(event.get("transcript_path"), event.get("tool_use_id")))
     waiting = []
     kept = []
     for entry in entries:
