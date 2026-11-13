@@ -91,7 +91,7 @@ Three cards, asked right after the connection works and before tables are listed
 > *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
 Options: **Skip for now** (no company context; say it can be added later in `/agami-model`) and **Draft it from the database** (after the build, Phase 2f drafts a short description from the model and Phase 7 shows it as a draft to correct). Text in "Other" is the answer. Write it as both of these (the record write is the only thing that fills `organization.yaml`):
-1. `bash "<plugin_root>/scripts/sm" set-org "<artifacts_dir>" --name '<company name>' --description '<one-line summary>'`, each value in single quotes (a `'` inside it written as `’`), so nothing in the text is read by the shell
+1. The name and the one-line summary, each written exactly as the person gave it with the Write tool to its own file, `<artifacts_dir>/local/tmp/agami-org-name.txt` and `<artifacts_dir>/local/tmp/agami-org-description.txt`, then `bash "<plugin_root>/scripts/sm" set-org "<artifacts_dir>" --name-file "<artifacts_dir>/local/tmp/agami-org-name.txt" --description-file "<artifacts_dir>/local/tmp/agami-org-description.txt"`. The person's text never goes on the command line, where the shell would read its quotes and symbols
 2. The full text to the **root** `<artifacts_dir>/organization.md` under `# About this company` (**narrative prose ONLY** — no model facts).
 
 Then confirm both landed. On a **later** onboard (company context already there) don't ask: say *"Sharing the **`<company>`** context you set earlier."*
@@ -105,7 +105,7 @@ Then confirm both landed. On a **later** onboard (company context already there)
 Options: **Generate one for me (Recommended)** / **Skip**.
 
 **Nothing is written at this step** — `datasource.yaml` does not exist until introspection (1.7) creates it. Bind the answer and act on it after 1.7:
-- **Text in "Other"** → its first sentence is `$DATASOURCE_DESCRIPTION`, written right after 1.7: `bash "<plugin_root>/scripts/sm" set-description "<root>" --description '<the sentence>'`, the sentence in single quotes (a `'` inside it written as `’`), so nothing in it is read by the shell. When it has more than one sentence, the whole text also goes to `<artifacts_dir>/<profile>/datasource.md` under `# About this database`.
+- **Text in "Other"** → its first sentence is `$DATASOURCE_DESCRIPTION`, written right after 1.7: the sentence, exactly as the person wrote it, with the Write tool to `<artifacts_dir>/local/tmp/agami-description.txt`, then `bash "<plugin_root>/scripts/sm" set-description "<root>" --description-file "<artifacts_dir>/local/tmp/agami-description.txt"`. The person's text never goes on the command line. When it has more than one sentence, the whole text also goes to `<artifacts_dir>/<profile>/datasource.md` under `# About this database`.
 - **Generate one for me** → `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched, and the Phase 7 summary shows it as a draft they can edit.
 - **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
 
