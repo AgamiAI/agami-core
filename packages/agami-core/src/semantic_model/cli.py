@@ -175,10 +175,27 @@ def _split_list(value: Optional[str]) -> list[str]:
     return list(dict.fromkeys(v.strip() for v in (value or "").split(",") if v.strip()))
 
 
+def _even_runs(names: list[str], max_size: int) -> list[list[str]]:
+    """`names` cut, in order, into the fewest runs of at most `max_size`, the longer runs first."""
+    if not names:
+        return []
+    count = -(-len(names) // max_size)
+    size, extra = divmod(len(names), count)
+    runs, start = [], 0
+    for i in range(count):
+        end = start + size + (1 if i < extra else 0)
+        runs.append(names[start:end])
+        start = end
+    return runs
+
+
 def _enrich_chunks(args) -> int:
-    """The model split into enricher-sized chunks: each area in the model's order, cut into runs of
-    at most `--max-tables` live tables. It reads only the model, so the skill can plan the subagents
-    before the database is touched."""
+    """The model split into enricher-sized chunks: each area in the model's order, cut into the
+    fewest runs of at most `--max-tables` live tables, sized as evenly as possible (13 is 7 + 6, not
+    12 + 1, so no enricher is left with a scrap). `parallel` is true only when there are 2 or more
+    chunks and the model is larger than one chunk: two small areas are quicker described inline than
+    by two subagents. It reads only the model, so the skill can plan the subagents before the
+    database is touched."""
     if args.area or args.out or args.tables is not None:
         _print_json({"error": "--chunks lists every area's chunks; it takes no --area, --out or --tables"})
         return 2
@@ -190,10 +207,10 @@ def _enrich_chunks(args) -> int:
     for area in org.subject_areas:
         names = [t.name for t in _live_items(area.tables_defined)]
         total += len(names)
-        for n, start in enumerate(range(0, len(names), args.max_tables), start=1):
-            chunks.append({"chunk": f"{area.name}-{n}", "area": area.name,
-                           "tables": names[start:start + args.max_tables]})
-    _print_json({"chunks": chunks, "tables": total, "max_tables": args.max_tables})
+        for n, part in enumerate(_even_runs(names, args.max_tables), start=1):
+            chunks.append({"chunk": f"{area.name}-{n}", "area": area.name, "tables": part})
+    _print_json({"chunks": chunks, "tables": total, "max_tables": args.max_tables,
+                 "parallel": len(chunks) >= 2 and total > args.max_tables})
     return 0
 
 
