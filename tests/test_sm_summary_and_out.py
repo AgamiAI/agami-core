@@ -74,13 +74,48 @@ def _unsign_metrics(root: Path, n: int) -> None:
         f.write_text(yaml.safe_dump(doc))
 
 
-@pytest.mark.parametrize("n, line", [(2, "2 definitions are waiting for sign-off."),
-                                     (1, "1 definition is waiting for sign-off.")])
+@pytest.mark.parametrize("n, line", [(2, "2 definitions are waiting for sign-off: 2 metrics."),
+                                     (1, "1 definition is waiting for sign-off: 1 metric.")])
 def test_summary_says_what_waits_for_sign_off(model, n, line):
     _unsign_metrics(model, n)
     text = summary.onboarding_summary(model)["markdown"]
     assert summary.onboarding_summary(model)["totals"]["needs_signoff"] == n
     assert text.endswith(TABLE + "\n\n" + line + "\n")
+
+
+def _awaiting(root: Path, metrics: int, entities: int) -> None:
+    """Leave `metrics` metrics and `entities` entities awaiting sign-off, copying the sample's
+    files under new names when it has fewer, as a fresh build of a larger database leaves them."""
+    area = root / "subject_areas" / "agami-example"
+    for folder, n in (("metrics", metrics), ("entities", entities)):
+        files = sorted((area / folder).glob("*.yaml"))
+        docs = [yaml.safe_load(f.read_text()) for f in files]
+        for f in files:
+            f.unlink()
+        for i in range(n):
+            doc = dict(docs[i % len(docs)])
+            doc["name"] = f"{doc['name']} {i}"
+            doc["review_state"] = "unreviewed"
+            for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+                doc.pop(k, None)
+            (area / folder / f"copy_{i:02d}.yaml").write_text(yaml.safe_dump(doc))
+
+
+def test_summary_counts_what_the_sign_off_card_counts(model, capsys):
+    # A live run's summary said 11 (metrics alone) where the card said 23.
+    _awaiting(model, metrics=11, entities=12)
+    assert cli.main(["review-queue", str(model)]) == 0
+    queue = json.loads(capsys.readouterr().out)["counts"]
+    assert queue["rule_1"] + queue["rule_2"] == 23
+    text = summary.onboarding_summary(model)["markdown"]
+    assert text.endswith("\n\n23 definitions are waiting for sign-off: 11 metrics, 12 entities.\n")
+    assert text.startswith("**agami-example: 11 tables, 12 joins, 11 metrics, 14 examples.**")
+
+
+def test_the_sign_off_line_names_joins_too():
+    from semantic_model import summary as S
+    assert S._signoff_line({"metrics": 0, "entities": 1, "joins": 2, "waiting": 3, "signed": 0}) == (
+        "3 definitions are waiting for sign-off: 1 entity, 2 joins.")
 
 
 def test_summary_has_a_totals_row_with_two_areas(model):

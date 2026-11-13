@@ -104,8 +104,9 @@ def test_describe_count_matches_overview(model):
     s = _by_id(steps.onboarding_steps(model))
     totals = _totals(model)
     assert s["describe"]["count"] == f"{totals['described_pct']}% described, {totals['metrics']} metrics"
-    signed = totals["metrics"] - totals["needs_signoff"]
-    assert s["signoff"]["count"] == f"{signed} of {totals['metrics']} signed"
+    signoff = curate.signoff_counts(L.load_datasource(model, include_rejected=True))
+    assert s["signoff"]["count"] == (
+        f"{signoff['signed']} of {signoff['signed'] + signoff['waiting']} signed")
     assert s["examples"]["count"] == (f"{totals['examples']} examples" if totals["examples"] else None)
     # pinned to the sample, so a count that drifts from overview's totals can't pass by rebuilding it
     assert [s[i]["count"] for i in ("describe", "signoff", "examples")] == [
@@ -119,6 +120,44 @@ def test_signoff_counts_only_signed_metrics(model):
     metric.write_text(yaml.safe_dump(doc))
     steps.mark(model, "signoff", "done")
     assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "7 of 8 signed"
+
+
+def _unsign_all(root: Path, folder: str) -> int:
+    """Send every file in each area's `folder` back to review, as a fresh build leaves them."""
+    files = sorted((root / "subject_areas").glob(f"*/{folder}/*.yaml"))
+    for f in files:
+        doc = yaml.safe_load(f.read_text())
+        doc["review_state"] = "unreviewed"
+        for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+            doc.pop(k, None)
+        f.write_text(yaml.safe_dump(doc))
+    return len(files)
+
+
+def test_signoff_counts_entities_and_joins_like_the_card(model):
+    # The card counts metrics, entities and joins awaiting review; a run that signs nothing still
+    # shows a count while the step runs and once it is done.
+    metrics, entities = _unsign_all(model, "metrics"), _unsign_all(model, "entities")
+    rel = model / "subject_areas" / "agami-example" / "relationships.yaml"
+    doc = yaml.safe_load(rel.read_text())
+    doc["relationships"][0].update(review_state="unreviewed", signed_off_by=None,
+                                   signed_off_at=None, signed_off_role=None)
+    rel.write_text(yaml.safe_dump(doc))
+    total = metrics + entities + 1
+    steps.mark(model, "signoff", "in_progress")
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == f"0 of {total} signed"
+    assert total == 17
+    steps.mark(model, "signoff", "done")
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "0 of 17 signed"
+
+
+def test_describe_shows_its_percentage_before_any_metric(model):
+    for f in (model / "subject_areas").glob("*/metrics/*.yaml"):
+        f.unlink()
+    steps.mark(model, "describe", "in_progress")
+    s = _by_id(steps.onboarding_steps(model))
+    assert s["describe"]["count"] == "40% described, 0 metrics"
+    assert s["signoff"]["count"] is None  # pending: no count yet
 
 
 def test_a_model_that_stops_loading_does_not_regress_the_list(model):

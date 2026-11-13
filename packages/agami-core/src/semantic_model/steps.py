@@ -217,7 +217,7 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     from . import curate
     try:
         org = L.load_datasource(root, include_rejected=True)
-        return curate.overview(org, root)["totals"], None
+        return {**curate.overview(org, root)["totals"], "signoff": curate.signoff_counts(org)}, None
     except Exception as exc:  # noqa: BLE001 — see docstring
         first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
         return None, f"The model in {root} couldn't be read: {first}"
@@ -274,11 +274,14 @@ def _build_count(log: Path) -> Optional[str]:
 
 
 def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
-    metrics = totals["metrics"]
+    # The sign-off card's own total (metrics, entities and joins), so a run that signs nothing
+    # still reads "0 of 23 signed", and the step never counts metrics alone while the card says 23.
+    signoff = totals["signoff"]
+    to_sign = signoff["waiting"] + signoff["signed"]
     return {
         "build": f"{totals['tables']} tables, {totals['joins']} joins",
-        "describe": f"{totals['described_pct']}% described, {metrics} metrics",
-        "signoff": f"{metrics - totals['needs_signoff']} of {metrics} signed" if metrics else None,
+        "describe": f"{totals['described_pct']}% described, {totals['metrics']} metrics",
+        "signoff": f"{signoff['signed']} of {to_sign} signed" if to_sign else None,
         "examples": f"{totals['examples']} examples" if totals["examples"] else None,
     }
 

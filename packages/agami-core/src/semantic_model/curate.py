@@ -445,6 +445,29 @@ def _entity_item(area: Optional[str], ent) -> dict:
             "maps_to": maps, **_trust(ent)}
 
 
+def signoff_counts(org: Datasource) -> dict[str, int]:
+    """What the sign-off card counts: metrics, entities and joins awaiting review (`metrics`,
+    `entities`, `joins`, summed in `waiting`: the review queue's Rule 1 and Rule 2 items), and those
+    a person already approved (`signed`; engine-approved ones are not counted). The step list and the
+    closing summary both read this, so neither can show a different number from the card."""
+    out = {"metrics": 0, "entities": 0, "joins": 0, "waiting": 0, "signed": 0}
+    kinds = {"metric": "metrics", "entity": "entities", "relationship": "joins"}
+    groups = [(sa.metrics, "metric") for sa in org.subject_areas]
+    groups += [(sa.entities, "entity") for sa in org.subject_areas]
+    groups += [(sa.relationships, "relationship") for sa in org.subject_areas]
+    groups += [(org.cross_subject_area_metrics, "metric"),
+               (org.cross_subject_area_relationships, "relationship")]
+    for objs, kind in groups:
+        for obj in objs:
+            tab = _tab(obj)
+            if tab == "review":
+                out[kinds[kind]] += 1
+                out["waiting"] += 1
+            elif tab == "manual":
+                out["signed"] += 1
+    return out
+
+
 def _live(objs: list) -> list:
     return [o for o in objs if getattr(o, "review_state", "approved") != "rejected"]
 

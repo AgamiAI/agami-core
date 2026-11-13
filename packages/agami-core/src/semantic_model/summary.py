@@ -24,7 +24,9 @@ def _cell(text: str) -> str:
 
 
 def _count(n: int, noun: str) -> str:
-    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+    if n == 1:
+        return f"{n} {noun}"
+    return f"{n} {noun[:-1]}ies" if noun.endswith("y") else f"{n} {noun}s"
 
 
 def _row(name: str, numbers: dict[str, Any]) -> str:
@@ -33,10 +35,15 @@ def _row(name: str, numbers: dict[str, Any]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
-def _signoff_line(count: int) -> str:
-    if count == 1:
-        return "1 definition is waiting for sign-off."
-    return f"{count} definitions are waiting for sign-off."
+def _signoff_line(counts: dict[str, int]) -> str:
+    """The sign-off card's own count, split by kind ("23 definitions are waiting for sign-off: 11
+    metrics, 12 entities."): a live run's summary counted metrics alone and said 11 where the card
+    said 23. A kind with nothing waiting is left out."""
+    total = counts["waiting"]
+    head = "1 definition is" if total == 1 else f"{total} definitions are"
+    parts = [_count(counts[key], noun) for key, noun in
+             (("metrics", "metric"), ("entities", "entity"), ("joins", "join")) if counts[key]]
+    return f"{head} waiting for sign-off: {', '.join(parts)}."
 
 
 def onboarding_summary(root: Path) -> dict[str, Any]:
@@ -54,8 +61,9 @@ def onboarding_summary(root: Path) -> dict[str, Any]:
     if len(view["areas"]) > 1:
         table.append(_row("**Total**", totals))
     blocks.append("\n".join(table))
-    if totals["needs_signoff"] > 0:
-        blocks.append(_signoff_line(totals["needs_signoff"]))
+    waiting = curate.signoff_counts(org)
+    if waiting["waiting"] > 0:
+        blocks.append(_signoff_line(waiting))
     took = timing.onboarding_timing(root)["text"]
     if took:
         blocks.append(took)
