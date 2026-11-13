@@ -668,7 +668,7 @@ def _progress_line(raw: str) -> dict:
         # reason (the database's or the model's words) is quoted with the longer failure cap.
         from .say_text import quoted
         if raw.startswith("failed:"):
-            reason = quoted(raw[len("failed:"):].strip(), steps.FAILURE_CAP)
+            reason = quoted(steps.strip_paths(raw[len("failed:"):].strip()), steps.FAILURE_CAP)
             return {"line": f"The build didn't finish: {reason}", "done": False, "failed": True}
         return {"line": quoted(raw), "done": False, "failed": False}
     m, phrase, unit = parsed

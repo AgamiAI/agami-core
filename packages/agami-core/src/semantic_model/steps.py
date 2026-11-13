@@ -240,7 +240,9 @@ def _load_error(exc: Exception) -> str:
     file's name alone."""
     if isinstance(exc, OSError):
         reason = exc.strerror or type(exc).__name__
-        return f"{reason}: '{Path(str(exc.filename)).name}'" if exc.filename else reason
+        # A bytes name printed as str() kept its b'' quotes ('bytes.yaml'' in the chat).
+        name = os.fsdecode(exc.filename) if isinstance(exc.filename, bytes) else str(exc.filename)
+        return f"{reason}: '{Path(name).name}'" if exc.filename else reason
     return (str(exc).strip().splitlines() or [type(exc).__name__])[0]
 
 
@@ -280,11 +282,40 @@ def _own_log(log: Path, attempt_at: float) -> bool:
         return False
 
 
+_TOKEN = re.compile(r"\S+")
+_EDGE_BEFORE = "'\"(<["
+_EDGE_AFTER = "'\")>],;:.!?"
+_DRIVE = re.compile(r"[A-Za-z]:\\")
+
+
+def _last_part(token: str) -> str:
+    """A path-like token as its last component, the quotes and punctuation around it kept."""
+    start, end = 0, len(token)
+    while start < end and token[start] in _EDGE_BEFORE:
+        start += 1
+    while end > start and token[end - 1] in _EDGE_AFTER:
+        end -= 1
+    core = token[start:end]
+    seps = core.count("/") + core.count("\\")
+    if not (core.startswith(("/", "~")) or _DRIVE.match(core) or seps >= 2):
+        return token
+    parts = [p for p in re.split(r"[\\/]", core) if p]
+    return token[:start] + parts[-1] + token[end:] if parts else token
+
+
+def strip_paths(reason: str) -> str:
+    """`reason` with every path-like token (starting with `/`, `~` or a drive's `C:\\`, or holding two
+    or more path separators) cut to its last component: a failure reason is posted whole, and the
+    engine's errors name files by absolute path (`/Users/…/creds.yaml not found`), the home or temp
+    folder included. A token with one separator (`1/2`) is left alone."""
+    return _TOKEN.sub(lambda m: _last_part(m.group(0)), reason)
+
+
 def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
     """The problem line for a build that ended without finishing."""
     if state == "failed":
         # the reason is the build's error text, which can quote the database or the model
-        return f"The {noun} didn't finish: {quoted(reason or '', FAILURE_CAP)}"
+        return f"The {noun} didn't finish: {quoted(strip_paths(reason or ''), FAILURE_CAP)}"
     return f"The {noun} stopped before it finished."
 
 

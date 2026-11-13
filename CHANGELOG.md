@@ -30,7 +30,10 @@ below corresponds to one such version.
   A failed build's reason keeps up to 200 characters (the engine's own hints fit), and is said once,
   by `sm steps`, not again by `sm progress`; a build killed without a word ends `sm progress`'s loop
   too ("The build has ended: run `sm steps` and go on."). A log line the engine didn't phrase is
-  quoted, and a file the model can't open is named by its file name, never its path. The closing
+  quoted, and a file the model can't open is named by its file name, never its path (a bytes
+  file name too, with no stray quote). In a failure reason every path-like token (one starting
+  with `/`, `~` or a drive's `C:\`, or holding two or more path separators) is cut to its last
+  component: `failed: /Users/…/creds.yaml not found` is said as "creds.yaml not found". The closing
   mark with no model built yet (none on disk, or a build running) says why there is no summary.
   `seed-validate --out --no-card` says the table with a `then` that asks no examples card.
   On a resume whose build already wrote this run's model (the build step in progress by its mark,
