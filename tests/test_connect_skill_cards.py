@@ -375,7 +375,9 @@ def test_4a_personal_data_card_hides_columns_with_exclude_ops():
 def test_4a_identity_card_asks_once_and_saves_to_config():
     s = _phase_4()
     assert "reviewer_email" in s and "reviewer_role" in s
-    assert "chmod 600" in s
+    # .config holds no secret, and a `chmod` there stopped for permission on every first sign-off
+    assert "chmod" not in s
+    assert "Merge the two keys into `<artifacts_dir>/local/.config` (keep every other key)" in s
     assert "first approval" in s.lower()
     assert "never infer" in s.lower()
     assert "you@example.com" in s
