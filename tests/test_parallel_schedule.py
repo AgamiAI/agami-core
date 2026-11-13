@@ -55,7 +55,7 @@ def test_the_schedule_names_every_agent_the_plugin_ships():
 
 def test_parallel_work_rules():
     text = _read(PARALLEL)
-    assert len(text.splitlines()) < 80
+    assert len(text.splitlines()) < 90
     assert "run_in_background: true" in text
     assert "wait-files" in text and "--wait 60" in text and "all_ready" in text
     assert "at most 4" in text
@@ -117,7 +117,8 @@ def test_with_a_model_spec_the_enrichers_wait_for_phase_2():
     build = _read(REFS / "build.md")
     start = build[build.index("**Start the enrichers now"):build.index("**Join candidates")]
     assert "unless a model spec was attached" in start
-    assert "With one chunk, or with no Agent tool, nothing starts here" in start
+    assert "With `parallel: false` (one chunk, or a small model), or with no Agent tool, nothing starts" \
+        in start
     enrich = _read(REFS / "enrich.md")
     assert "**When 1.7 started the enrichers**" in enrich
     assert "pick up at 2a step 3 (collect)" in enrich
@@ -131,7 +132,7 @@ def test_one_asked_question_is_kept_once():
 def test_enrichers_start_from_two_chunks():
     text = _read(REFS / "enrich.md")
     assert 'enrich-input "$ROOT" --chunks' in text
-    assert "2 or more chunks" in text
+    assert "`parallel: true`" in text and "2 or more chunks" not in text
     assert "more than 30 tables" not in text
     assert re.search(r'enrich-input "\$ROOT" --area <area> --tables <t1,t2,…>', text)
     assert re.search(r'apply-enrichment "\$ROOT" --area <area> --tables <t1,t2,…>', text)
@@ -160,6 +161,52 @@ def test_example_writers_start_with_sign_off_and_never_write():
     assert "rejected in sign-off" in five_a
     after = examples[examples.index("**5b+5c"):]
     assert after.count('sm" seed-examples "$ROOT"') == 1
+
+
+def test_an_agent_call_that_returns_at_once_is_a_background_run():
+    fallback = _flat(_read(PARALLEL))
+    fallback = fallback[fallback.index("## 5. Fallbacks"):fallback.index("## 6.")]
+    assert "the Desktop app's has none" in fallback
+    assert "If it returns before the subagent has finished" in fallback
+    assert "the subagent is in the background: go on with the paired cards and collect with `wait-files`" \
+        in fallback
+    assert "Only if it returns the subagent's finished result is it foreground" in fallback
+    for doc in ("enrich.md", "review.md"):
+        assert "`run_in_background: true` where the Agent tool has that parameter" in _read(REFS / doc), doc
+
+
+def test_a_subagent_that_finished_without_its_file_is_given_up_at_once():
+    text = _flat(_read(PARALLEL))
+    give_up = text[text.index("## 4. Give up cleanly"):text.index("## 5.")]
+    assert "So is a subagent that has finished with no result file" in give_up
+    assert "give it up at once, with no wait" in give_up
+
+
+def test_a_resume_restamps_every_batch():
+    assert "a resume starts every batch again (readers, enrichers and writers alike) with a new stamp" \
+        in _flat(_read(PARALLEL))
+
+
+def test_describe_shows_no_chunk_count_of_its_own():
+    enrich = _flat(_read(REFS / "enrich.md"))
+    assert "of 9 chunks" not in enrich
+    assert '"✓ Sales 1 of 3: 12 tables described"' in enrich
+    assert 'After each applied chunk, run `sm steps "$ROOT"` and refresh the task list' in enrich
+    review = _flat(_read(REFS / "review.md"))
+    assert 'run `sm steps "$ROOT"` and refresh the task list ([task-list.md]' in review
+
+
+def test_a_resumed_build_with_a_model_goes_to_the_join_cards():
+    build = _flat(_read(REFS / "build.md"))
+    assert "a model is already on disk and no build log is running, go to the join cards below; " \
+        "do not build again" in build
+
+
+def test_the_example_phase_says_what_is_true_and_never_waits_silently():
+    examples = _flat(_read(REFS / "examples.md"))
+    assert "Expect 1–3 min" not in examples
+    assert "Collecting the example questions drafted during sign-off" in examples
+    assert "post one line saying it is still running" in examples
 
 
 def test_no_agent_tool_means_inline():

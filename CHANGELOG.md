@@ -18,19 +18,20 @@ below corresponds to one such version.
   agami-connect's SKILL.md gains a schedule, "What runs at the same time", and
   `shared/parallel-work.md` says how a batch starts, is collected with `sm wait-files` and is given
   up on. Column descriptions go to one `agami-enricher` per chunk of up to 12 tables whenever the
-  model has 2 or more chunks (it was 2+ areas and more than 30 tables), started right after the
+  model's chunks print `parallel: true` (it was 2+ areas and more than 30 tables), started right after the
   build so they run during the join cards. A new `agami-example-writer` agent drafts example
   questions for one subject area while the person signs off definitions; the main chat drops or
   rewrites what sign-off changed, adds the cross-area examples, and `seed-examples` checks every
   one as before. Document readers now write their findings to a result file and are collected the
   same way. `sm batch-id` prints a fresh stamp that goes into every batch's file names, so a file
   from an earlier run is never taken for this one's. With no Agent tool the same work is done
-  inline. Subagents still never write the model, run a command or ask the person anything. `sm steps` reads a build mark left by a session
-  that ended, with no log written since, as stopped once it is older than 30 minutes.
+  inline. Subagents still never write the model, run a command or ask the person anything.
 - **Enrichers work in chunks of at most 12 tables, and the skill can wait on them without ending
   the turn.** `sm enrich-input <root> --chunks [--max-tables 12]` splits the model into chunks
-  (each subject area in order, cut into runs of at most 12 live tables, named `<area>-1`,
-  `<area>-2`, …) without reading the database. `sm enrich-input … --tables t1,t2` writes one
+  (each subject area in order, cut into the fewest runs of at most 12 live tables, sized evenly so
+  13 tables are 7 + 6, named `<area>-1`, `<area>-2`, …) without reading the database. Its
+  `parallel` is true only with 2 or more chunks on a model of more than 12 tables, so two small
+  areas are described inline. `sm enrich-input … --tables t1,t2` writes one
   chunk's input file (the area's bundle stays whole; the file gains `chunk_tables`) and refuses a
   table outside the area. `sm apply-enrichment … --tables t1,t2` refuses the whole result when any
   description or edit touches another table; entities stay area-level. `sm wait-files --file <path>
@@ -46,7 +47,8 @@ below corresponds to one such version.
   change instead of typing it, each phase file marks its own step where it starts and ends, and the
   rule lives in one place, `shared/task-list.md`. A build that fails or stops says why and the list
   stays at "Read the tables and joins"; `sm progress --wait` returns at once on a failed build, with
-  `"failed": true`. Marking an earlier step started reopens every step after it, so reloading the
+  `"failed": true`. `sm steps` reads a build mark left by a session that ended, with no log written
+  since, as stopped once it is older than 30 minutes. Marking an earlier step started reopens every step after it, so reloading the
   schema shows that run's progress rather than the finished list. The sample path shows the same
   nine steps.
 

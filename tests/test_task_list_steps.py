@@ -83,6 +83,14 @@ def test_only_the_shared_file_names_a_host_task_tool():
     assert stated == [TASK_LIST]
 
 
+def test_the_list_also_moves_during_describe_and_sign_off():
+    # the paragraph right after the opening rule and its `<plugin_root>` pointer
+    paragraphs = [" ".join(p.split()) for p in _text(TASK_LIST).split("\n\n")]
+    after = paragraphs.index(next(p for p in paragraphs if p.startswith("> `<plugin_root>`"))) + 1
+    assert paragraphs[after] == ("Also refresh the task list after each applied chunk in describe, and after "
+                                 "each sign-off card is answered.")
+
+
 def test_connect_links_the_task_list_rule():
     section = _progress_section(_text(CONNECT / "SKILL.md"))
     assert "[shared/task-list.md](../../shared/task-list.md)" in section

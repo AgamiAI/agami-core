@@ -1,6 +1,6 @@
 """agami-connect reads documents and describes larger models in parallel subagents.
 
-A doc reader per document runs while the database is read; on a model of 2 or more chunks an
+A doc reader per document runs while the database is read; on a model whose chunks are `parallel` an
 enricher per chunk describes it, and an example writer per area drafts example questions during
 sign-off. Subagents can't show question cards, so they only read
 and return data: the main chat writes, one batch at a time, and an enricher's edits go through
@@ -75,6 +75,21 @@ def test_the_enricher_never_writes_and_reads_the_shared_rules():
     assert "skills/agami-connect/references/enrich.md" in body  # one set of rules, not a copy
 
 
+def test_the_enricher_describes_only_its_chunk():
+    meta, body = _agent("agami-enricher")
+    assert "chunk_tables" in body
+    assert "**Describe only the tables in `chunk_tables`.**" in body
+    assert "every table it rests on is in your chunk" in body
+    assert "one per subject area" not in meta["description"]
+    assert "one per chunk" in meta["description"] and len(meta["description"]) < 1024
+
+
+def test_the_enricher_launch_prompt_names_the_chunks_tables():
+    text = (REFS / "enrich.md").read_text(encoding="utf-8")
+    launch = text[text.index("2. **Launch the enrichers"):text.index("3. **Collect**")]
+    assert "Each prompt names `area`, `tables` (the chunk's tables" in launch
+    assert "**Two chunks of one area can return the same entity**" in text
+
 
 def test_1_5_gives_each_document_its_own_reader_in_the_background():
     text = (REFS / "context-and-tables.md").read_text(encoding="utf-8")
@@ -87,7 +102,7 @@ def test_1_5_gives_each_document_its_own_reader_in_the_background():
 
 def test_2a_uses_enrichers_from_two_chunks_and_applies_with_tables():
     text = (REFS / "enrich.md").read_text(encoding="utf-8")
-    assert "**2 or more chunks**" in text
+    assert "**`parallel: true`**" in text
     assert 'scripts/sm" apply-enrichment "$ROOT" --area <area> --tables <t1,t2,…>' in text
     assert 'scripts/sm" enrich-input "$ROOT" --area <area> --tables <t1,t2,…> --profile <profile>' in text
     assert "parallel-work.md" in text

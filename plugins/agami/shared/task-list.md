@@ -6,6 +6,8 @@ Run `sm steps` at the start of onboarding, when a step starts or ends, and after
 >
 > `$ROOT` is the database's folder, `<artifacts_dir>/<profile>`.
 
+Also refresh the task list after each applied chunk in describe, and after each sign-off card is answered.
+
 ```bash
 bash "<plugin_root>/scripts/sm" steps "$ROOT"
 bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark <id>=in_progress
