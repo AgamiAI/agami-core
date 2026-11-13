@@ -94,6 +94,15 @@ below corresponds to one such version.
   card's own line to reach it: without that, a
   live session refused the retried card although the text had just been posted. When the scratch folder can't be
   written, the commands print what they printed before, with no `say_id` and no extra sentence.
+  The refusal now says to write the text as the visible message (not in a thinking block) and to
+  ask the same card again in the same reply, without ending the turn: live runs put the text in a
+  thinking block after the first refusal, and after the second posted it and ended the turn with
+  no card. A `Stop` hook (`scripts/say_resume.py`) catches that ending: when the gate refused a
+  card for a text of this session and no card has been asked and the person has said nothing
+  since, it keeps the turn going once, with one fixed sentence ("Ask that card now."), and records
+  `resumed` on the entry so it never does so again for that text (the engine carries `resumed`
+  over when it prints the same text again, as it does `refused`). It never blocks when
+  `stop_hook_active` is true, and on any doubt says nothing, so the turn ends as before.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With
   agami's library missing or older than the plugin, those 13 verbs stop with
