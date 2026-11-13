@@ -44,6 +44,13 @@ def test_the_engine_says_rule_is_one_short_shared_file():
         assert part in flat, part
 
 
+def test_a_card_never_shares_a_reply_with_an_sm_call():
+    # A live run asked the card in the same reply as the `sm` call that printed the text to post, so
+    # the card was out before the text it had to follow existed.
+    flat = _flat(_read(ENGINE_SAYS))
+    assert "Never ask a card in the same reply as an `sm` call: wait for its output first." in flat
+
+
 CLOSING_RULE = ("The closing card is asked only in a message that begins with the summary. If the closing "
                 "mark's `say` does not contain the summary table")
 CLOSING_AGAIN = 'then run `sm steps "<root>" --mark first_question=in_progress` again.'
