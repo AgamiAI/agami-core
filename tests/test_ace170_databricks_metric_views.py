@@ -597,7 +597,7 @@ def test_a_join_tree_skips_tables_it_cannot_place_and_on_it_cannot_read():
     rel = X.ExportRelationship("a->b", type("R", (), {"on": "a.x = 'unterminated"})())
     assert not DB._on_reads_its_ends(rel.relationship, "a", "b")
     edge = DB._Edge("a", "b", rel, "x", "y")
-    tree = DB._join_tree("a", {"a": [edge]}, {"a"}, {"a": "a", "b": "b"})
+    tree = DB._join_tree("a", {"a": [edge]}, {"a"}, {"a": "a", "b": "b"}, {"a": set(), "b": set()})
     assert tree.order == () and tree.skipped == ()
 
 
@@ -653,6 +653,47 @@ def test_two_joined_tables_named_alike_are_joined_once_and_the_other_join_report
     names = [j["name"] for j in doc["joins"]]
     assert names.count("store_groups") == 1 and _validate(doc) == []
     assert ("degraded", "name_collision") in _losses(section)[("relationship", "orders->store-groups")]
+
+
+def test_join_names_and_source_columns_never_read_as_one_another(model, tmp_path):
+    # A join named like a column of the table it hangs from is ambiguous to Databricks
+    # ([AMBIGUOUS_REFERENCE_TO_FIELDS]); a source column named `source`, written `source.source`,
+    # reads as a field of itself ([INVALID_EXTRACT_BASE_FIELD_TYPE]).
+    tables = {"visits": ["id", "source", "articles"], "articles": ["id", "category"],
+              "category": ["id", "label"]}
+    for name, cols in tables.items():
+        _put(model, f"subject_areas/{AREA}/tables/{name}.yaml", {
+            "name": name, "schema": "SALES_DATA", "grain": ["id"],
+            "columns": [_col(c, "integer" if c == "id" else "string") for c in cols]})
+    rels = yaml.safe_load((model / f"subject_areas/{AREA}/relationships.yaml").read_text())
+    rels += [_rel("visits", "articles", from_column="articles", to_column="id"),
+             _rel("articles", "category", from_column="category", to_column="id")]
+    _put(model, f"subject_areas/{AREA}/relationships.yaml", rels)
+    _put(model, f"subject_areas/{AREA}/metrics/visit_sources.yaml",
+         _metric("visit sources", "COUNT(DISTINCT visits.source)", ["visits"]))
+    _, files = _export(model, tmp_path / "s")
+    doc = _definition(files["sales__visits.sql"])
+    (top,) = doc["joins"]
+    (nested,) = top["joins"]
+    assert (top["name"], nested["name"]) == ("articles_join", "category_join")
+    assert top["on"] == "source.articles = articles_join.id"
+    assert nested["on"] == "articles_join.category = category_join.id"
+    fields = {f["name"]: f["expr"] for f in doc["fields"]}
+    assert fields["source"] == "`source`" and fields["articles"] == "source.articles"
+    assert fields["category_label"] == "articles_join.category_join.label"
+    assert _measures({"x": files["sales__visits.sql"]})["visit sources"]["expr"] == \
+        "COUNT(DISTINCT `source`)"
+    assert _validate(doc) == []
+    for e in _expressions(doc):
+        _parse(e)
+
+
+def test_a_join_name_steps_past_every_name_in_its_scope():
+    assert DB._join_name("a", set(), set()) == "a"
+    assert DB._join_name("a", {"a"}, set()) == "a_join"
+    assert DB._join_name("a", {"a"}, {"a_join"}) == "a_join_2"
+    assert DB._join_name("source", set(), set()) == "source_join"
+    assert len(DB._join_name("x" * 255, {"x" * 255}, set())) == 255
 
 
 def test_names_past_the_identifier_limit_are_reported_not_written(model, tmp_path):

@@ -87,8 +87,9 @@ below corresponds to one such version.
   `<area>.analyst_evaluation_config.yaml` (Cortex Analyst's result-based
   scoring of the view's verified queries, written whenever the view holds one; it names the view
   `<database>.<schema>.<view>` and lists the queries it scores by question) and
-  `<area>.evaluation_run.sql` set up and start the runs; the run file sets the view's schema, since
-  an evaluation started with SQL runs in the session's database and schema. `--snowflake-mcp-server` (off by default) writes `<area>.mcp_server.sql`, a
+  `<area>.evaluation_run.sql` set up and start the runs; the run file holds no `USE`, which the SQL
+  API refuses, and its header names the schema to run it in, since an evaluation started with SQL
+  runs in the session's database and schema. `--snowflake-mcp-server` (off by default) writes `<area>.mcp_server.sql`, a
   Snowflake-managed MCP server over the view and the agent.
 - **Databricks: metric views.** One per fact table (`databricks/metric_views/<area>__<table>.sql`,
   version 1.1), with many-to-one joins, the joined tables' columns as fields, and each metric's

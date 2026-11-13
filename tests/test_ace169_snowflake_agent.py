@@ -940,7 +940,7 @@ def test_the_run_statements_parse_and_stage_the_files_byte_for_byte(acme):
     out, _ = acme
     sql = _read(out, f"{AREA}.evaluation_run.sql")
     statements = _statements(sql)
-    assert isinstance(statements[0], exp.Use)
+    assert isinstance(statements[0], exp.Create)   # the stage: no USE, which the SQL API refuses
     staged = {}
     for s in statements:
         if isinstance(s, exp.Copy):
@@ -1525,17 +1525,19 @@ def test_the_computed_answer_rounds_non_integer_numbers_to_plain_decimals(acme):
 # ---------------------------------------------------------------------------
 
 
-def test_only_the_run_file_sets_a_schema_and_its_header_says_why(acme, sample):
+def test_no_file_sets_a_schema_and_the_run_file_says_which_schema_it_needs(acme, sample):
+    # The SQL API refuses USE ("Command not supported by SQL API: USE"), so no file holds one; an
+    # evaluation still runs in the session's schema, which the run file's header names.
     out, _ = acme
     run = _read(out, f"{AREA}.evaluation_run.sql")
-    head = run.split("\nUSE SCHEMA", 1)[0]
+    head = run.split("\nCREATE STAGE", 1)[0]
     assert "session's database and schema" in head and "fully qualified" in head
+    assert "with that set to DEMO.SALES_DATA" in " ".join(head.replace("-- ", "").split())
     for root in (acme[0], sample[0]):
         for path in (root / "snowflake").glob("*.sql"):
-            if path.name.endswith(".evaluation_run.sql"):
-                continue
             assert not [s for s in _statements(path.read_text("utf-8"))
                         if isinstance(s, exp.Use)], path.name
+            assert not re.search(r"^USE ", path.read_text("utf-8"), re.M), path.name
 
 
 def test_the_response_instruction_only_asks_for_attribution(acme):

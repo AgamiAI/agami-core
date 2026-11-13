@@ -108,6 +108,13 @@ def _check_tags(where: str, item: dict, problems: list[str]) -> None:
             problems.append(f"{where}: {value!r} is not a CERTIFICATION_STATUS value")
 
 
+def _ident(text: str) -> str:
+    """A column name as the view's YAML spells it (bare, or double-quoted like a member's `expr`),
+    as one name for comparing: quoted text as stored, bare text casefolded like the rest here."""
+    node = _parse(text) if text else None
+    return node.name.casefold() if isinstance(node, exp.Column) else text.casefold()
+
+
 def _physical(table: dict) -> set[str]:
     """Columns the table exposes as a plain column expression: all the validator can know of the
     base table, since it cannot see the warehouse."""
@@ -168,7 +175,7 @@ def _check_table(t: dict, problems: list[str]) -> None:
     keys = ([t["primary_key"]] if "primary_key" in t else []) + t.get("unique_keys", [])
     for k in keys:
         # Keys are physical base table columns.
-        if not k.get("columns") or any(c.casefold() not in phys for c in k["columns"]):
+        if not k.get("columns") or any(_ident(c) not in phys for c in k["columns"]):
             problems.append(f"{where}: a key names a column that is not a physical column")
     for s in _MEMBERS + ("filters",):
         for it in t.get(s, []):
@@ -239,13 +246,13 @@ def validate_semantic_view(doc: dict) -> list[str]:
             problems.append(f"relationship {r['name']}: no relationship_columns")
         for c in cols:
             _keys(f"relationship {r['name']}", "relationship_column", c, problems)
-            if c.get("left_column", "").casefold() not in _physical(tables[left]):
+            if _ident(c.get("left_column", "")) not in _physical(tables[left]):
                 problems.append(f"relationship {r['name']}: left column is not a column of {left}")
         rt = tables[right]
         keys = [rt["primary_key"]] if "primary_key" in rt else []
         keys += rt.get("unique_keys", [])
-        want = {c.get("right_column", "").casefold() for c in cols}
-        if want not in [{x.casefold() for x in k["columns"]} for k in keys]:
+        want = {_ident(c.get("right_column", "")) for c in cols}
+        if want not in [{_ident(x) for x in k["columns"]} for k in keys]:
             problems.append(f"relationship {r['name']}: right columns are not a key of {right}")
         edges.setdefault(left, set()).add(right)
     if _has_cycle(edges):
@@ -1122,9 +1129,16 @@ def _keyword_view() -> X.ExportView:
             _col("table", "decimal", aggregation="additive")]
     t = X.ExportTable(M.Table(name="order", columns=[M.Column(**c) for c in cols], grain=["id"]),
                       X.PhysicalName(None, "SALES_DATA", "order"))
+    # A table whose key is a keyword, joined on a keyword column: `order.group` -> `group.select`.
+    g = X.ExportTable(M.Table(name="group", columns=[M.Column(**_col("select", "string"))],
+                              grain=["select"], unique_keys=[["select"]]),
+                      X.PhysicalName(None, "SALES_DATA", "group"))
+    rel = X.ExportRelationship("order->group", M.Relationship(
+        from_table="order", to_table="group", relationship="many_to_one", from_column="group",
+        to_column="select"))
     total = X.ExportMetric(M.Metric(name="order count", calculation="Orders."),
                            {"Snowflake": 'COUNT(DISTINCT "order".id) + COUNT(SALES_DATA.order.id)'})
-    return _fake_view("select", tables=(t,), metrics=(total,), examples=(
+    return _fake_view("select", tables=(t, g), metrics=(total,), relationships=(rel,), examples=(
         X.ExportQuestion("example", "q", "q?", 'SELECT "order", SUM("table") FROM "order" GROUP BY 1'),))
 
 
@@ -1144,9 +1158,20 @@ def test_keyword_columns_and_names_write_a_view_snowflake_can_parse():
     assert metric == "COUNT(DISTINCT order_.id) + COUNT(order_.id)"
     (q,) = doc["verified_queries"]
     assert q["sql"] == "SELECT order_, SUM(table_) FROM __order_ GROUP BY 1"
-    # The base table's own name is a keyword: written as stored, and said so.
-    got = {(x.kind, x.name): (x.outcome, x.reason) for x in losses}
-    assert got[("table", "order")] == ("degraded", "target_rule")
+    # Every name the view reads from the warehouse goes through the one quoting rule: Snowflake
+    # refuses a bare keyword there too ("Invalid identifier 'GROUP'. Consider adding double quotes").
+    assert t["base_table"] == {"database": "DEMO", "schema": "SALES_DATA", "table": '"ORDER"'}
+    assert t["primary_key"] == {"columns": ["id"]}
+    g = _table(doc, "group_")
+    assert g["base_table"]["table"] == '"GROUP"'
+    assert g["primary_key"] == {"columns": ['"SELECT"']}
+    assert g["unique_keys"] == [{"columns": ['"SELECT"']}]
+    (rel,) = doc["relationships"]
+    assert (rel["left_table"], rel["right_table"]) == ("order_", "group_")
+    assert rel["relationship_columns"] == [{"left_column": '"GROUP"', "right_column": '"SELECT"'}]
+    for ident in ('"GROUP"', '"SELECT"', '"ORDER"'):
+        assert isinstance(_parse(ident), exp.Column)
+    assert not [x for x in losses if x.reason == "target_rule"]
     assert S.semantic_view_fqn(_keyword_view(), opts) == 'DEMO."GROUP".select_'
 
 

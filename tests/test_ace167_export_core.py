@@ -1583,3 +1583,45 @@ def test_a_validation_check_that_cannot_run_is_said_so(model, tmp_path, monkeypa
     report, _ = _export(model, tmp_path / "o")
     assert report["model_validation"]["checked"] is False
     assert "sm validate" in report["model_validation"]["detail"]
+
+
+# ---------------------------------------------------------------------------
+# An ambiguity's text, set inside the sentences every target writes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,want", [
+    ("The question asks about open work.", "the question asks about open work"),
+    ("  a question says amount  ", "a question says amount"),
+    ("SLA attainment is asked about.", "SLA attainment is asked about"),
+    ("Q3 is named;", "Q3 is named"),
+])
+def test_a_sentence_becomes_a_clause(text, want):
+    assert X.clause(text) == want
+
+
+def test_every_target_sets_an_ambiguity_into_one_sentence_each():
+    from semantic_model import export_databricks_genie as G
+    from semantic_model import export_ossie as O
+    from semantic_model import export_snowflake as S
+    from semantic_model import models as M
+
+    amb = M.Ambiguity(name="open work", when="The question asks about open work.",
+                      behaviour="answer_and_offer", options=[
+                          M.AmbiguityOption(label="Open incidents", how="The open metric.",
+                                            default=True),
+                          M.AmbiguityOption(label="All open work", how="Every task row.")])
+    view = X.ExportView(target="databricks", engines=("Databricks",), source_engine="Databricks",
+                        sql_engine="Databricks", datasource="acme", description="", area="sales",
+                        area_description="", tables=(), metrics=(), relationships=(), entities=(),
+                        examples=(), golden=(), ambiguities=(amb,), terminology=())
+    opts = X.ExportOptions(targets=("snowflake",), location=X.Location("DEMO", "SALES_DATA"))
+    texts = [S.ambiguity_handling(amb), O._ambiguity_text(amb),
+             "".join(G._Space(view, opts).text_instruction()[0]["content"]),
+             *S._Builder(view, opts).instructions().values()]
+    for text in texts:
+        assert "when the question asks about open work," in text.casefold(), text
+        assert "The question" not in text and ".," not in text and ".;" not in text, text
+        assert ".." not in text, text
+    assert X.ambiguity_options(amb) == ("Open incidents (default): the open metric; "
+                                        "All open work: every task row")

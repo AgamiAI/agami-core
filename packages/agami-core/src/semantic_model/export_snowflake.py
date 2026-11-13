@@ -27,9 +27,10 @@ one name keep the first in order (`name_collision`).
 Identifier rule, for a name the model holds (a column, a table, a `--location` part): the model spells
 a Snowflake catalog name the way agami's dialect layer reads it (`dialects.Dialect.ident`), so an
 all-lower or all-upper plain name is the unquoted one, stored upper-case, and any other spelling is
-the stored name exactly. SQL here quotes a keyword in its stored case, and any name an unquoted
-spelling cannot reach. Where the YAML holds such a name bare (base table, keys, relationship
-columns), Snowflake documents no quoting, so it is written as stored and reported.
+the stored name exactly. Every place the view names one (a base table's parts, a key column, a
+relationship column, a member's `expr`) goes through `snowflake_ident`, which quotes a keyword in its
+stored case and any name an unquoted spelling cannot reach: Snowflake parses each of them as an
+identifier, and refuses a bare `GROUP` in a relationship ("Invalid identifier 'GROUP'").
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ from .export import (
     Reason,
     Target,
     WriterOutput,
+    clause,
     degraded,
     dropped,
     is_select_alias,
@@ -198,8 +200,10 @@ def ambiguity_handling(a: Any) -> str:
     default = next((o.label for o in a.options if o.default), None)
     labels = ", ".join(o.label for o in a.options)
     if a.behaviour == "ask":
-        return f"When {a.when} and the question does not settle it, ask which is meant: {labels}."
-    return f"When {a.when}, answer with {default or a.options[0].label}, say so, and offer {labels}."
+        return (f"When {clause(a.when)} and the question does not settle it, ask which is meant: "
+                f"{labels}.")
+    return (f"When {clause(a.when)}, answer with {default or a.options[0].label}, say so, and offer "
+            f"{labels}.")
 
 
 class _Builder:
@@ -219,6 +223,8 @@ class _Builder:
         self.view_metrics: list[dict] = []
         self.synonyms: set[str] = set()
         self.agami: dict[str, str] = {}                  # logical -> agami table name
+        # logical -> the base table as stored (None for a query); the document holds it quoted.
+        self.homes: dict[str, Optional[PhysicalName]] = {}
         # Each member that stands for one agami item: (item, section, kind, name), for its tag.
         self.items: list[tuple[dict, str, str, str]] = []
 
@@ -237,10 +243,7 @@ class _Builder:
         base table under `logical`: by the engine's case rules, and with any schema or database it
         names being the table's own. `archive.orders` is not the view's `orders`, and on Snowflake
         neither is `"orders"`. A table defined by a query has no schema to name."""
-        base = self.tables[logical]["base_table"]
-        home = (PhysicalName(base["database"], base["schema"], base["table"])
-                if "table" in base else None)
-        return names_table(ref, bare_name(self.agami[logical]), home, ENGINE)
+        return names_table(ref, bare_name(self.agami[logical]), self.homes[logical], ENGINE)
 
     def qualifier(self, col: Any) -> Optional[str]:
         """The logical table a column's qualifier names, or None when it names none for certain."""
@@ -284,14 +287,6 @@ class _Builder:
             kept.append(w)
         put_nonempty(item, "synonyms", kept)
 
-    def bare_names(self, kind: str, agami: str, field: str, names: list[str]) -> None:
-        """Report physical names the YAML holds bare that an unquoted spelling cannot reach."""
-        odd = [n for n in dict.fromkeys(names) if needs_quotes(n)]
-        if odd:
-            self.degrade(kind, agami, "target_rule", f"its {field} {', '.join(odd)} is written as "
-                         "stored, but needs quoting in SQL and Snowflake documents no quoting there; "
-                         "check it with verify_only")
-
     # --- tables ------------------------------------------------------------------------------
 
     def table(self, et: ExportTable, entities: dict[str, list[Any]]) -> None:
@@ -312,23 +307,25 @@ class _Builder:
         put_nonempty(doc, "description", join_sentences(
             t.description, *(f"Caveat: {c}" for c in t.caveats),
             *(join_sentences(f"Entity {e.name}:", e.description) for e in ents)))
-        if t.source_type == "sql":
+        home = None if t.source_type == "sql" else PhysicalName(
+            base_database(et, self.options), et.physical.schema or self.loc.schema, et.physical.table)
+        if home is None:
             doc["base_table"] = {"definition": t.sql}
         else:
-            doc["base_table"] = {"database": base_database(et, self.options),
-                                 "schema": et.physical.schema or self.loc.schema,
-                                 "table": et.physical.table}
-            self.bare_names("table", t.name, "base table name", list(doc["base_table"].values()))
+            doc["base_table"] = {"database": snowflake_ident(home.database),
+                                 "schema": snowflake_ident(home.schema),
+                                 "table": snowflake_ident(home.table)}
         self.tables[name], self.members[name], self.agami[name] = doc, {}, t.name
+        self.homes[name] = home
         self.items.append((doc, "table", "table", t.name))
         self.columns[name] = {c.name.casefold(): c.name for c in t.columns}
         self.column_members[name] = {}
         keys = [k for k in (t.grain, *t.unique_keys) if k]
-        self.bare_names("table", t.name, "key column", [c for k in keys for c in k])
         self.keys[name] = [{c.casefold() for c in k} for k in keys]
         if t.grain:
-            doc["primary_key"] = {"columns": list(t.grain)}
-        put_nonempty(doc, "unique_keys", [{"columns": list(k)} for k in t.unique_keys])
+            doc["primary_key"] = {"columns": [snowflake_ident(c) for c in t.grain]}
+        put_nonempty(doc, "unique_keys",
+                     [{"columns": [snowflake_ident(c) for c in k]} for k in t.unique_keys])
         self.add_synonyms(doc, [w for e in ents for w in (e.name, e.plural or "", *e.other_names)],
                           "table", t.name)
         for c in t.columns:
@@ -420,7 +417,6 @@ class _Builder:
             right = self._role_table(name, left, [a for a, _ in pairs])
             if right is None:
                 return
-        self.bare_names("relationship", name, "join column", [c for p in pairs for c in p])
         # A relationship holds tables and key columns only; what else it says does not travel.
         lost = [f"its {r.join_type} join type"] + (["its description"] if r.description else []) + (
             ["the questions it is for"] if r.for_questions_about else [])
@@ -429,7 +425,8 @@ class _Builder:
         self.edges.setdefault(left, set()).add(right)
         self.relationships.append({
             "name": rel_name, "left_table": left, "right_table": right,
-            "relationship_columns": [{"left_column": a, "right_column": b} for a, b in pairs]})
+            "relationship_columns": [{"left_column": snowflake_ident(a),
+                                      "right_column": snowflake_ident(b)} for a, b in pairs]})
 
     def _role_table(self, rel: str, table: str, fk: list[str]) -> Optional[str]:
         """A second logical table on `table`'s base table, for a self-join to reference: "a single
@@ -454,6 +451,7 @@ class _Builder:
         doc.update({k: deepcopy(src[k]) for k in ("base_table", "primary_key", "unique_keys")
                     if k in src})
         self.tables[name], self.members[name], self.agami[name] = doc, {}, self.agami[table]
+        self.homes[name] = self.homes[table]
         self.columns[name], self.keys[name] = self.columns[table], self.keys[table]
         self.items.append((doc, "table", "table", self.agami[table]))
         for item, section, kind, agami in list(self.items):
@@ -707,9 +705,9 @@ class _Builder:
         gen, ask = [], []
         for a in self.view.ambiguities:
             default = next((o.label for o in a.options if o.default), None)
-            opts = "; ".join(f"{o.label}: {o.how}" for o in a.options)
+            opts = "; ".join(f"{o.label}: {clause(o.how)}" for o in a.options)
             gen.append(join_sentences(
-                f"{a.name}: when {a.when}, the options are {opts}.",
+                f"{a.name}: when {clause(a.when)}, the options are {opts}.",
                 f"Use {default} unless the question says otherwise." if default else ""))
             ask.append(ambiguity_handling(a))
             self.degrade("ambiguity", a.name, "carried_as_text",

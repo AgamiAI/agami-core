@@ -754,6 +754,47 @@ def test_ossie_version_is_checked(model, tmp_path):
     assert next(iter(_docs(tmp_path / "plain").values()))["version"] == "0.1.1"
 
 
+def _put(root: Path, rel: str, doc) -> None:
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
+@pytest.mark.parametrize("version", ["0.1.1", "0.3"])
+def test_a_metric_names_every_field_as_dataset_field(model, tmp_path, version):
+    # Ossie's metrics are model-scoped: each field is `dataset.field`, so a bare column, and a
+    # COUNT(*) that names no dataset at all, are placed on the metric's one dataset.
+    _put(model, f"subject_areas/{AREA}/tables/events.yaml", {
+        "name": "events", "schema": "SALES_DATA", "columns": [_col("kind")]})
+    _put(model, f"subject_areas/{AREA}/metrics/bare.yaml",
+         _metric("bare", _all("100.0 * AVG(CASE WHEN amount > 0 THEN 1 ELSE 0 END) + COUNT(*)")))
+    _put(model, f"subject_areas/{AREA}/metrics/event_count.yaml",
+         _metric("event count", _all("COUNT(*)"), source_tables=["events"]))
+    report = _export(model, tmp_path / "q", version)
+    (doc,) = _docs(tmp_path / "q").values()
+    metrics = {m["name"]: m["expression"]["dialects"] for m in _model(doc)["metrics"]}
+    assert {d["expression"] for d in metrics["bare"]} == {
+        "100.0 * AVG(CASE WHEN orders.amount > 0 THEN 1 ELSE 0 END) + COUNT(orders.id)"}
+    assert _loss(report, "metric", "bare") == []
+    # No key to count: the expression stays as written, and the report says why.
+    assert {d["expression"] for d in metrics["event_count"]} == {"COUNT(*)"}
+    assert _loss(report, "metric", "event count") == [("degraded", "target_rule")]
+    datasets = {d["name"]: {f["name"] for f in d["fields"]} for d in _model(doc)["datasets"]}
+    for where, dialect, sql in _expressions({"datasets": [], "metrics": _model(doc)["metrics"]}):
+        for col in _parse(sql, dialect).find_all(exp.Column):
+            if not isinstance(col.this, exp.Star):
+                assert col.name in datasets.get(col.table, ()), (where, col.sql())
+
+
+def test_a_dataset_name_is_quoted_as_its_engine_quotes_it_and_bad_sql_stays_as_written():
+    assert O._dataset_ref("orders", "Snowflake") == "orders"
+    assert O._dataset_ref("order items", "Snowflake") == '"order items"'
+    assert O._dataset_ref("select", "Databricks") == "`select`"
+    ds = O._Datasets([{"name": "orders", "fields": [{"name": "id"}], "primary_key": ["id"]}])
+    assert O._qualified("SUM(", "Snowflake", "orders", ds) == ("SUM(", ["it does not parse"])
+    assert O._qualified('SUM("order items".id)', "Snowflake", None, ds)[1] == ["order items.id"]
+    assert O._qualified("COUNT(orders.*)", "Databricks", "orders", ds) == ("COUNT(orders.*)", [])
+
+
 def test_names_and_column_references():
     assert O.ossie_name("orders->customers#2") == "orders_to_customers_2"
     assert O.ossie_name("Average Order-Value") == "average_order_value"

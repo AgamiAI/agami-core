@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import argparse
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional
 
 import yaml
@@ -75,6 +75,9 @@ _DOLLAR_NOTE = (
     "-- references, and a dollar-quoted body has no escape for them: run this file in the SQL\n"
     "-- editor or on a SQL warehouse, where the text stays as written.\n")
 _SIMPLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# The name a metric view's expressions reach its source table by. A source column of that name
+# shadows it: `source.source` reads as a field of the column ([INVALID_EXTRACT_BASE_FIELD_TYPE]).
+SOURCE = "source"
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +107,15 @@ def _quote(part: str) -> str:
 
 def _dotted(*parts: Optional[str]) -> str:
     return ".".join(_quote(p) for p in parts if p)
+
+
+def _reach(ref: str, column: str) -> str:
+    """Column `column` (as written, quoted or not) of the table `ref` reaches. A source column named
+    `source` is written alone and back-quoted: qualified, it reads as a field of itself, and a
+    source column needs no qualifier."""
+    if ref == SOURCE and column.strip("`").casefold() == SOURCE:
+        return column if column.startswith("`") else f"`{column}`"
+    return f"{ref}.{column}"
 
 
 def metric_view_parts(view: ExportView, options: ExportOptions,
@@ -167,8 +179,9 @@ def _requalify(sql: str, refs: Mapping[str, str]) -> Optional[str]:
         ref = refs.get(chain[-2].text.casefold())
         if ref is None:
             return None
-        out += [sql[last:chain[0].start], ref]
-        last = chain[-2].end + 1
+        column = sql[chain[-1].start:chain[-1].end + 1]
+        out += [sql[last:chain[0].start], _reach(ref, column)]
+        last = chain[-1].end + 1
     return "".join(out) + sql[last:]
 
 
@@ -223,6 +236,7 @@ class _Tree:
     # Joins to a table whose join name another joined table already has (`order items`,
     # `order-items`): a metric view's joins are named, and one name cannot reach two tables.
     clashed: tuple[_Edge, ...] = ()
+    names: Mapping[str, str] = field(default_factory=dict)   # joined table -> its join name
 
     def path(self, table: str) -> list[str]:
         out = []
@@ -231,21 +245,36 @@ class _Tree:
             table = self.via[table].parent
         return out
 
-    def refs(self, aliases: Mapping[str, str]) -> dict[str, str]:
+    def refs(self) -> dict[str, str]:
         """Table -> how a field or measure expression reaches it."""
-        refs = {self.fact: "source"}
-        refs.update({t: ".".join(aliases[p] for p in self.path(t)) for t in self.order})
+        refs = {self.fact: SOURCE}
+        refs.update({t: ".".join(self.names[p] for p in self.path(t)) for t in self.order})
         return refs
 
 
+def _join_name(alias: str, scope: set[str], taken: set[str]) -> str:
+    """The name a join is given: its table's alias, unless a column in scope where the name is read
+    has that name too, or another join does. `products.category.label` is ambiguous when `products`
+    has a column `category` ([AMBIGUOUS_REFERENCE_TO_FIELDS]), so that join is named
+    `category_join`, then `category_join_2`, …; the same tables always give the same names."""
+    name, n = alias, 1
+    while name.casefold() in scope or name in taken or name == SOURCE:
+        suffix = "_join" if n == 1 else f"_join_{n}"
+        name, n = alias[:MAX_NAME - len(suffix)] + suffix, n + 1
+    return name
+
+
 def _join_tree(fact: str, edges: Mapping[str, list[_Edge]], placeable: set[str],
-               aliases: Mapping[str, str]) -> _Tree:
+               aliases: Mapping[str, str], columns: Mapping[str, set[str]]) -> _Tree:
     """Breadth first, so each table is reached by its shortest path; a metric view joins a table
     once, and a binding names a table, not a path, so a second path could not be chosen anyway. A
-    table whose join name an earlier joined table has is not joined, so the first keeps it."""
+    table whose join name an earlier joined table has is not joined, so the first keeps it.
+    `columns` holds each table's column names, casefolded: a join's name is read beside its parent
+    table's columns, and beside the source's, which an expression may name bare."""
     via: dict[str, _Edge] = {}
     order, skipped, clashed, queue = [], [], [], [fact]
-    names: set[str] = set()
+    seen: set[str] = set()
+    names: dict[str, str] = {}
     while queue:
         for e in edges.get(queue.pop(0), []):
             if e.child not in placeable:
@@ -253,22 +282,25 @@ def _join_tree(fact: str, edges: Mapping[str, list[_Edge]], placeable: set[str],
             if e.child == fact or e.child in via:
                 skipped.append(e)
                 continue
-            if aliases[e.child] in names:
+            if aliases[e.child] in seen:
                 clashed.append(e)
                 continue
-            names.add(aliases[e.child])
+            seen.add(aliases[e.child])
+            names[e.child] = _join_name(aliases[e.child], columns[fact] | columns[e.parent],
+                                        set(names.values()))
             via[e.child] = e
             order.append(e.child)
             queue.append(e.child)
-    return _Tree(fact, tuple(order), via, tuple(skipped), tuple(clashed))
+    return _Tree(fact, tuple(order), via, tuple(skipped), tuple(clashed), names)
 
 
-def _condition(e: _Edge, tree: _Tree, aliases: Mapping[str, str]) -> str:
+def _condition(e: _Edge, tree: _Tree) -> str:
     # A join's `on` reaches the table it hangs from by that table's join name, `source` at the top.
-    near = {e.parent: "source" if e.parent == tree.fact else aliases[e.parent],
-            e.child: aliases[e.child]}
+    near = {e.parent: SOURCE if e.parent == tree.fact else tree.names[e.parent],
+            e.child: tree.names[e.child]}
     if e.parent_col and e.child_col:
-        return f"{near[e.parent]}.{_quote(e.parent_col)} = {near[e.child]}.{_quote(e.child_col)}"
+        return (f"{_reach(near[e.parent], _quote(e.parent_col))} = "
+                f"{near[e.child]}.{_quote(e.child_col)}")
     return _requalify(e.rel.relationship.on, near) or ""  # `_edges` kept only `on:` that reads
 
 
@@ -337,7 +369,10 @@ class _Planner:
 
     def tree(self, fact: str) -> _Tree:
         if fact not in self.trees:
-            self.trees[fact] = _join_tree(fact, self.edges, set(self.sources), self.aliases)
+            columns = {k: {c.name.casefold() for c in t.table.columns}
+                       for k, t in self.tables.items()}
+            self.trees[fact] = _join_tree(fact, self.edges, set(self.sources), self.aliases,
+                                          columns)
         return self.trees[fact]
 
     def drop(self, kind: str, name: str, reason: Any, detail: str) -> None:
@@ -443,7 +478,7 @@ class _Planner:
 
     def plan(self, fact: str, metrics: list[ExportMetric]) -> Optional[MetricViewPlan]:
         tree = self.tree(fact)
-        refs = tree.refs(self.aliases)
+        refs = tree.refs()
         taken: set[str] = set()
         # Measures claim their names before fields do: a metric has no other home in this view.
         named = [(em, n) for em in metrics if (n := self._claim(taken, em.metric.name))]
@@ -502,10 +537,10 @@ class _Planner:
                     continue
                 taken.add(name)
                 by_column[(t, c.name.casefold())] = name
-                field: dict[str, Any] = {"name": name, "expr": f"{refs[t]}.{_quote(c.name)}"}
+                item: dict[str, Any] = {"name": name, "expr": _reach(refs[t], _quote(c.name))}
                 if c.description:
-                    field["comment"] = c.description
-                fields.append(field)
+                    item["comment"] = c.description
+                fields.append(item)
         return fields, by_column
 
     def _measure(self, em: ExportMetric, name: str, refs: Mapping[str, str],
@@ -608,8 +643,8 @@ class _Planner:
             e = tree.via[child]
             if e.parent != parent:
                 continue
-            join: dict[str, Any] = {"name": self.aliases[child], "source": self.sources[child],
-                                    "on": _condition(e, tree, self.aliases)}
+            join: dict[str, Any] = {"name": tree.names[child], "source": self.sources[child],
+                                    "on": _condition(e, tree)}
             nested = self._joins(child, tree)
             if nested:
                 join["joins"] = nested

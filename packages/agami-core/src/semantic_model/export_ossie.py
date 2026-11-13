@@ -33,11 +33,16 @@ from .export import (
     LossEntry,
     Target,
     WriterOutput,
+    ambiguity_options,
+    clause,
     degraded,
     distinct_columns,
     dropped,
+    parse_statement,
     put_nonempty,
     register,
+    splice_spans,
+    token_span,
 )
 from .models import bare_name
 
@@ -49,6 +54,8 @@ VERSIONS = {"0.1.1": V011, "0.3": V03, "0.3.0.dev0": V03}
 # agami engine -> Ossie dialect, from Ossie 0.1.1's closed dialect list. 0.3 accepts any string, but
 # both versions use this one map so a version switch never changes which metrics travel.
 DIALECTS = {"Databricks": "DATABRICKS", "Snowflake": "SNOWFLAKE"}
+_SQLGLOT = {"Databricks": "databricks", "Snowflake": "snowflake"}   # the parser's name for each
+_QUOTE = {"Databricks": "`", "Snowflake": '"'}
 
 # 0.1.1 closes `vendor_name` to six vendors, none of them agami, so its block goes under COMMON
 # with the payload keyed `agami`; 0.3 takes a free-form vendor name.
@@ -80,6 +87,10 @@ _MISSING_END = "an end is a dataset or field this file leaves out"
 _COLLISION = "another {kind} is already named {name}"
 _REL_DETAIL = "cardinality {card} and join type {join} have no Ossie field"
 _NON_ADDITIVE = "its non-additive dimensions have no Ossie field; they travel in its AI context"
+_UNPLACED = (
+    "a model-scoped metric names each field as dataset.field, and these stay as written, "
+    "on no one dataset of this file: {refs}"
+)
 _EXAMPLE_SQL = "carried as its question only; Ossie examples hold no SQL"
 _GOLDEN = "Ossie has no construct for an evaluation question"
 _ENTITY = "carried as {where}; its mappings and key have no Ossie construct"
@@ -165,6 +176,88 @@ def _metric_expression(sql: dict[str, str]) -> dict:
     # Each engine's own SQL under its own dialect; no portable `sql`, since nothing is translated.
     pairs = sorted((DIALECTS[e], s) for e, s in sql.items() if e in DIALECTS)
     return {"dialects": [{"dialect": d, "expression": s} for d, s in pairs]}
+
+
+class _Datasets:
+    """The datasets this file holds, as a model-scoped metric names them. Ossie's metrics sit on the
+    model, not a dataset, and "reference fields by multi-part name (dataset.field)" (the 0.3
+    schema's `metrics`; 0.1.1 has only model-level metrics too), so a binding's bare `amount` and
+    its `COUNT(*)` say nothing an importer can place."""
+
+    def __init__(self, datasets: list[dict]) -> None:
+        self.fields = {d["name"]: {f["name"].casefold(): f["name"] for f in d["fields"]}
+                       for d in datasets}
+        self.keys = {d["name"]: d.get("primary_key", []) for d in datasets}
+        self.by_name = {n.casefold(): n for n in self.fields}
+
+    def named(self, table: Optional[str]) -> Optional[str]:
+        return self.by_name.get(bare_name(table).casefold()) if table else None
+
+    def home(self, m: Any) -> Optional[str]:
+        """The one dataset a bare column or a `COUNT(*)` reads: the metric's primary table, else
+        its only source table; None when that is not one dataset of this file."""
+        if self.named(m.primary_table):
+            return self.named(m.primary_table)
+        tables = {self.named(t) for t in m.source_tables}
+        return tables.pop() if len(tables) == 1 else None
+
+
+def _dataset_ref(name: str, engine: str) -> str:
+    """A dataset's name as `engine`'s SQL reaches it: bare when plain, else in its quotes."""
+    if _PLAIN_IDENT.fullmatch(name) and name.upper() not in ANSI_RESERVED:
+        return name
+    q = _QUOTE[engine]
+    return q + name.replace(q, q * 2) + q
+
+
+def _qualified(sql: str, engine: str, home: Optional[str], ds: _Datasets) -> tuple[str, list[str]]:
+    """`sql` with every column read as `dataset.field` and `COUNT(*)` as a count of the home
+    dataset's key, spliced by token position; and what could not be placed, which stays as written."""
+    try:
+        tree = parse_statement(sql, engine)
+    except Exception:
+        return sql, ["it does not parse"]
+    spans: dict[tuple[int, int], str] = {}
+    unplaced: list[str] = []
+    _column_spans(sql, tree, engine, home, ds, spans, unplaced)
+    _count_star_spans(sql, engine, home, ds, spans, unplaced)
+    return splice_spans(sql, spans) or sql, unplaced
+
+
+def _column_spans(sql: str, tree: Any, engine: str, home: Optional[str], ds: _Datasets,
+                  spans: dict[tuple[int, int], str], unplaced: list[str]) -> None:
+    from sqlglot import exp
+
+    for col in tree.find_all(exp.Column):
+        if isinstance(col.this, exp.Star):
+            continue
+        table = ds.named(col.table) if col.table else home
+        if table is None or col.name.casefold() not in ds.fields[table]:
+            unplaced.append(f"{col.table}.{col.name}" if col.table else col.name)
+            continue
+        parts = (col.args.get("catalog"), col.args.get("db"), col.args.get("table"), col.this)
+        start, stop = token_span(*parts)
+        ident = sql[col.this.meta["start"]:stop]
+        spans[(start, stop)] = f"{_dataset_ref(table, engine)}.{ident}"
+
+
+def _count_star_spans(sql: str, engine: str, home: Optional[str], ds: _Datasets,
+                      spans: dict[tuple[int, int], str], unplaced: list[str]) -> None:
+    """Each `COUNT(*)` as a count of the home dataset's first key column: a key column is never
+    null, so counting it counts the rows, and it says which dataset's rows are counted."""
+    import sqlglot
+    from sqlglot.tokens import TokenType
+
+    tokens = sqlglot.Tokenizer(dialect=_SQLGLOT[engine]).tokenize(sql) if "*" in sql else []
+    for i in range(len(tokens) - 3):
+        count, open_, star, close = tokens[i:i + 4]
+        if (count.text.upper() == "COUNT" and open_.token_type == TokenType.L_PAREN
+                and star.token_type == TokenType.STAR and close.token_type == TokenType.R_PAREN):
+            if home is None or not ds.keys[home]:
+                unplaced.append("COUNT(*), on no dataset with a key")
+                continue
+            spans[(star.start, star.end + 1)] = (
+                f"{_dataset_ref(home, engine)}.{column_ref(ds.keys[home][0])}")
 
 
 def _extension(version: str, payload: dict) -> list[dict]:
@@ -325,9 +418,14 @@ def _metric_notes(m: Any) -> list[str]:
 
 
 def _metrics(
-    version: str, view: ExportView, losses: list[LossEntry], kept: set[tuple[str, str]]
+    version: str,
+    view: ExportView,
+    datasets: list[dict],
+    losses: list[LossEntry],
+    kept: set[tuple[str, str]],
 ) -> list[dict]:
     out, taken = [], set()
+    ds = _Datasets(datasets)
     for em in view.metrics:
         m, name = em.metric, ossie_name(em.metric.name)
         if name in taken:
@@ -340,7 +438,14 @@ def _metrics(
         # Ossie's to carry, and one it lacks a binding for the core has reported already.
         if m.non_additive_dimensions:
             losses.append(degraded(view.area, "metric", m.name, "carried_as_text", _NON_ADDITIVE))
-        metric: dict[str, Any] = {"name": name, "expression": _metric_expression(em.sql)}
+        sql, unplaced = {}, []
+        for engine, text in em.sql.items():   # only the engines this target registers
+            sql[engine], missed = _qualified(text, engine, ds.home(m), ds)
+            unplaced += [f"{x} ({engine})" for x in missed]
+        if unplaced:
+            losses.append(degraded(view.area, "metric", m.name, "target_rule", _UNPLACED.format(
+                refs=", ".join(dict.fromkeys(unplaced)))))
+        metric: dict[str, Any] = {"name": name, "expression": _metric_expression(sql)}
         put_nonempty(metric, "description", m.description or m.calculation)
         synonyms = [*([m.name] if name != m.name else []), *m.other_names]
         put_nonempty(metric, "ai_context", _context(version, _metric_notes(m), synonyms))
@@ -359,8 +464,7 @@ def _ambiguity_text(a: Any) -> str:
         if a.behaviour == "ask"
         else "answer with the default and offer the others"
     )
-    options = "; ".join(f"{o.label}{' (default)' if o.default else ''}: {o.how}" for o in a.options)
-    return f"{a.name}: when {a.when}, {act}. Options: {options}."
+    return f"{a.name}: when {clause(a.when)}, {act}. Options: {ambiguity_options(a)}."
 
 
 def _questions(view: ExportView, losses: list[LossEntry]) -> list[str]:
@@ -451,7 +555,7 @@ def build_model(view: ExportView, version: str) -> tuple[Optional[dict], list[Lo
     put_nonempty(model, "ai_context", _context(version, instructions, [*terms, *loose], questions))
     model["datasets"] = datasets
     put_nonempty(model, "relationships", _relationships(view, datasets, losses, kept))
-    put_nonempty(model, "metrics", _metrics(version, view, losses, kept))
+    put_nonempty(model, "metrics", _metrics(version, view, datasets, losses, kept))
     losses += _entity_losses(view, homes)
     if version == V011 and _has_context(model):
         # Once per file: the same loss on every item would bury the report's other entries.

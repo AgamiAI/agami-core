@@ -1098,6 +1098,10 @@ def test_caveats_labels_and_entity_matching_reach_the_space(model):
                                  "description": ["Labels: p = pending; v = void. Caveat: Legacy rows are blank."],
                                  "enable_entity_matching": True, "enable_format_assistance": True}
     assert configs["store_id"] == {"column_name": "store_id", "description": ["Labels: 1 = North."]}
+    # A coded number has no value dictionary in a space: its labels are only text, and say so.
+    losses = {(x.kind, x.name): (x.outcome, x.reason) for x in out.losses}
+    assert losses[("column", "orders.store_id")] == ("degraded", "carried_as_text")
+    assert ("column", "orders.status") not in losses
     measures = {m["display_name"]: m for m in space["instructions"]["sql_snippets"]["measures"]}
     assert measures["revenue"]["instruction"][-1] == "Caveat: Excludes tax."
     assert validate(space) == [] and run_together(space) == []

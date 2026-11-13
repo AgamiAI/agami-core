@@ -790,6 +790,25 @@ def join_sentences(*parts: Optional[str]) -> str:
     return " ".join(p.strip() for p in parts if p and p.strip())
 
 
+def clause(text: str) -> str:
+    """`text`, which the model holds as a sentence of its own, as a clause inside a longer one:
+    trimmed, its closing punctuation dropped, and an opening capital lowered when it only opens the
+    sentence. An ambiguity's `when` reads "The question asks ….", and set after "when" it would
+    otherwise read "When The question asks …., answer …". A first word that is not a capital and
+    lower-case letters (`SLA`, `Q3`) is a name, so it keeps its case."""
+    text = text.strip().rstrip(".;:, ").rstrip()
+    rest = text.split(" ", 1)[0][1:]
+    if text[:1].isupper() and (not rest or (rest.isalpha() and rest.islower())):
+        return text[0].lower() + text[1:]
+    return text
+
+
+def ambiguity_options(a: Any) -> str:
+    """An ambiguity's options as one clause list: `label (default): how; label: how`."""
+    return "; ".join(f"{o.label}{' (default)' if o.default else ''}: {clause(o.how)}"
+                     for o in a.options)
+
+
 def put_nonempty(doc: dict, key: str, value: Any) -> None:
     """`doc[key] = value` unless `value` is None or an empty string, list or dict: a target file
     leaves an empty field out rather than writing it blank."""

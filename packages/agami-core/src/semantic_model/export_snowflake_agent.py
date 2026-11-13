@@ -764,9 +764,11 @@ def run_sql(view: ExportView, options: ExportOptions, agent_text: Optional[str],
     out = [
         f"-- Evaluation runs for {view.area}, written by `sm export`: written, never run.\n"
         f"-- Run them after {', '.join(first)}. Each section names the privileges its run needs.\n"
-        "-- Every name here is fully qualified. The USE SCHEMA statement is there because an\n"
-        "-- evaluation started with SQL runs in the session's database and schema (Cortex Agent\n"
-        "-- evaluations), so it sets that to the view's schema.\n"
+        "-- Every name here is fully qualified, and the file holds no USE statement, which the SQL "
+        "API\n-- refuses. An evaluation started with SQL still runs in the session's database and "
+        "schema\n-- (Cortex Agent evaluations), so run this file with that set to "
+        f"{schema}: the context\n-- of a worksheet, a connection's database and schema, or the "
+        "SQL API request's database and\n-- schema fields.\n"
         "-- Privileges for every run: USAGE on the database and schema, CREATE STAGE, CREATE TASK "
         "and\n-- CREATE FILE FORMAT on the schema, EXECUTE TASK ON ACCOUNT, and the "
         "SNOWFLAKE.CORTEX_USER\n-- database role. A run executes as a task, and a task ignores "
@@ -777,7 +779,6 @@ def run_sql(view: ExportView, options: ExportOptions, agent_text: Optional[str],
         "that changed\n-- gets new names. To run the same files again, change the run name in "
         "its START, STATUS and\n-- results statements, all three alike. The COPY INTO statements "
         "stage the files beside this\n-- one; PUT them instead from a client if you edit them.",
-        f"USE SCHEMA {schema};",
         f"CREATE STAGE IF NOT EXISTS {stage}\n  FILE_FORMAT = (TYPE = 'CSV' FIELD_DELIMITER = NONE "
         "RECORD_DELIMITER = '\\n' SKIP_HEADER = 0\n  FIELD_OPTIONALLY_ENCLOSED_BY = NONE "
         "ESCAPE_UNENCLOSED_FIELD = NONE);",

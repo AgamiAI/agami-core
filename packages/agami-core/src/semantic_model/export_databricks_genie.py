@@ -51,6 +51,8 @@ from .export import (
     LossEntry,
     PhysicalName,
     WriterOutput,
+    ambiguity_options,
+    clause,
     degraded,
     distinct_columns,
     dropped,
@@ -259,6 +261,12 @@ class _Space:
                                     *(f"Caveat: {x}" for x in c.caveats)) if x)
         if text:
             config["description"] = text_field(text)
+        if labels and c.type != "string":
+            # Entity matching, the space's one value dictionary, takes string columns only; a coded
+            # number keeps its labels as description text, which Genie may not apply to an answer.
+            self.degrade("column", f"{t.name}.{c.name}", "carried_as_text", "its value labels are "
+                         "in its column description only: entity matching, the value dictionary a "
+                         "space builds, takes string columns, so an answer may show the stored codes")
         names = synonyms.get((bare_name(t.name).casefold(), c.name.casefold()), [])
         if names:
             config["synonyms"] = names
@@ -333,10 +341,9 @@ class _Space:
         v = self.view
         parts: list[tuple[str, str, str, str]] = []   # (kind, name, text, where it is said)
         for a in v.ambiguities:
-            options = "; ".join(f"{o.label}{' (default)' if o.default else ''}: {o.how}"
-                                for o in a.options)
-            parts.append(("ambiguity", a.name, f"{a.name}: when {a.when}, {_BEHAVIOUR[a.behaviour]}. "
-                          f"Options: {options}.\n", "in the space's text instruction"))
+            parts.append(("ambiguity", a.name, f"{a.name}: when {clause(a.when)}, "
+                          f"{_BEHAVIOUR[a.behaviour]}. Options: {ambiguity_options(a)}.\n",
+                          "in the space's text instruction"))
         if v.description:
             parts.append(("datasource", v.datasource, f"About {v.datasource}: {v.description}\n",
                           "its description is in the space's text instruction"))
