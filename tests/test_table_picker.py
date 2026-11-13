@@ -236,6 +236,28 @@ def test_select_all_shown_then_save_posts_the_names_once_in_inventory_order():
     assert got["save"] is True
 
 
+@pytest.mark.parametrize("schema", ["constructor", "toString", "__proto__", "hasOwnProperty"])
+def test_a_schema_named_like_an_object_property_still_renders_and_saves(schema):
+    """Copilot on #657: a schema named `constructor` found an inherited property, skipped building
+    its section and threw, so the page neither rendered nor saved."""
+    inv = {
+        "profile": "demo",
+        "tables": [
+            {"schema": schema, "table": "orders", "columns": []},
+            {"schema": "sales", "table": "orders", "columns": []},
+            {"schema": schema, "table": "items", "columns": []},
+        ],
+    }
+    steps = "ids.save.fire('click');\n" + _REPORT
+    got = _node(inv, steps)
+    assert got["ticked"] == ["orders", "items", "orders"]  # one section per schema, in list order
+    assert got["posted"][0]["body"]["keep"] == [
+        f"{schema}.orders",
+        f"{schema}.items",
+        "sales.orders",
+    ]
+
+
 def test_nothing_ticked_cannot_be_saved():
     steps = "ids['none-shown'].fire('click'); ids.save.fire('click');\n" + _REPORT
     got = _node(_inventory(), steps)

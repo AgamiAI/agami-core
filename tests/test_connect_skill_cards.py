@@ -857,3 +857,13 @@ def test_1_6p_headers_are_new_and_fit_a_card():
     s = _section_16p()
     for h in ("Table list", "Table pick"):
         assert f"header `{h}`" in s and len(h) <= 12
+
+
+def test_1_6p_back_to_the_cards_goes_to_the_numbered_list():
+    """Copilot on #657: in a cloud or web session the page can be unreachable without
+    SSH_CONNECTION; going back to the Tables card offered Pick from a list, another dead page."""
+    s = _section_16p()
+    back = s[s.index("**Back to the cards** reads the helper's output first"):]
+    back = back[: back.index("\n")]
+    assert back.index("TaskStop") < back.index("**The numbered list**")
+    assert "`Tables` card again" not in back

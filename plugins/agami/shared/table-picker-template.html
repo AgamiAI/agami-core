@@ -120,9 +120,9 @@
 
   function build() {
     var host = document.getElementById('schemas');
-    var bySchema = {};
+    var bySchema = new Map();  // keyed by catalog names: `constructor` must not find a property
     data.tables.forEach(function (t) {
-      var s = bySchema[t.schema];
+      var s = bySchema.get(t.schema);
       if (!s) {
         s = { name: t.schema, rows: [] };
         s.el = el('section', 'schema');
@@ -152,7 +152,7 @@
         table.appendChild(s.body);
         s.el.appendChild(table);
         host.appendChild(s.el);
-        bySchema[t.schema] = s;
+        bySchema.set(t.schema, s);
         sections.push(s);
       }
       var tr = el('tr');
