@@ -103,7 +103,8 @@ below corresponds to one such version.
   `COUNT(CASE WHEN p THEN 1 END)`; an `ELSE 0` under `COALESCE(…, 0)`; under a plain `GROUP BY`,
   `SUM(CASE WHEN p THEN 1 ELSE 0 END)` as a count and `NULLIF(COUNT(*), 0)` as `COUNT(*)`; and
   the order of `AND`, `=` and `*` operands. Each was run both ways on SQLite, DuckDB and Postgres.
-  When a declared metric reads the same columns but is still written differently, the column's
+  When a declared metric reads the same columns with the same kind of aggregate but is still
+  written differently, the column's
   status is the new `computed_differently` ("not compared") instead of `unmatched`.
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**

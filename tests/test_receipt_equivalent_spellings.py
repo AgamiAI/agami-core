@@ -289,6 +289,26 @@ DIFFERENT = [
         "DuckDB divides by zero to infinity",
         ("duckdb", "full", False),
     ),
+    # A FILTER can leave a group's aggregate with no input, so the grouped-only rules do not hold
+    # inside one: group 1 has no row with g > 1, giving NULL against 0. Both directions.
+    (
+        "COUNT(CASE WHEN p = 'paid' THEN 1 END) FILTER (WHERE g > 1)",
+        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END) FILTER (WHERE g > 1)",
+        "a FILTER that empties group 1: 0 against NULL",
+        (("sqlite", "duckdb"), "full", True),
+    ),
+    (
+        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END) FILTER (WHERE g > 1)",
+        "COUNT(CASE WHEN p = 'paid' THEN 1 END) FILTER (WHERE g > 1)",
+        "a FILTER that empties group 1: NULL against 0",
+        (("sqlite", "duckdb"), "full", True),
+    ),
+    (
+        "COUNT(*) FILTER (WHERE g > 1)",
+        "NULLIF(COUNT(*) FILTER (WHERE g > 1), 0)",
+        "a FILTER that empties group 1: 0 against NULL",
+        (("sqlite", "duckdb"), "full", True),
+    ),
 ]
 
 
@@ -331,14 +351,15 @@ def test_a_grouped_only_rule_does_not_match_a_global_aggregate(
 
 @pytest.mark.parametrize("binding,written,why,witness", DIFFERENT, ids=_ids(DIFFERENT))
 def test_a_spelling_that_can_differ_is_not_matched(tmp_path, binding, written, why, witness):
-    engine, dataset, grouped = witness
-    conn = ENGINES[engine](DATASETS[dataset])
-    try:
-        assert _run(conn, _statement(binding, grouped)) != _run(
-            conn, _statement(written, grouped)
-        ), why
-    finally:
-        conn.close()
+    engines, dataset, grouped = witness
+    for engine in engines if isinstance(engines, tuple) else (engines,):
+        conn = ENGINES[engine](DATASETS[dataset])
+        try:
+            assert _run(conn, _statement(binding, grouped)) != _run(
+                conn, _statement(written, grouped)
+            ), (engine, why)
+        finally:
+            conn.close()
     # Asserted where the witness shows the difference: `NULLIF(COUNT(*), 0)` is, rightly, the same
     # number under a GROUP BY.
     assert _status(tmp_path, binding, written, grouped=grouped)[0] == rt.COMPUTED_DIFFERENTLY
@@ -467,3 +488,39 @@ def test_a_grand_total_modifier_in_any_dialect_is_not_grouped(sql, dialect, grou
     import sqlglot
 
     assert rt._arm_is_grouped(sqlglot.parse_one(sql, read=dialect)) is grouped
+
+
+def test_an_empty_string_literal_is_not_a_row_count(tmp_path):
+    """Oracle reads `''` as NULL, so `COUNT('')` is 0 there and not `COUNT(*)`. Neither SQLite nor
+    DuckDB does, so there is no executed witness here; a non-empty string still counts rows."""
+    assert _status(tmp_path, "COUNT(*)", "COUNT('')", False)[0] != rt.MATCHED
+    assert (
+        _status(
+            tmp_path,
+            "COUNT(*) FILTER (WHERE p = 'paid')",
+            "COUNT(CASE WHEN p = 'paid' THEN '' END)",
+            False,
+        )[0]
+        != rt.MATCHED
+    )
+
+
+@pytest.mark.parametrize(
+    "written", ["MAX(x)", "COUNT(DISTINCT x)", "MIN(x) FILTER (WHERE p = 'paid')"]
+)
+def test_a_different_aggregate_over_the_same_columns_reads_unmatched(tmp_path, written):
+    """Same columns is not enough for `computed_differently`: a MAX is not a way of writing a SUM."""
+    binding = "SUM(x)" if "FILTER" not in written else "SUM(x) FILTER (WHERE p = 'paid')"
+    assert _status(tmp_path, binding, written, False) == (rt.UNMATCHED, None)
+
+
+@pytest.mark.parametrize(
+    "binding,written",
+    [
+        ("SUM(x) * 1.0 / NULLIF(COUNT(x), 0)", "AVG(x)"),
+        ("COUNT(*) FILTER (WHERE p = 'paid')", "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)"),
+    ],
+)
+def test_the_same_aggregate_family_written_differently_is_not_compared(tmp_path, binding, written):
+    """An average is a sum over a count, and a sum of 1s and 0s is a count."""
+    assert _status(tmp_path, binding, written, False) == (rt.COMPUTED_DIFFERENTLY, None)

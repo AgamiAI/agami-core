@@ -1371,10 +1371,11 @@ UNDECLARABLE = "undeclarable"
 # it means exactly one thing: every candidate binding was read, and none of them is this column.
 MATCHED = "matched"
 UNMATCHED = "unmatched"
-# A declared metric reads exactly the columns this value reads, and the two are still written
-# differently after the equivalent spellings are normalised (#655). They may be the same number in a
-# form `_equivalent_form` does not recognise, so the settled `unmatched` — "this is not the agreed
-# definition" — is not earned; neither is `matched`. Not compared, and said so.
+# A declared metric reads exactly the columns this value reads, with the same kinds of aggregate
+# (`_shape`: a SUM of a 0/1 flag is a count, an AVG a sum over a count), and the two are still
+# written differently after the equivalent spellings are normalised (#655). They may be the same
+# number in a form `_equivalent_form` does not recognise, so the settled `unmatched` — "this is not
+# the agreed definition" — is not earned; neither is `matched`. Not compared, and said so.
 COMPUTED_DIFFERENTLY = "computed_differently"
 
 
@@ -4303,7 +4304,7 @@ def assemble_receipt(
     candidates = _metric_candidates(org, metric_storage_type, metric_dialect)
     by_binding = _by_binding(candidates)
     by_binding_grouped = _by_binding(candidates, grouped=True)
-    binding_columns = _binding_columns(candidates)
+    binding_shapes = _binding_shapes(candidates)
     # Computed ONCE: it is a property of the model and the engine, not of any one column.
     unread_declarations = _declarations_unread(org, metric_storage_type, candidates)
     output_columns = _output_columns(tree)
@@ -4315,7 +4316,7 @@ def assemble_receipt(
     for oc in output_columns[:_RECEIPT_MAX_REFS]:
         status, match = _match_output_column(oc, unread_declarations, by_binding, visible,
                                              metric_dialect, own_alias_memo,
-                                             by_binding_grouped, binding_columns)
+                                             by_binding_grouped, binding_shapes)
         # Everything a MATCHED metric contributes, and null on every other status. An item that
         # matched nothing must assert nothing about a metric it did not match — ACE-059's review
         # found three false positives of exactly this shape in the joins section, two of them
@@ -8160,6 +8161,11 @@ def _is_int_literal(node: Any, value: str) -> bool:
     return isinstance(node, exp.Literal) and not node.is_string and node.this == value
 
 
+def _is_non_null_literal(node: Any) -> bool:
+    """A literal no engine reads as NULL. Not `''`: Oracle stores the empty string as NULL."""
+    return isinstance(node, exp.Literal) and not (node.is_string and node.this == "")
+
+
 def _single_branch_case(node: Any) -> bool:
     return isinstance(node, exp.Case) and not node.args.get("this") and len(node.args["ifs"]) == 1
 
@@ -8190,8 +8196,8 @@ def _equivalent_form(node: "exp.Expression", grouped: bool = False) -> "exp.Expr
     `grouped` adds the two rules that hold only where every group has at least one row, which a
     plain GROUP BY guarantees and a global aggregate does not (an empty table): there `SUM` of 1s
     and 0s is never NULL, and `COUNT(*)` is never 0. They apply only to an aggregate of the arm
-    itself — not inside a subquery, whose aggregate runs over its own set, nor a window, whose frame
-    can be empty.
+    itself — not inside a subquery, whose aggregate runs over its own set, a window, whose frame
+    can be empty, or a FILTER, which can drop every row of a group.
 
     Bottom-up, so a rule sees its operands already rewritten: `COALESCE(SUM(x) FILTER …, 0)` reaches
     the COALESCE rule as `COALESCE(SUM(CASE …), 0)`. The node is the caller's copy (both reducers
@@ -8234,10 +8240,10 @@ def _rewrite_one(node: "exp.Expression", grouped: bool) -> "exp.Expression":
         # COUNT this function builds carries no such mark, so neither side keeps it.
         node.set("big_int", None)
         # COUNT(<non-null literal>) counts rows; COUNT(CASE WHEN p THEN <literal> END) counts matches.
-        if isinstance(node.this, exp.Literal):
+        if _is_non_null_literal(node.this):
             node.set("this", exp.Star())
         elif _single_branch_case(node.this) and not node.this.args.get("default") \
-                and isinstance(node.this.args["ifs"][0].args.get("true"), exp.Literal):
+                and _is_non_null_literal(node.this.args["ifs"][0].args.get("true")):
             node.this.args["ifs"][0].set("true", exp.Literal.number(1))
         return node
     if isinstance(node, exp.Coalesce) and len(node.expressions) == 1 \
@@ -8254,7 +8260,11 @@ def _rewrite_one(node: "exp.Expression", grouped: bool) -> "exp.Expression":
                 and _is_int_literal(inner.this.args["ifs"][0].args.get("true"), "1"):
             return exp.Count(this=inner.this)            # a sum of 1s, 0 when none: a count
         return node
-    if grouped and node.find_ancestor(exp.Select, exp.Window) is None:
+    # Type first: `find_ancestor` walks to the root, and on every node of a deep AND chain that was
+    # quadratic. A FILTER, like a subquery or a window frame, can leave a group's aggregate with no
+    # input row at all, which is exactly where these rules stop holding.
+    if grouped and isinstance(node, (exp.Sum, exp.Nullif)) \
+            and node.find_ancestor(exp.Select, exp.Window, exp.Filter) is None:
         if isinstance(node, exp.Sum) and _single_branch_case(node.this) \
                 and _is_int_literal(node.this.args.get("default"), "0") \
                 and _is_int_literal(node.this.args["ifs"][0].args.get("true"), "1"):
@@ -8597,9 +8607,37 @@ def _column_names(node: "exp.Expression") -> frozenset:
     return frozenset(col.name for col in node.find_all(exp.Column))
 
 
-def _binding_columns(candidates: list[MetricCandidate]) -> set:
-    """Every column set a read binding reads, for `COMPUTED_DIFFERENTLY`. Once per receipt."""
-    return {_column_names(c.reduced) for c in candidates if c.reduced is not None}
+def _is_indicator(node: Any) -> bool:
+    """A 0/1 flag: the literal 0 or 1, NULL, or a CASE whose every branch is one. A SUM of it counts."""
+    if isinstance(node, exp.Null) or _is_int_literal(node, "0") or _is_int_literal(node, "1"):
+        return True
+    return isinstance(node, exp.Case) and all(
+        _is_indicator(branch.args.get("true")) for branch in node.args["ifs"]) and (
+        node.args.get("default") is None or _is_indicator(node.args["default"]))
+
+
+def _aggregate_families(node: "exp.Expression") -> frozenset:
+    """Which kinds of aggregate a reduced expression computes, so a MAX is never read as a way of
+    writing a SUM. A SUM of a 0/1 flag is a count, and an AVG is a sum over a count."""
+    out: set[str] = set()
+    for agg in node.find_all(exp.AggFunc):
+        if isinstance(agg, exp.Sum):
+            out.add("count" if _is_indicator(agg.this) else "sum")
+        elif isinstance(agg, exp.Avg):
+            out.update(("sum", "count"))
+        else:
+            out.add(type(agg).__name__.lower())
+    return frozenset(out)
+
+
+def _shape(node: "exp.Expression") -> tuple:
+    """The columns a reduced expression reads and the aggregate kinds it computes."""
+    return _column_names(node), _aggregate_families(node)
+
+
+def _binding_shapes(candidates: list[MetricCandidate]) -> set:
+    """Every shape a read binding has, for `COMPUTED_DIFFERENTLY`. Once per receipt."""
+    return {_shape(c.reduced) for c in candidates if c.reduced is not None}
 
 
 def _lookup(reduced: "exp.Expression", index: dict) -> list:
@@ -8618,7 +8656,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                          by_binding: dict, visible: set[str], dialect: "str | None",
                          memo: dict[int, dict[str, str]],
                          by_binding_grouped: Optional[dict] = None,
-                         binding_columns: "set | frozenset" = frozenset(),
+                         binding_shapes: "set | frozenset" = frozenset(),
                          ) -> tuple[str, Optional[MetricCandidate]]:
     """One output column against every declared metric: `(status, matched candidate or None)`.
 
@@ -8638,10 +8676,10 @@ def _match_output_column(oc: OutputColumn, unread: bool,
     4. **`UNMATCHED`** — every candidate binding was read, the column was compared against all of
        them, and none is this value. That is a settled claim and it is the whole point of the
        section: it is the sentence "this number is not the organisation's agreed definition".
-       Not reached when a declared binding reads exactly the columns this aggregate reads: then the
-       two are written differently and may still be one number, so the answer is
-       `COMPUTED_DIFFERENTLY` (#655). `binding_columns` is `_binding_columns(candidates)`; left
-       empty, that rung is skipped.
+       Not reached when a declared binding reads exactly the columns this aggregate reads with the
+       same kinds of aggregate (`_shape`): then the two are written differently and may still be
+       one number, so the answer is `COMPUTED_DIFFERENTLY` (#655). `binding_shapes` is
+       `_binding_shapes(candidates)`; left empty, that rung is skipped.
 
     Equality is after `_equivalent_form` on both sides. In an arm with a plain GROUP BY the
     projection is also compared, grouped-reduced, against `by_binding_grouped`.
@@ -8665,7 +8703,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
         return UNDETERMINED, None
     if unread:
         return UNDETERMINED, None
-    if _is_aggregate(oc.expr) and _column_names(reduced) in binding_columns:
+    if _is_aggregate(oc.expr) and _shape(reduced) in binding_shapes:
         return COMPUTED_DIFFERENTLY, None
     return UNMATCHED, None
 
