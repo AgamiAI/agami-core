@@ -125,11 +125,11 @@ def test_build_refreshes_the_list_after_each_wait():
     assert "\n#" not in item
     # the poll's own `list` refreshes the task list: one call per pass, no `sm steps` beside it
     assert "Its output also carries `list`" in item and "No separate `sm steps` call per pass" in item
-    # the loop stops on a failed build too, and the person is told why
-    loop = text[:wait.start()].rsplit("\n", 3)[-3]
-    assert "in a loop that stops when any of these happens: it says `done`; it says `failed`; or its `list` " \
-        "shows the build step not started again (`·`)" in " ".join(text.split())
-    assert "`failed`" in item and "`problem`" in item
+    # the loop stops when `then` says the build has ended (a failed build too) or a killed build
+    # shows `·`, and the person is told why from the problem `say`
+    assert "in a loop that stops when its `then` says the build has ended, or when its `list` shows the " \
+        "build step not started again (`·`)" in " ".join(text.split())
+    assert "the build has ended" in item and "its `say`" in item
 
 
 def test_task_list_says_what_to_do_with_a_problem():
@@ -158,8 +158,9 @@ def test_the_last_step_is_done_before_the_turn_ends():
 
 def test_build_stops_waiting_on_a_problem():
     text = _text(REFS / "build.md")
-    assert "or its `list` shows the build step not started again (`·`)" in text
-    assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, refresh the task list from its `list`, say its `problem`' in text
+    assert "or when its `list` shows the build step not started again (`·`)" in text
+    assert 'run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, and do what its `then` says' in text
+    assert "post its `say`, then refresh the task list from its `list`, then handle it" in " ".join(text.split())
     assert '"The validator gates the write"' in text and "\nThe validator gates the write" in text
 
 

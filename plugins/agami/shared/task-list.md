@@ -20,8 +20,8 @@ call both marks the step and gives the list to show. Each phase file says which 
 `sm progress --wait` prints the same `list`, so during the build its output refreshes the list with
 no `sm steps` call of its own.
 
-**After a `sm steps` or `sm progress` call whose `then` says to update the task list, update it
-from `list` before anything else; when `changed` is false there is nothing to do.** The output's
+**After a `sm steps` or `sm progress` call, update the task list from `list` when its `then` says
+to, before anything else; otherwise there is nothing to do.** The output's
 `say` and `then` are followed as [engine-says.md](engine-says.md) says. Never filter or shorten the
 output (no `grep`, `head`, `sed` or `jq`): copy the whole `list`.
 
@@ -41,8 +41,8 @@ agami-connect's SKILL.md, all not started except the first. Switch to `sm steps`
 show what it prints. Don't seed the list again from memory.
 
 **A `problem`.** When `sm steps` prints a `problem` that is not null, the model on disk couldn't be
-read or the last build didn't finish: say it to the person in one sentence before going on, and
-don't start the next step until it is dealt with.
+read or the last build didn't finish. The first time, its `say` is the problem line: post it (that is
+how you say it to the person before going on), then do what its `then` says; wait until it is fixed.
 
 **The step ids**, for the marks:
 

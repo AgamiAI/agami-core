@@ -60,7 +60,7 @@ The format comes from the extension (`--format csv|json|tsv` overrides it). CSV 
    ```bash
    bash "<plugin_root>/scripts/sm" enrich-input "<root>" --chunks
    ```
-   It prints `chunks`, each `{chunk, area, tables}`: every area cut into the fewest runs of at most 12 tables, sized evenly, and a model of more than 8 tables always gets at least two chunks; and `parallel`, true with two or more chunks. With **`parallel: true`**, give each chunk to an `agami-core:agami-enricher` subagent (steps 1–6). With `parallel: false` (a single chunk), describe it yourself, as the rest of 2a says; with no Agent tool, describe every chunk yourself, one after another, the same way.
+   It prints `chunks`, each `{chunk, area, tables}`: every area cut into the fewest runs of at most 12 tables, sized evenly, and a model of more than 8 tables always gets at least two chunks; and `parallel`, true when there are two or more chunks and more than 8 tables. With **`parallel: true`**, give each chunk to an `agami-core:agami-enricher` subagent (steps 1–6). With `parallel: false` (a single chunk, or a model of no more than 8 tables, which can still come as one chunk per area), describe every chunk yourself, one after another, as the rest of 2a says; with no Agent tool, do the same.
 1. **Stamp the batch, then prepare each chunk's input**: run `bash "<plugin_root>/scripts/sm" batch-id` once and use its `batch` in every file name below ([parallel-work.md](../../../shared/parallel-work.md)); then one pre-approved call per chunk, the chunk's tables comma-separated (never an empty list):
    ```bash
    bash "<plugin_root>/scripts/sm" enrich-input "<root>" --area <area> --tables <t1,t2,…> --profile <profile> --out "<artifacts_dir>/local/tmp/agami-enrich-<batch>-<chunk>.input.json"

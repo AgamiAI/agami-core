@@ -12,9 +12,9 @@ Runs on **every** invocation that produces or refreshes a model — even if Phas
 ```bash
 bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=in_progress
 ```
-Its `say` holds the whole closing summary: the first line with the totals, the overview table (one row per subject area), the sign-off line, and how long setup took (*"Set up in 6 min 40 s"*, measured from the step marks). Its `then` says to post it, update the task list, and ask the closing card in that same message. So post its `say` exactly, as the first text of the message, with no closing sentence of your own before it or in its place; refresh the task list from its `list`; and ask the closing card below in that same message. Never count, time or round anything yourself.
+Its `say` normally holds the whole closing summary: the first line with the totals, the overview table (one row per subject area), the sign-off line, and how long setup took (*"Set up in 6 min 40 s"*, measured from the step marks). Its `then` says to post it, update the task list, and ask the closing card in that same message. So post its `say` exactly, as the first text of the message, with no closing sentence of your own before it or in its place; refresh the task list from its `list`; and ask the closing card below in that same message. Never count, time or round anything yourself.
 
-The closing card is never asked in a message that does not begin with the summary.
+The closing card is asked only in a message that begins with the summary. If the closing mark's `say` does not contain the summary table (a problem line in its place, or no `say` at all), deal with what it says, then run `sm steps "<root>" --mark first_question=in_progress` again.
 
 **Where the host can draw a visual in the chat, the overview card too** ([`shared/overview-card.md`](../../../shared/overview-card.md); how it is drawn, and its fallback: [`shared/native-elements.md`](../../../shared/native-elements.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. The tiles are drawn as well as the summary, not instead of it (the summary is the record in the transcript), and a click on a tile carries on in the chat.
 

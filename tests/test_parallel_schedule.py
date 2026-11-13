@@ -193,7 +193,7 @@ def test_describe_shows_no_chunk_count_of_its_own():
     assert '"✓ Sales: 12 tables described, 96 columns, 5 entities."' in enrich
     assert "post its `say` exactly and do its `then`, which says to refresh the task list" in enrich
     review = _flat(_read(REFS / "review.md"))
-    assert 'run `sm steps "<root>"` and refresh the task list ([task-list.md]' in review
+    assert 'run `sm steps "<root>"` and do what its `then` says ([task-list.md]' in review
 
 
 def test_a_resumed_build_with_a_model_goes_to_the_join_cards():

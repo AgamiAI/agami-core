@@ -470,8 +470,8 @@ def test_root_is_defined_where_plugin_root_is():
 # Section 2: the task list
 def test_the_task_list_is_updated_when_then_says_so():
     text = _flat(_read(SHARED / "task-list.md"))
-    assert ("After a `sm steps` or `sm progress` call whose `then` says to update the task list, update "
-            "it from `list` before anything else; when `changed` is false there is nothing to do.") in text
+    assert ("After a `sm steps` or `sm progress` call, update the task list from `list` when its `then` "
+            "says to, before anything else; otherwise there is nothing to do.") in text
     assert "Never filter or shorten the output" in text
     assert "`✓` is done, `▶` is in progress, `·` is not started" in text
 
@@ -490,7 +490,7 @@ def test_the_build_loop_is_one_progress_call_per_pass():
 def test_the_closing_card_comes_after_the_summary(name, card):
     text = _flat(_read(REFS / name))
     call = text.index('scripts/sm" steps "<root>" --mark first_question=in_progress')
-    rule = text.index("The closing card is never asked in a message that does not begin with the summary.")
+    rule = text.index("The closing card is asked only in a message that begins with the summary.")
     assert call < rule < text.index(card)
     assert "post its `say` exactly" in text
 
