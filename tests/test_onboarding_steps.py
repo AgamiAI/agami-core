@@ -364,10 +364,10 @@ def test_build_done_mark_without_a_model_or_log_is_in_progress(tmp_path):
 
 
 def test_progress_parsing_is_shared_with_sm_progress():
-    # one table of phrases: an unknown line has no count here and is passed through by sm progress
+    # one table of phrases: an unknown line has no count here and is passed through, quoted, by sm progress
     assert steps.parse_progress("something the engine never writes") is None
     assert cli._progress_line("something the engine never writes") == {
-        "line": "something the engine never writes", "done": False, "failed": False}
+        "line": '"something the engine never writes"', "done": False, "failed": False}
     m, phrase, unit = steps.parse_progress("columns+grain 33/34")
     assert (m.groups(), unit) == (("33", "34"), "tables")
 

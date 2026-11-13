@@ -668,13 +668,14 @@ def _progress_line(raw: str) -> dict:
     from . import steps
     parsed = steps.parse_progress(raw)
     if not parsed:
-        # Posted as is (`then`: "Post `line`"), so a line the engine didn't phrase stays one capped
-        # line, and a failure's reason (the database's or the model's words) is quoted.
-        from .say_text import one_line, quoted
+        # Posted as is (`then`: "Post `line`"), so a line the engine didn't phrase is quoted like
+        # other model text (a tampered log's `# …` must not render as a heading), and a failure's
+        # reason (the database's or the model's words) is quoted with the longer failure cap.
+        from .say_text import quoted
         if raw.startswith("failed:"):
-            reason = quoted(raw[len("failed:"):].strip())
+            reason = quoted(raw[len("failed:"):].strip(), steps.FAILURE_CAP)
             return {"line": f"The build didn't finish: {reason}", "done": False, "failed": True}
-        return {"line": one_line(raw), "done": False, "failed": False}
+        return {"line": quoted(raw), "done": False, "failed": False}
     m, phrase, unit = parsed
     if unit:
         n, total = int(m.group(1)), int(m.group(2))
@@ -709,21 +710,27 @@ def cmd_progress(args) -> int:
     # The compact step list rides along only when it moved since `sm steps` or `sm progress` last
     # printed it, so each poll is one call, and `then` says whether to refresh the task list.
     root = Path(args.root).expanduser()
-    listed = steps.compact(steps.onboarding_steps(root))["list"]
+    view = steps.compact(steps.onboarding_steps(root))
+    listed = view["list"]
     shown = _progress_line(current) if current else {"line": "", "done": False, "failed": False}
     before = steps.read_printed(root)
     steps.remember_printed(root, before, {"list": listed, "line": shown["line"]})
     # Nothing is remembered for a folder that doesn't exist yet, and its list is the fresh one every
     # time (`sm steps` prints it): reporting it as moved would ask for a refresh on every poll.
     list_changed = root.is_dir() and before.get("list") != listed
-    line_new = bool(shown["line"]) and before.get("line") != shown["line"]
+    # A failure is not posted from here: `sm steps` says it as its problem, and saying it in both
+    # places posted it twice.
+    line_new = bool(shown["line"]) and not shown["failed"] and before.get("line") != shown["line"]
     out: dict[str, Any] = {**shown, "started": bool(current)}
     if current:
         out["changed"] = current != start
     if list_changed:
         out["list"] = listed
     out["list_changed"] = list_changed
-    out["then"] = steps.progress_next(line_new, list_changed, shown["done"] or shown["failed"])
+    # A problem on the list (a build killed with no `failed:` line) ends the build too: its log
+    # never moves on again, so "call this again" would loop for ever.
+    ended = shown["done"] or shown["failed"] or bool(view["problem"])
+    out["then"] = steps.progress_next(line_new, list_changed, ended)
     _print_json(out)
     return 0
 
@@ -805,8 +812,11 @@ def cmd_steps(args) -> int:
     before = steps.read_printed(root)
     changed = before.get("list") != listed
     closing = ("first_question", "in_progress") in marks
+    # No summary while the build isn't done (no model on disk, or a build running): an earlier
+    # model's summary would not be this run's.
+    built = next(s["status"] for s in result["steps"] if s["id"] == "build") == "done"
     said = steps.steps_next(changed, result["problem"], before.get("problem"), closing,
-                            _closing_summary(root) if closing else None)
+                            _closing_summary(root) if closing and built else None, built)
     # The problem is remembered as said: it is said once, not on every call while it lasts.
     steps.remember_printed(root, before, {"list": listed, "problem": result["problem"]})
     # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
@@ -1962,6 +1972,7 @@ def cmd_seed_validate(args) -> int:
 
 THEN_ENRICHED = "Post `say`, then run `sm steps` and update the task list."
 THEN_EXAMPLES = "Post `say`, then ask the examples card."
+THEN_EXAMPLES_NO_CARD = "Post `say`."
 
 # The examples table posted after `seed-validate --out`: a live run wrote the items to a file and
 # then had to assemble the table itself, so the engine builds it from the items it wrote.
@@ -1977,9 +1988,10 @@ def _preview(item: dict) -> str:
     return cell(", ".join(str(v) for v in rows[0]), PREVIEW_CHARS) if rows else "no rows"
 
 
-def examples_say(printed: str) -> dict[str, Any]:
+def examples_say(printed: str, card: bool = True) -> dict[str, Any]:
     """`say` (the examples table, ready to post) and `then` for `seed-validate --out`, from the JSON
     it wrote: one area's item list, or several areas' `items`. {} for anything else (an error).
+    `card` False (`--no-card`, the sample path, which asks no examples card) drops the card from `then`.
     Questions and results are model and database text: in cells, or quoted, never bare prose."""
     from .say_text import cell, quoted
     try:
@@ -2005,7 +2017,11 @@ def examples_say(printed: str) -> dict[str, Any]:
         names = ", ".join(quoted(str(it.get("question", ""))) for it in failed[:FAILED_NAMED])
         line += f" {len(failed)} failed: {names}."
     blocks.append(line)
-    return {"say": "\n\n".join(blocks), "then": THEN_EXAMPLES}
+    return {"say": "\n\n".join(blocks), "then": THEN_EXAMPLES if card else THEN_EXAMPLES_NO_CARD}
+
+
+def _examples_out_say(printed: str, args) -> dict[str, Any]:
+    return examples_say(printed, card=not args.no_card)
 
 
 # --- several subject areas per call (#544) -------------------------------------------------
@@ -2552,7 +2568,7 @@ def _run_to_out(args) -> int:
     out = Path(args.out_file).expanduser()
     write_atomically(out, data)
     said = getattr(args, "out_say", None)
-    extra = said(buf.getvalue()) if said is not None else {}
+    extra = said(buf.getvalue(), args) if said is not None else {}
     # one line: the skill reads it at a glance
     print(json.dumps({"out": str(out), "bytes": len(data), **extra}, ensure_ascii=False))
     return rc
@@ -2971,7 +2987,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
     _add_out(sp)
-    sp.set_defaults(func=cmd_seed_validate_areas, out_say=examples_say)
+    sp.add_argument("--no-card", action="store_true",
+                    help="with --out: `then` asks no examples card (the sample path asks none)")
+    sp.set_defaults(func=cmd_seed_validate_areas, out_say=_examples_out_say)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")
     sp.add_argument("--profile", required=True)

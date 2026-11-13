@@ -43,6 +43,11 @@ MARK_STATUSES = ("in_progress", "done", "skipped")
 # killed process writes no `failed:` line), so the list doesn't read "building" forever.
 STALE_BUILD_SECONDS = 1800
 
+# The longest failure reason a problem line or progress line carries. Longer than the 80 of other
+# model text: the reason can't be told apart from the engine's own hints ("no tables discovered. If
+# the catalog is locked down, …"), and a hint cut at 80 loses the advice it exists for.
+FAILURE_CAP = 200
+
 # Each progress-log line, in the person's words: (pattern, phrase, unit). The engine's own wording
 # (`columns+grain 30/52`) is for the engine; a person reads "Reading columns … 30/52 tables".
 PROGRESS_PHRASES = (
@@ -223,10 +228,20 @@ def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         return {**curate.overview(org, root)["totals"],
                 "signoff": curate.model_signoff_counts(root)}, None
     except Exception as exc:  # noqa: BLE001 — see docstring
-        first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        first = _load_error(exc)
         # Posted as a `say`: the engine's words first, the folder by name (no absolute path), and
         # the loader's message, which can quote the model's own files, capped and in quotes.
         return None, f"The model in {quoted(root.name)} couldn't be read: {quoted(first)}"
+
+
+def _load_error(exc: Exception) -> str:
+    """The first line of a load error. An OSError's own text starts with the absolute path of the
+    file it couldn't open (the home or temp folder included), so it is said as its reason and the
+    file's name alone."""
+    if isinstance(exc, OSError):
+        reason = exc.strerror or type(exc).__name__
+        return f"{reason}: '{Path(str(exc.filename)).name}'" if exc.filename else reason
+    return (str(exc).strip().splitlines() or [type(exc).__name__])[0]
 
 
 def _log_state(log: Path, model: Path, now: float,
@@ -269,7 +284,7 @@ def _unfinished(state: str, reason: Optional[str], noun: str) -> str:
     """The problem line for a build that ended without finishing."""
     if state == "failed":
         # the reason is the build's error text, which can quote the database or the model
-        return f"The {noun} didn't finish: {quoted(reason or '')}"
+        return f"The {noun} didn't finish: {quoted(reason or '', FAILURE_CAP)}"
     return f"The {noun} stopped before it finished."
 
 
@@ -425,6 +440,9 @@ THEN_LINE_AND_LIST = "Post `line` and update the task list from `list`."
 THEN_LINE = "Post `line`."
 THEN_NOTHING = "Nothing new: call this again."
 THEN_ENDED = "The build has ended: run `sm steps` and go on."
+THEN_NOT_BUILT = ("The model is not built yet, so there is no summary: do not ask the closing "
+                  "card.")
+THEN_AND_UPDATE = " Update the task list from `list`."
 
 
 def _last_path(root: Path) -> Path:
@@ -476,18 +494,22 @@ def remember_printed(root: Path, before: dict[str, Any], printed: dict[str, Any]
 
 
 def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str],
-               closing: bool, summary: Optional[str]) -> dict[str, Any]:
+               closing: bool, summary: Optional[str], built: bool = True) -> dict[str, Any]:
     """`say` and `then` for `sm steps`.
 
     A problem is said once: the same problem already said (`said_before`) is left out of `say`, but
     still in `problem`. It never hides the refresh or the closing card: with a changed list, `then`
     asks for both; on the closing mark the summary follows it in the same `say`. When the closing
-    summary can't be built, the person hears the problem and no closing card is asked."""
+    summary can't be built, the person hears the problem and no closing card is asked; when that is
+    because the model isn't built (none on disk, or a build running), `then` says so, since nothing
+    else would tell why the summary is missing."""
     fresh = problem if problem and problem != said_before else None
     if closing and summary is not None:
         return {"say": f"{fresh}\n\n{summary}" if fresh else summary, "then": THEN_CLOSING}
     if closing and problem:
         return {"say": problem, "then": THEN_NO_SUMMARY}
+    if closing and not built:
+        return {"then": THEN_NOT_BUILT + (THEN_AND_UPDATE if changed else "")}
     if fresh:
         return {"say": fresh, "then": THEN_PROBLEM_AND_UPDATE if changed else THEN_PROBLEM}
     return {"then": THEN_UPDATE if changed else THEN_UP_TO_DATE}
