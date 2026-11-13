@@ -1,61 +1,50 @@
 # agami-connect · Phase 1.7–1.8: build the model
 
-Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash.
+Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full the same way. Each command below is its own Bash call, with no variable, pipe, `;`, `&&` or redirect on the line ([invocation-conventions.md](../../../shared/invocation-conventions.md)).
 
 ### 1.7 — Run the introspection engine (on the kept tables)
 
 Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark build=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark build=in_progress
 ```
 
 **On a resume** of `/agami-connect`, when `sm steps` shows the build in progress, no build log is running, and a model was written since this build was started (`datasource.yaml` is newer than the build's start mark), go to the join cards below; do not build again. An older model on disk (a reload) is not that case: build as below.
 
 This is the deterministic core — it replaces hand-authoring tables/columns/FK SQL/confidence formulas. Run it exactly as written, with the full quoted path (never `cd` into the scripts folder, never a shell variable for the path): that form is the one agami pre-approves, so it doesn't stop for permission.
 
+First write the kept allowlist, one table per line, with the Write tool to `<artifacts_dir>/local/tmp/agami-keep.txt` (1.6's `--keep` usually wrote it already). Then one call, on one line:
+
 ```bash
-# write the kept allowlist to a file first (zsh-safe — no word-splitting to get wrong)
-printf '%s\n' incident problem change_request sys_user ... > "<artifacts_dir>/local/tmp/agami-keep.txt"
-AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
-  --profile <profile> --db-type <db_type> \
-  --artifacts "<artifacts_dir>" \
-  [--tables-file "<artifacts_dir>/local/tmp/agami-keep.txt"] \
-  [--exclude-columns <schema.table.column list from 1.6>]
+AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-keep.txt" --exclude-columns <schema.table.column> <schema.table.column>
 ```
 
 (The raised cap is the same one 1.6 explains — [why](context-and-tables.md#raised-cap). Without it a large schema's `sql_tables` / foreign-key reads are refused, the engine swallows it, and you get a model with no join graph and no error to show for it.)
 
-`--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
+`--tables-file` is the prune step's **kept set** (it also covers the no-catalog/probe-only case from 1.2). `--exclude-columns` marks the dropped columns excluded during the build — one validated write, no follow-up curate call. Leave either option out when it has nothing to pass; omit both only when the user kept everything or skipped pruning. (If a table name is bogus / can't be described, the engine now drops it with a note and — if *nothing* describes — errors clearly instead of writing a partial model.)
 
 **On a server database the build takes from seconds to many minutes, and the command prints nothing until it returns, which reads as hung.** So on every server database (anything but SQLite and DuckDB, which return in seconds) run it **in the background and show progress from its log** (the rules for any wait: [native-elements.md](../../../shared/native-elements.md#waits)):
 
 1. **One background call.** Bash with `run_in_background: true`, and a `description` the person can read in the app's Background tasks pane, in their words: *"Read the tables (Snowflake, 84 tables)"*.
 2. **Say once where to watch**, the first time a background step starts in a run: *"Reading your tables in the background. In the Desktop app, ⋮ → Background tasks shows it live."* (Leave out the second sentence outside the Desktop app.)
-3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done` or `failed`, or `sm steps` (below) prints a `problem`:
+3. **Keep the turn open and post progress with `sm progress`**, in a loop until it says `done` or `failed`, one call per pass:
    ```bash
-   bash "<plugin_root>/scripts/sm" progress "<artifacts_dir>/<profile>" --wait 20
+   bash "<plugin_root>/scripts/sm" progress "<root>" --wait 20
    ```
    It returns as soon as the build's log moves on (or after 20 seconds) with `line`, ready to post: *"Reading columns ▰▰▰▱▱▱▱▱ 12/34 tables"*, the bar drawn from the log's own counts and rounded down (never an estimate), and `done` once the build has finished. Post `line` when `changed` is true. Use this, not `tail` or a watcher of your own: it is pre-approved, and a turn that ends mid-onboarding loses the skill's pre-approvals, so every later command would stop for permission. If you do end your turn while it runs, say so in that message (*"Still reading your tables; I'll carry on as soon as it finishes."*).
 
-   After every `sm progress --wait` call, refresh the task list ([task-list.md](../../../shared/task-list.md)):
-   ```bash
-   bash "<plugin_root>/scripts/sm" steps "$ROOT"
-   ```
+   Its output also carries `list`, the same step list `sm steps` prints: after every pass, the next thing is to refresh the task list from that `list` ([task-list.md](../../../shared/task-list.md)). No separate `sm steps` call per pass.
 
-   When `failed` is true, or `sm steps` prints a `problem` that is not null (a killed build writes no `failed` line; `sm steps` calls it stopped after 30 silent minutes), the build stopped (`sm steps` shows the build step pending again, with the `problem`): say the `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
-4. **The onboarding step's label** is the build step's `text` from that `sm steps` output, with the live count once the build's log has one (*"Read the tables and joins — 12 of 34 tables"*; right after the start mark it has none) and the final numbers when it ends; never type the count yourself.
+   When `failed` is true, or the `list` shows the build step not started again (`·`; a killed build writes no `failed` line, and the steps call it stopped after 30 silent minutes), the build stopped: run `bash "<plugin_root>/scripts/sm" steps "<root>"` once, say its `problem` to the person in one sentence, and handle it as the paragraph "The validator gates the write" below says (surface the errors and stop).
+   **After the last "Checking joins" line**, the build tests possible joins against the data, and that can take a minute or more: post the line `sm progress` prints for it (*"Testing possible joins: 120 probed"*) whenever `changed` is true, and if a pass brings no such line, post once that the joins are being checked against the data (*"Checking the remaining columns against your data for joins…"*), so the wait before the join cards is never silent.
+4. **The onboarding step's label** is the build step's line in that `list`, with the live count once the build's log has one (*"Read the tables and joins — 12 of 34 tables"*; right after the start mark it has none) and the final numbers when it ends; never type the count yourself.
 5. **When it exits**, read the command's own output (the report, and the validator's verdict) as below.
 
 **Where background commands aren't available, a batched build** keeps it legible instead:
 
-1. **Batched build (30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**:
+1. **Batched build (30+ tables) — `--append`.** Split the kept allowlist into batches of ~10–15 tables and introspect **one batch per call**, each a quick *foreground* command that returns in tens of seconds. Every call MERGES into the existing model (prior tables are loaded from disk, never re-queried), so you end with the full union — and you report `batch 3/5 (+12 tables)` between calls, natural progress with **no background monitor to babysit**. Write each batch's tables with the Write tool to its own file, `<artifacts_dir>/local/tmp/agami-batch-1.txt`, `agami-batch-2.txt` and so on, then run one call per file, each its own Bash call (never a loop):
    ```bash
-   split -l 12 "<artifacts_dir>/local/tmp/agami-keep.txt" "<artifacts_dir>/local/tmp/agami-batch-"      # batch files
-   for b in "<artifacts_dir>/local/tmp/agami-batch-"*; do
-     AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect \
-       --profile <p> --db-type <t> \
-       --artifacts "<artifacts_dir>" --tables-file "$b" --append
-   done
+   AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" introspect --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --tables-file "<artifacts_dir>/local/tmp/agami-batch-1.txt" --append
    ```
    (`--append` on the first batch just creates the model — there's nothing to merge yet. The relationship pass runs each batch across the union, deduped, so the final batch yields the complete join graph.)
 (`--progress <file>` moves the log elsewhere. SQLite and DuckDB run in the foreground: they return in seconds.)
@@ -64,19 +53,19 @@ It builds + **validates** + writes the model at `<artifacts_dir>/<profile>/`: st
 
 The validator gates the write — **if it fails, the model is not persisted.** Surface the errors verbatim and stop (this should be rare; the engine emits valid models).
 
-**Post one progress line, with numbers from the engine's output only.** No card here: the build asks nothing. Every number comes from the report it printed (`tables:`, `relationships:`, `subject_areas (<A>)`, `capability modes:`, `deep tables:`, `sensitive columns:`); never estimate, round up or fill a number the output didn't give. For how many joins came from declared foreign keys, count the relationship items with `origin: "fk"` in `bash "<plugin_root>/scripts/sm" review-items "$ROOT"`; if you didn't run it, leave that clause out.
+**Post one progress line, with numbers from the engine's output only.** No card here: the build asks nothing. Every number comes from the report it printed (`tables:`, `relationships:`, `subject_areas (<A>)`, `capability modes:`, `deep tables:`, `sensitive columns:`); never estimate, round up or fill a number the output didn't give. For how many joins came from declared foreign keys, count the relationship items with `origin: "fk"` in `bash "<plugin_root>/scripts/sm" review-items "<root>"`; if you didn't run it, leave that clause out.
 
 `✓ Read <N> tables into <A> subject area(s) (<catalog|probe> mode); <R> joins, <F> from declared foreign keys; <S> columns flagged personal; <D> wide tables.`
 
 Add **one finding** on the next line when the report has one worth a person's attention, quoted from it: a `suspected personal data (review):` line, a `large table` line, or a note that dropped a table. One, not a list; none when there is none. Batched builds post `batch 3/5 (+12 tables)` between calls, then this line once at the end.
 
-**Empty tables — say so before going on.** Read `rows` per table from `bash "<plugin_root>/scripts/sm" model-tree "$ROOT"` (measured during the build; `null` when it wasn't). When some tables have 0 rows, add to the progress line *"<k> of <N> tables are empty"* and name up to 5. **When every measured table is empty**, the build can't find joins or keys from the data, and every example will return nothing, so stop and say it plainly: *"These <N> tables have no rows: the database holds the structure only."* Then AskUserQuestion, header `Empty`: **Connect a different database (Recommended)** (Phase 0a, a new name) / **Continue with the structure only** (descriptions, metrics and sign-off still work; Phase 6's examples will show 0 rows, so say that again there) / **Stop here**. A live run built a whole model on an empty demo database before anyone noticed.
+**Empty tables — say so before going on.** Read `rows` per table from `bash "<plugin_root>/scripts/sm" model-tree "<root>"`, its whole output, never filtered (measured during the build; `null` when it wasn't). When some tables have 0 rows, add to the progress line *"<k> of <N> tables are empty"* and name up to 5. **When every measured table is empty**, the build can't find joins or keys from the data, and every example will return nothing, so stop and say it plainly: *"These <N> tables have no rows: the database holds the structure only."* Then AskUserQuestion, header `Empty`: **Connect a different database (Recommended)** (Phase 0a, a new name) / **Continue with the structure only** (descriptions, metrics and sign-off still work; Phase 6's examples will show 0 rows, so say that again there) / **Stop here**. A live run built a whole model on an empty demo database before anyone noticed.
 
 **Backstop reconciliation — if `<N>` is fewer than the catalog held, say what's NOT in the model and why** (the 1.3 guard should have covered this up front; repeat it here so it can't slip). E.g. *"Modeled 52 of 70 tables — left out `public` (17, separate Salesforce dataset) and `pg_auto_copy` (1, system). Say the word if you want any of them."* A user who picked "all" should never have to diff the catalog themselves to notice a schema is missing.
 
 **Start the enrichers now, before the join cards**, so the columns are described while the person decides joins. Do this once the model has validated (and the person didn't stop at the `Empty` card), unless a model spec was attached: 1.8 replaces the subject areas, so with a spec the enrichers start in Phase 2 instead.
 
-1. **Find the chunks** ([enrich.md 2a](enrich.md#2a--descriptions-describe-coded-columns-leave-only-self-evident-ones-empty) step 0, `sm enrich-input "$ROOT" --chunks`). With `parallel: false` (one chunk, or a small model), or with no Agent tool, nothing starts here: go to the join cards, and Phase 2 describes the model inline.
+1. **Find the chunks** ([enrich.md 2a](enrich.md#2a--descriptions-describe-coded-columns-leave-only-self-evident-ones-empty) step 0, `sm enrich-input "<root>" --chunks`). With `parallel: false` (one chunk, or a small model), or with no Agent tool, nothing starts here: go to the join cards, and Phase 2 describes the model inline.
 2. **Collect the document readers** started in 1.5 with `sm wait-files` on their result files (they have had the cards and the build to run), and merge them into `$DATA_MODEL_DOC_TEXT` as 1.5 says, conflict cards included. A reader still not ready within the give-up limit ([parallel-work.md](../../../shared/parallel-work.md)): read that document yourself (1.5's inline path), say so in one line, and go on.
 3. **Run 2a.0's deterministic metadata step** ([enrich.md 2a.0](enrich.md#2a0--deterministic-metadata-first-run-before-any-hand-enrichment): `sm enrich-metadata`, and `sm describe-file` when the person gave a column dictionary), so the enrichers' input already carries what the database and the dictionary say.
 4. **Start the enrichers**: enrich.md 2a steps 1–2, one `agami-enricher` per chunk in the background, per [parallel-work.md](../../../shared/parallel-work.md).
@@ -102,8 +91,7 @@ The join is the candidate's `id` without its schemas, `->` drawn as `→`; the m
 Add each confirmed join with:
 
 ```bash
-bash "<plugin_root>/scripts/sm" curate "<artifacts_dir>/<profile>" \
-  --ops-file "<artifacts_dir>/<profile>/.introspect/join_candidates.json" --candidate "<id>"
+bash "<plugin_root>/scripts/sm" curate "<root>" --ops-file "<root>/.introspect/join_candidates.json" --candidate "<id>"
 ```
 
 Never accept them all unasked: a column can match a key's values by chance (two counters that both run 1, 2, 3 …). The name-guessed joins (a `dealer_id` beside a `dealers` table) are still written `unreviewed` as before and aren't listed again.
@@ -114,8 +102,7 @@ Introspection proposed areas by name and joins only where the catalog or `*_id` 
 
 1. **Dry run** and show the result:
    ```bash
-   bash "<plugin_root>/scripts/sm" apply-spec "<artifacts_dir>/<profile>" \
-     --file "<artifacts_dir>/local/model-spec/<profile>/spec.json" --dry-run
+   bash "<plugin_root>/scripts/sm" apply-spec "<root>" --file "<artifacts_dir>/local/model-spec/<profile>/spec.json" --dry-run
    ```
    `errors` lists every problem at once (a table the build didn't find, an area a table names that the spec doesn't declare, a join column that doesn't exist) — show them all and stop; the person fixes the workbook and you re-run 1.6s.
 
@@ -130,7 +117,7 @@ Surface any `notes` too — in particular a metric flagged as a plain aggregate:
 
 When the model has validated (and the spec, if one was attached, is applied), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark build=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark build=done
 ```
 
 ---

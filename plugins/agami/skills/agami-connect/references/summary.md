@@ -1,45 +1,29 @@
 # agami-connect · Phase 7–8.5: summary and next steps
 
-Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash.
+Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full the same way. Each command below is its own Bash call, with no variable, pipe, `;`, `&&` or redirect on the line ([invocation-conventions.md](../../../shared/invocation-conventions.md)).
 
 ## Phase 7: Post-introspect summary (MANDATORY — NEVER SKIP)
 
-Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `$ROOT` is `<artifacts_dir>/<profile>`:
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `<root>` is `<artifacts_dir>/<profile>`:
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark first_question=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=in_progress
 ```
 
 **Sequencing gate (read first):** Phases 7–8 run **only after the user has finished validating** — i.e. after every Phase 6 example has an answer on a card (or, in the full view, they sent `done`), and after the Phase 4 cards were answered. **Never print this summary or the Phase 8 closing while a review or examples card is still unanswered** (a full view page being open doesn't hold it: the page is read-only and its card is asked again) — wait for the person, don't summarize over them.
 
-Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved. Lead with the **must-do** count, break out optional polish separately.
+Runs on **every** invocation that produces or refreshes a model — even if Phase 4 found nothing and all entries auto-approved.
 
-Scan the model; count by `confidence`/`review_state`/type:
-
-```
-agami-connect just ran. Here's what we found:
-
-  ✓  <N> tables, <M> columns across <A> subject areas   (structure)
-  ✓  <C>% of columns described                           (from `sm coverage` — never 0%)
-  ✓  <K> relationships with join cardinality              (<E> confirmed from declared FKs)
-  ⚠  <R1> inferred/probed relationships                   (review — confirm the join)
-  ⚠  <R2> proposed metrics                                (sign-off — Rule 1)
-  ✓  <S> sensitive columns flagged (never extracted)
-
-  <R2 + stale> items need your sign-off to start querying.
-  <R1> low-confidence joins can wait — they surface as warnings on the answers
-  that use them and self-approve as you query.
-```
-(Omit any zero line. The closing two lines are mandatory — they tell the user "you can ship now; the tail is optional.")
-
-**Then, where the host can draw a visual in the chat, the overview card** ([`shared/overview-card.md`](../../../shared/overview-card.md); how it is drawn, and its fallback: [`shared/native-elements.md`](../../../shared/native-elements.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. It comes after the block above (which stays: it is the record in the transcript), and a click on a tile carries on in the chat. Where the host can't draw one, the block alone is the summary.
-
-**Right under the overview** (the card, or the block where there is no card), how long setup took, from the step marks:
+**The summary comes from one command**, never assembled by hand:
 ```bash
-bash "<plugin_root>/scripts/sm" timing "$ROOT"
+bash "<plugin_root>/scripts/sm" summary "<root>"
 ```
-Show its `text` as printed, on its own line (*"Set up in 6 min 40 s"*); when `text` is empty, show nothing. Never time it yourself.
+It prints ready-to-post markdown: the headline counts, one row per subject area, how many definitions wait for sign-off, and how long setup took (*"Set up in 6 min 40 s"*, measured from the step marks; left out when there is nothing to time). Post its output exactly as printed, as the text of the same message that asks the closing card below, at the top of that message. Never count, time or round anything yourself.
 
-When 2f drafted the company description, show it too, in one line: *"Company (draft): <description>. Correct it in /agami-model."* After the block, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
+The closing card is never asked in a message that does not begin with this summary.
+
+**Where the host can draw a visual in the chat, the overview card too** ([`shared/overview-card.md`](../../../shared/overview-card.md); how it is drawn, and its fallback: [`shared/native-elements.md`](../../../shared/native-elements.md)): one tile per subject area and one for what needs sign-off, every number from `sm overview`. The tiles are drawn as well as the summary, not instead of it (the summary is the record in the transcript), and a click on a tile carries on in the chat.
+
+When 2f drafted the company description, show it too, in one line under the summary: *"Company (draft): <description>. Correct it in /agami-model."* After the summary, in the same message, state the datasource's one-line description from `datasource.yaml` — *"Agents will pick this datasource by: "<description>" — edit it any time with `sm set-description`."* If you generated it in 2f, say it is a draft. If it is empty (they skipped 1.4 C), say so in one line: an organization with several datasources routes questions by this line.
 
 Then **AskUserQuestion**: `Review what needs sign-off` (→ `/agami-model review` — approve or reject the pending metrics/entities on cards; when that review ends, come back here to Phase 8, the starter questions, rather than agami-model's overview card, so onboarding still ends on a first question) / `See the model` (→ `/agami-model` — the overview in the chat, then hide tables or columns) / `Show the full view` (→ `/agami-model`'s Phase 5: the model explorer page served from localhost; give the URL, then this card again) / `Skip — I'll review later` (default). If a sibling skill isn't built yet, omit that option — don't error.
 
@@ -86,7 +70,7 @@ The model keeps improving as you use it:
 ```
 Once the summary and these question choices are posted, before ending the turn, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark first_question=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=done
 ```
 
 End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.

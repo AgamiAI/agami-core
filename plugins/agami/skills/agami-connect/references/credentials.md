@@ -1,6 +1,6 @@
 # agami-connect · Phase 0a: connect a database
 
-Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash.
+Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full the same way. Each command below is its own Bash call, with no variable, pipe, `;`, `&&` or redirect on the line ([invocation-conventions.md](../../../shared/invocation-conventions.md)).
 
 ## Phase 0a: First-time credential bootstrap
 
@@ -12,14 +12,14 @@ Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin
 - **Linux and anything else, and Databricks on every system** (its secret is a `token`, and the page stores a `password`): the file. 0a.1 → 0a.2 → 0a.3 → **0a.4** (`credentials.example`) → 0a.5 → 0a.5b → 0a.6 → 0a.7 → 0a.8 → **0a.9** (a card waits for the filled-in file) → 0a.10 → Phase 1.
 
 ### 0a.1 — Set up `<artifacts_dir>/local/`
+Two calls:
 ```bash
-mkdir -p "<artifacts_dir>/local" && chmod 700 "<artifacts_dir>/local"
+mkdir -p "<artifacts_dir>/local"
 ```
-If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`:
 ```bash
-mkdir -p ~/.config/agami && printf '%s\n' "<artifacts_dir>" > ~/.config/agami/path
-grep -qxF 'local/' "<artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n' >> "<artifacts_dir>/.gitignore"
+chmod 700 "<artifacts_dir>/local"
 ```
+If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line (Read it first; add the line with the Edit tool, or write the file with that one line when it doesn't exist).
 
 ### 0a.2 — Ask the database type
 
@@ -95,12 +95,10 @@ For a connection with no secret to type (Snowflake browser sign-in, BigQuery, Tr
 **2. Start the helper in the background.** Call Bash with `run_in_background: true`:
 
 ```bash
-echo "agami-helper-pid $$" >&2; exec bash "<plugin_root>/scripts/py" connect_helper.py --spec "<artifacts_dir>/local/tmp/agami-connect-spec.json"
+bash "<plugin_root>/scripts/py" connect_helper.py --spec "<artifacts_dir>/local/tmp/agami-connect-spec.json"
 ```
 
-The `exec` chain (this shell, then `scripts/py`) keeps one PID, so the `agami-helper-pid` line on stderr is the helper's own PID, for stopping it where TaskStop isn't available. It is not an error line; ignore it when looking for the last stderr line.
-
-Stdout is JSON lines and nothing else. **Wait for the helper's first line with the Monitor tool**: the Bash result names the task and its output file, so use the Monitor tool to watch the helper's output until its first line, or the task's exit (an until-loop on that output file that stops on the first JSON line, which the `agami-helper-pid` line is not, or when the task has exited). Never run a foreground `sleep`: the Desktop Code tab blocks it. As a fallback where Monitor isn't available, re-read the output file at spaced intervals, each read its own tool call, never a tight loop. Stop waiting when one of these happens:
+Stdout is JSON lines and nothing else. **Wait for the helper's first line with the Monitor tool**: the Bash result names the task and its output file, so use the Monitor tool to watch the helper's output until its first line, or the task's exit (an until-loop on that output file that stops on the first JSON line, or when the task has exited). Never run a foreground `sleep`: the Desktop Code tab blocks it. As a fallback where Monitor isn't available, re-read the output file at spaced intervals, each read its own tool call, never a tight loop. Stop waiting when one of these happens:
 
 - **The first line has a `status`**: it is the final line. Every check that runs before the page (`missing_driver`, `name_taken`, `no_store`, `stale_install`, and the other refusals), and the whole `sso` path, prints that one line and exits. Skip step 3 and go to step 4 with it.
 - **The first line has a `url`** (`{"url": "http://127.0.0.1:<port>/<token>/", "expires_in": 300}`): the page is listening, usually within a second. Go to step 3.
@@ -120,7 +118,7 @@ Don't run the helper in the foreground: it would hold the turn until the page is
 - **New link** → stop the running helper (below) and start step 2 again with the same spec.
 - **Use a file instead (manual)** → stop the helper, then 0a.4.
 
-The helper exits when the page is submitted or the 5 minutes pass, and that exit also brings you back if the card is still open: go to step 4 and don't ask the card again. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id, or, where TaskStop isn't available, `kill <PID>` with the PID from the `agami-helper-pid` line (`kill` sends SIGTERM, and the helper then takes back whatever it stored), and show the database-type card again.
+The helper exits when the page is submitted or the 5 minutes pass, and that exit also brings you back if the card is still open: go to step 4 and don't ask the card again. Never wait silently: if the person writes before the helper is done, answer, and remind them the link is still open. If they want to stop, stop the background task with TaskStop and its task id (the helper then takes back whatever it stored), and show the database-type card again. Where TaskStop isn't available, the helper stops by itself when its 5 minutes are up: say so, and wait for its exit before starting it again.
 
 **4. Read the final line** of the output when the helper exits, and act on it. The exit is what you wait for after the link is posted: the Monitor tool watching the task until it exits (or, as the fallback, spaced re-reads of the output file), never a foreground `sleep`; the background task's exit notice also brings you back. Exit code is 0 for every outcome; `status` (and a refusal's `reason`) says what happened, and `detail` is the one line to show the person. Each outcome gets one sentence plus the next card:
 
@@ -143,9 +141,9 @@ The helper exits when the page is submitted or the 5 minutes pass, and that exit
 
 `Use a file instead (manual)` always means 0a.4 → 0a.9 → 0a.10, the same as Linux. A line that is not one of these, or no final line at all: show the last line of output and offer `Try again` / `Use a file instead (manual)`. Delete the spec file once the helper has exited.
 
-On `connected` (the connection test passed), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)); `$ROOT` is `<artifacts_dir>/<profile>`:
+On `connected` (the connection test passed), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)); `<root>` is `<artifacts_dir>/<profile>`:
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark connect=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark connect=done
 ```
 
 ### 0a.4 — Write `<artifacts_dir>/local/credentials.example`
@@ -230,13 +228,13 @@ For BigQuery / Databricks / any key-or-token file: remind the user to `chmod 600
 
 ### 0a.5 — Resolve the agami interpreter + detect tools
 
-**`$PY` = `data.interpreter.python3` from the Phase-0 `connect_resolve.py` call** — the ONE Python agami uses for the model *and* DB connections (introspection always runs `python -m execute_sql` under it on *every* tier, so the DB driver must live in it). It's already the **scored** pick — the candidate that has `pydantic`+`sqlglot`+`pyyaml` AND the `$DB_TYPE` driver — so there's no guessing and the user sets nothing. **Re-run `connect_resolve.py --db-type $DB_TYPE` now** that the DB type is known, so the interpreter is scored against the right driver and native tools are refreshed. It records as `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON` is honored as a first-priority override but is never required.)
+**`<python3>` = `data.interpreter.python3`, written out in full, from the Phase-0 `connect_resolve.py` call** — the ONE Python agami uses for the model *and* DB connections (introspection always runs `python -m execute_sql` under it on *every* tier, so the DB driver must live in it). It's already the **scored** pick — the candidate that has `pydantic`+`sqlglot`+`pyyaml` AND the `$DB_TYPE` driver — so there's no guessing and the user sets nothing. **Re-run `bash "<plugin_root>/scripts/py" connect_resolve.py --db-type <db_type>` now** that the DB type is known, so the interpreter is scored against the right driver and native tools are refreshed. It records as `tool_paths.python3` in 0a.7. (`AGAMI_PYTHON` is honored as a first-priority override but is never required.)
 
 Native CLIs (optional fast path for *queries* — introspection doesn't use them) are in `data.tools` (`psql`/`mysql`/`snowsql`/`sqlite3`/`duckdb`/`bq`, `null` if absent), detected with `which` only. **Forbidden** elsewhere: `pgrep`/`ps`/`lsof`/`find /`/`ls /Applications`/port scans.
 
-**If `data.interpreter.has_driver` is `false`** the `$DB_TYPE` driver isn't in `$PY` yet — confirm via AskUserQuestion, then `"$PY" -m pip install --user <package>` from the table (probe was already done in `$PY` by `connect_resolve.py`):
+**If `data.interpreter.has_driver` is `false`** the `$DB_TYPE` driver isn't in `<python3>` yet — confirm via AskUserQuestion, then `"<python3>" -m pip install --user <package>` from the table, where `<python3>` is `data.interpreter.python3` written out in full (probe was already done in `<python3>` by `connect_resolve.py`):
 
-| `$DB_TYPE` | probe (`"$PY" -c '…'`) | pip package |
+| `$DB_TYPE` | probe (`"<python3>" -c '…'`) | pip package |
 |---|---|---|
 | postgres / redshift | `import psycopg2` | `psycopg2-binary` |
 | mysql | `import pymysql` | `pymysql` |
@@ -251,15 +249,17 @@ Native CLIs (optional fast path for *queries* — introspection doesn't use them
 
 > **duckdb needs `pytz`** to materialize `TIMESTAMP WITH TIME ZONE` values into Python — without it a query that selects a timestamptz column fails at runtime (`Required module 'pytz' failed to import`), so it's part of the driver install, not optional.
 
-If the driver is missing, **confirm via AskUserQuestion**, then `"$PY" -m pip install --user <package>` (plain `pip install` fallback). Same "never install silently" convention as the model deps (0a.5b). Do this for `$PY` so `sm introspect` connects on the first try.
+If the driver is missing, **confirm via AskUserQuestion**, then `"<python3>" -m pip install --user <package>` (plain `pip install` fallback). Same "never install silently" convention as the model deps (0a.5b). Do this for `<python3>` so `sm introspect` connects on the first try.
 
 ### 0a.5b — Ensure the semantic-model dependencies
 
 The model (introspection, validation, traversal, curation — everything the `sm` wrapper drives) needs **`pydantic` + `sqlglot` + `pyyaml`** in the interpreter agami uses. Check the resolved interpreter (`$AGAMI_PYTHON` → `.config` `tool_paths.python3` → `python3`):
 
 ```bash
-"$PY" -c 'import pydantic, sqlglot, yaml' 2>/dev/null && echo "model deps OK"
+"<python3>" -c 'import pydantic, sqlglot, yaml'
 ```
+
+Exit 0 means they are there; an `ImportError` names the one that is missing.
 
 If they're present, continue. If missing, **confirm via AskUserQuestion before installing** (same convention as the DB-driver install above — agami never installs silently):
 > agami needs the **agami-core** package (which pulls `pydantic`, `sqlglot`, `pyyaml`) to build and read the semantic model. Install it now? (one-time, user-site — `pip install --user`)
@@ -289,17 +289,17 @@ Detect the OS once so the options are platform-native — `uname -s` (`Darwin` =
 {
   "schema_version": 1,
   "tier": "<cli | duckdb | python>",
-  "active_profile": "$PROFILE_NAME",
+  "active_profile": "<profile>",
   "artifacts_dir": "<resolved absolute path>",
-  "tool_paths": { "psql": "...", "python3": "$PY" },
+  "tool_paths": { "psql": "...", "python3": "<python3>" },
   "detected_at": "<ISO8601 UTC from `date -u +%Y-%m-%dT%H:%M:%SZ`>"
 }
 ```
-`python3` MUST be the `$PY` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 <artifacts_dir>/local/.config`.
+`python3` MUST be the `<python3>` resolved in 0a.5 (the interpreter that has both the model deps and the DB driver) — `sm` and the introspection engine read it from here, so recording the wrong one reintroduces the interpreter mismatch. `chmod 600 <artifacts_dir>/local/.config`.
 
-The database's folder is known from here, `$ROOT` = `<artifacts_dir>/<profile>`: mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+The database's folder is known from here, `<root>` = `<artifacts_dir>/<profile>`: mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark connect=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark connect=in_progress
 ```
 
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
@@ -360,7 +360,7 @@ Read the first token of stdout and act:
 
 Before Phase 1, with the connection saved (this path doesn't test it; Phase 1's first read does), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark connect=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark connect=done
 ```
 
 ---

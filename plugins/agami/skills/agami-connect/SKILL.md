@@ -58,7 +58,7 @@ The same steps every run, in the person's words (no "introspect", "enrich" or "N
 
 Leave out a step that won't run (8 when no reports were shared in 1.5; 3 with a model spec workbook, which names the tables); never add your own working steps to this list. **When a step finishes, add its numbers to its label**, so the list reads as a running summary: *"Read the tables and joins — 21 tables, 19 joins"*, *"Describe columns and add metrics — 93% described, 7 metrics"*, *"Sign off definitions — 5 of 7 signed"*, *"Write and check example questions — 10 of 11 ran"*. The label with its numbers is each step's `text` in `sm steps`' output, copied as printed, never typed by hand and never an estimate; a step with nothing to count keeps its plain label. **While a long step runs, its label carries the live count too** (*"Read the tables and joins — 30 of 52 tables"*), from the same `text`, refreshed after every `sm progress --wait`, so the list shows movement during a wait and not only at the end. **Mark each step in progress when it starts and done the moment it ends**, exactly one in progress at a time, and keep it in progress while a card for that step is waiting, so the list shows where the person is while they decide.
 
-**Don't seed it again if the list already holds these steps** (the skill is resuming after a hand-off, a password page or a file wait): run `sm steps` first and show what it prints ([shared/task-list.md](../../shared/task-list.md), resuming). When `$ARGUMENTS == reintrospect`, the list restarts at the first step this run marks started (step 2, when Phase 1 begins): `sm steps` reopens that step and every step after it, and keeps the steps before it done.
+**Don't seed it again if the list already holds these steps** (the skill is resuming after a hand-off, a password page or a file wait): run `sm steps "<root>"` first and show what it prints ([shared/task-list.md](../../shared/task-list.md), resuming). When `$ARGUMENTS == reintrospect`, the list restarts at the first step this run marks started (step 2, when Phase 1 begins): `sm steps` reopens that step and every step after it, and keeps the steps before it done.
 
 ## What runs at the same time
 
@@ -68,7 +68,7 @@ Subagents read and draft in the background while the person answers cards, so no
 |---|---|
 | The context and table cards (1.5–1.6) | One `agami-doc-reader` per shared document, up to 4 |
 | The build (1.7) | Document readers still running; the build itself is a background task |
-| The join cards after the build (1.7) | `agami-enricher`s: one per chunk of up to 12 tables |
+| The join cards after the build (1.7) | `agami-enricher`s: one per chunk of up to 8 tables |
 | The sign-off cards (4) | `agami-example-writer`s: one per subject area, drafting example questions |
 | The wait for the example run (6) | `sm seed-validate` as a background task |
 
@@ -99,6 +99,7 @@ Non-negotiable. They override every other instruction here when they conflict.
 3. **Never scan or guess.** No `pgrep`, `ps`, `lsof`, `find /`, `ls /Applications`, no port-listener scans, no testing connections to common hostnames. The only acceptable Bash probes here are `which <tool>` and `bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" -c 'import <module>'`.
 4. **If credentials are missing for the active profile, run Phase 0a.** It ends connected (the password page, 0a.4k) or with a card that waits for the filled-in file (0a.9). A person who closes the chat instead can come back later with any data question — `agami-query` auto-invokes us and 0a.10 picks the file up.
 5. **NEVER put a credential on a Bash command line** — no `export PGPASSWORD=…`, no `psql -W <pw>`, no heredoc that interpolates a secret. Hosts render Bash calls in chat; anything on the line leaks. Runtime queries use the auth files from `scripts/setup_pgauth.py` (psql/mysql) or `python -m execute_sql` (every driver, reads `<artifacts_dir>/local/credentials` itself). See [`shared/connection-reference.md → HARD RULES`](../../shared/connection-reference.md).
+6. **Run each agami command as its own Bash call: `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" <verb> …` with every path written out in full.** Never put a variable assignment, a pipe, `;`, `&&`, a redirect or a filter on the line, and never run two agami commands in one call. A line written any other way stops to ask the person for permission; written this way it is pre-approved while the skill is running. Read the whole output: the commands print only what you need. `<root>` in the phase files is the database's model folder, `<artifacts_dir>/<profile>`, written out in full; scratch files go only in `<artifacts_dir>/local/tmp/`, named `agami-…`, never `/tmp` ([`shared/invocation-conventions.md`](../../shared/invocation-conventions.md)).
 
 If you reach for a command that doesn't fit, stop and re-read this section.
 
@@ -140,7 +141,8 @@ If you reach for a command that doesn't fit, stop and re-read this section.
 The phases live in their own files, so a run loads only the ones it reaches. **Before starting a
 phase, `Read` its file; never work a phase from memory of an earlier run or of this list.** Those
 files write the plugin root as `<plugin_root>`: it is `${CLAUDE_PLUGIN_ROOT}`, the path to write
-into their commands.
+into their commands. They write the database's model folder as `<root>`: it is
+`<artifacts_dir>/<profile>`, written out in full.
 
 | Phase | When | File |
 |---|---|---|

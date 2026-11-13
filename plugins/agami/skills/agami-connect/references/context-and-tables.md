@@ -1,12 +1,12 @@
 # agami-connect · Phase 1.0–1.6s: context and tables
 
-Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash.
+Part of [agami-connect](../SKILL.md). `<plugin_root>` in this file is the plugin's root directory: the absolute path agami-connect's SKILL.md shows in its own commands. Write that path into a command, quoted; never paste `<plugin_root>` or an unset variable into Bash. `<root>` is the database's model folder, `<artifacts_dir>/<profile>`, written out in full the same way. Each command below is its own Bash call, with no variable, pipe, `;`, `&&` or redirect on the line ([invocation-conventions.md](../../../shared/invocation-conventions.md)).
 
 ## Phase 1: Introspect → semantic model
 
-Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `$ROOT` is `<artifacts_dir>/<profile>`:
+Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); `<root>` is `<artifacts_dir>/<profile>`:
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark context=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark context=in_progress
 ```
 
 ### 1.0 — Set expectations before kicking off
@@ -43,11 +43,7 @@ The engine **auto-backs-up any legacy (v1) model** (`index.yaml` + per-schema `_
 When the user chooses **Onboard another database**, ask (AskUserQuestion, header `Same org`) whether the new database belongs to the **same company** or a **different** one. A deployment (one artifacts dir) holds exactly **one** company/organization with many datasources under it; a genuinely different company is a **different folder**.
 
 - **Same company (the common case)** → the new profile **attaches under the deployment org**: it lands in the **same** `<artifacts_dir>`, shares the same `org_id` from the root `organization.yaml`, and **shares the company context** authored earlier. Do **not** re-ask the company description (1.4 detects the already-authored company context and skips it); the per-database note is still asked. Narrate it: *"This attaches under your **`<company name>`** organization, sharing the company context you set earlier — its per-database notes stay its own."*
-- **Different company** → set up a **new deployment folder**. Pick/confirm a new artifacts dir path, create it, and **repoint** the pointer to it (the same idiom Phase 0a.1 uses for a non-default dir):
-  ```bash
-  mkdir -p "<new_artifacts_dir>" && mkdir -p ~/.config/agami && printf '%s\n' "<new_artifacts_dir>" > ~/.config/agami/path
-  grep -qxF 'local/' "<new_artifacts_dir>/.gitignore" 2>/dev/null || printf 'local/\n' >> "<new_artifacts_dir>/.gitignore"
-  ```
+- **Different company** → set up a **new deployment folder**. Pick/confirm a new artifacts dir path, create it, and **repoint** the pointer to it (the same steps Phase 0a.1 uses for a non-default dir): `mkdir -p "<new_artifacts_dir>"` as its own call; then the Write tool writes the folder's absolute path as the only line of `<home>/.config/agami/path` (your home folder written out; the Write tool makes the folder); then `<new_artifacts_dir>/.gitignore` gets a `local/` line (Read it first; add the line with the Edit tool, or write the file with that one line when it doesn't exist).
   The current org's files are **untouched**; the first onboarding in the new folder mints a **fresh** `org_id` + its own company record (1.4 authors it there). This is the only way to run two companies from one machine — one folder each.
 
 ### 1.2 — Scope: schemas, and the no-catalog case
@@ -95,7 +91,7 @@ Three cards, asked right after the connection works and before tables are listed
 > *"What's your company called, and what does it do? Type a sentence or two in Other, name first. It's shared by every database you connect here."*
 
 Options: **Skip for now** (no company context; say it can be added later in `/agami-model`) and **Draft it from the database** (after the build, Phase 2f drafts a short description from the model and Phase 7 shows it as a draft to correct). Text in "Other" is the answer. Write it as both of these (the record write is the only thing that fills `organization.yaml`):
-1. `bash "<plugin_root>/scripts/sm" set-org "<artifacts_dir>" --name "<company name>" --description "<one-line summary>"`
+1. `bash "<plugin_root>/scripts/sm" set-org "<artifacts_dir>" --name '<company name>' --description '<one-line summary>'`, each value in single quotes (a `'` inside it written as `’`), so nothing in the text is read by the shell
 2. The full text to the **root** `<artifacts_dir>/organization.md` under `# About this company` (**narrative prose ONLY** — no model facts).
 
 Then confirm both landed. On a **later** onboard (company context already there) don't ask: say *"Sharing the **`<company>`** context you set earlier."*
@@ -109,7 +105,7 @@ Then confirm both landed. On a **later** onboard (company context already there)
 Options: **Generate one for me (Recommended)** / **Skip**.
 
 **Nothing is written at this step** — `datasource.yaml` does not exist until introspection (1.7) creates it. Bind the answer and act on it after 1.7:
-- **Text in "Other"** → its first sentence is `$DATASOURCE_DESCRIPTION`, written right after 1.7: `bash "<plugin_root>/scripts/sm" set-description "$ROOT" --description "$DATASOURCE_DESCRIPTION"`. When it has more than one sentence, the whole text also goes to `<artifacts_dir>/<profile>/datasource.md` under `# About this database`.
+- **Text in "Other"** → its first sentence is `$DATASOURCE_DESCRIPTION`, written right after 1.7: `bash "<plugin_root>/scripts/sm" set-description "<root>" --description '<the sentence>'`, the sentence in single quotes (a `'` inside it written as `’`), so nothing in it is read by the shell. When it has more than one sentence, the whole text also goes to `<artifacts_dir>/<profile>/datasource.md` under `# About this database`.
 - **Generate one for me** → `$DATASOURCE_DESCRIPTION = generate`. **Phase 2f** writes it once every table is enriched, and the Phase 7 summary shows it as a draft they can edit.
 - **Skip** → leave it empty. Say plainly that `model_deploy` will warn about it, and that an agent picking between several datasources will be guessing from the name.
 
@@ -165,19 +161,19 @@ Stash everything gathered (the readers' merged findings, or doc text + repo defi
 
 When 1.5 saved no report SQL, export or screenshot, mark the report check skipped now, so it leaves the list:
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark reports=skipped
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark reports=skipped
 ```
 
 The context is gathered: mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark context=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark context=done
 ```
 
 ### 1.6 — Discover & prune the table list (cheap first pass)
 
 Mark the table step started and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=in_progress
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark tables=in_progress
 ```
 
 **Before the full, expensive introspection, summarise the tables in the chat and ask which to keep** — so staging/backup/scratch tables and dated snapshots can be dropped. The full grain/FK/description work then runs on **only the kept tables**, which on a big DB (hundreds of staging/snapshot tables) is the difference between minutes and hours.
@@ -185,12 +181,10 @@ bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=in_progress
 **Run the discover pass** — it lists tables + columns only (no grain, FK, or row-count probes, so it's fast even over a tunnel):
 
 ```bash
-ts=$(date -u +%Y%m%d-%H%M%S)
-AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" discover \
-  --profile <profile> --db-type <db_type> \
-  --artifacts "<artifacts_dir>" \
-  [--schemas <selected_schemas…>]   # the 1.3 pick, if you narrowed schemas
+AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" discover --profile <profile> --db-type <db_type> --artifacts "<artifacts_dir>" --schemas <schema> <schema>
 ```
+
+`--schemas` is the 1.3 pick; leave it out when you didn't narrow the schemas.
 
 > **<a id="raised-cap"></a>Why the `AGAMI_SQL_MAX_ROWS` prefix — and why it must stay a prefix.** The executor **refuses** (never truncates) any result over the row cap, default 1000. That bound is sized for a *user query*, where a runaway is the thing it exists to stop. A **catalog read** blows past it on schema size alone — `information_schema.columns` for a 500-table catalog is tens of thousands of rows — and the engine **swallows that refusal silently**, degrading to one round-trip per table, or reporting "catalog enumeration denied" when the catalog was in fact readable. So the three commands that read catalog or dictionary tables — `discover` (1.6), `introspect` (1.7), `enrich-metadata` (2a.0) — run with a raised cap.
 >
@@ -252,22 +246,20 @@ bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_pat
 
 Once the kept set is settled (or the person chose to model everything), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=done
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark tables=done
 ```
 
 ### 1.6s — With a model spec: the spec IS the kept set
 
 The spec names the tables, so there is no table pick: mark the step skipped and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash
-bash "<plugin_root>/scripts/sm" steps "$ROOT" --mark tables=skipped
+bash "<plugin_root>/scripts/sm" steps "<root>" --mark tables=skipped
 ```
 
-When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 table card — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p` that folder first):
+When a model spec workbook was attached in 1.5, convert it FIRST and skip the 1.6 table card — the spec already names every table to model. Its outputs go under `local/`, outside the profile, so moving a partial model aside (1.8) never takes them with it (`mkdir -p "<artifacts_dir>/local/model-spec/<profile>"` first, as its own call):
 
 ```bash
-"$PY" "<plugin_root>/scripts/model_spec_workbook.py" parse --file "<workbook.xlsx>" \
-  --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" \
-  --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
+bash "<plugin_root>/scripts/py" model_spec_workbook.py parse --file "<workbook.xlsx>" --out "<artifacts_dir>/local/model-spec/<profile>/spec.json" --tables-out "<artifacts_dir>/local/model-spec/<profile>/spec-tables.txt"
 ```
 
 It prints the counts it read (`subject_areas`, `tables`, `joins`, `joins_approved`, `joins_with_condition`, `metrics`, `sensitive_columns`, `rules`). **Quote those numbers verbatim — never count a sheet by reading it.** Exit 1 prints `errors` naming the missing sheet or column: show them and stop, the person fixes the workbook. Then run 1.7 with `--tables-file` set to `spec-tables.txt` as **ONE call — the single background call + progress tail (1.7 option 2), never `--append` batches**, however many tables the spec names. The spec is applied once, over the whole set, so read the whole set in one go.
