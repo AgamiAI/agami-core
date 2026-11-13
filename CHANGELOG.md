@@ -75,6 +75,14 @@ below corresponds to one such version.
 
 ### Changed
 
+- **Building a model is about 7x faster.** Each statement the build sends ran in its own process
+  that imported the semantic-model runtime only to report that no model was loaded. The receipt
+  now answers "no model" first and looks the runtime up without importing it, so the bundled
+  sample builds in 9.1 s instead of 66.4 s (median of three, 181 statements), with the same
+  model. A missing runtime is still reported as missing. One cause changes: a runtime module
+  that is installed but raises when imported, on a call with no model, is now reported as "no
+  model" rather than "could not be built", because the module is no longer run to find out.
+
 - **Every agami decision is a question card in the chat; no page opens on its own and nothing is
   pasted back.** agami-connect, agami-model, agami-query, agami-reconcile, agami-save-golden and
   agami-eval used to open an HTML page and wait for a block the person generated there and pasted
