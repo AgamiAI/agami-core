@@ -41,9 +41,15 @@ def _started(root: Path, at: datetime) -> None:
     steps.mark(root, "build", "in_progress", now=at)
 
 
-def _model_written(root: Path, at: datetime) -> None:
+def _model_written(root: Path, at: datetime, *, by_build: bool = True) -> None:
+    """The model's datasource.yaml written at `at`; by a build, its log written just before."""
     shutil.copytree(SAMPLE, root, dirs_exist_ok=True)
     os.utime(root / "datasource.yaml", (at.timestamp(), at.timestamp()))
+    if by_build:
+        log = root / ".introspect" / "progress.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("discovered 11 tables\ndone: 11 tables, 12 relationships\n")
+        os.utime(log, (at.timestamp(), at.timestamp()))
 
 
 def _build(out: dict) -> str:
@@ -139,3 +145,16 @@ def test_a_model_that_does_not_load_does_not_say_it(tmp_path, capsys):
     _started(root, NOW - timedelta(minutes=5))
     out = _run(["steps", str(root)], capsys)
     assert not out["then"].startswith(WRITTEN)
+
+
+@pytest.mark.parametrize("writer", ["set-description", "ensure-org-id"])
+def test_a_later_write_by_another_command_is_not_a_finished_build(tmp_path, capsys, writer):
+    """A rebuild marked started that stopped with no log of its own; then another command rewrote
+    datasource.yaml after the mark. That is not this attempt's build: no skip."""
+    root = tmp_path / "acme"
+    _model_written(root, NOW - timedelta(days=1))          # the earlier build, and its log
+    _started(root, NOW - timedelta(hours=2))                # this attempt: no log since
+    os.utime(root / "datasource.yaml", ((NOW - timedelta(minutes=5)).timestamp(),) * 2)  # e.g. ensure-org-id
+    out = _run(["steps", str(root)], capsys)
+    assert not out["then"].startswith(WRITTEN)
+    assert out["problem"] == "The rebuild stopped before it finished."

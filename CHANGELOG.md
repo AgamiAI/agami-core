@@ -37,7 +37,8 @@ below corresponds to one such version.
   mark with no model built yet (none on disk, or a build running) says why there is no summary.
   `seed-validate --out --no-card` says the table with a `then` that asks no examples card.
   On a resume whose build already wrote this run's model (the build step in progress by its mark,
-  no build log running, `datasource.yaml` written at or after that mark), plain `sm steps` says
+  no build log running, `datasource.yaml` and the build's own log both written at or after that
+  mark, so another command rewriting `datasource.yaml` doesn't count), plain `sm steps` says
   "The model is already written: go to the join cards without building again." and counts the
   model's tables and joins, so the skill no longer compares file times itself.
   The summary's sign-off line and the step list's sign-off count now count what the

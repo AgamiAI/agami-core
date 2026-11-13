@@ -401,9 +401,11 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     # A resume after this attempt's build wrote its model (no log running, the model loads): the
     # skill goes on to the join cards instead of building again, which it could only have told by
     # comparing file times itself. Checked before the staleness rule: a build that finished long ago
-    # did not die.
+    # did not die. The build's own log must be this attempt's too: `set-description`,
+    # `set-terminology` or `ensure-org-id` also rewrite datasource.yaml, and a stopped rebuild
+    # followed by one of them must not read as finished.
     landed = (state == "none" and attempt_at is not None and totals is not None
-              and _written_since(model, attempt_at))
+              and _written_since(model, attempt_at) and _own_log(log, attempt_at))
     if state == "none" and attempt_at is not None and now_at - attempt_at > STALE_BUILD_SECONDS \
             and not _own_log(log, attempt_at) and not landed:
         # A mark left by a session that ended before the build wrote a line: nothing is building.
