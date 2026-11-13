@@ -2327,8 +2327,15 @@ def _qualified_column(t: Table, column: str) -> str:
 
 
 def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, int]],
-               found_by: str) -> dict:
-    """One candidate as the report and join_candidates.json carry it: a ready `add` op and its evidence."""
+               prio: int) -> dict:
+    """One candidate as the report and join_candidates.json carry it: a ready `add` op, its evidence,
+    and `recommend`, the answer its join card marks "(Recommended)" ("add" or "leave_out").
+
+    The engine decides that, not the model: cards drawn without it carried no recommendation, the
+    first answer ("Add it") was taken, and a seat count, a comment length and a stock quantity were
+    joined to other tables' ids. Adding is recommended only when the data clears the match bar and
+    the column's name is for the key or starts the table's name (`cust_ref`, `customers`); a match
+    on the type alone is what small whole numbers do by chance."""
     if hit is None:
         summary = "the probe could not compare the two columns"
     else:
@@ -2344,12 +2351,13 @@ def _candidate(t: Table, c: Column, u: Table, k: str, hit: Optional[tuple[int, i
     if u.schema_name:
         op["to_schema"] = u.schema_name
     op["description"] = f"found by introspection: {summary}"
-    evidence = {"found_by": found_by, "summary": summary}
+    evidence = {"found_by": "name" if prio == 0 else "type", "summary": summary}
     if hit is not None:
         evidence.update(matched=hit[0], sampled=hit[1],
                         match_rate=round(hit[0] / hit[1], 4) if hit[1] else 0.0)
+    recommend = "add" if _offered(hit) and prio <= 1 else "leave_out"
     return {"id": f"{_qualified_column(t, c.name)}->{_qualified_column(u, k)}", "op": op,
-            "evidence": evidence}
+            "evidence": evidence, "recommend": recommend}
 
 
 _T = TypeVar("_T")
@@ -2547,7 +2555,7 @@ def _scan_join_candidates(dialect: D.Dialect, runner: Runner, rels: list[Relatio
         pool.shutdown(wait=True)
     tally.finish()
     for _, (prio, t, c, u, k), hit in sorted(probed, key=lambda p: p[0]):
-        cand = _candidate(t, c, u, k, hit, "name" if prio == 0 else "type")
+        cand = _candidate(t, c, u, k, hit, prio)
         if _offered(hit):
             report.join_candidates.append(cand)
         elif prio == 0 or (hit is not None and hit[0]):

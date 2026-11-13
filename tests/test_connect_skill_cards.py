@@ -755,3 +755,17 @@ def test_join_candidate_group_options_preview_the_joins_they_add():
     assert "each option's `preview` lists every join that option adds" in s
     assert "Never offer a numbered range" in s
     assert "Add all remaining" in s and "Add none" in s
+
+
+def test_join_cards_put_the_engines_recommendation_first():
+    # Round 4 drew the join cards with no "(Recommended)" and the first answer, "Add it", added three
+    # chance joins. The engine now names the answer per candidate (`recommend`); the card follows it.
+    s = _join_candidates()
+    one = s[s.index("**Up to 4 candidates:**"):s.index("**More than 4:**")]
+    assert "`recommend`" in one
+    assert "**Leave it out (Recommended)**" in one and "**Add it (Recommended)**" in one
+    assert "first" in one
+    assert "never the model's own guess" in one
+    many = s[s.index("**More than 4:**"):]
+    assert "`recommend: add`" in many and "**Add none (Recommended)**" in many
+    assert "full matches (Recommended)" not in many

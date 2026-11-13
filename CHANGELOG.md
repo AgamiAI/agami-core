@@ -312,6 +312,15 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Join cards recommend leaving a chance match out again.** Each join candidate in
+  `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
+  95% bar and the column's name is for the key or starts the table's name (`cust_ref`,
+  `customers`), `leave_out` otherwise (a match on the column's type alone, or a near miss). The
+  skill puts that answer first with "(Recommended)" (and the group card for more than four leads
+  with the recommended joins, or with **Add none** when none is). Before, the skill named no
+  recommended answer, so it depended on the model: a live run drew the cards with none, the first
+  answer ("Add it") was taken, and a seat count, a comment length and a stock quantity were joined
+  to other tables' ids.
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core
   reads, so a top-level key written by a newer agami-core was deleted from disk without a word. Those

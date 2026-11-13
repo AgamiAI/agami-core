@@ -593,3 +593,44 @@ def test_no_progress_line_follows_an_interrupted_scan(tmp_path, monkeypatch):
     for t in pool_threads() - before:
         t.join(2)
     assert (log.read_text() if log.exists() else "") == at_interrupt
+
+
+# Which answer the join card recommends is decided here, not by the model: in a live run whose
+# cards carried no "(Recommended)", the first answer ("Add it") was taken and three chance joins
+# (a seat count, a comment length, a stock quantity matching some table's ids) were added.
+# `orders.seats` matches `coupons.id` on its type alone, as small whole numbers do.
+_CHANCE_SCHEMA = (
+    "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT);"
+    "CREATE TABLE coupons(id INTEGER PRIMARY KEY, label TEXT);"
+    "CREATE TABLE orders(id INTEGER PRIMARY KEY, cust_ref INTEGER, seats INTEGER);"
+    "INSERT INTO customers VALUES (11, 'a'), (12, 'b'), (13, 'c');"
+    "INSERT INTO coupons VALUES (1, 'x'), (2, 'y'), (3, 'z');"
+    "INSERT INTO orders VALUES (1, 11, 1), (2, 12, 2), (3, 13, 3), (4, 11, 2);"
+)
+
+
+def test_a_join_the_columns_name_points_at_is_recommended(tmp_path):
+    _, _, out = _build(tmp_path, _CHANCE_SCHEMA)
+    by_id = {c["id"]: c for c in _candidates(out)["candidates"]}
+    assert by_id["main.orders.cust_ref->main.customers.id"]["recommend"] == "add"
+
+
+def test_a_join_only_the_type_backs_is_recommended_to_be_left_out(tmp_path):
+    _, _, out = _build(tmp_path, _CHANCE_SCHEMA)
+    by_id = {c["id"]: c for c in _candidates(out)["candidates"]}
+    chance = by_id["main.orders.seats->main.coupons.id"]
+    assert chance["evidence"]["match_rate"] == 1.0   # a full match, and still a chance one
+    assert chance["recommend"] == "leave_out"
+
+
+def test_a_join_below_the_bar_is_recommended_to_be_left_out(tmp_path):
+    _, _, out = _build(tmp_path)
+    doc = _candidates(out)
+    assert doc["low_overlap"] and {c["recommend"] for c in doc["low_overlap"]} == {"leave_out"}
+    assert {c["id"]: c["recommend"] for c in doc["candidates"]}[_CUST_REF] == "add"
+
+
+def test_every_listed_join_says_which_answer_is_recommended(tmp_path):
+    _, _, out = _build(tmp_path, _CHANCE_SCHEMA)
+    doc = _candidates(out)
+    assert all(c["recommend"] in ("add", "leave_out") for c in doc["candidates"] + doc["low_overlap"])
