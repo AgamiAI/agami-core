@@ -21,6 +21,11 @@
 #         bash scripts/sm prepare ~/agami-artifacts/main --area sales --sql "SELECT 1"
 set -euo pipefail
 
+# Every Python this launcher starts runs from `/` and with PYTHONSAFEPATH (3.11+), so nothing in the
+# caller's folder is imported: `python -m pip` and `python -c` put the working folder first on
+# sys.path, and a `pip.py` in a cloned repository would otherwise run on the next install.
+export PYTHONSAFEPATH=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The CLI runs as `python -m semantic_model.cli` against the INSTALLED agami-core package; we install it
 # (with the model extra: pydantic/sqlglot/pyyaml) on demand below. The source differs by layout:
@@ -64,11 +69,16 @@ GIT_REF="${PLUGIN_VER:+v$PLUGIN_VER}"; GIT_REF="${GIT_REF:-main}"
 # refuses BOTH --user and plain with "externally-managed-environment"; --break-system-packages is the
 # sanctioned escape for a user-scoped tool install like ours. (Ancient pip lacks the flag → that tier
 # just fails and we fall through to the next source / exit 3 — no regression.)
+# From `/`, like every probe: `-m pip` would otherwise import a `pip.py` from the caller's folder on a
+# Python older than 3.11, where PYTHONSAFEPATH does nothing. Not `-I`: it hides the user site, where a
+# `--user` pip, or the `--user` install the readiness probes then look for, may live.
 _pip_try() {
-  "$PY" -m pip install --user -q "$@" >&2 2>/dev/null \
-    || "$PY" -m pip install -q "$@" >&2 2>/dev/null \
-    || "$PY" -m pip install --user --break-system-packages -q "$@" >&2 2>/dev/null \
-    || "$PY" -m pip install --break-system-packages -q "$@" >&2
+  ( cd / && {
+    "$PY" -m pip install --user -q "$@" >&2 2>/dev/null \
+      || "$PY" -m pip install -q "$@" >&2 2>/dev/null \
+      || "$PY" -m pip install --user --break-system-packages -q "$@" >&2 2>/dev/null \
+      || "$PY" -m pip install --break-system-packages -q "$@" >&2
+  } )
 }
 
 # Ensure the agami-core package (+ its model deps) is importable in $PY; install once if not.
@@ -205,14 +215,26 @@ if [ "${1:-}" = "install" ]; then
   exit 0
 fi
 
+# The verbs the permission hook (approve_own_calls.py, VERBS) approves with no prompt never install:
+# an install is a network fetch and runs build code, which the person must agree to. A missing or
+# stale library stops them with how to install it. tests/test_approve_own_calls.py keeps this list
+# and the hook's table equal.
+NO_INSTALL_VERBS="steps progress timing summary overview areas coverage review-queue review-items model-tree bundle batch-id wait-files"
+case " $NO_INSTALL_VERBS " in
+  *" ${1:-} "*)
+    if ! { _imports_ok && _version_ok; }; then
+      echo "agami's library needs installing or updating: run  bash \"$(cd "$SCRIPT_DIR/.." && pwd)/scripts/sm\" install" >&2
+      exit 3
+    fi ;;
+esac
+
 ensure_pkg
 # Run the CLI from a neutral cwd so a `semantic_model` in the caller's cwd can't shadow the installed
 # package via `python -m` putting cwd on sys.path[0].
-# PYTHONSAFEPATH (3.11+; ignored below) is a belt-and-suspenders second guard; `cd /` is the portable
-# guarantee. The CLI moves back to the caller's folder once it is imported (AGAMI_CALLER_CWD), so a
-# relative path argument resolves where the caller ran `sm`, not against `/` (#542). Git Bash's /c/...
-# form is converted for a Windows Python.
-export PYTHONSAFEPATH=1
+# PYTHONSAFEPATH (exported at the top; 3.11+, ignored below) is a belt-and-suspenders second guard;
+# `cd /` is the portable guarantee. The CLI moves back to the caller's folder once it is imported
+# (AGAMI_CALLER_CWD), so a relative path argument resolves where the caller ran `sm`, not against `/`
+# (#542). Git Bash's /c/... form is converted for a Windows Python.
 AGAMI_CALLER_CWD="$(cygpath -m "$PWD" 2>/dev/null || printf '%s' "$PWD")"
 export AGAMI_CALLER_CWD
 cd /

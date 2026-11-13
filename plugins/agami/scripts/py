@@ -22,8 +22,12 @@ if [ -z "$PY" ]; then
 fi
 # Warn (stderr only, never fatal) when this Python's installed agami-core is older than the plugin: it
 # wins over the bundled lib/, and a plugin update doesn't upgrade it. `sm install` is the fix it names.
-"$PY" "$SCRIPT_DIR/_plugin_version.py" --check </dev/null >/dev/null || true
+( cd / && "$PY" "$SCRIPT_DIR/_plugin_version.py" --check ) </dev/null >/dev/null || true
 export AGAMI_LIBRARY_VERSION_CHECKED=1
+# `-m` and `-c` put the working folder first on sys.path, so a `pip.py` or `execute_sql.py` there
+# would run instead; PYTHONSAFEPATH (3.11+) stops that. Not for a script, whose own folder (the
+# plugin's scripts/) must stay on sys.path for its imports.
+case "${1:-}" in -m|-c|-I) export PYTHONSAFEPATH=1 ;; esac
 case "${1:-}" in
   */*|-*|"") ;;                                         # a path, an option, or nothing: as given
   *.py) [ -f "$SCRIPT_DIR/$1" ] && set -- "$SCRIPT_DIR/$1" "${@:2}" ;;

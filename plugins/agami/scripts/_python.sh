@@ -12,7 +12,8 @@
 usable_python() {
   case "$1" in
     *[Ww]indows[Aa]pps*)
-      [ "$("$1" -c 'print("agami-python-ok")' 2>/dev/null </dev/null | tr -d '\r')" = "agami-python-ok" ] ;;
+      # from `/` and with PYTHONSAFEPATH: `-c` would otherwise import from the caller's folder
+      [ "$(cd / && PYTHONSAFEPATH=1 "$1" -c 'print("agami-python-ok")' 2>/dev/null </dev/null | tr -d '\r')" = "agami-python-ok" ] ;;
     *) [ -x "$1" ] ;;
   esac
 }
@@ -23,7 +24,7 @@ usable_python() {
 _PY_VERSION_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_plugin_version.py"
 never_current() {
   local rc=0
-  "$1" "$_PY_VERSION_HELPER" --usable </dev/null >/dev/null 2>&1 || rc=$?
+  ( cd / && "$1" "$_PY_VERSION_HELPER" --usable ) </dev/null >/dev/null 2>&1 || rc=$?
   [ "$rc" -eq 3 ]
 }
 path_python() {
