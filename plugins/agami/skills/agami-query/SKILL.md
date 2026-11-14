@@ -813,15 +813,7 @@ The `.optins` file is the never-re-prompt gate. Once it's written (with any of t
 
 ### 4f — Numbered follow-up suggestions (always 5)
 
-**The onboarding's last step (once, right after onboarding).** When the session's task list still shows *Summary and first question* in progress, this answer is the first one after agami-connect, and the step is now true: mark it done and update the task list from the `list` it prints, before the follow-ups:
-
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<artifacts_dir>/<profile>" --mark first_question=done
-```
-
-(`<artifacts_dir>/<profile>` written out in full, as `$ROOT` above.) Never when the list shows that step done or shows no onboarding steps: a question asked later is not part of onboarding.
-
-**Sample-profile orientation footer (once, before the follow-ups).** If `active_profile` is `agami-example` AND `<artifacts_dir>/local/.agami-example-intro` does **not** exist, then — after the answer, before the "What next?" bullets — print this plain-prose footer ONCE, then create the marker (`touch <artifacts_dir>/local/.agami-example-intro`) so it never repeats. This is ungated by `.optins` (the sample is a guided demo). Keep it to these ~4 lines, plain, no hype:
+**The onboarding's last step (once, right after onboarding).** When the session's task list still shows *Summary and first question* in progress, this answer is the first one after agami-connect, and the step is now true: before the follow-ups, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" steps "<artifacts_dir>/<profile>" --mark first_question=done` (the folder written out in full, as `$ROOT` above) and update the task list from the `list` it prints. Never when the list shows that step done or shows no onboarding steps: a question asked later is not part of onboarding. **Sample-profile orientation footer (once, before the follow-ups).** If `active_profile` is `agami-example` AND `<artifacts_dir>/local/.agami-example-intro` does **not** exist, then — after the answer, before the "What next?" bullets — print this plain-prose footer ONCE, then create the marker (`touch <artifacts_dir>/local/.agami-example-intro`) so it never repeats. This is ungated by `.optins` (the sample is a guided demo). Keep it to these ~4 lines, plain, no hype:
 
 ```
 If a number ever looks off, say "save this as a correction" (or paste the right SQL) — I'll teach the model so next time is right.
