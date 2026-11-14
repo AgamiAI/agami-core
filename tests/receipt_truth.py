@@ -9,9 +9,10 @@ numbers, so it is checked by computing them twice on the same data:
     and its WHERE replaced by the listed restrictions plus the table's applied declared filters
     (which the receipt does not list, because they are part of what the table means).
 
-Joins and GROUP BY are kept as written, and so are the WHERE conjuncts that join two references
-(a bare `column = column`, decided HERE and narrowly, so a condition the receipt wrongly treated as a
-join still makes the two disagree). HAVING, QUALIFY, ORDER BY, LIMIT and DISTINCT are dropped from
+Joins and GROUP BY are kept, but each inner join's ON and the WHERE keep only their JOINING
+predicates — a bare `column = column` across two references, decided HERE (unqualified sides
+resolved through the model's own table definitions) and never by the code under check. So a value
+condition the receipt failed to list, in a WHERE or hidden in an ON, makes the two disagree. HAVING, QUALIFY, ORDER BY, LIMIT and DISTINCT are dropped from
 both: they choose which groups are shown, and the claim is about each group's value.
 
 The two must agree group by group. One side may hold a group the other lacks only where a FILTER or
@@ -208,33 +209,81 @@ def _group_keys(sel: "exp.Select") -> "list[exp.Expression] | None":
     return keys
 
 
-def _value_ref(expr: "exp.Expression", dialect: "str | None") -> "str | None":
-    """The one qualifier the column's value reads, its own FILTER or CASE condition taken off."""
-    value = rt._peeled(rt._equivalent_form(rt._fold_unquoted_identifiers(expr), False,
-                                           rt._count_kind(dialect)))[0]
-    refs = {col.table for col in value.find_all(exp.Column) if col.table}
+def _value_ref(expr: "exp.Expression") -> "str | None":
+    """The one qualifier the column's VALUE reads: its columns, leaving out any inside its own
+    FILTER clause or a CASE WHEN condition (those choose rows, they are not what is added up).
+    Decided here, not by the code under check."""
+    refs = set()
+    for col in expr.find_all(exp.Column):
+        if col.find_ancestor(exp.Where) is not None:
+            continue
+        case_branch = col.find_ancestor(exp.If)
+        if case_branch is not None and _under(col, case_branch.this):
+            continue
+        if col.table:
+            refs.add(col.table.lower())
     return next(iter(refs)) if len(refs) == 1 else None
 
 
-def _join_conjuncts(sel: "exp.Select") -> list:
-    """The statement's WHERE conjuncts that join two references: a bare `a.x = b.y` across two
-    qualifiers, or an unqualified `x = y` in a SELECT reading more than one relation."""
-    relations = sum(isinstance(c, (exp.From, exp.Join)) for c in sel.iter_expressions())
-    out = []
-    for cond in rt._and_conjuncts((sel.args.get("where") or exp.Where()).this):
-        if not (isinstance(cond, exp.EQ) and isinstance(cond.this, exp.Column)
-                and isinstance(cond.expression, exp.Column)):
-            continue
-        left, right = cond.this.table, cond.expression.table
-        if (left and right and left.lower() != right.lower()) or (
-                not (left and right) and relations > 1):
-            out.append(cond.copy())
+def _under(node: "exp.Expression", root: "exp.Expression") -> bool:
+    while node is not None:
+        if node is root:
+            return True
+        node = node.parent
+    return False
+
+
+def _model_columns(org: Any) -> dict[str, set[str]]:
+    """table name (lowercased) -> its column names (lowercased), read off the model directly."""
+    out: dict[str, set[str]] = {}
+    for area in org.subject_areas:
+        for table in area.tables_defined:
+            out.setdefault(table.name.lower(), set()).update(c.name.lower() for c in table.columns)
     return out
 
 
-def pair(oc: "rt.OutputColumn", item: dict, applied: list[str],
+def _references(sel: "exp.Select", org: Any) -> "dict[str, set[str] | None]":
+    """alias (lowercased) -> the model's columns for the table it reads; None when unknown."""
+    tables = _model_columns(org)
+    out: dict[str, Any] = {}
+    for child in sel.iter_expressions():
+        if isinstance(child, (exp.From, exp.Join)) and child.this is not None:
+            source = child.this
+            known = isinstance(source, exp.Table) and source.name.lower() in tables
+            out[source.alias_or_name.lower()] = tables[source.name.lower()] if known else None
+    return out
+
+
+def _joins(cond: "exp.Expression", refs: "dict[str, set[str] | None]") -> bool:
+    """A bare `col = col` whose two sides are known to read two different references — the only
+    conjunct the reference keeps as a join. An unqualified side is resolved through the model; one
+    that cannot be resolved makes the conjunct a value condition, which the receipt has to list."""
+    if not (isinstance(cond, exp.EQ) and isinstance(cond.this, exp.Column)
+            and isinstance(cond.expression, exp.Column)):
+        return False
+    ends = []
+    for col in (cond.this, cond.expression):
+        if col.table:
+            ends.append(col.table.lower())
+            continue
+        if any(cols is None for cols in refs.values()):
+            return False
+        hits = [ref for ref, cols in refs.items() if col.name.lower() in cols]
+        if len(hits) != 1:
+            return False
+        ends.append(hits[0])
+    return ends[0] != ends[1]
+
+
+def pair(oc: "rt.OutputColumn", item: dict, applied: list[str], org: Any,
          dialect: "str | None") -> "tuple[str, str] | str":
-    """(the statement's arm, the reference) as SQL, or why it cannot be rebuilt."""
+    """(the statement's arm, the reference) as SQL, or why it cannot be rebuilt.
+
+    The reference keeps only what the receipt does not have to list: the joins themselves, each
+    inner join's ON cut down to its joining predicates (so a value condition hidden in an ON
+    disappears from the reference and the numbers disagree), the WHERE's joining predicates, and
+    outer, SEMI and ANTI joins as written. Every value condition comes from the receipt.
+    """
     keys = _group_keys(oc.sel)
     if keys is None:
         return "grouping sets"
@@ -242,11 +291,13 @@ def pair(oc: "rt.OutputColumn", item: dict, applied: list[str],
     if not isinstance(binding, exp.Select):
         return "binding does not parse"
     binding = binding.expressions[0]
-    ref = _value_ref(oc.expr, dialect)
+    ref = _value_ref(oc.expr)
     if ref is not None:
         for col in binding.find_all(exp.Column):
             col.set("table", exp.to_identifier(ref))
-    conds = _join_conjuncts(oc.sel)
+    refs = _references(oc.sel, org)
+    where = oc.sel.args.get("where")
+    conds = [c.copy() for c in rt._and_conjuncts(where.this if where else None) if _joins(c, refs)]
     for text in [*item["restrictions"], *applied]:
         parsed = rt._parse_declared_predicate(text, dialect)
         if parsed is None:
@@ -258,6 +309,12 @@ def pair(oc: "rt.OutputColumn", item: dict, applied: list[str],
     for arg in ("order", "limit", "offset", "distinct", "having", "qualify"):
         base.set(arg, None)
     statement, reference = base.copy(), base.copy()
+    for join in reference.args.get("joins") or []:
+        inner = not join.args.get("side") and (join.args.get("kind") or "").upper() not in (
+            "SEMI", "ANTI")
+        if inner and join.args.get("on") is not None:
+            kept = [c.copy() for c in rt._and_conjuncts(join.args["on"]) if _joins(c, refs)]
+            join.set("on", exp.and_(*kept) if kept else exp.true())
     named = [k.copy().as_(f"k{i}") for i, k in enumerate(keys)]
     statement.set("expressions", [*named, oc.expr.copy().as_("v")])
     reference.set("expressions", [*(k.copy() for k in named), binding.as_("v")])
@@ -303,7 +360,8 @@ def check(org: Any, sql: str, conn: Any) -> Outcome:
             why = "a value is withheld"
         elif cut:
             why = "a list was cut short"
-        rebuilt = None if why else pair(oc, item, applied.get(item["scope"], []), dialect)
+        rebuilt = None if why else pair(oc, item, applied.get(item["scope"], []), org,
+                                            dialect)
         if isinstance(rebuilt, str):
             why = rebuilt
         if why is None:

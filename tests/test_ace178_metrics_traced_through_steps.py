@@ -29,7 +29,7 @@ if str(PKG_SRC) not in sys.path:
 from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
-from receipt_trick_queries import STEP_TRICKS  # noqa: E402
+from receipt_trick_queries import STEP_TRICK_TWINS, STEP_TRICKS  # noqa: E402
 
 # --- fixture ----------------------------------------------------------------
 
@@ -683,6 +683,171 @@ def test_no_step_hides_a_restriction(tmp_path, sql):
     item = _one(org, sql, "n")
     if item["status"] == rt.MATCHED:
         assert item["restrictions"] or item["joins_not_declared"], sql
+
+
+@pytest.mark.parametrize("sql", STEP_TRICKS)
+def test_no_step_trick_reads_as_a_curated_twin_it_is_not(tmp_path, sql):
+    """The same trick queries against the full model, which also declares the curated twins
+    (`paid_sales`, `paid_order_count`): a plain match is right only where the statement IS that
+    twin, which `STEP_TRICK_TWINS` records by hand."""
+    org = _org(tmp_path, metrics=ALL_METRICS)
+    item = _one(org, sql, "n")
+    if item["status"] == rt.MATCHED and not (item["restrictions"] or item["joins_not_declared"]):
+        assert STEP_TRICK_TWINS.get(sql) == item["name"], (sql, item["name"])
+
+
+def test_every_hand_written_twin_is_a_step_trick_and_still_reads_as_it(tmp_path):
+    org = _org(tmp_path, metrics=ALL_METRICS)
+    for sql, twin in STEP_TRICK_TWINS.items():
+        assert sql in STEP_TRICKS
+        item = _one(org, sql, "n")
+        assert (item["status"], item["name"], item["restrictions"]) == (rt.MATCHED, twin, []), sql
+
+
+# --- review fixes (ACE-178 PR review) ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT SUM(a.total_amount) "
+        "AS n FROM x a JOIN x b ON a.customer_id = b.id WHERE b.status = 'paid'",
+        "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders), p AS (SELECT id FROM x "
+        "WHERE status = 'paid'), q AS (SELECT customer_id, total_amount FROM x) "
+        "SELECT SUM(q.total_amount) AS n FROM q JOIN p ON q.customer_id = p.id",
+    ],
+    ids=["self-join", "two-steps-one-base"],
+)
+def test_one_step_read_through_two_references_is_undetermined(org, sql):
+    """Path references are keyed by the step's body, so two references to one step would collapse
+    and `b`'s condition would stand for `a`'s metric condition. Not modelled: undetermined."""
+    item = _one(org, sql, "n")
+    assert (item["status"], item["reason"]) == (rt.UNDETERMINED, rt._WHY_TWICE)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "WITH a AS (SELECT generate_series(1, 3) AS k) SELECT SUM(o.total_amount) AS n FROM orders o "
+        "CROSS JOIN a",
+        "SELECT SUM(o.total_amount) AS n FROM orders o CROSS JOIN (SELECT UNNEST(ARRAY[1, 2, 3]) AS k) a",
+        "WITH f AS (SELECT MAX(opened) AS m, generate_series(1, 3) AS g FROM orders) "
+        "SELECT SUM(o.total_amount) AS n FROM orders o CROSS JOIN f",
+        "WITH s AS (SELECT total_amount, unnest(ARRAY[1, 2]) AS g FROM orders) "
+        "SELECT SUM(total_amount) AS n FROM s",
+        "WITH s AS (SELECT total_amount, my_rows(id) AS g FROM orders) SELECT SUM(total_amount) AS n FROM s",
+    ],
+    ids=["series-lookup", "unnest-derived", "aggregate-and-series", "unnest-rows", "unknown"],
+)
+def test_a_step_that_can_return_several_rows_per_row_is_undetermined(org, sql):
+    """A set-returning function multiplies the rows joined to it (or drops them all, over an empty
+    array), and a function the parser does not know might. Never a one-row lookup."""
+    item = _one(org, sql, "n")
+    assert (item["status"], item["reason"]) == (rt.UNDETERMINED, rt._WHY_SRF)
+
+
+def test_a_name_a_recursive_sibling_could_bind_is_undetermined(org):
+    """Under WITH RECURSIVE an engine binds `orders` in `a` to the sibling defined after it, which
+    keeps only refunded orders; the scope gate reads the table. Which one is not established."""
+    item = _one(
+        org,
+        "WITH RECURSIVE a AS (SELECT total_amount, status FROM orders), orders AS "
+        "(SELECT total_amount, status FROM public.orders WHERE status = 'refunded') "
+        "SELECT SUM(total_amount) AS n FROM a",
+        "n",
+    )
+    assert (item["status"], item["reason"]) == (rt.UNDETERMINED, rt._WHY_RECURSIVE)
+
+
+def test_distinct_on_is_row_order_not_de_duplication(org):
+    item = _one(
+        org,
+        "WITH s AS (SELECT DISTINCT ON (customer_id) customer_id, total_amount FROM "
+        "orders ORDER BY customer_id, id) SELECT COUNT(DISTINCT total_amount) AS n FROM s",
+        "n",
+    )
+    assert (item["status"], item["reason"]) == (rt.UNDETERMINED, rt._WHY_ROW_ORDER)
+
+
+def test_steps_that_fan_out_stay_linear(org):
+    """Each step joining the one before twice used to be walked 2^n times. A step body is entered
+    once; the second reference makes the number undetermined at once."""
+    import time
+
+    ctes = ["c0 AS (SELECT id, total_amount FROM orders)"] + [
+        f"c{i} AS (SELECT a.id, a.total_amount FROM c{i - 1} a JOIN c{i - 1} b ON b.id = a.id)"
+        for i in range(1, 40)
+    ]
+    sql = "WITH " + ", ".join(ctes) + " SELECT SUM(total_amount) AS n FROM c39"
+    started = time.perf_counter()
+    item = _one(org, sql, "n")
+    assert time.perf_counter() - started < 1.0
+    assert item["status"] == rt.UNDETERMINED
+
+
+def test_a_long_list_of_joins_is_capped_and_counted(org):
+    """`joins_not_declared` is one label per join the caller wrote: capped like the conditions,
+    charged to the same receipt budget, and a cut list is counted on the marker."""
+    import json
+
+    ctes = ", ".join(f"c{i} AS (SELECT id FROM orders)" for i in range(30))
+    joins = " ".join(f"JOIN c{i} ON c{i}.id = o.id" for i in range(30))
+    outs = ", ".join(f"SUM(o.total_amount) AS n{i}" for i in range(50))
+    sql = f"WITH {ctes} SELECT {outs} FROM orders o {joins}"
+    section = rt.assemble_receipt(org, sql)["columns"]
+    items = [i for i in section["items"] if i["kind"] == "output"]
+    assert all(len(i["joins_not_declared"] or []) <= rt._RECEIPT_MAX_RESTRICTIONS for i in items)
+    assert sum(
+        len(i["joins_not_declared"] or []) for i in items
+    ) <= rt._RECEIPT_MAX_CONDITIONS + len(items)
+    assert "list only some of their conditions or joins" in section["undetermined"]
+    assert len(json.dumps(section)) < 200_000
+
+
+def test_a_join_dropping_groups_is_a_result_filter_on_either_side(org):
+    """After a grouped step, a join to another relation keeps only the groups that find a partner,
+    whichever side of the join the step is written on."""
+    for sql in (
+        "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) "
+        "SELECT g.n AS n FROM g JOIN customers c ON c.status = g.status",
+        "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) "
+        "SELECT g.n AS n FROM customers c JOIN g ON c.status = g.status",
+    ):
+        item = _one(org, sql, "n")
+        assert item["result_filters"] == ["c.status = g.status"], sql
+
+
+def test_a_full_join_names_no_missing_table(org):
+    """A FULL join keeps both sides' rows whatever its ON says: not modelled, so nothing is claimed
+    about which tables the number was counted over either."""
+    item = _one(
+        org, "SELECT COUNT(*) AS n FROM orders o FULL JOIN payments p ON p.order_id = o.id", "n"
+    )
+    assert (item["status"], item["missing_tables"]) == (rt.UNDETERMINED, None)
+
+
+def test_an_aggregate_over_a_one_row_steps_number_says_so(org):
+    item = _one(
+        org, "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT MAX(a.d) AS n FROM a", "n"
+    )
+    assert item["reason"] == rt._WHY_REAGGREGATE
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE CAST(c AS TEXT) LIKE '%x@example.com%'",
+        "WITH s AS (SELECT o.total_amount FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE CAST(c AS TEXT) LIKE '%x@example.com%') SELECT SUM(total_amount) AS n FROM s",
+    ],
+    ids=["plain", "in-a-step"],
+)
+def test_a_whole_row_reference_has_its_values_withheld(org, sql):
+    """A whole-row reference carries every column of the row, a sensitive one included, under no
+    column's name."""
+    section = rt.assemble_receipt(org, sql)["columns"]
+    assert "x@example.com" not in str(section)
 
 
 def test_the_adversarial_corpus_is_the_size_it_claims():

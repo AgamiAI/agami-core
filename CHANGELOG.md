@@ -32,7 +32,13 @@ below corresponds to one such version.
   unattributable column, nesting too deep, a sampled table, an unread binding, or several metrics
   alike). `aggregate` now also counts a number computed in a step. When a statement names a
   sensitive column, every value in a condition that reads a step's column (or an output alias, or
-  holds a subquery) is withheld, so a rename in a step cannot carry one out.
+  holds a subquery) is withheld, so a rename in a step cannot carry one out; a whole-row reference
+  (`CAST(c AS TEXT)`) has its values withheld whenever the model declares a sensitive column. Not
+  modelled, so `undetermined` with its reason: one step read through two references, a step
+  projecting a set-returning or unknown function (never a one-row lookup), a name a `WITH
+  RECURSIVE` sibling defined later could bind, and `DISTINCT ON`. A step body is entered once per
+  number, so steps that fan out stay linear. `joins_not_declared` lists are capped and charged to
+  the receipt's condition budget, a cut list counted on the section's marker.
 - **A metric matches only a number that read all its tables (#630).** The expression alone matched
   `SUM(amount) FROM orders` to a metric declared on `payments`. A metric whose `source_tables` the
   number did not all read is not its match, and `missing_tables` names the metric and the table. A
@@ -57,7 +63,9 @@ below corresponds to one such version.
   statement names a sensitive column anywhere. Each list shows ten conditions and the receipt one
   hundred in all; the section's `undetermined` sentence counts the columns cut short. A number read
   through a CTE or subquery, or from a sampled or time-travelled table, now reads `undetermined`
-  where it used to read `matched` with that filter unseen. The receipt's echo bound also strips
+  where it used to read `matched` with that filter unseen, and so does a number in a shape the check
+  does not model: a FULL join, a window over filtered rows, an outer-join condition its aggregate
+  lets NULL rows past, or two references whose names differ only by case. The receipt's echo bound also strips
   invisible characters (zero-width, word joiner, byte-order mark, tag characters).
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked

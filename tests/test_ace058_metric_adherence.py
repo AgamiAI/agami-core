@@ -916,7 +916,8 @@ def test_a_shared_binding_whose_declarers_are_all_elsewhere_is_undetermined(tmp_
 
 
 def test_the_arm_source_map_is_resolved_once_for_all_of_an_arms_columns(tmp_path, monkeypatch):
-    """`_arm_sources` shares `_reads_only_visible`'s memo — same key, same map, one resolve per arm.
+    """Every reader of an arm's source map shares one memo — same key, same map, one resolve per
+    arm. (It was `_arm_sources` and `_reads_only_visible`; since ACE-178 it is `_arm_restrictions`.)
 
     Driven through `assemble_receipt` rather than the `_statuses` helper: that helper hands each
     column a FRESH `{}`, so it cannot observe the memo at all and a test written against it would

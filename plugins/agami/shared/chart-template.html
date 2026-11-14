@@ -1707,6 +1707,14 @@
             li.appendChild(el('code', { text: b.metric }));
             li.appendChild(document.createTextNode(': the ' + String(b.aggregate || '').toLowerCase() + ' of it per '));
             li.appendChild(el('code', { text: (b.by || []).join(', ') }));
+            if ((b.restrictions || []).length) {
+              li.appendChild(document.createTextNode(', its rows counted only where '));
+              li.appendChild(el('code', { text: b.restrictions.join(' and ') }));
+            }
+            if ((b.joins_not_declared || []).length) {
+              li.appendChild(document.createTextNode(', through joins the semantic model does not declare: '));
+              li.appendChild(el('code', { text: b.joins_not_declared.join(', ') }));
+            }
             ul.appendChild(li);
           });
           rb.appendChild(el('h5', { text: 'Built from a defined metric' }));

@@ -1018,6 +1018,11 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
     aggregates = [_fold(a.get("aggregate", "")) for a in (prepare or {}).get("aggregates", [])]
     prepare_read = isinstance(prepare, dict) and "aggregates" in prepare
     only_bare_counts = bool(aggregates) and all(a == "count(*)" for a in aggregates)
+    # The section's marker says when an item's list was cut to fit the receipt; a cut list is then
+    # never presented as the whole.
+    cut = "list only some of their conditions" in str(
+        ((receipt or {}).get("columns") or {}).get("undetermined") or "")
+    more = " (the receipt lists only some)" if cut else ""
     for item in ((receipt or {}).get("columns") or {}).get("items", []):
         if item.get("kind") != "output":
             continue
@@ -1045,7 +1050,7 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                                   evidence={"metric": item.get("name"), "joins_not_declared": joins},
                                   note=f"matches the metric {item.get('name')!r}, counted through "
                                        f"{'a join' if len(joins) == 1 else 'joins'} the semantic "
-                                       f"model does not declare: {', '.join(joins)}"))
+                                       f"model does not declare: {', '.join(joins)}{more}"))
             else:
                 # The rows it was counted over are named, not judged: whether a slice is what the
                 # question meant is the person's call, and the counting is the defined metric's.
@@ -1063,20 +1068,32 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
         elif item.get("missing_tables"):
             # A defined metric computes this expression over a table the statement never read: the
             # same calculation on other rows (#630). Not a gap in the model, which defines it.
+            # "Does not read" only when the statement names the table nowhere; a table it uses only to
+            # filter (an IN or EXISTS) is named, and the number is still not counted over it.
+            named = _tables_read(receipt)
             missing = [f"{m.get('metric')!r}, defined on {', '.join(map(str, m.get('tables') or []))}"
                        for m in item["missing_tables"]]
+            elsewhere = any(str(t) in named for m in item["missing_tables"] for t in m.get("tables") or [])
             rows.append(_part(f"metric:{column}", UNRESOLVED,
                               evidence={"column": column, "missing_tables": item["missing_tables"]},
                               note="the expression is the metric " + "; ".join(missing)
-                                   + ", which this statement does not read"))
+                                   + (", which this number is not counted over (the statement only "
+                                      "filters on it)" if elsewhere else
+                                      ", which this statement does not read")))
         elif item.get("built_from"):
             # Built on a defined metric (an average of a per-day total): not that metric, and not a
             # gap either. Named, so the person can judge whether the second step is what they meant.
             built = item["built_from"]
             by = ", ".join(map(str, built.get("by") or []))
+            note = (f"built from the metric {built.get('metric')!r}: "
+                    f"{str(built.get('aggregate', '')).lower()} of it per {by or 'group'}")
+            if built.get("restrictions"):
+                note += ", counted only where " + " and ".join(map(str, built["restrictions"]))
+            if built.get("joins_not_declared"):
+                note += (", through joins the semantic model does not declare: "
+                         + ", ".join(map(str, built["joins_not_declared"])))
             rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "built_from": built},
-                              note=f"built from the metric {built.get('metric')!r}: "
-                                   f"{str(built.get('aggregate', '')).lower()} of it per {by or 'group'}"))
+                              note=note + (more if built.get("restrictions") or built.get("joins_not_declared") else "")))
         elif item.get("missing_conditions"):
             # A defined metric computes this value over a condition the statement does not apply.
             # Not a gap in the semantic model, which defines it; not judged a defect either, since

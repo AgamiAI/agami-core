@@ -104,6 +104,8 @@ METRIC_MISSING_LABEL = "' is not '"
 # ACE-178: a join the model does not declare on a matched number's path, and a number built from one.
 METRIC_JOINS_LABEL = "', counted through a join the semantic model does not declare: '"
 METRIC_BUILT_LABEL = "' is built from '"
+METRIC_BUILT_RESTRICTIONS_LABEL = "', its rows counted only where '"
+METRIC_BUILT_JOINS_LABEL = "', through joins the semantic model does not declare: '"
 # `json.dumps` spacing, which the template's hand-written sample receipt does not use.
 NONCE_RESULT_UNAFFECTED = '"result_affected": false'
 
@@ -328,7 +330,7 @@ def test_the_construction_sites_the_assertions_stand_on_are_each_unique():
                  JOIN_NO_PREDICATE, JOIN_DECLARED_GUARD, AGGREGATES_SECTION_CONSTRUCTION,
                  AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL, METRIC_RESTRICTIONS_LABEL,
                  METRIC_RESULT_FILTERS_LABEL, METRIC_MISSING_LABEL, METRIC_JOINS_LABEL,
-                 METRIC_BUILT_LABEL):
+                 METRIC_BUILT_LABEL, METRIC_BUILT_RESTRICTIONS_LABEL, METRIC_BUILT_JOINS_LABEL):
         assert template.count(site) == 1, f"{site!r} appears {template.count(site)}x, not once"
 
 

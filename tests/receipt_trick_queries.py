@@ -287,4 +287,118 @@ STEP_TRICKS = [
     "WITH s AS (SELECT o.total_amount FROM orders o LEFT JOIN customers c ON c.id = "
     "o.customer_id WHERE c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
     "WITH x AS (SELECT * FROM orders WHERE status = 'paid') SELECT SUM(x.total_amount) AS n FROM x",
+    # PR review (ACE-178). One step read through two references: its references collapsed into
+    # one, so `b`'s condition stood for the metric's own condition on `a`.
+    "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT SUM(a.total_amount) "
+    "AS n FROM x a JOIN x b ON a.customer_id = b.id WHERE b.status = 'paid'",
+    "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT SUM(a.total_amount) "
+    "AS n FROM x a, x b WHERE a.customer_id = b.id AND b.status = 'paid'",
+    "WITH x AS (SELECT id, customer_id, total_amount, status FROM orders), p AS (SELECT id FROM x "
+    "WHERE status = 'paid'), q AS (SELECT customer_id, total_amount FROM x) "
+    "SELECT SUM(q.total_amount) AS n FROM q JOIN p ON q.customer_id = p.id",
+    "WITH orders AS (SELECT id, customer_id, total_amount, status FROM orders) SELECT "
+    "SUM(a.total_amount) AS n FROM orders a JOIN orders b ON a.customer_id = b.id "
+    "WHERE b.status = 'paid'",
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) "
+    "SELECT a.n FROM g a CROSS JOIN g b WHERE b.status = 'paid'",
+    # Set-returning and unknown functions in a step multiply or drop rows no condition states.
+    "WITH a AS (SELECT generate_series(1, 3) AS k) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "CROSS JOIN a",
+    "SELECT SUM(o.total_amount) AS n FROM orders o CROSS JOIN (SELECT UNNEST(ARRAY[1, 2, 3]) AS k) a",
+    "WITH f AS (SELECT MAX(opened) AS m, generate_series(1, 3) AS g FROM orders) "
+    "SELECT SUM(o.total_amount) AS n FROM orders o CROSS JOIN f",
+    "WITH s AS (SELECT total_amount, generate_series(1, 3) AS g FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM s",
+    "WITH s AS (SELECT total_amount, unnest(ARRAY[1, 2]) AS g FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM s",
+    "WITH s AS (SELECT total_amount, my_rows(id) AS g FROM orders) SELECT SUM(total_amount) AS n FROM s",
+    # Under WITH RECURSIVE a step may bind a sibling defined after it.
+    "WITH RECURSIVE a AS (SELECT total_amount, status FROM orders), orders AS (SELECT "
+    "total_amount, status FROM public.orders WHERE status = 'refunded') "
+    "SELECT SUM(total_amount) AS n FROM a",
+    # DISTINCT ON keeps one row per key, chosen by order: not a de-duplication.
+    "WITH s AS (SELECT DISTINCT ON (customer_id) customer_id, total_amount FROM orders "
+    "ORDER BY customer_id, id) SELECT COUNT(DISTINCT total_amount) AS n FROM s",
+    # A lookup step's value that cuts every row, and a FULL join in a step.
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "CROSS JOIN a WHERE a.d > '2030-01-01'",
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT SUM(o.total_amount) AS n FROM orders o "
+    "JOIN a ON a.d IS NULL",
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders GROUP BY status) SELECT SUM(o.total_amount) AS n "
+    "FROM orders o CROSS JOIN a",
+    "WITH x AS (SELECT o.id, o.total_amount FROM orders o FULL JOIN payments p "
+    "ON p.order_id = o.id) SELECT COUNT(*) AS n FROM x",
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY ROLLUP(status)) "
+    "SELECT n FROM g WHERE status IS NULL",
 ]
+
+# PR #660 review. (label, metrics declared, storage type, statement): each read `matched` with
+# nothing listed before it was fixed; none may now. The metrics are declared per case, in the
+# `acme` model's tables, so a case adds no metric the other batteries would also see.
+_PAID_PAYMENTS = {"paid_payments": ("SUM(amount) FILTER (WHERE status = 'paid')", ["payments"])}
+REVIEW_TRICKS = [
+    ("window frame: a FILTER inside OVER is not a WHERE",
+     {"paid_window": ("SUM(total_amount) FILTER (WHERE status = 'paid') "
+                      "OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", ["orders"])},
+     "PostgreSQL",
+     "SELECT SUM(total_amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS n "
+     "FROM orders WHERE status = 'paid'"),
+    ("mixed-reference FILTERs over a ratio",
+     {"amount_ratio": ("SUM(total_amount) / SUM(amount)", ["orders", "payments"])},
+     "PostgreSQL",
+     "SELECT SUM(o.total_amount) FILTER (WHERE o.status = 'paid') / "
+     "SUM(p.amount) FILTER (WHERE p.status = 'paid') AS n "
+     "FROM orders o JOIN payments p ON p.order_id = o.id"),
+    ("an unqualified equality on one table in a two-table SELECT",
+     {"order_count": ("COUNT(*)", ["orders"])},
+     "PostgreSQL",
+     "SELECT COUNT(*) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
+     "WHERE customer_id = total_amount"),
+    ("aliases that differ only by quoted case",
+     {"paid_sales": ("SUM(total_amount) FILTER (WHERE status = 'paid')", ["orders"])},
+     "PostgreSQL",
+     'SELECT SUM(orders.total_amount) AS n FROM orders AS orders CROSS JOIN orders AS "ORDERS" '
+     "WHERE \"ORDERS\".status = 'paid'"),
+    ("an ANTI join's ON is not a filter on the kept rows",
+     {"paid_sales": ("SUM(total_amount) FILTER (WHERE status = 'paid')", ["orders"])},
+     "DuckDB",
+     "SELECT SUM(o.total_amount) AS n FROM orders o ANTI JOIN payments p "
+     "ON p.order_id = o.id AND o.status = 'paid'"),
+    ("a FULL join keeps both sides whatever its ON says",
+     _PAID_PAYMENTS, "PostgreSQL",
+     "SELECT SUM(p.amount) AS n FROM orders o FULL JOIN payments p "
+     "ON p.order_id = o.id AND p.status = 'paid'"),
+    ("an aggregate's own FILTER equating two references",
+     {"order_count": ("COUNT(*)", ["orders"])},
+     "PostgreSQL",
+     "SELECT COUNT(*) FILTER (WHERE o.customer_id = c.id) AS n "
+     "FROM orders o CROSS JOIN customers c"),
+    ("an outer ON condition where null-extended rows still count",
+     {"paid_payment_rows": ("COUNT(COALESCE(id, 0)) FILTER (WHERE status = 'paid')",
+                            ["payments"])},
+     "PostgreSQL",
+     "SELECT COUNT(COALESCE(p.id, 0)) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id = o.id AND p.status = 'paid'"),
+]
+
+
+# Against the curated twins (`paid_sales`, `paid_order_count`), these STEP_TRICKS ARE a twin: each
+# keeps only the paid orders it counts, through its steps, and may read as that twin with nothing
+# listed. Any other plain match of a STEP_TRICK, against either model, is a false one. Written by
+# hand; a key that is not in STEP_TRICKS fails the battery.
+STEP_TRICK_TWINS = {
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) SELECT n FROM g WHERE status = 'paid'":
+        'paid_order_count',
+    "WITH g AS (SELECT status AS st, COUNT(*) AS n FROM orders GROUP BY 1) SELECT n FROM g WHERE st = 'paid'":
+        'paid_order_count',
+    "WITH orders AS (SELECT id, total_amount FROM public.orders WHERE status = 'paid') SELECT SUM(total_amount) AS n FROM orders":
+        'paid_sales',
+    "SELECT COUNT(*) AS n FROM (WITH o AS (SELECT id FROM orders WHERE status = 'paid') SELECT id FROM o) x":
+        'paid_order_count',
+    "WITH s AS (SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders) SELECT n FROM s":
+        'paid_order_count',
+    "WITH s AS (SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS n FROM orders) SELECT s.n AS n FROM s":
+        'paid_sales',
+    "WITH s0 AS (SELECT id, total_amount FROM orders WHERE status = 'paid'), s1 AS (SELECT id, total_amount FROM s0), s2 AS (SELECT id, total_amount FROM s1), s3 AS (SELECT id, total_amount FROM s2), s4 AS (SELECT id, total_amount FROM s3), s5 AS (SELECT id, total_amount FROM s4), s6 AS (SELECT id, total_amount FROM s5), s7 AS (SELECT id, total_amount FROM s6), s8 AS (SELECT id, total_amount FROM s7), s9 AS (SELECT id, total_amount FROM s8) SELECT SUM(total_amount) AS n FROM s9":
+        'paid_sales',
+}

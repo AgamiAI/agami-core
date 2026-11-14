@@ -1152,6 +1152,43 @@ def test_a_number_built_from_a_metric_is_open_and_says_how():
     assert "built from the metric 'total_sales': avg of it per opened" in row["note"]
 
 
+def test_a_built_from_number_names_its_own_restrictions_and_joins():
+    """ACE-178 review: "built from total_sales, avg per opened" must also say which rows the per-day
+    totals were counted over, and any join the semantic model does not declare."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "a", "status": "unmatched",
+                                      "aggregate": True, "built_from": {
+                                          "metric": "total_sales", "aggregate": "AVG",
+                                          "by": ["opened"], "restrictions": ["daily > 100"],
+                                          "joins_not_declared": ["orders → payments"]}}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "AVG(daily)"}]})
+    assert "counted only where daily > 100" in row["note"]
+    assert "orders → payments" in row["note"]
+
+
+def test_a_list_the_receipt_cut_short_is_never_presented_as_whole():
+    receipt = {"columns": {"undetermined": "1 of the listed output column(s) list only some of their "
+                                           "conditions or joins.",
+                           "items": [{"kind": "output", "column": "n", "status": "matched",
+                                      "name": "total_sales", "aggregate": True,
+                                      "source_tables": ["orders"], "restrictions": [],
+                                      "joins_not_declared": ["orders → c1"]}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(total_amount)"}]})
+    assert row["note"].endswith("(the receipt lists only some)")
+
+
+def test_a_metric_table_used_only_to_filter_is_not_called_unread():
+    """A table the statement filters on (an IN or EXISTS) is read, just not counted over."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "unmatched",
+                                      "aggregate": True, "missing_tables": [
+                                          {"metric": "paid_orders", "tables": ["payments"]}]}]},
+               "tables": {"items": [{"qname": "orders"}, {"qname": "payments"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "COUNT(*)"}]})
+    assert "not counted over (the statement only filters on it)" in row["note"]
+    assert "does not read" not in row["note"]
+
+
 def test_an_undetermined_number_carries_its_reason():
     receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "undetermined",
                                       "aggregate": True,
