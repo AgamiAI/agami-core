@@ -303,3 +303,33 @@ def test_an_add_never_signs_itself_off(tmp_path, kind, folder):
     doc = yaml.safe_load((tmp_path / "subject_areas" / "sales" / folder / "copied.yaml").read_text())
     assert doc["review_state"] == "unreviewed"
     assert not {"signed_off_by", "signed_off_at", "signed_off_role"} & set(doc)
+
+
+def test_a_derived_metric_in_a_cycle_is_said_and_nothing_runs(tmp_path, monkeypatch, capsys):
+    rc, out, seen = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_derived("a", "{b} + 1", ["b"]), _derived("b", "{a} + 1", ["a"])],
+    )
+    assert rc == 1 and seen == []
+    assert "cycle" in out["test_run"]["a"]["error"]
+
+
+def test_a_file_item_the_model_refuses_still_expands_for_the_test_run(tmp_path, monkeypatch, capsys):
+    # An unknown key makes the item fail the model's own check; the test run still expands it, and
+    # the write reports the key.
+    item = {**_derived("twice", "2 * {order_count}", ["order_count"]), "colour": "blue"}
+    rc, out, seen = _run(tmp_path, monkeypatch, capsys, [item])
+    assert out["test_run"] == {"twice": {"ok": True}}
+    assert "(COUNT(*))" in seen[0]
+
+
+def test_a_failure_with_no_words_is_named_by_its_kind(tmp_path, monkeypatch, capsys):
+    def silent(sql: str):
+        if sql == "SELECT 1":
+            return []
+        raise ValueError()
+
+    rc, out, _ = _run(tmp_path, monkeypatch, capsys, [_metric("a", "SUM(id)", ["orders"])], runner=silent)
+    assert out["test_run"]["a"] == {"error": "ValueError"}
