@@ -68,8 +68,8 @@ below corresponds to one such version.
     or `batch-id`, or `wait-files --file <scratch>… [--wait 0-600]`. Options must be written in
     full and only once (`--mark` and `--file` may repeat); the Bash call may carry no
     `run_in_background` or `timeout`;
-  - a Write or Read of `<artifacts_dir>/local/tmp/agami-*.json|txt|tsv|md` (case-sensitive,
-    symlinks resolved, not a hard link);
+  - a Write, Edit or Read of `<artifacts_dir>/local/tmp/agami-*.json|txt|tsv|md` (case-sensitive,
+    symlinks resolved, not a hard link; an Edit gets exactly a Write's checks);
   - a Read of a file under the plugin's folder.
   Nothing that connects to a database, uses credentials, installs, reads a file the call names,
   or changes the model or its sign-off is approved, and no `scripts/py` call is. It also runs for

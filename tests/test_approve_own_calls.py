@@ -98,6 +98,9 @@ def _file(tool: str, path: str, **extra: object) -> dict:
     tool_input: dict = {"file_path": path, **extra}
     if tool == "Write":
         tool_input.setdefault("content", "{}")
+    if tool == "Edit":
+        tool_input.setdefault("old_string", "{}")
+        tool_input.setdefault("new_string", '{"a": 1}')
     return {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
 
 
@@ -428,7 +431,7 @@ def test_every_other_cli_verb_is_refused():
 
 @pytest.mark.parametrize("name", ["agami-x.json", "agami-enrich-20261112-ab12-sales-1.result.json",
                                   "agami-notes.md", "agami-cols.tsv", "agami-a_b.txt"])
-@pytest.mark.parametrize("tool", ["Write", "Read"])
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
 def test_a_scratch_file_is_allowed(art, tool, name):
     assert _decision(_file(tool, str(art / "local" / "tmp" / name)), art) == "allow"
 
@@ -459,7 +462,7 @@ def test_the_scratch_folder_comes_from_the_pointer_file(tmp_path):
     "local/tmp/agami-x y.json", "local/tmp/agami-x;y.json", "local/tmp", "local/agami-x.json",
     "local/credentials", "local/.config", "agami-x.json",
 ])
-@pytest.mark.parametrize("tool", ["Write", "Read"])
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
 def test_other_artifact_paths_say_nothing(art, tool, rel):
     assert _decision(_file(tool, str(art) + "/" + rel), art) is None
 
@@ -470,7 +473,7 @@ def test_relative_and_tilde_paths_say_nothing(art):
 
 
 @pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
-@pytest.mark.parametrize("tool", ["Write", "Read"])
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
 def test_a_hard_linked_scratch_file_says_nothing(art, tmp_path, tool):
     outside = tmp_path / "settings.json"
     outside.write_text("{}")
@@ -511,7 +514,8 @@ def test_no_scratch_folder_says_nothing(tmp_path):
     assert _decision(_file("Write", str(art / "local" / "tmp" / "agami-x.json")), art) is None
 
 
-@pytest.mark.parametrize("tool, extra", [("Write", {"mode": "append"}), ("Read", {"pages": "1"})])
+@pytest.mark.parametrize("tool, extra", [("Write", {"mode": "append"}), ("Read", {"pages": "1"}),
+                                         ("Edit", {"edits": []}), ("Edit", {"content": "{}"})])
 def test_an_unknown_file_field_says_nothing(art, tool, extra):
     assert _decision(_file(tool, str(art / "local" / "tmp" / "agami-x.json"), **extra), art) is None
 
@@ -607,7 +611,7 @@ def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     # the second entry is say_gate.py on AskUserQuestion (tests/test_say_gate.py)
     entry = doc["hooks"]["PreToolUse"][0]
-    assert entry["matcher"] == "Bash|Write|Read"
+    assert entry["matcher"] == "Bash|Write|Read|Edit"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
     assert hook["command"] == (
@@ -688,9 +692,74 @@ def test_every_form_the_hook_approves_is_one_allowed_tools_already_covers(art):
 
 
 @pytest.mark.parametrize("name", ["say-pending.json", "agami-say-pending.json"])
-@pytest.mark.parametrize("tool", ["Write", "Read"])
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
 def test_the_say_gates_pending_file_is_never_approved(art, tool, name):
     """A subagent with Write could otherwise plant text the say gate then has the assistant post
     verbatim. Excluded by name, so a wider scratch pattern later still leaves it out."""
     assert _decision(_file(tool, str(art / "local" / "tmp" / name)), art) is None
     assert name in HOOK_MOD.NEVER_APPROVED
+
+
+# --- Edit of a scratch file: the same files, the same checks as Write ------------------------------------
+# A live run prompted three times on Edits of `agami-metrics.json` it had just written. The hooks
+# reference (https://code.claude.com/docs/en/hooks, "PreToolUse input") documents Edit's input as
+# `file_path`, `old_string`, `new_string`, `replace_all`, and lists no MultiEdit tool.
+
+
+def test_an_edit_of_an_existing_scratch_file_is_allowed(art):
+    target = art / "local" / "tmp" / "agami-metrics.json"
+    target.write_text("{}")
+    assert _decision(_file("Edit", str(target)), art) == "allow"
+    assert _decision(_file("Edit", str(target), replace_all=True), art) == "allow"
+
+
+@pytest.mark.parametrize("name", ["say-pending.json", "agami-say-pending.json"])
+def test_an_edit_of_the_pending_file_is_never_allowed(art, name):
+    target = art / "local" / "tmp" / name
+    target.write_text("[]")
+    assert _decision(_file("Edit", str(target)), art) is None
+
+
+def test_an_edit_outside_the_scratch_folder_says_nothing(art, tmp_path):
+    outside = tmp_path / "agami-x.json"
+    outside.write_text("{}")
+    for path in (outside, art / "local" / "agami-x.json", art / "acme" / "agami-x.json", PLUGIN / "shared" / "task-list.md"):
+        assert _decision(_file("Edit", str(path)), art) is None, path
+
+
+@SYMLINKS
+def test_an_edit_through_a_link_says_nothing(art, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    link = art / "local" / "tmp" / "agami-link.json"
+    link.symlink_to(outside)
+    assert _decision(_file("Edit", str(link)), art) is None
+    inside = art / "local" / "tmp" / "agami-real.json"
+    inside.write_text("{}")
+    renamed = art / "local" / "tmp" / "agami-alias.json"
+    renamed.symlink_to(inside)  # even a link to a scratch file of its own: Write allows this one too
+    assert _decision(_file("Edit", str(renamed)), art) == _decision(_file("Write", str(renamed)), art)
+
+
+@pytest.mark.skipif(not hasattr(os, "link"), reason="hard links")
+def test_an_edit_of_a_hard_linked_file_says_nothing(art, tmp_path):
+    outside = tmp_path / "settings.json"
+    outside.write_text("{}")
+    target = art / "local" / "tmp" / "agami-x.json"
+    os.link(outside, target)
+    assert _decision(_file("Edit", str(target)), art) is None
+
+
+@pytest.mark.parametrize("tool", ["MultiEdit", "NotebookEdit", "edit", "Edits"])
+def test_other_edit_tools_say_nothing(art, tool):
+    target = art / "local" / "tmp" / "agami-x.json"
+    target.write_text("{}")
+    assert _decision(_file(tool, str(target)), art) is None
+
+
+def test_edit_and_write_agree_on_every_scratch_path(art, tmp_path):
+    tmp = art / "local" / "tmp"
+    (tmp / "agami-there.json").write_text("{}")
+    for path in (tmp / "agami-there.json", tmp / "agami-new.md", tmp / "x.json", tmp / "say-pending.json",
+                 tmp / "AGAMI-x.json", tmp_path / "agami-x.json"):
+        assert _decision(_file("Edit", str(path)), art) == _decision(_file("Write", str(path)), art), path

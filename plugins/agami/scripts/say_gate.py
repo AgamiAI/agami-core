@@ -53,7 +53,7 @@ import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-# Not `agami-…`: approve_own_calls.py lets Write and Read of `agami-*` scratch files through.
+# Not `agami-…`: approve_own_calls.py lets Write, Edit and Read of `agami-*` scratch files through.
 FILE_NAME = "say-pending.json"
 KINDS = ("summary", "examples")
 FIELDS = ("id", "kind", "needle", "say", "created_at")

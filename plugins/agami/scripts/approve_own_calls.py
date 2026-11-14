@@ -14,8 +14,9 @@ its own turn). It never denies, and neither does the plugin's other hook (say_ga
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
      it, no shell syntax at all) whose verb is in VERBS and whose every argument passes that
      verb's row: the options it may carry, written in full, and the kind of each value.
-  B. Write / Read of a file directly inside `<artifacts_dir>/local/tmp/` named
-     `agami-*.json|txt|tsv|md` (case-sensitive), symlinks resolved, not a hard link.
+  B. Write / Edit / Read of a file directly inside `<artifacts_dir>/local/tmp/` named
+     `agami-*.json|txt|tsv|md` (case-sensitive), symlinks resolved, not a hard link. Edit gets
+     exactly Write's checks: it can do nothing to such a file that Write could not.
   C. Read of a file under this plugin's root.
 
 The plugin root is where this file is, never anything the call names. Every check fails closed:
@@ -52,7 +53,7 @@ UNQUOTED_SPECIAL = set("$*?[]{}()!#")
 
 TMP_NAME = re.compile(r"agami-[A-Za-z0-9._-]+\.(json|txt|tsv|md)")
 # The say gate's pending file (say_gate.py): text in it is shown to the person verbatim,
-# so a Write of it is never waved through, whatever TMP_NAME becomes. The old name is listed too.
+# so a Write or Edit of it is never waved through, whatever TMP_NAME becomes. The old name is listed too.
 NEVER_APPROVED = {"say-pending.json", "agami-say-pending.json"}
 MARK = re.compile(r"[a-z_]+=(in_progress|done|skipped)")
 AREA = re.compile(r"[A-Za-z0-9_.-]+")
@@ -62,6 +63,8 @@ SECONDS = re.compile(r"[0-9]{1,3}")
 TOOL_KEYS = {
     "Bash": {"command", "description"},
     "Write": {"file_path", "content"},
+    # Edit's input as the hooks reference documents it; it lists no MultiEdit tool.
+    "Edit": {"file_path", "old_string", "new_string", "replace_all"},
     "Read": {"file_path", "offset", "limit"},
 }
 

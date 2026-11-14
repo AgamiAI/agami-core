@@ -647,7 +647,7 @@ def test_the_gate_writes_only_the_pending_file(art, tmp_path):
 def _gate_hook() -> dict:
     doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     entries = doc["hooks"]["PreToolUse"]
-    assert [e["matcher"] for e in entries] == ["Bash|Write|Read", "AskUserQuestion"]
+    assert [e["matcher"] for e in entries] == ["Bash|Write|Read|Edit", "AskUserQuestion"]
     (hook,) = entries[1]["hooks"]
     return hook
 

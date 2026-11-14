@@ -24,8 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-# Not `agami-…`: the plugin's approve hook lets Write and Read of `agami-*` scratch files through
-# without a prompt, and a subagent able to write this file could plant text for the assistant to post.
+# Not `agami-…`: the plugin's approve hook lets Write, Edit and Read of `agami-*` scratch files through
+# without a prompt, and a subagent able to write this file could plant text to be shown to the person.
 FILE_NAME = "say-pending.json"
 KINDS = ("summary", "examples")
 NEEDLE_CHARS = 120
