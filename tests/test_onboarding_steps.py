@@ -155,6 +155,25 @@ def test_a_system_sign_off_is_never_called_signed(model, capsys):
     assert "signed" not in count
 
 
+def test_the_sample_reads_the_same_total_mid_run_and_after_the_system_sign_off(model, capsys):
+    # A live sample run read "0 of 23 signed" while the step ran and "20 approved by agami" at the
+    # end: the silent build's system sign-off approved 3 guessed joins that were in the first count
+    # and not in the second. A join introspection approved itself is still never counted.
+    metrics, entities = _unsign_all(model, "metrics"), _unsign_all(model, "entities")
+    rel = model / "subject_areas" / "agami-example" / "relationships.yaml"
+    doc = yaml.safe_load(rel.read_text())
+    for r in doc["relationships"][:3]:
+        r.update(review_state="unreviewed", signed_off_by=None, signed_off_at=None, signed_off_role=None)
+    rel.write_text(yaml.safe_dump(doc))
+    total = metrics + entities + 3
+    steps.mark(model, "signoff", "in_progress")
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == f"0 of {total} signed"
+    assert cli.main(["approve-queue", str(model), "--signer", "system", "--role", "system"]) == 0
+    capsys.readouterr()
+    steps.mark(model, "signoff", "done")
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == f"{total} approved by agami"
+
+
 def test_hidden_personal_columns_are_counted_on_the_step(model):
     table = next(f for f in (model / "subject_areas").glob("*/tables/*.yaml")
                  if any(c.get("sensitive") for c in yaml.safe_load(f.read_text())["columns"]))

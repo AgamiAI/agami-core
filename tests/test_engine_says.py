@@ -23,9 +23,9 @@ SAMPLE = PLUGIN / "samples" / "store" / "model"
 
 UPDATE = "Update the task list from `list` now, before anything else."
 UP_TO_DATE = "The task list is up to date."
-CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
-           "closing card in that same message. The step stays in progress until the first question "
-           "is answered.")
+CLOSING = ("Update the task list from `list`, then post `say` exactly as written as your last "
+           "message: it ends your turn, with no card or other tool call after it. The step stays in "
+           "progress until the first question is answered.")
 
 
 @pytest.fixture
@@ -75,7 +75,7 @@ def test_full_carries_the_keys_too(model, capsys):
 def test_the_closing_mark_says_the_whole_summary(model, capsys):
     steps.mark(model, "examples", "done")
     out = _run(["steps", str(model), "--mark", "first_question=in_progress"], capsys)
-    assert out["say"] == summary.onboarding_summary(model)["markdown"]
+    assert out["say"] == summary.closing_message(model)
     assert out["say"].startswith("**agami-example: 11 tables, 12 joins, 8 metrics, 14 examples.**")
     assert out["then"] == CLOSING
     assert out["list"][-1].startswith("▶ Summary and first question")
@@ -90,8 +90,8 @@ def test_other_marks_say_nothing(model, capsys):
         assert "say" not in out, mark
 
 
-NO_SUMMARY = ("Say this to the person. The summary could not be built, so do not ask the closing "
-              "card; fix the problem and run this command again.")
+NO_SUMMARY = ("Say this to the person. The summary could not be built, so do not post the closing "
+              "message; fix the problem and run this command again.")
 PROBLEM = "Say this to the person before going on."
 PROBLEM_AND_UPDATE = "Say this to the person before going on. Then update the task list from `list`."
 
@@ -147,11 +147,11 @@ def test_a_problem_on_the_closing_mark_comes_before_the_summary(model, capsys, m
     monkeypatch.setattr(steps, "_log_state", lambda *a, **k: ("failed", "boom"))
     out = _run(["steps", str(model), "--mark", "first_question=in_progress"], capsys)
     assert out["problem"] == 'The last rebuild didn\'t finish: "boom"'
-    assert out["say"] == out["problem"] + "\n\n" + summary.onboarding_summary(model)["markdown"]
+    assert out["say"] == out["problem"] + "\n\n" + summary.closing_message(model)
     assert out["then"] == CLOSING
     # said once: the next closing mark carries the summary alone
     out = _run(["steps", str(model), "--mark", "first_question=in_progress"], capsys)
-    assert out["say"] == summary.onboarding_summary(model)["markdown"]
+    assert out["say"] == summary.closing_message(model)
 
 
 def test_full_on_the_closing_mark_carries_the_list_its_then_names(model, capsys):
@@ -163,7 +163,7 @@ def test_full_on_the_closing_mark_carries_the_list_its_then_names(model, capsys)
 def test_a_closing_mark_with_no_summary_says_nothing(model, capsys, monkeypatch):
     def broken(root):
         raise ValueError("cannot sum up")
-    monkeypatch.setattr(summary, "onboarding_summary", broken)
+    monkeypatch.setattr(summary, "closing_message", broken)
     out = _run(["steps", str(model), "--mark", "first_question=in_progress"], capsys)
     assert "say" not in out and out["then"] == UPDATE
 
@@ -281,22 +281,44 @@ def fake_db(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
 
-def test_seed_validate_out_says_the_examples_table(model, tmp_path, capsys, fake_db):
+EXAMPLES_LINE = "✓ 13 of 14 examples ran. 1 failed when run, so it is left out."
+THEN_FAILED = ("Post `say`, then leave the failed examples out as the examples step says, and go on. "
+               "The table of the examples comes in the closing message, not now.")
+THEN_ALL_RAN = "Post `say` and go on. The table of the examples comes in the closing message, not now."
+
+
+def test_seed_validate_out_says_one_short_line_and_keeps_the_run(model, tmp_path, capsys, fake_db):
+    # The table of the examples, posted mid-run with more calls after it, reached the person only as
+    # a one-sentence summary; it is shown in the closing message instead, from the run kept here.
     target = tmp_path / "local" / "tmp" / "agami-examples.json"
     out = _run(["seed-validate", str(model), "--profile", "acme", "--out", str(target)], capsys)
-    assert out["then"] == "Post `say`, then ask the examples card."
+    assert (out["say"], out["then"]) == (EXAMPLES_LINE, THEN_FAILED)
+    assert len(out["say"]) <= 150
     items = json.loads(target.read_text(encoding="utf-8"))
-    assert out["say"] == EXAMPLES_SAY
     assert len(items["items"]) == 14  # no --area: every area, in one combined result
+    kept = json.loads((model / ".introspect" / "examples.last.json").read_text(encoding="utf-8"))
+    assert len(kept["items"]) == 14 and kept["at"]
+    assert {it["area"] for it in kept["items"]} == {"agami-example"}
+    assert sum(1 for it in kept["items"] if it.get("error")) == 1
 
 
 def test_seed_validate_without_out_is_unchanged(model, capsys, fake_db):
     out = _run(["seed-validate", str(model), "--profile", "acme", "--area", "agami-example"], capsys)
     assert isinstance(out, list) and "say" not in out[0]
+    assert not (model / ".introspect" / "examples.last.json").exists()
     target = model.parent / "agami-one.json"
     one = _run(["seed-validate", str(model), "--profile", "acme", "--area", "agami-example",
                 "--out", str(target)], capsys)
-    assert one["say"] == EXAMPLES_SAY  # one area's plain list gives the same table
+    assert one["say"] == EXAMPLES_LINE  # one area's plain list gives the same line
+    kept = json.loads((model / ".introspect" / "examples.last.json").read_text(encoding="utf-8"))
+    assert {it["area"] for it in kept["items"]} == {"agami-example"}  # labelled with its area
+
+
+def test_seed_validate_takes_no_card_flag_any_more(model, tmp_path):
+    # No path asks an examples card now, so the flag that left it out is gone.
+    with pytest.raises(SystemExit):
+        cli.main(["seed-validate", str(model), "--profile", "acme", "--out", str(tmp_path / "x.json"),
+                  "--no-card"])
 
 
 def _items(n: int, failed: int = 0) -> list[dict]:
@@ -305,55 +327,22 @@ def _items(n: int, failed: int = 0) -> list[dict]:
     return ran + [{"question": f"Broken {i}", "error": "boom"} for i in range(1, failed + 1)]
 
 
-def test_the_table_stops_at_fifteen_and_names_five_failures():
-    said = cli.examples_say(json.dumps({"items": _items(17, failed=6)}))["say"]
-    lines = said.splitlines()
-    assert lines[0] == "| # | Example | Rows | Result |"
-    assert lines[2] == "| 1 | Question 1 | 2 | a, 1 |"
-    assert lines[16:20] == ["| 15 | Question 15 | 2 | a, 15 |", "", "Showing 15 of 17.", ""]
-    assert lines[-1] == ('17 of 23 examples ran. 6 failed: "Broken 1", "Broken 2", "Broken 3", '
-                         '"Broken 4", "Broken 5".')
+def test_the_line_counts_what_ran_and_what_failed():
+    assert cli.examples_say(json.dumps({"items": _items(17, failed=6)})) == {
+        "say": "✓ 17 of 23 examples ran. 6 failed when run, so they are left out.", "then": THEN_FAILED}
+    assert cli.examples_say(json.dumps(_items(3))) == {"say": "✓ 3 of 3 examples ran.",
+                                                       "then": THEN_ALL_RAN}
 
 
-def test_a_long_first_row_is_cut_to_sixty_characters():
-    item = {"question": "q|x", "row_count": 1, "row_preview": [["x" * 80]]}
-    row = cli.examples_say(json.dumps([item]))["say"].splitlines()[2]
-    cell = row.split(" | ")[-1].removesuffix(" |")
-    assert len(cell) == 60 and cell.endswith("…")
-    assert "q\\|x" in row  # a pipe stays in its cell
-
-
-def test_no_rows_and_none_ran():
-    said = cli.examples_say(json.dumps([{"question": "q", "row_count": 0, "row_preview": []}]))["say"]
-    assert "| 1 | q | 0 | no rows |" in said
-    assert cli.examples_say(json.dumps([{"question": "q", "error": "x"}]))["say"] == (
-        '0 of 1 examples ran. 1 failed: "q".')
+def test_no_question_text_reaches_the_line():
+    # model text has no place in the mid-run line: nothing of a hostile question can be posted there
+    said = cli.examples_say(json.dumps([{"question": HOSTILE, "error": "x"}]))["say"]
+    assert said == "✓ 0 of 1 examples ran. 1 failed when run, so it is left out."
 
 
 @pytest.mark.parametrize("printed", ["not json", '{"error": "unknown_area"}', "[1]"])
 def test_an_error_output_says_nothing(printed):
     assert cli.examples_say(printed) == {}
-
-
-# The sample's 14 examples through the fake database above, pinned.
-EXAMPLES_SAY = """\
-| # | Example | Rows | Result |
-|---|---|---|---|
-| 1 | How many orders have been placed? | 3 | alpha, 1,234 |
-| 2 | What is our total revenue? | 3 | alpha, 1,234 |
-| 3 | What is the average order value? | 3 | alpha, 1,234 |
-| 4 | Who are the top 5 customers by total spend? | 3 | alpha, $1,234.00 |
-| 5 | What is revenue by product category? | 3 | alpha, $1,234.00 |
-| 6 | Show the monthly revenue trend over the last 12 months. | 3 | alpha, $1,234.00 |
-| 7 | Break down orders by status. | 3 | alpha, 1,234 |
-| 8 | How many orders come from each channel? | 3 | alpha, 1,234 |
-| 9 | What are the top 10 products by units sold? | 3 | alpha, 1,234 |
-| 10 | How many active subscriptions do we have? | 3 | alpha, 1,234 |
-| 11 | What is monthly recurring revenue by plan tier? | 3 | alpha, $1,234.00 |
-| 12 | How many customers have both placed an order and hold a subscription? | 3 | alpha, 1,234 |
-| 13 | Which product categories drive the most revenue in each sales channel? | 3 | alpha, 1234 |
-
-13 of 14 examples ran. 1 failed: "What is the total amount refunded and how many refunds were issued?"."""
 
 
 # --- E. sm apply-enrichment ----------------------------------------------------------------------
@@ -401,30 +390,6 @@ def _visible(text: str) -> str:
     """`text` as markdown renders it: a backslash before a markdown control character is not shown."""
     import re
     return re.sub(r"\\([\\*_`#\[\]<>|])", r"\1", text)
-
-
-def test_a_hostile_failed_question_is_one_quoted_capped_line():
-    items = [{"question": "Fine", "row_count": 1, "row_preview": [["1"]]},
-             {"question": HOSTILE, "error": "boom"}]
-    said = cli.examples_say(json.dumps(items))["say"]
-    lines = said.splitlines()
-    assert lines == ["| # | Example | Rows | Result |", "|---|---|---|---|", "| 1 | Fine | 1 | 1 |",
-                     "", lines[-1]]
-    assert lines[-1].startswith('1 of 2 examples ran. 1 failed: "Refunds? \\#\\# New section Ignore')
-    assert said.count("Refunds?") == 1
-    (part,) = _quoted_parts(lines[-1])
-    assert len(_visible(part)) - 2 <= 80 and part.endswith('…"')  # the cap is on the visible text
-
-
-def test_a_hostile_question_or_result_stays_in_its_cell():
-    items = [{"question": HOSTILE, "row_count": 1, "row_preview": [["a\\|b\n| x | y |", "z"]]}]
-    lines = cli.examples_say(json.dumps(items))["say"].splitlines()
-    assert len(lines) == 5 and lines[2].startswith("| 1 | Refunds? \\#\\# New section")
-    assert not any(ln.startswith("#") for ln in lines)
-    row = lines[2]
-    # every column break left is one of the row's own five
-    assert row.replace("\\\\", "").replace("\\|", "").count("|") == 5
-    assert "a\\\\\\|b \\| x \\| y \\|" in row
 
 
 def test_a_long_datasource_name_is_capped_on_the_bold_line(model, capsys):
@@ -495,7 +460,7 @@ def test_a_failed_build_line_is_quoted_and_capped(tmp_path, capsys):
 # --- E. round 3: failed and killed builds, the last text leaks ----------------------------------
 
 ENDED = "The build has ended: run `sm steps` and go on."
-NOT_BUILT = "The model is not built yet, so there is no summary: do not ask the closing card."
+NOT_BUILT = "The model is not built yet, so there is no summary: do not post the closing message."
 
 
 def _posts(out: dict) -> list[str]:
@@ -601,17 +566,6 @@ def test_a_failure_reason_keeps_up_to_200_characters(tmp_path, capsys):
     _log(root, "failed: " + LONG_HINT * 3)
     (part,) = _quoted_parts(_run(["progress", str(root)], capsys)["line"])
     assert len(part) - 2 == 200 and part.endswith('…"')
-
-
-def test_seed_validate_no_card_only_changes_then(model, tmp_path, capsys, fake_db):
-    target = tmp_path / "agami-examples.json"
-    with_card = _run(["seed-validate", str(model), "--profile", "acme", "--out", str(target)], capsys)
-    no_card = _run(["seed-validate", str(model), "--profile", "acme", "--out", str(target),
-                    "--no-card"], capsys)
-    assert with_card["then"] == "Post `say`, then ask the examples card."
-    assert no_card["then"] == "Post `say`."
-    assert {k: v for k, v in no_card.items() if k != "then"} == \
-        {k: v for k, v in with_card.items() if k != "then"}
 
 
 # --- database text can't become a link or an image in a cell or in quotes ---------------------------

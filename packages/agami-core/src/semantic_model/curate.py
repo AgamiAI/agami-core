@@ -463,8 +463,10 @@ def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, 
     With `since` (the onboarding run's start), `signed` is only what a person signed off from then
     on; one signed off before it (the sample's ready-made definitions, an earlier session's) is
     `earlier`. A live sample run read "9 of 9 signed" though the person signed nothing. `by_agami` is
-    the metrics and entities approved with a system sign-off rather than by a person (the sample's
-    silent build); engine-approved joins are structure, never counted."""
+    what was approved with a system sign-off rather than by a person (the sample's silent build), joins
+    included: they were in the card's total while waiting, and a live sample run read "0 of 23 signed"
+    then "20 approved by agami". Joins the build approved itself (declared keys) are structure, never
+    counted."""
     out = {"metrics": 0, "entities": 0, "joins": 0, "waiting": 0, "signed": 0, "earlier": 0,
            "by_agami": 0}
     kinds = {"metric": "metrics", "entity": "entities", "relationship": "joins"}
@@ -484,7 +486,8 @@ def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, 
                 # An approval with no time (an approve op the caller did not stamp) is not dated before
                 # the run, so it stays the person's.
                 out["signed" if since is None or at is None or at >= since else "earlier"] += 1
-            elif tab == "auto" and kind != "relationship" and getattr(obj, "review_state", None) == "approved":
+            elif tab == "auto" and getattr(obj, "review_state", None) == "approved" and (
+                    kind != "relationship" or getattr(obj, "signed_off_by", None) not in (None, "agami_introspect")):
                 out["by_agami"] += 1
     return out
 

@@ -814,8 +814,6 @@ def cmd_steps(args) -> int:
     said = steps.steps_next(changed, result["problem"], before.get("problem"), closing,
                             _closing_summary(root) if closing and built else None, built,
                             model_written=result["model_written"] and not marks)
-    if said.get("then") == steps.THEN_CLOSING:
-        said = gate_say(said, "summary")
     # The problem is remembered as said: it is said once, not on every call while it lasts.
     steps.remember_printed(root, before, {"list": listed, "problem": result["problem"]})
     # `--full` carries `list` too, so every `then` ("update the task list from `list`") reads right.
@@ -825,12 +823,12 @@ def cmd_steps(args) -> int:
 
 
 def _closing_summary(root: Path) -> Optional[str]:
-    """`sm summary`'s text for the closing step's `say`, or None when the model can't be summed up
-    (the step list's `problem` then says why). Broad on purpose, as steps._totals: the list must
-    still print."""
+    """The closing message for the closing step's `say` (the summary, the examples kept and the
+    questions to start with), or None when the model can't be summed up (the step list's `problem`
+    then says why). Broad on purpose, as steps._totals: the list must still print."""
     from . import summary
     try:
-        return summary.onboarding_summary(root)["markdown"]
+        return summary.closing_message(root)
     except Exception:  # noqa: BLE001 — see docstring
         return None
 
@@ -2091,87 +2089,48 @@ def cmd_seed_validate(args) -> int:
 
 
 THEN_ENRICHED = "Post `say`, then run `sm steps` and update the task list."
-THEN_EXAMPLES = "Post `say`, then ask the examples card."
-THEN_EXAMPLES_NO_CARD = "Post `say`."
-
-# The examples table posted after `seed-validate --out`: a live run wrote the items to a file and
-# then had to assemble the table itself, so the engine builds it from the items it wrote.
-EXAMPLES_SHOWN = 15
-PREVIEW_CHARS = 60
-FAILED_NAMED = 5
+THEN_EXAMPLES = "Post `say` and go on. The table of the examples comes in the closing message, not now."
+THEN_EXAMPLES_FAILED = ("Post `say`, then leave the failed examples out as the examples step says, and "
+                        "go on. The table of the examples comes in the closing message, not now.")
 
 
-def _preview(item: dict) -> str:
-    """The first result row's values joined, as one short cell (cut to PREVIEW_CHARS)."""
-    from .say_text import cell
-    rows = item.get("row_preview") or []
-    return cell(", ".join(str(v) for v in rows[0]), PREVIEW_CHARS) if rows else "no rows"
+def examples_say(printed: str) -> dict[str, Any]:
+    """`say` (one short line: how many examples ran, how many failed) and `then` for
+    `seed-validate --out`, from the JSON it wrote: one area's item list, or several areas' `items`.
+    {} for anything else (an error). The table of the examples is not here: shown mid-run, before
+    more calls, it reached the person only as a one-sentence summary, so it is part of the closing
+    message (summary.closing_message), which ends the turn."""
+    items = _examples_items(printed)
+    if items is None:
+        return {}
+    failed = sum(1 for it in items if it.get("error"))
+    line = f"✓ {len(items) - failed} of {len(items)} examples ran."
+    if failed:
+        line += (" 1 failed when run, so it is left out." if failed == 1
+                 else f" {failed} failed when run, so they are left out.")
+    return {"say": line, "then": THEN_EXAMPLES_FAILED if failed else THEN_EXAMPLES}
 
 
-def examples_say(printed: str, card: bool = True) -> dict[str, Any]:
-    """`say` (the examples table, ready to post) and `then` for `seed-validate --out`, from the JSON
-    it wrote: one area's item list, or several areas' `items`. {} for anything else (an error).
-    `card` False (`--no-card`, the sample path, which asks no examples card) drops the card from `then`.
-    Questions and results are model and database text: in cells, or quoted, never bare prose."""
-    from .say_text import cell, quoted
+def _examples_items(printed: str) -> Optional[list[dict]]:
     try:
         doc = json.loads(printed)
     except ValueError:
-        return {}
+        return None
     items = doc.get("items") if isinstance(doc, dict) else doc
     if not isinstance(items, list) or not all(isinstance(it, dict) for it in items):
-        return {}
-    ran = [it for it in items if not it.get("error")]
-    failed = [it for it in items if it.get("error")]
-    blocks = []
-    if ran:
-        table = ["| # | Example | Rows | Result |", "|---|---|---|---|"]
-        table += [f"| {n} | {cell(str(it.get('question', '')))} | {cell(str(it.get('row_count', 0)))} | "
-                  f"{_preview(it)} |" for n, it in enumerate(ran[:EXAMPLES_SHOWN], 1)]
-        blocks.append("\n".join(table))
-        if len(ran) > EXAMPLES_SHOWN:
-            # its own paragraph: a line straight under the table would render as one more row
-            blocks.append(f"Showing {EXAMPLES_SHOWN} of {len(ran)}.")
-    line = f"{len(ran)} of {len(items)} examples ran."
-    if failed:
-        names = ", ".join(quoted(str(it.get("question", ""))) for it in failed[:FAILED_NAMED])
-        line += f" {len(failed)} failed: {names}."
-    blocks.append(line)
-    return {"say": "\n\n".join(blocks), "then": THEN_EXAMPLES if card else THEN_EXAMPLES_NO_CARD}
+        return None
+    return items
 
 
 def _examples_out_say(printed: str, args) -> dict[str, Any]:
-    said = examples_say(printed, card=not args.no_card)
-    # Gated with or without the examples card: `--no-card` (the sample path) asks none, but the
-    # closing card comes next, and the table is due before it like any other (a live sample run
-    # never showed it while only the carded run was gated).
-    return gate_say(said, "examples")
-
-
-# A multi-line `say` printed right before a card was not posted in live runs (the wrap-up went into
-# a thinking block), so those two are recorded for the plugin's AskUserQuestion hook, which shows
-# the text to the person with the card when it was not posted. The sentence is added only when the
-# record was written. The skill text (shared/engine-says.md) names that fallback once; this
-# sentence, printed at the moment the text is due, asks only for the post, the better path (the
-# person sees it rendered, in place).
-THEN_GATED = " Post it as your visible message, not in thinking."
-
-
-def gate_say(said: dict[str, Any], kind: str) -> dict[str, Any]:
-    """`said` with `say_id` and THEN_GATED when its `say` was registered as pending, else as is."""
-    from . import say_pending
-    if not said.get("say"):
-        return said
-    try:
-        import agami_paths
-        art = agami_paths.artifacts_dir()
-    except Exception:  # noqa: BLE001 — no artifacts folder: nothing to gate, nothing to change
-        return said
-    say_id = say_pending.register(art, kind, said["say"])
-    if say_id is None:
-        return said
-    # `say_id` first: a preview that cuts a long output short still carries it.
-    return {"say_id": say_id, **said, "then": said["then"] + THEN_GATED}
+    """The short line for the chat, and the run kept for the closing message's table."""
+    from . import summary
+    items = _examples_items(printed)
+    if items is not None and len(args.area or []) == 1:
+        items = [{**it, "area": args.area[0]} for it in items]
+    if items is not None:
+        summary.remember_examples_run(Path(args.root), items)
+    return examples_say(printed)
 
 
 # --- several subject areas per call (#544) -------------------------------------------------
@@ -3141,8 +3100,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--profile", required=True, help="credentials profile (for live-DB execution)")
     sp.add_argument("--preview", type=int, default=10, help="max result rows per seed in the dashboard preview (default 10)")
     _add_out(sp)
-    sp.add_argument("--no-card", action="store_true",
-                    help="with --out: `then` asks no examples card (the sample path asks none)")
     sp.set_defaults(func=cmd_seed_validate_areas, out_say=_examples_out_say)
 
     sp = sub.add_parser("introspect", help="introspect a live DB into the semantic model")

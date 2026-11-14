@@ -563,20 +563,20 @@ def compact(result: dict[str, Any]) -> dict[str, Any]:
 
 THEN_UPDATE = "Update the task list from `list` now, before anything else."
 THEN_UP_TO_DATE = "The task list is up to date."
-THEN_CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
-                "closing card in that same message. The step stays in progress until the first question "
-                "is answered.")
+THEN_CLOSING = ("Update the task list from `list`, then post `say` exactly as written as your last "
+                "message: it ends your turn, with no card or other tool call after it. The step stays in "
+                "progress until the first question is answered.")
 THEN_PROBLEM = "Say this to the person before going on."
 THEN_PROBLEM_AND_UPDATE = ("Say this to the person before going on. Then update the task list from "
                            "`list`.")
-THEN_NO_SUMMARY = ("Say this to the person. The summary could not be built, so do not ask the "
-                   "closing card; fix the problem and run this command again.")
+THEN_NO_SUMMARY = ("Say this to the person. The summary could not be built, so do not post the "
+                   "closing message; fix the problem and run this command again.")
 THEN_LINE_AND_LIST = "Post `line` and update the task list from `list`."
 THEN_LINE = "Post `line`."
 THEN_NOTHING = "Nothing new: call this again."
 THEN_ENDED = "The build has ended: run `sm steps` and go on."
-THEN_NOT_BUILT = ("The model is not built yet, so there is no summary: do not ask the closing "
-                  "card.")
+THEN_NOT_BUILT = ("The model is not built yet, so there is no summary: do not post the closing "
+                  "message.")
 THEN_AND_UPDATE = " Update the task list from `list`."
 THEN_MODEL_WRITTEN = "The model is already written: go to the join cards without building again."
 
@@ -635,9 +635,9 @@ def steps_next(changed: bool, problem: Optional[str], said_before: Optional[str]
     """`say` and `then` for `sm steps`.
 
     A problem is said once: the same problem already said (`said_before`) is left out of `say`, but
-    still in `problem`. It never hides the refresh or the closing card: with a changed list, `then`
-    asks for both; on the closing mark the summary follows it in the same `say`. When the closing
-    summary can't be built, the person hears the problem and no closing card is asked; when that is
+    still in `problem`. It never hides the refresh or the closing message: with a changed list, `then`
+    asks for both; on the closing mark the closing message follows it in the same `say`. When the
+    closing message can't be built, the person hears the problem and it is not posted; when that is
     because the model isn't built (none on disk, or a build running), `then` says so, since nothing
     else would tell why the summary is missing. `model_written` (a plain call on a resume whose build
     already wrote this run's model) sends the skill on to the join cards."""
