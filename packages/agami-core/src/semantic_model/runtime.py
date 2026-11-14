@@ -1371,6 +1371,12 @@ UNDECLARABLE = "undeclarable"
 # it means exactly one thing: every candidate binding was read, and none of them is this column.
 MATCHED = "matched"
 UNMATCHED = "unmatched"
+# A declared metric reads exactly the columns this value reads, with the same kinds of aggregate
+# (`_shape`: a SUM of a 0/1 flag is a count, an AVG a sum over a count), and the two are still
+# written differently after the equivalent spellings are normalised (#655). They may be the same
+# number in a form `_equivalent_form` does not recognise, so the settled `unmatched` — "this is not
+# the agreed definition" — is not earned; neither is `matched`. Not compared, and said so.
+COMPUTED_DIFFERENTLY = "computed_differently"
 
 
 # Why the checks did not run, when they did not. `None` means they DID — the analysis reached the
@@ -1706,9 +1712,14 @@ def _echo_name(name: str) -> str:
 # `SUM(o.total * 1.2)` and every structural character becomes `?`. So the character filter here is
 # the narrow one — control characters and line breaks, which is what carries a prompt-injection
 # payload out of a quoted identifier — and the length bound does the rest of the work. The same set
-# as `tools._AUDIT_CONTROL`: C0/C1 controls, line/paragraph separators, bidi controls, lone surrogates.
+# as `tools._AUDIT_CONTROL`: C0/C1 controls, line/paragraph separators, bidi controls, lone surrogates,
+# and the invisible characters below.
 _ECHO_CONTROL = re.compile(
-    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff"
+    # And the invisible ones, since a restriction carries the caller's literals (ACE-177): zero-width
+    # space / joiners, word joiner and invisible operators, the byte-order mark, the Arabic letter
+    # mark, and the tag characters, which spell hidden text.
+    r"\u200b-\u200d\u2060-\u2064\ufeff\u061c\U000e0000-\U000e007f]"
 )
 # Wider than an identifier because an expression legitimately holds several, and still far below
 # what a statement could inflate a receipt with: a CASE expression a person writes fits, and a
@@ -3975,7 +3986,7 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
 
 
 def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
-                    dropped_outputs: int) -> Optional[str]:
+                    dropped_outputs: int, truncated: int = 0) -> Optional[str]:
     """What the `columns` section did NOT establish about THIS statement — null when nothing.
 
     Composed per receipt, the way `tables`, `joins` and `aggregates` compose theirs. The fixed
@@ -3991,12 +4002,24 @@ def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
 
     All three clauses are bare COUNTS of the caller's own output columns and references, and none
     names anything, so the marker discloses nothing the items beside it do not already.
+
+    `computed_differently` counts too, in its own clause: it is not settled either way (#655).
+
+    And `truncated`, the output columns with more conditions (or more metrics missing a condition, or
+    more joins the model does not declare) than an item lists (ACE-177, ACE-178): a list cut short
+    must not read as the whole slice.
     """
     unsettled = sum(1 for item in output_items if item["status"] == UNDETERMINED)
+    differently = sum(1 for item in output_items if item["status"] == COMPUTED_DIFFERENTLY)
     return " ".join(clause for clause in (
         (f"{unsettled} of the listed output column(s) could not be matched against the model's "
          "declared metrics, so which definition they compute is not established."
          if unsettled else ""),
+        (f"{differently} of the listed output column(s) read the same columns as a declared metric "
+         "but are computed differently, and the two were not compared, so whether they are the "
+         "same number is not established." if differently else ""),
+        (f"{truncated} of the listed output column(s) list only some of their conditions or joins."
+         if truncated else ""),
         (f"{dropped_outputs} further output column(s) are not listed." if dropped_outputs else ""),
         (f"{dropped_refs} further column reference(s) are not listed." if dropped_refs else ""),
     ) if clause) or None
@@ -4117,6 +4140,12 @@ def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Opti
     return status, match
 
 
+def _pins(model_version: Optional[str]) -> dict[str, Any]:
+    """What every assembled receipt is pinned to: the model version it was checked against, and the
+    agami-core version whose rules checked it (ACE-177)."""
+    return {"model_version": model_version, "agami_core_version": guardrail.core_version()}
+
+
 def assemble_receipt(
     org: Datasource,
     sql: str,
@@ -4159,7 +4188,7 @@ def assemble_receipt(
         # A receipt that never got a parse tree checked nothing, and has to say so rather than hand
         # back five clean-looking empty sections. This return and the next carry DIFFERENT reasons —
         # see UNDETERMINED_NO_PARSER.
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_NO_PARSER)}
     # The REASON the engine could not be resolved is dropped here on purpose: every section below
     # states what IT did not establish, and "the model does not say which engine this is" is not a
@@ -4170,7 +4199,7 @@ def assemble_receipt(
     dialect = _dialect_of(org)[0]
     tree = _parse_sql(sql, dialect)
     if tree is None:
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_UNPARSEABLE)}
 
     scope = _alias_map(tree)                  # alias/name -> bare table name
@@ -4291,6 +4320,8 @@ def assemble_receipt(
     metric_storage_type = _storage_type_of(org)
     candidates = _metric_candidates(org, metric_storage_type, metric_dialect)
     by_binding = _by_binding(candidates)
+    by_binding_grouped = _by_binding(candidates, grouped=True)
+    binding_shapes = _binding_shapes(candidates)
     # Computed ONCE: it is a property of the model and the engine, not of any one column.
     unread_declarations = _declarations_unread(org, metric_storage_type, candidates)
     output_columns = _output_columns(tree)
@@ -4299,9 +4330,75 @@ def assemble_receipt(
     # One alias map per SELECT, not per output column: every column of an arm shares that arm's
     # SELECT, and `_own_alias_map` walks a subtree. Lives for this call only.
     own_alias_memo: dict[int, dict[str, str]] = {}
+    # One restriction set per SELECT (ACE-177), its own memo and never `own_alias_memo`.
+    restriction_memo: dict = {}
+    sensitive_names = {_tkey(name) for name in _sensitive_by_table(org)[1]}
+    # Whether the statement names a sensitive column anywhere: then a condition holding a subquery has
+    # its values withheld too (`_withholds`).
+    statement_sensitive = any(_tkey(col.name) in sensitive_names
+                              for col in tree.find_all(exp.Column))
+    # Output items whose condition lists did not fit (by position), counted onto the marker rather
+    # than the item.
+    truncated: set[int] = set()
+    # How many conditions the whole receipt may still render. One SELECT's conditions apply to every
+    # aggregating column of it, so per-item caps alone multiply by the column count. Past the budget
+    # each list keeps its FIRST condition, so a restricted number never shows `[]`.
+    budget = [_RECEIPT_MAX_CONDITIONS]
+
+    def _shown(nodes: "tuple | list") -> list[str]:
+        keep = min(len(nodes), _RECEIPT_MAX_RESTRICTIONS, max(1, budget[0]))
+        budget[0] -= keep
+        if keep < len(nodes):
+            truncated.add(len(output_items))
+        return [_restriction_text(n, sensitive_names, metric_dialect, statement_sensitive)
+                for n in nodes[:keep]]
+
+    def _labels(labels: "tuple | list") -> list[str]:
+        # Joins named on a number's path (ACE-178): capped and charged to the same budget as the
+        # conditions, since their count is the caller's to choose; a cut list is counted on the
+        # marker, never shown as the whole.
+        keep = min(len(labels), _RECEIPT_MAX_RESTRICTIONS, max(1, budget[0]))
+        budget[0] -= keep
+        if keep < len(labels):
+            truncated.add(len(output_items))
+        return list(labels[:keep])
+
+    def _missing(missing: tuple) -> "list[dict[str, Any]] | None":
+        if len(missing) > _ECHO_MAX_NAMES:
+            truncated.add(len(output_items))
+        return [{"metric": name, "conditions": _shown(conds)}
+                for name, conds in missing[:_ECHO_MAX_NAMES]] or None
+
+    def _missing_tables(missing: tuple) -> "list[dict[str, Any]] | None":
+        # Capped like `missing_conditions`, and a cut counted on the marker the same way.
+        if len(missing) > _ECHO_MAX_NAMES:
+            truncated.add(len(output_items))
+        return [{"metric": name, "tables": [_echo_name(t) for t in tables]}
+                for name, tables in missing[:_ECHO_MAX_NAMES]] or None
+
+    def _built(built: "dict | None") -> "dict[str, Any] | None":
+        if built is None:
+            return None
+        return {"metric": built["metric"], "aggregate": built["aggregate"],
+                "by": _shown(built["by"]), "restrictions": _shown(built["restrictions"]),
+                "joins_not_declared": _labels(built["joins"])}
+
+    # ACE-178: one trace per receipt, so each step is read once however many columns pass through
+    # it; each written join's status and label, so a number counted through one the model does not
+    # declare can name it; and the declared second-order metrics, by what they are built from.
+    trace = _Trace(metric_dialect, tidx, visible, restriction_memo, own_alias_memo, {}, {})
+    join_status = {id(js.node): (status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
+                   for js, (status, _match) in zip(join_sites, join_results)}
+    second_order = _second_order_index(candidates, metric_storage_type)
+
     for oc in output_columns[:_RECEIPT_MAX_REFS]:
-        status, match = _match_output_column(oc, unread_declarations, by_binding, visible,
-                                             metric_dialect, own_alias_memo)
+        result = _match_output_column(oc, unread_declarations, by_binding, visible,
+                                      metric_dialect, own_alias_memo,
+                                      by_binding_grouped, binding_shapes,
+                                      tidx=tidx, restriction_memo=restriction_memo,
+                                      trace=trace, join_status=join_status,
+                                      second_order=second_order)
+        status, match = result.status, result.match
         # Everything a MATCHED metric contributes, and null on every other status. An item that
         # matched nothing must assert nothing about a metric it did not match — ACE-059's review
         # found three false positives of exactly this shape in the joins section, two of them
@@ -4344,13 +4441,28 @@ def assemble_receipt(
             # Whether the projection aggregates (SUM, COUNT, AVG, ...). A plain column in a list
             # query computes nothing a metric could define, so a reader that grades "matches no
             # metric" reads this first and says nothing about such a column.
-            "aggregate": bool(oc.expr is not None and any(
-                agg.find_ancestor(exp.Window) is None for agg in oc.expr.find_all(exp.AggFunc))),
+            # Followed through steps (ACE-178): a column passing on a step's count aggregates.
+            "aggregate": result.aggregating,
             # The same scope label `tables` and `joins` carry, from the same composer, so a reader
             # can join the three sections on it for a column that appears in more than one.
             "scope": oc.scope,
             "status": status,
             **trust,
+            # ACE-177. Which rows a MATCHED number was counted over, beyond the metric's own
+            # conditions, and the conditions applied after counting; `[]` is the positive claim
+            # "over exactly the metric's definition". Null on every other status, like the trust block.
+            "restrictions": _shown(result.restrictions) if match is not None else None,
+            "result_filters": _shown(result.result_filters) if match is not None else None,
+            # A declared metric computing this value whose own condition the statement does not
+            # apply, and which condition. Null when there is none.
+            "missing_conditions": _missing(result.missing),
+            # ACE-178. Joins on the counted rows' path the model does not declare (matched only;
+            # `[]` with `restrictions == []` is the plain match); a metric whose tables the number
+            # did not all read, and which; what a number is built from; and why it is undetermined.
+            "joins_not_declared": _labels(result.joins) if match is not None else None,
+            "missing_tables": _missing_tables(result.missing_tables),
+            "built_from": _built(result.built_from),
+            "reason": result.reason,
         })
 
     def _declared_table(bare: str) -> Optional[tuple]:
@@ -4637,10 +4749,11 @@ def assemble_receipt(
     ]
 
     receipt: dict[str, Any] = {
-        "model_version": model_version,
+        **_pins(model_version),
         "columns": {
             "items": column_items,
-            "undetermined": _columns_marker(output_items, dropped_cols, dropped_outputs),
+            "undetermined": _columns_marker(output_items, dropped_cols, dropped_outputs,
+                                            len(truncated)),
         },
         "tables": {
             "items": table_items,
@@ -4752,7 +4865,7 @@ def assemble_refusal_receipt(
     `guardrail.receipt_from_assembled` maps either one with no branch.
     """
     if not _HAVE_SQLGLOT:
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_NO_PARSER)}
     # The raise from `_parse_sql` is deliberately NOT allowed to escape here, unlike everywhere
     # else in the guard path. This is the receipt attached to a REFUSAL, so the statements
@@ -4761,7 +4874,7 @@ def assemble_refusal_receipt(
     # error. `_parse_sql` already returns None for that, and None has an honest answer here.
     tree = _parse_sql(sql, _dialect_of(org)[0])
     if tree is None:
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_UNPARSEABLE)}
 
     cte_names = _cte_names(tree)
@@ -4792,7 +4905,7 @@ def assemble_refusal_receipt(
             f" {dropped} further reference(s) are not listed." if dropped else ""
         ),
     }
-    return {"model_version": model_version, **sections}
+    return {**_pins(model_version), **sections}
 
 
 # ---------------------------------------------------------------------------
@@ -7658,6 +7771,10 @@ def _inner_join_predicates(sel: "exp.Select") -> list["exp.Expression"]:
     for join in sel.args.get("joins") or []:
         if join.args.get("side"):
             continue
+        # A SEMI or ANTI join keeps or drops rows by whether its ON finds a partner — an ANTI join
+        # keeps exactly the rows its ON rejects — so its ON is not a filter on the kept rows.
+        if (join.args.get("kind") or "").upper() in ("SEMI", "ANTI"):
+            continue
         on = join.args.get("on")
         if on is not None:
             out.append(on)
@@ -7850,6 +7967,43 @@ def _folded_conjuncts(
 _PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
+def _bound_declared_predicate(declared: str, ident: str,
+                               dialect: "str | None") -> "tuple[str, exp.Expression | None]":
+    """One declared filter with `{alias}` bound to `ident`: (the bound text, its parsed predicate or
+    None). Shared by ACE-099's per-reference accounting and ACE-177's subtraction of an applied
+    default filter, so the two bind and parse a declaration one way.
+
+    `ident` is the CALLER's text (a quoted identifier holds any string at all) and the bound text
+    ends up in a receipt, so it goes through `_echo_name` first, which is the only point at which
+    it can.
+    """
+    safe = _echo_name(ident)
+    bound = declared.replace("{alias}", safe)
+    # A bound that is safe to PRINT is not automatically safe to RE-PARSE, and this whole predicate
+    # is about to be parsed. `_ECHO_UNSAFE` is an echo-safety alphabet: it keeps `-`, `.` and `*`
+    # because a printed name legitimately carries them. Two hyphens open a SQL line comment, so an
+    # alias written `is_deleted--` binds to a predicate whose text ENDS at the comment, and the stump
+    # that survives is what gets compared — a stump that can match a conjunct the statement really
+    # wrote and report `applied` for a statement that applied nothing. That is the one direction this
+    # determination must never fail in, so an alias that is not a plain identifier is not compared at
+    # all. The declared text still rides on the entry: the status is what we lost, not the filter.
+    #
+    # Conditional on the declaration actually CONTAINING `{alias}`, because a declaration that binds
+    # nothing cannot have been corrupted by what it did not bind. An already-qualified filter
+    # (`t.deleted_at IS NULL`, the form `docs/format-spec.md` writes) and an unqualified one are both
+    # legal, and for either of them `bound` is the model author's own text end to end — the alias
+    # never appears in it, however it is spelled. Refusing to compare there is a knowable false
+    # `undetermined`, and false `undetermined`s are what the section's marker is counted from.
+    if "{alias}" in declared and _PLAIN_IDENTIFIER.fullmatch(safe) is None:
+        return bound, None
+    # A surviving bind marker means the predicate is incomplete — whatever the executor would have
+    # bound decides what it selects, and comparing the unbound text would compare a different
+    # predicate than the one the author declared.
+    if _BIND_MARKER.search(bound):
+        return bound, None
+    return bound, _parse_declared_predicate(bound, dialect)
+
+
 def _declared_filter_status(
     declared: str,
     site: _RefSite,
@@ -7876,32 +8030,9 @@ def _declared_filter_status(
     enclosing it, and the asymmetry is deliberate — see the two comments where each is decided.
     """
     ref = site.ref
-    safe = _echo_name(ref.alias or ref.bare)
-    bound = declared.replace("{alias}", safe)
+    bound, declared_predicate = _bound_declared_predicate(declared, ref.alias or ref.bare,
+                                                          dialect)
     entry = {"expr": bound, "status": "undetermined"}
-    # A bound that is safe to PRINT is not automatically safe to RE-PARSE, and this whole predicate
-    # is about to be parsed. `_ECHO_UNSAFE` is an echo-safety alphabet: it keeps `-`, `.` and `*`
-    # because a printed name legitimately carries them. Two hyphens open a SQL line comment, so an
-    # alias written `is_deleted--` binds to a predicate whose text ENDS at the comment, and the stump
-    # that survives is what gets compared — a stump that can match a conjunct the statement really
-    # wrote and report `applied` for a statement that applied nothing. That is the one direction this
-    # determination must never fail in, so an alias that is not a plain identifier is not compared at
-    # all. The declared text still rides on the entry: the status is what we lost, not the filter.
-    #
-    # Conditional on the declaration actually CONTAINING `{alias}`, because a declaration that binds
-    # nothing cannot have been corrupted by what it did not bind. An already-qualified filter
-    # (`t.deleted_at IS NULL`, the form `docs/format-spec.md` writes) and an unqualified one are both
-    # legal, and for either of them `bound` is the model author's own text end to end — the alias
-    # never appears in it, however it is spelled. Refusing to compare there is a knowable false
-    # `undetermined`, and false `undetermined`s are what the section's marker is counted from.
-    if "{alias}" in declared and _PLAIN_IDENTIFIER.fullmatch(safe) is None:
-        return entry
-    # A surviving bind marker means the predicate is incomplete — whatever the executor would have
-    # bound decides what it selects, and comparing the unbound text would compare a different
-    # predicate than the one the author declared.
-    if _BIND_MARKER.search(bound):
-        return entry
-    declared_predicate = _parse_declared_predicate(bound, dialect)
     if declared_predicate is None:
         return entry
     # Innermost first, so `chain[0]` is the reference's own select and the rest are the statement it
@@ -8069,7 +8200,8 @@ def _strip_qualifiers(node: "exp.Expression") -> "exp.Expression":
     return stripped
 
 
-def _reduced_binding(text: str, dialect: "str | None") -> "exp.Expression | None":
+def _reduced_binding(text: str, dialect: "str | None",
+                     grouped: bool = False) -> "exp.Expression | None":
     """A metric binding parsed and normalized for comparison — None when it will not parse.
 
     THE PARSER CHECK IS OUTSIDE THE CACHE, and that placement is the whole reason this is two
@@ -8084,11 +8216,12 @@ def _reduced_binding(text: str, dialect: "str | None") -> "exp.Expression | None
     """
     if not _HAVE_SQLGLOT:
         return None
-    return _reduced_binding_cached(text, dialect)
+    forms = _reduced_binding_cached(text, dialect)
+    return None if forms is None else forms[grouped]
 
 
 @functools.lru_cache(maxsize=1024)
-def _reduced_binding_cached(text: str, dialect: "str | None") -> "exp.Expression | None":
+def _reduced_binding_cached(text: str, dialect: "str | None") -> "tuple | None":
     """The memoized half of `_reduced_binding`, reached only when the parser is present.
 
     Cached for the reason `_reduced_on` is: a pure function of MODEL-author text and the engine it
@@ -8111,13 +8244,31 @@ def _reduced_binding_cached(text: str, dialect: "str | None") -> "exp.Expression
     # the unwrap has to happen before the comparison and not after.
     if isinstance(parsed, exp.Select):
         return None
-    return _strip_qualifiers(_fold_unquoted_identifiers(parsed))
+    # Both reductions off ONE parse, indexed by `grouped`: the plain one and the one for an arm with
+    # a plain GROUP BY (`_equivalent_form`). One cache entry per binding, as before.
+    base = _strip_qualifiers(_fold_unquoted_identifiers(parsed))
+    big = _count_kind(dialect)
+    plain = _equivalent_form(base.copy(), False, big)
+    grouped = _equivalent_form(base, True, big)
+    # And each of the two split into (expression, own conditions) for ACE-177, off copies so the
+    # full forms above stay what `_shape` and `_reduced_binding` callers compare.
+    return plain, grouped, _peeled(plain.copy()), _peeled(grouped.copy())
 
 
-def _reduced_projection(node: "exp.Expression", dialect: "str | None") -> "exp.Expression":
+def _peeled_binding(text: str, dialect: "str | None",
+                    grouped: bool = False) -> "tuple[exp.Expression, tuple] | None":
+    """A binding as (expression, its own conditions) — see `_peeled`. None when it will not parse."""
+    if not _HAVE_SQLGLOT:
+        return None
+    forms = _reduced_binding_cached(text, dialect)
+    return None if forms is None else forms[2 + grouped]
+
+
+def _reduced_projection(node: "exp.Expression", dialect: "str | None",
+                        grouped: bool = False) -> "exp.Expression":
     """One output column's expression, normalized the SAME way a binding is.
 
-    Same two steps in the same order, which is the whole contract of this pair: normalizing the two
+    Same steps in the same order, which is the whole contract of this pair: normalizing the two
     sides differently is how a comparison starts reporting differences that are not there. Not
     cached — this is the caller's own text and changes every request, so a cache keyed by it would
     grow without bound on a public server.
@@ -8125,9 +8276,161 @@ def _reduced_projection(node: "exp.Expression", dialect: "str | None") -> "exp.E
     `dialect` is unused and deliberately in the signature: the node is already parsed, in that
     dialect, by the single parse `assemble_receipt` made. Taking the argument keeps the two halves
     reading as a pair and makes it a compile error rather than a silent divergence if this ever has
-    to re-parse.
+    to re-parse — and it now decides the type of a COUNT the normaliser builds (`_count_kind`).
+    `grouped` is `_equivalent_form`'s, and the caller passes it only for an arm with a
+    plain GROUP BY (`_arm_is_grouped`).
     """
-    return _strip_qualifiers(_fold_unquoted_identifiers(node))
+    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), grouped,
+                            _count_kind(dialect))
+
+
+# The aggregates for which `AGG(x) FILTER (WHERE p)` and `AGG(CASE WHEN p THEN x END)` are one value:
+# each ignores NULL inputs, so a row the CASE turns into NULL is the row FILTER drops, and on no
+# surviving row both return what that aggregate returns for nothing (NULL, or 0 for COUNT).
+# Not MIN, MAX or any DISTINCT: those COMPARE values, and a CASE result carries no column collation,
+# so over a `COLLATE NOCASE` text column SQLite gives a different MIN, MAX and distinct count for
+# the CASE form. Without knowing the column's collation, they are left as written.
+_NULL_IGNORING_AGGS = (exp.Sum, exp.Avg, exp.Count) if _HAVE_SQLGLOT else ()
+
+
+@functools.lru_cache(maxsize=32)
+def _count_kind(dialect: "str | None") -> Any:
+    """How this dialect's parse marks a plain COUNT's result type (`big_int`).
+
+    T-SQL is the one where it is a fact about the value: COUNT returns int and COUNT_BIG bigint, so
+    `COUNT_BIG(*) * 50000` and `COUNT(*) * 50000` differ once the product passes 2^31. A parsed COUNT
+    keeps its mark, and a COUNT the normaliser builds takes the dialect's plain one.
+    """
+    parsed = _parse_sql("COUNT(*)", dialect)
+    return parsed.args.get("big_int") if isinstance(parsed, exp.Count) else None
+
+
+def _is_int_literal(node: Any, value: str) -> bool:
+    return isinstance(node, exp.Literal) and not node.is_string and node.this == value
+
+
+def _is_non_null_literal(node: Any) -> bool:
+    """A literal no engine reads as NULL. Not `''`: Oracle stores the empty string as NULL."""
+    return isinstance(node, exp.Literal) and not (node.is_string and node.this == "")
+
+
+def _single_branch_case(node: Any) -> bool:
+    return isinstance(node, exp.Case) and not node.args.get("this") and len(node.args["ifs"]) == 1
+
+
+def _conjuncts(node: "exp.Expression") -> list:
+    """The terms of an AND chain, through any parentheses: `(a AND b) AND c` is three terms."""
+    out: list = []
+    for term in node.flatten():
+        out.extend(_conjuncts(term) if isinstance(term, exp.And) else [term])
+    return out
+
+
+def _equivalent_form(node: "exp.Expression", grouped: bool = False,
+                     count_kind: Any = None) -> "exp.Expression":
+    """`node` with the equivalent spellings of one metric rewritten to a single form (#655).
+
+    Every rule here returns the same value as the spelling it replaces ON EVERY INPUT — NULLs, no
+    matching row, an empty table — and `tests/test_receipt_equivalent_spellings.py` executes both
+    sides of each on SQLite, DuckDB and Postgres to show it. A rule whose two forms can differ on
+    some data is not here, however close; the test file lists the ones considered and rejected,
+    each with a witness. In particular NOT here:
+
+      * `SUM(CASE WHEN p THEN x ELSE 0 END)` as `SUM(x) FILTER (WHERE p)`: 0 against NULL when no
+        row matches. It is equal under a `COALESCE(…, 0)`, which is a rule below;
+      * a numeric cast against `* 1.0` for division: SQLite keeps integer division under a
+        NUMERIC cast, and Postgres gives a quotient past 10^16 one digit fewer;
+      * FILTER as CASE for MIN, MAX or a DISTINCT, and swapping the sides of `=` or `<>`: both
+        change which collation compares text on SQLite;
+      * dropping `NULLIF(d, 0)` from a denominator: DuckDB divides by zero to infinity, not NULL.
+
+    `grouped` adds the two rules that hold only where every group has at least one row, which a
+    plain GROUP BY guarantees and a global aggregate does not (an empty table): there `SUM` of 1s
+    and 0s is never NULL, and `COUNT(*)` is never 0. They apply only to an aggregate of the arm
+    itself — not inside a subquery, whose aggregate runs over its own set, a window, whose frame
+    can be empty, or a FILTER, which can drop every row of a group.
+
+    Bottom-up, so a rule sees its operands already rewritten: `COALESCE(SUM(x) FILTER …, 0)` reaches
+    the COALESCE rule as `COALESCE(SUM(CASE …), 0)`. The node is the caller's copy (both reducers
+    copy first), so it is rewritten in place.
+    """
+    root = node
+    for sub in reversed(list(node.walk())):
+        new = _rewrite_one(sub, grouped, count_kind)
+        if new is not sub:
+            if sub is root:
+                root = new
+            else:
+                sub.replace(new)
+    return root
+
+
+def _rewrite_one(node: "exp.Expression", grouped: bool, count_kind: Any) -> "exp.Expression":
+    """One node's rewrite under `_equivalent_form`'s rules, or the node itself. A COUNT built here
+    takes `count_kind` (`_count_kind`) as its result type."""
+    # FILTER (WHERE p) -> CASE WHEN p THEN x END; COUNT(*) counts rows, so its value is a literal 1.
+    if isinstance(node, exp.Filter) and isinstance(node.this, _NULL_IGNORING_AGGS) \
+            and isinstance(node.expression, exp.Where) and not node.this.expressions:
+        agg, inner = node.this.copy(), node.this.this
+        if isinstance(inner, exp.Distinct):              # compares values: see above
+            return node
+        value = exp.Literal.number(1) if isinstance(inner, exp.Star) else inner
+        agg.set("this", exp.Case(ifs=[exp.If(this=node.expression.this, true=value)]))
+        # The rebuilt aggregate is detached, so it cannot tell whether it sits in a subquery or a
+        # window: it gets only the rules that hold everywhere.
+        return _rewrite_one(agg, False, count_kind)
+    # CASE … ELSE NULL END is CASE … END.
+    if isinstance(node, exp.Case) and isinstance(node.args.get("default"), exp.Null):
+        node.set("default", None)
+        return node
+    if isinstance(node, exp.Count):
+        # COUNT(<non-null literal>) counts rows; COUNT(CASE WHEN p THEN <literal> END) counts matches.
+        if _is_non_null_literal(node.this):
+            node.set("this", exp.Star())
+        elif _single_branch_case(node.this) and not node.this.args.get("default") \
+                and _is_non_null_literal(node.this.args["ifs"][0].args.get("true")):
+            node.this.args["ifs"][0].set("true", exp.Literal.number(1))
+        return node
+    if isinstance(node, exp.Coalesce) and len(node.expressions) == 1 \
+            and _is_int_literal(node.expressions[0], "0"):
+        inner = node.this
+        if isinstance(inner, exp.Count):                 # COUNT is never NULL
+            return inner
+        if isinstance(inner, exp.Sum) and isinstance(inner.this, exp.Case) \
+                and _is_int_literal(inner.this.args.get("default"), "0"):
+            # The zeros an ELSE 0 adds change a SUM only from NULL to 0, which COALESCE does anyway.
+            inner.this.set("default", None)
+        if isinstance(inner, exp.Sum) and _single_branch_case(inner.this) \
+                and not inner.this.args.get("default") \
+                and _is_int_literal(inner.this.args["ifs"][0].args.get("true"), "1"):
+            # A sum of 1s, 0 when none: a count.
+            return exp.Count(this=inner.this, big_int=count_kind)
+        return node
+    # Type first: `find_ancestor` walks to the root, and on every node of a deep AND chain that was
+    # quadratic. A FILTER, like a subquery or a window frame, can leave a group's aggregate with no
+    # input row at all, which is exactly where these rules stop holding.
+    if grouped and isinstance(node, (exp.Sum, exp.Nullif)) \
+            and node.find_ancestor(exp.Select, exp.Window, exp.Filter) is None:
+        if isinstance(node, exp.Sum) and _single_branch_case(node.this) \
+                and _is_int_literal(node.this.args.get("default"), "0") \
+                and _is_int_literal(node.this.args["ifs"][0].args.get("true"), "1"):
+            return exp.Count(this=exp.Case(ifs=[node.this.args["ifs"][0].copy()]),
+                             big_int=count_kind)
+        if isinstance(node, exp.Nullif) and isinstance(node.this, exp.Count) \
+                and isinstance(node.this.this, exp.Star) and _is_int_literal(node.expression, "0"):
+            return node.this
+    # Operand order that does not change a value. Sorted by the parsed form, never by `.sql()`.
+    if isinstance(node, exp.And) and not isinstance(node.parent, exp.And):
+        terms = sorted(_conjuncts(node), key=repr)
+        out = terms[0]
+        for term in terms[1:]:
+            out = exp.And(this=out, expression=term)
+        return out
+    # Not `=` or `<>`: SQLite compares two columns of different collations with the LEFT one's, so
+    # `a = b` and `b = a` can select different rows. AND and multiplication have no such side.
+    if isinstance(node, exp.Mul) and repr(node.this) > repr(node.expression):
+        return exp.Mul(this=node.expression, expression=node.this)
+    return node
 
 
 class MetricCandidate(NamedTuple):
@@ -8142,6 +8445,14 @@ class MetricCandidate(NamedTuple):
     area: Optional[str]        # the subject area's name; None for a cross-area metric
     binding: str               # the binding text as the model author wrote it, for the item
     reduced: "exp.Expression | None"
+    # The same binding reduced as if it stood in an arm with a plain GROUP BY, where two more
+    # spellings are equal (see `_equivalent_form`). None exactly when `reduced` is.
+    grouped: "exp.Expression | None" = None
+    # Each form split by `_peeled` into (expression, own conditions): the expression is what the
+    # index is keyed on, and the conditions are the rows the metric is defined over (ACE-177).
+    # None exactly when `reduced` is.
+    peeled: "tuple | None" = None
+    grouped_peeled: "tuple | None" = None
 
 
 def _metric_candidates(org: Datasource, storage_type: "str | None",
@@ -8185,7 +8496,10 @@ def _metric_candidates(org: Datasource, storage_type: "str | None",
         text = (bindings or {}).get(storage_type)
         if not text or not text.strip():
             continue
-        out.append(MetricCandidate(mm, area, text, _reduced_binding(text, dialect)))
+        out.append(MetricCandidate(mm, area, text, _reduced_binding(text, dialect),
+                                   _reduced_binding(text, dialect, grouped=True),
+                                   _peeled_binding(text, dialect),
+                                   _peeled_binding(text, dialect, grouped=True)))
     return out
 
 
@@ -8252,67 +8566,7 @@ def _output_columns(node: "exp.Expression") -> list[OutputColumn]:
     return out
 
 
-def _reads_only_visible(oc: OutputColumn, visible: set[str],
-                        memo: dict[int, dict[str, str]]) -> bool:
-    """Whether every relation this output column's expression reads is one the walk can see behind.
-
-    The `visible` set is the model's declared tables minus every name the statement bound for
-    itself, which `assemble_receipt` already computes for the aggregate analysis. A column computed
-    off a CTE, a derived table or a name the model does not declare sits behind a boundary this
-    layer does not enter: `SELECT MAX(x.t) FROM (…) x` reads `x` perfectly well and knows nothing
-    about what computed `t`.
-
-    That distinction is the whole of why this exists. The value is NOT "none matched" — the analysis
-    did not read the thing it would have had to read to say so, and the section's own marker already
-    states that it does not enter those scopes, so an item claiming otherwise would contradict the
-    sentence printed beside it. ACE-060 shipped this rule for `not_multiplied` and found this second
-    shape of it in review; ACE-059 generalized it. This is the same rule again, one section over.
-
-    Qualifiers resolve through `_own_alias_map`, NOT `_alias_map`. The latter is a whole-subtree
-    last-wins walk, so a CTE body's binding overwrites the outer query's for the same alias — which
-    is precisely what produced ACE-059's signed-off false match. An UNQUALIFIED column is not
-    evidence of anything either way and is left to the sources the SELECT reads.
-
-    `memo` is keyed by `id(sel)` and is why this takes one, the same device `_folded_conjuncts`
-    uses: EVERY output column of one arm shares that arm's SELECT, so resolving the map per column
-    walked the same subtree once per projection. Measured at 8.96 ms against `main`'s 4.09 ms on a
-    40-column statement — and the tell was that a model with NO metrics was SLOWER than one with
-    400, because with candidates present most columns match and never reach this function at all.
-    The memo lives for one `assemble_receipt` call, which is the span the tree it keys outlives.
-    """
-    if oc.expr is None:                      # a star: nothing read, nothing established
-        return False
-    scope_map = memo.get(id(oc.sel))
-    if scope_map is None:
-        scope_map = memo[id(oc.sel)] = _own_alias_map(oc.sel)
-    # A relation this SELECT COMPUTED — a derived table, a `VALUES` list — is a scope we do not
-    # enter, so nothing computed off it is established. Asked through ACE-059's helper rather than
-    # inferred from an empty alias map, and that distinction is the whole of this branch: an empty
-    # map has TWO causes and only one of them is a gap.
-    #
-    #   `SELECT MAX(x.t) FROM (SELECT …) x`  — reads something it cannot see behind  -> undetermined
-    #   `SELECT 1 AS one`                    — reads NOTHING AT ALL                  -> settles
-    #
-    # Treating both as gaps (which reading the map alone does) reports "could not be matched" for a
-    # statement with nothing left to establish, and puts a non-null marker on a trivially complete
-    # receipt. That is the mirror of the false settled claim above: a false UNSETTLED one, and it
-    # costs the section the null marker that means "established, here it is".
-    if _computed_relations(oc.sel):
-        return False
-    # And the base tables it does read, which must all be ones the model declares and the statement
-    # did not bind itself. A CTE name IS an `exp.Table` to the parser, so it arrives here and is
-    # caught by `visible` having had the statement's CTE names subtracted out of it.
-    if any(_tkey(src) not in visible for src in set(scope_map.values())):
-        return False
-    for col in oc.expr.find_all(exp.Column):
-        if col.table:
-            bare = scope_map.get(col.table, col.table)
-            if _tkey(bare) not in visible:
-                return False
-    return True
-
-
-def _by_binding(candidates: list[MetricCandidate]) -> dict:
+def _by_binding(candidates: list[MetricCandidate], grouped: bool = False) -> dict:
     """Candidates indexed by their reduced binding — EVERY candidate declaring it, in declaration
     order.
 
@@ -8335,29 +8589,19 @@ def _by_binding(candidates: list[MetricCandidate]) -> dict:
     Candidates whose binding could not be read carry `reduced is None` and are absent here. They are
     still in `candidates`, because whether ANY of them is unread is what decides between `unmatched`
     and `undetermined`.
+
+    `grouped` indexes each binding's grouped reduction instead, for an arm with a plain GROUP BY.
+
+    Keyed on the PEELED expression (`_peeled`): a metric's own FILTER or CASE condition is one of its
+    conditions rather than part of what it computes, so `SUM(x) FILTER (WHERE p)` and `SUM(x)` share
+    a bucket and the conditions decide between them (ACE-177).
     """
     out: dict = {}
     for cand in candidates:
-        if cand.reduced is not None:
-            out.setdefault(cand.reduced, []).append(cand)
+        peeled = cand.grouped_peeled if grouped else cand.peeled
+        if peeled is not None:
+            out.setdefault(peeled[0], []).append(cand)
     return out
-
-
-def _arm_sources(oc: OutputColumn, memo: dict[int, dict[str, str]]) -> set[str]:
-    """The bare relations this output column's own SELECT reads, folded for comparison.
-
-    Shares `memo` with `_reads_only_visible` — same key, same map, resolved once per arm — so
-    consulting it costs nothing on a statement whose columns already reached that check.
-
-    `_bare` as well as `_tkey`, so this side is normalized identically to the DECLARED side in
-    `_discriminate`. `_tkey` only lowercases; a schema left on either half would make two spellings
-    of one table fail to compare. `_own_alias_map` already returns bare names, so this is belt and
-    braces here — and it is the half that makes the pair provably symmetric.
-    """
-    scope_map = memo.get(id(oc.sel))
-    if scope_map is None:
-        scope_map = memo[id(oc.sel)] = _own_alias_map(oc.sel)
-    return {_tkey(_bare(src)) for src in scope_map.values()}
 
 
 def _discriminate(cands: list[MetricCandidate], sources: set[str]) -> Optional[MetricCandidate]:
@@ -8419,51 +8663,1503 @@ def _declarations_unread(org: Datasource, storage_type: "str | None",
     return False
 
 
+def _arm_is_grouped(sel: "exp.Select") -> bool:
+    """Whether every group this arm returns has at least one row: a plain, non-empty GROUP BY.
+
+    ROLLUP, CUBE, GROUPING SETS, `GROUP BY ()`, `GROUP BY ALL` and WITH TOTALS can each return a
+    row aggregated over nothing (a grand total on an empty table), which is exactly where the
+    grouped-only rules of `_equivalent_form` stop holding.
+    """
+    group = sel.args.get("group")
+    if group is None or not group.expressions:
+        return False
+    if any(group.args.get(k) for k in ("grouping_sets", "cube", "rollup", "totals", "all")):
+        return False
+    return not any(isinstance(e, (exp.Rollup, exp.Cube, exp.GroupingSets, exp.Tuple))
+                   for e in group.expressions)
+
+
+def _is_aggregate(expr: "exp.Expression | None") -> bool:
+    """Whether the projection aggregates (SUM, COUNT, AVG, ...) outside a window."""
+    return bool(expr is not None and any(
+        agg.find_ancestor(exp.Window) is None for agg in expr.find_all(exp.AggFunc)))
+
+
+def _column_names(node: "exp.Expression") -> frozenset:
+    """The (already folded, unqualified) column names a reduced expression reads."""
+    return frozenset(col.name for col in node.find_all(exp.Column))
+
+
+def _is_indicator(node: Any) -> bool:
+    """A 0/1 flag: the literal 0 or 1, NULL, or a CASE whose every branch is one. A SUM of it counts."""
+    if isinstance(node, exp.Null) or _is_int_literal(node, "0") or _is_int_literal(node, "1"):
+        return True
+    return isinstance(node, exp.Case) and all(
+        _is_indicator(branch.args.get("true")) for branch in node.args["ifs"]) and (
+        node.args.get("default") is None or _is_indicator(node.args["default"]))
+
+
+def _aggregate_families(node: "exp.Expression") -> frozenset:
+    """Which kinds of aggregate a reduced expression computes, so a MAX is never read as a way of
+    writing a SUM. A SUM of a 0/1 flag is a count, and an AVG is a sum over a count."""
+    out: set[str] = set()
+    for agg in node.find_all(exp.AggFunc):
+        if isinstance(agg, exp.Sum):
+            out.add("count" if _is_indicator(agg.this) else "sum")
+        elif isinstance(agg, exp.Avg):
+            out.update(("sum", "count"))
+        else:
+            out.add(type(agg).__name__.lower())
+    return frozenset(out)
+
+
+def _shape(node: "exp.Expression") -> tuple:
+    """The columns a reduced expression reads and the aggregate kinds it computes."""
+    return _column_names(node), _aggregate_families(node)
+
+
+def _binding_shapes(candidates: list[MetricCandidate]) -> set:
+    """Every shape a read binding has, for `COMPUTED_DIFFERENTLY`. Once per receipt."""
+    return {_shape(c.reduced) for c in candidates if c.reduced is not None}
+
+
+def _lookup(reduced: "exp.Expression", index: dict) -> list:
+    """The candidates declaring `reduced`, looking through one ROUND wrapper.
+
+    Rounding is presentation: `ROUND(<metric>, 1)` is still the metric, and a live run showed a
+    rounded rate reported as "not the agreed definition" beside the signed-off one it was.
+    """
+    cands = index.get(reduced)
+    if not cands and isinstance(reduced, exp.Round):
+        cands = index.get(reduced.this)
+    return cands or []
+
+
+# ---------------------------------------------------------------------------
+# Which rows a matched metric was counted over (ACE-177)
+#
+# Comparing the expression alone stamped a count over one slice of a table as the metric that counts
+# all of it: nothing compared carried the statement's WHERE. Both sides now reduce to an expression
+# plus a SET of conditions. A metric's own FILTER or CASE condition is one of its conditions; the
+# statement's are its WHERE and inner-join ON value conditions, plus the column's own FILTER or CASE.
+# A metric fits when every condition of its own is among the statement's, and whatever is left over
+# is listed on the item: the receipt names the slice rather than refusing the match, because the
+# counting IS the agreed metric and only the rows differ.
+#
+# Sets, compared by structure after the same normalisation the expression gets (#655), so the order
+# of AND terms cannot decide a match. No implication: `amount > 100` does not cover `amount > 50`.
+# ---------------------------------------------------------------------------
+
+# How many conditions an item lists in each of its lists. An attention bound, like
+# `_RECEIPT_MAX_ASSUMPTIONS`, and a response bound: a WHERE of thousands of AND terms would otherwise
+# be copied into every aggregating column. What does not fit is COUNTED on the section's marker,
+# never put on the item as a number — the sections carry no integer but the model's row estimate.
+_RECEIPT_MAX_RESTRICTIONS = 10
+# And the whole receipt's: conditions rendered across every item, at most. See `_shown` in
+# `assemble_receipt` for what happens past it.
+_RECEIPT_MAX_CONDITIONS = 100
+
+# What a withheld value reads as. The receipt is stored with the query, and a value compared with a
+# sensitive column need not be.
+_WITHHELD = "<withheld>"
+
+
+def _own_nodes(node: "exp.Expression", kinds: Any) -> list:
+    """The nodes of `kinds` in `node`, not descending into a nested SELECT or into a node found.
+
+    ITERATIVE, for `_and_conjuncts`' reason: a conjunct can be arbitrarily deep, and a recursive
+    walk over a caller's predicate is a `RecursionError` the caller chose. Pruned at a nested SELECT
+    because a subquery's columns and aggregates are about ITS rows, and at a found node because a
+    column's identifier and an aggregate's own aggregates are not separate facts.
+    """
+    out: list = []
+    stack: list = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, kinds):
+            out.append(cur)
+            continue
+        if isinstance(cur, exp.Select) and cur is not node:
+            continue
+        stack.extend(reversed(list(cur.iter_expressions())))
+    return out
+
+
+def _peel_unit(unit: "exp.Expression") -> "tuple[exp.Expression, list] | None":
+    """One aggregate as (aggregate without its own condition, that condition's conjuncts).
+
+    `AGG(…) FILTER (WHERE p)` peels for every aggregate: FILTER restricts the aggregate's input rows
+    exactly as a WHERE does. A single-branch `CASE WHEN p THEN v END` with no ELSE peels only for the
+    aggregates that ignore NULLs and only without DISTINCT — the set `_equivalent_form` turns a
+    FILTER into, and for the same collation reason. Never with an ELSE: `ELSE 0` gives 0 where the
+    WHERE form gives NULL. An aggregate with no condition of its own is `(itself, [])`; a FILTER over
+    something that is not an aggregate is None, which stops the whole expression peeling.
+    """
+    if isinstance(unit, exp.Filter):
+        where = unit.expression
+        if isinstance(unit.this, exp.AggFunc) and isinstance(where, exp.Where) \
+                and where.this is not None:
+            return unit.this.copy(), _and_conjuncts(where.this)
+        return None
+    if isinstance(unit, _NULL_IGNORING_AGGS) and not unit.expressions \
+            and _single_branch_case(unit.this) and not unit.this.args.get("default"):
+        branch = unit.this.args["ifs"][0]
+        value = branch.args.get("true")
+        agg = unit.copy()
+        # COUNT(CASE WHEN p THEN 1 END) counts the rows p admits: COUNT(*) over them.
+        agg.set("this", exp.Star() if isinstance(unit, exp.Count) and _is_non_null_literal(value)
+                else value.copy())
+        return agg, _and_conjuncts(branch.this)
+    return unit, []
+
+
+def _peeled(node: "exp.Expression") -> "tuple[exp.Expression, tuple]":
+    """A reduced expression as (expression, its own conditions), for ACE-177's comparison.
+
+    Peels only when EVERY aggregate of the expression carries the same condition set: then the
+    condition restricts all of what is computed, which is what a WHERE does. Mixed conditions —
+    `SUM(x) FILTER (WHERE p) / SUM(x)`, a share — are the expression's meaning and stay in it.
+
+    Under a GROUP BY the two forms differ in one way, accepted and stated: the WHERE form returns no
+    row for a group with no qualifying rows, where the CASE form returns NULL for it. Every group both
+    return has the same value, which is the claim the match makes. `node` is the caller's copy and is
+    rewritten in place.
+    """
+    # Never inside a window: a FILTER there drops rows from the frame, a WHERE drops them from the
+    # rows the frame is counted over, and with a ROWS frame the two give different numbers.
+    if node.find(exp.Window) is not None:
+        return node, ()
+    units = _own_nodes(node, (exp.Filter, exp.AggFunc))
+    peels = [_peel_unit(unit) for unit in units]
+    if not peels or any(p is None for p in peels):
+        return node, ()
+    first = frozenset(peels[0][1])
+    if not first or any(frozenset(conds) != first for _, conds in peels[1:]):
+        return node, ()
+    root = node
+    for unit, (agg, _) in zip(units, peels):
+        if unit is root:
+            root = agg
+        else:
+            unit.replace(agg)
+    return root, tuple(peels[0][1])
+
+
+def _condition_key(node: "exp.Expression", dialect: "str | None") -> "exp.Expression":
+    """One condition in the form it is compared in: the same steps a binding takes (#655)."""
+    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), False,
+                            _count_kind(dialect))
+
+
+class _Restriction(NamedTuple):
+    """One condition on the rows a column read, beside the references it names.
+
+    Attributed to a REFERENCE (the alias a FROM or JOIN wrote), never to a table: in a self-join
+    `a` and `b` are both orders, and `b.status = 'paid'` restricts b's rows, not the a-rows a number
+    summing `a.total_amount` reads.
+    """
+
+    key: "exp.Expression"   # `_condition_key`, what the comparison uses
+    ref: Optional[str]      # the one reference it restricts; None when it names several or none can be told
+    refs: frozenset         # every reference its columns name, for telling two spellings apart
+    node: "exp.Expression"  # as the statement wrote it, for the item
+    default: bool = False   # an applied declared default filter of that reference (ACE-099's report)
+
+
+class _ArmRestrictions(NamedTuple):
+    """Everything ACE-177 reads off one SELECT, built once per SELECT (`_arm_restrictions`)."""
+
+    amap: dict                 # `_own_alias_map`: reference -> bare table
+    refs: frozenset            # the folded references this SELECT reads, computed ones included
+    unseen: bool               # its rows were decided where this check does not look (see below)
+    values: frozenset          # references to a one-row lookup step: values, not rows (ACE-178)
+    rows: list                 # WHERE + inner-join ON conditions + SEMI/ANTI joins, statement order
+    outer: list                # (restriction, references on that outer join's optional side)
+    after: list                # HAVING + QUALIFY conjuncts: applied after counting. Not a LIMIT,
+    #                            which also drops groups after counting and is not listed.
+    mentioned: frozenset       # every column any predicate of this SELECT names, folded
+    full: bool = False         # a FULL join: each side keeps its rows whatever the ON says
+    columns: dict = {}         # reference -> the model's column names for its table; None unknown
+
+    @property
+    def rows_refs(self) -> frozenset:
+        """The references whose ROWS this SELECT reads: a one-row lookup step adds none."""
+        return self.refs - self.values
+
+
+def _ref_of(qualifier: str, amap: dict) -> str:
+    """The reference a column qualifier names in this SELECT, folded: exact, else ignoring case when
+    exactly one matches that way (an unquoted `O.status` is alias `o`), else the qualifier itself."""
+    if qualifier in amap:
+        return _tkey(qualifier)
+    hits = [k for k in amap if _tkey(k) == _tkey(qualifier)]
+    return _tkey(hits[0] if len(hits) == 1 else qualifier)
+
+
+def _table_of(ref: str, amap: dict) -> str:
+    """The folded bare table a reference reads (or the reference itself when it is computed)."""
+    hits = [v for k, v in amap.items() if _tkey(k) == ref]
+    return _tkey(_bare(hits[0])) if len(hits) == 1 else ref
+
+
+def _named_refs(cols: list, amap: dict) -> frozenset:
+    return frozenset(_ref_of(col.table, amap) for col in cols if col.table)
+
+
+def _endpoint(col: "exp.Column", amap: dict, columns: dict) -> Optional[str]:
+    """The reference one side of an equality reads: its qualifier, else the ONE reference whose
+    table the model says has that column. None when that cannot be told — a reference the model
+    does not describe, or a name two of them carry."""
+    if col.table:
+        return _ref_of(col.table, amap)
+    if any(names is None for names in columns.values()):
+        return None
+    hits = [ref for ref, names in columns.items() if _tkey(col.name) in names]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _joins_two(cond: "exp.Expression", amap: dict, columns: dict,
+               values: frozenset = frozenset()) -> bool:
+    """Whether a statement-level conjunct JOINS two references rather than restricting rows: a
+    bare `col = col` whose two sides are known to read two different references, and nothing else.
+
+    An unqualified side is resolved through the model (`_endpoint`); when it cannot be, the
+    conjunct is kept as a restriction. Anything more — an OR, a function, a CASE, a literal, a
+    non-equal comparison — restricts rows whatever references it names, and is listed: dropping a
+    restriction is the direction this section must not fail in. So is `a.x = a.y` on one reference.
+    So is a comparison with a column of a one-row lookup step (`values`, ACE-178): that column is
+    one value, so `o.id = d.k` keeps the orders whose id is that value, exactly as `o.id = 7` would.
+    """
+    if not isinstance(cond, exp.EQ):
+        return False
+    left, right = cond.this, cond.expression
+    if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+        return False
+    ends = (_endpoint(left, amap, columns), _endpoint(right, amap, columns))
+    return None not in ends and ends[0] != ends[1] and not (set(ends) & values)
+
+
+def _restriction(cond: "exp.Expression", amap: dict, refs: frozenset,
+                 dialect: "str | None", columns: "dict | None" = None,
+                 values: frozenset = frozenset()) -> "_Restriction | None":
+    """One condition as a `_Restriction`, or None when it is a statement-level join (`columns` is
+    passed for those). A column's own FILTER or CASE condition passes no `columns` and is never
+    dropped: equating two references there restricts THAT number, not the statement's rows."""
+    if columns is not None and _joins_two(cond, amap, columns, values):
+        return None
+    cols = _own_nodes(cond, exp.Column)
+    # A lookup step's column is a value the condition compares with, not a reference it restricts.
+    named = _named_refs(cols, amap) - values
+    refs = refs - values
+    cols = [col for col in cols if not (col.table and _ref_of(col.table, amap) in values)]
+    if len(named) == 1 and all(col.table for col in cols):
+        ref: Optional[str] = next(iter(named))
+    elif not named and cols and len(refs) == 1:
+        ref = next(iter(refs))      # unqualified, in a SELECT reading one reference
+    else:
+        ref = None
+    return _Restriction(_condition_key(cond, dialect), ref, named, cond)
+
+
+# The arguments on a table reference that change which of its rows are read: a sample, and the
+# time-travel clauses (`AT`, `FOR SYSTEM_TIME AS OF`, `CHANGES`). A number over one is not the
+# metric over the table, and the clause is not a condition this check can compare.
+_UNSEEN_TABLE_ARGS = ("sample", "when", "version", "changes")
+
+
+def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | None",
+                      visible: set, memo: dict,
+                      alias_memo: dict[int, dict[str, str]],
+                      step_memo: "dict | None" = None) -> _ArmRestrictions:
+    """One SELECT's conditions, built once and remembered on `id(sel)` — `_folded_conjuncts`' device
+    and reason (each condition is copied to be normalised). Its OWN memo, never `own_alias_memo` —
+    which it only READS, for the alias map each SELECT resolves once.
+
+    The conjuncts are `_filtering_conjuncts`' — WHERE plus inner-join ONs — and not
+    `_mentioned_predicates`', which includes HAVING and outer ONs. An outer join's ON conditions are
+    kept apart with the references on the side that join makes optional: they decide what a number
+    reading THAT side adds up, and nothing about one that does not. A SEMI or ANTI join keeps or
+    drops rows by what another relation holds, so the join itself is listed.
+
+    `unseen`: the SELECT samples a table or reads it as of another time. A step it reads is no
+    longer unseen: ACE-178 follows it (`_flow`).
+    """
+    got = memo.get(id(sel))
+    if got is not None:
+        return got
+    amap = alias_memo.get(id(sel))
+    if amap is None:
+        amap = alias_memo[id(sel)] = _own_alias_map(sel)
+    computed = _computed_relations(sel)
+    refs = frozenset({_tkey(k) for k in amap} | set(computed))
+    sources = [child.this for child in sel.iter_expressions()
+               if isinstance(child, (exp.From, exp.Join)) and isinstance(child.this, exp.Table)]
+    names = [child.this.alias_or_name for child in sel.iter_expressions()
+             if isinstance(child, (exp.From, exp.Join)) and child.this is not None]
+    # Two references whose names differ only by case (`orders` and `"ORDERS"`) cannot be told
+    # apart once folded, so nothing is attributed to either of them. A step it reads is not unseen:
+    # ACE-178 follows it.
+    unseen = (len({_tkey(n) for n in names}) < len(names)
+              or sel.args.get("sample") is not None
+              or any(t.args.get(arg) is not None for t in sources for arg in _UNSEEN_TABLE_ARGS))
+    smemo = step_memo if step_memo is not None else {}
+    values = frozenset(_tkey(src.alias_or_name) for src in _own_sources(sel)
+                       if (step := _step_of(src, smemo)) is not None and step.one_row)
+    # The applied declared default filters, as (key, reference): part of what the table means, so
+    # not listed as an extra. Bound the way ACE-099 binds them, per reference.
+    # reference -> the model's column names for its table, for resolving an unqualified column.
+    columns: dict = {}
+    for alias, bare in amap.items():
+        info = tidx.get(_tkey(bare)) if tidx is not None and _tkey(bare) in visible else None
+        columns[_tkey(alias)] = {_tkey(c.name) for c in info[0].columns} if info else None
+    for ref in computed:
+        columns[ref] = None
+    defaults: set = set()
+    for alias, bare in amap.items():
+        info = tidx.get(_tkey(bare)) if tidx is not None and _tkey(bare) in visible else None
+        for declared in (info[0].default_filters if info else []):
+            predicate = _bound_declared_predicate(declared, alias, dialect)[1]
+            if predicate is not None:
+                defaults.add((_condition_key(predicate, dialect), _tkey(alias)))
+    rows = []
+    for cond in _filtering_conjuncts(sel):
+        found = _restriction(cond, amap, refs, dialect, columns, values)
+        if found is not None:
+            rows.append(found._replace(default=(found.key, found.ref) in defaults))
+    outer = []
+    frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
+    prior = ({_tkey(frm.this.alias_or_name)} if frm is not None and frm.this is not None
+             else set())
+    for join in sel.args.get("joins") or []:
+        here = {_tkey(join.this.alias_or_name)}
+        kind = (join.args.get("kind") or "").upper()
+        side = (join.args.get("side") or "").upper()
+        if kind in ("SEMI", "ANTI"):
+            rows.append(_Restriction(_condition_key(join, dialect), None, frozenset(), join))
+        elif side:
+            optional = frozenset(here if side == "LEFT" else prior if side == "RIGHT"
+                                 else here | prior)
+            for cond in _and_conjuncts(join.args.get("on")):
+                found = _restriction(cond, amap, refs, dialect, columns, values)
+                if found is not None:
+                    outer.append((found, optional))
+        prior |= here
+    after = []
+    for clause in ("having", "qualify"):
+        node = sel.args.get(clause)
+        if node is not None and node.this is not None:
+            after.extend(_and_conjuncts(node.this))
+    mentioned = frozenset().union(*(_predicate_columns(p) for p in _mentioned_predicates(sel)))
+    full = any((j.args.get("side") or "").upper() == "FULL" for j in sel.args.get("joins") or [])
+    got = memo[id(sel)] = _ArmRestrictions(amap, refs, unseen, values, rows, outer, after,
+                                           mentioned, full, columns)
+    return got
+
+
+# ---------------------------------------------------------------------------
+# Following a number through the steps of a query (ACE-178)
+#
+# ACE-177 compared a number's expression and the conditions of the SELECT it was written in, and read
+# `undetermined` for a number behind a step, whose filter it could not see. A step — a WITH body, a
+# subquery in FROM — is followed now. A column the outer query only passes on is replaced with what
+# the step computed, down to the SELECT that computes the number; the conditions on the rows it
+# counted are collected from every step those rows came through; and the result is compared exactly
+# as ACE-177 compares a number written in place.
+#
+# One reading of what a step is (`_step_of`), and it binds a WITH name by the scope gate's own rule
+# (`_cte_binding`), so the receipt cannot follow a name into a step the gate checked as a table.
+# Whatever a step does that this does not follow, the number reads `undetermined` with the reason.
+# ---------------------------------------------------------------------------
+
+# Why a number could not be followed: the only text an output item's `reason` can carry.
+_WHY_RECURSIVE = "it is computed in a recursive step"
+_WHY_PIVOT = "it goes through a pivot or unpivot"
+_WHY_ROW_ORDER = "it depends on the order of rows"
+_WHY_WINDOW = "it goes through a window function in a step"
+_WHY_UNION = "it comes from a UNION, whose arms can compute or count it differently"
+_WHY_GROUPS = "a step groups or de-duplicates the rows it is counted over"
+_WHY_STEPS = "it combines numbers computed in different steps"
+_WHY_STAR = "it is every column of a table or step (*)"
+_WHY_UNREADABLE = "it reads a relation the semantic model does not declare"
+_WHY_UNATTRIBUTED = "a column it reads could not be attributed to one table or step"
+_WHY_DEEP = "its steps are nested deeper than the receipt follows"
+_WHY_UNSEEN = "it reads a sampled table, or a table as of another time"
+_WHY_TWICE = "it reads one step through two references"
+_WHY_REAGGREGATE = "it aggregates a number a step already computed"
+_WHY_SRF = "a step uses a function that can return several rows, or one the check does not know"
+# How many steps one number's path may enter before it reads `undetermined` (`_WHY_DEEP`): a bound on
+# the caller's SQL, like `_MAX_CTE_CHAIN`, for a statement whose steps fan out rather than chain.
+_MAX_PATH_VISITS = 256
+# The functions that return several rows per input row. A step projecting one multiplies or drops
+# rows no condition states; one projecting a function sqlglot does not know might, so it fails closed.
+_SET_RETURNING = tuple(getattr(exp, name) for name in (
+    "Unnest", "Explode", "ExplodeOuter", "Posexplode", "PosexplodeOuter", "GenerateSeries",
+    "ExplodingGenerateSeries", "Inline", "Anonymous") if hasattr(exp, name)) if _HAVE_SQLGLOT else ()
+_WHY_UNREAD = "a declared metric's definition could not be read"
+_WHY_SEVERAL = "more than one declared metric computes it the same way"
+_WHY_UNMODELLED = ("it is counted in a way the check does not model: a FULL join, a window over "
+                   "filtered rows, an outer join whose NULL rows count, or a FILTER over two tables")
+
+
+class _Step(NamedTuple):
+    """What one step hands back, read once per reference (`_step_of`)."""
+
+    body: "exp.Expression"
+    listed: list                # the column list its alias gives (`WITH s(a, b)`), else []
+    computes: bool              # it aggregates or groups: it hands back numbers it computed
+    one_row: bool               # always exactly one row: a lookup, whose columns are values
+    reason: Optional[str]       # why what passes through it cannot be followed; None when it can
+    distinct: bool = False      # SELECT DISTINCT: followed only under an aggregate duplicates
+    #                             cannot move (`_is_fan_immune`), and for conditions
+
+
+def _step_reason(body: "exp.Select") -> Optional[str]:
+    """Why rows or values passing through this SELECT cannot be followed, or None.
+
+    An allowlist in effect: the clauses that change WHICH rows there are in a way no condition
+    states (an order-dependent cut, a window, a de-duplication, a grouping a column list does not
+    state, a row source that is not a table) each stop the trace.
+    """
+    if body.find(exp.Pivot) is not None:
+        return _WHY_PIVOT
+    if any(proj.find(*_SET_RETURNING) is not None for proj in body.expressions):
+        return _WHY_SRF
+    if any(body.args.get(arg) for arg in ("limit", "offset", "fetch", "qualify")):
+        return _WHY_ROW_ORDER
+    distinct = body.args.get("distinct")
+    if isinstance(distinct, exp.Distinct) and distinct.args.get("on") is not None:
+        return _WHY_ROW_ORDER         # DISTINCT ON keeps one row per key, chosen by order
+    for proj in body.expressions:
+        for window in proj.find_all(exp.Window):
+            return _WHY_ROW_ORDER if window.args.get("order") else _WHY_WINDOW
+    if any(body.args.get(arg) for arg in ("laterals", "connect", "match")):
+        return _WHY_UNREADABLE
+    if body.args.get("group") is not None and not _arm_is_grouped(body):
+        return _WHY_GROUPS
+    return None
+
+
+def _classify_step(body: "exp.Expression", listed: list, recursive: bool) -> _Step:
+    if recursive:
+        return _Step(body, listed, False, False, _WHY_RECURSIVE)
+    if isinstance(body, exp.SetOperation):
+        return _Step(body, listed, False, False, _WHY_UNION)
+    if not isinstance(body, exp.Select):
+        return _Step(body, listed, False, False, _WHY_UNREADABLE)
+    aggregates = any(_own_nodes(proj, exp.AggFunc) for proj in body.expressions)
+    grouped = body.args.get("group") is not None or body.args.get("having") is not None
+    computes = aggregates or grouped
+    has_from = (body.args.get("from_") or body.args.get("from")) is not None
+    reason = _step_reason(body)
+    # An aggregate with no GROUP BY and no HAVING returns one row whatever it reads; a FROM-less
+    # SELECT with no WHERE returns one row of constants. Never a step with a reason: a set-returning
+    # function beside an aggregate returns several rows.
+    one_row = reason is None and ((aggregates and not grouped) or (
+        not computes and not has_from and body.args.get("where") is None))
+    return _Step(body, listed, computes, one_row, reason, bool(body.args.get("distinct")))
+
+
+def _step_of(src: "exp.Expression", memo: dict) -> "_Step | None":
+    """The step a FROM or JOIN source reads, or None when it reads a table. Remembered on `id`.
+
+    A WITH name binds by `_cte_binding`, the scope gate's lexical rule: a schema-qualified name, a
+    later sibling, a non-recursive self-reference and a mixed-quote spelling all read the TABLE.
+    """
+    key = id(src)
+    if key in memo:
+        return memo[key]
+    step: "_Step | None" = None
+    if isinstance(src, exp.Table):
+        cte = _cte_binding(src)
+        if cte is not None:
+            with_ = cte.parent
+            recursive = bool(isinstance(with_, exp.With) and with_.args.get("recursive")
+                             and any(_cte_binding(t) is cte for t in cte.this.find_all(exp.Table)))
+            step = _classify_step(cte.this, _alias_columns(cte), recursive)
+            if _alias_columns(src) and step.reason is None:
+                step = step._replace(reason=_WHY_UNATTRIBUTED)
+        elif not isinstance(src.this, exp.Identifier):
+            step = _Step(src, [], False, False, _WHY_UNREADABLE)   # a table function
+        elif not src.db and _recursive_namesake(src):
+            # The scope gate reads this as the table. Under WITH RECURSIVE an engine may bind it to
+            # a sibling defined after the step that reads it, so what it reads is not established.
+            step = _Step(src, [], False, False, _WHY_RECURSIVE)
+    elif isinstance(src, exp.Subquery):
+        step = _classify_step(src.this, _alias_columns(src), False)
+    else:
+        step = _Step(src, [], False, False, _WHY_UNREADABLE)       # VALUES, LATERAL, UNNEST …
+    memo[key] = step
+    return step
+
+
+def _recursive_namesake(table: "exp.Table") -> bool:
+    """Whether an enclosing WITH RECURSIVE defines a step of this table reference's name, in any
+    position: Postgres binds a forward reference to it under RECURSIVE."""
+    node = table.parent
+    while node is not None:
+        with_ = node.args.get("with_") or node.args.get("with")
+        if isinstance(with_, exp.With) and with_.args.get("recursive") and any(
+                _tkey(cte.alias_or_name) == _tkey(table.name) for cte in with_.expressions):
+            return True
+        node = node.parent
+    return False
+
+
+def _reached_again(reached: dict, body: "exp.Expression", via: tuple) -> bool:
+    """Whether a step body was already reached through another reference (`_path`, `_inline`,
+    `_flow`): one step through two references is not modelled."""
+    return reached.setdefault(id(body), via) != via
+
+
+def _pref(sel: "exp.Select", ref: str) -> str:
+    """A reference made unique across the statement: `o` in a step and `o` outside are two."""
+    return f"{id(sel)}:{ref}"
+
+
+def _rows_sources(sel: "exp.Select", memo: dict) -> list:
+    """The FROM and JOIN sources whose rows this SELECT reads: a one-row lookup step adds none."""
+    return [src for src in _own_sources(sel)
+            if not ((step := _step_of(src, memo)) is not None and step.one_row)]
+
+
+def _reads_steps(sel: "exp.Select", memo: dict) -> bool:
+    return any(_step_of(src, memo) is not None for src in _rows_sources(sel, memo))
+
+
+def _source_named(sel: "exp.Select", col: "exp.Column", memo: dict,
+                  tidx: "dict | None" = None) -> "exp.Expression | None":
+    """The source a column reads in this SELECT: its qualifier's, or the only rows source.
+
+    With `tidx`, an unqualified column among several sources is the one source that can supply
+    its name — a declared table declaring it, or a step projecting it — when no other can or might
+    (a `*` might). The engine binds it there or refuses the statement. Used for the VALUE's own
+    columns only: crediting a metric's condition keeps ACE-177's rule that an unqualified column in
+    a SELECT reading several references stands for none of them.
+    """
+    if col.table:
+        return _pick_binding(_own_sources(sel), col.table)
+    sources = _own_sources(sel)
+    if len(sources) != 1:
+        sources = _rows_sources(sel, memo)
+    if len(sources) == 1:
+        return sources[0]
+    if tidx is None:
+        return None
+    answers = [(src, _supplies(src, col.name, memo, tidx)) for src in sources]
+    yes = [src for src, answer in answers if answer]
+    return yes[0] if len(yes) == 1 and all(a is not None for _, a in answers) else None
+
+
+def _supplies(src: "exp.Expression", name: str, memo: dict, tidx: dict) -> "bool | None":
+    """Whether a source can supply a column of this name: None when that cannot be told."""
+    step = _step_of(src, memo)
+    if step is None:
+        hit = tidx.get(_tkey(_bare(src.name))) if isinstance(src, exp.Table) else None
+        return None if hit is None else any(_tkey(c.name) == _tkey(name) for c in hit[0].columns)
+    if step.reason or not isinstance(step.body, exp.Select):
+        return None
+    if step.listed:
+        return _tkey(name) in {_tkey(n) for n in step.listed}
+    if any(p.is_star for p in step.body.expressions):
+        return None
+    return any(_tkey(p.alias_or_name) == _tkey(name) for p in step.body.expressions)
+
+
+def _plain_projection(step: _Step, name: str) -> "exp.Column | None":
+    """The input column a step's output `name` hands back unchanged, or None."""
+    if not isinstance(step.body, exp.Select):
+        return None
+    proj = _projection_for(step.body, name, step.listed)
+    inner = proj.this if isinstance(proj, exp.Alias) else proj
+    return inner if isinstance(inner, exp.Column) and inner.name else None
+
+
+def _ground(col: "exp.Column", sel: "exp.Select", memo: dict, passed: set,
+            depth: int = 0, *, distinct: bool = True,
+            tidx: "dict | None" = None) -> "tuple | None":
+    """(SELECT, reference, column) of the TABLE column a plain column reads, followed through
+    steps that hand rows back; None when it is a value a step computed, or cannot be told.
+    Every step reference passed through is added to `passed`. `distinct=False` refuses a DISTINCT
+    step: what an aggregate duplicates can move is not what it reads beneath one.
+
+    Remembered in `memo` per (SELECT, qualifier, name): a WHERE of thousands of conditions over a
+    chain of steps grounds the same few columns through the same steps each time."""
+    key = ("ground", id(sel), _tkey(col.table or ""), _tkey(col.name), distinct, tidx is None,
+           depth)
+    hit = memo.get(key)
+    if hit is None:
+        steps: set = set()
+        hit = memo[key] = (_ground_once(col, sel, memo, steps, depth, distinct, tidx),
+                           frozenset(steps))
+    passed |= hit[1]
+    return hit[0]
+
+
+def _ground_once(col: "exp.Column", sel: "exp.Select", memo: dict, passed: set, depth: int,
+                 distinct: bool, tidx: "dict | None") -> "tuple | None":
+    if depth >= _MAX_CTE_CHAIN:
+        return None
+    src = _source_named(sel, col, memo, tidx)
+    if src is None:
+        return None
+    step = _step_of(src, memo)
+    ref = _tkey(src.alias_or_name)
+    if step is None:
+        return sel, ref, col
+    if step.reason or step.computes or step.one_row or (step.distinct and not distinct):
+        return None
+    inner = _plain_projection(step, col.name)
+    if inner is None:
+        return None
+    passed.add(_pref(sel, ref))
+    return _ground(inner, step.body, memo, passed, depth + 1, distinct=distinct, tidx=tidx)
+
+
+def _value_columns(node: "exp.Expression", arm: _ArmRestrictions) -> list:
+    """A condition's columns, less those of a one-row lookup step (values, not references)."""
+    return [col for col in _own_nodes(node, exp.Column)
+            if not (col.table and _ref_of(col.table, arm.amap) in arm.values)]
+
+
+def _lift(r: _Restriction, sel: "exp.Select", arm: _ArmRestrictions, memo: dict,
+          dialect: "str | None") -> _Restriction:
+    """One SELECT's restriction in the terms of the whole statement: its references made unique,
+    and a column it reads through a step replaced by the table column behind it, so its key
+    compares with a metric's own condition on that table. Shown as the statement wrote it."""
+    if not _reads_steps(sel, memo):
+        return r._replace(ref=_pref(sel, r.ref) if r.ref else None,
+                          refs=frozenset(_pref(sel, x) for x in r.refs))
+    refs: set = set()
+    grounded = True
+    renamed = []                          # (column, the table column it stands for)
+    for orig in _value_columns(r.node, arm):
+        found = _ground(orig, sel, memo, set())
+        if found is None:
+            grounded = False
+            continue
+        gsel, gref, gcol = found
+        refs.add(_pref(gsel, gref))
+        if _tkey(gcol.name) != _tkey(orig.name):
+            renamed.append((orig, gcol))
+    ref = next(iter(refs)) if grounded and len(refs) == 1 else None
+    key = r.key
+    if renamed:
+        # The key strips qualifiers already, so only a RENAMED column changes it: rebuilt then,
+        # on a copy with each renamed column replaced by the one it stands for.
+        node = r.node.copy()
+        pairs = dict(zip(map(id, _value_columns(r.node, arm)), _value_columns(node, arm)))
+        for orig, gcol in renamed:
+            copy = pairs[id(orig)]
+            new = exp.Column(this=gcol.this.copy())
+            if copy is node:
+                node = new
+            else:
+                copy.replace(new)
+        key = _condition_key(node, dialect)
+    return _Restriction(key, ref, frozenset(refs), r.node, r.default)
+
+
+def _optional_refs(sel: "exp.Select") -> set:
+    """The references on the optional side of this SELECT's outer joins."""
+    frm = sel.args.get("from_") or sel.args.get("from")
+    prior = {_tkey(frm.this.alias_or_name)} if frm is not None and frm.this is not None else set()
+    out: set = set()
+    for join in sel.args.get("joins") or []:
+        here = {_tkey(join.this.alias_or_name)}
+        side = (join.args.get("side") or "").upper()
+        out |= here if side == "LEFT" else prior if side == "RIGHT" else (
+            here | prior if side == "FULL" else set())
+        prior |= here
+    return out
+
+
+class _Trace(NamedTuple):
+    """Everything one receipt's column analysis shares: the engine and model, and the memos."""
+
+    dialect: "str | None"
+    tidx: "dict | None"
+    visible: set
+    rmemo: dict                 # `_arm_restrictions`, per SELECT
+    amemo: dict                 # `_own_alias_map`, per SELECT
+    smemo: dict                 # `_step_of`, per source
+    pmemo: dict                 # `_path`, per (SELECT, what the number reads)
+
+    def arm(self, sel: "exp.Select") -> _ArmRestrictions:
+        return _arm_restrictions(sel, self.dialect, self.tidx, self.visible, self.rmemo,
+                                 self.amemo, self.smemo)
+
+
+class _Flow(NamedTuple):
+    """Where an output column's number is computed (`_flow`)."""
+
+    sel: "exp.Select"           # the SELECT that computes it
+    expr: "exp.Expression | None"   # the number in that SELECT's terms, as written there
+    value: "exp.Expression | None"  # the same with every column read through a step grounded
+    layers: tuple               # ((SELECT, the step source it passes on), ...), outermost first
+    reason: Optional[str] = None
+    built_on: Optional[tuple] = None   # (step source, step, the step's column, outer aggregate)
+
+
+def _flow(oc: OutputColumn, tr: _Trace) -> _Flow:
+    """Follow an output column down to the SELECT that computes its number.
+
+    A layer that only passes a step's column on (no aggregate of its own) is replaced by what the
+    step projects, and the walk continues in the step. The first SELECT that aggregates is where
+    the number is computed; an aggregate over a number a grouped step computed is the second-order
+    shape (`built_on`). A value that draws on two computing steps, or on one this does not follow,
+    stops with the reason.
+    """
+    sel, expr = oc.sel, oc.expr
+    if expr is None:
+        return _Flow(sel, None, None, (), _WHY_STAR)
+    layers: list = []
+    for _ in range(_MAX_CTE_CHAIN):
+        stepped = []                    # (column, source, step) for columns read from a step
+        for col in _own_nodes(expr, exp.Column):
+            src = _source_named(sel, col, tr.smemo, tr.tidx)
+            step = _step_of(src, tr.smemo) if src is not None else None
+            if src is None and _reads_steps(sel, tr.smemo):
+                return _Flow(sel, expr, None, tuple(layers), _WHY_UNATTRIBUTED)
+            if step is not None and step.reason:
+                return _Flow(sel, expr, None, tuple(layers), step.reason)
+            if step is not None:
+                stepped.append((col, src, step))
+        if _own_nodes(expr, exp.AggFunc):
+            return _computing(sel, expr, [x for x in stepped if x[2].computes], tuple(layers), tr)
+        if not stepped:
+            return _computing(sel, expr, [], tuple(layers), tr)
+        sources = {id(src) for _, src, _ in stepped}
+        others = [col for col in _own_nodes(expr, exp.Column)
+                  if all(col is not c for c, _, _ in stepped)]
+        if len(sources) > 1 or others:
+            return _Flow(sel, expr, None, tuple(layers), _WHY_STEPS)
+        _, src, step = stepped[0]
+        # The step it passes on, read through a second reference in the same SELECT, is the one
+        # step through two references (see `_path`).
+        seen = {id(step.body): id(src)}
+        if any(o is not src and (other := _step_of(o, tr.smemo)) is not None
+               and _reached_again(seen, other.body, id(o)) for o in _own_sources(sel)):
+            return _Flow(sel, expr, None, tuple(layers), _WHY_TWICE)
+        expr = expr.copy()
+        for col in _own_nodes(expr, exp.Column):
+            proj = _projection_for(step.body, col.name, step.listed)
+            if proj is None:
+                return _Flow(sel, expr, None, tuple(layers), _WHY_UNATTRIBUTED)
+            inner = (proj.this if isinstance(proj, exp.Alias) else proj).copy()
+            if col is expr:
+                expr = inner
+            else:
+                col.replace(inner)
+        layers.append((sel, src))
+        sel = step.body
+    return _Flow(sel, expr, None, tuple(layers), _WHY_DEEP)
+
+
+def _rows_chain(sel: "exp.Select", tr: _Trace):
+    """The SELECTs a `COUNT(*)` counts the rows of, followed down while each reads ONE rows source
+    that is a step handing rows back: (SELECT, its rows sources, the one source's step or None)."""
+    for _ in range(_MAX_CTE_CHAIN):
+        sources = _rows_sources(sel, tr.smemo)
+        step = _step_of(sources[0], tr.smemo) if len(sources) == 1 else None
+        yield sel, sources, step
+        if step is None or step.reason or step.computes:
+            return
+        sel = step.body
+
+
+def _computing(sel: "exp.Select", expr: "exp.Expression", stepped: list, layers: tuple,
+               tr: _Trace) -> _Flow:
+    """The number is computed in `sel`. Ground every column it reads through a step to the table
+    column behind it, so the expression compared is the one actually computed; recognise the
+    second-order shape; stop where neither holds."""
+    if stepped:
+        agg = expr.this if isinstance(expr, exp.Round) else expr
+        col = agg.this if isinstance(agg, exp.AggFunc) else None
+        while isinstance(col, (exp.Cast, exp.TryCast)):    # `AVG(g.n::numeric)`
+            col = col.this
+        _, src, step = stepped[0]
+        if (len(stepped) == 1 and isinstance(col, exp.Column) and col is stepped[0][0]
+                and _arm_is_grouped(step.body)):
+            return _Flow(sel, expr, None, layers, None, (src, step, col, agg))
+        # Anything else over one grouping step counts or folds its groups (`COUNT(DISTINCT g.k)`,
+        # a CASE over a group key); over a one-row step it aggregates a number already computed;
+        # over two, it combines. A different calculation each time, not followed.
+        if len({id(s) for _, s, _ in stepped}) > 1:
+            return _Flow(sel, expr, None, layers, _WHY_STEPS)
+        why = _WHY_REAGGREGATE if stepped[0][2].one_row else _WHY_GROUPS
+        return _Flow(sel, expr, None, layers, why)
+    insensitive = all(_is_fan_immune(agg) for agg in _own_nodes(expr, exp.AggFunc))
+    if _own_nodes(expr, exp.AggFunc) and not _own_nodes(expr, exp.Column):
+        # COUNT(*) over a step that groups counts its groups, and over a DISTINCT step counts the
+        # rows left after duplicates went: neither is the count of the rows the step read.
+        for s, sources, step in _rows_chain(sel, tr):
+            if any((st := _step_of(src, tr.smemo)) is not None and st.computes
+                   for src in sources) or (step is not None and step.distinct):
+                return _Flow(sel, expr, None, layers, _WHY_GROUPS)
+    if not _reads_steps(sel, tr.smemo):
+        return _Flow(sel, expr, expr, layers)
+    value = _inline(expr, sel, tr, insensitive)
+    if not isinstance(value, exp.Expression):
+        if insensitive or not isinstance(_inline(expr, sel, tr, True), exp.Expression):
+            return _Flow(sel, expr, None, layers, value or _WHY_UNATTRIBUTED)
+        return _Flow(sel, expr, None, layers, _WHY_GROUPS)
+    return _Flow(sel, expr, value, layers)
+
+
+def _inline(node: "exp.Expression", sel: "exp.Select", tr: _Trace, distinct: bool,
+            depth: int = 0, reached: "dict | None" = None) -> "exp.Expression | str | None":
+    """`node`, an expression in `sel`, with every column it reads through a step that hands rows
+    back replaced by what that step computes per row (`closed - opened AS days` → `closed -
+    opened`), down to table columns: the expression actually computed, as if written in place.
+    Exact, because nothing groups between the step and the aggregate over it. When a column cannot
+    be followed: `_WHY_STAR` for a step projecting `*`, else None. `distinct=False` refuses a
+    DISTINCT step (see `_ground`)."""
+    if depth >= _MAX_CTE_CHAIN:
+        return _WHY_DEEP
+    reached = {} if reached is None else reached
+    arm = tr.arm(sel)
+    out = node.copy()
+    for orig, copy in zip(_value_columns(node, arm), _value_columns(out, arm)):
+        src = _source_named(sel, orig, tr.smemo, tr.tidx)
+        if src is None:
+            return None
+        step = _step_of(src, tr.smemo)
+        if step is None:
+            new: "exp.Expression | None" = exp.Column(this=orig.this.copy())
+        elif step.reason:
+            return step.reason
+        elif step.computes or step.one_row or (step.distinct and not distinct):
+            return None
+        else:
+            # One step through two references reads as one: see `_path`.
+            if _reached_again(reached, step.body, (id(sel), id(src))):
+                return _WHY_TWICE
+            proj = _projection_for(step.body, orig.name, step.listed)
+            inner = proj.this if isinstance(proj, exp.Alias) else proj
+            if inner is None or isinstance(inner, exp.Star):
+                return _WHY_STAR if any(p.is_star for p in step.body.expressions) else None
+            new = _inline(inner, step.body, tr, distinct, depth + 1, reached)
+            if not isinstance(new, exp.Expression):
+                return new
+        if copy is out:
+            out = new
+        else:
+            copy.replace(new)
+    return out
+
+
+class _Path(NamedTuple):
+    """What the counted rows came through, from the computing SELECT down (`_path`)."""
+
+    amap: dict                  # path reference -> folded bare table, every table read
+    rows: list                  # restrictions on the counted rows, path references
+    after: list                 # conditions applied after counting (HAVING, QUALIFY)
+    mentioned: frozenset
+    joins: list                 # exp.Join nodes the counted rows went through
+    unseen: bool                # a table the semantic model does not declare, or not in scope
+    reason: Optional[str]
+    full: bool = False          # a FULL join on the path
+    outer_used: bool = False    # an outer join's ON condition restricts the number
+
+
+def _path(sel: "exp.Select", wide: frozenset, tr: _Trace, skip: "int | None" = None) -> _Path:
+    """The scopes the rows counted in `sel` came through: `sel`, and every step its rows came from
+    (a step on the optional side of an outer join only when the number reads that side). A step
+    that groups, joined in, decides which keys exist: its conditions are restrictions too.
+    Remembered per (SELECT, what the number reads)."""
+    key = (id(sel), wide, skip)
+    got = tr.pmemo.get(key)
+    if got is not None:
+        return got
+    amap: dict = {}
+    rows: list = []
+    after: list = []
+    mentioned: set = set()
+    joins: list = []
+    state: dict = {"unseen": False, "reason": None, "full": False, "outer": False, "visits": 0}
+    # Each step body reached, by which reference. Path references are keyed by the BODY, so two
+    # references to one step (`FROM x a JOIN x b`) would collapse into one and a condition on `b`
+    # could stand for a metric's own condition on `a`: that is not modelled, so it is undetermined.
+    # It also keeps the walk linear: a body is entered once however the steps fan out.
+    reached: dict = {}
+
+    def visit(s: "exp.Select", depth: int) -> None:
+        state["visits"] += 1
+        if depth >= _MAX_CTE_CHAIN or state["visits"] > _MAX_PATH_VISITS:
+            state["reason"] = state["reason"] or _WHY_DEEP
+            return
+        arm = tr.arm(s)
+        state["full"] = state["full"] or arm.full
+        if arm.unseen:
+            state["reason"] = state["reason"] or _WHY_UNSEEN
+        mentioned.update(arm.mentioned)
+        # The steps first: a WITH body or a FROM subquery is written before the conditions of the
+        # SELECT reading it, so the innermost step's conditions are listed first (statement order).
+        optional = _optional_refs(s)
+        for src in _own_sources(s):
+            if id(src) == skip:
+                continue
+            ref = _tkey(src.alias_or_name)
+            if ref in optional and _pref(s, ref) not in wide:
+                continue
+            step = _step_of(src, tr.smemo)
+            if step is None:
+                table = _tkey(_bare(src.name))
+                amap[_pref(s, ref)] = table
+                if table not in tr.visible:
+                    state["unseen"] = True
+            elif step.reason:
+                state["reason"] = state["reason"] or step.reason
+            elif step.one_row:
+                continue
+            else:
+                if _reached_again(reached, step.body, (id(s), ref)):
+                    state["reason"] = state["reason"] or _WHY_TWICE
+                    continue
+                if step.computes:
+                    inner = tr.arm(step.body)
+                    # Never dropped as a join: what decides which keys exist is a restriction.
+                    rows.extend(_lift(_restriction(n, inner.amap, inner.refs, tr.dialect,
+                                                   values=inner.values),
+                                      step.body, inner, tr.smemo, tr.dialect)
+                                for n in inner.after)
+                visit(step.body, depth + 1)
+        rows.extend(_lift(r, s, arm, tr.smemo, tr.dialect) for r in arm.rows)
+        for r, outer_side in arm.outer:
+            if {_pref(s, x) for x in outer_side} & wide:
+                rows.append(_lift(r, s, arm, tr.smemo, tr.dialect))
+                state["outer"] = True
+        joins.extend(s.args.get("joins") or [])
+
+    visit(sel, 0)
+    after.extend(tr.arm(sel).after)
+    got = tr.pmemo[key] = _Path(amap, rows, after, frozenset(mentioned), joins,
+                                state["unseen"], state["reason"], state["full"], state["outer"])
+    return got
+
+
+def _group_columns(sel: "exp.Select") -> list:
+    """The plain columns a SELECT groups by, a position (`GROUP BY 1`) read as its projection."""
+    group = sel.args.get("group")
+    out = []
+    for g in (group.expressions if group is not None else []):
+        if isinstance(g, exp.Literal) and g.is_int and 0 < int(g.name) <= len(sel.expressions):
+            proj = sel.expressions[int(g.name) - 1]
+            g = proj.this if isinstance(proj, exp.Alias) else proj
+        if isinstance(g, exp.Column):
+            out.append(g)
+    return out
+
+
+def _follow_to(col: "exp.Column", sel: "exp.Select", target: "exp.Select",
+               memo: dict) -> "exp.Column | None":
+    """The plain column of `target` a column of an outer layer passes on, or None."""
+    for _ in range(_MAX_CTE_CHAIN):
+        src = _source_named(sel, col, memo)
+        step = _step_of(src, memo) if src is not None else None
+        if step is None or step.reason:
+            return None
+        inner = _plain_projection(step, col.name)
+        if inner is None:
+            return None
+        if step.body is target:
+            return inner
+        sel, col = step.body, inner
+    return None
+
+
+def _upper(flow: _Flow, tr: _Trace) -> "tuple[list, list]":
+    """The conditions of the layers above the computing SELECT: applied after counting.
+
+    One kind is a restriction on the counted rows after all: a condition on a column the computing
+    SELECT groups by. `WHERE status = 'paid'` after `GROUP BY status` keeps the rows `WHERE status =
+    'paid'` before it would, so it is translated onto that column and compared like one. Anything
+    else — on a computed number, on another relation, a join that drops groups — is a result filter.
+    """
+    rows: list = []
+    after: list = []
+    grouped = _arm_is_grouped(flow.sel)
+    keys = _group_columns(flow.sel) if grouped else []
+    computing = tr.arm(flow.sel)
+    for layer, src in flow.layers:
+        arm = tr.arm(layer)
+        xref = _tkey(src.alias_or_name)
+        conds = list(arm.rows) + [r for r, optional in arm.outer if xref in optional]
+        for r in conds:
+            node = r.node.copy()
+            hit = bool(keys) and isinstance(r.node, exp.Expression) and not isinstance(
+                r.node, exp.Join)
+            for orig, copy in zip(_value_columns(r.node, arm), _value_columns(node, arm)):
+                if not hit:
+                    break
+                # Only a condition on the step the number passes through restricts its rows: on
+                # another reference to the same step (`FROM g a CROSS JOIN g b WHERE b.k = 'v'`) it
+                # keeps result rows, it does not decide what `a` counted.
+                if _source_named(layer, orig, tr.smemo) is not src:
+                    hit = False
+                    break
+                target = _follow_to(orig, layer, flow.sel, tr.smemo)
+                if target is None or not any(
+                        _tkey(target.name) == _tkey(k.name) and (
+                            not target.table or not k.table
+                            or _ref_of(target.table, computing.amap)
+                            == _ref_of(k.table, computing.amap)) for k in keys):
+                    hit = False
+                    break
+                new = target.copy()
+                if copy is node:
+                    node = new
+                else:
+                    copy.replace(new)
+            found = _restriction(node, computing.amap, computing.refs, tr.dialect,
+                                 values=computing.values) if hit else None
+            if found is not None:
+                rows.append(_lift(found, flow.sel, computing, tr.smemo, tr.dialect)._replace(
+                    node=r.node, default=False))
+            else:
+                after.append(r.node)
+        after.extend(arm.after)
+        # A join to another relation keeps only the result rows that find a partner, whichever side
+        # of the join the step the number passes through is written on. A one-row lookup step has
+        # one row for every result row, so a join to it keeps them all.
+        others = [o for o in _own_sources(layer) if o is not src
+                  and not ((st := _step_of(o, tr.smemo)) is not None and st.one_row)]
+        for join in (layer.args.get("joins") or []) if others else []:
+            if join.args.get("side"):
+                continue
+            after.extend(c for c in _and_conjuncts(join.args.get("on"))
+                         if _joins_two(c, arm.amap, arm.columns, arm.values))
+    return rows, after
+
+
+class _ColumnMatch(NamedTuple):
+    """`_match_output_column`'s answer. The tuples hold condition nodes, rendered by the assembler
+    (`_restriction_text`), which is the one place the sensitive index is read."""
+
+    status: str
+    match: "MetricCandidate | None"
+    restrictions: tuple = ()     # matched: conditions beyond the metric's own
+    result_filters: tuple = ()   # matched: HAVING and QUALIFY, and conditions after a step counted
+    missing: tuple = ()          # otherwise: (metric name, its conditions the statement lacks)
+    joins: tuple = ()            # matched: the joins on the counted rows' path not declared
+    missing_tables: tuple = ()   # otherwise: (metric name, its tables the number did not read)
+    reason: Optional[str] = None     # undetermined: why, from the `_WHY_*` vocabulary
+    built_from: Optional[dict] = None  # an aggregate over a matched per-group number
+    aggregating: bool = False    # the number aggregates, here or in a step it was computed in
+
+
+# The aggregates that skip a NULL input, and the operators that keep a NULL a NULL: a number built
+# only from these gets nothing from a row an outer join null-extended.
+_NULL_SKIPPING = (exp.Sum, exp.Avg, exp.Count, exp.Min, exp.Max) if _HAVE_SQLGLOT else ()
+_NULL_KEEPING = (exp.Column, exp.Identifier, exp.Literal, exp.Paren, exp.Add, exp.Sub, exp.Mul,
+                 exp.Div, exp.Neg, exp.Distinct, exp.Cast, exp.DataType) if _HAVE_SQLGLOT else ()
+
+
+def _ignores_null_rows(value: "exp.Expression") -> bool:
+    """Whether every aggregate in a column's value skips a row whose columns are all NULL."""
+    aggs = _own_nodes(value, exp.AggFunc)
+    return bool(aggs) and all(
+        isinstance(agg, _NULL_SKIPPING) and not isinstance(agg.this, exp.Star)
+        and all(isinstance(n, _NULL_KEEPING) for n in agg.this.walk())
+        for agg in aggs)
+
+
+def _compatible(r: _Restriction, sources: set, read: set, amap: dict) -> bool:
+    """Whether a statement's condition can stand for a metric's own: it restricts one reference,
+    the number reads that reference, and the metric is defined over that reference's table (or
+    declares none). Otherwise the customers' `c.status = 'paid'`, or a self-join's other side, would
+    stand for a metric's `status = 'paid'` once qualifiers are gone."""
+    return (r.ref is not None and r.ref in read
+            and (not sources or _table_of(r.ref, amap) in sources))
+
+
+def _value_reads(value: "exp.Expression", sel: "exp.Select", tr: _Trace) -> "tuple[set, set]":
+    """(read, wide): the references the number certainly reads, for crediting a metric's own
+    condition, and every reference it may read, for an outer join's condition (listing too much is
+    the safe direction there). In path terms, through steps."""
+    arm = tr.arm(sel)
+    passed: set = set()
+    read: set = set()
+    cols = _value_columns(value, arm)
+    unsure = False
+    for col in cols:
+        found = _ground(col, sel, tr.smemo, passed)
+        if found is None:
+            unsure = True
+        else:
+            read.add(_pref(found[0], found[1]))
+    if not cols:
+        # `COUNT(*)` reads the one rows source of its SELECT, followed down; with several, none —
+        # and an outer join's optional side is not one it reads (ACE-177's rule: the join keeps
+        # every row of the other side whatever its ON says).
+        for s, sources, step in _rows_chain(sel, tr):
+            if len(sources) != 1:
+                break
+            ref = _tkey(sources[0].alias_or_name)
+            (passed if step is not None else read).add(_pref(s, ref))
+    wide = set(read) | passed
+    if unsure:
+        wide |= {_pref(sel, x) for x in arm.rows_refs}
+    return read, wide
+
+
+def _second_order_fit(built: dict, step: _Step, second_order: tuple, read_tables: set
+                      ) -> "MetricCandidate | None":
+    """The declared second-order metric this built-on number is, or None: the same outer
+    aggregate over the same base metric at the same grain, over tables the number read."""
+    grain = _group_columns(step.body)
+    group = step.body.args.get("group")
+    if group is None or len(grain) != len(group.expressions):
+        return None
+    names = frozenset(_tkey(g.name) for g in grain)
+    for cand, outer, base, inner_grain in second_order:
+        sources = {_tkey(_bare(t)) for t in (cand.metric.source_tables or [])}
+        if (outer, base, inner_grain) == (built["aggregate"], built["metric"], names) \
+                and sources <= read_tables:
+            return cand
+    return None
+
+
 def _match_output_column(oc: OutputColumn, unread: bool,
                          by_binding: dict, visible: set[str], dialect: "str | None",
-                         memo: dict[int, dict[str, str]]
-                         ) -> tuple[str, Optional[MetricCandidate]]:
-    """One output column against every declared metric: `(status, matched candidate or None)`.
+                         memo: dict[int, dict[str, str]],
+                         by_binding_grouped: Optional[dict] = None,
+                         binding_shapes: "set | frozenset" = frozenset(),
+                         *, tidx: "dict | None" = None,
+                         restriction_memo: "dict | None" = None,
+                         trace: "_Trace | None" = None,
+                         join_status: "dict | None" = None,
+                         second_order: tuple = (),
+                         ) -> _ColumnMatch:
+    """One output column against every declared metric.
 
-    The branch ORDER is the contract, and each rung is a claim the analysis has earned:
+    The number is first followed to the SELECT that computes it (`_flow`), through every step on
+    the way; what cannot be followed is `undetermined` with its reason. Then the branch ORDER is the
+    contract, and each rung is a claim the analysis has earned:
 
-    1. **A match, if the expressions are equal**, looked up in `by_binding` rather than scanned
-       for. When several metrics declare that one binding the expression cannot name one of them,
-       so the tables the statement reads decide — and when they cannot narrow it to exactly one,
-       the answer is `undetermined`, not a guess (see `_discriminate`).
-    2. **`undetermined` when the column sits behind a boundary we do not enter** — see
-       `_reads_only_visible`. Asked only AFTER the match, because a column whose expression we DID
-       compare successfully has been established regardless of what else is in scope.
-    3. **`undetermined` when any declaration went unread** — see `_declarations_unread` for the two
-       shapes that covers. A failure to read the MODEL is never a fact about the model: `unmatched`
-       would tell a reader "none of your declared metrics is this column" on the strength of our own
-       parse failure, and send a model author looking for a definition they have already written.
-    4. **`UNMATCHED`** — every candidate binding was read, the column was compared against all of
-       them, and none is this value. That is a settled claim and it is the whole point of the
-       section: it is the sentence "this number is not the organisation's agreed definition".
+    1. **A match, if the expressions are equal, the metric's own conditions are all among the
+       conditions on the rows the number counted (from every step those rows came through), and
+       the number read every one of the metric's `source_tables`** (ACE-177, ACE-178). Looked up in
+       `by_binding` on the peeled expression rather than scanned for. Of the metrics that fit, the
+       most specific wins (largest condition set, then largest table set, by inclusion); several
+       equally specific are narrowed by the tables read, and when that cannot reach one the answer
+       is `undetermined` (see `_discriminate`). The conditions beyond the metric's own, and the
+       joins on the path the model does not declare, ride the item.
+    2. **`undetermined` when the number reads a table the model does not declare.**
+    3. **`undetermined` when any declaration went unread** — see `_declarations_unread`.
+    4. **`COMPUTED_DIFFERENTLY`** when a metric computing this expression has a condition the
+       statement does not write as such but writes something about the same column (`IN ('paid')`
+       against `= 'paid'`: not compared, so not called missing), or when a binding has this
+       aggregate's `_shape` (#655) and no metric was ruled out for its tables.
+    5. **`UNMATCHED`** — every candidate binding was read and none is this value.
+
+    A metric condition the statement does not apply at all, and a metric table it did not read,
+    ride the item whatever the status. Restrictions count only for a number that aggregates: a
+    WHERE changes which rows come back, not what a plain `customer_id` is.
     """
-    if oc.expr is not None:
-        # A DICT LOOKUP, not a scan of every candidate. sqlglot's `__hash__` is consistent with its
-        # `__eq__` — both derive from the node's structure — so the equality this comparison is
-        # defined as is exactly what the lookup performs, and 50 output columns against a model
-        # declaring hundreds of metrics costs 50 hashes rather than their product.
-        reduced = _reduced_projection(oc.expr, dialect)
-        cands = by_binding.get(reduced)
-        # Rounding is presentation: `ROUND(<metric>, 1)` is still the metric, and a live run showed
-        # a rounded rate reported as "not the agreed definition" beside the signed-off one it was.
-        if not cands and isinstance(reduced, exp.Round):
-            cands = by_binding.get(reduced.this)
-        if cands:
-            if len(cands) == 1:
-                return MATCHED, cands[0]
-            # Several metrics declare this one expression, so it does not identify any of them.
-            cand = _discriminate(cands, _arm_sources(oc, memo))
-            return (MATCHED, cand) if cand is not None else (UNDETERMINED, None)
-    if not _reads_only_visible(oc, visible, memo):
-        return UNDETERMINED, None
-    if unread:
-        return UNDETERMINED, None
-    return UNMATCHED, None
+    tr = trace or _Trace(dialect, tidx, visible,
+                         restriction_memo if restriction_memo is not None else {}, memo, {}, {})
+    flow = _flow(oc, tr)
+    if flow.reason:
+        return _ColumnMatch(UNDETERMINED, None, reason=flow.reason,
+                            aggregating=_is_number(flow, tr))
+    if flow.built_on is not None:
+        return _match_built_on(oc, flow, unread, by_binding, visible, dialect, memo,
+                               by_binding_grouped, binding_shapes, tr, join_status or {},
+                               second_order)
+    sel, expr, value = flow.sel, flow.expr, flow.value
+    aggregating = bool(_own_nodes(expr, exp.AggFunc))
+    missing: list = []
+    lacking_tables: list = []
+    not_compared = False
+    reduced = _reduced_projection(value, dialect)
+    forms = [(False, reduced, by_binding)]
+    if by_binding_grouped and _arm_is_grouped(sel):
+        # Consulted even when the plain index matched: two metrics written differently can be one
+        # number under a GROUP BY. FIRST, so a metric found both ways is compared in the form in
+        # which it is that one number: there `SUM(CASE WHEN p THEN 1 ELSE 0 END)` is a count of p
+        # with p as its condition, and judged in its plain form it would look less specific than
+        # the `COUNT(*) FILTER (WHERE p)` it equals.
+        forms.insert(0, (True, _reduced_projection(value, dialect, grouped=True),
+                         by_binding_grouped))
+    found: list = []
+    own_found: dict = {}
+    for grouped, form, index in forms:
+        key, own = _peeled(form.copy())
+        own_found[grouped] = own
+        for cand in _lookup(key, index):
+            if all(cand is not f[0] for f in found):
+                found.append((cand, (cand.grouped_peeled if grouped else cand.peeled)[1], grouped))
+    arm = tr.arm(sel)
+    # What the number READS is its value with its own FILTER or CASE condition taken off: in
+    # `SUM(a.x) FILTER (WHERE b.s = 'p')` the sum reads `a`, and `b` only decides which rows.
+    peeled_value = _peeled(_equivalent_form(_fold_unquoted_identifiers(expr), False,
+                                            _count_kind(dialect)))[0]
+    read, wide = _value_reads(peeled_value, sel, tr)
+    path = _path(sel, frozenset(wide), tr)
+    if path.reason:
+        return _ColumnMatch(UNDETERMINED, None, reason=path.reason, aggregating=aggregating)
+    upper_rows, upper_after = _upper(flow, tr)
+    read_tables = set(path.amap.values())
+    if found:
+        def _rows(grouped: bool) -> list:
+            own: list = []
+            if own_found[grouped]:
+                # The column's own conditions, from a peel that keeps qualifiers, so each can be
+                # attributed to a reference and shown as the statement wrote it.
+                _, written = _peeled(_equivalent_form(_fold_unquoted_identifiers(expr),
+                                                      grouped, _count_kind(dialect)))
+                if not written:
+                    # Uniform once qualifiers were stripped, mixed with them kept: one reference's
+                    # FILTER beside another's. Not one condition on the number (ACE-177).
+                    return None
+                # Never dropped as a join: equating two references in a number's own FILTER
+                # restricts THAT number.
+                own = [_lift(_restriction(c, arm.amap, arm.refs, dialect, values=arm.values),
+                             sel, arm, tr.smemo, dialect) for c in written]
+            return own + (path.rows + upper_rows if aggregating else [])
+
+        # Shapes this check does not model are not settled (ACE-177 item 8): a FULL join keeps both
+        # sides' rows whatever its ON says; a window's frame is counted over the rows a WHERE
+        # leaves; an outer join's ON condition restricts a number only if the rows it null-extends
+        # add nothing to it.
+        if aggregating and (path.full or (expr.find(exp.Window) is not None and path.rows)
+                            or (path.outer_used and not _ignores_null_rows(peeled_value))):
+            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
+        rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
+        if any(rows is None for rows in rows_by_form.values()):
+            return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNMODELLED, aggregating=True)
+        fitting: list = []
+        unfit: list = []
+        for cand, conds, grouped in found:
+            sources = {_tkey(_bare(s)) for s in (cand.metric.source_tables or [])}
+            if sources - read_tables:
+                # The metric is defined over a table this number never read: not its match,
+                # whatever the expression (#630).
+                lacking_tables.append((cand.metric.name, tuple(sorted(sources - read_tables))))
+                continue
+            rows = rows_by_form[grouped]
+            absent = [m for m in conds
+                      if not any(r.key == m and _compatible(r, sources, read, path.amap)
+                                 for r in rows)]
+            if absent:
+                unfit.append((cand, absent, rows))
+            else:
+                fitting.append((cand, frozenset(conds), rows, sources))
+        if fitting:
+            def _beats(g: tuple, f: tuple) -> bool:
+                # More conditions, or (with as many) a declared table set strictly containing a
+                # declared one: a two-table metric over both tables read beats its one-table twin.
+                return (g[1] > f[1] or (g[1] == f[1] and bool(f[3]) and g[3] > f[3]))
+
+            maximal = [f for f in fitting if not any(_beats(g, f) for g in fitting)]
+            chosen = maximal[0] if len(maximal) == 1 else None
+            if chosen is None:
+                cand = _discriminate([f[0] for f in maximal], read_tables)
+                chosen = next((f for f in maximal if f[0] is cand), None)
+            if chosen is None:
+                return _ColumnMatch(UNDETERMINED, None, reason=_WHY_SEVERAL,
+                                    aggregating=aggregating)
+            cand, conds, rows, sources = chosen
+            extras: list = []
+            seen: set = set()
+            for r in rows:
+                # Told apart by the references named as well as the condition: `o.status =
+                # 'x' AND c.status = 'x'` are two restrictions once qualifiers are stripped.
+                ident = (r.key, r.refs, r.ref)
+                if r.default or ident in seen or (
+                        r.key in conds and _compatible(r, sources, read, path.amap)):
+                    continue
+                seen.add(ident)
+                extras.append(r.node)
+            return _ColumnMatch(MATCHED, cand, tuple(extras), tuple(path.after + upper_after),
+                                joins=_undeclared_joins(path.joins, tr, join_status or {}),
+                                aggregating=aggregating)
+        for cand, absent, rows in unfit:
+            # A condition whose column the statement filters some other way is NOT called
+            # missing: `status IN ('paid')` may be `status = 'paid'` spelled differently, and
+            # ACE-099 draws the same line between `omitted` and `undetermined`.
+            mentioned = path.mentioned.union(*(_predicate_columns(r.node) for r in rows))
+            gone = tuple(m for m in absent if not (_predicate_columns(m) & mentioned))
+            not_compared = not_compared or len(gone) < len(absent)
+            if gone:
+                missing.append((cand.metric.name, gone))
+    if path.unseen or unread:
+        status = UNDETERMINED
+    elif not_compared:
+        status = COMPUTED_DIFFERENTLY
+    elif not lacking_tables and _is_aggregate(value) and _shape(reduced) in binding_shapes:
+        status = COMPUTED_DIFFERENTLY
+    else:
+        status = UNMATCHED
+    reason = None if status != UNDETERMINED else (_WHY_UNREAD if unread else _WHY_UNREADABLE)
+    return _ColumnMatch(status, None, missing=tuple(missing),
+                        missing_tables=tuple(lacking_tables), reason=reason,
+                        aggregating=aggregating)
+
+
+def _second_order_index(candidates: list, storage_type: "str | None") -> tuple:
+    """(candidate, outer aggregate, base metric, folded grain columns) for every declared
+    second-order metric (`inner_grain` and an `OUTER({base})` binding). Once per receipt."""
+    from .derived import SECOND_ORDER_RE
+
+    out = []
+    for cand in candidates:
+        grain = getattr(cand.metric, "inner_grain", None)
+        raw = (cand.metric.bindings or {}).get(storage_type or "")
+        hit = SECOND_ORDER_RE.match(raw) if grain and raw else None
+        if hit:
+            out.append((cand, hit.group(1).upper(), hit.group(2).strip(),
+                        frozenset(_tkey(g.split(".")[-1]) for g in grain)))
+    return tuple(out)
+
+
+def _is_number(flow: _Flow, tr: _Trace) -> bool:
+    """Whether a value that could not be followed is a number: it aggregates where it stopped, or
+    reads a number a step computed (`b.s / a.c` over two steps' totals)."""
+    if flow.expr is None:
+        return False
+    if _is_aggregate(flow.expr):
+        return True
+    for col in _own_nodes(flow.expr, exp.Column):
+        src = _source_named(flow.sel, col, tr.smemo, tr.tidx)
+        step = _step_of(src, tr.smemo) if src is not None else None
+        if step is not None and step.computes:
+            return True
+    return False
+
+
+def _undeclared_joins(joins: list, tr: _Trace, join_status: dict) -> tuple:
+    """The joins on the counted rows' path the model does not declare, labelled as the joins
+    section labels them. A join to a one-row lookup step is not on the path: it neither repeats
+    nor drops a row. A join the section did not reach (past its cap) is listed: not established."""
+    out: list = []
+    for join in joins:
+        step = _step_of(join.this, tr.smemo)
+        if step is not None and step.one_row:
+            continue
+        status, label = join_status.get(id(join), (None, None))
+        if status != DECLARED:
+            out.append(label or f"{_echo_name(_relation_name(join.this))} (not checked)")
+    return tuple(dict.fromkeys(out))
+
+
+def _match_built_on(oc: OutputColumn, flow: _Flow, unread: bool, by_binding: dict,
+                    visible: set, dialect: "str | None", memo: dict,
+                    by_binding_grouped: "dict | None", binding_shapes: "set | frozenset",
+                    tr: _Trace, join_status: dict, second_order: tuple) -> _ColumnMatch:
+    """An aggregate over a number a grouped step computed: "average daily sales" over a per-day
+    total. The per-group number is matched where it is computed; when it is a metric, this number
+    is BUILT FROM it, by the step's grouping, with the outer aggregate. When the model declares
+    that second-order metric (`inner_grain`), it is that metric."""
+    src, step, col, agg = flow.built_on
+    proj = _projection_for(step.body, col.name, step.listed)
+    inner_expr = proj.this if isinstance(proj, exp.Alias) else proj
+    if inner_expr is None:
+        return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNATTRIBUTED, aggregating=True)
+    inner = _match_output_column(
+        OutputColumn(oc.key, inner_expr, oc.scope, step.body), unread, by_binding, visible,
+        dialect, memo, by_binding_grouped, binding_shapes, trace=tr, join_status=join_status,
+        second_order=second_order)
+    if inner.status != MATCHED:
+        status = UNDETERMINED if inner.status == UNDETERMINED else UNMATCHED
+        return _ColumnMatch(status, None, reason=inner.reason, aggregating=True)
+    read, wide = _value_reads(_peeled(_equivalent_form(_fold_unquoted_identifiers(flow.expr),
+                                                       False, _count_kind(dialect)))[0],
+                              flow.sel, tr)
+    path = _path(flow.sel, frozenset(wide), tr, skip=id(src))
+    if path.reason:
+        return _ColumnMatch(UNDETERMINED, None, reason=path.reason, aggregating=True)
+    upper_rows, upper_after = _upper(flow, tr)
+    per_group = [r.node for r in path.rows + upper_rows] + list(tr.arm(step.body).after)
+    group = step.body.args.get("group")
+    built = {
+        "metric": inner.match.metric.name,
+        "aggregate": agg.key.upper(),
+        "by": tuple(group.expressions) if group is not None else (),
+        "restrictions": tuple(inner.restrictions) + tuple(per_group),
+        "joins": tuple(dict.fromkeys(inner.joins + _undeclared_joins(path.joins, tr,
+                                                                     join_status))),
+    }
+    read_tables = set(path.amap.values()) | {
+        _tkey(_bare(t)) for t in (inner.match.metric.source_tables or [])}
+    cand = _second_order_fit(built, step, second_order, read_tables)
+    if cand is not None:
+        return _ColumnMatch(MATCHED, cand, built["restrictions"],
+                            tuple(path.after + upper_after), joins=built["joins"],
+                            built_from=built, aggregating=True)
+    return _ColumnMatch(UNMATCHED, None, built_from=built, aggregating=True)
+
+
+def _withholds(node: "exp.Expression", sensitive: "set[str] | frozenset[str]",
+               statement_sensitive: bool) -> bool:
+    """Whether a condition's values are withheld: it names a sensitive column (by name, folded, on
+    any table — the conservative rule `_projected_sensitive` applies to an ambiguous reference), or,
+    when the statement names a sensitive column anywhere, it holds a subquery or reads a name that
+    may be one renamed (`_may_be_renamed`). That is how `email AS e` in a step, then `WHERE s.e =
+    '…'`, is caught without following the rename: simple, and wider than needed in the safe
+    direction. ACE-178 lists conditions from inside steps, so the second half is what keeps a
+    sensitive value out of the receipt however many steps it went through."""
+    if any(_tkey(col.name) in sensitive for col in node.find_all(exp.Column)):
+        return True
+    # A whole-row reference (`CAST(c AS TEXT)`, `row_to_json(c)`) carries every column of its row,
+    # a sensitive one included, under no column's name.
+    if sensitive and any(_is_row_reference(col) for col in node.find_all(exp.Column)):
+        return True
+    if not statement_sensitive:
+        return False
+    return node.find(exp.Select) is not None or any(
+        _may_be_renamed(col) for col in node.find_all(exp.Column))
+
+
+def _is_row_reference(col: "exp.Column") -> bool:
+    """Whether an unqualified column names one of its SELECT's sources rather than a column."""
+    sel = _enclosing_select(col)
+    return (not col.table and sel is not None
+            and _pick_binding(_own_sources(sel), col.name) is not None)
+
+
+def _may_be_renamed(col: "exp.Column") -> bool:
+    """Whether a column in a condition may stand for another under a new name: it reads a step (a
+    CTE, a subquery in FROM, anything that is not a table), or it is unqualified in a SELECT that
+    reads one, or it names one of its own SELECT's output aliases (some engines let a WHERE do
+    that). A column of the statement's own tables, qualified or not, is what it is called."""
+    sel = _enclosing_select(col)
+    if sel is None:
+        return True
+    if not col.table and any(isinstance(p, exp.Alias) and _tkey(p.alias) == _tkey(col.name)
+                             for p in sel.expressions):
+        return True
+    sources = _own_sources(sel)
+    picked = [_pick_binding(sources, col.table)] if col.table else sources
+    return any(src is None or not isinstance(src, exp.Table) or _cte_binding(src) is not None
+               for src in picked)
+
+
+def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[str]",
+                      dialect: "str | None" = None, statement_sensitive: bool = False) -> str:
+    """One condition rendered for the item: as the parser read it, in the datasource's own dialect
+    (so `E'…'`, `B'101'` or `~*` read back as written), bounded like every caller-written expression
+    in the receipt (`_echo_expr`), and with its values withheld when `_withholds` says so.
+
+    Withholding replaces every LEAF that is not a name — not an identifier, and not inside a column
+    reference, a table reference or a data type — rather than a list of literal kinds: a list misses
+    the next string syntax a dialect adds (`U&'…'`), and a leaf that is not a value loses nothing.
+
+    Serialized as a FRAGMENT for a label, the same argument `_join_condition` makes and
+    `tests/test_ace093_byte_identity.py` records: bound to a receipt field and never assigned
+    anywhere a driver reads.
+    """
+    shown = node.copy()
+    # Asked of the ORIGINAL node: whether a column may be renamed depends on the SELECT it sits in.
+    if _withholds(node, sensitive, statement_sensitive):
+        for leaf in [n for n in shown.walk() if not list(n.iter_expressions())]:
+            if isinstance(leaf, (exp.Identifier, exp.Star)) or leaf.find_ancestor(
+                    exp.Column, exp.Table, exp.DataType, exp.TableAlias) is not None:
+                continue
+            if leaf is not shown:
+                leaf.replace(exp.Var(this=_WITHHELD))
+    return _echo_expr(shown.sql(dialect=dialect))
 
 
 def _storage_type_of(org: Datasource) -> "str | None":

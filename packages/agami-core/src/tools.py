@@ -61,6 +61,7 @@ from guardrail import (
     Failure,
     Receipt,
     Refusal,
+    core_version,
     receipt_from_assembled,
     undetermined_receipt,
 )
@@ -90,16 +91,9 @@ SERVER_NAME = "agami"
 
 def server_version() -> str:
     """Best-effort version: the AGAMI_VERSION env override, else the installed package metadata.
-    Shared by both transports' serverInfo."""
-    env_v = os.environ.get("AGAMI_VERSION")
-    if env_v:
-        return env_v
-    try:
-        from importlib.metadata import PackageNotFoundError, version
-
-        return version("agami-core")
-    except PackageNotFoundError:
-        return "0.0.0"
+    Shared by both transports' serverInfo, and the same value every receipt records
+    (`guardrail.core_version`, the one source)."""
+    return core_version()
 
 
 # Client-facing usage guidance, surfaced by both transports. Describes the 4-tool flow;
@@ -4210,9 +4204,12 @@ _OWN_COLUMN_ARGUMENTS = frozenset(
 #: A control character or line break in stored caller text could forge a line of a log or a report
 #: that reads it, so each is replaced with a space: the C0 and C1 controls, the Unicode line and
 #: paragraph separators, the bidi controls that reorder how a line displays, and a lone surrogate,
-#: which is not text at all. The same set as `runtime._ECHO_CONTROL`.
+#: which is not text at all; and the invisible characters that carry hidden text (zero-width
+#: space and joiners, word joiner and invisible operators, byte-order mark, Arabic letter mark, tag
+#: characters). The same set as `runtime._ECHO_CONTROL`.
 _AUDIT_CONTROL = re.compile(
-    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff"
+    r"\u200b-\u200d\u2060-\u2064\ufeff\u061c\U000e0000-\U000e007f]"
 )
 
 #: What is stored for a value that cannot become text, with the cut flag set.
@@ -5876,10 +5873,37 @@ TOOLS: dict[str, dict[str, Any]] = {
             "matched metric's `{name, area, definition_prose, expression, confidence, origin, "
             "review_state, signed_off_*}`, with status matched (the value computes that declared "
             "metric) / unmatched (every declared binding was read and none of them is this value, "
-            "i.e. the number is NOT the org's agreed definition — say so) / undetermined (the "
-            "value sits behind a CTE or derived table we do not read into, or a declared binding "
-            "could not be parsed — NOT a claim that no metric matches); every metric key is null "
-            "unless status is 'matched'. kind 'reference' is one per column the statement READ, "
+            "i.e. the number is NOT the org's agreed definition — say so) / computed_differently "
+            "(a declared metric reads the same columns with the same kind of aggregate but is "
+            "written differently, and the two "
+            "were not compared — NOT a claim either way, so do not call the number wrong) / "
+            "undetermined (it could not be told, and `reason` says why in one phrase — a step "
+            "that depends on row order, a UNION, a shape the check does not model (a FULL join, "
+            "a window over filtered rows, an outer-join condition its aggregate lets NULL rows "
+            "past), a declared binding that could not be parsed — NOT a claim that no metric "
+            "matches). A number is followed through every CTE and "
+            "subquery to where it is computed, and its restrictions are collected from every "
+            "step. Every metric key is null "
+            "unless status is 'matched' (`missing_conditions`, `missing_tables` and `built_from` "
+            "are the exceptions, below). A "
+            "matched item also carries `restrictions` — the "
+            "conditions its rows were counted over beyond the metric's own (WHERE, inner-join ON, "
+            "its own FILTER/CASE; [] means the metric's whole definition) — and `result_filters` "
+            "(HAVING/QUALIFY, applied after counting; a LIMIT is not listed): name the slice "
+            "with the metric, e.g. "
+            "'change requests, counted only where state = ...'. A matched item's "
+            "`joins_not_declared` names a join its rows went through that the semantic model "
+            "does not declare: say so beside the metric ([] with restrictions [] is the plain "
+            "metric). On any other status, "
+            "`missing_conditions` names a metric computing this value whose own condition the "
+            "statement does not apply, `missing_tables` a metric whose tables the statement did "
+            "not all read, and `built_from` the metric a number is built on (e.g. an average of "
+            "a per-day total: {metric, aggregate, by, restrictions, joins_not_declared}) — say "
+            "'built from <metric>, <aggregate> by <by>', with its restrictions ('counted only "
+            "where …') and joins, never that it is the metric. When the section's `undetermined` "
+            "says an item lists only some of its conditions or joins, say the list is partial. A "
+            "value compared with a sensitive column reads `<withheld>`. "
+            "kind 'reference' is one per column the statement READ, "
             "`{kind, column}` plus `sensitive: true` where it applies, and it never carries a "
             "metric.\n"
             "`receipt.tables.items[].scan_risk` — a sentence, or null, when that table is large "
