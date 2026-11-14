@@ -34,7 +34,10 @@ RUFF = ["uvx", "ruff@0.15.19"]
 # against an editable install where the data directories resolve into the source tree
 # whatever the wheel contains (#122). Without this dependency it would skip, and a guard that
 # skips is the same as no guard.
-TEST_DEPS = ["--with", "pytest-cov", "--with", "pytest-xdist", "--with", "build", "--with-editable", "packages/agami-core[model,server]"]
+# `duckdb` for the same reason: it is an engine, not a server, so the tests that check a number on
+# DuckDB (the receipt's equivalent spellings and its claim-against-the-numbers harness, ACE-177) run
+# in-process — and without it they skip, everywhere, CI included.
+TEST_DEPS = ["--with", "pytest-cov", "--with", "pytest-xdist", "--with", "build", "--with", "duckdb", "--with-editable", "packages/agami-core[model,server]"]
 # One worker per core, as CI runs it — the suite is a long tail of short tests, not a few slow ones.
 PARALLEL = ["-n", "auto"]
 # `dev/` is here because it holds gate logic CI executes (changelog_gate.py), not just local

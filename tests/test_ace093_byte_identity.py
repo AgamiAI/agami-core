@@ -382,6 +382,7 @@ def test_no_shipped_prose_promises_a_rewrite():
 _RESERIALISE_EXEMPT = {
     ("packages/agami-core/src/semantic_model/runtime.py", "_aggregate_sites"),
     ("packages/agami-core/src/semantic_model/runtime.py", "_join_condition"),
+    ("packages/agami-core/src/semantic_model/runtime.py", "_restriction_text"),
 }
 
 
@@ -416,7 +417,16 @@ def test_nothing_re_serialises_a_parsed_statement():
     exemption is a claim about the CALL, and the call moved when the three spellings of a written
     join condition were given one reader.
 
-    Two entries is not a quota and this list is not full. What each entry costs is the strong form
+    **`_restriction_text` is the third, argued the same way (ACE-177).** It renders one condition
+    the statement applied to the rows a matched metric read — a WHERE or ON conjunct, or a metric's
+    own FILTER condition — into the `restrictions`, `result_filters` and `missing_conditions` fields
+    of the receipt's `columns` items. A fragment, bound to a receipt field and never assigned
+    anywhere a driver reads; the spec requires the receipt to SHOW the slice a number was counted
+    over, and sqlglot's normalization of spacing and keyword case is a property of that label as it
+    is of the join predicate's. It serializes in the datasource's own dialect, so a string or
+    operator only that engine spells (`E'…'`, `~*`) reads back as written rather than translated.
+
+    Three entries is not a quota and this list is not full. What each entry costs is the strong form
     of the claim, and what earns one is the argument above made in full for a FRAGMENT that reaches
     only a receipt field; a third call site earns its entry the same way or does not get one.
 

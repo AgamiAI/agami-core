@@ -1036,8 +1036,28 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                                        f"{', '.join(sources)}, which this statement does not read; "
                                        "the expression matches by shape only"))
             else:
-                rows.append(_part(f"metric:{column}", CONFIRMED, evidence={"metric": item.get("name")},
-                                  note="the output matches a defined metric"))
+                # The rows it was counted over are named, not judged: whether a slice is what the
+                # question meant is the person's call, and the counting is the defined metric's.
+                restrictions = [str(r) for r in (item.get("restrictions") or [])]
+                result_filters = [str(r) for r in (item.get("result_filters") or [])]
+                evidence = {"metric": item.get("name")}
+                note = "the output matches a defined metric"
+                if restrictions:
+                    evidence["restrictions"] = restrictions
+                    note += ", counted only where " + " and ".join(restrictions)
+                if result_filters:
+                    evidence["result_filters"] = result_filters
+                    note += ", then kept only results where " + " and ".join(result_filters)
+                rows.append(_part(f"metric:{column}", CONFIRMED, evidence=evidence, note=note))
+        elif item.get("missing_conditions"):
+            # A defined metric computes this value over a condition the statement does not apply.
+            # Not a gap in the semantic model, which defines it; not judged a defect either, since
+            # the question may want every row. Left open, naming what differs.
+            missing = [f"{m.get('metric')} ({' and '.join(map(str, m.get('conditions') or []))})"
+                       for m in item["missing_conditions"]]
+            rows.append(_part(f"metric:{column}", UNRESOLVED,
+                              evidence={"column": column, "missing_conditions": item["missing_conditions"]},
+                              note="computes a defined metric without its own condition: " + "; ".join(missing)))
         elif item.get("aggregate") is False or (item.get("aggregate") is None and prepare_read and not aggregates and status == "unmatched"):
             # A plain column in a list query computes nothing a metric could define: `number`,
             # `type` or `opened` matching no metric is not a gap, and saying so for every column of
@@ -1045,6 +1065,12 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
             # the output aggregates; an older receipt without the key is read through the
             # pre-flight, which lists the statement's aggregates.
             continue
+        elif status == "computed_differently":
+            # A declared metric reads the same columns and is written differently (#655). Neither a
+            # match nor a gap: the two were not compared, so it is not judged either way.
+            rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "status": status},
+                              note="computed differently from a declared metric that reads the same columns; "
+                                   "the two were not compared"))
         elif only_bare_counts:
             rows.append(_part(f"metric:{column}", CONFIRMED,
                               note="a bare count matches no metric by design"))

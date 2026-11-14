@@ -14,6 +14,29 @@ below corresponds to one such version.
 
 ### Added
 
+- **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
+  section compared an output column's expression with each metric's binding and nothing else, so
+  `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,
+  with nothing saying it was one slice. A matched item now carries `restrictions` (the WHERE,
+  inner-join ON and the column's own FILTER or CASE conditions beyond the metric's own; `[]` means
+  the metric's whole definition) and `result_filters` (HAVING, QUALIFY). A metric's own condition is
+  compared as part of the match, so a curated `SUM(amount) FILTER (WHERE status = 'paid')` now
+  matches a statement filtering to paid rows, and a statement leaving that condition out carries
+  `missing_conditions` naming it; one filtering the same column another way reads
+  `computed_differently`. An outer join's ON condition is listed for a number that reads the joined
+  table, and a SEMI or ANTI join is listed as the join. Only a bare `column = column` between two
+  references counts as a join condition; anything else naming two tables is listed. A metric's own
+  condition counts only on a reference the number reads, so a self-join's other side never stands
+  for it. An applied declared default filter is not listed. Every value in a condition naming a
+  sensitive column reads `<withheld>`, as does every value in a condition holding a subquery when the
+  statement names a sensitive column anywhere. Each list shows ten conditions and the receipt one
+  hundred in all; the section's `undetermined` sentence counts the columns cut short. A number read
+  through a CTE or subquery, or from a sampled or time-travelled table, now reads `undetermined`
+  where it used to read `matched` with that filter unseen, and so does a number in a shape the check
+  does not model: a FULL join, a window over filtered rows, an outer-join condition its aggregate
+  lets NULL rows past, or two references whose names differ only by case. The receipt's echo bound also strips
+  invisible characters (zero-width, word joiner, byte-order mark, tag characters).
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a
@@ -95,6 +118,17 @@ below corresponds to one such version.
   `prune-template.html` and `parse_prune_block.py` are gone.
 
 ### Fixed
+
+- **The receipt no longer calls a metric written another way "not the agreed definition" (#655).**
+  `SUM(CASE WHEN p THEN x END)` beside a binding `SUM(x) FILTER (WHERE p)` was reported
+  `unmatched`. Spellings that give the same number on every input now match: FILTER and
+  `CASE WHEN … END` for SUM, AVG and COUNT (not MIN, MAX or DISTINCT, which compare text by
+  collation); `COUNT(*)`, `COUNT(1)` and `COUNT(CASE WHEN p THEN 1 END)`; an `ELSE 0` under
+  `COALESCE(…, 0)`; under a plain `GROUP BY`, `SUM(CASE WHEN p THEN 1 ELSE 0 END)` as a count and
+  `NULLIF(COUNT(*), 0)` as `COUNT(*)`; and the order of `AND` terms and `*` operands. Each was run
+  both ways on SQLite, DuckDB and Postgres. When a declared metric reads the same columns with the
+  same kind of aggregate but is still written differently, the column's status is the new
+  `computed_differently` ("not compared") instead of `unmatched`.
 
 - **Rebuilding a model keeps `datasource.yaml` keys this agami-core does not know (#589).**
   Re-introspection and applying a model spec rewrote `datasource.yaml` from the fields this core

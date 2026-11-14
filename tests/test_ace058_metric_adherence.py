@@ -405,9 +405,12 @@ def _statuses(org, sql: str, *, drop: tuple[str, ...] = ()) -> list[tuple[str, s
              if c.metric.name not in drop]
     out = []
     for oc in rt._output_columns(tree):
-        status, match = rt._match_output_column(
+        # ACE-177: the matcher answers with the conditions too; this battery reads the status and
+        # the metric, which keep their meaning.
+        result = rt._match_output_column(
             oc, rt._declarations_unread(org, rt._storage_type_of(org), cands),
             rt._by_binding(cands), visible, dialect, {})
+        status, match = result.status, result.match
         out.append((oc.key, status, match.metric.name if match else None))
     return out
 
@@ -635,7 +638,8 @@ def test_the_deleted_containment_test_is_grep_clean():
 
 def test_the_receipt_is_still_the_five_sections_and_the_pin(org):
     receipt = rt.assemble_receipt(org, "SELECT SUM(total_amount) AS revenue FROM orders")
-    assert set(receipt) == {"model_version", "columns", "tables", "joins", "aggregates",
+    assert set(receipt) == {"model_version", "agami_core_version", "columns", "tables", "joins",
+                            "aggregates",
                             "assumptions"}
 
 
@@ -779,7 +783,8 @@ def test_matching_does_not_scan_every_declared_metric(org):
     indexed = {c.metric.name for bucket in idx.values() for c in bucket}
     assert "broken_metric" not in indexed
     assert "broken_metric" in {c.metric.name for c in cands}
-    bucket = idx[rt._reduced_binding(PAID_REVENUE, "postgres")]
+    # ACE-177: keyed on the peeled expression; the bucket's contents are the claim, unchanged.
+    bucket = idx[rt._peeled_binding(PAID_REVENUE, "postgres")[0]]
     assert [c.metric.name for c in bucket] == ["paid_revenue"]
 
 
@@ -800,7 +805,9 @@ def test_two_metrics_declaring_one_binding_name_neither(tmp_path):
     org = _org_with_metric(tmp_path, "duplicate_binding",
                            bindings={"PostgreSQL": PAID_REVENUE})
     cands = rt._metric_candidates(org, rt._storage_type_of(org), rt._dialect_of(org)[0])
-    bucket = rt._by_binding(cands)[rt._reduced_binding(PAID_REVENUE, "postgres")]
+    # ACE-177: the index is keyed on the PEELED expression — a binding's own FILTER is one of its
+    # conditions, not part of what it computes.
+    bucket = rt._by_binding(cands)[rt._peeled_binding(PAID_REVENUE, "postgres")[0]]
     assert {c.metric.name for c in bucket} == {"paid_revenue", "duplicate_binding"}, \
         "both declarations must be carried — dropping one is what made the false match possible"
 

@@ -145,7 +145,7 @@ def test_every_declared_section_is_present_and_shaped(org):
     """Empty-but-declared, never absent: a consumer must not have to tell "no joins" from "joins
     not checked", and it cannot do that if the key is sometimes missing."""
     receipt = rt.assemble_receipt(org, SQL)
-    assert tuple(receipt) == ("model_version", *guardrail.Receipt.SECTIONS)
+    assert tuple(receipt) == ("model_version", "agami_core_version", *guardrail.Receipt.SECTIONS)
     sections = _sections(org)
     for name, section in sections.items():
         assert set(section) == {"items", "undetermined"}, name
@@ -636,7 +636,14 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
         frozenset({"kind", "column"}),
         frozenset({"kind", "column", "scope", "status", "name", "area", "definition_prose",
                    "expression", "confidence", "origin", "review_state", "signed_off_by",
-                   "signed_off_role", "signed_off_at", "source_tables", "aggregate"}),
+                   "signed_off_role", "signed_off_at", "source_tables", "aggregate",
+                   # ACE-177: the rows a matched number was counted over, the conditions applied
+                   # after counting, and a metric condition the statement lacks. These DO carry the
+                   # statement's own literals — the slice is the point — bounded by `_echo_expr`,
+                   # with every value beside a sensitive column withheld. Lists of strings, never a
+                   # number, so the integer assertion below still holds; and a CTE body is not
+                   # read for them, so `CTE_LITERAL` still reaches nowhere.
+                   "restrictions", "result_filters", "missing_conditions"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
         frozenset({"ref", "alias", "qname", "declared", "rows", "rows_as_of", "freshness",
@@ -675,7 +682,7 @@ def test_the_receipt_is_the_sections_and_the_version_pin(org):
     was described against. A flat key coming back would mean two descriptions of one statement that
     are free to disagree, which is the defect the sections exist to remove."""
     receipt = rt.assemble_receipt(org, SQL, model_version="v1")
-    assert list(receipt) == ["model_version", *guardrail.Receipt.SECTIONS]
+    assert list(receipt) == ["model_version", "agami_core_version", *guardrail.Receipt.SECTIONS]
     assert receipt["model_version"] == "v1"
     assert not (set(receipt) & DELETED_FLAT_KEYS)
 
@@ -703,7 +710,7 @@ def test_there_is_no_conditional_key_left_and_no_way_to_ask_for_one(org):
     import inspect
 
     plain = rt.assemble_receipt(org, SQL)
-    assert set(plain) == {"model_version", *guardrail.Receipt.SECTIONS}
+    assert set(plain) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
     assert "default_filters_applied" not in plain and "pre_flight" not in plain
 
     # Same shape for a statement that DOES omit a declared filter — the fact lands per reference,
