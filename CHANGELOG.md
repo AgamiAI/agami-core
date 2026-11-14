@@ -325,6 +325,15 @@ below corresponds to one such version.
 - **`sm --help` prints its usage again.** The `overview` verb's help said "% described", and
   argparse reads a bare `%` in help text as a format code, so `sm --help` raised a `TypeError`
   instead of printing. A test now runs `--help` for the top level and every verb.
+- **A derived metric can be added and test-run, its bases in the same file or not.** `sm add --kind
+  metric --profile` test-ran each binding as written, so `{revenue} / {order count}` reached the
+  database with its braces. SQLite reads `{` as an unrecognized token, which execute_sql reports
+  only as "an unexpected error on the server", and a live sample run could not add "average order
+  value" at all. The test run now expands a derived (or second-order) metric from its bases, taken
+  from the model and from the same file in any order, and runs it over its own table, else its
+  bases' table. A base that is in neither is said plainly ("it is built from 'revenue', which is not
+  a metric yet: add it first, or in the same file"), with nothing run. When a test run fails in a
+  way execute_sql can't classify, the reason is the database's own words, not the generic line.
 - **Join cards recommend leaving a chance match out again.** Each join candidate in
   `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
   95% bar and the column's name reads as a reference (named for the key, or the table's word alone

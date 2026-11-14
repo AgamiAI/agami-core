@@ -203,3 +203,84 @@ def test_the_runner_names_the_failure_kind_from_the_exit_code():
     assert INTRO.ExecuteSqlFailure("x", 4).kind == "auth"
     assert INTRO.ExecuteSqlFailure("x", 7).kind == "column_not_found"
     assert INTRO.ExecuteSqlFailure("x", 99).kind is None
+
+
+# A live sample run added "average order value" as `{revenue} / {order count}`. The test run sent
+# the braces to SQLite as written, which answered with its generic "unexpected error on the server",
+# so the metric could never be added, with or without its bases in the same file.
+
+
+def _derived(name: str, binding: str, bases: list[str], tables: list[str] | None = None) -> dict:
+    return {**_metric(name, binding, tables if tables is not None else ["orders"]), "base_metrics": bases}
+
+
+def test_a_derived_metric_over_a_model_metric_runs_its_expanded_sql(tmp_path, monkeypatch, capsys):
+    rc, out, seen = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_derived("orders per order", "{order_count} / {order_count}", ["order_count"])],
+    )
+    assert rc == 0 and out["test_run"] == {"orders per order": {"ok": True}}
+    assert "{" not in seen[0] and "(COUNT(*)) / (COUNT(*))" in seen[0]
+    assert (tmp_path / "subject_areas" / "sales" / "metrics" / "orders_per_order.yaml").exists()
+
+
+def test_a_derived_metric_and_its_bases_can_be_added_in_one_file(tmp_path, monkeypatch, capsys):
+    # The derived metric comes first in the file: its bases are taken from the batch whatever the order.
+    rc, out, seen = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [
+            _derived("average order value", "{revenue} / {order count}", ["revenue", "order count"]),
+            _metric("revenue", "SUM(amount)", ["orders"]),
+            _metric("order count", "COUNT(DISTINCT id)", ["orders"]),
+        ],
+    )
+    assert rc == 0, out
+    assert all(r == {"ok": True} for r in out["test_run"].values())
+    aov = next(q for q in seen if "/" in q)
+    assert "(SUM(amount)) / (COUNT(DISTINCT id))" in aov and "{" not in aov
+    written = {p.name for p in (tmp_path / "subject_areas" / "sales" / "metrics").iterdir()}
+    assert {"average_order_value.yaml", "revenue.yaml", "order_count.yaml"} <= written
+
+
+def test_a_derived_metric_with_no_source_tables_runs_over_its_bases_table(tmp_path, monkeypatch, capsys):
+    rc, out, seen = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_derived("double count", "2 * {order_count}", ["order_count"], tables=[])],
+    )
+    assert out["test_run"] == {"double count": {"ok": True}}
+    assert '"public"."orders"' in seen[0]
+
+
+def test_a_base_that_is_nowhere_is_said_plainly_and_nothing_runs(tmp_path, monkeypatch, capsys):
+    rc, out, seen = _run(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        [_derived("aov", "{revenue} / {order_count}", ["revenue", "order_count"])],
+    )
+    assert rc == 1 and seen == [] and out["applied"] == []
+    reason = out["test_run"]["aov"]["error"]
+    assert "revenue" in reason and "same file" in reason
+    assert "server" not in reason
+
+
+def test_an_unexpected_database_error_says_the_databases_own_words(tmp_path, monkeypatch, capsys):
+    def generic(sql: str):
+        if sql == "SELECT 1":
+            return []
+        raise INTRO.ExecuteSqlFailure(
+            "The statement could not be run because of an unexpected error on the server. "
+            "The details are in the server log.\n"
+            'Database error: SQLite execution error: unrecognized token: "#"',
+            6,
+        )
+
+    rc, out, _ = _run(tmp_path, monkeypatch, capsys, [_metric("a", "SUM(#)", ["orders"])], runner=generic)
+    reason = out["test_run"]["a"]["error"]
+    assert "unrecognized token" in reason and "server log" not in reason

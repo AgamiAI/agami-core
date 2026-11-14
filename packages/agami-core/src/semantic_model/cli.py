@@ -1197,6 +1197,81 @@ def _connection_failed(runner, exc: Exception) -> bool:
     return False
 
 
+# execute_sql's first line for a failure it could not classify. It is written for a hosted caller,
+# who must not see the raw text; here the person needs the database's own words, which follow it.
+_GENERIC_FAILURE_START = "The statement could not be run because of an unexpected error on the server"
+
+
+def _test_run_reason(exc: Exception) -> str:
+    """One line saying why a test run failed, in words the person can act on."""
+    lines = [ln.strip() for ln in str(exc).splitlines() if ln.strip()]
+    if not lines:
+        return type(exc).__name__
+    if lines[0].startswith(_GENERIC_FAILURE_START):
+        own = next((ln for ln in lines[1:] if ln.startswith("Database error:")), None)
+        if own:
+            return own[len("Database error:"):].strip()[:300]
+    return lines[0][:300]
+
+
+def _batch_metric(item: dict):
+    """A metric from an `sm add` file, as the derived-metric expansion reads it. A file item the
+    model would refuse (an unknown key, say) still expands: only these fields are read."""
+    from types import SimpleNamespace
+
+    from .models import Metric
+    try:
+        return Metric.model_validate({"calculation": "", **item})
+    except Exception:  # noqa: BLE001 — the write reports the item's own problem; this only expands it
+        return SimpleNamespace(
+            name=item.get("name"), bindings=item.get("bindings") or {},
+            base_metrics=item.get("base_metrics") or [], inner_grain=item.get("inner_grain") or [],
+            source_tables=item.get("source_tables") or [])
+
+
+def _missing_bases(metric, storage_type: str, idx: dict) -> list[str]:
+    """The `{base}` names a metric's binding uses that neither the model nor the file defines."""
+    from . import derived as DV
+    seen, missing, todo = set(), [], [metric]
+    while todo:
+        m = todo.pop()
+        for ref in DV.binding_refs((getattr(m, "bindings", None) or {}).get(storage_type)):
+            if ref in seen:
+                continue
+            seen.add(ref)
+            if ref in idx:
+                todo.append(idx[ref])
+            else:
+                missing.append(ref)
+    return missing
+
+
+def _derived_test_sql(metric, storage_type: str, idx: dict, org) -> tuple[Optional[str], list[str], Optional[str]]:
+    """A derived metric's SQL with its `{base}` names replaced by the bases' SQL, the tables it
+    reads (its own `source_tables`, else its bases'), and the reason it can't be expanded.
+
+    The database never sees a `{name}`: SQLite reads `{` as an unrecognized token, which execute_sql
+    reports only as an unexpected error on the server, so a live run could not add a derived metric
+    at all. Its bases come from the model and from the same file, so they can be added together."""
+    from . import derived as DV
+    missing = _missing_bases(metric, storage_type, idx)
+    if missing:
+        names = ", ".join(repr(n) for n in missing)
+        return None, [], (f"it is built from {names}, which is not a metric yet: add "
+                          f"{'it' if len(missing) == 1 else 'them'} first, or in the same file")
+    try:
+        sql = DV.resolve_metric_sql(metric, storage_type, idx, org)
+    except DV.DerivedError as e:
+        return None, [], str(e).splitlines()[0][:300]
+    tables = list(getattr(metric, "source_tables", None) or [])
+    if not tables:
+        for ref in getattr(metric, "base_metrics", None) or DV.binding_refs(metric.bindings.get(storage_type)):
+            for t in getattr(idx.get(ref), "source_tables", None) or []:
+                if t not in tables:
+                    tables.append(t)
+    return sql, tables, None
+
+
 def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, dict], Optional[str]]:
     """Each metric's binding for this database, run once over zero rows: name → {ok} or {error}.
     The second value is the reason the database could not be reached, which stops the batch.
@@ -1205,7 +1280,9 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
     a text code to a number; neither was caught, because nothing ran the SQL before the sign-off.
     `WHERE 1 = 0` reads no rows and still makes the database resolve every column and operator.
     A metric over several tables needs their join to run, so it is reported `not_test_run`.
+    A derived metric runs its expanded SQL, its bases taken from the model and from `items`.
     """
+    from . import derived as DV
     from . import dialects as D
     from . import introspect as INTRO
     from .models import table_key
@@ -1218,6 +1295,9 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
     # Keyed by (schema, name): two same-named tables in different schemas stay apart.
     defs = list({table_key(t.name, t.schema_name): t for sa in org.subject_areas for t in sa.tables_defined}.items())
     runner = INTRO.make_execute_sql_runner(profile, building_the_model=True)
+    # The file's metrics override the model's of the same name, as the write will.
+    batch = {it["name"]: _batch_metric(it) for it in items if isinstance(it, dict) and it.get("name")}
+    idx = {**DV.metric_index(org), **batch}
     out: dict[str, dict] = {}
     for it in items:
         if not isinstance(it, dict):
@@ -1228,6 +1308,12 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
         if not binding:
             out[name] = {"not_test_run": f"no binding for {storage_type}"}
             continue
+        metric = batch.get(name)
+        if metric is not None and (DV.is_derived(metric) or DV.is_second_order(metric)):
+            binding, sources, problem = _derived_test_sql(metric, storage_type, idx, org)
+            if problem:
+                out[name] = {"error": problem}
+                continue
         hits = _tables_named(defs, str(sources[0])) if len(sources) == 1 else []
         if len(sources) != 1 or not hits:
             out[name] = {"not_test_run": "reads more than one table, or a table the model doesn't have"}
@@ -1242,7 +1328,7 @@ def _metric_test_runs(root: str, profile: str, items: list) -> tuple[dict[str, d
             runner(sql)
             out[name] = {"ok": True}
         except Exception as e:  # noqa: BLE001 — a failed binding is reported per metric, not raised
-            reason = str(e).splitlines()[0][:300] if str(e) else type(e).__name__
+            reason = _test_run_reason(e)
             if _connection_failed(runner, e):
                 return {"connection": {"error": reason}}, reason
             out[name] = {"error": reason}
