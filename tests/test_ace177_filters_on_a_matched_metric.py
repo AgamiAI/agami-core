@@ -652,3 +652,70 @@ def test_metrics_missing_a_condition_past_the_cap_are_counted(tmp_path):
     (item,) = [i for i in section["items"] if i["kind"] == "output"]
     assert len(item["missing_conditions"]) == rt._ECHO_MAX_NAMES
     assert "list only some of their conditions" in section["undetermined"]
+
+
+# --- item 9 and criterion 13: the receipt says which agami-core made it ---------------------------
+
+
+def test_every_receipt_carries_the_agami_core_version(org, monkeypatch):
+    """Beside `model_version`, so a stored receipt can be explained after the matching rules change.
+    From the one version source the server already reports (`AGAMI_VERSION`, else the installed
+    package), on the assembled dict and on the contract's `Receipt` alike."""
+    import guardrail
+    import tools
+
+    monkeypatch.setenv("AGAMI_VERSION", "9.9.9-test")
+    assert tools.server_version() == guardrail.core_version() == "9.9.9-test"
+    assembled = rt.assemble_receipt(org, "SELECT COUNT(*) AS n FROM orders")
+    assert assembled["agami_core_version"] == "9.9.9-test"
+    assert guardrail.receipt_from_assembled(assembled).agami_core_version == "9.9.9-test"
+    assert guardrail.undetermined_receipt("r").agami_core_version == "9.9.9-test"
+
+
+def test_a_stored_receipt_read_back_holds_the_version_and_every_new_key(tmp_path, monkeypatch):
+    """Criterion 13, through the real chokepoint, serializer and store: `query_executions.receipt`
+    read back holds `agami_core_version` and an output item with every ACE-177 key."""
+    import json
+    import sqlite3
+
+    from test_ace098_completeness import _record_one, _rows
+
+    from store import Store
+
+    app_db = "sqlite://" + str(tmp_path / "app.db")
+    store = Store.connect(app_db)
+    store.run_migrations()
+    store.close()
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "acme").mkdir(parents=True)
+    _write_model(artifacts / "acme", storage_type="SQLite")
+    # `_record_one` executes against area `sales`; this model's area is `s`, so name it `sales`.
+    area = artifacts / "acme" / "subject_areas"
+    (area / "s").rename(area / "sales")
+    ds = artifacts / "acme" / "datasource.yaml"
+    ds.write_text(ds.read_text().replace("subject_areas/s", "subject_areas/sales"))
+    sa = area / "sales" / "subject_area.yaml"
+    sa.write_text(sa.read_text().replace("name: s", "name: sales"))
+    warehouse = tmp_path / "warehouse.db"
+    con = sqlite3.connect(warehouse)
+    con.execute("CREATE TABLE orders (id INTEGER, customer_id INTEGER, status TEXT, "
+                "total_amount REAL, is_deleted BOOLEAN, opened TEXT, closed TEXT)")
+    con.execute("INSERT INTO orders VALUES (1, 1, 'paid', 5.0, 0, NULL, NULL)")
+    con.commit()
+    con.close()
+    monkeypatch.setenv("AGAMI_DB_URL", app_db)
+    monkeypatch.delenv("APP_DATABASE_URL", raising=False)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(artifacts))
+    monkeypatch.setenv("DATASOURCE_URL__ACME", f"sqlite:///{warehouse}")
+    monkeypatch.delenv("AGAMI_ORG_ID", raising=False)
+    monkeypatch.setenv("AGAMI_VERSION", "9.9.9-stored")
+
+    sql = "SELECT COUNT(*) AS n FROM orders WHERE status = 'paid' AND customer_id = 1"
+    assert _record_one(sql)["envelope"].status == "ok"
+    (row,) = _rows(app_db)
+    receipt = json.loads(row["receipt"])
+    assert receipt["agami_core_version"] == "9.9.9-stored"
+    (item,) = [i for i in receipt["columns"]["items"] if i["kind"] == "output"]
+    assert {"restrictions", "result_filters", "missing_conditions"} <= set(item)
+    assert (item["status"], item["name"], item["restrictions"]) == (
+        "matched", "paid_order_count", ["customer_id = 1"])

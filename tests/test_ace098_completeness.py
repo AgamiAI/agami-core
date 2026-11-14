@@ -268,7 +268,7 @@ def test_the_record_carries_the_receipt_for_an_executed_call_and_a_refused_one(e
 
     for row in _rows(env.app_db):
         receipt = json.loads(row["receipt"])
-        assert set(receipt) == {"model_version", *guardrail.Receipt.SECTIONS}
+        assert set(receipt) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
         markers = [receipt[s]["undetermined"] for s in guardrail.Receipt.SECTIONS]
         assert any(m for m in markers), (
             f"{row['status']} row carries no undetermined marker at all — the state that says "

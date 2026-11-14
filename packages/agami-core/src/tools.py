@@ -61,6 +61,7 @@ from guardrail import (
     Failure,
     Receipt,
     Refusal,
+    core_version,
     receipt_from_assembled,
     undetermined_receipt,
 )
@@ -90,16 +91,9 @@ SERVER_NAME = "agami"
 
 def server_version() -> str:
     """Best-effort version: the AGAMI_VERSION env override, else the installed package metadata.
-    Shared by both transports' serverInfo."""
-    env_v = os.environ.get("AGAMI_VERSION")
-    if env_v:
-        return env_v
-    try:
-        from importlib.metadata import PackageNotFoundError, version
-
-        return version("agami-core")
-    except PackageNotFoundError:
-        return "0.0.0"
+    Shared by both transports' serverInfo, and the same value every receipt records
+    (`guardrail.core_version`, the one source)."""
+    return core_version()
 
 
 # Client-facing usage guidance, surfaced by both transports. Describes the 4-tool flow;

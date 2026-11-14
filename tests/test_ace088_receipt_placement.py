@@ -188,7 +188,7 @@ def test_every_refusal_carries_a_receipt_with_every_section_declared(declared, r
 
     assert body["refusal"]["rule"] == guardrail.RULE_SELECT_STAR
     receipt = body["receipt"]
-    assert set(receipt) == {"model_version", *guardrail.Receipt.SECTIONS}
+    assert set(receipt) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
     for name in guardrail.Receipt.SECTIONS:
         assert set(receipt[name]) == {"items", "undetermined"}, name
         assert receipt[name]["undetermined"], name
@@ -285,7 +285,7 @@ def test_the_ok_body_carries_exactly_one_receipt_and_it_is_the_envelopes(declare
     # Real, not the empty stub: an `ok` Envelope carrying the default would be claiming "checked,
     # found nothing" about a statement that ran.
     assert [i["qname"] for i in body["receipt"]["tables"]["items"]] == ["public.orders"]
-    assert set(body["receipt"]) == {"model_version", *guardrail.Receipt.SECTIONS}
+    assert set(body["receipt"]) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
 
 
 # ---------------------------------------------------------------------------

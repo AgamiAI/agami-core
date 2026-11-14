@@ -221,7 +221,7 @@ def _assert_bounded(body: dict) -> None:
     here.
     """
     receipt = body["receipt"]
-    assert set(receipt) == {"model_version", *guardrail.Receipt.SECTIONS}
+    assert set(receipt) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
     assert {frozenset(i) for i in receipt["tables"]["items"]} <= {frozenset({"ref", "declared"})}
     for name in ("columns", "joins", "aggregates", "assumptions"):
         assert receipt[name]["items"] == [], name

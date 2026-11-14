@@ -4139,6 +4139,12 @@ def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Opti
     return status, match
 
 
+def _pins(model_version: Optional[str]) -> dict[str, Any]:
+    """What every assembled receipt is pinned to: the model version it was checked against, and the
+    agami-core version whose rules checked it (ACE-177)."""
+    return {"model_version": model_version, "agami_core_version": guardrail.core_version()}
+
+
 def assemble_receipt(
     org: Datasource,
     sql: str,
@@ -4181,7 +4187,7 @@ def assemble_receipt(
         # A receipt that never got a parse tree checked nothing, and has to say so rather than hand
         # back five clean-looking empty sections. This return and the next carry DIFFERENT reasons —
         # see UNDETERMINED_NO_PARSER.
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_NO_PARSER)}
     # The REASON the engine could not be resolved is dropped here on purpose: every section below
     # states what IT did not establish, and "the model does not say which engine this is" is not a
@@ -4192,7 +4198,7 @@ def assemble_receipt(
     dialect = _dialect_of(org)[0]
     tree = _parse_sql(sql, dialect)
     if tree is None:
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_UNPARSEABLE)}
 
     scope = _alias_map(tree)                  # alias/name -> bare table name
@@ -4700,7 +4706,7 @@ def assemble_receipt(
     ]
 
     receipt: dict[str, Any] = {
-        "model_version": model_version,
+        **_pins(model_version),
         "columns": {
             "items": column_items,
             "undetermined": _columns_marker(output_items, dropped_cols, dropped_outputs,
@@ -4816,7 +4822,7 @@ def assemble_refusal_receipt(
     `guardrail.receipt_from_assembled` maps either one with no branch.
     """
     if not _HAVE_SQLGLOT:
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_NO_PARSER)}
     # The raise from `_parse_sql` is deliberately NOT allowed to escape here, unlike everywhere
     # else in the guard path. This is the receipt attached to a REFUSAL, so the statements
@@ -4825,7 +4831,7 @@ def assemble_refusal_receipt(
     # error. `_parse_sql` already returns None for that, and None has an honest answer here.
     tree = _parse_sql(sql, _dialect_of(org)[0])
     if tree is None:
-        return {"model_version": model_version,
+        return {**_pins(model_version),
                 **_undetermined_sections(UNDETERMINED_UNPARSEABLE)}
 
     cte_names = _cte_names(tree)
@@ -4856,7 +4862,7 @@ def assemble_refusal_receipt(
             f" {dropped} further reference(s) are not listed." if dropped else ""
         ),
     }
-    return {"model_version": model_version, **sections}
+    return {**_pins(model_version), **sections}
 
 
 # ---------------------------------------------------------------------------

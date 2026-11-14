@@ -638,7 +638,8 @@ def test_the_deleted_containment_test_is_grep_clean():
 
 def test_the_receipt_is_still_the_five_sections_and_the_pin(org):
     receipt = rt.assemble_receipt(org, "SELECT SUM(total_amount) AS revenue FROM orders")
-    assert set(receipt) == {"model_version", "columns", "tables", "joins", "aggregates",
+    assert set(receipt) == {"model_version", "agami_core_version", "columns", "tables", "joins",
+                            "aggregates",
                             "assumptions"}
 
 
