@@ -850,7 +850,7 @@ def _git_email() -> Optional[str]:
     """git's `user.email` on this computer, read locally (no network), or None when git isn't
     there, has none set, or it isn't an email."""
     try:
-        out = subprocess.run(["git", "config", "--get", "user.email"], capture_output=True,
+        out = subprocess.run(["git", "config", "--get", "user.email"], capture_output=True, encoding="utf-8",
                              text=True, timeout=5).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return None
