@@ -109,14 +109,15 @@ def card(use_id: str = CARD_ID) -> str:
     return tool_use("AskUserQuestion", use_id)
 
 
-def result(content: object) -> str:
-    return _line("user", {"role": "user", "content": [{"tool_use_id": "toolu_1", "type": "tool_result",
+def result(content: object, use_id: str = "toolu_1") -> str:
+    return _line("user", {"role": "user", "content": [{"tool_use_id": use_id, "type": "tool_result",
                                                        "content": content}]})
 
 
 def printed(say_id: str = "5ca1ab1e", say: str = SUMMARY) -> str:
-    """The tool result of the engine command that registered `say_id`, as Claude Code stores it."""
-    return result(json.dumps({"say": say, "say_id": say_id, "then": "Post `say`."}, indent=2))
+    """The Bash call of the engine command that registered `say_id` and its tool result, as Claude
+    Code stores them (two lines)."""
+    return tool_use("Bash", "toolu_1") + "\n" + result(json.dumps({"say": say, "say_id": say_id, "then": "Post `say`."}, indent=2))
 
 
 def _transcript(tmp_path: Path, *lines: str, with_card: bool = True) -> Path:
@@ -239,7 +240,7 @@ def test_a_request_copy_or_a_subagent_line_does_not_count(art, tmp_path):
 def test_the_id_in_a_list_shaped_tool_result_counts(art, tmp_path):
     _write_pending(art, [_entry()])
     block = [{"type": "text", "text": json.dumps({"say_id": "5ca1ab1e"})}]
-    path = _transcript(tmp_path, result(block))
+    path = _transcript(tmp_path, tool_use(), result(block))
     assert _shown(_gate(_event(str(path)), art)) == SUMMARY
 
 
@@ -910,3 +911,47 @@ def test_the_plugin_has_no_stop_hook_and_nothing_loads_the_old_one():
     for path in PLUGIN.rglob("*"):
         if path.is_file() and path.suffix in (".py", ".json", ".md", ".sh", ""):
             assert "say_resume" not in path.read_text(encoding="utf-8", errors="replace"), path
+
+
+# --- session ownership: the engine's own `say_id` key, in a Bash result -----------------------------------
+
+
+@pytest.mark.parametrize("content", [
+    "done. ref 5ca1ab1e",                                  # a bare id in prose
+    "5ca1ab1e",
+    '{"id": "5ca1ab1e"}',                                   # another key
+    '{"say_id": "5ca1ab1e0"}',                              # a longer value
+    "say_id 5ca1ab1e",
+])
+def test_a_bare_id_in_a_bash_result_is_not_this_sessions(art, tmp_path, content):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    path = _transcript(tmp_path, tool_use(), result(content))
+    assert _gate(_event(str(path)), art) == ""
+    assert _read_pending(art) == entries
+
+
+@pytest.mark.parametrize("tool", ["Agent", "Task", "Read", "Grep", "mcp__x__y"])
+def test_the_engines_id_in_another_tools_result_does_not_count(art, tmp_path, tool):
+    # A subagent's report, or a file read back, can quote the engine's output: not this session's print.
+    entries = [_entry()]
+    _write_pending(art, entries)
+    out = json.dumps({"say_id": "5ca1ab1e", "say": SUMMARY}, indent=2)
+    path = _transcript(tmp_path, tool_use(tool, "toolu_9"), result(out, "toolu_9"))
+    assert _gate(_event(str(path)), art) == ""
+    assert _read_pending(art) == entries
+
+
+def test_a_result_whose_call_is_not_in_the_tail_does_not_count(art, tmp_path):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    path = _transcript(tmp_path, result(json.dumps({"say_id": "5ca1ab1e"}, indent=2)))
+    assert _gate(_event(str(path)), art) == ""
+
+
+@pytest.mark.parametrize("form", [{"indent": 2}, {}, {"separators": (",", ":")}])
+def test_the_engines_printed_forms_count(art, tmp_path, form):
+    _write_pending(art, [_entry()])
+    out = json.dumps({"say_id": "5ca1ab1e", "say": SUMMARY, "then": "x"}, **form)
+    path = _transcript(tmp_path, tool_use(), result(out))
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY

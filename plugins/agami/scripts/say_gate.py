@@ -13,8 +13,9 @@ in step by tests/test_say_gate.py), and this hook, before a card, checks the ses
   2. Entries older than MAX_AGE, and entries not shaped as the engine writes them (the needle not
      the say's first line, a control character, longer than the engine registers, an unknown
      kind: forged, since the file's text is shown verbatim), are dropped (the file is rewritten).
-  3. An entry belongs to this session only if its id is in a tool result in the transcript's tail
-     (the engine printed it as `say_id`). Others are left alone.
+  3. An entry belongs to this session only if the result of one of the main thread's Bash calls in
+     the transcript's tail carries its id as the engine prints it (`"say_id": "<id>"`). Others are
+     left alone.
   4. One that belongs is done with once its needle (the first line of its `say`) is in visible
      assistant text after that tool result: text blocks only, never thinking. It goes, unshown by
      the hook, so the person never sees it twice.
@@ -276,15 +277,20 @@ def _result_text(block: dict) -> str:
 
 
 def read_events(rows: list) -> tuple:
-    """(tool result texts, visible assistant texts), each as (position, text) in transcript order."""
-    results, texts = [], []
+    """(Bash result texts, visible assistant texts), each as (position, text) in transcript order.
+    Only the results of the main thread's own Bash calls: the engine prints `say_id` there, and a
+    subagent's report or a file read back may quote it without being this session's print."""
+    results, texts, bash = [], [], set()
     for n, row in enumerate(rows):
         for block in _blocks(row, "user", "user"):
-            if block.get("type") == "tool_result":
+            if block.get("type") == "tool_result" and block.get("tool_use_id") in bash:
                 results.append((n, _result_text(block)))
         for block in _blocks(row, "assistant", "assistant"):
             if block.get("type") == "text" and isinstance(block.get("text"), str):
                 texts.append((n, block["text"]))
+            elif block.get("type") == "tool_use" and block.get("name") == "Bash" \
+                    and isinstance(block.get("id"), str):
+                bash.add(block["id"])
     return results, texts
 
 
@@ -315,8 +321,11 @@ def _squash(text: str) -> str:
 
 def printed_at(entry_id: str, results: list) -> Optional[int]:
     """Where the engine's output carrying `entry_id` first appears, or None (not this session's).
-    The id must stand alone: a longer run of hex holding it is something else."""
-    pattern = re.compile(r"(?<![0-9a-fA-F])" + entry_id + r"(?![0-9a-fA-F])")
+    Only as the engine prints it, the `say_id` key with the id as its value (`cli._print_json`,
+    indented or not): a bare run of hex in prose, or a date, is something else."""
+    if not ID.fullmatch(entry_id):
+        return None
+    pattern = re.compile(r'"say_id"\s*:\s*"' + entry_id + '"')
     return next((n for n, text in results if pattern.search(text)), None)
 
 

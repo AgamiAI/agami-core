@@ -426,7 +426,7 @@ def test_every_other_cli_verb_is_refused():
             assert _decision(_bash(f'bash "{SM}" {verb}'), art) is None, verb
 
 
-# --- B. Write / Read of agami's scratch files ----------------------------------------------------------
+# --- B. Write / Edit / Read of agami's scratch files ----------------------------------------------------------
 
 
 @pytest.mark.parametrize("name", ["agami-x.json", "agami-enrich-20261112-ab12-sales-1.result.json",
@@ -694,7 +694,7 @@ def test_every_form_the_hook_approves_is_one_allowed_tools_already_covers(art):
 @pytest.mark.parametrize("name", ["say-pending.json", "agami-say-pending.json"])
 @pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
 def test_the_say_gates_pending_file_is_never_approved(art, tool, name):
-    """A subagent with Write could otherwise plant text the say gate then has the assistant post
+    """A subagent with Write or Edit could otherwise plant text the say gate then shows the person
     verbatim. Excluded by name, so a wider scratch pattern later still leaves it out."""
     assert _decision(_file(tool, str(art / "local" / "tmp" / name)), art) is None
     assert name in HOOK_MOD.NEVER_APPROVED
