@@ -307,3 +307,7 @@ def test_apply_enrichment_and_steps_say_what_to_post():
     enrich = _flat(_read(REFS / "enrich.md"))
     step3 = enrich.split("3. **Collect**", 1)[1].split("4. **Apply each chunk", 1)[0]
     assert "post its `say` exactly and do its `then`" in step3
+
+
+def test_the_engine_says_file_keeps_its_lines_short():
+    assert max(len(line) for line in _read(ENGINE_SAYS).splitlines()) <= 105

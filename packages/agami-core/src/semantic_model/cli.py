@@ -2027,8 +2027,9 @@ def _examples_out_say(printed: str, args) -> dict[str, Any]:
 # A multi-line `say` printed right before a card was not posted in live runs (the wrap-up went into
 # a thinking block), so those two are recorded for the plugin's AskUserQuestion hook, which shows
 # the text to the person with the card when it was not posted. The sentence is added only when the
-# record was written. It does not mention that fallback: posting the text is still the better path
-# (the person sees it rendered, in place), and saying a hook will cover it invites skipping it.
+# record was written. The skill text (shared/engine-says.md) names that fallback once; this
+# sentence, printed at the moment the text is due, asks only for the post, the better path (the
+# person sees it rendered, in place).
 THEN_GATED = " Post it as your visible message, not in thinking."
 
 
