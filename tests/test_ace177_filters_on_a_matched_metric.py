@@ -502,3 +502,28 @@ def test_assembly_stays_inside_the_bound(org):
         rt.assemble_receipt(org, sql)
         timings.append(time.perf_counter() - started)
     assert min(timings) < 1.0, timings
+
+
+# --- edges of the reduction ----------------------------------------------------------------------
+
+
+def test_a_filter_over_a_function_the_parser_does_not_know_is_not_peeled(tmp_path):
+    """FILTER over an unrecognised function is not known to be an aggregate, so its condition
+    stays part of the expression and nothing is matched through it."""
+    org = _org(tmp_path, metrics={"vendor_total": ("my_total(total_amount)", ["orders"])})
+    item = _one(org, "SELECT my_total(total_amount) FILTER (WHERE status = 'paid') AS s "
+                     "FROM orders", "s")
+    assert item["status"] != rt.MATCHED
+
+
+def test_an_unqualified_column_across_an_outer_join_takes_its_condition(org):
+    """An unqualified column could be either side's, so the optional side's condition is listed:
+    listing too much is the safe direction here."""
+    item = _one(org, "SELECT SUM(amount) AS paid FROM orders o LEFT JOIN payments p "
+                     "ON p.order_id = o.id AND p.status = 'paid'", "paid")
+    assert (item["name"], item["restrictions"]) == ("payment_total", ["p.status = 'paid'"])
+
+
+def test_a_peeled_binding_is_unread_without_the_parser(monkeypatch):
+    monkeypatch.setattr(rt, "_HAVE_SQLGLOT", False)
+    assert rt._peeled_binding("COUNT(*)", "postgres") is None

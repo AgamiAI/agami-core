@@ -9158,8 +9158,6 @@ def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[s
     """
     shown = node.copy()
     if any(_tkey(col.name) in sensitive for col in shown.find_all(exp.Column)):
-        if isinstance(shown, _VALUE_LEAVES):
-            shown = exp.Var(this=_WITHHELD)
         for leaf in list(shown.find_all(*_VALUE_LEAVES)):
             leaf.replace(exp.Var(this=_WITHHELD))
     return _echo_expr(shown.sql())
