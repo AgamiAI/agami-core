@@ -79,7 +79,8 @@ below corresponds to one such version.
   a row never showed the closing summary, and the last two not the examples table, although the
   engine handed both over as `say`: the model wrote its wrap-up into a thinking block and asked the
   card. Now `sm steps --mark first_question=in_progress` (when its `say` carries the summary) and
-  `sm seed-validate --out` (without `--no-card`) record their `say` in
+  `sm seed-validate --out` (with or without `--no-card`: the sample path asks no examples card, but
+  the closing card follows) record their `say` in
   `<artifacts_dir>/local/tmp/say-pending.json` (a name the approve hook never waves through, so a
   subagent can't plant text in it), print its `say_id` just before `say`, and end `then` with "Post
   it as your visible message, not in thinking." A second `PreToolUse` hook (`scripts/say_gate.py`,

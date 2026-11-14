@@ -99,13 +99,38 @@ def test_seed_validate_out_registers_the_examples_table(art, capsys, fake_db):
     assert entry["needle"] == "| # | Example | Rows | Result |"
 
 
-def test_no_card_registers_nothing(art, capsys, fake_db):
+def test_no_card_registers_the_examples_table_the_same_way(art, capsys, fake_db):
+    # The sample path asks no examples card, but the closing card follows: the table is due before it
+    # (live run round 6, sample: never registered, so never shown). Same kind, `say_id` before `say`.
     target = art / "local" / "tmp" / "agami-examples.json"
     target.parent.mkdir(parents=True)
     out = _run(["seed-validate", str(art / "acme"), "--profile", "acme", "--out", str(target),
                 "--no-card"], capsys)
+    assert out["then"] == "Post `say`." + GATED
+    (entry,) = _pending(art)
+    assert (entry["id"], entry["kind"], entry["say"]) == (out["say_id"], "examples", out["say"])
+    assert entry["needle"] == "| # | Example | Rows | Result |"
+    assert list(out).index("say_id") == list(out).index("say") - 1
+
+
+def test_no_card_examples_then_the_closing_summary_are_both_kept_in_order(art, capsys, fake_db):
+    target = art / "local" / "tmp" / "agami-examples.json"
+    target.parent.mkdir(parents=True)
+    ex = _run(["seed-validate", str(art / "acme"), "--profile", "acme", "--out", str(target),
+               "--no-card"], capsys)
+    summ = _close(art, capsys)
+    assert [(e["kind"], e["id"]) for e in _pending(art)] == [("examples", ex["say_id"]),
+                                                              ("summary", summ["say_id"])]
+
+
+def test_no_card_without_a_scratch_folder_prints_what_it_printed_before(tmp_path, capsys, fake_db,
+                                                                        monkeypatch):
+    root = tmp_path / "acme"
+    shutil.copytree(SAMPLE, root)
+    monkeypatch.setenv("AGAMI_ARTIFACTS_DIR", str(tmp_path / "missing"))
+    out = _run(["seed-validate", str(root), "--profile", "acme", "--out", str(tmp_path / "x.json"),
+                "--no-card"], capsys)
     assert out["then"] == "Post `say`." and "say_id" not in out
-    assert not (art / "local" / "tmp" / say_pending.FILE_NAME).exists()
 
 
 def test_examples_then_summary_are_both_kept_in_order(art, capsys, fake_db):

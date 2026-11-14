@@ -2020,8 +2020,10 @@ def examples_say(printed: str, card: bool = True) -> dict[str, Any]:
 
 def _examples_out_say(printed: str, args) -> dict[str, Any]:
     said = examples_say(printed, card=not args.no_card)
-    # Only the table asked before the examples card is gated: with --no-card no card follows it.
-    return gate_say(said, "examples") if said and not args.no_card else said
+    # Gated with or without the examples card: `--no-card` (the sample path) asks none, but the
+    # closing card comes next, and the table is due before it like any other (a live sample run
+    # never showed it while only the carded run was gated).
+    return gate_say(said, "examples")
 
 
 # A multi-line `say` printed right before a card was not posted in live runs (the wrap-up went into
