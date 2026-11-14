@@ -763,3 +763,13 @@ def test_edit_and_write_agree_on_every_scratch_path(art, tmp_path):
     for path in (tmp / "agami-there.json", tmp / "agami-new.md", tmp / "x.json", tmp / "say-pending.json",
                  tmp / "AGAMI-x.json", tmp_path / "agami-x.json"):
         assert _decision(_file("Edit", str(path)), art) == _decision(_file("Write", str(path)), art), path
+
+
+
+@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
+def test_the_say_gates_claim_files_are_never_approved(art, tool):
+    # say_gate.py claims an entry by creating `say-claim-<id>`; a subagent must not pre-create one.
+    target = art / "local" / "tmp" / "say-claim-5ca1ab1e"
+    assert _decision(_file(tool, str(target)), art) is None
+    target.write_text("")
+    assert _decision(_file(tool, str(target)), art) is None

@@ -107,12 +107,14 @@ def register(artifacts_dir: Path, kind: str, say: str, now: Optional[datetime] =
         path = tmp / FILE_NAME
         if path.is_symlink() or (path.exists() and not path.is_file()):
             return None
+        entry_id = secrets.token_hex(4)
+        at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+        # Read just before the atomic replace, with nothing slow in between: the plugin's hook may be
+        # rewriting the file too, and what it wrote is kept.
         try:
             entries = load(path)
         except ValueError:
             entries = []  # a damaged file is replaced: the hook gives no opinion on it meanwhile
-        entry_id = secrets.token_hex(4)
-        at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
         entries = [e for e in entries if e.get("kind") != kind]
         entries.append({"id": entry_id, "kind": kind, "needle": needle, "say": say,
                         "created_at": at.isoformat()})

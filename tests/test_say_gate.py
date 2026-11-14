@@ -294,25 +294,32 @@ def test_another_sessions_entry_is_neither_shown_nor_dropped_beside_this_ones(ar
     assert _read_pending(art) == [other]
 
 
-def test_over_the_cap_the_newest_that_fit_are_shown(art, tmp_path, monkeypatch):
-    """Rule: walk from the newest back, keep each `say` while the joined message stays within
-    MAX_MESSAGE_CHARS, stop at the first that does not fit; show the kept ones in registration order.
-    The left-out older ones are dropped without a word."""
+def test_over_the_cap_the_oldest_that_fit_are_shown_and_the_rest_wait(art, tmp_path, monkeypatch):
+    """Rule: from the oldest, take each `say` whole while the joined message stays within
+    MAX_MESSAGE_CHARS, and stop at the first that does not fit. The ones not shown stay pending and
+    are shown at the next card: nothing is removed without being shown."""
     monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", len(SUMMARY) + 2 + len(EXAMPLES) - 1)
     _write_pending(art, [_entry("aaaa0001", EXAMPLES, "examples"), _entry("bbbb0002")])
     path = _transcript(tmp_path, printed("aaaa0001", EXAMPLES), printed("bbbb0002"))
+    assert _shown(_gate(_event(str(path)), art)) == EXAMPLES
+    assert [e["id"] for e in _read_pending(art)] == ["bbbb0002"]
     assert _shown(_gate(_event(str(path)), art)) == SUMMARY
     assert _read_pending(art) == []
 
 
+def _text(entries: list) -> str:
+    return GATE_MOD.SEPARATOR.join(piece for _, piece in GATE_MOD.plan(entries))
+
+
 def test_exactly_at_the_cap_both_are_shown(monkeypatch):
     entries = [{"say": "a" * 10}, {"say": "b" * 10}]
-    assert GATE_MOD.message(entries) == "a" * 10 + "\n\n" + "b" * 10
+    assert _text(entries) == "a" * 10 + "\n\n" + "b" * 10
     monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", 22)
-    assert GATE_MOD.message(entries) == "a" * 10 + "\n\n" + "b" * 10
+    assert _text(entries) == "a" * 10 + "\n\n" + "b" * 10
     monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", 21)
-    assert GATE_MOD.message(entries) == "b" * 10
-    assert GATE_MOD.message([]) == ""
+    assert _text(entries) == "a" * 10           # the newer one waits
+    assert [e for e, _ in GATE_MOD.plan(entries)] == [entries[0]]
+    assert GATE_MOD.plan([]) == []
 
 
 CUT = "The rest is in the model summary: ask agami to show it."
@@ -326,7 +333,7 @@ def _table(rows: int) -> str:
 def test_a_single_text_over_the_documented_cap_is_cut_at_a_whole_line():
     say = _table(600)
     assert 10_000 < len(say) <= GATE_MOD.MAX_SAY_CHARS
-    out = GATE_MOD.message([{"say": say}])
+    out = _text([{"say": say}])
     assert len(out) <= 10_000 and out.endswith("\n\n" + CUT)
     kept = out[: -len("\n\n" + CUT)]
     assert say.startswith(kept + "\n")             # a prefix of the text ending at a line break
@@ -335,20 +342,41 @@ def test_a_single_text_over_the_documented_cap_is_cut_at_a_whole_line():
     assert len(kept) + 1 + len(next_line) + len("\n\n" + CUT) > 10_000  # the next line would not fit
 
 
-def test_over_the_cap_the_newest_is_cut_and_older_ones_dropped(art, tmp_path):
+def test_an_over_long_oldest_is_cut_and_shown_and_the_newer_waits(art, tmp_path):
     big = _table(600)
-    _write_pending(art, [_entry("aaaa0001", EXAMPLES, "examples"), _entry("bbbb0002", say=big)])
-    path = _transcript(tmp_path, printed("aaaa0001", EXAMPLES), printed("bbbb0002", big))
+    _write_pending(art, [_entry("aaaa0001", say=big), _entry("bbbb0002", EXAMPLES, "examples")])
+    path = _transcript(tmp_path, printed("aaaa0001", big), printed("bbbb0002", EXAMPLES))
     out = _shown(_gate(_event(str(path)), art))
     assert len(out) <= 10_000 and out.startswith("**acme: 300 tables.**") and out.endswith(CUT)
     assert "| # | Example |" not in out
+    assert [e["id"] for e in _read_pending(art)] == ["bbbb0002"]
+    assert _shown(_gate(_event(str(path)), art)) == EXAMPLES
     assert _read_pending(art) == []
+
+
+def test_no_entry_is_ever_removed_unshown(art, tmp_path):
+    """Whatever the sizes, every entry of this session is shown (whole or cut) before it leaves the
+    file, one card after another."""
+    says = [("aaaa0001", _table(600)), ("bbbb0002", _table(200)), ("cccc0003", _table(250)), ("dddd0004", SUMMARY)]
+    _write_pending(art, [_entry(i, say=t) for i, t in says])
+    path = _transcript(tmp_path, *[printed(i, t) for i, t in says])
+    seen = []
+    for _ in range(len(says) + 1):
+        out = _gate(_event(str(path)), art)
+        if out:
+            text = _shown(out)
+            assert len(text) <= 10_000
+            seen.append(text)
+    assert _read_pending(art) == []
+    joined = "\n\n".join(seen)
+    for _, say in says:
+        assert say.splitlines()[0] in joined
 
 
 def test_a_first_line_longer_than_the_cap_leaves_only_the_fixed_line(monkeypatch):
     monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", 80)
-    assert GATE_MOD.message([{"say": "x" * 81 + "\nmore"}]) == CUT
-    assert GATE_MOD.message([{"say": "short\n" + "y" * 100}]) == "short\n\n" + CUT
+    assert _text([{"say": "x" * 81 + "\nmore"}]) == CUT
+    assert _text([{"say": "short\n" + "y" * 100}]) == "short\n\n" + CUT
 
 
 def test_the_cut_line_is_fixed_text():
@@ -663,7 +691,7 @@ def test_the_gate_imports_nothing_of_the_plugin_or_the_package():
     assert "spec_from_file_location" not in source
 
 
-def test_the_gate_writes_only_the_pending_file(art, tmp_path):
+def test_the_gate_writes_only_the_pending_file_and_its_claim(art, tmp_path):
     _write_pending(art, [_entry()])
     path = _transcript(tmp_path, printed())
 
@@ -673,7 +701,8 @@ def test_the_gate_writes_only_the_pending_file(art, tmp_path):
     before = snapshot()
     _gate(_event(str(path)), art)
     after = snapshot()
-    assert {p for p in after if before.get(p) != after[p]} | (set(before) - set(after)) == {_pending_path(art)}
+    changed = {p for p in after if before.get(p) != after[p]} | (set(before) - set(after))
+    assert changed == {_pending_path(art), art / "local" / "tmp" / "say-claim-5ca1ab1e"}
 
 
 # --- hooks.json ---------------------------------------------------------------------------------------
@@ -955,3 +984,130 @@ def test_the_engines_printed_forms_count(art, tmp_path, form):
     out = json.dumps({"say_id": "5ca1ab1e", "say": SUMMARY, "then": "x"}, **form)
     path = _transcript(tmp_path, tool_use(), result(out))
     assert _shown(_gate(_event(str(path)), art)) == SUMMARY
+
+
+# --- concurrency: claims, and saves that keep what others wrote ------------------------------------------
+
+
+def test_two_hook_processes_print_the_text_exactly_once_every_time(art, tmp_path):
+    """Two cards in one reply run two hook processes at once. Only the one that creates the entry's
+    claim file prints it."""
+    path = _transcript(tmp_path, printed())
+    event = json.dumps(_event(str(path))).encode()
+    claim = art / "local" / "tmp" / "say-claim-5ca1ab1e"
+    for trial in range(25):
+        _write_pending(art, [_entry()])
+        claim.unlink(missing_ok=True)
+        procs = [subprocess.Popen([sys.executable, "-I", str(GATE)], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, env=_env(art)) for _ in range(2)]
+        outs = [proc.communicate(event, timeout=30)[0] for proc in procs]
+        printed_count = sum(1 for out in outs if out)
+        assert printed_count == 1, (trial, outs)
+        assert all(_shown(out.decode()) == SUMMARY for out in outs if out)
+        assert _read_pending(art) == []
+
+
+def test_a_lost_claim_prints_nothing(art, tmp_path):
+    _write_pending(art, [_entry()])
+    (art / "local" / "tmp" / "say-claim-5ca1ab1e").write_text("")
+    assert _gate(_event(str(_transcript(tmp_path, printed()))), art) == ""
+
+
+def test_an_entry_registered_during_the_wait_survives(art, tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setattr(GATE_MOD, "CARD_WAIT", 5.0)
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, printed(), with_card=False)
+    late = _entry("bbbb0002", EXAMPLES, "examples")
+
+    def register_then_card() -> None:
+        time.sleep(0.3)
+        _write_pending(art, [*_read_pending(art), late])
+        time.sleep(0.2)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(card() + "\n")
+
+    writer = threading.Thread(target=register_then_card)
+    writer.start()
+    try:
+        assert _shown(_gate(_event(str(path)), art)) == SUMMARY
+    finally:
+        writer.join()
+    assert _read_pending(art) == [late]
+
+
+def test_a_save_that_fails_after_the_claim_releases_it(art, tmp_path, monkeypatch):
+    _write_pending(art, [_entry()])
+
+    def fail(*_a: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(GATE_MOD, "save", fail)
+    path = _transcript(tmp_path, printed())
+    assert _gate(_event(str(path)), art) == ""
+    assert not (art / "local" / "tmp" / "say-claim-5ca1ab1e").exists()
+    monkeypatch.undo()
+    monkeypatch.setattr(GATE_MOD, "CARD_WAIT", 0.3)
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY   # shown at the next card instead
+
+
+def test_stale_claims_are_removed_and_fresh_ones_kept(art, tmp_path):
+    tmp = art / "local" / "tmp"
+    old, fresh, other = tmp / "say-claim-01d0c1a1", tmp / "say-claim-f2e5a0b1", tmp / "say-claim-notours"
+    for f in (old, fresh, other):
+        f.write_text("")
+    hour_ago = time.time() - 3600
+    os.utime(old, (hour_ago, hour_ago))
+    os.utime(other, (hour_ago, hour_ago))
+    _write_pending(art, [_entry()])
+    _gate(_event(str(_transcript(tmp_path, printed()))), art)
+    assert not old.exists() and fresh.exists() and other.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or sys.platform == "win32", reason="symlinks")
+def test_a_claim_name_that_is_a_link_is_never_followed(art, tmp_path):
+    target = tmp_path / "elsewhere"
+    (art / "local" / "tmp" / "say-claim-5ca1ab1e").symlink_to(target)
+    _write_pending(art, [_entry()])
+    assert _gate(_event(str(_transcript(tmp_path, printed()))), art) == ""
+    assert not target.exists()
+
+
+def test_claims_are_named_from_the_validated_id_only():
+    assert GATE_MOD.claim_name("5ca1ab1e") == "say-claim-5ca1ab1e"
+    for bad in ("../x", "5CA1AB1E", "5ca1ab1e0", "", "a/b"):
+        with pytest.raises(Exception):
+            GATE_MOD.claim_name(bad)
+
+
+# --- the card's line is waited for once per entry ---------------------------------------------------------
+
+
+def test_after_one_timed_out_wait_later_cards_decide_at_once(art, tmp_path, monkeypatch):
+    monkeypatch.setattr(GATE_MOD, "CARD_WAIT", 0.6)
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, printed(), with_card=False)
+    started = time.monotonic()
+    assert _gate(_event(str(path)), art) == ""
+    assert time.monotonic() - started >= 0.6
+    assert _read_pending(art)[0]["waited"] is True
+    started = time.monotonic()
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY   # decided from what the transcript holds
+    assert time.monotonic() - started < 0.4
+    assert _read_pending(art) == []
+
+
+def test_after_the_wait_a_posted_text_is_still_not_shown(art, tmp_path, monkeypatch):
+    monkeypatch.setattr(GATE_MOD, "CARD_WAIT", 0.3)
+    _write_pending(art, [_entry(waited=True)])
+    path = _transcript(tmp_path, printed(), text(SUMMARY), with_card=False)
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == []
+
+
+@pytest.mark.parametrize("waited", [1, "true", None])
+def test_a_misshapen_wait_mark_says_nothing(art, tmp_path, waited):
+    entry = _entry(waited=waited)
+    _write_pending(art, [entry])
+    assert _gate(_event(str(_transcript(tmp_path, printed()))), art) == ""
+    assert _read_pending(art) == [entry]

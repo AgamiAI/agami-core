@@ -19,13 +19,19 @@ in step by tests/test_say_gate.py), and this hook, before a card, checks the ses
   4. One that belongs is done with once its needle (the first line of its `say`) is in visible
      assistant text after that tool result: text blocks only, never thinking. It goes, unshown by
      the hook, so the person never sees it twice.
-  5. The ones that belong and were not posted go too, and their `say`s are printed, in the order
-     the engine registered them, as one `systemMessage` (which Claude Code shows the person), the
-     file saved first: a text is shown once at most, and not at all if the save fails.
+  5. The ones that belong and were not posted are printed as one `systemMessage` (which Claude Code
+     shows the person), in the order the engine registered them, as many as fit MAX_MESSAGE_CHARS
+     (the rest wait for the next card; one that alone is too long is cut at a whole line). Each is
+     first claimed (a `say-claim-<id>` file created with O_EXCL: of two hook processes for two
+     cards in one reply, only one prints it), then removed from the file, saved before printing: a
+     text is shown once at most, and if the save fails the claim is given back and nothing printed.
+  Every save reads the file again just before its atomic replace and changes only the entries this
+  run handled, so an entry the engine registered meanwhile is kept.
 
 Its only output is `systemMessage`: it makes no decision about any call, so the card always goes
 ahead through the normal permission flow. It reads only the pending file and the transcript path it
-is handed, and writes only the pending file (through a temp file beside it, for an atomic replace).
+is handed, and writes only the pending file (through a temp file beside it, for an atomic replace)
+and claim files beside it (removed once older than MAX_AGE).
 Every doubt prints nothing: input it can't parse, a file it can't read or trust, a change it can't
 save, an exception. Like approve_own_calls.py it imports nothing of the plugin or the agami package,
 and hooks.json runs it with `python3 -I` from PATH.
@@ -38,7 +44,8 @@ the in-memory conversation": in a live session the text posted right before a ca
 yet when the hook ran. Lines are appended in order, so when this session has unposted text the hook
 waits (at most CARD_WAIT seconds) until the card's own tool_use line (`tool_use_id`) is in the
 transcript, which puts everything before it there too; without that it would show again text the
-assistant had just posted. If the line never appears: nothing.
+assistant had just posted. If the line never appears: nothing, and the entry is marked `waited`, so
+later cards decide at once from what the transcript holds (one wait per entry, not one per card).
 """
 
 from __future__ import annotations
@@ -61,6 +68,13 @@ FIELDS = ("id", "kind", "needle", "say", "created_at")
 # Counts an earlier engine kept for the card refusals this hook no longer makes. An entry it wrote
 # may still be on disk: read as usual (the types it wrote, or a doubt), never used.
 LEGACY = ("refused", "resumed")
+# Set by this hook, through the same keep-what-others-wrote save, once it waited CARD_WAIT for a
+# card's line that never came: later cards decide from the transcript at once, not after 3 s each.
+WAITED = "waited"
+# A file `say-claim-<id>` beside the pending file, created with O_EXCL by the one hook process that
+# shows the entry: two cards in one reply run two processes, and only one may print the text. Not
+# `agami-…`, so approve_own_calls.py never lets a subagent create one.
+CLAIM_PREFIX = "say-claim-"
 NEEDLE_CHARS = 120
 MAX_AGE = timedelta(minutes=30)
 # A clock that moved back a little must not hide a fresh entry; one far in the future is not ours.
@@ -149,10 +163,10 @@ def _created(entry: dict) -> datetime:
 
 def _check_entry(entry: Any) -> None:
     """Doubt unless `entry` is exactly what the engine writes."""
-    if not isinstance(entry, dict) or set(entry) - set(LEGACY) != set(FIELDS):
+    if not isinstance(entry, dict) or set(entry) - set(LEGACY) - {WAITED} != set(FIELDS):
         raise Doubt("fields")
-    if type(entry.get("resumed", False)) is not bool:
-        raise Doubt("resumed")
+    if type(entry.get("resumed", False)) is not bool or type(entry.get(WAITED, False)) is not bool:
+        raise Doubt("resumed or waited")
     refused = entry.get("refused", 0)
     if type(refused) is not int or refused < 0:
         raise Doubt("refused")
@@ -299,16 +313,18 @@ def _has_card(rows: list, tool_use_id: str) -> bool:
                for row in rows for b in _blocks(row, "assistant", "assistant"))
 
 
-def card_rows(path: Any, tool_use_id: Any, rows: list) -> list:
+class NeverCaughtUp(Doubt):
+    """The card's own line did not reach the transcript within CARD_WAIT."""
+
+
+def card_rows(path: Any, tool_use_id: str, rows: list) -> list:
     """`rows` (the tail already read) if it holds the card's own tool_use line, so that the text
     written before the card is there too; else the tail read again until it does, for up to
-    CARD_WAIT seconds. Doubt when it never does."""
-    if not isinstance(tool_use_id, str) or not tool_use_id:
-        raise Doubt("no tool_use_id")
+    CARD_WAIT seconds. NeverCaughtUp when it never does."""
     deadline = time.monotonic() + CARD_WAIT
     while not _has_card(rows, tool_use_id):
         if time.monotonic() >= deadline:
-            raise Doubt("the transcript has not caught up with the card")
+            raise NeverCaughtUp("the transcript has not caught up with the card")
         time.sleep(CARD_POLL)
         rows = transcript_tail(path)
     return rows
@@ -365,19 +381,79 @@ def _cut(say: str) -> str:
     return f"{head}{SEPARATOR}{CUT_LINE}" if head else CUT_LINE
 
 
-def message(waiting: list) -> str:
-    """The `say`s of `waiting` (in file order, the order the engine registered them) joined by a
-    blank line, within MAX_MESSAGE_CHARS: the newest that fit whole, still in order; the older ones
-    are left out without a word, as the newest is what the card follows. When not even the newest
-    fits, it alone is shown, cut at a whole line (`_cut`)."""
-    says: list = []
-    for entry in reversed(waiting):
-        if len(SEPARATOR.join([entry["say"], *says])) > MAX_MESSAGE_CHARS:
+def plan(waiting: list) -> list:
+    """What to show of `waiting` (in file order, the order the engine registered them), as
+    (entry, text) pairs within MAX_MESSAGE_CHARS once joined by SEPARATOR: from the oldest, each
+    whole while it fits, stopping at the first that does not; the rest stay pending for the next
+    card, so nothing leaves the file unshown. An oldest that alone does not fit is shown cut at a
+    whole line (`_cut`)."""
+    shown: list = []
+    for entry in waiting:
+        if len(SEPARATOR.join([*(text for _, text in shown), entry["say"]])) > MAX_MESSAGE_CHARS:
             break
-        says.insert(0, entry["say"])
-    if waiting and not says:
-        return _cut(waiting[-1]["say"])
-    return SEPARATOR.join(says)
+        shown.append((entry, entry["say"]))
+    if waiting and not shown:
+        shown.append((waiting[0], _cut(waiting[0]["say"])))
+    return shown
+
+
+# --- concurrency ----------------------------------------------------------------------------------
+
+
+def claim_name(entry_id: str) -> str:
+    if not isinstance(entry_id, str) or not ID.fullmatch(entry_id):
+        raise Doubt("not an id")
+    return CLAIM_PREFIX + entry_id
+
+
+def claim(folder: str, entry_id: str) -> bool:
+    """Whether this process now owns showing `entry_id`: it created its claim file (O_EXCL, never
+    through a link). False when another process did first; any other failure is a doubt."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(os.path.join(folder, claim_name(entry_id)), flags, 0o600)
+    except FileExistsError:
+        return False
+    os.close(fd)
+    return True
+
+
+def release(folder: str, ids: list) -> None:
+    for entry_id in ids:
+        try:
+            os.unlink(os.path.join(folder, claim_name(entry_id)))
+        except OSError:
+            pass
+
+
+CLAIM = re.compile(re.escape(CLAIM_PREFIX) + r"[0-9a-f]{8}")
+
+
+def clear_stale_claims(folder: str, now: float) -> None:
+    """Claim files older than MAX_AGE: their entries are gone by now. Only plain files named as
+    this hook names them are touched."""
+    for name in os.listdir(folder):
+        if not CLAIM.fullmatch(name):
+            continue
+        path = os.path.join(folder, name)
+        try:
+            st = os.lstat(path)
+            if stat.S_ISREG(st.st_mode) and now - st.st_mtime > MAX_AGE.total_seconds():
+                os.unlink(path)
+        except OSError:
+            pass
+
+
+def update(path: str, drop: set, mark: set = frozenset()) -> None:
+    """Remove the entries `drop` names, and mark the ones `mark` names as waited for, in the file as
+    it is NOW: read again just before the atomic replace, so an entry the engine registered (or
+    another hook process changed) since this one first read it is kept."""
+    if not drop and not mark:
+        return
+    current = load(path)
+    after = [{**e, WAITED: True} if e["id"] in mark else e for e in current if e["id"] not in drop]
+    if after != current:
+        save(path, after)
 
 
 def decide(event: Any, now: Optional[datetime] = None) -> Optional[dict]:
@@ -389,30 +465,43 @@ def decide(event: Any, now: Optional[datetime] = None) -> Optional[dict]:
     path = pending_file()
     if path is None:
         return None
+    folder = os.path.dirname(path)
     entries = load(path)
     if not entries:
         return None
     now = now or datetime.now(timezone.utc)
     if any(_created(e) - now > MAX_SKEW for e in entries):
         raise Doubt("an entry from the future")
+    clear_stale_claims(folder, time.time())
     fresh = [e for e in entries if now - _created(e) <= MAX_AGE and well_formed(e)]
-    if len(fresh) != len(entries):
-        save(path, fresh)
-        entries = fresh
-    transcript = event.get("transcript_path")
+    update(path, {e["id"] for e in entries if not any(e is f for f in fresh)})
+    entries = fresh
+    transcript, tool_use_id = event.get("transcript_path"), event.get("tool_use_id")
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        raise Doubt("no tool_use_id")
     rows = transcript_tail(transcript)
     kept, waiting = _sort(entries, rows)
-    if waiting:
+    unwaited = {e["id"] for e in waiting if not e.get(WAITED)}
+    if unwaited:
         # Only now, with text of this session not yet seen posted, is the lag worth waiting out (see
         # the module docstring): text posted just before the card would otherwise be shown twice.
-        # Another session's entry or a posted one costs no wait.
-        kept, waiting = _sort(entries, card_rows(transcript, event.get("tool_use_id"), rows))
-    # Saved before anything is printed, so a text is shown once at most; a save that fails raises,
-    # and the text is not shown at all.
-    remaining = [e for e in kept if not any(e is w for w in waiting)]
-    if len(remaining) != len(entries):
-        save(path, remaining)
-    text = message(waiting)
+        # Once per entry: after a wait that timed out, later cards decide from what is there.
+        try:
+            kept, waiting = _sort(entries, card_rows(transcript, tool_use_id, rows))
+        except NeverCaughtUp:
+            update(path, set(), unwaited)
+            raise
+    posted = {e["id"] for e in entries if not any(e is k for k in kept)}
+    shown = plan(waiting)
+    mine = [(e, text) for e, text in shown if claim(folder, e["id"])]
+    try:
+        # Saved before anything is printed, so a text is shown once at most; a save that fails
+        # gives the claims back, and the text waits for the next card.
+        update(path, posted | {e["id"] for e, _ in mine})
+    except BaseException:
+        release(folder, [e["id"] for e, _ in mine])
+        raise
+    text = SEPARATOR.join(text for _, text in mine)
     return {"systemMessage": text} if text else None
 
 

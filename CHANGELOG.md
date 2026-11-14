@@ -84,18 +84,23 @@ below corresponds to one such version.
   subagent can't plant text in it), print its `say_id` just before `say`, and end `then` with "Post
   it as your visible message, not in thinking." A second `PreToolUse` hook (`scripts/say_gate.py`,
   on `AskUserQuestion` only) checks, when a card is asked, whether each recorded text whose
-  `say_id` this session's transcript shows was posted as visible text after it. One that was not is
+  `say_id` this session's transcript shows (as the engine prints it, in the result of the session's
+  own Bash call) was posted as visible text after it. One that was not is
   printed as a `systemMessage`, which Claude Code shows the person, and removed, so it is shown once;
   several are shown in the order they were recorded, in one message of at most 10,000 characters,
-  Claude Code's limit for it (over that, the newest that fit whole; a single text over it is cut at
-  a whole line and ends with "The rest is in the model summary: ask agami to show it."). One that was posted is removed and not shown again. The hook
+  Claude Code's limit for it (from the oldest, those that fit whole; the rest wait for the next
+  card; a single text over it is cut at a whole line and ends with "The rest is in the model
+  summary: ask agami to show it."). Two cards in one reply show a text once: the hook process that
+  creates the entry's `say-claim-<id>` file prints it, the other does not. Every save of the file
+  re-reads it first and changes only what that run handled, so a text recorded meanwhile is kept. One that was posted is removed and not shown again. The hook
   makes no decision of any kind, so the card always goes ahead on its first ask. It forgets texts
   older than 30 minutes, drops an entry not shaped as the engine writes it (needle not the text's
   first line, a control character, longer than 32,000 characters, an unknown kind), saves the file
   before printing (a save that fails shows nothing), and on any doubt says nothing. The transcript
   is written asynchronously, so when text of this session is not yet seen posted it first waits (up
   to 3 s) for the card's own line to reach it: without that, text posted just before the card would
-  be shown a second time. When the scratch folder can't be written, the commands print what they
+  be shown a second time. It waits at most once per text: after a wait that timed out, later cards
+  decide at once from what the transcript holds. When the scratch folder can't be written, the commands print what they
   printed before, with no `say_id` and no extra sentence.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With
