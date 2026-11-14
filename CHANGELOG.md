@@ -86,8 +86,9 @@ below corresponds to one such version.
   on `AskUserQuestion` only) checks, when a card is asked, whether each recorded text whose
   `say_id` this session's transcript shows was posted as visible text after it. One that was not is
   printed as a `systemMessage`, which Claude Code shows the person, and removed, so it is shown once;
-  several are shown in the order they were recorded, in one message of at most 32,000 characters
-  (over that, the newest that fit). One that was posted is removed and not shown again. The hook
+  several are shown in the order they were recorded, in one message of at most 10,000 characters,
+  Claude Code's limit for it (over that, the newest that fit whole; a single text over it is cut at
+  a whole line and ends with "The rest is in the model summary: ask agami to show it."). One that was posted is removed and not shown again. The hook
   makes no decision of any kind, so the card always goes ahead on its first ask. It forgets texts
   older than 30 minutes, drops an entry not shaped as the engine writes it (needle not the text's
   first line, a control character, longer than 32,000 characters, an unknown kind), saves the file

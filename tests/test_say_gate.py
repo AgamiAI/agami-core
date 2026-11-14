@@ -295,29 +295,63 @@ def test_another_sessions_entry_is_neither_shown_nor_dropped_beside_this_ones(ar
 
 def test_over_the_cap_the_newest_that_fit_are_shown(art, tmp_path, monkeypatch):
     """Rule: walk from the newest back, keep each `say` while the joined message stays within
-    MAX_SAY_CHARS, stop at the first that does not fit; show the kept ones in registration order.
+    MAX_MESSAGE_CHARS, stop at the first that does not fit; show the kept ones in registration order.
     The left-out older ones are dropped without a word."""
-    monkeypatch.setattr(GATE_MOD, "MAX_SAY_CHARS", len(SUMMARY) + 2 + len(EXAMPLES) - 1)
+    monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", len(SUMMARY) + 2 + len(EXAMPLES) - 1)
     _write_pending(art, [_entry("aaaa0001", EXAMPLES, "examples"), _entry("bbbb0002")])
     path = _transcript(tmp_path, printed("aaaa0001", EXAMPLES), printed("bbbb0002"))
     assert _shown(_gate(_event(str(path)), art)) == SUMMARY
     assert _read_pending(art) == []
 
 
-def test_exactly_at_the_cap_both_are_shown():
+def test_exactly_at_the_cap_both_are_shown(monkeypatch):
     entries = [{"say": "a" * 10}, {"say": "b" * 10}]
     assert GATE_MOD.message(entries) == "a" * 10 + "\n\n" + "b" * 10
-    saved = GATE_MOD.MAX_SAY_CHARS
-    try:
-        GATE_MOD.MAX_SAY_CHARS = 22
-        assert GATE_MOD.message(entries) == "a" * 10 + "\n\n" + "b" * 10
-        GATE_MOD.MAX_SAY_CHARS = 21
-        assert GATE_MOD.message(entries) == "b" * 10
-        GATE_MOD.MAX_SAY_CHARS = 9
-        assert GATE_MOD.message(entries) == ""
-    finally:
-        GATE_MOD.MAX_SAY_CHARS = saved
+    monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", 22)
+    assert GATE_MOD.message(entries) == "a" * 10 + "\n\n" + "b" * 10
+    monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", 21)
+    assert GATE_MOD.message(entries) == "b" * 10
     assert GATE_MOD.message([]) == ""
+
+
+CUT = "The rest is in the model summary: ask agami to show it."
+
+
+def _table(rows: int) -> str:
+    return "**acme: 300 tables.**\n\n| Area | Tables |\n|---|---|\n" + "\n".join(
+        f"| area_{n:04d} with a long enough name | {n} |" for n in range(rows))
+
+
+def test_a_single_text_over_the_documented_cap_is_cut_at_a_whole_line():
+    say = _table(600)
+    assert 10_000 < len(say) <= GATE_MOD.MAX_SAY_CHARS
+    out = GATE_MOD.message([{"say": say}])
+    assert len(out) <= 10_000 and out.endswith("\n\n" + CUT)
+    kept = out[: -len("\n\n" + CUT)]
+    assert say.startswith(kept + "\n")             # a prefix of the text ending at a line break
+    assert kept.splitlines() == say.splitlines()[: len(kept.splitlines())]
+    next_line = say.splitlines()[len(kept.splitlines())]
+    assert len(kept) + 1 + len(next_line) + len("\n\n" + CUT) > 10_000  # the next line would not fit
+
+
+def test_over_the_cap_the_newest_is_cut_and_older_ones_dropped(art, tmp_path):
+    big = _table(600)
+    _write_pending(art, [_entry("aaaa0001", EXAMPLES, "examples"), _entry("bbbb0002", say=big)])
+    path = _transcript(tmp_path, printed("aaaa0001", EXAMPLES), printed("bbbb0002", big))
+    out = _shown(_gate(_event(str(path)), art))
+    assert len(out) <= 10_000 and out.startswith("**acme: 300 tables.**") and out.endswith(CUT)
+    assert "| # | Example |" not in out
+    assert _read_pending(art) == []
+
+
+def test_a_first_line_longer_than_the_cap_leaves_only_the_fixed_line(monkeypatch):
+    monkeypatch.setattr(GATE_MOD, "MAX_MESSAGE_CHARS", 80)
+    assert GATE_MOD.message([{"say": "x" * 81 + "\nmore"}]) == CUT
+    assert GATE_MOD.message([{"say": "short\n" + "y" * 100}]) == "short\n\n" + CUT
+
+
+def test_the_cut_line_is_fixed_text():
+    assert GATE_MOD.CUT_LINE == CUT
 
 
 def test_a_hostile_say_is_shown_only_as_the_message(art, tmp_path):
@@ -766,11 +800,15 @@ def test_the_needle_matches_the_first_line_after_squashing(art, tmp_path):
     assert _shown(_gate(_event(str(_transcript(tmp_path, printed(say=say)))), art)) == say
 
 
-def test_the_say_cap_is_the_engines():
+def test_the_say_cap_is_the_engines_and_the_message_cap_is_the_hosts():
     pytest.importorskip("pydantic")
     from semantic_model import say_pending
 
-    assert GATE_MOD.MAX_SAY_CHARS == say_pending.MAX_SAY_CHARS
+    # An entry longer than the engine registers is forged; what the gate prints is cut to the host's
+    # documented systemMessage limit, so the host never replaces it with a preview.
+    assert GATE_MOD.MAX_SAY_CHARS == say_pending.MAX_SAY_CHARS == 32_000
+    assert GATE_MOD.MAX_MESSAGE_CHARS == 10_000
+    assert GATE_MOD.MAX_MESSAGE_CHARS < GATE_MOD.MAX_SAY_CHARS
 
 
 # --- review fixes: no wait unless an entry is this session's and unsatisfied -------------------------------

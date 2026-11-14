@@ -70,10 +70,15 @@ MAX_SKEW = timedelta(minutes=5)
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_PENDING_BYTES = 256 * 1024
 # The longest `say` the engine registers (say_pending.MAX_SAY_CHARS, where the number is derived;
-# a test keeps the two equal). An entry longer than that was not written by the engine. It is also the
-# cap on the whole message when several texts are shown at one card.
+# a test keeps the two equal). An entry longer than that was not written by the engine.
 MAX_SAY_CHARS = 32_000
+# The most the hook prints. https://code.claude.com/docs/en/hooks ("JSON output"): a hook's
+# `systemMessage` is "capped at 10,000 characters"; over that, Claude Code shows a file path and a
+# 2,000-character preview instead, which the person would not read.
+MAX_MESSAGE_CHARS = 10_000
 SEPARATOR = "\n\n"
+# Ends a text cut to fit MAX_MESSAGE_CHARS. Fixed: nothing in it comes from the model or the data.
+CUT_LINE = "The rest is in the model summary: ask agami to show it."
 TAIL_LINES = 400
 TAIL_BYTES = 2 * 1024 * 1024
 # How long to wait for the transcript to catch up with the card, well inside the hook's 10 s timeout.
@@ -339,15 +344,30 @@ def _sort(entries: list, rows: list) -> tuple:
     return kept, waiting
 
 
+def _cut(say: str) -> str:
+    """`say` cut after its last whole line that leaves room for CUT_LINE within MAX_MESSAGE_CHARS,
+    with CUT_LINE after a blank line; CUT_LINE alone when not even the first line fits."""
+    kept: list = []
+    for line in say.splitlines():
+        if len("\n".join([*kept, line]).rstrip()) + len(SEPARATOR) + len(CUT_LINE) > MAX_MESSAGE_CHARS:
+            break
+        kept.append(line)
+    head = "\n".join(kept).rstrip()
+    return f"{head}{SEPARATOR}{CUT_LINE}" if head else CUT_LINE
+
+
 def message(waiting: list) -> str:
     """The `say`s of `waiting` (in file order, the order the engine registered them) joined by a
-    blank line. Over MAX_SAY_CHARS, the newest that fit whole, still in order; the older ones are
-    left out without a word, as the newest is what the card follows."""
+    blank line, within MAX_MESSAGE_CHARS: the newest that fit whole, still in order; the older ones
+    are left out without a word, as the newest is what the card follows. When not even the newest
+    fits, it alone is shown, cut at a whole line (`_cut`)."""
     says: list = []
     for entry in reversed(waiting):
-        if len(SEPARATOR.join([entry["say"], *says])) > MAX_SAY_CHARS:
+        if len(SEPARATOR.join([entry["say"], *says])) > MAX_MESSAGE_CHARS:
             break
         says.insert(0, entry["say"])
+    if waiting and not says:
+        return _cut(waiting[-1]["say"])
     return SEPARATOR.join(says)
 
 
