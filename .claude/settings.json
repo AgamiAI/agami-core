@@ -40,5 +40,40 @@
   "enabledPlugins": {
     "astral@astral": true,
     "code-review@claude-plugins-official": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Read|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PROJECT_DIR}/plugins/agami/scripts/approve_own_calls.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PROJECT_DIR}/plugins/agami/scripts/say_gate.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$CLAUDE_ENV_FILE\" ] && printf \"export CLAUDE_PLUGIN_ROOT='%s'\\n\" \"$CLAUDE_PROJECT_DIR/plugins/agami\" >> \"$CLAUDE_ENV_FILE\"; true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }
