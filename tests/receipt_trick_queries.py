@@ -172,7 +172,7 @@ NOT_A_PLAIN_MATCH = [
     "WHERE o.status || c.region = 'paid' || c.region",
     "SELECT SUM(o.total_amount) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
     "WHERE p.amount > o.total_amount",
-    # The same filter one step back: not followed here (ACE-178), so not settled either.
+    # The same filter one step back: ACE-178 follows the step and lists it.
     "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM paid",
     "SELECT COUNT(*) AS n FROM (SELECT id FROM orders WHERE status = 'paid') x",
     "SELECT SUM(p.total_amount) AS n FROM (SELECT total_amount FROM orders "
@@ -224,4 +224,67 @@ UNSEEN_ROWS = [
     ("Snowflake", "SELECT SUM(total_amount) AS n FROM orders AT(TIMESTAMP => '2026-01-01')"),
     ("BigQuery", "SELECT SUM(total_amount) AS n FROM orders "
                  "FOR SYSTEM_TIME AS OF TIMESTAMP '2026-01-01'"),
+]
+
+
+# ACE-178: a restriction hidden one or more steps back — in a CTE, a subquery in FROM, a step's join,
+# a lookup step's value, a filter on a step's group key — over the same synthetic model, against
+# UNFILTERED metrics. None may read a plain `matched`: each lists the restriction, names a join the
+# model does not declare, or is not `matched`. A false match found in ACE-178's reviews joins here.
+STEP_TRICKS = [
+    # B. join forms through a step
+    "WITH s AS (SELECT o.total_amount FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "AND c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
+    "WITH s AS (SELECT o.total_amount FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
+    "SELECT SUM(s.total_amount) AS n FROM (SELECT o.total_amount FROM orders o, customers c "
+    "WHERE c.id = o.customer_id AND c.region = 'EU') s",
+    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN (SELECT id FROM customers "
+    "WHERE region = 'EU') c ON c.id = o.customer_id",
+    # C. step-specific
+    "WITH g AS (SELECT status, COUNT(*) AS n FROM orders GROUP BY status) "
+    "SELECT n FROM g WHERE status = 'paid'",
+    "WITH g AS (SELECT status AS st, COUNT(*) AS n FROM orders GROUP BY 1) "
+    "SELECT n FROM g WHERE st = 'paid'",
+    "WITH a AS (SELECT MAX(opened) AS d FROM orders) SELECT COUNT(*) AS n FROM orders o, a "
+    "WHERE o.opened >= a.d",
+    "WITH z AS (SELECT 1 AS k WHERE FALSE) SELECT COUNT(*) AS n FROM orders o CROSS JOIN z",
+    "WITH orders AS (SELECT id, total_amount FROM public.orders WHERE status = 'paid') "
+    "SELECT SUM(total_amount) AS n FROM orders",
+    "SELECT COUNT(*) AS n FROM (WITH o AS (SELECT id FROM orders WHERE status = 'paid') "
+    "SELECT id FROM o) x",
+    "WITH p AS (SELECT id, customer_id FROM orders WHERE status = 'paid') "
+    "SELECT COUNT(*) AS n FROM p a JOIN p b ON a.id = b.id",
+    "WITH a AS (SELECT id FROM s), s AS (SELECT id FROM orders WHERE status = 'paid') "
+    "SELECT COUNT(*) AS n FROM a",
+    "WITH p AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM \"p\"",
+    "WITH r AS (SELECT total_amount, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM r WHERE rn <= 10",
+    "WITH t AS (SELECT total_amount FROM orders ORDER BY total_amount DESC LIMIT 10) "
+    "SELECT SUM(total_amount) AS n FROM t",
+    "WITH d AS (SELECT DISTINCT customer_id, total_amount FROM orders) "
+    "SELECT SUM(total_amount) AS n FROM d",
+    "WITH u AS (SELECT total_amount FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT total_amount FROM orders) SELECT SUM(total_amount) AS n FROM u",
+    "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') "
+    "SELECT COUNT(*) AS n FROM orders WHERE id IN (SELECT id FROM paid)",
+    "WITH s AS (SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders) SELECT n FROM s",
+    "WITH s AS (SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS n FROM orders) "
+    "SELECT s.n AS n FROM s",
+    # Ten steps, the filter only in the innermost.
+    "WITH s0 AS (SELECT id, total_amount FROM orders WHERE status = 'paid'), "
+    + ", ".join(f"s{i} AS (SELECT id, total_amount FROM s{i - 1})" for i in range(1, 10))
+    + " SELECT SUM(total_amount) AS n FROM s9",
+    "WITH c AS (SELECT o.total_amount, c.status FROM orders o JOIN customers c "
+    "ON c.id = o.customer_id) SELECT SUM(total_amount) AS n FROM c WHERE status = 'paid'",
+    "WITH g AS (SELECT customer_id, COUNT(*) AS c FROM orders GROUP BY customer_id "
+    "HAVING COUNT(*) > 5) SELECT COUNT(*) AS n FROM orders o JOIN g ON g.customer_id = "
+    "o.customer_id",
+    "WITH g AS (SELECT customer_id, SUM(total_amount) AS t FROM orders WHERE status = 'paid' "
+    "GROUP BY customer_id) SELECT SUM(t) AS n FROM g",
+    "WITH RECURSIVE r AS (SELECT id, total_amount FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT id, total_amount FROM r WHERE id < 0) SELECT SUM(total_amount) AS n FROM r",
+    "WITH s AS (SELECT o.total_amount FROM orders o LEFT JOIN customers c ON c.id = "
+    "o.customer_id WHERE c.region = 'EU') SELECT SUM(total_amount) AS n FROM s",
+    "WITH x AS (SELECT * FROM orders WHERE status = 'paid') SELECT SUM(x.total_amount) AS n FROM x",
 ]
