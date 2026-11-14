@@ -63,12 +63,11 @@ The model keeps improving as you use it:
 • /agami-model — the model in the chat: sign off metrics/joins/entities, hide tables
   or columns you don't want queried, add metrics, and edit descriptions.
 ```
-Once the summary and these question choices are posted, before ending the turn, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
+End the turn with the step still in progress: "Summary and first question" is done when the first question is answered, not when it is offered. The answer comes in a later turn, from agami-query, and its Phase 4f marks the step done then ([task-list.md](../../../shared/task-list.md)):
 ```bash
 bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=done
 ```
-
-End the turn. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
+A live run ticked the step while the first question was still unanswered. Picking a number routes the question into query-database. Keep each suggestion under 80 chars and grounded in real tables.
 
 ---
 

@@ -24,7 +24,8 @@ from skill_docs import PLUGIN  # noqa: E402
 
 SAMPLE = PLUGIN / "samples" / "store" / "model"
 CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
-           "closing card in that same message.")
+           "closing card in that same message. The step stays in progress until the first question "
+           "is answered.")
 GATED = " Post it as your visible message, not in thinking."
 
 

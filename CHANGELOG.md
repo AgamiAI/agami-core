@@ -346,6 +346,10 @@ below corresponds to one such version.
   wait to be confirmed ("11 tables, 12 joins, 3 to confirm"), so "no join candidates to offer" and
   "three inferred joins, flagged until you confirm them" no longer come from counts made by hand.
   The sample path asks no identity card: nothing on it is signed in the person's name.
+- **"Summary and first question" is ticked once the first question is answered.** A live run ticked
+  it while the starter-question card was still waiting for its answer. agami-connect now leaves the
+  step in progress (the closing mark's `then` says so), and agami-query marks it done after the
+  first answer, when the task list still shows the step in progress. The step keeps its name.
 - **Join cards recommend leaving a chance match out again.** Each join candidate in
   `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
   95% bar and the column's name reads as a reference (named for the key, or the table's word alone

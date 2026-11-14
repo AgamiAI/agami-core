@@ -564,7 +564,8 @@ def compact(result: dict[str, Any]) -> dict[str, Any]:
 THEN_UPDATE = "Update the task list from `list` now, before anything else."
 THEN_UP_TO_DATE = "The task list is up to date."
 THEN_CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
-                "closing card in that same message.")
+                "closing card in that same message. The step stays in progress until the first question "
+                "is answered.")
 THEN_PROBLEM = "Say this to the person before going on."
 THEN_PROBLEM_AND_UPDATE = ("Say this to the person before going on. Then update the task list from "
                            "`list`.")

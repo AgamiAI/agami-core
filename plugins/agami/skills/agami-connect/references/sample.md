@@ -88,7 +88,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
      | `Active subscriptions and MRR` | Subscriptions joined to plans |
 
      (The first two are the multi-table joins. All four are backed by EXPLAIN-validated seed examples in the shipped model, so they answer reliably. "Other" takes any question, a monthly trend or "customers with both an order and a subscription" among them.) Where AskUserQuestion is unavailable, list the same four as a numbered list ([question-cards rule 7](../../../shared/question-cards.md#7-where-askuserquestion-is-unavailable)).
-   - Once the card is answered, mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)): the summary and its question choices are posted. (Not before the card: a call between the summary and the card would split the message the `then` asks for.)
+   - The step stays in progress until the first question is answered: once agami-query has posted the answer to the question picked (or typed), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)). Not when the card is answered: a live run ticked "Summary and first question" while the question was still unanswered.
      ```bash
      bash "<plugin_root>/scripts/sm" steps "<root>" --mark first_question=done
      ```

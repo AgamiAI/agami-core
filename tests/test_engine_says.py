@@ -24,7 +24,8 @@ SAMPLE = PLUGIN / "samples" / "store" / "model"
 UPDATE = "Update the task list from `list` now, before anything else."
 UP_TO_DATE = "The task list is up to date."
 CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
-           "closing card in that same message.")
+           "closing card in that same message. The step stays in progress until the first question "
+           "is answered.")
 
 
 @pytest.fixture

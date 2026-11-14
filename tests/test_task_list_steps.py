@@ -150,10 +150,21 @@ def test_every_path_shows_the_same_nine_steps():
     assert "own short list" not in _text(CONNECT / "SKILL.md")
 
 
-def test_the_last_step_is_done_before_the_turn_ends():
-    # the first answer comes in a later turn, from agami-query: a mark after it would never run
-    text = _text(REFS / "summary.md")
-    assert text.index("--mark first_question=done") < text.index("End the turn.")
+def test_the_last_step_is_done_only_once_the_first_question_is_answered():
+    # A live run ticked "Summary and first question" while the question was still unanswered. The
+    # answer comes from agami-query, in a later turn on the main path, so agami-query marks it done.
+    summary = " ".join(_text(REFS / "summary.md").split())
+    assert "End the turn with the step still in progress" in summary
+    assert "its Phase 4f marks the step done then" in summary
+    sample = " ".join(_text(REFS / "sample.md").split())
+    assert "once agami-query has posted the answer to the question picked (or typed), mark the step done" in sample
+    assert "Not when the card is answered" in sample
+    query = " ".join(_text(SKILLS_DIR / "agami-query" / "SKILL.md").split())
+    fourf = query[query.index("### 4f"):]
+    assert "still shows *Summary and first question* in progress" in fourf
+    assert '--mark first_question=done' in fourf[:1200]
+    assert "Never when the list shows that step done or shows no onboarding steps" in fourf
+    assert "The step stays in progress until the first question is answered." in steps.THEN_CLOSING
 
 
 def test_build_stops_waiting_on_a_problem():
