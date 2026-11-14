@@ -60,6 +60,8 @@ def test_receipt_fields_are_the_version_pin_and_the_five_sections_in_order():
     and the same guard now works by pinning the intended ones."""
     assert [f.name for f in fields(Receipt)] == [
         "model_version",
+        # ACE-177: which agami-core assembled it, beside which model it was checked against.
+        "agami_core_version",
         *Receipt.SECTIONS,
     ]
 
@@ -111,7 +113,8 @@ def test_an_undetermined_receipt_covers_a_section_added_to_the_type():
     source, because "it iterates" is the property, not the spelling."""
     receipt = guardrail.undetermined_receipt("r")
     marked = [name for name in Receipt.SECTIONS if getattr(receipt, name).undetermined == "r"]
-    assert len(marked) == len(Receipt.SECTIONS) == len(fields(Receipt)) - 1
+    # Every field but the two version pins is a section.
+    assert len(marked) == len(Receipt.SECTIONS) == len(fields(Receipt)) - 2
 
 
 def test_an_assembled_receipt_maps_onto_the_contract_with_tuple_items():

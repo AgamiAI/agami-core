@@ -42,6 +42,8 @@ if str(PKG_SRC) not in sys.path:
 from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
+from receipt_trick_queries import SPELLINGS_DIFFERENT  # noqa: E402
+
 # --- the data the two spellings are run on -----------------------------------
 
 _ROWS = [
@@ -253,109 +255,8 @@ SAME = [
     ("COUNT(*) FILTER (WHERE p <> 'open')", "COUNT(*) FILTER (WHERE p != 'open')", False),
 ]
 
-# (binding, written, why it is not the same number, witness). Each witness is
-# (engine, dataset, grouped) on which the two return different rows.
-DIFFERENT = [
-    (
-        "SUM(x) FILTER (WHERE p = 'paid')",
-        "SUM(CASE WHEN p = 'paid' THEN x ELSE 0 END)",
-        "no matching row: NULL against 0",
-        ("sqlite", "none_paid", False),
-    ),
-    (
-        "AVG(x) FILTER (WHERE p = 'paid')",
-        "AVG(CASE WHEN p = 'paid' THEN x ELSE 0 END)",
-        "the zeros are averaged in",
-        ("sqlite", "full", False),
-    ),
-    (
-        "COUNT(*) FILTER (WHERE p = 'paid')",
-        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END)",
-        "an empty table: 0 against NULL",
-        ("sqlite", "empty", False),
-    ),
-    (
-        "COUNT(*) FILTER (WHERE p = 'paid')",
-        "SUM(CASE WHEN p = 'paid' THEN 1 END)",
-        "a group with no match: 0 against NULL",
-        ("sqlite", "full", True),
-    ),
-    (
-        "COUNT(*)",
-        "NULLIF(COUNT(*), 0)",
-        "an empty table: 0 against NULL",
-        ("sqlite", "empty", False),
-    ),
-    # Widening for division. A numeric cast keeps integer division on SQLite, and on Postgres a
-    # quotient past 10^16 keeps one digit fewer than `* 1.0` gives (not reproducible on this data).
-    (
-        "SUM(x) * 1.0 / COUNT(*)",
-        "CAST(SUM(x) AS NUMERIC) / COUNT(*)",
-        "SQLite: a NUMERIC cast of an integer is still an integer",
-        ("sqlite", "full", False),
-    ),
-    # Dropping NULLIF from a denominator: DuckDB returns infinity for 1/0, not NULL.
-    (
-        "SUM(x) / NULLIF(COUNT(*) FILTER (WHERE p = 'zzz'), 0)",
-        "SUM(x) / COUNT(*) FILTER (WHERE p = 'zzz')",
-        "DuckDB divides by zero to infinity",
-        ("duckdb", "full", False),
-    ),
-    # A FILTER can leave a group's aggregate with no input, so the grouped-only rules do not hold
-    # inside one: group 1 has no row with g > 1, giving NULL against 0. Both directions.
-    (
-        "COUNT(CASE WHEN p = 'paid' THEN 1 END) FILTER (WHERE g > 1)",
-        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END) FILTER (WHERE g > 1)",
-        "a FILTER that empties group 1: 0 against NULL",
-        (("sqlite", "duckdb"), "full", True),
-    ),
-    (
-        "SUM(CASE WHEN p = 'paid' THEN 1 ELSE 0 END) FILTER (WHERE g > 1)",
-        "COUNT(CASE WHEN p = 'paid' THEN 1 END) FILTER (WHERE g > 1)",
-        "a FILTER that empties group 1: NULL against 0",
-        (("sqlite", "duckdb"), "full", True),
-    ),
-    # A CASE result carries no column collation, so over a collated text column DISTINCT, MIN and
-    # MAX compare differently in the CASE form: SQLite, `x TEXT COLLATE NOCASE`.
-    (
-        "COUNT(DISTINCT x) FILTER (WHERE p = 'paid')",
-        "COUNT(DISTINCT CASE WHEN p = 'paid' THEN x END)",
-        "'a' and 'A' are one value under NOCASE, two in the CASE form",
-        ("sqlite_nocase", "nocase", False),
-    ),
-    (
-        "MIN(x) FILTER (WHERE p = 'paid')",
-        "MIN(CASE WHEN p = 'paid' THEN x END)",
-        "NOCASE orders 'a' first, BINARY orders 'A' first",
-        ("sqlite_nocase", "nocase", False),
-    ),
-    (
-        "MAX(x) FILTER (WHERE p = 'paid')",
-        "MAX(CASE WHEN p = 'paid' THEN x END)",
-        "NOCASE orders 'B' last, BINARY orders 'a' last",
-        ("sqlite_nocase", "nocase", False),
-    ),
-    # SQLite compares two columns of different collations with the LEFT one's, so `=` and `<>` are
-    # not symmetric there.
-    (
-        "COUNT(*) FILTER (WHERE x = p)",
-        "COUNT(*) FILTER (WHERE p = x)",
-        "'a' = 'A' under the left column's NOCASE, not under BINARY",
-        ("sqlite_nocase", "nocase", False),
-    ),
-    (
-        "COUNT(*) FILTER (WHERE x <> p)",
-        "COUNT(*) FILTER (WHERE p <> x)",
-        "'a' <> 'A' only under the left column's BINARY",
-        ("sqlite_nocase", "nocase", False),
-    ),
-    (
-        "COUNT(*) FILTER (WHERE g > 1)",
-        "NULLIF(COUNT(*) FILTER (WHERE g > 1), 0)",
-        "a FILTER that empties group 1: 0 against NULL",
-        (("sqlite", "duckdb"), "full", True),
-    ),
-]
+# Moved to the shared trick list (ACE-177 criterion 11): one place holds every false match.
+DIFFERENT = SPELLINGS_DIFFERENT
 
 
 def _ids(cases):
