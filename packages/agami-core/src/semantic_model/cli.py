@@ -2819,7 +2819,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help='print {"markdown": <the same text>, "totals": {...}} instead')
     sp.set_defaults(func=cmd_summary)
 
-    sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, % described, metrics/joins (and how many await sign-off), examples")
+    sp = sub.add_parser("overview", help="per-area numbers for an overview card: tables, %% described, metrics/joins (and how many await sign-off), examples")
     sp.add_argument("root")
     sp.set_defaults(func=cmd_overview)
 

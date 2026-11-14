@@ -322,6 +322,9 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **`sm --help` prints its usage again.** The `overview` verb's help said "% described", and
+  argparse reads a bare `%` in help text as a format code, so `sm --help` raised a `TypeError`
+  instead of printing. A test now runs `--help` for the top level and every verb.
 - **Join cards recommend leaving a chance match out again.** Each join candidate in
   `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
   95% bar and the column's name reads as a reference (named for the key, or the table's word alone
