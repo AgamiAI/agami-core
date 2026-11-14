@@ -645,3 +645,22 @@ def test_a_stored_receipt_read_back_holds_the_version_and_every_new_key(tmp_path
     assert {"restrictions", "result_filters", "missing_conditions"} <= set(item)
     assert (item["status"], item["name"], item["restrictions"]) == (
         "matched", "paid_order_count", ["customer_id = 1"])
+
+
+def test_an_uninstalled_core_reports_the_placeholder_version(monkeypatch):
+    """Running from a source tree with no installed distribution: the same "0.0.0" `serverInfo`
+    has always reported, never an exception out of a receipt."""
+    import importlib.metadata
+
+    import guardrail
+
+    def missing(name):
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.delenv("AGAMI_VERSION", raising=False)
+    monkeypatch.setattr(importlib.metadata, "version", missing)
+    guardrail._installed_version.cache_clear()
+    try:
+        assert guardrail.core_version() == "0.0.0"
+    finally:
+        guardrail._installed_version.cache_clear()
