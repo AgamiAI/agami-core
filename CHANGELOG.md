@@ -14,6 +14,21 @@ below corresponds to one such version.
 
 ### Added
 
+- **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
+  section compared an output column's expression with each metric's binding and nothing else, so
+  `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,
+  with nothing saying it was one slice. A matched item now carries `restrictions` (the WHERE,
+  inner-join ON and the column's own FILTER or CASE conditions beyond the metric's own; `[]` means
+  the metric's whole definition) and `result_filters` (HAVING, QUALIFY). A metric's own condition is
+  compared as part of the match, so a curated `SUM(amount) FILTER (WHERE status = 'paid')` now
+  matches a statement filtering to paid rows, and a statement leaving that condition out carries
+  `missing_conditions` naming it; one filtering the same column another way reads
+  `computed_differently`. An outer join's ON condition is listed for a number that reads the joined
+  table. An applied declared default filter is not listed. A value compared with a sensitive column
+  reads `<withheld>`. Each list shows ten conditions; the section's `undetermined` sentence counts the
+  columns with more. A number read through a CTE or subquery now reads `undetermined` where it used
+  to read `matched` with that step's filter unseen.
+
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
   suggest-units`, `sm set-units`, `sm sensitive` and placeholder findings give each column a

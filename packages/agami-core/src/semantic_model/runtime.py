@@ -3981,7 +3981,7 @@ def _aggregates_marker(tree, reports: list[AggregateReport],
 
 
 def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
-                    dropped_outputs: int) -> Optional[str]:
+                    dropped_outputs: int, truncated: int = 0) -> Optional[str]:
     """What the `columns` section did NOT establish about THIS statement — null when nothing.
 
     Composed per receipt, the way `tables`, `joins` and `aggregates` compose theirs. The fixed
@@ -3999,6 +3999,9 @@ def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
     names anything, so the marker discloses nothing the items beside it do not already.
 
     `computed_differently` counts too, in its own clause: it is not settled either way (#655).
+
+    And `truncated`, the output columns with more conditions than an item lists (ACE-177): a list
+    cut short must not read as the whole slice, least of all an empty one.
     """
     unsettled = sum(1 for item in output_items if item["status"] == UNDETERMINED)
     differently = sum(1 for item in output_items if item["status"] == COMPUTED_DIFFERENTLY)
@@ -4009,6 +4012,8 @@ def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
         (f"{differently} of the listed output column(s) read the same columns as a declared metric "
          "but are computed differently, and the two were not compared, so whether they are the "
          "same number is not established." if differently else ""),
+        (f"{truncated} of the listed output column(s) list only the first "
+         f"{_RECEIPT_MAX_RESTRICTIONS} of their conditions." if truncated else ""),
         (f"{dropped_outputs} further output column(s) are not listed." if dropped_outputs else ""),
         (f"{dropped_refs} further column reference(s) are not listed." if dropped_refs else ""),
     ) if clause) or None
@@ -4313,10 +4318,24 @@ def assemble_receipt(
     # One alias map per SELECT, not per output column: every column of an arm shares that arm's
     # SELECT, and `_own_alias_map` walks a subtree. Lives for this call only.
     own_alias_memo: dict[int, dict[str, str]] = {}
+    # One restriction set per SELECT (ACE-177), its own memo and never `own_alias_memo`.
+    restriction_memo: dict = {}
+    sensitive_names = {_tkey(name) for name in _sensitive_by_table(org)[1]}
+    # Output items whose condition lists did not fit (by position), counted onto the marker rather
+    # than the item.
+    truncated: set[int] = set()
+
+    def _shown(nodes: "tuple | list") -> list[str]:
+        if len(nodes) > _RECEIPT_MAX_RESTRICTIONS:
+            truncated.add(len(output_items))
+        return [_restriction_text(n, sensitive_names) for n in nodes[:_RECEIPT_MAX_RESTRICTIONS]]
+
     for oc in output_columns[:_RECEIPT_MAX_REFS]:
-        status, match = _match_output_column(oc, unread_declarations, by_binding, visible,
-                                             metric_dialect, own_alias_memo,
-                                             by_binding_grouped, binding_shapes)
+        result = _match_output_column(oc, unread_declarations, by_binding, visible,
+                                      metric_dialect, own_alias_memo,
+                                      by_binding_grouped, binding_shapes,
+                                      tidx=tidx, restriction_memo=restriction_memo)
+        status, match = result.status, result.match
         # Everything a MATCHED metric contributes, and null on every other status. An item that
         # matched nothing must assert nothing about a metric it did not match — ACE-059's review
         # found three false positives of exactly this shape in the joins section, two of them
@@ -4365,6 +4384,16 @@ def assemble_receipt(
             "scope": oc.scope,
             "status": status,
             **trust,
+            # ACE-177. Which rows a MATCHED number was counted over, beyond the metric's own
+            # conditions, and the conditions applied after counting; `[]` is the positive claim
+            # "over exactly the metric's definition". Null on every other status, like the trust block.
+            "restrictions": _shown(result.restrictions) if match is not None else None,
+            "result_filters": _shown(result.result_filters) if match is not None else None,
+            # A declared metric computing this value whose own condition the statement does not
+            # apply, and which condition. Null when there is none.
+            "missing_conditions": [
+                {"metric": name, "conditions": _shown(conds)}
+                for name, conds in result.missing[:_ECHO_MAX_NAMES]] or None,
         })
 
     def _declared_table(bare: str) -> Optional[tuple]:
@@ -4654,7 +4683,8 @@ def assemble_receipt(
         "model_version": model_version,
         "columns": {
             "items": column_items,
-            "undetermined": _columns_marker(output_items, dropped_cols, dropped_outputs),
+            "undetermined": _columns_marker(output_items, dropped_cols, dropped_outputs,
+                                            len(truncated)),
         },
         "tables": {
             "items": table_items,
@@ -7864,6 +7894,43 @@ def _folded_conjuncts(
 _PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*")
 
 
+def _bound_declared_predicate(declared: str, ident: str,
+                               dialect: "str | None") -> "tuple[str, exp.Expression | None]":
+    """One declared filter with `{alias}` bound to `ident`: (the bound text, its parsed predicate or
+    None). Shared by ACE-099's per-reference accounting and ACE-177's subtraction of an applied
+    default filter, so the two bind and parse a declaration one way.
+
+    `ident` is the CALLER's text (a quoted identifier holds any string at all) and the bound text
+    ends up in a receipt, so it goes through `_echo_name` first, which is the only point at which
+    it can.
+    """
+    safe = _echo_name(ident)
+    bound = declared.replace("{alias}", safe)
+    # A bound that is safe to PRINT is not automatically safe to RE-PARSE, and this whole predicate
+    # is about to be parsed. `_ECHO_UNSAFE` is an echo-safety alphabet: it keeps `-`, `.` and `*`
+    # because a printed name legitimately carries them. Two hyphens open a SQL line comment, so an
+    # alias written `is_deleted--` binds to a predicate whose text ENDS at the comment, and the stump
+    # that survives is what gets compared — a stump that can match a conjunct the statement really
+    # wrote and report `applied` for a statement that applied nothing. That is the one direction this
+    # determination must never fail in, so an alias that is not a plain identifier is not compared at
+    # all. The declared text still rides on the entry: the status is what we lost, not the filter.
+    #
+    # Conditional on the declaration actually CONTAINING `{alias}`, because a declaration that binds
+    # nothing cannot have been corrupted by what it did not bind. An already-qualified filter
+    # (`t.deleted_at IS NULL`, the form `docs/format-spec.md` writes) and an unqualified one are both
+    # legal, and for either of them `bound` is the model author's own text end to end — the alias
+    # never appears in it, however it is spelled. Refusing to compare there is a knowable false
+    # `undetermined`, and false `undetermined`s are what the section's marker is counted from.
+    if "{alias}" in declared and _PLAIN_IDENTIFIER.fullmatch(safe) is None:
+        return bound, None
+    # A surviving bind marker means the predicate is incomplete — whatever the executor would have
+    # bound decides what it selects, and comparing the unbound text would compare a different
+    # predicate than the one the author declared.
+    if _BIND_MARKER.search(bound):
+        return bound, None
+    return bound, _parse_declared_predicate(bound, dialect)
+
+
 def _declared_filter_status(
     declared: str,
     site: _RefSite,
@@ -7890,32 +7957,9 @@ def _declared_filter_status(
     enclosing it, and the asymmetry is deliberate — see the two comments where each is decided.
     """
     ref = site.ref
-    safe = _echo_name(ref.alias or ref.bare)
-    bound = declared.replace("{alias}", safe)
+    bound, declared_predicate = _bound_declared_predicate(declared, ref.alias or ref.bare,
+                                                          dialect)
     entry = {"expr": bound, "status": "undetermined"}
-    # A bound that is safe to PRINT is not automatically safe to RE-PARSE, and this whole predicate
-    # is about to be parsed. `_ECHO_UNSAFE` is an echo-safety alphabet: it keeps `-`, `.` and `*`
-    # because a printed name legitimately carries them. Two hyphens open a SQL line comment, so an
-    # alias written `is_deleted--` binds to a predicate whose text ENDS at the comment, and the stump
-    # that survives is what gets compared — a stump that can match a conjunct the statement really
-    # wrote and report `applied` for a statement that applied nothing. That is the one direction this
-    # determination must never fail in, so an alias that is not a plain identifier is not compared at
-    # all. The declared text still rides on the entry: the status is what we lost, not the filter.
-    #
-    # Conditional on the declaration actually CONTAINING `{alias}`, because a declaration that binds
-    # nothing cannot have been corrupted by what it did not bind. An already-qualified filter
-    # (`t.deleted_at IS NULL`, the form `docs/format-spec.md` writes) and an unqualified one are both
-    # legal, and for either of them `bound` is the model author's own text end to end — the alias
-    # never appears in it, however it is spelled. Refusing to compare there is a knowable false
-    # `undetermined`, and false `undetermined`s are what the section's marker is counted from.
-    if "{alias}" in declared and _PLAIN_IDENTIFIER.fullmatch(safe) is None:
-        return entry
-    # A surviving bind marker means the predicate is incomplete — whatever the executor would have
-    # bound decides what it selects, and comparing the unbound text would compare a different
-    # predicate than the one the author declared.
-    if _BIND_MARKER.search(bound):
-        return entry
-    declared_predicate = _parse_declared_predicate(bound, dialect)
     if declared_predicate is None:
         return entry
     # Innermost first, so `chain[0]` is the reference's own select and the rest are the statement it
@@ -8131,7 +8175,20 @@ def _reduced_binding_cached(text: str, dialect: "str | None") -> "tuple | None":
     # a plain GROUP BY (`_equivalent_form`). One cache entry per binding, as before.
     base = _strip_qualifiers(_fold_unquoted_identifiers(parsed))
     big = _count_kind(dialect)
-    return _equivalent_form(base.copy(), False, big), _equivalent_form(base, True, big)
+    plain = _equivalent_form(base.copy(), False, big)
+    grouped = _equivalent_form(base, True, big)
+    # And each of the two split into (expression, own conditions) for ACE-177, off copies so the
+    # full forms above stay what `_shape` and `_reduced_binding` callers compare.
+    return plain, grouped, _peeled(plain.copy()), _peeled(grouped.copy())
+
+
+def _peeled_binding(text: str, dialect: "str | None",
+                    grouped: bool = False) -> "tuple[exp.Expression, tuple] | None":
+    """A binding as (expression, its own conditions) — see `_peeled`. None when it will not parse."""
+    if not _HAVE_SQLGLOT:
+        return None
+    forms = _reduced_binding_cached(text, dialect)
+    return None if forms is None else forms[2 + grouped]
 
 
 def _reduced_projection(node: "exp.Expression", dialect: "str | None",
@@ -8318,6 +8375,11 @@ class MetricCandidate(NamedTuple):
     # The same binding reduced as if it stood in an arm with a plain GROUP BY, where two more
     # spellings are equal (see `_equivalent_form`). None exactly when `reduced` is.
     grouped: "exp.Expression | None" = None
+    # Each form split by `_peeled` into (expression, own conditions): the expression is what the
+    # index is keyed on, and the conditions are the rows the metric is defined over (ACE-177).
+    # None exactly when `reduced` is.
+    peeled: "tuple | None" = None
+    grouped_peeled: "tuple | None" = None
 
 
 def _metric_candidates(org: Datasource, storage_type: "str | None",
@@ -8362,7 +8424,9 @@ def _metric_candidates(org: Datasource, storage_type: "str | None",
         if not text or not text.strip():
             continue
         out.append(MetricCandidate(mm, area, text, _reduced_binding(text, dialect),
-                                   _reduced_binding(text, dialect, grouped=True)))
+                                   _reduced_binding(text, dialect, grouped=True),
+                                   _peeled_binding(text, dialect),
+                                   _peeled_binding(text, dialect, grouped=True)))
     return out
 
 
@@ -8514,12 +8578,16 @@ def _by_binding(candidates: list[MetricCandidate], grouped: bool = False) -> dic
     and `undetermined`.
 
     `grouped` indexes each binding's grouped reduction instead, for an arm with a plain GROUP BY.
+
+    Keyed on the PEELED expression (`_peeled`): a metric's own FILTER or CASE condition is one of its
+    conditions rather than part of what it computes, so `SUM(x) FILTER (WHERE p)` and `SUM(x)` share
+    a bucket and the conditions decide between them (ACE-177).
     """
     out: dict = {}
     for cand in candidates:
-        key = cand.grouped if grouped else cand.reduced
-        if key is not None:
-            out.setdefault(key, []).append(cand)
+        peeled = cand.grouped_peeled if grouped else cand.peeled
+        if peeled is not None:
+            out.setdefault(peeled[0], []).append(cand)
     return out
 
 
@@ -8671,64 +8739,430 @@ def _lookup(reduced: "exp.Expression", index: dict) -> list:
     return cands or []
 
 
+# ---------------------------------------------------------------------------
+# Which rows a matched metric was counted over (ACE-177)
+#
+# Comparing the expression alone stamped a count over one slice of a table as the metric that counts
+# all of it: nothing compared carried the statement's WHERE. Both sides now reduce to an expression
+# plus a SET of conditions. A metric's own FILTER or CASE condition is one of its conditions; the
+# statement's are its WHERE and inner-join ON value conditions, plus the column's own FILTER or CASE.
+# A metric fits when every condition of its own is among the statement's, and whatever is left over
+# is listed on the item: the receipt names the slice rather than refusing the match, because the
+# counting IS the agreed metric and only the rows differ.
+#
+# Sets, compared by structure after the same normalisation the expression gets (#655), so the order
+# of AND terms cannot decide a match. No implication: `amount > 100` does not cover `amount > 50`.
+# ---------------------------------------------------------------------------
+
+# How many conditions an item lists in each of its lists. An attention bound, like
+# `_RECEIPT_MAX_ASSUMPTIONS`, and a response bound: a WHERE of thousands of AND terms would otherwise
+# be copied into every aggregating column. What does not fit is COUNTED on the section's marker,
+# never put on the item as a number — the sections carry no integer but the model's row estimate.
+_RECEIPT_MAX_RESTRICTIONS = 10
+
+# The leaves that carry a value a condition compares a column with. Beside a sensitive column each is
+# replaced with `_WITHHELD` before the condition is rendered: the receipt is stored with the query,
+# and the value need not be.
+_VALUE_LEAVES = tuple(
+    getattr(exp, name) for name in
+    ("Literal", "HexString", "ByteString", "BitString", "National", "RawString")
+    if hasattr(exp, name)) if _HAVE_SQLGLOT else ()
+_WITHHELD = "<withheld>"
+
+
+def _own_nodes(node: "exp.Expression", kinds: Any) -> list:
+    """The nodes of `kinds` in `node`, not descending into a nested SELECT or into a node found.
+
+    ITERATIVE, for `_and_conjuncts`' reason: a conjunct can be arbitrarily deep, and a recursive
+    walk over a caller's predicate is a `RecursionError` the caller chose. Pruned at a nested SELECT
+    because a subquery's columns and aggregates are about ITS rows, and at a found node because a
+    column's identifier and an aggregate's own aggregates are not separate facts.
+    """
+    out: list = []
+    stack: list = [node]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, kinds):
+            out.append(cur)
+            continue
+        if isinstance(cur, exp.Select) and cur is not node:
+            continue
+        stack.extend(reversed(list(cur.iter_expressions())))
+    return out
+
+
+def _peel_unit(unit: "exp.Expression") -> "tuple[exp.Expression, list] | None":
+    """One aggregate as (aggregate without its own condition, that condition's conjuncts).
+
+    `AGG(…) FILTER (WHERE p)` peels for every aggregate: FILTER restricts the aggregate's input rows
+    exactly as a WHERE does. A single-branch `CASE WHEN p THEN v END` with no ELSE peels only for the
+    aggregates that ignore NULLs and only without DISTINCT — the set `_equivalent_form` turns a
+    FILTER into, and for the same collation reason. Never with an ELSE: `ELSE 0` gives 0 where the
+    WHERE form gives NULL. An aggregate with no condition of its own is `(itself, [])`; a FILTER over
+    something that is not an aggregate is None, which stops the whole expression peeling.
+    """
+    if isinstance(unit, exp.Filter):
+        where = unit.expression
+        if isinstance(unit.this, exp.AggFunc) and isinstance(where, exp.Where) \
+                and where.this is not None:
+            return unit.this.copy(), _and_conjuncts(where.this)
+        return None
+    if isinstance(unit, _NULL_IGNORING_AGGS) and not unit.expressions \
+            and _single_branch_case(unit.this) and not unit.this.args.get("default"):
+        branch = unit.this.args["ifs"][0]
+        value = branch.args.get("true")
+        agg = unit.copy()
+        # COUNT(CASE WHEN p THEN 1 END) counts the rows p admits: COUNT(*) over them.
+        agg.set("this", exp.Star() if isinstance(unit, exp.Count) and _is_non_null_literal(value)
+                else value.copy())
+        return agg, _and_conjuncts(branch.this)
+    return unit, []
+
+
+def _peeled(node: "exp.Expression") -> "tuple[exp.Expression, tuple]":
+    """A reduced expression as (expression, its own conditions), for ACE-177's comparison.
+
+    Peels only when EVERY aggregate of the expression carries the same condition set: then the
+    condition restricts all of what is computed, which is what a WHERE does. Mixed conditions —
+    `SUM(x) FILTER (WHERE p) / SUM(x)`, a share — are the expression's meaning and stay in it.
+
+    Under a GROUP BY the two forms differ in one way, accepted and stated: the WHERE form returns no
+    row for a group with no qualifying rows, where the CASE form returns NULL for it. Every group both
+    return has the same value, which is the claim the match makes. `node` is the caller's copy and is
+    rewritten in place.
+    """
+    units = _own_nodes(node, (exp.Filter, exp.AggFunc))
+    peels = [_peel_unit(unit) for unit in units]
+    if not peels or any(p is None for p in peels):
+        return node, ()
+    first = frozenset(peels[0][1])
+    if not first or any(frozenset(conds) != first for _, conds in peels[1:]):
+        return node, ()
+    root = node
+    for unit, (agg, _) in zip(units, peels):
+        if unit is root:
+            root = agg
+        else:
+            unit.replace(agg)
+    return root, tuple(peels[0][1])
+
+
+def _condition_key(node: "exp.Expression", dialect: "str | None") -> "exp.Expression":
+    """One condition in the form it is compared in: the same steps a binding takes (#655)."""
+    return _equivalent_form(_strip_qualifiers(_fold_unquoted_identifiers(node)), False,
+                            _count_kind(dialect))
+
+
+class _Restriction(NamedTuple):
+    """One condition on the rows a column read, beside where it came from."""
+
+    key: "exp.Expression"   # `_condition_key`, what the comparison uses
+    table: Optional[str]    # the folded bare table it constrains; None when not attributable
+    node: "exp.Expression"  # as the statement wrote it, for the item
+    default: bool = False   # an applied declared default filter of that table (ACE-099's report)
+
+
+class _ArmRestrictions(NamedTuple):
+    """Everything ACE-177 reads off one SELECT, built once per SELECT (`_arm_restrictions`)."""
+
+    amap: dict
+    relations: frozenset       # the folded relations this SELECT reads, computed ones included
+    steps: bool                # reads a CTE, derived table or VALUES: its rows were decided earlier
+    rows: list                 # WHERE + inner-join ON value conditions, statement order
+    outer: list                # (restriction, relations on that outer join's optional side)
+    after: list                # HAVING + QUALIFY conjuncts: applied after counting
+    mentioned: frozenset       # every column any predicate of this SELECT names, folded
+
+
+def _qualified_source(qualifier: str, amap: dict) -> str:
+    """The source a column qualifier names in this SELECT: exact, else ignoring case when exactly one
+    alias matches that way (an unquoted `O.status` is alias `o`), else the qualifier itself."""
+    if qualifier in amap:
+        return amap[qualifier]
+    hits = [k for k in amap if _tkey(k) == _tkey(qualifier)]
+    return amap[hits[0]] if len(hits) == 1 else qualifier
+
+
+def _qualifier_tables(cols: list, amap: dict) -> set:
+    return {_tkey(_bare(_qualified_source(col.table, amap))) for col in cols if col.table}
+
+
+def _joins_two(cond: "exp.Expression", cols: list, amap: dict, relations: frozenset) -> bool:
+    """Whether a conjunct JOINS two relations rather than restricting one.
+
+    Two relation REFERENCES named — by qualifier, so `a.id = b.customer_id` over two aliases of one
+    table is the self-join it is — or `col = col` with an unqualified side in a SELECT reading more
+    than one relation (the comma-join form). Narrower than ACE-112's rule on purpose: a
+    column-to-column comparison on ONE reference restricts its rows, and dropping a restriction is
+    the direction this section must not fail in.
+    """
+    if len({_tkey(col.table) for col in cols if col.table}) >= 2:
+        return True
+    return (isinstance(cond, exp.EQ) and isinstance(cond.this, exp.Column)
+            and isinstance(cond.expression, exp.Column)
+            and not (cond.this.table and cond.expression.table) and len(relations) >= 2)
+
+
+def _conjunct_table(cols: list, amap: dict, relations: frozenset) -> Optional[str]:
+    """The one table a restriction constrains, when it can be told; an unqualified column belongs to
+    the only relation of a one-relation SELECT."""
+    tables = _qualifier_tables(cols, amap)
+    if len(tables) == 1:
+        return next(iter(tables))
+    if not tables and cols and len(relations) == 1:
+        return next(iter(relations))
+    return None
+
+
+def _restriction(cond: "exp.Expression", amap: dict, relations: frozenset,
+                 dialect: "str | None") -> "_Restriction | None":
+    cols = _own_nodes(cond, exp.Column)
+    if _joins_two(cond, cols, amap, relations):
+        return None
+    return _Restriction(_condition_key(cond, dialect), _conjunct_table(cols, amap, relations), cond)
+
+
+def _bare_of(node: "exp.Expression", amap: dict) -> str:
+    name = node.alias_or_name
+    return _tkey(_bare(_qualified_source(name, amap)))
+
+
+def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | None",
+                      visible: set, memo: dict,
+                      alias_memo: dict[int, dict[str, str]]) -> _ArmRestrictions:
+    """One SELECT's conditions, built once and remembered on `id(sel)` — `_folded_conjuncts`' device
+    and reason (each condition is copied to be normalised). Its OWN memo, never `own_alias_memo` —
+    which it only READS, for the alias map `_reads_only_visible` and `_arm_sources` already resolve
+    once per SELECT.
+
+    The conjuncts are `_filtering_conjuncts`' — WHERE plus inner-join ONs — and not
+    `_mentioned_predicates`', which includes HAVING and outer ONs. An outer join's ON conditions are
+    kept apart with the relations on the side that join makes optional: they decide what a number
+    reading THAT side adds up, and nothing about one that does not.
+    """
+    got = memo.get(id(sel))
+    if got is not None:
+        return got
+    amap = alias_memo.get(id(sel))
+    if amap is None:
+        amap = alias_memo[id(sel)] = _own_alias_map(sel)
+    computed = _computed_relations(sel)
+    relations = frozenset({_tkey(_bare(v)) for v in amap.values()} | set(computed))
+    ctes = _cte_names(sel.root())
+    steps = bool(computed) or any(_tkey(_bare(v)) in ctes for v in amap.values())
+    # The applied declared default filters, as (key, table): part of what the table means, so not
+    # listed as an extra. Bound the way ACE-099 binds them, per reference.
+    defaults: set = set()
+    for alias, bare in amap.items():
+        info = tidx.get(_tkey(bare)) if tidx is not None and _tkey(bare) in visible else None
+        for declared in (info[0].default_filters if info else []):
+            predicate = _bound_declared_predicate(declared, alias, dialect)[1]
+            if predicate is not None:
+                defaults.add((_condition_key(predicate, dialect), _tkey(_bare(bare))))
+    rows = []
+    for cond in _filtering_conjuncts(sel):
+        found = _restriction(cond, amap, relations, dialect)
+        if found is not None:
+            rows.append(found._replace(default=(found.key, found.table) in defaults))
+    outer = []
+    frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
+    prior = {_bare_of(frm.this, amap)} if frm is not None and frm.this is not None else set()
+    for join in sel.args.get("joins") or []:
+        here = {_bare_of(join.this, amap)}
+        side = (join.args.get("side") or "").upper()
+        if side:
+            optional = frozenset(here if side == "LEFT" else prior if side == "RIGHT"
+                                 else here | prior)
+            for cond in _and_conjuncts(join.args.get("on")):
+                found = _restriction(cond, amap, relations, dialect)
+                if found is not None:
+                    outer.append((found, optional))
+        prior |= here
+    after = []
+    for clause in ("having", "qualify"):
+        node = sel.args.get(clause)
+        if node is not None and node.this is not None:
+            after.extend(_and_conjuncts(node.this))
+    mentioned = frozenset().union(*(_predicate_columns(p) for p in _mentioned_predicates(sel)))
+    got = memo[id(sel)] = _ArmRestrictions(amap, relations, steps, rows, outer, after, mentioned)
+    return got
+
+
+def _reads(expr: "exp.Expression", arm: _ArmRestrictions) -> set:
+    """The relations a column's expression reads. An unqualified column could be any of them."""
+    cols = _own_nodes(expr, exp.Column)
+    out = _qualifier_tables(cols, arm.amap)
+    if any(not col.table for col in cols):
+        out |= arm.relations
+    return out
+
+
+class _ColumnMatch(NamedTuple):
+    """`_match_output_column`'s answer. The three tuples hold condition nodes, rendered by the
+    assembler (`_restriction_text`), which is the one place the sensitive index is read."""
+
+    status: str
+    match: "MetricCandidate | None"
+    restrictions: tuple = ()     # matched: conditions beyond the metric's own
+    result_filters: tuple = ()   # matched: HAVING and QUALIFY
+    missing: tuple = ()          # otherwise: (metric name, its conditions the statement lacks)
+
+
+def _compatible(r: _Restriction, sources: set) -> bool:
+    """Whether a statement's condition can be the metric's own: on a table the metric is defined
+    over, or on one that cannot be told, or the metric declares none. Otherwise `c.status = 'paid'`
+    on customers would stand for a metric's `status = 'paid'` on orders once qualifiers are gone."""
+    return r.table is None or not sources or r.table in sources
+
+
 def _match_output_column(oc: OutputColumn, unread: bool,
                          by_binding: dict, visible: set[str], dialect: "str | None",
                          memo: dict[int, dict[str, str]],
                          by_binding_grouped: Optional[dict] = None,
                          binding_shapes: "set | frozenset" = frozenset(),
-                         ) -> tuple[str, Optional[MetricCandidate]]:
-    """One output column against every declared metric: `(status, matched candidate or None)`.
+                         *, tidx: "dict | None" = None,
+                         restriction_memo: "dict | None" = None,
+                         ) -> _ColumnMatch:
+    """One output column against every declared metric.
 
     The branch ORDER is the contract, and each rung is a claim the analysis has earned:
 
-    1. **A match, if the expressions are equal**, looked up in `by_binding` rather than scanned
-       for. When several metrics declare that one binding the expression cannot name one of them,
-       so the tables the statement reads decide — and when they cannot narrow it to exactly one,
-       the answer is `undetermined`, not a guess (see `_discriminate`).
+    0. **`undetermined` when the column's SELECT reads an earlier step** — a CTE, a derived table, a
+       `VALUES` list — and a metric computes its expression. Which rows the step let through is not
+       read here (ACE-178 follows it), so neither a plain match nor its restrictions are established;
+       the match this used to report hid the step's filter.
+    1. **A match, if the expressions are equal and the metric's own conditions are all among the
+       statement's** (ACE-177). Looked up in `by_binding` on the peeled expression rather than
+       scanned for. Of the metrics that fit, the most specific wins (largest condition set by
+       inclusion); several equally specific are narrowed by the tables the statement reads, and when
+       that cannot reach one the answer is `undetermined` (see `_discriminate`). The statement's
+       conditions beyond the matched metric's own ride the item.
     2. **`undetermined` when the column sits behind a boundary we do not enter** — see
-       `_reads_only_visible`. Asked only AFTER the match, because a column whose expression we DID
-       compare successfully has been established regardless of what else is in scope.
-    3. **`undetermined` when any declaration went unread** — see `_declarations_unread` for the two
-       shapes that covers. A failure to read the MODEL is never a fact about the model: `unmatched`
-       would tell a reader "none of your declared metrics is this column" on the strength of our own
-       parse failure, and send a model author looking for a definition they have already written.
-    4. **`UNMATCHED`** — every candidate binding was read, the column was compared against all of
-       them, and none is this value. That is a settled claim and it is the whole point of the
-       section: it is the sentence "this number is not the organisation's agreed definition".
-       Not reached when a declared binding reads exactly the columns this aggregate reads with the
-       same kinds of aggregate (`_shape`): then the two are written differently and may still be
-       one number, so the answer is `COMPUTED_DIFFERENTLY` (#655). `binding_shapes` is
-       `_binding_shapes(candidates)`; left empty, that rung is skipped.
+       `_reads_only_visible`.
+    3. **`undetermined` when any declaration went unread** — see `_declarations_unread`.
+    4. **`COMPUTED_DIFFERENTLY`** when a metric computing this expression has a condition the
+       statement does not write as such but writes something about the same column (`IN ('paid')`
+       against `= 'paid'`: not compared, so not called missing), or when a binding has this
+       aggregate's `_shape` (#655).
+    5. **`UNMATCHED`** — every candidate binding was read and none is this value.
 
-    Equality is after `_equivalent_form` on both sides. In an arm with a plain GROUP BY the
-    projection is also compared, grouped-reduced, against `by_binding_grouped`.
+    A metric condition the statement does not apply at all rides the item whatever the status.
+    Restrictions count only for a column that aggregates: a WHERE changes which rows come back, not
+    what a plain `customer_id` is.
     """
+    rmemo = restriction_memo if restriction_memo is not None else {}
+    missing: list = []
+    not_compared = False
+    reduced = None
     if oc.expr is not None:
         # A DICT LOOKUP, not a scan of every candidate. sqlglot's `__hash__` is consistent with its
         # `__eq__` — both derive from the node's structure — so the equality this comparison is
-        # defined as is exactly what the lookup performs, and 50 output columns against a model
-        # declaring hundreds of metrics costs 50 hashes rather than their product.
+        # defined as is exactly what the lookup performs.
         reduced = _reduced_projection(oc.expr, dialect)
-        cands = _lookup(reduced, by_binding)
+        forms = [(False, reduced, by_binding)]
         if by_binding_grouped and _arm_is_grouped(oc.sel):
             # Consulted even when the plain index matched: two metrics written differently can be one
-            # number under a GROUP BY, and then this column names neither of them.
-            grouped_cands = _lookup(_reduced_projection(oc.expr, dialect, grouped=True),
-                                    by_binding_grouped)
-            cands = cands + [c for c in grouped_cands if all(c is not d for d in cands)]
-        if cands:
-            if len(cands) == 1:
-                return MATCHED, cands[0]
-            # Several metrics declare this one expression, so it does not identify any of them.
-            cand = _discriminate(cands, _arm_sources(oc, memo))
-            return (MATCHED, cand) if cand is not None else (UNDETERMINED, None)
-    if not _reads_only_visible(oc, visible, memo):
-        return UNDETERMINED, None
-    if unread:
-        return UNDETERMINED, None
-    if _is_aggregate(oc.expr) and _shape(reduced) in binding_shapes:
-        return COMPUTED_DIFFERENTLY, None
-    return UNMATCHED, None
+            # number under a GROUP BY. FIRST, so a metric found both ways is compared in the form in
+            # which it is that one number: there `SUM(CASE WHEN p THEN 1 ELSE 0 END)` is a count of p
+            # with p as its condition, and judged in its plain form it would look less specific than
+            # the `COUNT(*) FILTER (WHERE p)` it equals.
+            forms.insert(0, (True, _reduced_projection(oc.expr, dialect, grouped=True),
+                             by_binding_grouped))
+        found: list = []
+        own_found: dict = {}
+        for grouped, form, index in forms:
+            key, own = _peeled(form.copy())
+            own_found[grouped] = own
+            for cand in _lookup(key, index):
+                if all(cand is not f[0] for f in found):
+                    found.append((cand, (cand.grouped_peeled if grouped else cand.peeled)[1],
+                                  grouped))
+        if found:
+            arm = _arm_restrictions(oc.sel, dialect, tidx, visible, rmemo, memo)
+            if arm.steps:
+                return _ColumnMatch(UNDETERMINED, None)
+            aggregating = bool(_own_nodes(oc.expr, exp.AggFunc))
+            outer = []
+            if aggregating and arm.outer:
+                read = _reads(oc.expr, arm)
+                outer = [r for r, optional in arm.outer if optional & read]
+
+            def _rows(grouped: bool) -> list:
+                own: list = []
+                if own_found[grouped]:
+                    # The column's own conditions, from a peel that keeps qualifiers, so each can be
+                    # attributed to a table and shown as the statement wrote it.
+                    _, written = _peeled(_equivalent_form(_fold_unquoted_identifiers(oc.expr),
+                                                          grouped, _count_kind(dialect)))
+                    own = [r for r in (_restriction(c, arm.amap, arm.relations, dialect)
+                                       for c in written) if r is not None]
+                return own + (arm.rows + outer if aggregating else [])
+
+            rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
+            fitting: list = []
+            unfit: list = []
+            for cand, conds, grouped in found:
+                sources = {_tkey(_bare(s)) for s in (cand.metric.source_tables or [])}
+                rows = rows_by_form[grouped]
+                absent = [m for m in conds
+                          if not any(r.key == m and _compatible(r, sources) for r in rows)]
+                if absent:
+                    unfit.append((cand, absent, rows))
+                else:
+                    fitting.append((cand, frozenset(conds), rows, sources))
+            if fitting:
+                maximal = [f for f in fitting if not any(f[1] < g[1] for g in fitting)]
+                chosen = maximal[0] if len(maximal) == 1 else None
+                if chosen is None:
+                    cand = _discriminate([f[0] for f in maximal], _arm_sources(oc, memo))
+                    chosen = next((f for f in maximal if f[0] is cand), None)
+                if chosen is None:
+                    return _ColumnMatch(UNDETERMINED, None)
+                cand, conds, rows, sources = chosen
+                extras: list = []
+                seen: set = set()
+                for r in rows:
+                    if r.default or r.key in seen or (r.key in conds and _compatible(r, sources)):
+                        continue
+                    seen.add(r.key)
+                    extras.append(r.node)
+                return _ColumnMatch(MATCHED, cand, tuple(extras), tuple(arm.after))
+            for cand, absent, rows in unfit:
+                # A condition whose column the statement filters some other way is NOT called
+                # missing: `status IN ('paid')` may be `status = 'paid'` spelled differently, and
+                # ACE-099 draws the same line between `omitted` and `undetermined`.
+                mentioned = arm.mentioned.union(*(_predicate_columns(r.node) for r in rows))
+                gone = tuple(m for m in absent if not (_predicate_columns(m) & mentioned))
+                not_compared = not_compared or len(gone) < len(absent)
+                if gone:
+                    missing.append((cand.metric.name, gone))
+    if not _reads_only_visible(oc, visible, memo) or unread:
+        status = UNDETERMINED
+    elif not_compared or (_is_aggregate(oc.expr) and _shape(reduced) in binding_shapes):
+        status = COMPUTED_DIFFERENTLY
+    else:
+        status = UNMATCHED
+    return _ColumnMatch(status, None, missing=tuple(missing))
+
+
+def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[str]") -> str:
+    """One condition rendered for the item: as the parser read it, bounded like every caller-written
+    expression in the receipt (`_echo_expr`), with each value withheld when a column it names is
+    sensitive.
+
+    Serialized as a FRAGMENT for a label, the same argument `_join_condition` makes and
+    `tests/test_ace093_byte_identity.py` records: bound to a receipt field and never assigned
+    anywhere a driver reads. Sensitive by NAME, folded, on any table — the conservative rule
+    `_projected_sensitive` applies to an ambiguous reference — so a same-named column elsewhere is
+    withheld too, which is the safe direction.
+    """
+    shown = node.copy()
+    if any(_tkey(col.name) in sensitive for col in shown.find_all(exp.Column)):
+        if isinstance(shown, _VALUE_LEAVES):
+            shown = exp.Var(this=_WITHHELD)
+        for leaf in list(shown.find_all(*_VALUE_LEAVES)):
+            leaf.replace(exp.Var(this=_WITHHELD))
+    return _echo_expr(shown.sql())
 
 
 def _storage_type_of(org: Datasource) -> "str | None":

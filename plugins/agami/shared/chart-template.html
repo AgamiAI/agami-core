@@ -1656,6 +1656,16 @@
             if (m.definition_prose) {
               li.appendChild(document.createTextNode(' — ' + m.definition_prose));
             }
+            // The rows this number was counted over beyond the metric's own definition (ACE-177):
+            // without them a count over one slice reads as the whole metric.
+            if ((m.restrictions || []).length) {
+              li.appendChild(document.createTextNode(', counted only where '));
+              li.appendChild(el('code', { text: m.restrictions.join(' and ') }));
+            }
+            if ((m.result_filters || []).length) {
+              li.appendChild(document.createTextNode(', then kept only where '));
+              li.appendChild(el('code', { text: m.result_filters.join(' and ') }));
+            }
             li.appendChild(el('br'));
             li.appendChild(el('span', { class: 'receipt-meta', text: approvalPhrase(m) }));
             ul.appendChild(li);

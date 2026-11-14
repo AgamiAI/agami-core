@@ -96,6 +96,10 @@ JOIN_DECLARED_GUARD = "if (r.status === 'declared') {"
 AGGREGATES_SECTION_CONSTRUCTION = "renderSection('aggregates', 'Aggregates', null, list => {"
 AGG_UNAFFECTED_GUARD = "(a.status === 'multiplied' && a.result_affected === false)"
 AGG_UNAFFECTED_LABEL = "'rows repeated by a join; value unaffected'"
+# ACE-177: a matched metric's slice is drawn beside its definition, so a count over some rows never
+# reads as the whole metric on the page.
+METRIC_RESTRICTIONS_LABEL = "', counted only where '"
+METRIC_RESULT_FILTERS_LABEL = "', then kept only where '"
 # `json.dumps` spacing, which the template's hand-written sample receipt does not use.
 NONCE_RESULT_UNAFFECTED = '"result_affected": false'
 
@@ -318,7 +322,8 @@ def test_the_construction_sites_the_assertions_stand_on_are_each_unique():
                  MARKER_LABEL, MARKER_READ, EMPTY_STATE_CONSTRUCTION,
                  JOINS_SECTION_CONSTRUCTION, JOIN_STATUS_BADGE, JOIN_PREDICATE_LABEL,
                  JOIN_NO_PREDICATE, JOIN_DECLARED_GUARD, AGGREGATES_SECTION_CONSTRUCTION,
-                 AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL):
+                 AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL, METRIC_RESTRICTIONS_LABEL,
+                 METRIC_RESULT_FILTERS_LABEL):
         assert template.count(site) == 1, f"{site!r} appears {template.count(site)}x, not once"
 
 

@@ -1088,6 +1088,30 @@ def test_a_metric_computed_differently_is_neither_confirmed_nor_a_gap():
     assert "not compared" in row["note"]
 
 
+def test_a_matched_metric_counted_over_a_slice_is_confirmed_and_names_the_slice():
+    """ACE-177: the counting is the defined metric's, so the part is confirmed; the rows it was
+    counted over ride the note, because whether that slice is what was asked is the person's call."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "matched",
+                                      "name": "change_count", "aggregate": True,
+                                      "restrictions": ["state = 'open'"]}]},
+               "tables": {"items": [{"qname": "change_requests"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "COUNT(*)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:n", "confirmed")
+    assert "counted only where state = 'open'" in row["note"]
+
+
+def test_a_metric_whose_own_condition_the_statement_leaves_out_is_open_not_a_gap():
+    """ACE-177: the model DEFINES this metric, so calling it "matches no metric" would be false; and
+    the question may want every row, so it is not a defect either. Open, naming the condition."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "s", "status": "unmatched",
+                                      "aggregate": True, "missing_conditions": [
+                                          {"metric": "paid_sales", "conditions": ["status = 'paid'"]}]}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(total_amount)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:s", "unresolved")
+    assert "paid_sales (status = 'paid')" in row["note"]
+
+
 def test_without_a_pre_flight_an_unmatched_aggregate_stays_open():
     older = {"columns": {"items": [{"kind": "output", "column": "total", "status": "unmatched"}]}, "tables": {"items": []}}
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, None)] == [("metric:total", "unresolved")]
