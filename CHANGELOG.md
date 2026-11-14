@@ -32,7 +32,9 @@ below corresponds to one such version.
   statement names a sensitive column anywhere. Each list shows ten conditions and the receipt one
   hundred in all; the section's `undetermined` sentence counts the columns cut short. A number read
   through a CTE or subquery, or from a sampled or time-travelled table, now reads `undetermined`
-  where it used to read `matched` with that filter unseen. The receipt's echo bound also strips
+  where it used to read `matched` with that filter unseen, and so does a number in a shape the check
+  does not model: a FULL join, a window over filtered rows, an outer-join condition its aggregate
+  lets NULL rows past, or two references whose names differ only by case. The receipt's echo bound also strips
   invisible characters (zero-width, word joiner, byte-order mark, tag characters).
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked

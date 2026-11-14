@@ -28,6 +28,7 @@ import receipt_truth as truth  # noqa: E402
 from receipt_trick_queries import (  # noqa: E402
     CURATED_SPELLINGS,
     NOT_A_PLAIN_MATCH,
+    REVIEW_TRICKS,
     SEMI_ANTI,
     TWIN_TRICKS,
 )
@@ -109,6 +110,8 @@ def test_every_matched_claim_agrees_with_the_numbers(tmp_path, engine):
             if engine == "duckdb":
                 for _, sql in SEMI_ANTI:
                     outcome.add(truth.check(org, sql, conn))
+        for i, (_, metrics, _, sql) in enumerate(REVIEW_TRICKS):
+            outcome.add(truth.check(_org(tmp_path, f"review{i}", storage_type, metrics), sql, conn))
     finally:
         conn.close()
     assert outcome.mismatches == []
@@ -129,3 +132,35 @@ def test_the_harness_catches_a_claim_that_hides_a_restriction(tmp_path, monkeypa
     outcome = truth.check(org, MATCHED_EXAMPLES[0], conn)
     conn.close()
     assert outcome.compared == 1 and len(outcome.mismatches) == 1
+
+
+
+def _hiding(monkeypatch, hide):
+    """Make the receipt drop every statement-level condition `hide` picks: a false plain match
+    planted on purpose, which the harness must catch on the numbers alone."""
+    real = rt._arm_restrictions
+
+    def arm(*args, **kwargs):
+        got = real(*args, **kwargs)
+        return got._replace(rows=[r for r in got.rows if not hide(r.node)])
+
+    monkeypatch.setattr(rt, "_arm_restrictions", arm)
+
+
+@pytest.mark.parametrize("sql,hide", [
+    # (a) a value condition hidden in an inner join's ON.
+    ("SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+     "AND c.region = 'EU'", lambda node: "region" in node.sql()),
+    # (b) an unqualified WHERE equality on ONE table, read as if it joined two.
+    ("SELECT COUNT(*) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
+     "WHERE customer_id = total_amount", lambda node: "total_amount" in node.sql()),
+], ids=["inner ON filter", "unqualified WHERE equality"])
+def test_the_harness_catches_a_hidden_restriction(tmp_path, monkeypatch, sql, hide):
+    conn, storage_type = _connect("sqlite")
+    org = _org(tmp_path, "unfiltered", storage_type, UNFILTERED)
+    honest = truth.check(org, sql, conn)
+    assert honest.compared == 1 and honest.mismatches == [], honest
+    _hiding(monkeypatch, hide)
+    planted = truth.check(org, sql, conn)
+    conn.close()
+    assert planted.compared == 1 and len(planted.mismatches) == 1, planted

@@ -7728,6 +7728,10 @@ def _inner_join_predicates(sel: "exp.Select") -> list["exp.Expression"]:
     for join in sel.args.get("joins") or []:
         if join.args.get("side"):
             continue
+        # A SEMI or ANTI join keeps or drops rows by whether its ON finds a partner — an ANTI join
+        # keeps exactly the rows its ON rejects — so its ON is not a filter on the kept rows.
+        if (join.args.get("kind") or "").upper() in ("SEMI", "ANTI"):
+            continue
         on = join.args.get("on")
         if on is not None:
             out.append(on)
@@ -8855,6 +8859,10 @@ def _peeled(node: "exp.Expression") -> "tuple[exp.Expression, tuple]":
     return has the same value, which is the claim the match makes. `node` is the caller's copy and is
     rewritten in place.
     """
+    # Never inside a window: a FILTER there drops rows from the frame, a WHERE drops them from the
+    # rows the frame is counted over, and with a ROWS frame the two give different numbers.
+    if node.find(exp.Window) is not None:
+        return node, ()
     units = _own_nodes(node, (exp.Filter, exp.AggFunc))
     peels = [_peel_unit(unit) for unit in units]
     if not peels or any(p is None for p in peels):
@@ -8903,6 +8911,8 @@ class _ArmRestrictions(NamedTuple):
     after: list                # HAVING + QUALIFY conjuncts: applied after counting. Not a LIMIT,
     #                            which also drops groups after counting and is not listed.
     mentioned: frozenset       # every column any predicate of this SELECT names, folded
+    full: bool = False         # a FULL join: each side keeps its rows whatever the ON says
+    columns: dict = {}         # reference -> the model's column names for its table; None unknown
 
 
 def _ref_of(qualifier: str, amap: dict) -> str:
@@ -8924,28 +8934,42 @@ def _named_refs(cols: list, amap: dict) -> frozenset:
     return frozenset(_ref_of(col.table, amap) for col in cols if col.table)
 
 
-def _joins_two(cond: "exp.Expression", amap: dict, refs: frozenset) -> bool:
-    """Whether a conjunct JOINS two references rather than restricting rows: a bare `col = col`
-    between two different references, or with an unqualified side in a SELECT reading more than
-    one (the comma-join form), and nothing else.
+def _endpoint(col: "exp.Column", amap: dict, columns: dict) -> Optional[str]:
+    """The reference one side of an equality reads: its qualifier, else the ONE reference whose
+    table the model says has that column. None when that cannot be told — a reference the model
+    does not describe, or a name two of them carry."""
+    if col.table:
+        return _ref_of(col.table, amap)
+    if any(names is None for names in columns.values()):
+        return None
+    hits = [ref for ref, names in columns.items() if _tkey(col.name) in names]
+    return hits[0] if len(hits) == 1 else None
 
-    Anything more — an OR, a function, a CASE, a literal, a non-equal comparison — restricts rows
-    whatever references it names, and is listed: dropping a restriction is the direction this
-    section must not fail in. So is `a.x = a.y` on one reference.
+
+def _joins_two(cond: "exp.Expression", amap: dict, columns: dict) -> bool:
+    """Whether a statement-level conjunct JOINS two references rather than restricting rows: a
+    bare `col = col` whose two sides are known to read two different references, and nothing else.
+
+    An unqualified side is resolved through the model (`_endpoint`); when it cannot be, the
+    conjunct is kept as a restriction. Anything more — an OR, a function, a CASE, a literal, a
+    non-equal comparison — restricts rows whatever references it names, and is listed: dropping a
+    restriction is the direction this section must not fail in. So is `a.x = a.y` on one reference.
     """
     if not isinstance(cond, exp.EQ):
         return False
     left, right = cond.this, cond.expression
     if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
         return False
-    if left.table and right.table:
-        return _ref_of(left.table, amap) != _ref_of(right.table, amap)
-    return len(refs) >= 2
+    ends = (_endpoint(left, amap, columns), _endpoint(right, amap, columns))
+    return None not in ends and ends[0] != ends[1]
 
 
 def _restriction(cond: "exp.Expression", amap: dict, refs: frozenset,
-                 dialect: "str | None") -> "_Restriction | None":
-    if _joins_two(cond, amap, refs):
+                 dialect: "str | None", columns: "dict | None" = None) -> "_Restriction | None":
+    """One condition as a `_Restriction`, or None when it is a statement-level join (`columns` is
+    passed for those). A column's own FILTER or CASE condition passes no `columns` and is never
+    dropped: equating two references there restricts THAT number, not the statement's rows."""
+    if columns is not None and _joins_two(cond, amap, columns):
         return None
     cols = _own_nodes(cond, exp.Column)
     named = _named_refs(cols, amap)
@@ -8992,11 +9016,23 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
     ctes = _cte_names(sel.root())
     sources = [child.this for child in sel.iter_expressions()
                if isinstance(child, (exp.From, exp.Join)) and isinstance(child.this, exp.Table)]
+    names = [child.this.alias_or_name for child in sel.iter_expressions()
+             if isinstance(child, (exp.From, exp.Join)) and child.this is not None]
+    # Two references whose names differ only by case (`orders` and `"ORDERS"`) cannot be told
+    # apart once folded, so nothing is attributed to either of them.
     unseen = (bool(computed) or any(_tkey(_bare(v)) in ctes for v in amap.values())
+              or len({_tkey(n) for n in names}) < len(names)
               or sel.args.get("sample") is not None
               or any(t.args.get(arg) is not None for t in sources for arg in _UNSEEN_TABLE_ARGS))
     # The applied declared default filters, as (key, reference): part of what the table means, so
     # not listed as an extra. Bound the way ACE-099 binds them, per reference.
+    # reference -> the model's column names for its table, for resolving an unqualified column.
+    columns: dict = {}
+    for alias, bare in amap.items():
+        info = tidx.get(_tkey(bare)) if tidx is not None and _tkey(bare) in visible else None
+        columns[_tkey(alias)] = {_tkey(c.name) for c in info[0].columns} if info else None
+    for ref in computed:
+        columns[ref] = None
     defaults: set = set()
     for alias, bare in amap.items():
         info = tidx.get(_tkey(bare)) if tidx is not None and _tkey(bare) in visible else None
@@ -9006,7 +9042,7 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
                 defaults.add((_condition_key(predicate, dialect), _tkey(alias)))
     rows = []
     for cond in _filtering_conjuncts(sel):
-        found = _restriction(cond, amap, refs, dialect)
+        found = _restriction(cond, amap, refs, dialect, columns)
         if found is not None:
             rows.append(found._replace(default=(found.key, found.ref) in defaults))
     outer = []
@@ -9023,7 +9059,7 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
             optional = frozenset(here if side == "LEFT" else prior if side == "RIGHT"
                                  else here | prior)
             for cond in _and_conjuncts(join.args.get("on")):
-                found = _restriction(cond, amap, refs, dialect)
+                found = _restriction(cond, amap, refs, dialect, columns)
                 if found is not None:
                     outer.append((found, optional))
         prior |= here
@@ -9033,7 +9069,9 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
         if node is not None and node.this is not None:
             after.extend(_and_conjuncts(node.this))
     mentioned = frozenset().union(*(_predicate_columns(p) for p in _mentioned_predicates(sel)))
-    got = memo[id(sel)] = _ArmRestrictions(amap, refs, unseen, rows, outer, after, mentioned)
+    full = any((j.args.get("side") or "").upper() == "FULL" for j in sel.args.get("joins") or [])
+    got = memo[id(sel)] = _ArmRestrictions(amap, refs, unseen, rows, outer, after, mentioned,
+                                           full, columns)
     return got
 
 
@@ -9064,6 +9102,22 @@ class _ColumnMatch(NamedTuple):
     restrictions: tuple = ()     # matched: conditions beyond the metric's own
     result_filters: tuple = ()   # matched: HAVING and QUALIFY
     missing: tuple = ()          # otherwise: (metric name, its conditions the statement lacks)
+
+
+# The aggregates that skip a NULL input, and the operators that keep a NULL a NULL: a number built
+# only from these gets nothing from a row an outer join null-extended.
+_NULL_SKIPPING = (exp.Sum, exp.Avg, exp.Count, exp.Min, exp.Max) if _HAVE_SQLGLOT else ()
+_NULL_KEEPING = (exp.Column, exp.Identifier, exp.Literal, exp.Paren, exp.Add, exp.Sub, exp.Mul,
+                 exp.Div, exp.Neg, exp.Distinct, exp.Cast, exp.DataType) if _HAVE_SQLGLOT else ()
+
+
+def _ignores_null_rows(value: "exp.Expression") -> bool:
+    """Whether every aggregate in a column's value skips a row whose columns are all NULL."""
+    aggs = _own_nodes(value, exp.AggFunc)
+    return bool(aggs) and all(
+        isinstance(agg, _NULL_SKIPPING) and not isinstance(agg.this, exp.Star)
+        and all(isinstance(n, _NULL_KEEPING) for n in agg.this.walk())
+        for agg in aggs)
 
 
 def _compatible(r: _Restriction, sources: set, read: set, amap: dict) -> bool:
@@ -9142,6 +9196,12 @@ def _match_output_column(oc: OutputColumn, unread: bool,
             if arm.unseen:
                 return _ColumnMatch(UNDETERMINED, None)
             aggregating = bool(_own_nodes(oc.expr, exp.AggFunc))
+            # Shapes this check does not model are not settled (item 8): a FULL join keeps both
+            # sides' rows whatever its ON says, and a window's frame is counted over the rows a
+            # WHERE leaves, so neither restricts a number the way a listed condition says.
+            if aggregating and (arm.full or (oc.expr.find(exp.Window) is not None
+                                             and (arm.rows or arm.outer))):
+                return _ColumnMatch(UNDETERMINED, None)
             # What the number READS is its value with its own FILTER or CASE condition taken off: in
             # `SUM(a.x) FILTER (WHERE b.s = 'p')` the sum reads `a`, and `b` only decides which rows.
             value = _peeled(_equivalent_form(_fold_unquoted_identifiers(oc.expr), False,
@@ -9150,6 +9210,10 @@ def _match_output_column(oc: OutputColumn, unread: bool,
             if aggregating and arm.outer:
                 wide = _reads(value, arm, strict=False)
                 outer = [r for r, optional in arm.outer if optional & wide]
+                # An outer ON condition restricts a number only if the rows it null-extends add
+                # nothing to it. A COALESCE, CASE or any non-NULL-ignoring aggregate lets them in.
+                if outer and not _ignores_null_rows(value):
+                    return _ColumnMatch(UNDETERMINED, None)
             read = _reads(value, arm, strict=True)
 
             def _rows(grouped: bool) -> list:
@@ -9159,11 +9223,16 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     # attributed to a table and shown as the statement wrote it.
                     _, written = _peeled(_equivalent_form(_fold_unquoted_identifiers(oc.expr),
                                                           grouped, _count_kind(dialect)))
-                    own = [r for r in (_restriction(c, arm.amap, arm.refs, dialect)
-                                       for c in written) if r is not None]
+                    if not written:
+                        # Uniform once qualifiers were stripped, mixed with them kept: one
+                        # reference's FILTER beside another's. Not one condition on the number.
+                        return None
+                    own = [_restriction(c, arm.amap, arm.refs, dialect) for c in written]
                 return own + (arm.rows + outer if aggregating else [])
 
             rows_by_form = {grouped: _rows(grouped) for grouped in own_found}
+            if any(rows is None for rows in rows_by_form.values()):
+                return _ColumnMatch(UNDETERMINED, None)
             fitting: list = []
             unfit: list = []
             for cand, conds, grouped in found:

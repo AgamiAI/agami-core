@@ -225,3 +225,52 @@ UNSEEN_ROWS = [
     ("BigQuery", "SELECT SUM(total_amount) AS n FROM orders "
                  "FOR SYSTEM_TIME AS OF TIMESTAMP '2026-01-01'"),
 ]
+
+# PR #660 review. (label, metrics declared, storage type, statement): each read `matched` with
+# nothing listed before it was fixed; none may now. The metrics are declared per case, in the
+# `acme` model's tables, so a case adds no metric the other batteries would also see.
+_PAID_PAYMENTS = {"paid_payments": ("SUM(amount) FILTER (WHERE status = 'paid')", ["payments"])}
+REVIEW_TRICKS = [
+    ("window frame: a FILTER inside OVER is not a WHERE",
+     {"paid_window": ("SUM(total_amount) FILTER (WHERE status = 'paid') "
+                      "OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", ["orders"])},
+     "PostgreSQL",
+     "SELECT SUM(total_amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS n "
+     "FROM orders WHERE status = 'paid'"),
+    ("mixed-reference FILTERs over a ratio",
+     {"amount_ratio": ("SUM(total_amount) / SUM(amount)", ["orders", "payments"])},
+     "PostgreSQL",
+     "SELECT SUM(o.total_amount) FILTER (WHERE o.status = 'paid') / "
+     "SUM(p.amount) FILTER (WHERE p.status = 'paid') AS n "
+     "FROM orders o JOIN payments p ON p.order_id = o.id"),
+    ("an unqualified equality on one table in a two-table SELECT",
+     {"order_count": ("COUNT(*)", ["orders"])},
+     "PostgreSQL",
+     "SELECT COUNT(*) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
+     "WHERE customer_id = total_amount"),
+    ("aliases that differ only by quoted case",
+     {"paid_sales": ("SUM(total_amount) FILTER (WHERE status = 'paid')", ["orders"])},
+     "PostgreSQL",
+     'SELECT SUM(orders.total_amount) AS n FROM orders AS orders CROSS JOIN orders AS "ORDERS" '
+     "WHERE \"ORDERS\".status = 'paid'"),
+    ("an ANTI join's ON is not a filter on the kept rows",
+     {"paid_sales": ("SUM(total_amount) FILTER (WHERE status = 'paid')", ["orders"])},
+     "DuckDB",
+     "SELECT SUM(o.total_amount) AS n FROM orders o ANTI JOIN payments p "
+     "ON p.order_id = o.id AND o.status = 'paid'"),
+    ("a FULL join keeps both sides whatever its ON says",
+     _PAID_PAYMENTS, "PostgreSQL",
+     "SELECT SUM(p.amount) AS n FROM orders o FULL JOIN payments p "
+     "ON p.order_id = o.id AND p.status = 'paid'"),
+    ("an aggregate's own FILTER equating two references",
+     {"order_count": ("COUNT(*)", ["orders"])},
+     "PostgreSQL",
+     "SELECT COUNT(*) FILTER (WHERE o.customer_id = c.id) AS n "
+     "FROM orders o CROSS JOIN customers c"),
+    ("an outer ON condition where null-extended rows still count",
+     {"paid_payment_rows": ("COUNT(COALESCE(id, 0)) FILTER (WHERE status = 'paid')",
+                            ["payments"])},
+     "PostgreSQL",
+     "SELECT COUNT(COALESCE(p.id, 0)) AS n FROM orders o LEFT JOIN payments p "
+     "ON p.order_id = o.id AND p.status = 'paid'"),
+]

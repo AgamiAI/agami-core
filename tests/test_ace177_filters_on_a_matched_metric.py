@@ -39,6 +39,7 @@ from semantic_model import runtime as rt  # noqa: E402
 from receipt_trick_queries import (  # noqa: E402
     CURATED_SPELLINGS,
     NOT_A_PLAIN_MATCH,
+    REVIEW_TRICKS,
     SEMI_ANTI,
     TWIN_TRICKS,
     UNSEEN_ROWS,
@@ -239,7 +240,9 @@ def test_qualify_is_reported_separately(org):
 @pytest.mark.parametrize("sql", [
     "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id",
     "SELECT COUNT(*) AS n FROM orders o, customers c WHERE c.id = o.customer_id",
-    "SELECT COUNT(*) AS n FROM orders, customers WHERE customer_id = id",
+    # Unqualified: each side resolves to one table through the model. (`customer_id = id` would
+    # not: `id` is on both, so it stays a restriction — see the review tricks.)
+    "SELECT COUNT(*) AS n FROM orders, payments WHERE customer_id = order_id",
     "SELECT COUNT(*) AS n FROM orders a JOIN orders b ON a.id = b.customer_id",
 ])
 def test_a_joining_condition_is_not_a_restriction(org, sql):
@@ -664,3 +667,16 @@ def test_an_uninstalled_core_reports_the_placeholder_version(monkeypatch):
         assert guardrail.core_version() == "0.0.0"
     finally:
         guardrail._installed_version.cache_clear()
+
+
+@pytest.mark.parametrize("label,metrics,storage_type,sql", REVIEW_TRICKS,
+                         ids=[t[0] for t in REVIEW_TRICKS])
+def test_no_review_trick_reads_as_a_plain_match(tmp_path, label, metrics, storage_type, sql):
+    """PR #660's findings (criterion 11): each read `matched` with nothing listed. When the shape
+    cannot be modelled safely the answer is `undetermined` (item 8), never a plain match."""
+    org = _org(tmp_path, storage_type=storage_type, metrics=metrics)
+    item = _one(org, sql, "n")
+    assert not (item["status"] == rt.MATCHED and item["restrictions"] == []), (label, item)
+    # An ANTI join keeps exactly the rows its ON rejects, so its ON can never be a metric's own
+    # condition: naming `paid_sales` with the join listed is still the wrong metric.
+    assert not (" ANTI " in sql and item["name"] == "paid_sales"), (label, item)
