@@ -36,6 +36,14 @@ if str(PKG_SRC) not in sys.path:
 from semantic_model import loader as L  # noqa: E402
 from semantic_model import runtime as rt  # noqa: E402
 
+from receipt_trick_queries import (  # noqa: E402
+    CURATED_SPELLINGS,
+    NOT_A_PLAIN_MATCH,
+    SEMI_ANTI,
+    TWIN_TRICKS,
+    UNSEEN_ROWS,
+)
+
 # --- fixture ----------------------------------------------------------------
 
 PAID_SALES = "SUM(total_amount) FILTER (WHERE status = 'paid')"
@@ -160,14 +168,7 @@ def test_the_unfiltered_query_reads_matched_with_nothing_listed(org):
 # --- criterion 3 and item 2: a metric's own condition is not an extra ----------------------------
 
 
-@pytest.mark.parametrize("sql", [
-    "SELECT SUM(total_amount) AS s FROM orders WHERE status = 'paid'",
-    f"SELECT {PAID_SALES} AS s FROM orders",
-    "SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS s FROM orders",
-    "SELECT SUM(o.total_amount) AS s FROM orders o WHERE ((O.STATUS = 'paid'))",
-    "SELECT SUM(total_amount) FILTER (WHERE status = 'paid') AS s FROM orders o "
-    "WHERE o.status = 'paid'",
-])
+@pytest.mark.parametrize("sql", CURATED_SPELLINGS)
 def test_a_curated_metrics_own_condition_is_not_listed_as_an_extra(org, sql):
     """Criterion 3. Written as a WHERE, as the metric's own FILTER, as the CASE form #658 accepts,
     qualified and in another case: the same rows, so the curated metric with nothing extra."""
@@ -302,62 +303,7 @@ def test_a_plain_column_carries_no_restrictions(tmp_path):
 
 UNFILTERED = {k: ALL_METRICS[k] for k in ("change_count", "total_sales", "order_count")}
 
-ADVERSARIAL = [
-    "SELECT COUNT(*) AS n FROM orders WHERE NOT (status = 'cancelled')",
-    "SELECT COUNT(*) AS n FROM orders WHERE status <> 'cancelled'",
-    "SELECT COUNT(*) AS n FROM orders WHERE status IN ('paid', 'shipped')",
-    "SELECT COUNT(*) AS n FROM orders WHERE status NOT IN ('cancelled')",
-    "SELECT SUM(total_amount) AS n FROM orders WHERE total_amount BETWEEN 10 AND 100",
-    "SELECT COUNT(*) AS n FROM orders WHERE status = 'paid' OR status = 'shipped'",
-    "SELECT COUNT(*) AS n FROM orders WHERE status IS NOT NULL",
-    "SELECT COUNT(*) AS n FROM orders WHERE status LIKE 'p%'",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "AND c.region = 'EU'",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE c.region = 'EU'",
-    "SELECT COUNT(*) AS n FROM orders o, customers c WHERE c.id = o.customer_id "
-    "AND c.region = 'EU'",
-    "SELECT COUNT(*) AS n FROM orders o WHERE EXISTS (SELECT 1 FROM customers c "
-    "WHERE c.id = o.customer_id AND c.region = 'EU')",
-    "SELECT COUNT(*) AS n FROM orders WHERE customer_id IN (SELECT id FROM customers "
-    "WHERE region = 'EU')",
-    "SELECT COUNT(*) AS n FROM orders o WHERE o.opened = o.closed",
-    "SELECT COUNT(*) AS n FROM orders WHERE 1 = 0",
-    "SELECT COUNT(*) AS n FROM orders WHERE TRUE AND status = 'paid'",
-    "SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders",
-    "SELECT SUM(CASE WHEN status = 'paid' THEN total_amount END) AS n FROM orders",
-    "SELECT COUNT(CASE WHEN status = 'paid' THEN 'x' END) AS n FROM orders",
-    "SELECT COUNT(*) FILTER (WHERE status = 'paid') AS n FROM orders WHERE customer_id = 3",
-    "SELECT COUNT(*) AS n FROM orders WHERE ((O.STATUS = 'paid'))",
-    "SELECT customer_id, COUNT(*) AS n FROM orders WHERE status = 'paid' "
-    "GROUP BY customer_id HAVING COUNT(*) > 1",
-    "SELECT COUNT(DISTINCT number) AS n FROM change_requests WHERE opened >= DATE '2026-01-01'",
-    "SELECT COUNT(*) AS n FROM orders WHERE " + " AND ".join(
-        f"status <> 's{i}'" for i in range(12)),
-    # A condition naming two references that is not a bare `col = col` restricts rows (review).
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE o.status = 'x' OR c.region = 'EU'",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE COALESCE(o.status, c.status) = 'x'",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE (o.status, c.region) IN (('x', 'EU'))",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id OR c.region = 'EU'",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE (o.status = 'paid' OR c.id IS NULL)",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE CASE WHEN c.id IS NULL THEN TRUE ELSE o.status = 'x' END",
-    "SELECT COUNT(*) AS n FROM orders o JOIN orders o2 ON o2.id = o.id "
-    "AND (o2.status = 'paid' OR o.id < 0)",
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
-    "WHERE o.status || c.region = 'paid' || c.region",
-    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
-    "WHERE p.amount > o.total_amount",
-    # The same filter one step back: not followed here (ACE-178), so not settled either.
-    "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM paid",
-    "SELECT COUNT(*) AS n FROM (SELECT id FROM orders WHERE status = 'paid') x",
-    "SELECT SUM(p.total_amount) AS n FROM (SELECT total_amount FROM orders "
-    "WHERE status = 'paid') p",
-]
+ADVERSARIAL = NOT_A_PLAIN_MATCH
 
 
 @pytest.mark.parametrize("sql", ADVERSARIAL)
@@ -388,14 +334,7 @@ def test_a_curated_twins_condition_on_another_table_is_not_its_own(org):
     assert (item["name"], item["restrictions"]) == ("total_sales", ["c.status = 'paid'"])
 
 
-@pytest.mark.parametrize("storage_type,sql", [
-    ("DuckDB", "SELECT SUM(o.total_amount) AS n FROM orders o SEMI JOIN payments p "
-               "ON p.order_id = o.id"),
-    ("DuckDB", "SELECT SUM(o.total_amount) AS n FROM orders o ANTI JOIN payments p "
-               "ON p.order_id = o.id"),
-    ("Databricks", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT ANTI JOIN payments p "
-                   "ON p.order_id = o.id AND p.status = 'x'"),
-])
+@pytest.mark.parametrize("storage_type,sql", SEMI_ANTI)
 def test_a_semi_or_anti_join_is_listed(tmp_path, storage_type, sql):
     """It keeps or drops rows by what another relation holds: a restriction, listed as the join."""
     org = _org(tmp_path, storage_type=storage_type, metrics=UNFILTERED)
@@ -404,13 +343,7 @@ def test_a_semi_or_anti_join_is_listed(tmp_path, storage_type, sql):
     assert len(item["restrictions"]) == 1 and "JOIN payments" in item["restrictions"][0]
 
 
-@pytest.mark.parametrize("storage_type,sql", [
-    ("PostgreSQL", "SELECT SUM(total_amount) AS n FROM orders TABLESAMPLE SYSTEM (10)"),
-    ("DuckDB", "SELECT SUM(total_amount) AS n FROM orders USING SAMPLE 10%"),
-    ("Snowflake", "SELECT SUM(total_amount) AS n FROM orders AT(TIMESTAMP => '2026-01-01')"),
-    ("BigQuery", "SELECT SUM(total_amount) AS n FROM orders "
-                 "FOR SYSTEM_TIME AS OF TIMESTAMP '2026-01-01'"),
-])
+@pytest.mark.parametrize("storage_type,sql", UNSEEN_ROWS)
 def test_a_sampled_or_time_travelled_table_is_not_settled(tmp_path, storage_type, sql):
     """Some rows, or the rows of another moment: not the metric over the table, and not a condition
     this check can compare."""
@@ -418,14 +351,7 @@ def test_a_sampled_or_time_travelled_table_is_not_settled(tmp_path, storage_type
     assert _one(org, sql, "n")["status"] == rt.UNDETERMINED
 
 
-@pytest.mark.parametrize("sql", [
-    "SELECT SUM(a.total_amount) AS s FROM orders a JOIN orders b ON b.id = a.customer_id "
-    "WHERE b.status = 'paid'",
-    "SELECT SUM(a.total_amount) FILTER (WHERE b.status = 'paid') AS s FROM orders a "
-    "JOIN orders b ON b.id = a.customer_id",
-    "SELECT SUM(o.total_amount) AS s FROM orders o JOIN payments p ON p.order_id = o.id "
-    "WHERE status = 'paid'",
-])
+@pytest.mark.parametrize("sql", TWIN_TRICKS)
 def test_a_condition_on_a_reference_the_number_does_not_read_is_not_its_metrics(org, sql):
     """A self-join's other side is the same table and different rows; an unqualified column in a
     two-reference SELECT cannot be told. Neither stands for `paid_sales`'s own condition."""
@@ -678,9 +604,9 @@ def test_a_stored_receipt_read_back_holds_the_version_and_every_new_key(tmp_path
     import json
     import sqlite3
 
-    from test_ace098_completeness import _record_one, _rows
-
     from store import Store
+
+    from test_ace098_completeness import _record_one, _rows
 
     app_db = "sqlite://" + str(tmp_path / "app.db")
     store = Store.connect(app_db)
