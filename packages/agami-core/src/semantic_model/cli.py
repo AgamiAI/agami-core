@@ -31,6 +31,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -839,6 +840,38 @@ def cmd_timing(args) -> int:
     No timeline is not an error: every number is 0 and the line is empty."""
     from . import timing
     _print_json(timing.onboarding_timing(Path(args.root)))
+    return 0
+
+
+_EMAIL_RE = re.compile(r"\S+@\S+\.\S+")
+
+
+def _git_email() -> Optional[str]:
+    """git's `user.email` on this computer, read locally (no network), or None when git isn't
+    there, has none set, or it isn't an email."""
+    try:
+        out = subprocess.run(["git", "config", "--get", "user.email"], capture_output=True,
+                             text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out if _EMAIL_RE.fullmatch(out) else None
+
+
+def cmd_identity(args) -> int:
+    """Who sign-offs are recorded under: `reviewer_email` / `reviewer_role` from
+    `<artifacts_dir>/local/.config`, and, when no email is saved, `suggested_email`, the email git
+    already holds on this computer. A card can't have a text field, so a live run's identity card
+    had only "Type it in Other" and "Don't sign anything yet"; the suggestion is offered as an
+    option the person picks, never recorded without that pick."""
+    config: dict = {}
+    try:
+        doc = json.loads((Path(args.artifacts_dir).expanduser() / "local" / ".config").read_text(encoding="utf-8"))
+        config = doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        pass
+    email = config.get("reviewer_email") or None
+    _print_json({"reviewer_email": email, "reviewer_role": config.get("reviewer_role") or None,
+                 "suggested_email": None if email else _git_email()})
     return 0
 
 
@@ -2901,6 +2934,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("timing", help="how long onboarding took, from the step marks: seconds per step, the total, and a 'Set up in …' line")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")
     sp.set_defaults(func=cmd_timing)
+
+    sp = sub.add_parser("identity", help="who sign-offs are recorded under (from local/.config), and "
+                        "the email git already holds on this computer to offer when none is saved")
+    sp.add_argument("artifacts_dir", help="the artifacts folder, the parent of the model folders")
+    sp.set_defaults(func=cmd_identity)
 
     sp = sub.add_parser("summary", help="the onboarding's closing summary as markdown, ready to post: totals, the per-area table, what waits for sign-off, and the 'Set up in …' line")
     sp.add_argument("root", help="the model folder, <artifacts_dir>/<profile>")

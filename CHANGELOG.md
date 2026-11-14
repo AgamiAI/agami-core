@@ -350,6 +350,13 @@ below corresponds to one such version.
   it while the starter-question card was still waiting for its answer. agami-connect now leaves the
   step in progress (the closing mark's `then` says so), and agami-query marks it done after the
   first answer, when the task list still shows the step in progress. The step keeps its name.
+- **The sign-off identity card offers the email this computer knows, and deciding later.** A live
+  run asked "Which email should sign-offs be recorded under? Type it in Other" with nothing to press
+  but "Don't sign anything yet": a card has no text field. New `sm identity <artifacts_dir>` prints
+  the saved `reviewer_email` / `reviewer_role` from `local/.config` and, when no email is saved,
+  `suggested_email`, git's `user.email` read locally. agami-connect and agami-model offer it as the
+  card's first option (recorded only when the person picks it), say in the question that typing in
+  Other is optional, and describe "Don't sign anything yet" as deciding later.
 - **Setting up `.gitignore` no longer shows as a failed command.** A live run chained
   `cat <artifacts>/.gitignore` onto its setup command, and on a first run, with no such file, the
   whole command showed "Failed". The skill now says to read it with the Read tool, never `cat` in

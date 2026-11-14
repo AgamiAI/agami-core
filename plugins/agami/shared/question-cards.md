@@ -99,9 +99,11 @@ A definition change, a host name, a reworded question: the person types it in "O
 them to type a reply message.
 
 A value the person must type (an email, a host) is asked for in the question text, *"Which email
-should sign-offs be recorded under? Type it in Other."*, never offered as an option such as "Type it
-in Other": people click that option and nothing gets typed. The options are the alternatives to
-typing ("Don't sign anything yet").
+should sign-offs be recorded under? Type it in Other, or decide later."*, never offered as an option
+such as "Type it in Other": people click that option and nothing gets typed. The options are the
+alternatives to typing: a value the engine already knows on this computer (git's email, from
+`sm identity`), which the person picks or not, and a way to decide later ("Don't sign anything
+yet").
 
 ### 5a. A question typed in "Other" is answered, then the same card is asked again
 

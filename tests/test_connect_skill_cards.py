@@ -784,3 +784,31 @@ def test_gitignore_is_read_with_the_read_tool_and_a_missing_one_is_not_an_error(
         assert "Read it first with the Read tool, never `cat` in Bash: a missing `.gitignore` is not an error" in flat, name
     sample = " ".join((refs / "sample.md").read_text(encoding="utf-8").split())
     assert "never `cat` in Bash: on a first run there is no `.gitignore` yet, which is not an error" in sample
+
+
+def _identity_card_rules(text: str) -> None:
+    # A live run's identity card had no field, only "Type it in Other" in the question and "Don't sign
+    # anything yet": the email git already holds is offered first, typing is optional, and deciding
+    # later is an option of its own.
+    flat = " ".join(text.split())
+    assert 'scripts/sm" identity "<artifacts_dir>"' in flat
+    assert "options **`<suggested_email>`** first" in flat
+    assert "Pick yours below, type another in Other, or decide later." in flat
+    assert "Type it in Other, or decide later." in flat
+    assert "Typing is never required" in flat
+    assert "never record git's email unless the person picks it on the card" in flat
+    assert "Decide later: nothing is signed now" in flat
+
+
+def test_4a_identity_card_offers_the_local_email_and_deciding_later():
+    _identity_card_rules(_phase_4())
+
+
+def test_model_identity_card_matches_connect():
+    _identity_card_rules((SKILL.parent.parent / "agami-model" / "SKILL.md").read_text(encoding="utf-8"))
+
+
+def test_the_sample_path_asks_no_identity_card():
+    flat = " ".join((SKILL.parent / "references" / "sample.md").read_text(encoding="utf-8").split())
+    assert "**No identity card on the sample path.**" in flat
+    assert "the definitions were approved by agami for the sample" in flat
