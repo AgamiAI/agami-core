@@ -57,7 +57,9 @@ The validator gates the write — **if it fails, the model is not persisted.** S
 
 **Post one progress line, with numbers from the engine's output only.** No card here: the build asks nothing. Every number comes from the report it printed (`tables:`, `relationships:`, `subject_areas (<A>)`, `capability modes:`, `deep tables:`, `sensitive columns:`); never estimate, round up or fill a number the output didn't give. For how many joins came from declared foreign keys, count the relationship items with `origin: "fk"` in `bash "<plugin_root>/scripts/sm" review-items "<root>"`; if you didn't run it, leave that clause out.
 
-`✓ Read <N> tables into <A> subject area(s) (<catalog|probe> mode); <R> joins, <F> from declared foreign keys; <S> columns flagged personal; <D> wide tables.`
+`✓ Read <N> tables into <A> subject area(s); <R> joins, <F> from declared foreign keys; <S> columns flagged personal; <D> wide tables.`
+
+When `capability modes:` shows `probe` for any capability, add *"Some of it was read from the data itself, because this login can't read the database's catalog."* Never name the mode ("catalog mode", "probe mode"): those are agami's words, not the person's.
 
 Add **one finding** on the next line when the report has one worth a person's attention, quoted from it: a `suspected personal data (review):` line, a `large table` line, or a note that dropped a table. One, not a list; none when there is none. Batched builds post `batch 3/5 (+12 tables)` between calls, then this line once at the end.
 

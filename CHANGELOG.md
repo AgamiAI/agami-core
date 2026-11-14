@@ -357,6 +357,12 @@ below corresponds to one such version.
   `suggested_email`, git's `user.email` read locally. agami-connect and agami-model offer it as the
   card's first option (recorded only when the person picks it), say in the question that typing in
   Other is optional, and describe "Don't sign anything yet" as deciding later.
+- **agami-connect's own working words stay out of what the person reads.** A live sample run told
+  the person "6B path", "catalog mode", "coverage gate", "derived form", "the shape doc", "engine
+  bug" and "agami-example". The build's progress line no longer asks for "(catalog mode)": when part
+  of the model was read from the data, it says so in words. The skill's plain-voice list now bans a
+  phase or branch name, a mode or check name, agami's own file names, "the engine", "derived form",
+  "profile" and a folder name the person didn't choose.
 - **Setting up `.gitignore` no longer shows as a failed command.** A live run chained
   `cat <artifacts>/.gitignore` onto its setup command, and on a first run, with no such file, the
   whole command showed "Failed". The skill now says to read it with the Read tool, never `cat` in

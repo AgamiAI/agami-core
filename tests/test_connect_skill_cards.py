@@ -812,3 +812,19 @@ def test_the_sample_path_asks_no_identity_card():
     flat = " ".join((SKILL.parent / "references" / "sample.md").read_text(encoding="utf-8").split())
     assert "**No identity card on the sample path.**" in flat
     assert "the definitions were approved by agami for the sample" in flat
+
+
+def test_the_plain_voice_list_bans_the_internal_words_a_live_run_said():
+    # A live sample run told the person "6B path", "catalog mode", "coverage gate", "derived form",
+    # "the shape doc", "engine bug" and "agami-example": the skill's own working words.
+    flat = " ".join(SKILL.read_text(encoding="utf-8").split())
+    plain = flat[flat.index("**Plain voice"):flat.index("## Progress tracking")]
+    for word in ('"6B"', '"the 6B path"', '"catalog mode"', '"coverage gate"', '"the shape doc"',
+                 '"engine bug"', '"derived form"', '"profile"', '"agami-example"'):
+        assert word in plain, word
+
+
+def test_the_build_line_names_no_mode():
+    text = (SKILL.parent / "references" / "build.md").read_text(encoding="utf-8")
+    assert "<catalog|probe> mode" not in text
+    assert "Never name the mode" in text
