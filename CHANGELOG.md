@@ -350,6 +350,18 @@ below corresponds to one such version.
   it while the starter-question card was still waiting for its answer. agami-connect now leaves the
   step in progress (the closing mark's `then` says so), and agami-query marks it done after the
   first answer, when the task list still shows the step in progress. The step keeps its name.
+- **An answer's table and "How this was answered" reach the chat: the answer ends its turn.** A live
+  first answer showed two sentences and no table, then the "How does this answer look?" card. A
+  probe through the Agent SDK found the same in every run, on this code and on older code, for a
+  plain question and for the first question after onboarding: with the card asked right after the
+  answer, the model wrote the answer only in thinking and showed the card alone. Saying so in the
+  skill did not change that. agami-query now asks no card after an answer in the same turn: every
+  call comes first, and the turn's last message is the answer (the table as `sm format-table`
+  printed it, the insight, the receipt), one line naming the replies ("looks right", what's off,
+  "chart", "sign off" when a definition is unsigned) and the follow-ups. The person's reply is
+  handled as the card's option was; the one-time GitHub-star ask comes after that reply, never
+  after the answer. Confirming the column meanings an answer leaned on now says which ones were
+  saved, not "Locked in. I won't ask about those again."
 - **The sign-off identity card offers the email this computer knows, and deciding later.** A live
   run asked "Which email should sign-offs be recorded under? Type it in Other" with nothing to press
   but "Don't sign anything yet": a card has no text field. New `sm identity <artifacts_dir>` prints

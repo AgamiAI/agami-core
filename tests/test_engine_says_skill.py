@@ -178,7 +178,7 @@ def test_the_examples_table_is_the_say_of_seed_validate():
 def test_the_first_answer_shows_the_table_before_any_sentence_about_it():
     p4 = _read(QUERY).split("## Phase 4: Present", 1)[1].split("### 4a ", 1)[0]
     order = next(line for line in p4.splitlines() if "4a Approach" in line)
-    assert order.index("4d Table") < order.index("4c Insight") < order.index("4d.2 Answer card")
+    assert order.index("4d Table") < order.index("4c Insight") < order.index("4f Numbered follow-ups")
     query = _read(QUERY)
     assert "The table is never left out when rows came back" in _flat(query)
     assert "### 4c — Insight, under the table" in query and "Insight first" not in query
