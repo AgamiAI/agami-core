@@ -4369,6 +4369,13 @@ def assemble_receipt(
         return [{"metric": name, "conditions": _shown(conds)}
                 for name, conds in missing[:_ECHO_MAX_NAMES]] or None
 
+    def _missing_tables(missing: tuple) -> "list[dict[str, Any]] | None":
+        # Capped like `missing_conditions`, and a cut counted on the marker the same way.
+        if len(missing) > _ECHO_MAX_NAMES:
+            truncated.add(len(output_items))
+        return [{"metric": name, "tables": [_echo_name(t) for t in tables]}
+                for name, tables in missing[:_ECHO_MAX_NAMES]] or None
+
     def _built(built: "dict | None") -> "dict[str, Any] | None":
         if built is None:
             return None
@@ -4453,8 +4460,7 @@ def assemble_receipt(
             # `[]` with `restrictions == []` is the plain match); a metric whose tables the number
             # did not all read, and which; what a number is built from; and why it is undetermined.
             "joins_not_declared": _labels(result.joins) if match is not None else None,
-            "missing_tables": [{"metric": name, "tables": [_echo_name(t) for t in tables]}
-                               for name, tables in result.missing_tables[:_ECHO_MAX_NAMES]] or None,
+            "missing_tables": _missing_tables(result.missing_tables),
             "built_from": _built(result.built_from),
             "reason": result.reason,
         })

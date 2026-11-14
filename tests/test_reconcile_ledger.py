@@ -18,6 +18,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "plugins" / "agami" / "scripts"))
 
@@ -1176,6 +1178,43 @@ def test_a_list_the_receipt_cut_short_is_never_presented_as_whole():
                "tables": {"items": [{"qname": "orders"}]}}
     [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(total_amount)"}]})
     assert row["note"].endswith("(the receipt lists only some)")
+
+
+def test_a_match_through_an_undeclared_join_still_describes_its_slice():
+    """Copilot on #661: the join makes the part open, and the rows it was counted over and the
+    filters after counting are still said, in the note and in the evidence."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "matched",
+                                      "name": "total_sales", "aggregate": True,
+                                      "source_tables": ["orders"],
+                                      "restrictions": ["status = 'paid'"],
+                                      "result_filters": ["n > 5"],
+                                      "joins_not_declared": ["orders → payments"]}]},
+               "tables": {"items": [{"qname": "orders"}, {"qname": "payments"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(total_amount)"}]})
+    assert row["verdict"] == "unresolved"
+    assert "counted only where status = 'paid'" in row["note"]
+    assert "then kept only results where n > 5" in row["note"]
+    assert row["evidence"]["restrictions"] == ["status = 'paid'"]
+    assert row["evidence"]["result_filters"] == ["n > 5"]
+
+
+CUT = "1 of the listed output column(s) list only some of their conditions or joins."
+
+
+@pytest.mark.parametrize("item", [
+    {"status": "matched", "name": "total_sales", "source_tables": ["orders"],
+     "restrictions": ["status = 'paid'"]},
+    {"status": "unmatched", "missing_conditions": [{"metric": "paid_sales",
+                                                     "conditions": ["status = 'paid'"]}]},
+    {"status": "unmatched", "missing_tables": [{"metric": "payment_total", "tables": ["payments"]}]},
+], ids=["confirmed", "missing-condition", "missing-table"])
+def test_every_branch_listing_from_a_cut_list_says_it_is_partial(item):
+    """Copilot on #661: when the marker says a list was cut, no listing reads as complete."""
+    receipt = {"columns": {"undetermined": CUT,
+                           "items": [{"kind": "output", "column": "n", "aggregate": True, **item}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(total_amount)"}]})
+    assert row["note"].endswith("(the receipt lists only some)"), row["note"]
 
 
 def test_a_metric_table_used_only_to_filter_is_not_called_unread():

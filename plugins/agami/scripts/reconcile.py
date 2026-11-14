@@ -1043,28 +1043,31 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                                   note=f"matched the metric {item.get('name')!r}, defined on "
                                        f"{', '.join(sources)}, which this statement does not read; "
                                        "the expression matches by shape only"))
-            elif joins:
-                # Counted through a join the semantic model does not declare: the rows it added up
-                # may not be the metric's rows. Left open, naming the join.
-                rows.append(_part(f"metric:{column}", UNRESOLVED,
-                                  evidence={"metric": item.get("name"), "joins_not_declared": joins},
-                                  note=f"matches the metric {item.get('name')!r}, counted through "
-                                       f"{'a join' if len(joins) == 1 else 'joins'} the semantic "
-                                       f"model does not declare: {', '.join(joins)}{more}"))
             else:
                 # The rows it was counted over are named, not judged: whether a slice is what the
                 # question meant is the person's call, and the counting is the defined metric's.
                 restrictions = [str(r) for r in (item.get("restrictions") or [])]
                 result_filters = [str(r) for r in (item.get("result_filters") or [])]
                 evidence = {"metric": item.get("name")}
-                note = "the output matches a defined metric"
+                slice_ = ""
                 if restrictions:
                     evidence["restrictions"] = restrictions
-                    note += ", counted only where " + " and ".join(restrictions)
+                    slice_ += ", counted only where " + " and ".join(restrictions)
                 if result_filters:
                     evidence["result_filters"] = result_filters
-                    note += ", then kept only results where " + " and ".join(result_filters)
-                rows.append(_part(f"metric:{column}", CONFIRMED, evidence=evidence, note=note))
+                    slice_ += ", then kept only results where " + " and ".join(result_filters)
+                if joins:
+                    # Counted through a join the semantic model does not declare: the rows it added
+                    # up may not be the metric's rows. Left open, naming the join and the slice.
+                    evidence["joins_not_declared"] = joins
+                    rows.append(_part(f"metric:{column}", UNRESOLVED, evidence=evidence,
+                                      note=f"matches the metric {item.get('name')!r}, counted through "
+                                           f"{'a join' if len(joins) == 1 else 'joins'} the semantic "
+                                           f"model does not declare: {', '.join(joins)}{slice_}{more}"))
+                else:
+                    rows.append(_part(f"metric:{column}", CONFIRMED, evidence=evidence,
+                                      note="the output matches a defined metric" + slice_
+                                           + (more if slice_ else "")))
         elif item.get("missing_tables"):
             # A defined metric computes this expression over a table the statement never read: the
             # same calculation on other rows (#630). Not a gap in the model, which defines it.
@@ -1079,7 +1082,7 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                               note="the expression is the metric " + "; ".join(missing)
                                    + (", which this number is not counted over (the statement only "
                                       "filters on it)" if elsewhere else
-                                      ", which this statement does not read")))
+                                      ", which this statement does not read") + more))
         elif item.get("built_from"):
             # Built on a defined metric (an average of a per-day total): not that metric, and not a
             # gap either. Named, so the person can judge whether the second step is what they meant.
@@ -1102,7 +1105,8 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                        for m in item["missing_conditions"]]
             rows.append(_part(f"metric:{column}", UNRESOLVED,
                               evidence={"column": column, "missing_conditions": item["missing_conditions"]},
-                              note="computes a defined metric without its own condition: " + "; ".join(missing)))
+                              note="computes a defined metric without its own condition: " + "; ".join(missing)
+                                   + more))
         elif item.get("aggregate") is False or (item.get("aggregate") is None and prepare_read and not aggregates and status == "unmatched"):
             # A plain column in a list query computes nothing a metric could define: `number`,
             # `type` or `opened` matching no metric is not a gap, and saying so for every column of

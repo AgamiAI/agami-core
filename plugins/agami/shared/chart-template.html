@@ -1694,6 +1694,24 @@
           rb.appendChild(el('h5', { text: 'Not a defined metric' }));
           rb.appendChild(ul);
         }
+        // A number whose expression is a defined metric's, over tables it was not counted over
+        // (ACE-178, #630): said beside the definitions, so it never reads as that metric.
+        const elsewhere = outputColumns().filter(i => (i.missing_tables || []).length);
+        if (elsewhere.length) {
+          const ul = el('ul');
+          elsewhere.forEach(i => i.missing_tables.forEach(mt => {
+            const li = el('li');
+            li.appendChild(el('code', { text: i.column }));
+            li.appendChild(document.createTextNode(' is not counted over '));
+            li.appendChild(el('code', { text: (mt.tables || []).join(', ') }));
+            li.appendChild(document.createTextNode(', which '));
+            li.appendChild(el('code', { text: mt.metric }));
+            li.appendChild(document.createTextNode(' is defined on'));
+            ul.appendChild(li);
+          }));
+          rb.appendChild(el('h5', { text: 'Defined on tables it does not count' }));
+          rb.appendChild(ul);
+        }
         // A number built on a defined metric (ACE-178): an average of a per-day total is not the
         // total, and it is said as what it is built from.
         const built = outputColumns().filter(i => i.built_from && i.status !== 'matched');

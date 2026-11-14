@@ -1066,8 +1066,10 @@ def test_a_long_statement_of_nested_steps_stays_inside_the_bound(org):
     ]
     sql = "WITH " + ", ".join(steps) + " SELECT SUM(total_amount) AS n FROM s9"
     assert len(sql) >= 50_000
+    # Best of five: a full parallel run once measured 1.05 s here against 0.45 s alone. The bound
+    # is the code's, and a busy machine's slowest moments are not.
     timings = []
-    for _ in range(3):
+    for _ in range(5):
         started = time.perf_counter()
         receipt = rt.assemble_receipt(org, sql)
         timings.append(time.perf_counter() - started)
