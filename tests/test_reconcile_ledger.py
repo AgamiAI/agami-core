@@ -1114,6 +1114,53 @@ def test_a_metric_whose_own_condition_the_statement_leaves_out_is_open_not_a_gap
     assert "paid_sales (status = 'paid')" in row["note"]
 
 
+def test_a_match_through_a_join_the_model_does_not_declare_is_open_and_names_it():
+    """ACE-178: the counting may be the metric's, but the rows went through a join the model does
+    not define, so they may not be the metric's rows. Open, naming the join."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "matched",
+                                      "name": "total_sales", "aggregate": True,
+                                      "source_tables": ["orders"], "restrictions": [],
+                                      "joins_not_declared": ["orders → payments"]}]},
+               "tables": {"items": [{"qname": "orders"}, {"qname": "payments"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(total_amount)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:n", "unresolved")
+    assert "orders → payments" in row["note"]
+
+
+def test_a_metric_on_a_table_never_read_is_open_naming_the_table():
+    """ACE-178 / #630: the expression is a defined metric's, over a table the statement never read.
+    Not a gap — the model defines it — and not that metric. Open, naming both."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "unmatched",
+                                      "aggregate": True, "missing_tables": [
+                                          {"metric": "payment_total", "tables": ["payments"]}]}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(amount)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:n", "unresolved")
+    assert "'payment_total', defined on payments, which this statement does not read" in row["note"]
+
+
+def test_a_number_built_from_a_metric_is_open_and_says_how():
+    """ACE-178: an average of a per-day total is built from the total, and is not it."""
+    receipt = {"columns": {"items": [{"kind": "output", "column": "a", "status": "unmatched",
+                                      "aggregate": True, "built_from": {
+                                          "metric": "total_sales", "aggregate": "AVG",
+                                          "by": ["opened"], "restrictions": [],
+                                          "joins_not_declared": []}}]},
+               "tables": {"items": [{"qname": "orders"}]}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "AVG(daily)"}]})
+    assert (row["part"], row["verdict"]) == ("metric:a", "unresolved")
+    assert "built from the metric 'total_sales': avg of it per opened" in row["note"]
+
+
+def test_an_undetermined_number_carries_its_reason():
+    receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "undetermined",
+                                      "aggregate": True,
+                                      "reason": "it depends on the order of rows"}]},
+               "tables": {"items": []}}
+    [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "SUM(x)"}]})
+    assert row["verdict"] == "unresolved" and row["note"].endswith("it depends on the order of rows")
+
+
 def test_without_a_pre_flight_an_unmatched_aggregate_stays_open():
     older = {"columns": {"items": [{"kind": "output", "column": "total", "status": "unmatched"}]}, "tables": {"items": []}}
     assert [(r["part"], r["verdict"]) for r in reconcile._grade_metrics(older, None)] == [("metric:total", "unresolved")]

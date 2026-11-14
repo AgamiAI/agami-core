@@ -371,12 +371,18 @@ def test_no_filtered_query_reads_as_a_plain_match(tmp_path, sql):
         assert item["restrictions"], sql
 
 
-def test_a_number_behind_a_step_is_not_settled(org):
-    """ACE-178 follows a number through a step; until then the step's filter is unseen, so the
-    count it feeds is `undetermined` rather than the whole metric."""
-    item = _one(org, "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') "
-                     "SELECT COUNT(*) AS n FROM paid", "n")
-    assert (item["status"], item["name"], item["restrictions"]) == (rt.UNDETERMINED, None, None)
+def test_a_number_behind_a_step_is_followed(tmp_path, org):
+    """Until ACE-178 the step's filter was unseen, so this read `undetermined` rather than the whole
+    metric. ACE-178 follows the step: the paid filter is the curated twin's own condition when the
+    twin is declared, and a listed restriction on the plain count when it is not."""
+    sql = ("WITH paid AS (SELECT id FROM orders WHERE status = 'paid') "
+           "SELECT COUNT(*) AS n FROM paid")
+    item = _one(org, sql, "n")
+    assert (item["status"], item["name"], item["restrictions"]) == (
+        rt.MATCHED, "paid_order_count", [])
+    plain = _one(_org(tmp_path, "unfiltered", metrics=UNFILTERED), sql, "n")
+    assert (plain["status"], plain["name"], plain["restrictions"]) == (
+        rt.MATCHED, "order_count", ["status = 'paid'"])
 
 
 def test_a_curated_twins_condition_on_another_table_is_not_its_own(org):

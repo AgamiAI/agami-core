@@ -641,9 +641,14 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
                    # after counting, and a metric condition the statement lacks. These DO carry the
                    # statement's own literals — the slice is the point — bounded by `_echo_expr`,
                    # with every value beside a sensitive column withheld. Lists of strings, never a
-                   # number, so the integer assertion below still holds; and a CTE body is not
-                   # read for them, so `CTE_LITERAL` still reaches nowhere.
-                   "restrictions", "result_filters", "missing_conditions"}),
+                   # number, so the integer assertion below still holds. ACE-178 reads a CTE body
+                   # for them, and `CTE_LITERAL` still reaches nowhere: the only output, `o.id`,
+                   # aggregates nothing, and a plain column carries no restrictions.
+                   "restrictions", "result_filters", "missing_conditions",
+                   # ACE-178: the joins on a matched number's path the model does not declare, a
+                   # metric whose tables the number did not all read, what a number is built from,
+                   # and why one is undetermined (a fixed phrase, never caller text).
+                   "joins_not_declared", "missing_tables", "built_from", "reason"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {
         frozenset({"ref", "alias", "qname", "declared", "rows", "rows_as_of", "freshness",

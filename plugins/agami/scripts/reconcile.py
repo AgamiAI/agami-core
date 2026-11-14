@@ -1026,15 +1026,26 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
         if status == "matched":
             sources = [str(t) for t in (item.get("source_tables") or [])]
             read = _tables_read(receipt)
+            joins = [str(j) for j in (item.get("joins_not_declared") or [])]
             if sources and not (set(sources) & read):
-                # The receipt matched by shape: the qualifiers were stripped to compare, so a
-                # `SUM(amount)` on one table equals a metric's `SUM(amount)` on another.
+                # A receipt from before ACE-178 matched by shape: the qualifiers were stripped to
+                # compare, so a `SUM(amount)` on one table equalled a metric's `SUM(amount)` on
+                # another. A current receipt never does (it names the table in `missing_tables`), but
+                # a stored one may.
                 rows.append(_part(f"metric:{column}", UNRESOLVED,
                                   evidence={"metric": item.get("name"), "source_tables": sources,
                                             "tables_read": sorted(read)},
                                   note=f"matched the metric {item.get('name')!r}, defined on "
                                        f"{', '.join(sources)}, which this statement does not read; "
                                        "the expression matches by shape only"))
+            elif joins:
+                # Counted through a join the semantic model does not declare: the rows it added up
+                # may not be the metric's rows. Left open, naming the join.
+                rows.append(_part(f"metric:{column}", UNRESOLVED,
+                                  evidence={"metric": item.get("name"), "joins_not_declared": joins},
+                                  note=f"matches the metric {item.get('name')!r}, counted through "
+                                       f"{'a join' if len(joins) == 1 else 'joins'} the semantic "
+                                       f"model does not declare: {', '.join(joins)}"))
             else:
                 # The rows it was counted over are named, not judged: whether a slice is what the
                 # question meant is the person's call, and the counting is the defined metric's.
@@ -1049,6 +1060,23 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                     evidence["result_filters"] = result_filters
                     note += ", then kept only results where " + " and ".join(result_filters)
                 rows.append(_part(f"metric:{column}", CONFIRMED, evidence=evidence, note=note))
+        elif item.get("missing_tables"):
+            # A defined metric computes this expression over a table the statement never read: the
+            # same calculation on other rows (#630). Not a gap in the model, which defines it.
+            missing = [f"{m.get('metric')!r}, defined on {', '.join(map(str, m.get('tables') or []))}"
+                       for m in item["missing_tables"]]
+            rows.append(_part(f"metric:{column}", UNRESOLVED,
+                              evidence={"column": column, "missing_tables": item["missing_tables"]},
+                              note="the expression is the metric " + "; ".join(missing)
+                                   + ", which this statement does not read"))
+        elif item.get("built_from"):
+            # Built on a defined metric (an average of a per-day total): not that metric, and not a
+            # gap either. Named, so the person can judge whether the second step is what they meant.
+            built = item["built_from"]
+            by = ", ".join(map(str, built.get("by") or []))
+            rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "built_from": built},
+                              note=f"built from the metric {built.get('metric')!r}: "
+                                   f"{str(built.get('aggregate', '')).lower()} of it per {by or 'group'}"))
         elif item.get("missing_conditions"):
             # A defined metric computes this value over a condition the statement does not apply.
             # Not a gap in the semantic model, which defines it; not judged a defect either, since
@@ -1083,8 +1111,10 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
         else:
             # `undetermined` is the receipt saying it could not tell (an ambiguous binding, a column
             # behind a CTE, a declaration it could not read). A failure to read is never a gap.
+            reason = item.get("reason")
             rows.append(_part(f"metric:{column}", UNRESOLVED, evidence={"column": column, "status": status},
-                              note="whether the output matches a metric could not be read"))
+                              note="whether the output matches a metric could not be read"
+                                   + (f": {reason}" if reason else "")))
     return rows
 
 

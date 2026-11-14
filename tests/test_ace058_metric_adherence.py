@@ -440,27 +440,26 @@ def test_a_cross_area_metric_matches(org):
         ("c", rt.MATCHED, "active_customers")]
 
 
-def test_a_binding_only_inside_a_cte_matches_no_output_column(org):
-    """SC-6. Containment credited this: the binding appears in the text, so the whole statement was
-    reported as using the metric even though the value never reaches the caller. Measured on the
-    live testbed as a false match before this change.
+def test_a_binding_inside_a_cte_matches_the_column_that_passes_it_on(org):
+    """SC-6 was about containment crediting a binding the caller never receives; that half is
+    `test_a_cte_body_is_not_an_output_column`, unchanged. Here the value DOES reach the caller: the
+    outer query passes the CTE's `r` on. Until ACE-178 the CTE was a scope this layer did not enter
+    and the column read `undetermined`; ACE-178 follows it to where it is computed (#621).
 
-    `broken_metric` is removed for this case so the settled `unmatched` is reachable — the unread
-    binding is its own test below, and leaving both in would confound the two.
+    `broken_metric` is removed so the unread binding cannot hold the column open.
     """
     got = _statuses(org, f"WITH x AS (SELECT {PAID_REVENUE} AS r FROM orders) "
                          "SELECT r AS revenue FROM x", drop=("broken_metric",))
-    # One output column, and it is NOT a match: the CTE is a scope this layer does not enter, so the
-    # honest answer is that nothing was established about it.
-    assert got == [("revenue", rt.UNDETERMINED, None)]
+    assert got == [("revenue", rt.MATCHED, "paid_revenue")]
 
 
-def test_a_value_from_a_derived_table_is_undetermined_not_unmatched(org):
-    """`SELECT MAX(x.t) FROM (…) x` reads `x` fine and knows nothing about what computed `t`.
-    ACE-060 shipped this rule for `not_multiplied` and found this second shape of it in review."""
+def test_a_value_from_a_derived_table_is_read_through_it(org):
+    """`SELECT MAX(x.t) FROM (…) x` was `undetermined`: the layer read `x` and knew nothing about
+    what computed `t`. ACE-178 follows the derived table: `t` is `total_amount`, so the number is
+    `MAX(total_amount)`, which no declared metric computes — a settled `unmatched`."""
     got = _statuses(org, "SELECT MAX(x.t) AS m FROM (SELECT total_amount AS t FROM orders) x",
                     drop=("broken_metric",))
-    assert got == [("m", rt.UNDETERMINED, None)]
+    assert got == [("m", rt.UNMATCHED, None)]
 
 
 def test_a_statement_that_reads_no_relation_at_all_still_settles(org):
@@ -483,22 +482,28 @@ def test_a_statement_that_reads_no_relation_at_all_still_settles(org):
     assert out["status"] == rt.UNDETERMINED
 
 
-def test_a_derived_table_source_is_still_a_scope_we_do_not_enter(org):
-    """The half of the empty-map case that IS a gap, kept passing by the same change."""
-    assert _statuses(org, "SELECT MAX(x.t) AS m FROM (SELECT total_amount AS t FROM orders) x",
-                     drop=("broken_metric",)) == [("m", rt.UNDETERMINED, None)]
+def test_a_relation_the_walk_cannot_read_is_still_a_gap(org):
+    """The half of the empty-map case that IS a gap. A derived table over a declared table is now
+    followed (ACE-178, see above); a `VALUES` list is rows no model declares, and stays a gap."""
     assert _statuses(org, "SELECT c AS v FROM (VALUES (1)) AS v(c)",
                      drop=("broken_metric",)) == [("v", rt.UNDETERMINED, None)]
 
 
 def test_a_join_to_a_derived_table_does_not_settle_off_the_visible_half(org):
-    """A SELECT reading `orders` AND a derived table has visible base tables, so a check that only
-    looked at the alias map's values would settle it. `_computed_relations` asks whether this SELECT
-    binds anything it computed, which is the question that matters."""
+    """A SELECT reading `orders` AND a relation it computed has visible base tables, so a check that
+    only looked at those would settle it. What matters is whether the computed relation was read.
+
+    A `VALUES` list is not: the number stays `undetermined`. `(SELECT 1 AS k)` is, since ACE-178: one
+    row of constants, so `o.id = d.k` keeps the orders whose id is 1, a restriction like `o.id = 1`.
+    The number is then settled — not the paid revenue, whose own condition it does not apply."""
+    assert _statuses(
+        org, "SELECT SUM(total_amount) AS revenue FROM orders o "
+             "JOIN (VALUES (1)) AS d(k) ON o.id = d.k", drop=("broken_metric",)) == [
+        ("revenue", rt.UNDETERMINED, None)]
     assert _statuses(
         org, "SELECT SUM(total_amount) AS revenue FROM orders o "
              "JOIN (SELECT 1 AS k) d ON o.id = d.k", drop=("broken_metric",)) == [
-        ("revenue", rt.UNDETERMINED, None)]
+        ("revenue", rt.UNMATCHED, None)]
 
 
 def test_a_star_is_undetermined(org):

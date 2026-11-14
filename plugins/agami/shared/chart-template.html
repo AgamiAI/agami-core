@@ -1666,6 +1666,11 @@
               li.appendChild(document.createTextNode(', then kept only results where '));
               li.appendChild(el('code', { text: m.result_filters.join(' and ') }));
             }
+            // Joins its rows went through that the model does not declare (ACE-178).
+            if ((m.joins_not_declared || []).length) {
+              li.appendChild(document.createTextNode(', counted through a join the semantic model does not declare: '));
+              li.appendChild(el('code', { text: m.joins_not_declared.join(', ') }));
+            }
             li.appendChild(el('br'));
             li.appendChild(el('span', { class: 'receipt-meta', text: approvalPhrase(m) }));
             ul.appendChild(li);
@@ -1687,6 +1692,24 @@
             ul.appendChild(li);
           }));
           rb.appendChild(el('h5', { text: 'Not a defined metric' }));
+          rb.appendChild(ul);
+        }
+        // A number built on a defined metric (ACE-178): an average of a per-day total is not the
+        // total, and it is said as what it is built from.
+        const built = outputColumns().filter(i => i.built_from && i.status !== 'matched');
+        if (built.length) {
+          const ul = el('ul');
+          built.forEach(i => {
+            const b = i.built_from;
+            const li = el('li');
+            li.appendChild(el('code', { text: i.column }));
+            li.appendChild(document.createTextNode(' is built from '));
+            li.appendChild(el('code', { text: b.metric }));
+            li.appendChild(document.createTextNode(': the ' + String(b.aggregate || '').toLowerCase() + ' of it per '));
+            li.appendChild(el('code', { text: (b.by || []).join(', ') }));
+            ul.appendChild(li);
+          });
+          rb.appendChild(el('h5', { text: 'Built from a defined metric' }));
           rb.appendChild(ul);
         }
         if (columns.length) {
