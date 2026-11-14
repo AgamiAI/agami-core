@@ -359,3 +359,15 @@ def test_artifacts_dir_source_names_where_the_folder_came_from(tmp_path, monkeyp
     assert CR.artifacts_dir_source() == "default"  # an empty pointer is no pointer
     pointer.write_text(str(tmp_path / "art") + "\n", encoding="utf-8")
     assert CR.artifacts_dir_source() == "pointer"
+
+
+@pytest.mark.parametrize("content, state", [(None, "missing"), ("local/\n", "has_local"),
+                                            ("*.tmp\n/local\n", "has_local"), ("*.tmp\n", "lacks_local"),
+                                            ("localish/\n", "lacks_local")])
+def test_gitignore_state_says_what_to_do_without_a_read_of_a_missing_file(tmp_path, monkeypatch, content, state):
+    # A live run's Read of `<artifacts_dir>/.gitignore` before it existed showed as a failed step; the
+    # resolver now says whether it is there and already ignores `local/`.
+    if content is not None:
+        (tmp_path / ".gitignore").write_text(content)
+    data, _ = _run(monkeypatch, tmp_path)
+    assert data["gitignore"] == state

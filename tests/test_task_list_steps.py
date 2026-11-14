@@ -157,8 +157,8 @@ def test_the_last_step_is_done_only_once_the_first_question_is_answered():
     assert "End the turn with the step still in progress" in summary
     assert "its Phase 4f marks the step done then" in summary
     sample = " ".join(_text(REFS / "sample.md").split())
-    assert "once agami-query has posted the answer to the question picked (or typed), mark the step done" in sample
-    assert "Not when the card is answered" in sample
+    assert "The step stays in progress until the first question is answered: agami-query marks it done" in sample
+    assert "a number is that listed question, word for word, handed to agami-query" in sample
     query = " ".join(_text(SKILLS_DIR / "agami-query" / "SKILL.md").split())
     fourf = query[query.index("### 4f"):]
     assert "still shows *Summary and first question* in progress" in fourf

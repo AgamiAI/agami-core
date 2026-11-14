@@ -1291,10 +1291,11 @@ def _eval_close() -> str:
 
 
 def test_the_close_is_a_card_and_the_report_is_the_full_view():
-    """Question cards: the score and the failing table in chat, then one card. The run's report is
-    served from localhost when the person asks to look, never as a file path to open."""
+    """The score and the failing table in chat end the turn with one reply line (long text before a
+    card does not reach the person). The run's report is served from localhost when the person asks
+    to look, never as a file path to open."""
     close = _eval_close()
-    assert "AskUserQuestion" in close
+    assert 'Reply "look at the failures", "fix one" or "done".' in close
     for label in ("**Look at the failures**", "**Fix one**", "**Done**"):
         assert label in close, label
     assert "serve_page.py" in close

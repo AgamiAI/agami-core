@@ -16,6 +16,7 @@ Output (the standard refactor contract):
       "profile_source": "explicit" | "env" | "active_profile" | "default",
       "artifacts_dir": "/Users/me/agami-artifacts",
       "artifacts_dir_source": "env" | "pointer" | "default",  # where artifacts_dir came from
+      "gitignore": "missing" | "has_local" | "lacks_local",  # <artifacts_dir>/.gitignore vs `local/`
       "credentials": {"present": bool, "chmod_ok": bool, "type": "sqlite"|null,
                       "fields": {...}, "missing_fields": [...]},
       "example_present": bool,
@@ -302,6 +303,20 @@ def artifacts_dir_source() -> str:
     return "default"
 
 
+def gitignore_state(art: Path) -> str:
+    """Whether `<art>/.gitignore` already ignores `local/`: "missing" (no file: write it with that one
+    line), "has_local" (nothing to do) or "lacks_local" (read it, then add the line). Read here so the
+    skill never Reads a file that may not exist: a live run showed that Read as a failed step."""
+    try:
+        text = (art / ".gitignore").read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "lacks_local"
+    lines = {line.strip() for line in text.splitlines()}
+    return "has_local" if lines & {"local/", "local", "/local/", "/local"} else "lacks_local"
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Resolve agami env state + next-phase decision.")
     ap.add_argument("--db-type", default=None, help="bind the interpreter probe to this dialect's driver")
@@ -383,6 +398,7 @@ def main(argv=None) -> int:
         "profile_source": profile_source,
         "artifacts_dir": str(art),
         "artifacts_dir_source": artifacts_dir_source(),
+        "gitignore": gitignore_state(art),
         "credentials": creds,
         "example_present": example_present,
         "config": config,

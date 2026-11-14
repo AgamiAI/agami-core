@@ -29,10 +29,13 @@ the person is on which cards) is in agami-connect's SKILL.md, "What runs at the 
 
 Go on with the cards and the main-chat work the schedule pairs with the batch. A card keeps the turn
 open. **Do not end the turn while subagents are running**: a turn that ends loses this skill's
-pre-approved commands, and every later command stops to ask for permission. The one exception is a
-Pause the person asks for (review.md 4b): the turn ends and the subagents are left to finish;
-nothing they write is used, since a resume starts every batch again (readers, enrichers and writers
-alike) with a new stamp.
+pre-approved commands, and every later command stops to ask for permission. Two turns end with
+subagents running. The sign-off list (review.md 4a) is long text, which ends its turn
+([engine-says.md](engine-says.md)): the example writers run on while it waits, a completion notice
+that arrives before the person's reply gets one line at most, and Phase 5a collects their files as
+usual. A Pause the person asks for (review.md 4b): the turn ends and the subagents are left to
+finish; nothing they write is used, since a resume starts every batch again (readers, enrichers and
+writers alike) with a new stamp.
 
 ## 3. Collect
 

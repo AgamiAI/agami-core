@@ -77,7 +77,7 @@ def test_intake_card_answers_go_through_the_intake_parser_and_numbers_through_re
 
 def test_the_vision_confirm_step_is_the_intake_card():
     vision = _between("### Vision branch", "### CSV branch")
-    assert "intake card" in vision
+    assert "confirmed at intake (Phase 1n)" in vision
 
 
 def test_each_chunk_ends_on_a_progress_card():
@@ -130,5 +130,5 @@ def test_no_page_is_opened_as_a_file():
 
 def test_every_card_header_fits_twelve_characters():
     headers = re.findall(r"header `([^`]+)`", SKILL)
-    assert len(headers) >= 4
+    assert len(headers) >= 3  # `What I read`, `Keep` and `Replace` became reply lines
     assert [h for h in headers if len(h) > 12] == []

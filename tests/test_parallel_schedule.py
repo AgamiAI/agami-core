@@ -108,7 +108,9 @@ def test_a_pause_collects_what_is_ready_and_a_resume_starts_the_writers_again():
     assert "leave them; don't wait for them or draft their examples yourself" in review
     assert "collect what is ready" not in review
     parallel = _flat(_read(PARALLEL))
-    assert "The one exception is a Pause the person asks for" in parallel
+    assert "A Pause the person asks for (review.md 4b): the turn ends and the subagents are left to finish" in parallel
+    # the sign-off list is long text, which ends its turn with the example writers still running
+    assert "The sign-off list (review.md 4a) is long text, which ends its turn" in parallel
     assert "**On resume**, the writers are always started again with a new batch stamp" in review
     assert "5a uses the files they wrote" not in review
 

@@ -412,9 +412,10 @@ def test_a_batch_too_small_to_split_is_not_split():
 
 def test_the_user_makes_one_decision_and_it_is_not_the_split():
     """A per-row prompt turns a twelve-number reconcile into twelve interruptions. The override
-    exists and is one option on the one card, not twelve prompts."""
+    exists and is one reply to the one offer, not twelve prompts. The offer ends its turn, since a
+    table before a card in the same message does not reach the person."""
     assert "Make the offer once, here, after the summary. Never per row." in OFFER
-    assert "Save all ten?" in OFFER
+    assert 'Reply "save all ten" (recommended)' in OFFER and "**The offer ends its turn**" in OFFER
     assert "**Leave some out**" in OFFER and "not twelve prompts" in OFFER
 
 

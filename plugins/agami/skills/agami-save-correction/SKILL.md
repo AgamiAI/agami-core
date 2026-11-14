@@ -336,7 +336,7 @@ Apply each individual edit as above. Show the user the combined diff in 4b befor
 
 ### 4b — show the diff to the user, get approval
 
-Build a unified diff (or a compact "before / after" summary) of the proposed change against the existing target file. Name the file in the prompt so the user knows what they're approving. Show via AskUserQuestion:
+Build a unified diff (or a compact "before / after" summary) of the proposed change against the existing target file. Name the file in the prompt so the user knows what they're approving. **The diff ends the turn**, with the three choices as one reply line, never a card after it: long text before a card in the same message does not reach the person ([`shared/engine-says.md`](../../shared/engine-says.md)). A one-line change may go on a card instead (header `Approve`), with the change in the `Yes` option's `preview`:
 
 > I want to update the target file in `<artifacts_dir>/<profile>/subject_areas/<area>/:
 >
@@ -346,10 +346,9 @@ Build a unified diff (or a compact "before / after" summary) of the proposed cha
 > + from_columns: [customer_id]
 > ```
 >
-> Approve?
-> - **Yes (Recommended)** — apply and validate
-> - **No** — leave the model as-is, the example is still saved
-> - **Edit first** — let me tweak before applying
+> Reply "yes" (recommended: apply and validate), "no" (leave the model as-is; the example is still saved) or "edit first" (tweak it before applying).
+
+The replies are the three choices: **Yes (Recommended)** — apply and validate; **No** — leave the model as-is, the example is still saved; **Edit first** — let me tweak before applying.
 
 For `org_context` / `user_preference` the file is `datasource.md` / `USER_MEMORY.md` instead of a schema yaml — same prompt shape, just a different filename.
 

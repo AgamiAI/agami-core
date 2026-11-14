@@ -1,8 +1,8 @@
 ---
 name: agami-model
-description: "The semantic model in the chat: what needs sign-off and the subject areas with their tables, then a card — review what needs sign-off (approve / reject the AI-proposed metrics, entities and guessed joins; Rule 1 — a query using an unsigned metric still answers but carries a warning until it's approved), hide tables or columns from queries, look up a table or metric, or show the full view (the model explorer page: browse with live search, edit descriptions/metrics/entities/joins, add metrics, edit datasource.md). Every change is applied through the curation engine and gated by the validator before it touches the YAML. (This skill absorbed the former `/agami-review`.)"
-when_to_use: "Use for BOTH model curation and trust review. Curation: 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'I don't want PII columns', 'add a metric', 'edit datasource.md', '/agami-model'. Review / sign-off: 'open the review dashboard', 'review my model', 'what needs review', 'sign off the metrics', 'approve the metrics', 'walk the review queue', '/agami-review' (now folded in here) — or after agami-connect's Phase 4 sign-off gate or Phase 7 summary prompts to review or inspect the model. Also use when the user replies to a previously-served full view with its back-channel block (exclude tables: … / curate-ops: … / new-metrics: … / done)."
-argument-hint: "[review | preseed | rule1] — go straight to the sign-off review; no arg shows the overview"
+description: "The semantic model in the chat: what needs sign-off and the subject areas with their tables, then the choices — review what needs sign-off (approve / reject the AI-proposed metrics, entities and guessed joins; Rule 1 — a query using an unsigned metric still answers but carries a warning until it's approved), hide tables or columns from queries, look up a table or metric, or show the full view (the model explorer page: browse with live search, edit descriptions/metrics/entities/joins, add metrics, edit datasource.md). Every change is applied through the curation engine and gated by the validator before it touches the YAML. (This skill absorbed the former `/agami-review`.)"
+when_to_use: "Use for BOTH model curation and trust review. Curation: 'open the model explorer', 'show me the model', 'browse my tables', 'exclude a table', 'remove this column', 'I don't want PII columns', 'add a metric', 'edit datasource.md', '/agami-model'. Review / sign-off: 'open the review dashboard', 'review my model', 'what needs review', 'sign off the metrics', 'approve the metrics', 'walk the review queue', '/agami-review' (now folded in here) — or after agami-connect's closing message, when the person replies 'review the model'. Also use when the user replies to a previously-served full view with its back-channel block (exclude tables: … / curate-ops: … / new-metrics: … / done)."
+argument-hint: "[review | preseed | rule1 | resume] — go straight to the sign-off review; no arg shows the overview"
 allowed-tools:
   - Bash(bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" *)
   - Bash(bash ${CLAUDE_PLUGIN_ROOT}/scripts/sm *)
@@ -24,9 +24,11 @@ Conventions for every card here: [`shared/question-cards.md`](../../shared/quest
 
 The flow:
 
-1. **Overview** (Phase 1) — read the model with `sm review-items` and `sm model-tree`, show what needs sign-off and the subject areas with their table counts, then one card: **Review what needs sign-off** / **Hide tables or columns** / **Look up a table or metric** / **Show the full view**.
+1. **Overview** (Phase 1) — read the model with `sm review-items` and `sm model-tree`, show what needs sign-off and the subject areas with their table counts; the overview ends its turn with the four choices as a reply line: review what needs sign-off / hide tables or columns / look up a table or metric / show the full view.
 2. **Act on the pick** (Phases 2–5) — cards, a table or two, and `sm curate` for every write.
-3. **Back to the card** — after each action, one line on what changed and the overview card again, until the person is done.
+3. **Back to the card** — after each action, one line on what changed and the overview card (the same four choices) again, until the person is done.
+
+**Long text ends its turn** ([`shared/engine-says.md`](../../shared/engine-says.md)): a table or a list is the last thing in its message, ending with the choices as a reply line, and a card is asked only after a line or two. Long text written before a card in the same message does not reach the person.
 
 Trust-spine semantics — three actions on the same `review_state` field:
 - **Exclude / Reject** → `rejected`. The loader drops rejected tables, columns, metrics, entities, and relationships entirely (`include_rejected=False` at runtime) — never in prompts, never joined, never aggregated. ("Hide" / "Exclude" is the verb for tables/columns; "Reject" for metrics/entities/joins — same op.)
@@ -37,7 +39,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 
 ## Conversation style
 
-- **Tables and cards.** Every result is a short markdown table (at most 15 rows, saying how many more); every decision is a card. No page opens unless the person picks **Show the full view**.
+- **Tables and cards.** Every result is a short markdown table (at most 15 rows, saying how many more) that ends its turn; every other decision is a card after a line or two. No page opens unless the person picks **Show the full view**.
 - **Plain voice.** Say "database", not "profile". A successful change gets a one-line ack with its counts.
 - **Qualified names everywhere.** Tables are `<area>.<table>`. Columns are `<area>.<table>.<column>` (area = subject area). No bare names.
 - **"Other" you can't act on is re-asked, never guessed.** A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Otherwise say in one line what didn't match and ask the same card again.
@@ -56,6 +58,7 @@ Trust-spine semantics — three actions on the same `review_state` field:
 **Scope.** Look at `$ARGUMENTS`:
 - `review` → skip the overview card and go straight to Phase 2 with every item waiting for sign-off.
 - `preseed` or `rule1` (from `/agami-connect`) → Phase 2 with `--scope preseed` / `--scope rule1`.
+- `resume` → act on the person's reply to the text that ended the last turn here (the overview, the sign-off list, a look-up), with no overview first. That reply comes in a new turn, which has lost this skill's pre-approved commands, so handle every such reply by invoking agami-model again with the Skill tool, `args` `resume`, first.
 - otherwise → Phase 1.
 
 **The identity card (sign-off identity: asked once, on the first approval).** Needed to stamp sign-off on an approve, and recorded on `curation_log.jsonl` and commits. It is resolved lazily: only when a batch holds an `approve`. Before the first `approve` op of the session, run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" identity "<artifacts_dir>"`: it prints `reviewer_email` and `reviewer_role` from `<artifacts_dir>/local/.config` (the keys `/agami-connect` uses too), and `suggested_email`, the email git already holds on this computer (read locally), when none is saved; a pasted full-view block's `signed-off-by:` line also supplies them. When both are there, use them and don't ask. When either is missing, ask one card with two questions, the same card as agami-connect Phase 4:
@@ -81,22 +84,25 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"
 - `model-tree` is `{datasource, subject_areas:[{area, description, tables:[{table, review_state, columns:[…]}]}]}`. Per subject area, count its tables, and the hidden ones (`review_state: rejected`) apart.
 - `sensitive` gives `count` (personal-data columns still queryable) and `suspected_count`.
 
-Post the overview, in this order:
+Where the host can draw a visual in the chat, draw the overview card first ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here). Then post the overview as the turn's last message, in this order:
 
 1. One sentence on sign-off, from the counts: *"4 metrics, 2 entities and 3 guessed joins need sign-off; 1 of them changed since it was approved."* or *"Nothing needs sign-off."*
-2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more. **Where the host can draw a visual in the chat, show the overview card in place of this table** ([`shared/overview-card.md`](../../shared/overview-card.md): one tile per area from `sm overview`, a click carries on here); keep the table where it can't ([`shared/native-elements.md`](../../shared/native-elements.md)).
+2. A table of the subject areas, `Subject area | Tables | Hidden`, largest first, at most 15 rows, then *"Showing 15 of <A> subject areas; <A−15> more."* when there are more. Leave it out where the overview card was drawn ([`shared/native-elements.md`](../../shared/native-elements.md)).
 3. When `count` or `suspected_count` > 0, one line: *"<n> columns look like personal data and are still queryable."*
+4. The reply line: *Reply "review" to sign off what's waiting, "hide" to keep tables or columns out of queries, "look up <name>", or "full view".* Leave "review" out when nothing needs sign-off.
 
-Then call AskUserQuestion, one question (header `Model`), *"What would you like to do with the model?"*:
+No card follows the overview: it ends the turn. Handle the reply as the four choices below; words that mean one of them count as it.
+
+**The overview card** (header `Model`), asked after each action (below) with one line before it, *"What would you like to do with the model?"*:
 
 - **Review what needs sign-off**: approve or reject the definitions waiting (Phase 2). Mark it **(Recommended)** and put it first when anything needs sign-off; leave it out when nothing does.
 - **Hide tables or columns**: keep them out of every query (Phase 3).
 - **Look up a table or metric**: its description, columns and caveats, in the chat (Phase 4).
 - **Show the full view**: the model explorer page, served from localhost (Phase 5).
 
-"Other" takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), an edit ("add a metric: refund rate = refunds / captured payments", "describe orders.status as …"), or "done". Route it to the phase it asks for; an edit becomes `sm curate` edit ops, or `sm add --kind metric` for a new metric, applied as Phase 6 says, then shown back in one line; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
+"Other" (or a reply to the overview) takes a request in the person's words: a name to look up ("orders"), something to hide ("hide sales.stg_leads"), an edit ("add a metric: refund rate = refunds / captured payments", "describe orders.status as …"), or "done". Route it to the phase it asks for; an edit becomes `sm curate` edit ops, or `sm add --kind metric` for a new metric, applied as Phase 6 says, then shown back in one line; "done" goes to Phase 7. A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). Anything else you can't place is re-asked, never guessed.
 
-**After each action** (Phases 2–4), post one line on what changed and ask this card again, with the counts recomputed. Dismissing the card, or "done" in "Other", ends the session (Phase 7).
+**After each action** (Phases 2–3), post one line on what changed and ask the overview card, with the counts recomputed. Dismissing the card, or "done" in "Other", ends the session (Phase 7).
 
 ---
 
@@ -108,21 +114,16 @@ The same pattern and wording as agami-connect Phase 4 (sign-offs, the personal-d
 bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" review-items "$ROOT" --scope all
 ```
 
-(`--scope preseed` or `--scope rule1` when `$ARGUMENTS` asked for it.) Keep the items whose `tab` is `review`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set); a guessed join's is its `title` and `cardinality`. An item with `changes_since_approval` was signed off before and has changed since: say so on its row, with what changed. Show a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a).
+(`--scope preseed` or `--scope rule1` when `$ARGUMENTS` asked for it.) Keep the items whose `tab` is `review`. A metric's meaning is its `extra_lines` entry labelled `Definition`; an entity's is its `maps_to` (and `source_signal` when set); a guessed join's is its `title` and `cardinality`. An item with `changes_since_approval` was signed off before and has changed since: say so on its row, with what changed. **The list ends the turn**: one line, *"<P> definitions wait for your sign-off:"*, a markdown table, `Kind | Name | What it means | SQL`, one short line per item taken from those fields (never a meaning you made up), at most 15 rows, then *"Showing 15 of <P>; <P−15> more."* when there are more, and the reply line below. The **SQL** column is what the item maps to, so the person checks the formula and not only the words: a metric's binding for this database's engine from `bindings`, with its `source_tables`; a join's condition; an entity's `maps_to` column. Show it in backticks, cut at about 80 characters with `…` (the whole of it is answered on request, question-cards rule 5a). No card follows the list: a list before a card in the same message does not reach the person.
 
-Then call AskUserQuestion, one question (header `Sign-off`), *"What should I do with the <P> definitions waiting for sign-off?"*:
+The reply line: *Reply "approve all", "review each" or "later", or "show the full view".* Put **approve all** first, with "(recommended)" after it, only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`; otherwise put **review each** first with "(recommended)". Handle the reply as these choices (Approve all, Review one by one, Skip for now, Show the full view); words that mean one of them count as it:
 
-- **Approve all**: sign off every item as listed. Mark it **(Recommended)** and put it first only when the list is short and confident: every item fits in the table above (15 or fewer), none has `changes_since_approval`, and every metric has a `Definition`. Otherwise put **Review one by one** first and mark that one (Recommended).
-- **Review one by one**: up to 4 items per card (below).
-- **Skip for now**: nothing is signed; they still work, and answers that use one carry a warning until it is signed off.
-- **Show the full view**: the model explorer page with every definition and its SQL, served from localhost (Phase 5); then this card again.
-
-| Answer | Do |
+| Reply | Do |
 |---|---|
 | Approve all | The identity card first if needed (Phase 0), then one batch: `{"op":"approve","kind":"<kind>","area":"<area>","name":"<name>"}` per item (leave `area` out when the item's `area` is null, a cross-area metric or join), applied with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-signoff.json" --signer "<reviewer_email>" --role "<reviewer_role>"`. Say how many were signed off, from its `applied`. |
 | Review one by one | The one-by-one cards below. |
-| Skip for now | Nothing is written. Back to the overview card. |
-| Show the full view | Phase 5, then this card again. |
+| Skip for now ("later") | Nothing is written. Back to the overview card. |
+| Show the full view | Phase 5; end that turn with the URL and the same reply line. |
 
 **Rule 1 guard.** A metric with an empty `Definition` can't be approved as it stands: on its card, ask for the definition in "Other" and apply it as an edit first.
 
@@ -141,7 +142,7 @@ After each card, apply its answers in one `sm curate` batch (approvals with `--s
 
 **Any other "Other" you can't act on is re-asked, never guessed.** A question ("show me the SQL", "why?") is answered first, then the same card asked again ([question-cards rule 5a](../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)). An empty change, a column or table the model doesn't have, or words you can't turn into one field's new value: say in one line what didn't match, and ask the same card again. The same when `sm curate` returns `errors` or `skipped` for the edit: show them, and ask the same card again.
 
-**Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column, label}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`). This question can share the sign-off card (two questions on one AskUserQuestion call). Show both in one table, `Table | Columns`, marking each suspected column "(suspected)", e.g. `customers | email, phone, ip_address (suspected)` (a table in the chat may show identifiers; the card names them in words); at most 15 rows and *"and N more"*. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
+**Personal-data columns (when `sm sensitive` reports `count` or `suspected_count` > 0).** Run `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" sensitive "$ROOT"`: `{count, columns:[{area, table, column, label}], suspected, suspected_count}`. `columns` are flagged personal, `suspected` look personal but weren't flagged (a phone-like or birth-date-like sample, a name like `ip_address`); a suspected one is marked "(suspected)" in its option. Ask it after the sign-off list's reply is handled (never in the list's turn), with one line before it, *"<n> columns look like personal data and are still queryable."*, and no table of them: the options name every one. Then one multiSelect question (header `Personal`), **"Hide these from queries"**: *"These columns look like personal data. Which should queries never read?"*
 
 Flagged and suspected columns are picked the same way:
 
@@ -152,7 +153,7 @@ Flagged and suspected columns are picked the same way:
 
 Hide the picks in one batch, `{"op":"exclude","kind":"table","area":"<area>","name":"<table>","column":"<column>"}` per column, with `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" curate "$ROOT" --ops-file "<artifacts_dir>/local/tmp/agami-hide.json"`, then say how many columns are hidden and how many personal-data columns stay queryable (`sm sensitive`'s new `count`). **Keep them all queryable** writes nothing. A name in "Other" that isn't a column in the model, or **Keep them all queryable** picked together with columns to hide, is said back and the same card asked again; never guess which column was meant.
 
-When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card. **When agami-connect sent the person here** (its Phase 7 `Review what needs sign-off`), go back to agami-connect Phase 8 instead, the starter questions, so onboarding still ends on a first question.
+When the queue is done (or skipped), recount with `sm review-items` and go back to the overview card. **When the person came here from agami-connect's closing message** (a "review the model" reply, agami-connect Phase 8), onboarding has already ended on its questions to start with: when the queue is done, say in one line that they can ask a question any time, and stop.
 
 ---
 
@@ -166,10 +167,10 @@ From the `model-tree` output, build the groups that apply, skipping anything alr
 - **Personal-data columns**: `sm sensitive`'s `columns` and `suspected` together.
 - **Tables by subject area**: every visible table, grouped by its subject area.
 
-Show a table of the groups, `Group | Count | First few`, the first 5 names in each and *"and N more"*. Then call AskUserQuestion, one multiSelect question (header `Hide`), *"Which of these should queries never read?"*, at most 4 options, the groups that apply in the order above:
+Say in one line how many groups there are to pick from; no table of them, since each option's `preview` lists its members (up to 15, then *"and N more"*) and a table before the card does not reach the person. Then call AskUserQuestion, one multiSelect question (header `Hide`), *"Which of these should queries never read?"*, at most 4 options, the groups that apply in the order above:
 
-- **Staging and backup tables (<n>)**: hides every table in the group.
-- **Personal-data columns (<n>)**: asks the Phase 2 "Hide these from queries" question next, so the person picks which.
+- **Staging and backup tables (<n>)**: hides every table in the group; its `preview` names them.
+- **Personal-data columns (<n>)**: asks the Phase 2 "Hide these from queries" question next, so the person picks which; its `preview` names them.
 - **Pick by subject area**: a follow-up card (below).
 - **Nothing for now**: writes nothing.
 
@@ -204,7 +205,7 @@ A hidden table isn't in `sm context` (the runtime drops it): print its descripti
 
 **A metric or entity.** From its `review-items` item: the `Definition` (a metric) or `maps_to` (an entity), each `Caveat` line, its `other_names`, and its sign-off state (`approved` by whom and when, or waiting, or changed since approval with what changed). Show the definition in words; leave the binding SQL out of the chat.
 
-Then back to the overview card.
+The look-up ends its turn, with one reply line last: *Say "look up" and another name, "review", "hide", or "done".* No card follows it: a table before a card in the same message does not reach the person.
 
 ---
 
@@ -229,15 +230,13 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/py" serve_page.py "$out" --minutes 30 --open
 
 Run `serve_page.py` with `run_in_background` and read its first line, `{"url": "http://localhost:<port>/<name>", "opened": true}`: `--open` opens the page in the person's own browser rather than the Desktop app's built-in pane. Set `initial_tab=review` when the person came from the review (or `$ARGUMENTS` was `review`/`preseed`/`rule1`); leave it empty otherwise, and the renderer's `auto` default opens on **Review** when anything needs sign-off and on **Tables** when the model is clean.
 
-Post the link and what the page does, in a few lines:
+Post the link and what the page does in one line, so the card after it is still seen:
 
 ```
-Full view, opened in your browser: http://localhost:<port>/<name> (open for 30 minutes)
-A read-only view of every table, metric, entity and join. Make changes on the card here:
-approve, hide, or type an edit in Other ("add a metric …", "describe orders.status as …").
+Full view, opened in your browser (read-only, 30 minutes): http://localhost:<port>/<name>
 ```
 
-With `"opened": false`, the first line reads *"Full view (open this in your browser): <url> …"* instead. Then ask again the card it was picked on: the Sign-off or item card when picked there (Phase 2), the overview card otherwise. The page is read-only; a block pasted from an older, editable page is still applied (5b).
+With `"opened": false`, it reads *"Full view (open this in your browser, read-only, 30 minutes): <url>"* instead. Then ask again the card it was picked on: an item card when picked there (Phase 2), the overview card otherwise; when it was a reply to the sign-off list, close with that list's reply line instead. The page is read-only; a block pasted from an older, editable page is still applied (5b).
 
 ### 5b — The pasted block
 
@@ -395,13 +394,17 @@ agami: 3 metrics need sign-off.
        | support      | 4      | 0      |
        Showing 2 of 2 subject areas.
        5 columns look like personal data and are still queryable.
+       Reply "review" to sign off what's waiting, "hide" to keep tables or columns out of
+       queries, "look up <name>", or "full view".
+       (the turn ends here)
 
-[card "Model": Review what needs sign-off (Recommended) / Hide tables or columns /
- Look up a table or metric / Show the full view]  → Hide tables or columns
+You: hide
 
+agami: 2 groups you could hide.
 [card "Hide": Personal-data columns (5) / Pick by subject area / Nothing for now]
  → Personal-data columns (5)
 
+agami: 5 columns look like personal data and are still queryable.
 [card "Personal": customers (3: email, phone, ip_address (suspected)) /
  leads (2: email, ssn) / Keep them all queryable]  → both tables
 
@@ -413,8 +416,9 @@ agami: Hidden 5 columns; 0 personal-data columns are still queryable.
 ```
 You: I never want agami to use the staging tables
 
+agami: 1 group you could hide.
 [card "Hide": Staging and backup tables (2) / Pick by subject area / Nothing for now]
- → Staging and backup tables (2)   (the table above the card listed sales.stg_leads,
+ → Staging and backup tables (2)   (its preview lists sales.stg_leads,
                                     sales.customer_score_stg)
 
 agami: Hidden 2 tables.

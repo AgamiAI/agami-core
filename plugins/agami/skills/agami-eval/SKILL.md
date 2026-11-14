@@ -15,7 +15,7 @@ This skill orchestrates:
 2. **Choose** one — the only one, the one named, or the one the user picks.
 3. **Run** it via `scripts/run_golden_eval.py`, which generates, executes and scores every case.
 4. **Present** the verdicts in the order the script emitted them, failures first.
-5. **Ask** what next on one card: look at the failures (the run's report, served from localhost), fix one, or done.
+5. **Ask** what next in one reply line that ends the results: look at the failures (the run's report, served from localhost), fix one, or done.
 
 Spec for the deterministic half: [`scripts/run_golden_eval.py`](../../scripts/run_golden_eval.py) (dataset choice + schema rendering + the printed payload). The scoring itself is agami-core's.
 
@@ -166,13 +166,13 @@ Most of them were also scored, but not all: an unconfirmed item can come back `u
 
 One compact line — the passes build the case, the failures drive the conversation.
 
-Then, when anything did not pass (a failure, an error or an unscored case), call AskUserQuestion, one question, header `Next step`, *"What next?"*:
+Then, when anything did not pass (a failure, an error or an unscored case), the results end the turn with one reply line, *Reply "look at the failures", "fix one" or "done".*: the score and the tables above are long text, and long text before a card in the same message does not reach the person ([`shared/engine-says.md`](../../shared/engine-says.md)). These are the `Next step` choices (header `Next step`, *"What next?"*), asked as a card only after a line or two (as after the report's URL):
 
 - **Look at the failures**: the run's report, every case's question, its verdict, the table-set delta and the two statements side by side, served from localhost.
 - **Fix one**: pick a failing case and say which side is wrong.
 - **Done**: end here.
 
-No `(Recommended)`: what to do about a failure is the person's call. Where AskUserQuestion is unavailable, ask the same as a short numbered list ([`shared/question-cards.md`](../../shared/question-cards.md) rule 7). When everything passed there is nothing to decide: say one line, *"Say 'show the report' to see every case side by side."*, and end the turn.
+No recommendation: what to do about a failure is the person's call. When everything passed there is nothing to decide: say one line, *"Say 'show the report' to see every case side by side."*, and end the turn.
 
 | Answer | Do |
 |---|---|

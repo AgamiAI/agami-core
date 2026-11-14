@@ -57,7 +57,9 @@ def test_overview_reads_the_engine_and_shows_a_short_table():
     assert 'sm" review-items "$ROOT"' in s
     assert 'sm" model-tree "$ROOT"' in s
     assert "15 rows" in s and "more" in s
-    assert "AskUserQuestion" in s
+    # the overview is long text, so it ends its turn with a reply line; the card comes after actions
+    assert "No card follows the overview: it ends the turn." in s
+    assert "**The overview card** (header `Model`), asked after each action" in s
 
 
 def test_overview_card_has_the_four_options():
@@ -89,7 +91,8 @@ def test_review_reuses_the_connect_review_pattern():
     assert "agami-connect" in s and "Phase 4" in s
     for label in ("Approve all", "Review one by one", "Skip for now", "Approve all remaining"):
         assert label in s, label
-    assert "up to 4" in s
+    assert "Up to 4 items per card" in s
+    assert "**The list ends the turn**" in s
     assert "Approve" in s and "Reject" in s
     # The same wording as agami-connect Phase 4, so the two reviews read as one product.
     connect = skill_text("agami-connect")
@@ -213,15 +216,21 @@ def test_the_numbered_list_fallback_is_stated():
     assert "Where AskUserQuestion is unavailable, ask the same as a short numbered list" in _text()
 
 
-def test_a_review_started_from_connect_returns_to_its_starter_questions():
-    assert "agami-connect" in _review() and "Phase 8" in _review()
+def test_a_review_started_from_connect_does_not_start_onboarding_again():
+    # onboarding ended on its closing message; a review from its "review the model" reply stops there
+    assert "agami-connect's closing message" in _review() and "Phase 8" in _review()
+
+
+def test_a_reply_to_text_that_ended_a_turn_invokes_the_skill_again():
+    # a new turn loses the skill's pre-approved commands; invoking it again with `resume` brings them back
+    assert "invoking agami-model again with the Skill tool, `args` `resume`, first" in _text()
 
 
 def test_review_cards_offer_the_full_view_and_come_back_to_the_card() -> None:
     # Tester feedback: the explorer opened only when "show the full view" was typed in Other.
     review = _review()
-    assert review.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
-    assert "| Show the full view | Phase 5, then this card again. |" in review
+    assert review.count("- **Show the full view**") == 1      # the item cards
+    assert "| Show the full view | Phase 5; end that turn with the URL and the same reply line. |" in review
     assert "Then ask again the card it was picked on" in _full_view()
 
 

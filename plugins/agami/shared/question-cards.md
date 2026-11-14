@@ -4,6 +4,9 @@ Every agami decision is a card in the chat (Claude's AskUserQuestion tool), ever
 table in the chat, and a page opens only when the person asks for one. Link this file from your
 skill; do not copy it. `<plugin_root>` is defined at the top of `invocation-conventions.md`.
 
+**Long text ends its turn** ([engine-says.md](engine-says.md)): a card is asked only at the start
+of a turn or after a line or two, never after a table, a list or a summary in the same message.
+
 A card holds 1 to 4 questions. Each question has 2 to 4 options, plus the automatic "Other", and
 may allow several picks (`multiSelect`). `header` is at most 12 characters. Give each question a header no other
 question in the same flow uses: two different questions both headed "Database" read as the same
@@ -11,7 +14,9 @@ question asked twice.
 
 ## 1. A decision is a card, never prose
 
-Whenever the person must choose, call AskUserQuestion. Do not write "reply with 1, 2 or 3".
+Whenever the person must choose, call AskUserQuestion. Do not write "reply with 1, 2 or 3". The
+one exception is a choice about long text the person must read first: that text ends its turn with
+the choices as typed replies in one line (rule 3).
 
 ```json
 {"questions": [{"header": "Database", "question": "Which database should I connect to?",
@@ -34,10 +39,13 @@ recommendation. Facts about the person's environment ("which database?") get no 
              {"label": "Leave them for later", "description": "They still answer, with a warning"}]}
 ```
 
-## 3. A result is chat output, before the card that acts on it
+## 3. A result is chat output, and it ends its turn
 
 Show a short markdown table (at most 15 rows, and say how many more there are) and the one or two
-sentences that matter. The card then asks what to do about it.
+sentences that matter. A table, a list or a summary is the last thing in its turn: what to do about
+it is one line of typed replies at its end (*Reply "approve all", "review each" or "later".*),
+handled as a card's options would be, or a card asked at the start of the next turn. A card may
+follow a result only when the result is a line or two (a count, one name).
 
 ```
 | Table     | Rows   |
@@ -78,9 +86,9 @@ rate*), and a column as *<column> on <table>*.
 
 Group them (by schema, name pattern, subject area, status) and ask about the groups; "Other" takes
 the names of anything to treat differently. **A group option's `preview` lists every item the option
-covers**, one per line (up to 15, then "and N more"), and the same items are in a chat table above
-the card: an option such as "Add all 16" or "Only 1–8" with nothing to show which items those are
-leaves the person nothing to decide by. When items must be decided one by one, ask up to 4 per
+covers**, one per line (up to 15, then "and N more"), and an option such as "Add all 16" or "Only 1–8" with
+nothing to show which items those are leaves the person nothing to decide by. A chat table of the
+same items goes in an earlier turn, never above the card in its own message (rule 3). When items must be decided one by one, ask up to 4 per
 card, one question each, and put "Approve all remaining" (or its equivalent) on every card so a long
 queue can be finished in one press.
 
@@ -108,14 +116,18 @@ yet").
 ### 5a. A question typed in "Other" is answered, then the same card is asked again
 
 People use "Other" to ask before they decide: "show me the SQL", "show me the rows", "why do I
-need this?". That is not a change, a stop, or something you can't place. Answer it in the chat,
-then ask the same card again, with only the questions still open:
+need this?". That is not a change, a stop, or something you can't place. Answer it, then ask the
+same card again, with only the questions still open. The answer must reach the person, so only a
+line or two goes before the card; anything longer goes in the re-asked card's `preview` of the
+option it is about, with one line before the card saying where (*"The SQL is in the preview of
+Approve."*):
 
-- **The SQL**: the item's SQL in a fenced block (its binding for a metric, the statement for an
-  example or an answer), with the tables it reads in one line.
+- **The SQL**: the item's SQL (its binding for a metric, the statement for an example or an
+  answer), laid out over lines, with the tables it reads.
 - **The rows or values**: up to 15 rows of the result, or of a breakdown behind a single number
   (by its most telling column), run through the same guarded path the skill already uses.
-- **Why**: one or two sentences on what the step is for and what happens if they skip it.
+- **Why**: one or two sentences, before the card, on what the step is for and what happens if they
+  skip it.
 
 Answers given to the card's other questions stand: apply them before asking again.
 

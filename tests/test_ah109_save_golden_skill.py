@@ -170,10 +170,10 @@ def _section(start: str, end: str) -> str:
 
 
 def test_the_import_preview_is_a_table_and_a_confirm_card():
-    """Question cards: the parsed rows as a bounded table, then a card. The import still waits for an
-    explicit yes, now pressed rather than typed."""
+    """The parsed rows as a bounded table that ends its turn (a table before a card does not reach
+    the person), with the choice as one reply line. The import still waits for an explicit yes."""
     preview = _section("### 2c", "### 2d")
-    assert "AskUserQuestion" in preview
+    assert "**The rows end the turn**" in preview and 'Reply "import them" or "don\'t import"' in preview
     for label in ("**Import them**", "**Don't import**"):
         assert label in preview, label
     assert "at most 15 rows" in preview

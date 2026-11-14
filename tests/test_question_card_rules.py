@@ -153,4 +153,14 @@ def test_rule_4_group_options_show_their_items() -> None:
     text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
     rule_4 = text[text.index("## 4. "):text.index("## 5. ")]
     assert "A group option's `preview` lists every item the option" in rule_4
-    assert "chat table above" in rule_4
+    assert "never above the card in its own message (rule 3)" in rule_4
+
+
+def test_rule_3_ends_the_turn_on_a_result_and_points_at_the_rule() -> None:
+    # Long text written before a card in the same message reached the person only as a summary.
+    text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    assert "## 3. A result is chat output, and it ends its turn" in text
+    assert "**Long text ends its turn** ([engine-says.md](engine-says.md))" in text
+    rule_5a = text[text.index("### 5a."):text.index("## 6.")]
+    assert "only a\nline or two goes before the card" in rule_5a
+    assert "in a fenced block" not in rule_5a

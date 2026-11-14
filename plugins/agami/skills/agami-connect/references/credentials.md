@@ -16,7 +16,7 @@ One call, which creates the folder with its private mode:
 ```bash
 mkdir -m 700 -p "<artifacts_dir>/local"
 ```
-If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line (Read it first with the Read tool, never `cat` in Bash: a missing `.gitignore` is not an error, it means there is none yet, so write the file with that one line with the Write tool; when it exists, add the line with the Edit tool).
+If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line as preflight's `data.gitignore` says, never with `cat` in Bash and never by reading a file that may not be there (a Read of a missing file shows as a failed step): `missing` → write the file with that one line with the Write tool, no Read first; `lacks_local` → Read it with the Read tool, then add the line with the Edit tool; `has_local` → nothing to do.
 
 ### 0a.2 — Ask the database type
 
@@ -152,7 +152,7 @@ Use the **Write tool**. Shared header first, then the `$DB_TYPE` body with `[$PR
 **Header:**
 ```ini
 # <artifacts_dir>/local/credentials.example
-# Fill in your values below and save, then press "I've filled it in" in the chat.
+# Fill in your values below and save, then reply "done" in the chat.
 # agami moves this file to <artifacts_dir>/local/credentials and chmod-600s it for you — no
 # manual save or chmod needed. (Don't rename it yourself.)
 # agami only runs read-only SELECT queries, so a read-only database user is all it needs
@@ -296,9 +296,9 @@ bash "<plugin_root>/scripts/sm" steps "<root>" --mark connect=in_progress
 ### 0a.8 — Seed `<artifacts_dir>/USER_MEMORY.md` if missing
 Write the default seed (per [`shared/user-memory-format.md`](../../../shared/user-memory-format.md)) with the Write tool, which makes the folder; the file comes out readable by others under the usual umask, as this non-secret file should, so it needs no `chmod`. Don't overwrite. Migrate a v1.1 `<artifacts_dir>/local/USER_MEMORY.md` if present.
 
-### 0a.9 — Hand-off, then a card that waits for the file
+### 0a.9 — Hand-off, which ends the turn
 
-Show the summary, then the card. Don't ask the person to type a phrase.
+Show the summary as the last message of the turn, ending with the reply line below: no card after it, since long text before a card does not reach the person ([engine-says.md](../../../shared/engine-says.md)).
 ```
 ✓ <artifacts_dir>/local/ ready (chmod 700)
 ✓ Credentials template → <artifacts_dir>/local/credentials.example
@@ -314,15 +314,16 @@ Tip: agami only runs read-only queries, so a read-only database user is all it n
 
 Heads-up: a cold cloud warehouse (Snowflake especially) makes introspect the slow
 step — ~5–15 min for a sizable account. Postgres / MySQL are seconds.
+
+Reply "done" when the file is saved, or "show me the file again".
 ```
-Then **AskUserQuestion**, one question, header `Credentials`: *"Tell me when the file is filled in and saved."*
 
-| label | description | then |
-|---|---|---|
-| `I've filled it in` | Secure the file and connect | 0a.10 |
-| `Show me the file again` | Where the file is and what to fill in | Print the path and the field names of the `[$PROFILE_NAME]` section from the template you wrote (from your own copy, never by reading the file: once filled in it holds the password), then the same card again. |
+| Reply | then |
+|---|---|
+| "done" (or any words saying it is filled in) | 0a.10 |
+| "show me the file again" | Print the path and the field names of the `[$PROFILE_NAME]` section from the template you wrote (from your own copy, never by reading the file: once filled in it holds the password), ending with the same reply line. |
 
-The card is the wait: don't continue to Phase 1 until `I've filled it in` is pressed (or, in a later session, until the person comes back with any data question and preflight returns `promote`).
+The reply is the wait, in a new turn: handle it by invoking agami-connect again with `resume` first (as SKILL.md says before its preflight steps), so its commands stay pre-approved. Don't continue to Phase 1 until the person says the file is done (or, in a later session, until the person comes back with any data question and preflight returns `promote`).
 
 Show the read-only **Tip** line only for dialects with a user/role concept (`postgres`,
 `redshift`, `mysql`, `snowflake`, `sqlserver`, `oracle`, `databricks`, `trino`); **omit** it for
@@ -332,7 +333,7 @@ block, and fill in whatever `<…>` placeholders it uses (e.g. `<db>` / `<schema
 `<catalog>` / `<project>` / `<dataset>`) from the values they entered.
 
 ### 0a.10 — On re-entry: promote the filled-in template, then continue
-The person pressed `I've filled it in` on the 0a.9 card (or came back later with a data question, and preflight returned `promote`). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
+The person said the file is done after 0a.9 (or came back later with a data question, and preflight returned `promote`). **Promote it deterministically** with the helper — do NOT hand-roll an `mv`/append, and do NOT assume "no file yet." The script handles all four cases (first profile → move; Nth profile → append; name clash → refuse; placeholders → refuse), so the second-profile and `[main]`/`[main]` cases can't silently corrupt the file:
 
 ```bash
 bash "<plugin_root>/scripts/py" promote_credentials.py
@@ -341,8 +342,8 @@ bash "<plugin_root>/scripts/py" promote_credentials.py
 Read the first token of stdout and act:
 - `SECURED <profile>` → credentials created from the template (chmod 600, `.example` consumed). Continue.
 - `APPENDED <profile>` → the new profile was appended to an existing credentials file (other profiles untouched, chmod 600). Continue.
-- `COLLISION <profile>` → a profile by that name **already exists**; nothing was changed. Tell the user *"You already have a profile named `<profile>` — pick a different name for this database,"* go back to **0a.3** to rename, re-write the template in 0a.4 under the new name, and show the 0a.9 card again. Never overwrite or duplicate an existing profile.
-- `PLACEHOLDERS_REMAIN <fields>` → the template still holds template values; tell the person which fields to fill and show the 0a.9 card again (never introspect against a template).
+- `COLLISION <profile>` → a profile by that name **already exists**; nothing was changed. Tell the user *"You already have a profile named `<profile>` — pick a different name for this database,"* go back to **0a.3** to rename, re-write the template in 0a.4 under the new name, and end with 0a.9's reply line again. Never overwrite or duplicate an existing profile.
+- `PLACEHOLDERS_REMAIN <fields>` → the template still holds template values; tell the person which fields to fill and end with 0a.9's reply line again (never introspect against a template).
 - `NOTHING` → no `credentials.example` to promote (already promoted, or never written) — fall back to the preflight decision.
 
 (`<plugin_root>` is the plugin root, filled in with its absolute path when this skill loads; `promote_credentials.py` is stdlib-only and needs no special interpreter.)

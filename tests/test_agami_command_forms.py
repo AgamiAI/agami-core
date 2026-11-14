@@ -484,16 +484,15 @@ def test_the_build_loop_is_one_progress_call_per_pass():
     assert "```bash\n   bash \"<plugin_root>/scripts/sm\" steps" not in loop
 
 
-# Section 3: the closing summary
-@pytest.mark.parametrize("name,card", [("summary.md", "Then **AskUserQuestion**: `Review what needs sign-off`"),
-                                       ("sample.md", "**A card of starter questions")])
-def test_the_closing_card_comes_after_the_summary(name, card):
+# Section 3: the closing message
+@pytest.mark.parametrize("name", ["summary.md", "sample.md"])
+def test_the_closing_message_ends_the_turn_after_every_other_call(name):
+    # Long text before a tool call reached the person only as a summary: the closing message is the
+    # turn's last message, with every other call before it and no card after it.
     text = _flat(_read(REFS / name))
     call = text.index('scripts/sm" steps "<root>" --mark first_question=in_progress')
-    # summary.md opens the sentence with "The first time it is asked, the closing card…"
-    rule = text.index("losing card is asked only in a message that begins with the summary.")
-    assert call < rule < text.index(card)
-    assert "post its `say` exactly" in text
+    assert "post its `say` exactly as written as your last message" in text[call:]
+    assert "AskUserQuestion" not in text[call:text.index("Phase 8", call) if "Phase 8" in text[call:] else len(text)]
 
 
 def test_the_summary_is_not_assembled_by_hand():
@@ -502,8 +501,8 @@ def test_the_summary_is_not_assembled_by_hand():
     assert 'sm" timing' not in summary
     sample = _read(REFS / "sample.md")
     assert "`Subject area | Tables | Hidden` table" not in sample
-    assert "as well as the summary, not instead of it" in _flat(summary)
-    assert "as well as the summary, not instead of it" in _flat(sample)
+    assert "as well as the closing message, not instead of it" in _flat(summary)
+    assert "overview card's tiles where the session can draw them" in _flat(sample)
 
 
 # Section 4: no silent waits

@@ -43,7 +43,7 @@ The engine **auto-backs-up any legacy (v1) model** (`index.yaml` + per-schema `_
 When the user chooses **Onboard another database**, ask (AskUserQuestion, header `Same org`) whether the new database belongs to the **same company** or a **different** one. A deployment (one artifacts dir) holds exactly **one** company/organization with many datasources under it; a genuinely different company is a **different folder**.
 
 - **Same company (the common case)** → the new profile **attaches under the deployment org**: it lands in the **same** `<artifacts_dir>`, shares the same `org_id` from the root `organization.yaml`, and **shares the company context** authored earlier. Do **not** re-ask the company description (1.4 detects the already-authored company context and skips it); the per-database note is still asked. Narrate it: *"This attaches under your **`<company name>`** organization, sharing the company context you set earlier — its per-database notes stay its own."*
-- **Different company** → set up a **new deployment folder**. Pick/confirm a new artifacts dir path, create it, and **repoint** the pointer to it (the same steps Phase 0a.1 uses for a non-default dir): `mkdir -m 700 -p "<new_artifacts_dir>/local"`, one call that makes the folder and its private `local/`; then the Write tool writes the folder's absolute path as the only line of `<home>/.config/agami/path` (your home folder written out; the Write tool makes the folder); then `<new_artifacts_dir>/.gitignore` gets a `local/` line (Read it first with the Read tool, never `cat` in Bash: a missing `.gitignore` is not an error, it means there is none yet, so write the file with that one line with the Write tool; when it exists, add the line with the Edit tool).
+- **Different company** → set up a **new deployment folder**. Pick/confirm a new artifacts dir path, create it, and **repoint** the pointer to it (the same steps Phase 0a.1 uses for a non-default dir): `mkdir -m 700 -p "<new_artifacts_dir>/local"`, one call that makes the folder and its private `local/`; then the Write tool writes the folder's absolute path as the only line of `<home>/.config/agami/path` (your home folder written out; the Write tool makes the folder); then `<new_artifacts_dir>/.gitignore` gets a `local/` line: the folder was just made, so write the file with that one line with the Write tool, with no Read first (a Read of a missing file shows as a failed step) and never `cat` in Bash; only if the Write tool says the file already exists, Read it, then add the line with the Edit tool.
   The current org's files are **untouched**; the first onboarding in the new folder mints a **fresh** `org_id` + its own company record (1.4 authors it there). This is the only way to run two companies from one machine — one folder each.
 
 ### 1.2 — Scope: schemas, and the no-catalog case
@@ -194,26 +194,23 @@ AGAMI_SQL_MAX_ROWS=200000 bash "<plugin_root>/scripts/sm" discover --profile <pr
 
 It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json` and prints JSON with `table_count` and `inventory_path`. No page is written: everything about picking tables happens in the chat.
 
-**Summarise it in the chat, then ask one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens and nothing waits on a pasted block.
+**One line in the chat, then one card** (conventions: [`shared/question-cards.md`](../../../shared/question-cards.md)). No page opens and nothing waits on a pasted block.
 
 ```bash
 bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_path>"
 ```
 
-It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Show:
+It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Post one sentence only: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty). The rest goes in the card's previews, not in a table above it: a table before a card in the same message does not reach the person ([engine-says.md](../../../shared/engine-says.md)).
 
-1. One sentence: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty).
-2. A markdown table, one row per entry of `schemas` (`Schema | Tables`), at most 15 rows, then the line *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
-3. The first 5 names in `likely_noise` with their `why` and, when it has one, the table it copies (`copy_of`), then "and N more", so the person sees what "Drop staging and backups" would remove (a real table that only looks like a copy shows up here before they press it). If they ask for the whole list, show up to 15 rows and "and N more".
+- **Keep everything**'s `preview`: one line per entry of `schemas` (`<schema>  <tables> tables`), at most 15, then *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
+- **Drop staging and backups**'s `preview`: the first 15 names in `likely_noise` with their `why` and, when it has one, the table it copies (`copy_of`), then "and N more", so the person sees what it would remove (a real table that only looks like a copy shows up here before they press it).
 
-Then call AskUserQuestion, one question (header `Tables`):
+Then call AskUserQuestion, one question (header `Tables`), *"Which tables should agami model? Ask to see a schema or a table, or type columns to leave out in Other (`schema.table.column`)."*:
 
 - **Keep everything**: model all `<N>` tables.
 - **Drop staging and backups**: skip the `<M>` likely-noise tables. Offer it only when `likely_noise` is not empty and does not cover every table. Mark it **(Recommended)** and put it first only when `noise_all_copies` is true (every flagged table has a same-named counterpart, so dropping them loses no data); otherwise list it after **Keep everything** without "(Recommended)", since a flagged table with no counterpart may be real data. With no noise, or when it covers every table, leave this option out; in the second case say that everything looks like staging or backups and ask what to keep.
 - **Only some schemas**: pick which schemas to model. Leave it out when there is a single schema.
 - **Let me name them**: "Other" takes the table names. Names typed straight into "Other" count as this answer. If the option is picked with no names, ask a second card ("Which tables?", options "Keep everything" and "Drop staging and backups") whose "Other" takes the names.
-
-Add one line before the card: *"Ask to see any schema's tables or any table's columns, or type columns to leave out in Other (`schema.table.column`)."*
 
 Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep.txt`:
 
@@ -228,13 +225,13 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 
 If the person asks to skip this ("just introspect everything"), proceed to 1.7 unscoped.
 
-**Showing what is there (when asked).** "What's in sales?", "show me the columns of orders": list it in the chat from the inventory, then ask the same card again.
+**Showing what is there (when asked).** "What's in sales?", "show me the columns of orders": read it from the inventory, then ask the same card again with it in the `preview` of **Keep everything**, and one line before the card saying it is there ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
 ```bash
 bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_path>" --show "<schema | schema.table | table>"
 ```
 
-A schema prints its tables with their column counts; a table prints its columns with their types. Show them as a markdown table (`Table | Columns` or `Column | Type`), at most 15 rows, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (exit 1): say which name didn't match, or list the tables it could mean, and ask the same card again.
+A schema prints its tables with their column counts; a table prints its columns with their types. Show them one per line (`<table>  <columns> columns` or `<column>  <type>`), at most 15, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (exit 1): say which name didn't match, or list the tables it could mean, and ask the same card again.
 
 **Columns to leave out, typed in "Other".** Names of the form `schema.table.column` are columns to exclude from the build, whatever the table answer (Keep everything included) or on their own. Write them one per line with the Write tool to `<artifacts_dir>/local/tmp/agami-drop-columns.txt` and check them:
 

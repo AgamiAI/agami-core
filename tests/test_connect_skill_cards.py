@@ -86,7 +86,9 @@ def test_1_6_follow_up_card_stays_within_four_options():
 
 def test_1_6_lists_the_first_noise_names_before_the_card():
     s = _section_16()
-    assert "first 5" in s and "and N more" in s
+    # the names go in the option's preview, not in a list above the card (long text before a card
+    # does not reach the person)
+    assert "first 15 names in `likely_noise`" in s and "and N more" in s
     assert "schema_count" in s
 
 
@@ -220,8 +222,8 @@ def test_linux_path_keeps_the_file_and_asks_with_a_card():
     s = _between("### 0a.4 ", "## Phase 0s:")
     assert "promote_credentials.py" in s
     assert "credentials.example" in s
-    assert "I've filled it in" in s
-    assert "Show me the file again" in s
+    # the hand-off is long text, so it ends the turn with a reply line rather than a card
+    assert 'Reply "done" when the file is saved, or "show me the file again".' in s
     assert not re.search(r"say\W+.?introspect my database", s, re.I)
     assert "END THE TURN" not in s
 
@@ -326,7 +328,7 @@ def test_4a_default_path_opens_no_explorer_and_waits_for_no_paste():
     default = _default_path(_phase_4())
     assert not re.search(r"end the turn|paste|feedback block", default, re.I)
     assert "invoke `/agami-model preseed`" not in default
-    assert "AskUserQuestion" in default
+    assert "**The list ends the turn.**" in default
 
 
 def test_4a_reads_the_queue_and_the_personal_data_columns_from_the_engine():
@@ -336,16 +338,19 @@ def test_4a_reads_the_queue_and_the_personal_data_columns_from_the_engine():
     assert "extra_lines" in s
 
 
-def test_4a_review_card_has_the_three_options():
+def test_4a_sign_off_list_ends_the_turn_with_the_three_replies():
     s = _phase_4()
-    for label in ("Approve all", "Review one by one", "Skip for now"):
-        assert label in s, label
-    assert "(Recommended)" in s
+    assert 'The reply line: *Reply "approve all", "review each" or "later", or "show the full view".*' in s
+    for reply in ("| approve all |", "| review each |", "| later |", "| show the full view |"):
+        assert reply in s, reply
+    assert '"(recommended)"' in s
+    # the reply comes in a new turn: the skill is invoked again so its commands stay pre-approved
+    assert "invoking agami-connect again with the Skill tool, `args` `resume`" in s
 
 
 def test_4a_one_by_one_is_four_per_card_with_approve_all_remaining():
     s = _phase_4()
-    assert "up to 4" in s
+    assert "Up to 4 items per card" in s
     assert "Approve all remaining" in s
     assert "Approve" in s and "Reject" in s
 
@@ -387,14 +392,14 @@ def test_4a_keeps_the_explorer_as_the_full_view():
     s = _phase_4()
     assert "Show the full view" in s
     assert "serve_page.py" in s
-    assert "/agami-model preseed" in s.split("**Show the full view** (an option")[1]
+    assert "/agami-model preseed" in s.split("**Show the full view** (a reply to the sign-off list")[1]
 
 
 def test_4b_is_the_only_place_after_review_is_passed():
     text = skill_text("agami-connect")
     four_b = _between("**4b ", "## Phase 5:")
     assert "--after-review" in four_b
-    assert "Skip for now" in four_b
+    assert "the person replied **later**" in four_b
     phase_5 = _phase("## Phase 5:", "## Phase 6:")
     assert "columns_unenriched" in phase_5 and "preseed_review_pending" in phase_5
     assert "open `/agami-model preseed`, end the turn" not in phase_5
@@ -403,31 +408,15 @@ def test_4b_is_the_only_place_after_review_is_passed():
     )
 
 
-def test_6_shows_a_table_of_seeds_then_the_four_option_card():
+def test_6_asks_no_card_and_leaves_the_failed_ones_out():
+    # The examples table before the examples card never reached the person; every example that ran
+    # is kept, the table is shown in the closing message, and failed ones are left out.
     s = _phase_6()
     assert 'sm" seed-validate' in s
-    assert "15 rows" in s
-    for label in (
-        "Keep all that ran (Recommended)",
-        "Review one by one",
-        "Drop the failing ones",
-        "Show the full view",
-    ):
-        assert f"- **{label}**" in s, label
-    assert "Review the failing ones" not in s and "Review all one by one" not in s
-
-
-def test_6_keep_signs_with_add_example_and_drop_uses_remove_example():
-    s = _phase_6()
-    assert 'sm" add-example' in s and "--signer" in s and "--role" in s
-    assert 'sm" remove-example' in s
-
-
-def test_6_one_by_one_uses_keep_drop_and_other_for_a_fix():
-    s = _phase_6()
-    assert "Keep all remaining" in s
-    assert "up to 4" in s
-    assert "ask the same card again" in s.lower() and "never guess" in s.lower()
+    assert "**No examples card: every example that ran is kept.**" in s
+    assert "AskUserQuestion" not in s.split("### 6a ")[0]
+    assert 'sm" remove-example' in s and "**Failed ones are left out.**" in s
+    assert 'sm" add-example' not in s.split("**Show the full view**")[0]
 
 
 def test_6_default_path_renders_no_dashboard_and_waits_for_no_reply_grammar():
@@ -437,7 +426,7 @@ def test_6_default_path_renders_no_dashboard_and_waits_for_no_reply_grammar():
 
 
 def test_6_keeps_the_examples_page_as_the_full_view():
-    full = _phase_6().split("**Show the full view** (an option")[1]
+    full = _phase_6().split("**Show the full view** (asked for in words")[1]
     assert "render_examples_validation.py" in full and "serve_page.py" in full
     assert "validate N" in full  # its pasted block is still accepted
 
@@ -467,10 +456,10 @@ def test_review_summary_mentions_guessed_joins_without_a_card():
     assert "not put on a card" in s
 
 
-def test_phase_6_unsigned_identity_answer_continues_to_phase_7():
+def test_phase_6_asks_no_identity_card():
+    # No example is signed in onboarding any more, so no identity is asked for there.
     s = _phase_6()
-    assert "Don't sign anything yet" in s
-    assert "goes on to Phase 7 (not 4b)" in s
+    assert "Don't sign anything yet" not in s and "identity card" not in s
 
 
 def _card_headers(text: str) -> list[str]:
@@ -587,24 +576,26 @@ def test_1_4_asks_the_company_and_the_database_on_cards():
 def test_asked_questions_and_reports_are_used_after_the_build():
     text = skill_text("agami-connect")
     phase5 = text[text.index("## Phase 5") : text.index("## Phase 6")]
-    assert "agami-asked-questions.txt" in phase5 and "*(yours)*" in phase5
+    assert "agami-asked-questions.txt" in phase5
     six_b = text[text.index("### 6b ") : text.index("## Phase 7")]
     assert "header `Reports`" in six_b and "**Check them now (Recommended)** / **Later**" in six_b
     assert "agami-reconcile" in six_b
 
 
-def test_6a_asks_its_fix_on_a_card():
+def test_6a_asks_its_fix_as_the_last_thing_in_the_turn():
     s = _between("### 6a ", "## Phase 7:")
-    assert "AskUserQuestion" in s
     assert "> •" not in s
-    for label in ("Fix it everywhere (Recommended)", "Just this example", "Leave it for now"):
+    assert "as the last thing in the turn" in s
+    assert 'Reply "fix it everywhere" (recommended' in s
+    for label in ("Fix it everywhere", "Just this example", "Leave it for now"):
         assert label in s
 
 
-def test_review_from_phase_7_returns_to_the_starter_questions():
-    s = _between("## Phase 7:", "## Phase 8:")
-    line = next(ln for ln in s.splitlines() if "Review what needs sign-off" in ln)
-    assert "Phase 8" in line
+def test_the_closing_replies_are_handled_in_phase_8():
+    s = _between("## Phase 8:", "## Phase 8.5:")
+    for reply in ("A number from the list", "A question of their own", "Drop an example", "Change an example"):
+        assert reply in s, reply
+    assert "agami-query" in s and 'sm" remove-example' in s
 
 
 def test_phase_2c_points_at_the_phase_4_cards_not_the_explorer():
@@ -625,15 +616,14 @@ def test_8_5_link_candidates_card_stays_within_four_options():
     assert "at most 4" in s
 
 
-def test_the_sample_wrap_up_offers_its_starter_questions_on_a_card():
-    # A live run of the sample path ended in a numbered list to type a number back to.
+def test_the_sample_wrap_up_ends_on_the_closing_message_with_numbered_questions():
+    # The starter questions are the closing message's numbered list: no card after the summary, since
+    # long text before a card does not reach the person.
     text = skill_text("agami-connect")
     start = text.index("7. **Wrap up")
     wrap_up = text[start : text.index('8. **The "where to go deeper"', start)]
-    assert "header `Ask`" in wrap_up
-    assert "A numbered list of ~6 starter questions" not in wrap_up
-    options = [line for line in wrap_up.splitlines() if line.strip().startswith("| `")]
-    assert 2 <= len(options) <= 4
+    assert "header `Ask`" not in wrap_up and "AskUserQuestion" not in wrap_up
+    assert "Reply with a number, or ask your own question." in wrap_up
 
 
 def test_the_name_card_follows_the_fields_and_offers_the_database_name():
@@ -710,23 +700,11 @@ def test_sign_off_titles_are_the_decision_in_plain_words():
 # --- tester feedback on the question-cards branch ----------------------------------------------
 
 
-def test_example_cards_show_the_sql_in_the_keep_preview():
-    # Checking an example took typing "show me the SQL"; a metric card already shows its SQL.
-    s = _phase_6()
-    one_by_one = s[s.index("**One by one.**"):]
-    assert "**The SQL goes in the `Keep` option's `preview`**" in one_by_one
-    assert "`sql`" in one_by_one and "row_preview" in one_by_one
-
-
-def test_review_cards_offer_the_full_view_as_an_option():
+def test_review_cards_offer_the_full_view():
     # "show the full view" worked only typed in Other, and no card said it existed.
-    four, six = _phase_4(), _phase_6()
-    assert four.count("- **Show the full view**") == 2      # the Sign-off card and the item cards
-    assert six.count("- **Show the full view**") == 1        # the Examples card
-    assert "and **Show the full view** (the page below" in six  # the example item cards
-    assert "| Show the full view |" in four and "| Show the full view |" in six
-    phase_7 = _phase("## Phase 7", "## Phase 8")
-    assert "`Show the full view`" in phase_7
+    four = _phase_4()
+    assert four.count("- **Show the full view**") == 1      # the item cards
+    assert "| show the full view |" in four                  # a reply to the sign-off list
 
 
 def test_currency_and_flag_rate_asks_name_columns_in_words():
@@ -743,10 +721,10 @@ def _join_candidates() -> str:
     return text[start:text.index("Never accept them all unasked")]
 
 
-def test_join_candidates_are_listed_in_the_chat_before_the_card():
+def test_join_candidates_are_shown_in_the_card_previews_after_one_line():
     s = _join_candidates()
-    assert "Show every join before asking about any of them" in s
-    assert "| # | Join" in s and "leads.converted_contact_id → contacts.id" in s
+    assert "**Every join is shown on the card that asks about it, in its options' `preview`.**" in s
+    assert "| # | Join" not in s and "leads.converted_contact_id → contacts.id" in s
     assert "evidence.match_rate" in s and "low_overlap" in s
 
 
@@ -775,15 +753,17 @@ def test_join_cards_put_the_engines_recommendation_first():
     assert "full matches (Recommended)" not in many
 
 
-def test_gitignore_is_read_with_the_read_tool_and_a_missing_one_is_not_an_error():
-    # A live run chained `cat <artifacts>/.gitignore` onto a setup command; on a first run there is
-    # no such file, so the whole command showed as "Failed". Every place that sets the line up says how.
+def test_gitignore_is_never_read_before_it_exists():
+    # A live run chained `cat <artifacts>/.gitignore` onto a setup command, and later Read the file
+    # before it existed: both showed as a failed step. The resolver says what is there.
     refs = SKILL.parent / "references"
-    for name in ("credentials.md", "context-and-tables.md"):
-        flat = " ".join((refs / name).read_text(encoding="utf-8").split())
-        assert "Read it first with the Read tool, never `cat` in Bash: a missing `.gitignore` is not an error" in flat, name
+    flat = " ".join((refs / "credentials.md").read_text(encoding="utf-8").split())
+    assert "as preflight's `data.gitignore` says, never with `cat` in Bash" in flat
+    assert "`missing` → write the file with that one line with the Write tool, no Read first" in flat
+    tables = " ".join((refs / "context-and-tables.md").read_text(encoding="utf-8").split())
+    assert "the folder was just made, so write the file with that one line with the Write tool, with no Read first" in tables
     sample = " ".join((refs / "sample.md").read_text(encoding="utf-8").split())
-    assert "never `cat` in Bash: on a first run there is no `.gitignore` yet, which is not an error" in sample
+    assert "as step 1's `data.gitignore` says" in sample and "Never `cat` in Bash." in sample
 
 
 def _identity_card_rules(text: str) -> None:

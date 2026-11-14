@@ -21,12 +21,11 @@ below corresponds to one such version.
   exactly as given, before any card or further command) and `then` (one sentence: the next action).
   `sm steps` adds `changed` (whether `list` differs from the one `steps` or `progress` last printed
   for that model, kept in `<root>/.introspect/steps.last`), and on the mark that starts the closing
-  step its `say` is the whole `sm summary`. `sm progress` includes `list` only when it moved, with
-  `list_changed`. `seed-validate --out` says the examples table (`| # | Example | Rows | Result |`,
-  at most 15 rows, and how many ran or failed); `apply-enrichment` says one line of what it
-  applied. Model text in a `say` (a question, a result, a name, a loader error) is one line of at
+  step its `say` is the whole closing message (below). `sm progress` includes `list` only when it moved, with
+  `list_changed`. `seed-validate --out` says one line, how many examples ran and how many failed;
+  `apply-enrichment` says one line of what it applied. Model text in a `say` (a question, a result, a name, a loader error) is one line of at
   most 80 characters, inside a table cell or in double quotes, so it can never add a line, a heading
-  or a table row; a problem is said once, and never hides the task-list refresh or the closing card.
+  or a table row; a problem is said once, and never hides the task-list refresh or the closing message.
   A failed build's reason keeps up to 200 characters (the engine's own hints fit), and is said once,
   by `sm steps`, not again by `sm progress`; a build killed without a word ends `sm progress`'s loop
   too ("The build has ended: run `sm steps` and go on."). A log line the engine didn't phrase is
@@ -38,7 +37,6 @@ below corresponds to one such version.
   connection URL becomes its database's name, never its password; `a/b/c` and dates are left
   alone. The closing
   mark with no model built yet (none on disk, or a build running) says why there is no summary.
-  `seed-validate --out --no-card` says the table with a `then` that asks no examples card.
   On a resume whose build already wrote this run's model (the build step in progress by its mark,
   no build log running, `datasource.yaml` and the build's own log both written at or after that
   mark, so another command rewriting `datasource.yaml` doesn't count), plain `sm steps` says
@@ -57,8 +55,8 @@ below corresponds to one such version.
   stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a
   `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`, started with `python3` from
   PATH) that answers "allow" only for calls that are harmless even if a document is steering the
-  model, and says nothing about anything else, so the normal permission prompt applies. Neither it
-  nor the plugin's other hook (next entry) ever denies anything. It approves exactly:
+  model, and says nothing about anything else, so the normal permission prompt applies. It never
+  denies anything. It approves exactly:
   - one call of this plugin's `scripts/sm` (an optional `bash ` before it, nothing else, no shell
     syntax at all) running `steps [--mark <id>=<status>]… [--full]`, `progress [--wait 0-600]`,
     `timing`, `summary [--json]`, `overview`, `areas`, `coverage`, `review-queue`,
@@ -75,35 +73,6 @@ below corresponds to one such version.
   or changes the model or its sign-off is approved, and no `scripts/py` call is. It also runs for
   subagents, so an enricher's result write no longer prompts. The skills keep their
   `allowed-tools`, which cover every `sm` call in the turn a skill starts.
-- **Text that has to come before a card is shown even when it was not posted.** Five live runs in
-  a row never showed the closing summary, and the last two not the examples table, although the
-  engine handed both over as `say`: the model wrote its wrap-up into a thinking block and asked the
-  card. Now `sm steps --mark first_question=in_progress` (when its `say` carries the summary) and
-  `sm seed-validate --out` (with or without `--no-card`: the sample path asks no examples card, but
-  the closing card follows) record their `say` in
-  `<artifacts_dir>/local/tmp/say-pending.json` (a name the approve hook never waves through, so a
-  subagent can't plant text in it), print its `say_id` just before `say`, and end `then` with "Post
-  it as your visible message, not in thinking." A second `PreToolUse` hook (`scripts/say_gate.py`,
-  on `AskUserQuestion` only) checks, when a card is asked, whether each recorded text whose
-  `say_id` this session's transcript shows (as the engine prints it, in the result of the session's
-  own Bash call, or, for a call run in the background such as the example run, in the result of the
-  session's Read of exactly the output file Claude Code named for that call) was posted as visible text after it. One that was not is
-  printed as a `systemMessage`, which Claude Code shows the person, and removed, so it is shown once;
-  several are shown in the order they were recorded, in one message of at most 10,000 characters,
-  Claude Code's limit for it (from the oldest, those that fit whole; the rest wait for the next
-  card; a single text over it is cut at a whole line and ends with "The rest is in the model
-  summary: ask agami to show it."). Two cards in one reply show a text once: the hook process that
-  creates the entry's `say-claim-<id>` file prints it, the other does not. Every save of the file
-  re-reads it first and changes only what that run handled, so a text recorded meanwhile is kept. One that was posted is removed and not shown again. The hook
-  makes no decision of any kind, so the card always goes ahead on its first ask. It forgets texts
-  older than 30 minutes, drops an entry not shaped as the engine writes it (needle not the text's
-  first line, a control character, longer than 32,000 characters, an unknown kind), saves the file
-  before printing (a save that fails shows nothing), and on any doubt says nothing. The transcript
-  is written asynchronously, so when text of this session is not yet seen posted it first waits (up
-  to 3 s) for the card's own line to reach it: without that, text posted just before the card would
-  be shown a second time. It waits at most once per text: after a wait that timed out, later cards
-  decide at once from what the transcript holds. When the scratch folder can't be written, the commands print what they
-  printed before, with no `say_id` and no extra sentence.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With
   agami's library missing or older than the plugin, those 13 verbs stop with
@@ -322,6 +291,37 @@ below corresponds to one such version.
 
 ### Fixed
 
+- **Long text ends its turn, so onboarding's closing summary and examples table reach the chat.**
+  With Opus 5.5, any prose longer than about 150 characters written before a tool call in the same
+  message (a card or anything else) reached the person only as a one-sentence summary; text that
+  ends the reply is shown as written, and no wording of the instructions changed that. The rule is
+  now stated once in `shared/engine-says.md` (and pointed to from `question-cards.md`): a table, a
+  list or a summary the person must read is the last thing in its turn, and a card is asked only at
+  the start of a turn or after a line or two. Onboarding ends with one closing message that ends the
+  turn, the `say` of `sm steps --mark first_question=in_progress`: the summary, the database's
+  description, the example questions kept in the model with what each returned this run (and the
+  ones that failed, left out, with why), how to drop or change one, and four of them to start with,
+  numbered ("Reply with a number, or ask your own question."). There is no closing card and no
+  examples card: every example that ran is kept, `seed-validate --out` says one line and keeps the
+  run in `<root>/.introspect/examples.last.json` for the closing table, and `--no-card` is gone.
+  The sign-off list (agami-connect and agami-model), the reconcile intake, results and keep offer,
+  the golden import and replace, the eval results, the correction diff, the credentials hand-off
+  and the reintrospect preview end their turn with the choices as one reply line; the personal-data,
+  areas, tables, join and units cards are asked after one line, with the items in their options'
+  previews. A question typed in "Other" is answered in a line or two, or in the re-asked card's
+  preview. The `AskUserQuestion` hook that showed unposted text as a notice (`scripts/say_gate.py`,
+  `semantic_model/say_pending.py`, `say_id` and the pending file) is removed: its notice landed
+  after the card, drawn raw and collapsed.
+- **The sample's sign-off count is the same while it runs and at the end.** A live sample run read
+  "0 of 23 signed" while the step ran and "20 approved by agami" at the end: the silent build's
+  system sign-off approved 3 guessed joins that the first count held and the second left out. A
+  join with a system sign-off is now counted as approved by agami; a join the build approved itself
+  from a declared key is still not counted.
+- **Nothing in onboarding shows as a failed step any more.** agami-save-golden looked for existing
+  datasets with `ls` on a folder a first save has not made yet; it reads them with
+  `run_golden_eval.py --list`, which says none. The resolver now prints `gitignore` (`missing`,
+  `has_local` or `lacks_local`), so the skill writes a new `.gitignore` without first reading a file
+  that is not there.
 - **`sm --help` prints its usage again.** The `overview` verb's help said "% described", and
   argparse reads a bare `%` in help text as a format code, so `sm --help` raised a `TypeError`
   instead of printing. A test now runs `--help` for the top level and every verb.
