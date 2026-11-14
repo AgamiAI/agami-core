@@ -96,6 +96,18 @@ JOIN_DECLARED_GUARD = "if (r.status === 'declared') {"
 AGGREGATES_SECTION_CONSTRUCTION = "renderSection('aggregates', 'Aggregates', null, list => {"
 AGG_UNAFFECTED_GUARD = "(a.status === 'multiplied' && a.result_affected === false)"
 AGG_UNAFFECTED_LABEL = "'rows repeated by a join; value unaffected'"
+# ACE-177: a matched metric's slice is drawn beside its definition, so a count over some rows never
+# reads as the whole metric on the page.
+METRIC_RESTRICTIONS_LABEL = "', counted only where '"
+METRIC_RESULT_FILTERS_LABEL = "', then kept only results where '"
+METRIC_MISSING_LABEL = "' is not '"
+# ACE-178: a join the model does not declare on a matched number's path, and a number built from one.
+METRIC_JOINS_LABEL = "', counted through a join the semantic model does not declare: '"
+METRIC_BUILT_LABEL = "' is built from '"
+METRIC_BUILT_RESTRICTIONS_LABEL = "', its rows counted only where '"
+METRIC_BUILT_JOINS_LABEL = "', through joins the semantic model does not declare: '"
+# Copilot on #661: a number whose expression is a metric's on tables it was not counted over.
+METRIC_MISSING_TABLES_LABEL = "' is not counted over '"
 # `json.dumps` spacing, which the template's hand-written sample receipt does not use.
 NONCE_RESULT_UNAFFECTED = '"result_affected": false'
 
@@ -318,7 +330,10 @@ def test_the_construction_sites_the_assertions_stand_on_are_each_unique():
                  MARKER_LABEL, MARKER_READ, EMPTY_STATE_CONSTRUCTION,
                  JOINS_SECTION_CONSTRUCTION, JOIN_STATUS_BADGE, JOIN_PREDICATE_LABEL,
                  JOIN_NO_PREDICATE, JOIN_DECLARED_GUARD, AGGREGATES_SECTION_CONSTRUCTION,
-                 AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL):
+                 AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL, METRIC_RESTRICTIONS_LABEL,
+                 METRIC_RESULT_FILTERS_LABEL, METRIC_MISSING_LABEL, METRIC_JOINS_LABEL,
+                 METRIC_BUILT_LABEL, METRIC_BUILT_RESTRICTIONS_LABEL, METRIC_BUILT_JOINS_LABEL,
+                 METRIC_MISSING_TABLES_LABEL):
         assert template.count(site) == 1, f"{site!r} appears {template.count(site)}x, not once"
 
 

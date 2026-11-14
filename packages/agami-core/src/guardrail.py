@@ -21,6 +21,8 @@ runs on whatever `python3` the user already has, which on stock macOS is 3.9.6. 
 
 from __future__ import annotations
 
+import functools
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, get_args
 
@@ -332,6 +334,25 @@ class ReceiptSection:
     undetermined: str | None = None
 
 
+def core_version() -> str:
+    """The agami-core version this process runs: the `AGAMI_VERSION` override, else the installed
+    package's metadata, else "0.0.0". The one source for it — MCP's `serverInfo`
+    (`tools.server_version`) and every receipt (ACE-177) read it here."""
+    return os.environ.get("AGAMI_VERSION") or _installed_version()
+
+
+@functools.lru_cache(maxsize=1)
+def _installed_version() -> str:
+    # Cached: the installed package does not change under a running process, and a receipt is built
+    # on every executed query.
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("agami-core")
+    except PackageNotFoundError:
+        return "0.0.0"
+
+
 @dataclass(frozen=True)
 class Receipt:
     """What the statement did — every section declared, every gap named.
@@ -351,6 +372,9 @@ class Receipt:
     """
 
     model_version: str | None = None
+    # Which agami-core assembled it (ACE-177): a stored receipt has to be explainable after the
+    # matching rules change, and the model version alone cannot say which rules ran.
+    agami_core_version: str | None = field(default_factory=core_version)
     columns: ReceiptSection = field(default_factory=ReceiptSection)
     tables: ReceiptSection = field(default_factory=ReceiptSection)
     joins: ReceiptSection = field(default_factory=ReceiptSection)
@@ -450,6 +474,7 @@ def receipt_from_assembled(assembled: dict[str, Any]) -> Receipt:
     """
     return Receipt(
         model_version=assembled.get("model_version"),
+        agami_core_version=assembled.get("agami_core_version") or core_version(),
         **{
             name: ReceiptSection(
                 items=tuple(assembled[name]["items"]),

@@ -123,11 +123,12 @@ def test_count_star_without_a_filter_still_names_no_column(org):
     assert "names no column" in item["reason"]
 
 
-def test_a_value_from_a_derived_table_is_still_not_matched_to_a_metric(org):
-    # ACE-058/060 keep this undetermined: matching a value through a subquery is not done here.
+def test_a_value_from_a_derived_table_is_read_through_it_and_not_matched(org):
+    # ACE-058/060 kept this undetermined: a value through a subquery was not followed. ACE-178
+    # follows it, and this model declares no metric computing it, so it settles as `unmatched`.
     receipt = rt.assemble_receipt(org, ACCEPTANCE)
     (output,) = [i for i in receipt["columns"]["items"] if i["kind"] == "output"]
-    assert output["status"] == "undetermined"
+    assert (output["status"], output["name"]) == ("unmatched", None)
 
 
 @pytest.mark.parametrize("sql", [ACCEPTANCE, OVER_CTE, PLAIN, COMPUTED, NESTED,

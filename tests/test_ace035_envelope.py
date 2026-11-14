@@ -211,7 +211,7 @@ def test_tool_edge_refused_shape(monkeypatch, _emitted):
     # `receipt` key is new in ACE-088: a refused caller most needs the facts, so the receipt is on
     # the refused wire from that slice (bounded to the caller's own identifiers).
     assert set(out) == {"status", "refusal", "sql", "audit_id", "receipt"}
-    assert set(out["receipt"]) == {"model_version", *guardrail.Receipt.SECTIONS}
+    assert set(out["receipt"]) == {"model_version", "agami_core_version", *guardrail.Receipt.SECTIONS}
     assert out["status"] == "refused"
     assert set(out["refusal"]) == {"reason", "rule", "detail", "remediation"}
     assert out["refusal"]["rule"] == guardrail.RULE_READ_ONLY
