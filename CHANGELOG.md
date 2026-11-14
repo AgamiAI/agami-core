@@ -85,7 +85,8 @@ below corresponds to one such version.
   it as your visible message, not in thinking." A second `PreToolUse` hook (`scripts/say_gate.py`,
   on `AskUserQuestion` only) checks, when a card is asked, whether each recorded text whose
   `say_id` this session's transcript shows (as the engine prints it, in the result of the session's
-  own Bash call) was posted as visible text after it. One that was not is
+  own Bash call, or, for a call run in the background such as the example run, in the result of the
+  session's Read of exactly the output file Claude Code named for that call) was posted as visible text after it. One that was not is
   printed as a `systemMessage`, which Claude Code shows the person, and removed, so it is shown once;
   several are shown in the order they were recorded, in one message of at most 10,000 characters,
   Claude Code's limit for it (from the oldest, those that fit whole; the rest wait for the next

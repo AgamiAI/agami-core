@@ -13,9 +13,11 @@ in step by tests/test_say_gate.py), and this hook, before a card, checks the ses
   2. Entries older than MAX_AGE, and entries not shaped as the engine writes them (the needle not
      the say's first line, a control character, longer than the engine registers, an unknown
      kind: forged, since the file's text is shown verbatim), are dropped (the file is rewritten).
-  3. An entry belongs to this session only if the result of one of the main thread's Bash calls in
-     the transcript's tail carries its id as the engine prints it (`"say_id": "<id>"`). Others are
-     left alone.
+  3. An entry belongs to this session only if the engine's output carrying its id as the engine
+     prints it (`"say_id": "<id>"`) is, in the transcript's tail, the result of one of the main
+     thread's Bash calls, or of its Read of exactly the output file that Claude Code's reply to one
+     of its Bash calls run in the background named (a long `sm` call, the example run, is run that
+     way, and its output reaches the main thread only through that file). Others are left alone.
   4. One that belongs is done with once its needle (the first line of its `say`) is in visible
      assistant text after that tool result: text blocks only, never thinking. It goes, unshown by
      the hook, so the person never sees it twice.
@@ -101,6 +103,12 @@ CARD_WAIT = 3.0
 CARD_POLL = 0.1
 
 ID = re.compile(r"[0-9a-f]{8}")
+# Claude Code's reply to a Bash call with `run_in_background` (seen in live transcripts, version
+# 2.1.x), from its first character: the task id, then the absolute path of the file the output goes
+# to, which ends in `<task id>.output`; the hint after it, on the same line, may be worded otherwise.
+# Nothing else in the transcript ties that file to the call that started it.
+BACKGROUND_STARTED = re.compile(r"Command running in background with ID: ([A-Za-z0-9]+)\. "
+                                r"Output is being written to: (/[^\n]*/\1\.output)\.(?: [^\n]*)?")
 WHITESPACE = re.compile(r"\s+")
 
 
@@ -290,21 +298,52 @@ def _result_text(block: dict) -> str:
     return ""
 
 
+def background_output(block: dict, row: dict) -> Optional[str]:
+    """The output file named by Claude Code's reply to a Bash call run in the background (`block`, a
+    tool_result of such a call, in `row`), or None. The reply's whole text must be Claude Code's
+    sentence, its task id must be the file's name, and the line's `toolUseResult` must carry the same
+    task id: a foreground call's output can print the sentence, never that field."""
+    content = block.get("content")
+    found = BACKGROUND_STARTED.fullmatch(content) if isinstance(content, str) else None
+    record = row.get("toolUseResult")
+    if found is None or not isinstance(record, dict) or record.get("backgroundTaskId") != found[1]:
+        return None
+    return found[2]
+
+
 def read_events(rows: list) -> tuple:
-    """(Bash result texts, visible assistant texts), each as (position, text) in transcript order.
-    Only the results of the main thread's own Bash calls: the engine prints `say_id` there, and a
-    subagent's report or a file read back may quote it without being this session's print."""
-    results, texts, bash = [], [], set()
+    """(engine output texts, visible assistant texts), each as (position, text) in transcript order.
+    The engine prints `say_id` in the result of the main thread's own Bash call; a long call run in
+    the background (the example run) instead names a file, and its output reaches the main thread
+    as the result of a Read of exactly that file, after that reply. Nothing else counts: a subagent's
+    report, any other file read back, or a tool's input may quote the id without being this
+    session's print."""
+    results, texts = [], []
+    bash, background, reads, outputs = set(), set(), set(), set()
     for n, row in enumerate(rows):
         for block in _blocks(row, "user", "user"):
-            if block.get("type") == "tool_result" and block.get("tool_use_id") in bash:
+            if block.get("type") != "tool_result":
+                continue
+            use_id = block.get("tool_use_id")
+            if use_id in bash or use_id in reads:
                 results.append((n, _result_text(block)))
+            if use_id in background:
+                out = background_output(block, row)
+                if out is not None:
+                    outputs.add(out)
         for block in _blocks(row, "assistant", "assistant"):
-            if block.get("type") == "text" and isinstance(block.get("text"), str):
+            kind, use_id = block.get("type"), block.get("id")
+            if kind == "text" and isinstance(block.get("text"), str):
                 texts.append((n, block["text"]))
-            elif block.get("type") == "tool_use" and block.get("name") == "Bash" \
-                    and isinstance(block.get("id"), str):
-                bash.add(block["id"])
+            if kind != "tool_use" or not isinstance(use_id, str):
+                continue
+            tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+            if block.get("name") == "Bash":
+                bash.add(use_id)
+                if tool_input.get("run_in_background") is True:
+                    background.add(use_id)
+            elif block.get("name") == "Read" and tool_input.get("file_path") in outputs:
+                reads.add(use_id)
     return results, texts
 
 

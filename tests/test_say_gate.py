@@ -1111,3 +1111,191 @@ def test_a_misshapen_wait_mark_says_nothing(art, tmp_path, waited):
     _write_pending(art, [entry])
     assert _gate(_event(str(_transcript(tmp_path, printed()))), art) == ""
     assert _read_pending(art) == [entry]
+
+
+# --- session ownership: the output of the session's own background Bash call, read back ----------------
+# A long `sm` call (the example run) is started in the background: Claude Code answers the Bash call
+# with the file its output goes to, and the engine's output, `say_id` and all, reaches the main thread
+# only when the model reads that file. Such a Read counts only when its `file_path` is exactly the
+# file named in the reply to one of the main thread's own background Bash calls, earlier in the tail.
+
+BACKGROUND = Path(__file__).resolve().parent / "fixtures" / "say_gate" / "transcript-background.jsonl"
+BG_ID = "b0example"
+BG_FILE = f"/tmp/claude-0/-home-you-proj/00000000-0000-4000-8000-000000000001/tasks/{BG_ID}.output"
+
+
+def _call(name: str, use_id: str, tool_input: dict, **extra: object) -> str:
+    return _line("assistant", {"role": "assistant", "type": "message", "id": "msg_1",
+                               "content": [{"type": "tool_use", "id": use_id, "name": name,
+                                            "input": tool_input}]}, **extra)
+
+
+def bg_started(task_id: str = BG_ID, out_file: str = BG_FILE, use_id: str = "toolu_bg",
+               background: object = True, result_id: object = None, message: str | None = None,
+               **extra: object) -> str:
+    """The main thread's Bash call run in the background and Claude Code's reply to it, as the round 6
+    transcript holds them: the reply names the task and its output file, and `toolUseResult` carries
+    the task id again (`result_id`, the task's own id unless given; False leaves it out)."""
+    tool_input = {"command": 'bash "/home/you/agami/plugins/agami/scripts/sm" seed-validate x',
+                  "description": "Run the example questions (1)"}
+    if background is not None:
+        tool_input["run_in_background"] = background
+    reply = message if message is not None else (
+        f"Command running in background with ID: {task_id}. Output is being written to: {out_file}. "
+        "You will be notified when it completes. To check interim output, use Read on that file path.")
+    tur = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False, "noOutputExpected": False}
+    if result_id is not False:
+        tur["backgroundTaskId"] = task_id if result_id is None else result_id
+    return _call("Bash", use_id, tool_input, **extra) + "\n" + _line(
+        "user", {"role": "user", "content": [{"tool_use_id": use_id, "type": "tool_result",
+                                              "content": reply, "is_error": False}]},
+        toolUseResult=tur, **extra)
+
+
+def read_back(file_path: str = BG_FILE, use_id: str = "toolu_rd", say_id: str = "5ca1ab1e",
+              say: str = SUMMARY, **extra: object) -> str:
+    """A Read of `file_path` and its result: the engine's one-line JSON, numbered as Read numbers it."""
+    out = json.dumps({"out": "/home/you/proj/x.json", "say_id": say_id, "say": say, "then": "x"})
+    return _call("Read", use_id, {"file_path": file_path}, **extra) + "\n" + _line(
+        "user", {"role": "user", "content": [{"tool_use_id": use_id, "type": "tool_result",
+                                              "content": f"1\t{out}\n"}]}, **extra)
+
+
+def test_the_real_background_shape_is_read(art, tmp_path):
+    """Round 6's lines (neutral values): background start, its notification, the Read of its output."""
+    _write_pending(art, [_entry("2da27961", EXAMPLES, "examples")])
+    copy = tmp_path / "background.jsonl"
+    shutil.copy(BACKGROUND, copy)
+    with copy.open("a", encoding="utf-8") as fh:
+        fh.write(card() + "\n")
+    assert _shown(_gate(_event(str(copy)), art)) == EXAMPLES
+    assert _read_pending(art) == []
+    assert _gate(_event(str(copy)), art) == ""  # once only
+
+
+def test_background_output_read_through_its_own_file_is_this_sessions(art, tmp_path):
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, bg_started(), tool_use("TaskUpdate"), result("ok"), read_back())
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY
+    assert _read_pending(art) == []
+    for _ in range(2):
+        assert _gate(_event(str(path)), art) == ""
+
+
+def test_background_output_read_twice_is_shown_once(art, tmp_path):
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, bg_started(), read_back(), read_back(use_id="toolu_rd2"))
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY
+    assert _gate(_event(str(path)), art) == ""
+
+
+def test_background_output_posted_after_the_read_is_not_shown(art, tmp_path):
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, bg_started(), read_back(), text(SUMMARY))
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == []
+
+
+def test_background_output_already_claimed_is_not_shown_again(art, tmp_path):
+    (art / "local" / "tmp" / "say-claim-5ca1ab1e").write_text("", encoding="utf-8")
+    _write_pending(art, [_entry()])
+    assert _gate(_event(str(_transcript(tmp_path, bg_started(), read_back()))), art) == ""
+
+
+@pytest.mark.parametrize("other", [
+    "/tmp/claude-0/-home-you-proj/00000000-0000-4000-8000-000000000001/tasks/b1other.output",
+    "/tmp/elsewhere/b0example.output",                       # same name, another folder
+    BG_FILE + "x", BG_FILE[:-1], BG_FILE.upper(),
+    "/tmp/claude-0/-home-you-proj/00000000-0000-4000-8000-000000000001/tasks/../tasks/b0example.output",
+    "tasks/b0example.output",                                # relative
+    "/home/you/proj/artifacts/local/tmp/agami-examples-items.json",
+])
+def test_a_read_of_any_other_file_does_not_count(art, tmp_path, other):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    path = _transcript(tmp_path, bg_started(), read_back(other))
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == entries
+
+
+def test_a_read_with_no_background_start_does_not_count(art, tmp_path):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    assert _gate(_event(str(_transcript(tmp_path, read_back()))), art) == ""
+    # nor when the reply to the start is out of the tail: the call alone names no file
+    start_call = bg_started().splitlines()[0]
+    assert _gate(_event(str(_transcript(tmp_path, start_call, read_back()))), art) == ""
+    assert _read_pending(art) == entries
+
+
+def test_a_read_before_the_start_does_not_count(art, tmp_path):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    assert _gate(_event(str(_transcript(tmp_path, read_back(), bg_started()))), art) == ""
+
+
+@pytest.mark.parametrize("start", [
+    {"background": None},                                    # a foreground call printing the same words
+    {"background": False},
+    {"background": "true"},
+    {"result_id": False},                                    # no task id beside the reply
+    {"result_id": "b1other"},                                # another task's id
+    {"task_id": "b1other"},                                  # the reply's id is not the file's name
+    {"out_file": "tasks/b0example.output"},                  # not an absolute path
+    {"message": "Command running in background with ID: b0example."},
+    {"message": f"done\nCommand running in background with ID: {BG_ID}. Output is being written to: "
+                f"{BG_FILE}. You will be notified when it completes."},
+])
+def test_a_start_reply_that_is_not_exactly_claude_codes_names_no_file(art, tmp_path, start):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    path = _transcript(tmp_path, bg_started(**start), read_back())
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == entries
+
+
+def test_a_subagents_background_call_or_read_does_not_count(art, tmp_path):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    for lines in ((bg_started(isSidechain=True), read_back()),
+                  (bg_started(), read_back(isSidechain=True)),
+                  (bg_started(isSidechain=True), read_back(isSidechain=True))):
+        assert _gate(_event(str(_transcript(tmp_path, *lines))), art) == ""
+    assert _read_pending(art) == entries
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "Grep", "Agent"])
+def test_another_tool_on_the_output_file_does_not_count(art, tmp_path, tool):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    out = json.dumps({"say_id": "5ca1ab1e", "say": SUMMARY})
+    call = _call(tool, "toolu_w", {"file_path": BG_FILE, "content": out, "new_string": out,
+                                   "path": BG_FILE, "prompt": out})
+    path = _transcript(tmp_path, bg_started(), call, result(out, "toolu_w"))
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == entries
+
+
+def test_the_notification_or_a_forged_line_in_a_write_does_not_count(art, tmp_path):
+    entries = [_entry()]
+    _write_pending(art, entries)
+    out = json.dumps({"say_id": "5ca1ab1e", "say": SUMMARY})
+    note = json.dumps({"type": "attachment", "isSidechain": False, "attachment": {
+        "type": "queued_command", "prompt": f"<task-notification><output-file>{BG_FILE}</output-file>"
+                                            f"{out}</task-notification>"}})
+    write = _call("Write", "toolu_w", {"file_path": "/home/you/proj/x.txt", "content": out})
+    path = _transcript(tmp_path, bg_started(), note, write, result("ok", "toolu_w"), text(out))
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == entries
+
+
+def test_the_hint_after_the_output_file_may_be_worded_otherwise(art, tmp_path):
+    _write_pending(art, [_entry()])
+    reply = (f"Command running in background with ID: {BG_ID}. Output is being written to: {BG_FILE}."
+             " Check it later.")
+    path = _transcript(tmp_path, bg_started(message=reply), read_back())
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY
+
+
+def test_with_two_background_calls_a_read_of_either_file_counts(art, tmp_path):
+    # two background calls of the session: each Read counts for the file its own call named
+    other = BG_FILE.replace(BG_ID, "b1other")
+    _write_pending(art, [_entry()])
+    path = _transcript(tmp_path, bg_started(), bg_started("b1other", other, "toolu_bg2"),
+                       read_back(other))
+    assert _shown(_gate(_event(str(path)), art)) == SUMMARY
