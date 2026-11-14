@@ -27,23 +27,28 @@ def one_line(text: str, cap: int = CAP) -> str:
     return flat if len(flat) <= cap else flat[:cap - 1] + "…"
 
 
+def _escaped(text: str, cap: int) -> str:
+    """One line, capped on the visible text, then every markdown control character escaped: it can
+    neither end engine formatting nor start a link, an image or an autolink. `\\` is among them,
+    so an escaped `|` can't be turned back into a column break."""
+    return "".join("\\" + c if c in MARKDOWN_CONTROL else c for c in one_line(text, cap))
+
+
 def cell(text: str, cap: int = CAP) -> str:
-    """One table cell: one line, capped, with `\\` escaped before `|` (an unescaped `\\` in front of
-    an escaped `|` would turn it back into a column break)."""
-    return one_line(text, cap).replace("\\", "\\\\").replace("|", "\\|")
+    """One table cell: one line, capped, markdown escaped (`|` and `\\` included)."""
+    return _escaped(text, cap)
 
 
 def quoted(text: str, cap: int = CAP) -> str:
-    """Model text in running prose: one line, capped, in straight double quotes (an inner double
-    quote becomes a single one, so the quotes always close where the data ends)."""
-    return '"' + one_line(text, cap).replace('"', "'") + '"'
+    """Model text in running prose: one line, capped, markdown escaped, in straight double quotes
+    (an inner double quote becomes a single one, so the quotes always close where the data ends)."""
+    return '"' + _escaped(text, cap).replace('"', "'") + '"'
 
 
 def plain(text: str, cap: int = CAP) -> str:
     """Model text inside engine formatting (the summary's bold first line): one line, capped, with
     every markdown control character escaped, so it can neither end the bold nor start a link."""
-    flat = one_line(text, cap)
-    return "".join("\\" + c if c in MARKDOWN_CONTROL else c for c in flat)
+    return _escaped(text, cap)
 
 
 def count(n: int, singular: str, plural: str) -> str:
