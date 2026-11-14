@@ -12,7 +12,7 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
 
 1. **Resolve the environment first**, since the short-circuit skipped preflight step 1: `bash "<plugin_root>/scripts/py" connect_resolve.py --db-type sqlite --profile agami-example`. Its output names everything this path uses: `data.artifacts_dir` is `<artifacts_dir>` (on a first run, when `data.artifacts_dir_source` is `default` and there is no `.config`, ask 0a.6's card instead, default `~/agami-artifacts`), `data.interpreter.python3` is `<python3>`, `data.interpreter.has_model_deps` says whether agami-core is importable, and `data.tools.sqlite3` says whether the `sqlite3` CLI is there.
 
-   **Set up `local/`** (same as 0a.1): `mkdir -m 700 -p "<artifacts_dir>/local"`, one call. Ensure `<artifacts_dir>/.gitignore` ignores `local/` (0a.1 says how, with the Read and Edit tools).
+   **Set up `local/`** (same as 0a.1): `mkdir -m 700 -p "<artifacts_dir>/local"`, one call. Ensure `<artifacts_dir>/.gitignore` ignores `local/` (0a.1 says how, with the Read, Edit and Write tools, never `cat` in Bash: on a first run there is no `.gitignore` yet, which is not an error).
 
    Mark the step started and refresh the task list ([task-list.md](../../../shared/task-list.md)); here `<root>` is `<artifacts_dir>/agami-example`:
    ```bash

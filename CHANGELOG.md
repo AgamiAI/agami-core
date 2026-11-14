@@ -350,6 +350,11 @@ below corresponds to one such version.
   it while the starter-question card was still waiting for its answer. agami-connect now leaves the
   step in progress (the closing mark's `then` says so), and agami-query marks it done after the
   first answer, when the task list still shows the step in progress. The step keeps its name.
+- **Setting up `.gitignore` no longer shows as a failed command.** A live run chained
+  `cat <artifacts>/.gitignore` onto its setup command, and on a first run, with no such file, the
+  whole command showed "Failed". The skill now says to read it with the Read tool, never `cat` in
+  Bash, and that a missing `.gitignore` is not an error (write it with the Write tool), in all three
+  places that set it up.
 - **Join cards recommend leaving a chance match out again.** Each join candidate in
   `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
   95% bar and the column's name reads as a reference (named for the key, or the table's word alone

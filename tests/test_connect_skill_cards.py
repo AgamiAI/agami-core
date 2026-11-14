@@ -773,3 +773,14 @@ def test_join_cards_put_the_engines_recommendation_first():
     many = s[s.index("**More than 4:**"):]
     assert "`recommend: add`" in many and "**Add none (Recommended)**" in many
     assert "full matches (Recommended)" not in many
+
+
+def test_gitignore_is_read_with_the_read_tool_and_a_missing_one_is_not_an_error():
+    # A live run chained `cat <artifacts>/.gitignore` onto a setup command; on a first run there is
+    # no such file, so the whole command showed as "Failed". Every place that sets the line up says how.
+    refs = SKILL.parent / "references"
+    for name in ("credentials.md", "context-and-tables.md"):
+        flat = " ".join((refs / name).read_text(encoding="utf-8").split())
+        assert "Read it first with the Read tool, never `cat` in Bash: a missing `.gitignore` is not an error" in flat, name
+    sample = " ".join((refs / "sample.md").read_text(encoding="utf-8").split())
+    assert "never `cat` in Bash: on a first run there is no `.gitignore` yet, which is not an error" in sample

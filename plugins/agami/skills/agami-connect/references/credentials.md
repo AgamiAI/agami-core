@@ -16,7 +16,7 @@ One call, which creates the folder with its private mode:
 ```bash
 mkdir -m 700 -p "<artifacts_dir>/local"
 ```
-If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line (Read it first; add the line with the Edit tool, or write the file with that one line when it doesn't exist).
+If the user chose a non-default `<artifacts_dir>`, **persist the pointer** so future sessions find it, and gitignore `local/`: write the folder's absolute path as the only line of `<home>/.config/agami/path` with the Write tool (your home folder written out; the Write tool makes the folder), then give `<artifacts_dir>/.gitignore` a `local/` line (Read it first with the Read tool, never `cat` in Bash: a missing `.gitignore` is not an error, it means there is none yet, so write the file with that one line with the Write tool; when it exists, add the line with the Edit tool).
 
 ### 0a.2 — Ask the database type
 
