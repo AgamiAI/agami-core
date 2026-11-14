@@ -1299,3 +1299,14 @@ def test_with_two_background_calls_a_read_of_either_file_counts(art, tmp_path):
     path = _transcript(tmp_path, bg_started(), bg_started("b1other", other, "toolu_bg2"),
                        read_back(other))
     assert _shown(_gate(_event(str(path)), art)) == SUMMARY
+
+
+def test_a_user_text_naming_the_output_file_is_not_a_reply(art, tmp_path):
+    # Typed text in a user line (not a tool result) can quote the start sentence: it names no file.
+    entries = [_entry()]
+    _write_pending(art, entries)
+    reply = bg_started().splitlines()[1]
+    typed = json.loads(reply)
+    typed["message"]["content"] = [{"type": "text", "text": typed["message"]["content"][0]["content"]}]
+    path = _transcript(tmp_path, bg_started().splitlines()[0], json.dumps(typed), read_back())
+    assert _gate(_event(str(path)), art) == "" and _read_pending(art) == entries
