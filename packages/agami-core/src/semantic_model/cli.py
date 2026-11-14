@@ -1220,8 +1220,11 @@ def _batch_metric(item: dict):
     from types import SimpleNamespace
 
     from .models import Metric
+    # `area` and `qname` are dropped as the write drops them; a missing calculation is the write's
+    # problem to report, not a reason to skip the expansion.
+    fields = {k: v for k, v in item.items() if k not in ("area", "qname")}
     try:
-        return Metric.model_validate({"calculation": "", **item})
+        return Metric.model_validate({**fields, "calculation": fields.get("calculation") or "-"})
     except Exception:  # noqa: BLE001 — the write reports the item's own problem; this only expands it
         return SimpleNamespace(
             name=item.get("name"), bindings=item.get("bindings") or {},
