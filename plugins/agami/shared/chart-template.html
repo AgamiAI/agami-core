@@ -1663,13 +1663,30 @@
               li.appendChild(el('code', { text: m.restrictions.join(' and ') }));
             }
             if ((m.result_filters || []).length) {
-              li.appendChild(document.createTextNode(', then kept only where '));
+              li.appendChild(document.createTextNode(', then kept only results where '));
               li.appendChild(el('code', { text: m.result_filters.join(' and ') }));
             }
             li.appendChild(el('br'));
             li.appendChild(el('span', { class: 'receipt-meta', text: approvalPhrase(m) }));
             ul.appendChild(li);
           });
+          rb.appendChild(ul);
+        }
+        // A returned number that computes a defined metric without that metric's own condition
+        // (ACE-177): said beside the definitions, so it never reads as the metric.
+        const missing = outputColumns().filter(i => (i.missing_conditions || []).length);
+        if (missing.length) {
+          const ul = el('ul');
+          missing.forEach(i => i.missing_conditions.forEach(mc => {
+            const li = el('li');
+            li.appendChild(el('code', { text: i.column }));
+            li.appendChild(document.createTextNode(' is not '));
+            li.appendChild(el('code', { text: mc.metric }));
+            li.appendChild(document.createTextNode(': it leaves out '));
+            li.appendChild(el('code', { text: (mc.conditions || []).join(' and ') }));
+            ul.appendChild(li);
+          }));
+          rb.appendChild(el('h5', { text: 'Not a defined metric' }));
           rb.appendChild(ul);
         }
         if (columns.length) {

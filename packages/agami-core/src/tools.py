@@ -4210,9 +4210,12 @@ _OWN_COLUMN_ARGUMENTS = frozenset(
 #: A control character or line break in stored caller text could forge a line of a log or a report
 #: that reads it, so each is replaced with a space: the C0 and C1 controls, the Unicode line and
 #: paragraph separators, the bidi controls that reorder how a line displays, and a lone surrogate,
-#: which is not text at all. The same set as `runtime._ECHO_CONTROL`.
+#: which is not text at all; and the invisible characters that carry hidden text (zero-width
+#: space and joiners, word joiner and invisible operators, byte-order mark, Arabic letter mark, tag
+#: characters). The same set as `runtime._ECHO_CONTROL`.
 _AUDIT_CONTROL = re.compile(
-    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff"
+    r"\u200b-\u200d\u2060-\u2064\ufeff\u061c\U000e0000-\U000e007f]"
 )
 
 #: What is stored for a value that cannot become text, with the cut flag set.
@@ -5883,12 +5886,15 @@ TOOLS: dict[str, dict[str, Any]] = {
             "undetermined (the "
             "value sits behind a CTE or derived table we do not read into, or a declared binding "
             "could not be parsed — NOT a claim that no metric matches); every metric key is null "
-            "unless status is 'matched'. A matched item also carries `restrictions` — the "
+            "unless status is 'matched' (`missing_conditions` is the one exception, below). A "
+            "matched item also carries `restrictions` — the "
             "conditions its rows were counted over beyond the metric's own (WHERE, inner-join ON, "
             "its own FILTER/CASE; [] means the metric's whole definition) — and `result_filters` "
-            "(HAVING/QUALIFY, applied after counting): name the slice with the metric, e.g. "
-            "'change requests, counted only where state = ...'. `missing_conditions` names a "
-            "metric computing this value whose own condition the statement does not apply. A "
+            "(HAVING/QUALIFY, applied after counting; a LIMIT is not listed): name the slice "
+            "with the metric, e.g. "
+            "'change requests, counted only where state = ...'. On any other status, "
+            "`missing_conditions` names a metric computing this value whose own condition the "
+            "statement does not apply. A "
             "value compared with a sensitive column reads `<withheld>`. "
             "kind 'reference' is one per column the statement READ, "
             "`{kind, column}` plus `sensitive: true` where it applies, and it never carries a "

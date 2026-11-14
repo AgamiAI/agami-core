@@ -423,7 +423,8 @@ def test_nothing_re_serialises_a_parsed_statement():
     of the receipt's `columns` items. A fragment, bound to a receipt field and never assigned
     anywhere a driver reads; the spec requires the receipt to SHOW the slice a number was counted
     over, and sqlglot's normalization of spacing and keyword case is a property of that label as it
-    is of the join predicate's.
+    is of the join predicate's. It serializes in the datasource's own dialect, so a string or
+    operator only that engine spells (`E'…'`, `~*`) reads back as written rather than translated.
 
     Three entries is not a quota and this list is not full. What each entry costs is the strong form
     of the claim, and what earns one is the argument above made in full for a FRAGMENT that reaches

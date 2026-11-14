@@ -1712,9 +1712,14 @@ def _echo_name(name: str) -> str:
 # `SUM(o.total * 1.2)` and every structural character becomes `?`. So the character filter here is
 # the narrow one — control characters and line breaks, which is what carries a prompt-injection
 # payload out of a quoted identifier — and the length bound does the rest of the work. The same set
-# as `tools._AUDIT_CONTROL`: C0/C1 controls, line/paragraph separators, bidi controls, lone surrogates.
+# as `tools._AUDIT_CONTROL`: C0/C1 controls, line/paragraph separators, bidi controls, lone surrogates,
+# and the invisible characters below.
 _ECHO_CONTROL = re.compile(
-    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff]"
+    r"[\x00-\x1f\x7f-\x9f\u200e\u200f\u2028-\u202e\u2066-\u2069\ud800-\udfff"
+    # And the invisible ones, since a restriction carries the caller's literals (ACE-177): zero-width
+    # space / joiners, word joiner and invisible operators, the byte-order mark, the Arabic letter
+    # mark, and the tag characters, which spell hidden text.
+    r"\u200b-\u200d\u2060-\u2064\ufeff\u061c\U000e0000-\U000e007f]"
 )
 # Wider than an identifier because an expression legitimately holds several, and still far below
 # what a statement could inflate a receipt with: a CASE expression a person writes fits, and a
@@ -4000,8 +4005,8 @@ def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
 
     `computed_differently` counts too, in its own clause: it is not settled either way (#655).
 
-    And `truncated`, the output columns with more conditions than an item lists (ACE-177): a list
-    cut short must not read as the whole slice, least of all an empty one.
+    And `truncated`, the output columns with more conditions (or more metrics missing a condition)
+    than an item lists (ACE-177): a list cut short must not read as the whole slice.
     """
     unsettled = sum(1 for item in output_items if item["status"] == UNDETERMINED)
     differently = sum(1 for item in output_items if item["status"] == COMPUTED_DIFFERENTLY)
@@ -4012,8 +4017,8 @@ def _columns_marker(output_items: list[dict[str, Any]], dropped_refs: int,
         (f"{differently} of the listed output column(s) read the same columns as a declared metric "
          "but are computed differently, and the two were not compared, so whether they are the "
          "same number is not established." if differently else ""),
-        (f"{truncated} of the listed output column(s) list only the first "
-         f"{_RECEIPT_MAX_RESTRICTIONS} of their conditions." if truncated else ""),
+        (f"{truncated} of the listed output column(s) list only some of their conditions."
+         if truncated else ""),
         (f"{dropped_outputs} further output column(s) are not listed." if dropped_outputs else ""),
         (f"{dropped_refs} further column reference(s) are not listed." if dropped_refs else ""),
     ) if clause) or None
@@ -4321,14 +4326,31 @@ def assemble_receipt(
     # One restriction set per SELECT (ACE-177), its own memo and never `own_alias_memo`.
     restriction_memo: dict = {}
     sensitive_names = {_tkey(name) for name in _sensitive_by_table(org)[1]}
+    # Whether the statement names a sensitive column anywhere: then a condition holding a subquery has
+    # its values withheld too (`_withholds`).
+    statement_sensitive = any(_tkey(col.name) in sensitive_names
+                              for col in tree.find_all(exp.Column))
     # Output items whose condition lists did not fit (by position), counted onto the marker rather
     # than the item.
     truncated: set[int] = set()
+    # How many conditions the whole receipt may still render. One SELECT's conditions apply to every
+    # aggregating column of it, so per-item caps alone multiply by the column count. Past the budget
+    # each list keeps its FIRST condition, so a restricted number never shows `[]`.
+    budget = [_RECEIPT_MAX_CONDITIONS]
 
     def _shown(nodes: "tuple | list") -> list[str]:
-        if len(nodes) > _RECEIPT_MAX_RESTRICTIONS:
+        keep = min(len(nodes), _RECEIPT_MAX_RESTRICTIONS, max(1, budget[0]))
+        budget[0] -= keep
+        if keep < len(nodes):
             truncated.add(len(output_items))
-        return [_restriction_text(n, sensitive_names) for n in nodes[:_RECEIPT_MAX_RESTRICTIONS]]
+        return [_restriction_text(n, sensitive_names, metric_dialect, statement_sensitive)
+                for n in nodes[:keep]]
+
+    def _missing(missing: tuple) -> "list[dict[str, Any]] | None":
+        if len(missing) > _ECHO_MAX_NAMES:
+            truncated.add(len(output_items))
+        return [{"metric": name, "conditions": _shown(conds)}
+                for name, conds in missing[:_ECHO_MAX_NAMES]] or None
 
     for oc in output_columns[:_RECEIPT_MAX_REFS]:
         result = _match_output_column(oc, unread_declarations, by_binding, visible,
@@ -4391,9 +4413,7 @@ def assemble_receipt(
             "result_filters": _shown(result.result_filters) if match is not None else None,
             # A declared metric computing this value whose own condition the statement does not
             # apply, and which condition. Null when there is none.
-            "missing_conditions": [
-                {"metric": name, "conditions": _shown(conds)}
-                for name, conds in result.missing[:_ECHO_MAX_NAMES]] or None,
+            "missing_conditions": _missing(result.missing),
         })
 
     def _declared_table(bare: str) -> Optional[tuple]:
@@ -8759,14 +8779,12 @@ def _lookup(reduced: "exp.Expression", index: dict) -> list:
 # be copied into every aggregating column. What does not fit is COUNTED on the section's marker,
 # never put on the item as a number — the sections carry no integer but the model's row estimate.
 _RECEIPT_MAX_RESTRICTIONS = 10
+# And the whole receipt's: conditions rendered across every item, at most. See `_shown` in
+# `assemble_receipt` for what happens past it.
+_RECEIPT_MAX_CONDITIONS = 100
 
-# The leaves that carry a value a condition compares a column with. Beside a sensitive column each is
-# replaced with `_WITHHELD` before the condition is rendered: the receipt is stored with the query,
-# and the value need not be.
-_VALUE_LEAVES = tuple(
-    getattr(exp, name) for name in
-    ("Literal", "HexString", "ByteString", "BitString", "National", "RawString")
-    if hasattr(exp, name)) if _HAVE_SQLGLOT else ()
+# What a withheld value reads as. The receipt is stored with the query, and a value compared with a
+# sensitive column need not be.
 _WITHHELD = "<withheld>"
 
 
@@ -8854,77 +8872,90 @@ def _condition_key(node: "exp.Expression", dialect: "str | None") -> "exp.Expres
 
 
 class _Restriction(NamedTuple):
-    """One condition on the rows a column read, beside where it came from."""
+    """One condition on the rows a column read, beside the references it names.
+
+    Attributed to a REFERENCE (the alias a FROM or JOIN wrote), never to a table: in a self-join
+    `a` and `b` are both orders, and `b.status = 'paid'` restricts b's rows, not the a-rows a number
+    summing `a.total_amount` reads.
+    """
 
     key: "exp.Expression"   # `_condition_key`, what the comparison uses
-    table: Optional[str]    # the folded bare table it constrains; None when not attributable
+    ref: Optional[str]      # the one reference it restricts; None when it names several or none can be told
+    refs: frozenset         # every reference its columns name, for telling two spellings apart
     node: "exp.Expression"  # as the statement wrote it, for the item
-    default: bool = False   # an applied declared default filter of that table (ACE-099's report)
+    default: bool = False   # an applied declared default filter of that reference (ACE-099's report)
 
 
 class _ArmRestrictions(NamedTuple):
     """Everything ACE-177 reads off one SELECT, built once per SELECT (`_arm_restrictions`)."""
 
-    amap: dict
-    relations: frozenset       # the folded relations this SELECT reads, computed ones included
-    steps: bool                # reads a CTE, derived table or VALUES: its rows were decided earlier
-    rows: list                 # WHERE + inner-join ON value conditions, statement order
-    outer: list                # (restriction, relations on that outer join's optional side)
-    after: list                # HAVING + QUALIFY conjuncts: applied after counting
+    amap: dict                 # `_own_alias_map`: reference -> bare table
+    refs: frozenset            # the folded references this SELECT reads, computed ones included
+    unseen: bool               # its rows were decided where this check does not look (see below)
+    rows: list                 # WHERE + inner-join ON conditions + SEMI/ANTI joins, statement order
+    outer: list                # (restriction, references on that outer join's optional side)
+    after: list                # HAVING + QUALIFY conjuncts: applied after counting. Not a LIMIT,
+    #                            which also drops groups after counting and is not listed.
     mentioned: frozenset       # every column any predicate of this SELECT names, folded
 
 
-def _qualified_source(qualifier: str, amap: dict) -> str:
-    """The source a column qualifier names in this SELECT: exact, else ignoring case when exactly one
-    alias matches that way (an unquoted `O.status` is alias `o`), else the qualifier itself."""
+def _ref_of(qualifier: str, amap: dict) -> str:
+    """The reference a column qualifier names in this SELECT, folded: exact, else ignoring case when
+    exactly one matches that way (an unquoted `O.status` is alias `o`), else the qualifier itself."""
     if qualifier in amap:
-        return amap[qualifier]
+        return _tkey(qualifier)
     hits = [k for k in amap if _tkey(k) == _tkey(qualifier)]
-    return amap[hits[0]] if len(hits) == 1 else qualifier
+    return _tkey(hits[0] if len(hits) == 1 else qualifier)
 
 
-def _qualifier_tables(cols: list, amap: dict) -> set:
-    return {_tkey(_bare(_qualified_source(col.table, amap))) for col in cols if col.table}
+def _table_of(ref: str, amap: dict) -> str:
+    """The folded bare table a reference reads (or the reference itself when it is computed)."""
+    hits = [v for k, v in amap.items() if _tkey(k) == ref]
+    return _tkey(_bare(hits[0])) if len(hits) == 1 else ref
 
 
-def _joins_two(cond: "exp.Expression", cols: list, amap: dict, relations: frozenset) -> bool:
-    """Whether a conjunct JOINS two relations rather than restricting one.
+def _named_refs(cols: list, amap: dict) -> frozenset:
+    return frozenset(_ref_of(col.table, amap) for col in cols if col.table)
 
-    Two relation REFERENCES named — by qualifier, so `a.id = b.customer_id` over two aliases of one
-    table is the self-join it is — or `col = col` with an unqualified side in a SELECT reading more
-    than one relation (the comma-join form). Narrower than ACE-112's rule on purpose: a
-    column-to-column comparison on ONE reference restricts its rows, and dropping a restriction is
-    the direction this section must not fail in.
+
+def _joins_two(cond: "exp.Expression", amap: dict, refs: frozenset) -> bool:
+    """Whether a conjunct JOINS two references rather than restricting rows: a bare `col = col`
+    between two different references, or with an unqualified side in a SELECT reading more than
+    one (the comma-join form), and nothing else.
+
+    Anything more — an OR, a function, a CASE, a literal, a non-equal comparison — restricts rows
+    whatever references it names, and is listed: dropping a restriction is the direction this
+    section must not fail in. So is `a.x = a.y` on one reference.
     """
-    if len({_tkey(col.table) for col in cols if col.table}) >= 2:
-        return True
-    return (isinstance(cond, exp.EQ) and isinstance(cond.this, exp.Column)
-            and isinstance(cond.expression, exp.Column)
-            and not (cond.this.table and cond.expression.table) and len(relations) >= 2)
+    if not isinstance(cond, exp.EQ):
+        return False
+    left, right = cond.this, cond.expression
+    if not (isinstance(left, exp.Column) and isinstance(right, exp.Column)):
+        return False
+    if left.table and right.table:
+        return _ref_of(left.table, amap) != _ref_of(right.table, amap)
+    return len(refs) >= 2
 
 
-def _conjunct_table(cols: list, amap: dict, relations: frozenset) -> Optional[str]:
-    """The one table a restriction constrains, when it can be told; an unqualified column belongs to
-    the only relation of a one-relation SELECT."""
-    tables = _qualifier_tables(cols, amap)
-    if len(tables) == 1:
-        return next(iter(tables))
-    if not tables and cols and len(relations) == 1:
-        return next(iter(relations))
-    return None
-
-
-def _restriction(cond: "exp.Expression", amap: dict, relations: frozenset,
+def _restriction(cond: "exp.Expression", amap: dict, refs: frozenset,
                  dialect: "str | None") -> "_Restriction | None":
-    cols = _own_nodes(cond, exp.Column)
-    if _joins_two(cond, cols, amap, relations):
+    if _joins_two(cond, amap, refs):
         return None
-    return _Restriction(_condition_key(cond, dialect), _conjunct_table(cols, amap, relations), cond)
+    cols = _own_nodes(cond, exp.Column)
+    named = _named_refs(cols, amap)
+    if len(named) == 1 and all(col.table for col in cols):
+        ref: Optional[str] = next(iter(named))
+    elif not named and cols and len(refs) == 1:
+        ref = next(iter(refs))      # unqualified, in a SELECT reading one reference
+    else:
+        ref = None
+    return _Restriction(_condition_key(cond, dialect), ref, named, cond)
 
 
-def _bare_of(node: "exp.Expression", amap: dict) -> str:
-    name = node.alias_or_name
-    return _tkey(_bare(_qualified_source(name, amap)))
+# The arguments on a table reference that change which of its rows are read: a sample, and the
+# time-travel clauses (`AT`, `FOR SYSTEM_TIME AS OF`, `CHANGES`). A number over one is not the
+# metric over the table, and the clause is not a condition this check can compare.
+_UNSEEN_TABLE_ARGS = ("sample", "when", "version", "changes")
 
 
 def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | None",
@@ -8937,8 +8968,12 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
 
     The conjuncts are `_filtering_conjuncts`' — WHERE plus inner-join ONs — and not
     `_mentioned_predicates`', which includes HAVING and outer ONs. An outer join's ON conditions are
-    kept apart with the relations on the side that join makes optional: they decide what a number
-    reading THAT side adds up, and nothing about one that does not.
+    kept apart with the references on the side that join makes optional: they decide what a number
+    reading THAT side adds up, and nothing about one that does not. A SEMI or ANTI join keeps or
+    drops rows by what another relation holds, so the join itself is listed.
+
+    `unseen`: the SELECT reads a CTE, derived table or VALUES (its rows were decided in an earlier
+    step, which ACE-178 follows), or samples a table or reads it as of another time.
     """
     got = memo.get(id(sel))
     if got is not None:
@@ -8947,34 +8982,42 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
     if amap is None:
         amap = alias_memo[id(sel)] = _own_alias_map(sel)
     computed = _computed_relations(sel)
-    relations = frozenset({_tkey(_bare(v)) for v in amap.values()} | set(computed))
+    refs = frozenset({_tkey(k) for k in amap} | set(computed))
     ctes = _cte_names(sel.root())
-    steps = bool(computed) or any(_tkey(_bare(v)) in ctes for v in amap.values())
-    # The applied declared default filters, as (key, table): part of what the table means, so not
-    # listed as an extra. Bound the way ACE-099 binds them, per reference.
+    sources = [child.this for child in sel.iter_expressions()
+               if isinstance(child, (exp.From, exp.Join)) and isinstance(child.this, exp.Table)]
+    unseen = (bool(computed) or any(_tkey(_bare(v)) in ctes for v in amap.values())
+              or sel.args.get("sample") is not None
+              or any(t.args.get(arg) is not None for t in sources for arg in _UNSEEN_TABLE_ARGS))
+    # The applied declared default filters, as (key, reference): part of what the table means, so
+    # not listed as an extra. Bound the way ACE-099 binds them, per reference.
     defaults: set = set()
     for alias, bare in amap.items():
         info = tidx.get(_tkey(bare)) if tidx is not None and _tkey(bare) in visible else None
         for declared in (info[0].default_filters if info else []):
             predicate = _bound_declared_predicate(declared, alias, dialect)[1]
             if predicate is not None:
-                defaults.add((_condition_key(predicate, dialect), _tkey(_bare(bare))))
+                defaults.add((_condition_key(predicate, dialect), _tkey(alias)))
     rows = []
     for cond in _filtering_conjuncts(sel):
-        found = _restriction(cond, amap, relations, dialect)
+        found = _restriction(cond, amap, refs, dialect)
         if found is not None:
-            rows.append(found._replace(default=(found.key, found.table) in defaults))
+            rows.append(found._replace(default=(found.key, found.ref) in defaults))
     outer = []
     frm = sel.args.get("from_") or sel.args.get("from")  # sqlglot 30 keys FROM as `from_`
-    prior = {_bare_of(frm.this, amap)} if frm is not None and frm.this is not None else set()
+    prior = ({_tkey(frm.this.alias_or_name)} if frm is not None and frm.this is not None
+             else set())
     for join in sel.args.get("joins") or []:
-        here = {_bare_of(join.this, amap)}
+        here = {_tkey(join.this.alias_or_name)}
+        kind = (join.args.get("kind") or "").upper()
         side = (join.args.get("side") or "").upper()
-        if side:
+        if kind in ("SEMI", "ANTI"):
+            rows.append(_Restriction(_condition_key(join, dialect), None, frozenset(), join))
+        elif side:
             optional = frozenset(here if side == "LEFT" else prior if side == "RIGHT"
                                  else here | prior)
             for cond in _and_conjuncts(join.args.get("on")):
-                found = _restriction(cond, amap, relations, dialect)
+                found = _restriction(cond, amap, refs, dialect)
                 if found is not None:
                     outer.append((found, optional))
         prior |= here
@@ -8984,16 +9027,25 @@ def _arm_restrictions(sel: "exp.Select", dialect: "str | None", tidx: "dict | No
         if node is not None and node.this is not None:
             after.extend(_and_conjuncts(node.this))
     mentioned = frozenset().union(*(_predicate_columns(p) for p in _mentioned_predicates(sel)))
-    got = memo[id(sel)] = _ArmRestrictions(amap, relations, steps, rows, outer, after, mentioned)
+    got = memo[id(sel)] = _ArmRestrictions(amap, refs, unseen, rows, outer, after, mentioned)
     return got
 
 
-def _reads(expr: "exp.Expression", arm: _ArmRestrictions) -> set:
-    """The relations a column's expression reads. An unqualified column could be any of them."""
+def _reads(expr: "exp.Expression", arm: _ArmRestrictions, strict: bool) -> set:
+    """The references a column's expression reads.
+
+    `strict` is for crediting a metric's own condition: only a reference the number certainly
+    reads, so an unqualified column (or none, as in `COUNT(*)`) counts only in a SELECT reading one
+    reference. Otherwise it is for listing an outer join's condition, where an unqualified column
+    could be any reference and listing too much is the safe direction.
+    """
     cols = _own_nodes(expr, exp.Column)
-    out = _qualifier_tables(cols, arm.amap)
-    if any(not col.table for col in cols):
-        out |= arm.relations
+    out = set(_named_refs(cols, arm.amap))
+    unqualified = any(not col.table for col in cols)
+    if strict and (unqualified or not cols) and len(arm.refs) == 1:
+        out |= arm.refs
+    elif not strict and unqualified:
+        out |= arm.refs
     return out
 
 
@@ -9008,11 +9060,13 @@ class _ColumnMatch(NamedTuple):
     missing: tuple = ()          # otherwise: (metric name, its conditions the statement lacks)
 
 
-def _compatible(r: _Restriction, sources: set) -> bool:
-    """Whether a statement's condition can be the metric's own: on a table the metric is defined
-    over, or on one that cannot be told, or the metric declares none. Otherwise `c.status = 'paid'`
-    on customers would stand for a metric's `status = 'paid'` on orders once qualifiers are gone."""
-    return r.table is None or not sources or r.table in sources
+def _compatible(r: _Restriction, sources: set, read: set, amap: dict) -> bool:
+    """Whether a statement's condition can stand for a metric's own: it restricts one reference,
+    the number reads that reference, and the metric is defined over that reference's table (or
+    declares none). Otherwise the customers' `c.status = 'paid'`, or a self-join's other side, would
+    stand for a metric's `status = 'paid'` once qualifiers are gone."""
+    return (r.ref is not None and r.ref in read
+            and (not sources or _table_of(r.ref, amap) in sources))
 
 
 def _match_output_column(oc: OutputColumn, unread: bool,
@@ -9028,9 +9082,9 @@ def _match_output_column(oc: OutputColumn, unread: bool,
     The branch ORDER is the contract, and each rung is a claim the analysis has earned:
 
     0. **`undetermined` when the column's SELECT reads an earlier step** — a CTE, a derived table, a
-       `VALUES` list — and a metric computes its expression. Which rows the step let through is not
-       read here (ACE-178 follows it), so neither a plain match nor its restrictions are established;
-       the match this used to report hid the step's filter.
+       `VALUES` list — or samples a table or reads it as of another time, and a metric computes its
+       expression. Which rows that let through is not read here (ACE-178 follows a step), so neither
+       a plain match nor its restrictions are established; the match this used to report hid it.
     1. **A match, if the expressions are equal and the metric's own conditions are all among the
        statement's** (ACE-177). Looked up in `by_binding` on the peeled expression rather than
        scanned for. Of the metrics that fit, the most specific wins (largest condition set by
@@ -9079,13 +9133,18 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                                   grouped))
         if found:
             arm = _arm_restrictions(oc.sel, dialect, tidx, visible, rmemo, memo)
-            if arm.steps:
+            if arm.unseen:
                 return _ColumnMatch(UNDETERMINED, None)
             aggregating = bool(_own_nodes(oc.expr, exp.AggFunc))
+            # What the number READS is its value with its own FILTER or CASE condition taken off: in
+            # `SUM(a.x) FILTER (WHERE b.s = 'p')` the sum reads `a`, and `b` only decides which rows.
+            value = _peeled(_equivalent_form(_fold_unquoted_identifiers(oc.expr), False,
+                                             _count_kind(dialect)))[0]
             outer = []
             if aggregating and arm.outer:
-                read = _reads(oc.expr, arm)
-                outer = [r for r, optional in arm.outer if optional & read]
+                wide = _reads(value, arm, strict=False)
+                outer = [r for r, optional in arm.outer if optional & wide]
+            read = _reads(value, arm, strict=True)
 
             def _rows(grouped: bool) -> list:
                 own: list = []
@@ -9094,7 +9153,7 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                     # attributed to a table and shown as the statement wrote it.
                     _, written = _peeled(_equivalent_form(_fold_unquoted_identifiers(oc.expr),
                                                           grouped, _count_kind(dialect)))
-                    own = [r for r in (_restriction(c, arm.amap, arm.relations, dialect)
+                    own = [r for r in (_restriction(c, arm.amap, arm.refs, dialect)
                                        for c in written) if r is not None]
                 return own + (arm.rows + outer if aggregating else [])
 
@@ -9105,7 +9164,8 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                 sources = {_tkey(_bare(s)) for s in (cand.metric.source_tables or [])}
                 rows = rows_by_form[grouped]
                 absent = [m for m in conds
-                          if not any(r.key == m and _compatible(r, sources) for r in rows)]
+                          if not any(r.key == m and _compatible(r, sources, read, arm.amap)
+                                     for r in rows)]
                 if absent:
                     unfit.append((cand, absent, rows))
                 else:
@@ -9122,9 +9182,13 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                 extras: list = []
                 seen: set = set()
                 for r in rows:
-                    if r.default or r.key in seen or (r.key in conds and _compatible(r, sources)):
+                    # Told apart by the references named as well as the condition: `o.status =
+                    # 'x' AND c.status = 'x'` are two restrictions once qualifiers are stripped.
+                    ident = (r.key, r.refs, r.ref)
+                    if r.default or ident in seen or (
+                            r.key in conds and _compatible(r, sources, read, arm.amap)):
                         continue
-                    seen.add(r.key)
+                    seen.add(ident)
                     extras.append(r.node)
                 return _ColumnMatch(MATCHED, cand, tuple(extras), tuple(arm.after))
             for cand, absent, rows in unfit:
@@ -9145,22 +9209,41 @@ def _match_output_column(oc: OutputColumn, unread: bool,
     return _ColumnMatch(status, None, missing=tuple(missing))
 
 
-def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[str]") -> str:
-    """One condition rendered for the item: as the parser read it, bounded like every caller-written
-    expression in the receipt (`_echo_expr`), with each value withheld when a column it names is
-    sensitive.
+def _withholds(node: "exp.Expression", sensitive: "set[str] | frozenset[str]",
+               statement_sensitive: bool) -> bool:
+    """Whether a condition's values are withheld: it names a sensitive column (by name, folded, on
+    any table — the conservative rule `_projected_sensitive` applies to an ambiguous reference), or
+    it holds a subquery while the statement names a sensitive column anywhere. The second is how a
+    sensitive column renamed in a CTE (`email AS e` … `WHERE e = '…'`) is caught without following
+    the rename: simple, and wider than needed in the safe direction."""
+    if any(_tkey(col.name) in sensitive for col in node.find_all(exp.Column)):
+        return True
+    return statement_sensitive and node.find(exp.Select) is not None
+
+
+def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[str]",
+                      dialect: "str | None" = None, statement_sensitive: bool = False) -> str:
+    """One condition rendered for the item: as the parser read it, in the datasource's own dialect
+    (so `E'…'`, `B'101'` or `~*` read back as written), bounded like every caller-written expression
+    in the receipt (`_echo_expr`), and with its values withheld when `_withholds` says so.
+
+    Withholding replaces every LEAF that is not a name — not an identifier, and not inside a column
+    reference, a table reference or a data type — rather than a list of literal kinds: a list misses
+    the next string syntax a dialect adds (`U&'…'`), and a leaf that is not a value loses nothing.
 
     Serialized as a FRAGMENT for a label, the same argument `_join_condition` makes and
     `tests/test_ace093_byte_identity.py` records: bound to a receipt field and never assigned
-    anywhere a driver reads. Sensitive by NAME, folded, on any table — the conservative rule
-    `_projected_sensitive` applies to an ambiguous reference — so a same-named column elsewhere is
-    withheld too, which is the safe direction.
+    anywhere a driver reads.
     """
     shown = node.copy()
-    if any(_tkey(col.name) in sensitive for col in shown.find_all(exp.Column)):
-        for leaf in list(shown.find_all(*_VALUE_LEAVES)):
-            leaf.replace(exp.Var(this=_WITHHELD))
-    return _echo_expr(shown.sql())
+    if _withholds(shown, sensitive, statement_sensitive):
+        for leaf in [n for n in shown.walk() if not list(n.iter_expressions())]:
+            if isinstance(leaf, (exp.Identifier, exp.Star)) or leaf.find_ancestor(
+                    exp.Column, exp.Table, exp.DataType, exp.TableAlias) is not None:
+                continue
+            if leaf is not shown:
+                leaf.replace(exp.Var(this=_WITHHELD))
+    return _echo_expr(shown.sql(dialect=dialect))
 
 
 def _storage_type_of(org: Datasource) -> "str | None":

@@ -1093,11 +1093,13 @@ def test_a_matched_metric_counted_over_a_slice_is_confirmed_and_names_the_slice(
     counted over ride the note, because whether that slice is what was asked is the person's call."""
     receipt = {"columns": {"items": [{"kind": "output", "column": "n", "status": "matched",
                                       "name": "change_count", "aggregate": True,
-                                      "restrictions": ["state = 'open'"]}]},
+                                      "restrictions": ["state = 'open'"],
+                                      "result_filters": ["COUNT(*) > 2"]}]},
                "tables": {"items": [{"qname": "change_requests"}]}}
     [row] = reconcile._grade_metrics(receipt, {"aggregates": [{"aggregate": "COUNT(*)"}]})
     assert (row["part"], row["verdict"]) == ("metric:n", "confirmed")
     assert "counted only where state = 'open'" in row["note"]
+    assert "then kept only results where COUNT(*) > 2" in row["note"]
 
 
 def test_a_metric_whose_own_condition_the_statement_leaves_out_is_open_not_a_gap():

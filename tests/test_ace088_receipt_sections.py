@@ -638,9 +638,11 @@ def test_sections_carry_metadata_and_structure_only_never_values(org):
                    "expression", "confidence", "origin", "review_state", "signed_off_by",
                    "signed_off_role", "signed_off_at", "source_tables", "aggregate",
                    # ACE-177: the rows a matched number was counted over, the conditions applied
-                   # after counting, and a metric condition the statement lacks. Lists of strings,
-                   # never a number, so the integer assertion below still holds; and a CTE body is
-                   # not read for them, so `CTE_LITERAL` still reaches nowhere.
+                   # after counting, and a metric condition the statement lacks. These DO carry the
+                   # statement's own literals — the slice is the point — bounded by `_echo_expr`,
+                   # with every value beside a sensitive column withheld. Lists of strings, never a
+                   # number, so the integer assertion below still holds; and a CTE body is not
+                   # read for them, so `CTE_LITERAL` still reaches nowhere.
                    "restrictions", "result_filters", "missing_conditions"}),
     }
     assert {frozenset(i) for i in sections["tables"]["items"]} == {

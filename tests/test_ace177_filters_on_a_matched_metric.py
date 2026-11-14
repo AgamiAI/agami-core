@@ -334,6 +334,24 @@ ADVERSARIAL = [
     "SELECT COUNT(DISTINCT number) AS n FROM change_requests WHERE opened >= DATE '2026-01-01'",
     "SELECT COUNT(*) AS n FROM orders WHERE " + " AND ".join(
         f"status <> 's{i}'" for i in range(12)),
+    # A condition naming two references that is not a bare `col = col` restricts rows (review).
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE o.status = 'x' OR c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE COALESCE(o.status, c.status) = 'x'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE (o.status, c.region) IN (('x', 'EU'))",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id OR c.region = 'EU'",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE (o.status = 'paid' OR c.id IS NULL)",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE CASE WHEN c.id IS NULL THEN TRUE ELSE o.status = 'x' END",
+    "SELECT COUNT(*) AS n FROM orders o JOIN orders o2 ON o2.id = o.id "
+    "AND (o2.status = 'paid' OR o.id < 0)",
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE o.status || c.region = 'paid' || c.region",
+    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN payments p ON p.order_id = o.id "
+    "WHERE p.amount > o.total_amount",
     # The same filter one step back: not followed here (ACE-178), so not settled either.
     "WITH paid AS (SELECT id FROM orders WHERE status = 'paid') SELECT COUNT(*) AS n FROM paid",
     "SELECT COUNT(*) AS n FROM (SELECT id FROM orders WHERE status = 'paid') x",
@@ -370,6 +388,58 @@ def test_a_curated_twins_condition_on_another_table_is_not_its_own(org):
     assert (item["name"], item["restrictions"]) == ("total_sales", ["c.status = 'paid'"])
 
 
+@pytest.mark.parametrize("storage_type,sql", [
+    ("DuckDB", "SELECT SUM(o.total_amount) AS n FROM orders o SEMI JOIN payments p "
+               "ON p.order_id = o.id"),
+    ("DuckDB", "SELECT SUM(o.total_amount) AS n FROM orders o ANTI JOIN payments p "
+               "ON p.order_id = o.id"),
+    ("Databricks", "SELECT SUM(o.total_amount) AS n FROM orders o LEFT ANTI JOIN payments p "
+                   "ON p.order_id = o.id AND p.status = 'x'"),
+])
+def test_a_semi_or_anti_join_is_listed(tmp_path, storage_type, sql):
+    """It keeps or drops rows by what another relation holds: a restriction, listed as the join."""
+    org = _org(tmp_path, storage_type=storage_type, metrics=UNFILTERED)
+    item = _one(org, sql, "n")
+    assert item["status"] == rt.MATCHED
+    assert len(item["restrictions"]) == 1 and "JOIN payments" in item["restrictions"][0]
+
+
+@pytest.mark.parametrize("storage_type,sql", [
+    ("PostgreSQL", "SELECT SUM(total_amount) AS n FROM orders TABLESAMPLE SYSTEM (10)"),
+    ("DuckDB", "SELECT SUM(total_amount) AS n FROM orders USING SAMPLE 10%"),
+    ("Snowflake", "SELECT SUM(total_amount) AS n FROM orders AT(TIMESTAMP => '2026-01-01')"),
+    ("BigQuery", "SELECT SUM(total_amount) AS n FROM orders "
+                 "FOR SYSTEM_TIME AS OF TIMESTAMP '2026-01-01'"),
+])
+def test_a_sampled_or_time_travelled_table_is_not_settled(tmp_path, storage_type, sql):
+    """Some rows, or the rows of another moment: not the metric over the table, and not a condition
+    this check can compare."""
+    org = _org(tmp_path, storage_type=storage_type, metrics=UNFILTERED)
+    assert _one(org, sql, "n")["status"] == rt.UNDETERMINED
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT SUM(a.total_amount) AS s FROM orders a JOIN orders b ON b.id = a.customer_id "
+    "WHERE b.status = 'paid'",
+    "SELECT SUM(a.total_amount) FILTER (WHERE b.status = 'paid') AS s FROM orders a "
+    "JOIN orders b ON b.id = a.customer_id",
+    "SELECT SUM(o.total_amount) AS s FROM orders o JOIN payments p ON p.order_id = o.id "
+    "WHERE status = 'paid'",
+])
+def test_a_condition_on_a_reference_the_number_does_not_read_is_not_its_metrics(org, sql):
+    """A self-join's other side is the same table and different rows; an unqualified column in a
+    two-reference SELECT cannot be told. Neither stands for `paid_sales`'s own condition."""
+    item = _one(org, sql, "s")
+    assert not (item["name"] == "paid_sales" and item["restrictions"] == [])
+    assert item["status"] != rt.MATCHED or item["restrictions"]
+
+
+def test_the_same_condition_on_two_references_is_listed_twice(org):
+    item = _one(org, "SELECT SUM(o.total_amount) AS s FROM orders o JOIN customers c "
+                     "ON c.id = o.customer_id WHERE o.status = 'x' AND c.status = 'x'", "s")
+    assert item["restrictions"] == ["o.status = 'x'", "c.status = 'x'"]
+
+
 def test_each_union_arm_lists_its_own_restrictions(org):
     items = _outputs(org, "SELECT COUNT(*) AS n FROM orders WHERE customer_id = 1 "
                           "UNION ALL SELECT COUNT(*) AS n FROM orders")
@@ -403,6 +473,28 @@ def test_a_value_compared_with_a_sensitive_column_is_withheld(org, cond):
     assert SECRET[:9] not in json.dumps(receipt) and SECRET[9:] not in json.dumps(receipt)
 
 
+@pytest.mark.parametrize("sql", [
+    # Renamed in a CTE the outer SELECT does not read, then compared in a subquery.
+    "WITH s AS (SELECT id, email AS e FROM customers) SELECT COUNT(*) AS n FROM orders o "
+    f"WHERE o.customer_id IN (SELECT id FROM s WHERE e = '{SECRET}')",
+    "WITH s AS (SELECT id, email AS e FROM customers) SELECT COUNT(*) AS n FROM orders o "
+    f"WHERE EXISTS (SELECT 1 FROM s WHERE s.id = o.customer_id AND s.e = '{SECRET}')",
+    # A string syntax no list of literal kinds named.
+    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
+    "WHERE c.email = U&'someone.private@example.com'",
+    # A single-reference condition in an inner ON.
+    f"SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.email = '{SECRET}'",
+    # The column's own CASE condition.
+    f"SELECT SUM(CASE WHEN c.email = '{SECRET}' THEN o.total_amount END) AS n "
+    "FROM orders o JOIN customers c ON c.id = o.customer_id",
+])
+def test_a_sensitive_value_reached_another_way_is_withheld(org, sql):
+    import json
+
+    receipt = rt.assemble_receipt(org, sql)
+    assert SECRET[:9] not in json.dumps(receipt["columns"]), sql
+
+
 def test_a_sensitive_value_in_an_inner_join_condition_is_withheld(org):
     item = _one(org, "SELECT COUNT(*) AS n FROM orders o JOIN customers c "
                      f"ON c.id = o.customer_id AND c.email = '{SECRET}'", "n")
@@ -424,7 +516,7 @@ def test_an_overflowing_restriction_list_is_counted_on_the_marker(org):
     section = rt.assemble_receipt(org, sql)["columns"]
     (item,) = [i for i in section["items"] if i["kind"] == "output"]
     assert len(item["restrictions"]) == rt._RECEIPT_MAX_RESTRICTIONS
-    assert f"list only the first {rt._RECEIPT_MAX_RESTRICTIONS}" in section["undetermined"]
+    assert "list only some of their conditions" in section["undetermined"]
 
 
 # --- determinism and cost -----------------------------------------------------------------------
@@ -527,3 +619,36 @@ def test_an_unqualified_column_across_an_outer_join_takes_its_condition(org):
 def test_a_peeled_binding_is_unread_without_the_parser(monkeypatch):
     monkeypatch.setattr(rt, "_HAVE_SQLGLOT", False)
     assert rt._peeled_binding("COUNT(*)", "postgres") is None
+
+
+
+def test_a_restriction_reads_back_in_the_datasources_dialect(org):
+    item = _one(org, "SELECT COUNT(*) AS n FROM orders WHERE status ~* '^p'", "n")
+    assert item["restrictions"] == ["status ~* '^p'"]
+
+
+def test_invisible_characters_do_not_reach_a_restriction(org):
+    hidden = "a\u200b\u200d\u2060\ufeff\u061c" + "".join(chr(0xE0000 + c) for c in (0x49, 0x47))
+    item = _one(org, f"SELECT COUNT(*) AS n FROM orders WHERE status = '{hidden}z'", "n")
+    (text,) = item["restrictions"]
+    assert all(ch not in text for ch in hidden[1:]), ascii(text)
+
+
+def test_the_receipt_has_a_total_budget_and_never_shows_a_cut_list_as_empty(org):
+    conds = " AND ".join(f"status <> 's{i}'" for i in range(rt._RECEIPT_MAX_RESTRICTIONS))
+    cols = ", ".join(f"COUNT(*) AS c{i}" for i in range(30))
+    section = rt.assemble_receipt(org, f"SELECT {cols} FROM orders WHERE {conds}")["columns"]
+    outs = [i for i in section["items"] if i["kind"] == "output"]
+    assert all(i["restrictions"] for i in outs)
+    assert sum(len(i["restrictions"]) for i in outs) <= rt._RECEIPT_MAX_CONDITIONS + len(outs)
+    assert "list only some of their conditions" in section["undetermined"]
+
+
+def test_metrics_missing_a_condition_past_the_cap_are_counted(tmp_path):
+    metrics = {f"sales_{i}": (f"SUM(total_amount) FILTER (WHERE customer_id = {i})", ["orders"])
+               for i in range(rt._ECHO_MAX_NAMES + 1)}
+    org = _org(tmp_path, metrics=metrics)
+    section = rt.assemble_receipt(org, "SELECT SUM(total_amount) AS s FROM orders")["columns"]
+    (item,) = [i for i in section["items"] if i["kind"] == "output"]
+    assert len(item["missing_conditions"]) == rt._ECHO_MAX_NAMES
+    assert "list only some of their conditions" in section["undetermined"]

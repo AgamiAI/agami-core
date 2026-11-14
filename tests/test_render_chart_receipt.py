@@ -99,7 +99,8 @@ AGG_UNAFFECTED_LABEL = "'rows repeated by a join; value unaffected'"
 # ACE-177: a matched metric's slice is drawn beside its definition, so a count over some rows never
 # reads as the whole metric on the page.
 METRIC_RESTRICTIONS_LABEL = "', counted only where '"
-METRIC_RESULT_FILTERS_LABEL = "', then kept only where '"
+METRIC_RESULT_FILTERS_LABEL = "', then kept only results where '"
+METRIC_MISSING_LABEL = "' is not '"
 # `json.dumps` spacing, which the template's hand-written sample receipt does not use.
 NONCE_RESULT_UNAFFECTED = '"result_affected": false'
 
@@ -323,7 +324,7 @@ def test_the_construction_sites_the_assertions_stand_on_are_each_unique():
                  JOINS_SECTION_CONSTRUCTION, JOIN_STATUS_BADGE, JOIN_PREDICATE_LABEL,
                  JOIN_NO_PREDICATE, JOIN_DECLARED_GUARD, AGGREGATES_SECTION_CONSTRUCTION,
                  AGG_UNAFFECTED_GUARD, AGG_UNAFFECTED_LABEL, METRIC_RESTRICTIONS_LABEL,
-                 METRIC_RESULT_FILTERS_LABEL):
+                 METRIC_RESULT_FILTERS_LABEL, METRIC_MISSING_LABEL):
         assert template.count(site) == 1, f"{site!r} appears {template.count(site)}x, not once"
 
 

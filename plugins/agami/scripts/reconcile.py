@@ -1039,11 +1039,15 @@ def _grade_metrics(receipt: dict | None, prepare: dict | None) -> list[dict]:
                 # The rows it was counted over are named, not judged: whether a slice is what the
                 # question meant is the person's call, and the counting is the defined metric's.
                 restrictions = [str(r) for r in (item.get("restrictions") or [])]
+                result_filters = [str(r) for r in (item.get("result_filters") or [])]
                 evidence = {"metric": item.get("name")}
                 note = "the output matches a defined metric"
                 if restrictions:
                     evidence["restrictions"] = restrictions
                     note += ", counted only where " + " and ".join(restrictions)
+                if result_filters:
+                    evidence["result_filters"] = result_filters
+                    note += ", then kept only results where " + " and ".join(result_filters)
                 rows.append(_part(f"metric:{column}", CONFIRMED, evidence=evidence, note=note))
         elif item.get("missing_conditions"):
             # A defined metric computes this value over a condition the statement does not apply.

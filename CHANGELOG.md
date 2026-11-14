@@ -24,10 +24,16 @@ below corresponds to one such version.
   matches a statement filtering to paid rows, and a statement leaving that condition out carries
   `missing_conditions` naming it; one filtering the same column another way reads
   `computed_differently`. An outer join's ON condition is listed for a number that reads the joined
-  table. An applied declared default filter is not listed. A value compared with a sensitive column
-  reads `<withheld>`. Each list shows ten conditions; the section's `undetermined` sentence counts the
-  columns with more. A number read through a CTE or subquery now reads `undetermined` where it used
-  to read `matched` with that step's filter unseen.
+  table, and a SEMI or ANTI join is listed as the join. Only a bare `column = column` between two
+  references counts as a join condition; anything else naming two tables is listed. A metric's own
+  condition counts only on a reference the number reads, so a self-join's other side never stands
+  for it. An applied declared default filter is not listed. Every value in a condition naming a
+  sensitive column reads `<withheld>`, as does every value in a condition holding a subquery when the
+  statement names a sensitive column anywhere. Each list shows ten conditions and the receipt one
+  hundred in all; the section's `undetermined` sentence counts the columns cut short. A number read
+  through a CTE or subquery, or from a sampled or time-travelled table, now reads `undetermined`
+  where it used to read `matched` with that filter unseen. The receipt's echo bound also strips
+  invisible characters (zero-width, word joiner, byte-order mark, tag characters).
 
 - **Cards name things in words, show an example's SQL, and offer the full view.** A card asked
   "What currency is `widgets.price` in?"; it now asks about "the Price column on Widgets". `sm
