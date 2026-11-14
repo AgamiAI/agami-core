@@ -609,8 +609,7 @@ def test_the_hook_imports_nothing_of_the_plugin_or_the_package():
 
 def test_hooks_json_runs_python3_from_path_never_the_plugin_launcher():
     doc = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf-8"))
-    # the second entry is say_gate.py on AskUserQuestion (tests/test_say_gate.py)
-    entry = doc["hooks"]["PreToolUse"][0]
+    (entry,) = doc["hooks"]["PreToolUse"]
     assert entry["matcher"] == "Bash|Write|Read|Edit"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command"
@@ -691,15 +690,6 @@ def test_every_form_the_hook_approves_is_one_allowed_tools_already_covers(art):
     assert "Read(/${CLAUDE_PLUGIN_ROOT}/**)" in _allowed_tools("agami-connect")
 
 
-@pytest.mark.parametrize("name", ["say-pending.json", "agami-say-pending.json"])
-@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
-def test_the_say_gates_pending_file_is_never_approved(art, tool, name):
-    """A subagent with Write or Edit could otherwise plant text the say gate then shows the person
-    verbatim. Excluded by name, so a wider scratch pattern later still leaves it out."""
-    assert _decision(_file(tool, str(art / "local" / "tmp" / name)), art) is None
-    assert name in HOOK_MOD.NEVER_APPROVED
-
-
 # --- Edit of a scratch file: the same files, the same checks as Write ------------------------------------
 # A live run prompted three times on Edits of `agami-metrics.json` it had just written. The hooks
 # reference (https://code.claude.com/docs/en/hooks, "PreToolUse input") documents Edit's input as
@@ -711,13 +701,6 @@ def test_an_edit_of_an_existing_scratch_file_is_allowed(art):
     target.write_text("{}")
     assert _decision(_file("Edit", str(target)), art) == "allow"
     assert _decision(_file("Edit", str(target), replace_all=True), art) == "allow"
-
-
-@pytest.mark.parametrize("name", ["say-pending.json", "agami-say-pending.json"])
-def test_an_edit_of_the_pending_file_is_never_allowed(art, name):
-    target = art / "local" / "tmp" / name
-    target.write_text("[]")
-    assert _decision(_file("Edit", str(target)), art) is None
 
 
 def test_an_edit_outside_the_scratch_folder_says_nothing(art, tmp_path):
@@ -760,16 +743,6 @@ def test_other_edit_tools_say_nothing(art, tool):
 def test_edit_and_write_agree_on_every_scratch_path(art, tmp_path):
     tmp = art / "local" / "tmp"
     (tmp / "agami-there.json").write_text("{}")
-    for path in (tmp / "agami-there.json", tmp / "agami-new.md", tmp / "x.json", tmp / "say-pending.json",
+    for path in (tmp / "agami-there.json", tmp / "agami-new.md", tmp / "x.json", tmp / "notes.json",
                  tmp / "AGAMI-x.json", tmp_path / "agami-x.json"):
         assert _decision(_file("Edit", str(path)), art) == _decision(_file("Write", str(path)), art), path
-
-
-
-@pytest.mark.parametrize("tool", ["Write", "Read", "Edit"])
-def test_the_say_gates_claim_files_are_never_approved(art, tool):
-    # say_gate.py claims an entry by creating `say-claim-<id>`; a subagent must not pre-create one.
-    target = art / "local" / "tmp" / "say-claim-5ca1ab1e"
-    assert _decision(_file(tool, str(target)), art) is None
-    target.write_text("")
-    assert _decision(_file(tool, str(target)), art) is None

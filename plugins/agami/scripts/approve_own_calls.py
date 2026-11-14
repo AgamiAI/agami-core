@@ -8,8 +8,7 @@ write outside agami's scratch folder and a model's own `.introspect/` (`timeline
 `steps.last`, the step list `steps` and `progress` last printed), no read of a file the call
 names outside those, and no change to a model's content or trust state. Everything
 else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
-its own turn). It never denies, and neither does the plugin's other hook (say_gate.py, on
-`AskUserQuestion`), which only shows the person text of the engine's that was not posted.
+its own turn). It never denies.
 
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
      it, no shell syntax at all) whose verb is in VERBS and whose every argument passes that
@@ -52,9 +51,6 @@ FORBIDDEN_ANYWHERE = (";", "&", "|", "`", "$(", "<", ">", "\n", "\r")
 UNQUOTED_SPECIAL = set("$*?[]{}()!#")
 
 TMP_NAME = re.compile(r"agami-[A-Za-z0-9._-]+\.(json|txt|tsv|md)")
-# The say gate's pending file (say_gate.py): text in it is shown to the person verbatim,
-# so a Write or Edit of it is never waved through, whatever TMP_NAME becomes. The old name is listed too.
-NEVER_APPROVED = {"say-pending.json", "agami-say-pending.json"}
 MARK = re.compile(r"[a-z_]+=(in_progress|done|skipped)")
 AREA = re.compile(r"[A-Za-z0-9_.-]+")
 SECONDS = re.compile(r"[0-9]{1,3}")
@@ -124,15 +120,14 @@ def scratch_file(file_path: Any) -> bool:
     if not isinstance(file_path, str) or not _plain_path(file_path):
         return False
     name = re.split(r"[\\/]", file_path)[-1]
-    if not TMP_NAME.fullmatch(name) or name.lower() in NEVER_APPROVED:
+    if not TMP_NAME.fullmatch(name):
         return False
     try:
         tmp = scratch_dir()
     except Doubt:
         return False
     real = os.path.realpath(file_path)
-    if _norm(os.path.dirname(real)) != _norm(tmp) or not TMP_NAME.fullmatch(os.path.basename(real)) \
-            or os.path.basename(real).lower() in NEVER_APPROVED:
+    if _norm(os.path.dirname(real)) != _norm(tmp) or not TMP_NAME.fullmatch(os.path.basename(real)):
         return False
     try:
         st = os.stat(real)
