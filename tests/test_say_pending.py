@@ -25,7 +25,7 @@ from skill_docs import PLUGIN  # noqa: E402
 SAMPLE = PLUGIN / "samples" / "store" / "model"
 CLOSING = ("Post `say` exactly as written, then update the task list from `list`, then ask the "
            "closing card in that same message.")
-GATED = " The card is refused until this text has been posted."
+GATED = " Post it as your visible message, not in thinking."
 
 
 @pytest.fixture
@@ -69,7 +69,8 @@ def test_the_closing_mark_registers_its_summary(art, capsys):
     (entry,) = _pending(art)
     assert entry["id"] == out["say_id"] and len(entry["id"]) == 8
     int(entry["id"], 16)
-    assert entry["kind"] == "summary" and entry["say"] == out["say"] and entry["refused"] == 0
+    assert entry["kind"] == "summary" and entry["say"] == out["say"]
+    assert set(entry) == {"id", "kind", "needle", "say", "created_at"}
     assert entry["needle"] == out["say"].splitlines()[0].strip()
     assert datetime.fromisoformat(entry["created_at"]).tzinfo is not None
     assert list(out).index("say_id") == list(out).index("say") - 1  # just before `say`: a cut preview keeps it
@@ -214,7 +215,7 @@ def test_register_stamps_the_time_in_utc(tmp_path):
     sid = say_pending.register(tmp_path, "summary", "hello", now=when)
     (entry,) = say_pending.load(say_pending.pending_path(tmp_path))
     assert entry == {"id": sid, "kind": "summary", "needle": "hello", "say": "hello",
-                     "created_at": "2026-11-13T09:30:15+00:00", "refused": 0, "resumed": False}
+                     "created_at": "2026-11-13T09:30:15+00:00"}
 
 
 @pytest.mark.parametrize("text", ["{}", "[1]", '"x"', "null"])
@@ -234,22 +235,11 @@ def test_the_file_is_outside_the_auto_approved_scratch_names():
     assert not say_pending.FILE_NAME.startswith("agami-")
 
 
-def test_re_registering_the_same_text_carries_its_refusals(tmp_path):
-    """The deny bound is per text: printing the same summary again (a new id each time) must not
-    reset its count, so the same text is refused at most twice in all."""
-    first = say_pending.register(tmp_path, "summary", "same text")
+def test_re_registering_the_same_text_replaces_it_with_a_new_id(tmp_path):
+    ids = [say_pending.register(tmp_path, "summary", "same text") for _ in range(3)]
     path = say_pending.pending_path(tmp_path)
-    entries = say_pending.load(path)
-    entries[0]["refused"] = 2
-    say_pending.save(path, entries)
-    ids = [first]
-    for _ in range(3):
-        ids.append(say_pending.register(tmp_path, "summary", "same text"))
-        (entry,) = say_pending.load(path)
-        assert entry["id"] == ids[-1] and entry["refused"] == 2
-    assert len(set(ids)) == 4
-    say_pending.register(tmp_path, "summary", "different text")
-    assert say_pending.load(path)[0]["refused"] == 0
+    (entry,) = say_pending.load(path)
+    assert entry["id"] == ids[-1] and len(set(ids)) == 3
 
 
 def test_a_say_longer_than_the_cap_is_not_registered(tmp_path):
@@ -257,27 +247,15 @@ def test_a_say_longer_than_the_cap_is_not_registered(tmp_path):
     assert say_pending.register(tmp_path, "summary", "x" * say_pending.MAX_SAY_CHARS) is not None
 
 
-def test_re_registering_the_same_text_carries_its_resume(tmp_path):
-    """The Stop hook (say_resume.py) keeps a turn going at most once per text, like the refusals:
-    the same text printed again keeps `resumed`, a different one starts without it."""
-    say_pending.register(tmp_path, "summary", "same text")
-    path = say_pending.pending_path(tmp_path)
-    entries = say_pending.load(path)
-    assert entries[0]["resumed"] is False
-    entries[0]["resumed"] = True
-    say_pending.save(path, entries)
-    say_pending.register(tmp_path, "summary", "same text")
-    assert say_pending.load(path)[0]["resumed"] is True
-    say_pending.register(tmp_path, "summary", "different text")
-    assert say_pending.load(path)[0]["resumed"] is False
-
-
-def test_an_entry_written_without_resume_is_read_as_not_resumed(tmp_path):
-    # A pending file an older engine wrote has no `resumed`; re-registering over it still works.
+def test_an_entry_an_earlier_engine_wrote_with_counts_is_replaced_cleanly(tmp_path):
+    # An earlier engine also wrote `refused` and `resumed`; re-registering over such a file works and
+    # writes neither, for the same text or another kind.
     path = say_pending.pending_path(tmp_path)
     path.parent.mkdir(parents=True)
-    say_pending.save(path, [{"id": "5ca1ab1e", "kind": "summary", "needle": "same text", "say": "same text",
-                             "created_at": "2026-11-13T09:30:15+00:00", "refused": 1}])
+    old = {"id": "5ca1ab1e", "kind": "examples", "needle": "t", "say": "t",
+           "created_at": "2026-11-13T09:30:15+00:00", "refused": 2, "resumed": True}
+    say_pending.save(path, [old, {**old, "kind": "summary", "needle": "same text", "say": "same text"}])
     say_pending.register(tmp_path, "summary", "same text")
-    (entry,) = say_pending.load(path)
-    assert entry["refused"] == 1 and entry["resumed"] is False
+    first, second = say_pending.load(path)
+    assert first == old
+    assert set(second) == {"id", "kind", "needle", "say", "created_at"} and second["say"] == "same text"

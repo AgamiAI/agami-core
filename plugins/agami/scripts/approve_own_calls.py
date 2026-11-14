@@ -8,9 +8,8 @@ write outside agami's scratch folder and a model's own `.introspect/` (`timeline
 `steps.last`, the step list `steps` and `progress` last printed), no read of a file the call
 names outside those, and no change to a model's content or trust state. Everything
 else gets no output, so the normal permission flow applies (a skill's `allowed-tools` still cover
-its own turn). It never denies: the plugin's hooks deny only `AskUserQuestion`
-(say_gate.py), at most twice per pending text, and only to have the engine's own text shown; the
-one Stop hook (say_resume.py) only keeps a turn going, once per such text, to ask the refused card.
+its own turn). It never denies, and neither does the plugin's other hook (say_gate.py, on
+`AskUserQuestion`), which only shows the person text of the engine's that was not posted.
 
   A. Bash: one call of this plugin's `scripts/sm` (an optional leading `bash`, nothing else before
      it, no shell syntax at all) whose verb is in VERBS and whose every argument passes that
@@ -52,7 +51,7 @@ FORBIDDEN_ANYWHERE = (";", "&", "|", "`", "$(", "<", ">", "\n", "\r")
 UNQUOTED_SPECIAL = set("$*?[]{}()!#")
 
 TMP_NAME = re.compile(r"agami-[A-Za-z0-9._-]+\.(json|txt|tsv|md)")
-# The say gate's pending file (say_gate.py): text in it is handed to the assistant to post verbatim,
+# The say gate's pending file (say_gate.py): text in it is shown to the person verbatim,
 # so a Write of it is never waved through, whatever TMP_NAME becomes. The old name is listed too.
 NEVER_APPROVED = {"say-pending.json", "agami-say-pending.json"}
 MARK = re.compile(r"[a-z_]+=(in_progress|done|skipped)")

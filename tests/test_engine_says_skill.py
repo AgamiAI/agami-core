@@ -51,6 +51,20 @@ def test_a_card_never_shares_a_reply_with_an_sm_call():
     assert "Never ask a card in the same reply as an `sm` call: wait for its output first." in flat
 
 
+def test_the_text_before_a_card_is_posted_and_the_plugin_is_only_the_fallback():
+    # The card is no longer refused: the plugin shows text that was not posted. The skill text says
+    # so, still asks the assistant to post it, and no skill file describes a refusal any more.
+    flat = _flat(_read(ENGINE_SAYS))
+    assert "Post it yourself, as your visible message (never in thinking), exactly as written, before the card." in flat
+    assert "If you do not, the plugin shows that text to the person" in flat
+    docs = [CONNECT / "SKILL.md", *REFS.glob("*.md"), *SHARED.glob("*.md")]
+    for doc in docs:
+        text = _flat(_read(doc))
+        for stale in ("is refused and the text is handed back", "handed back in the refusal",
+                      "card is refused until"):
+            assert stale not in text, (doc.name, stale)
+
+
 CLOSING_RULE = ("The closing card is asked only in a message that begins with the summary. If the closing "
                 "mark's `say` does not contain the summary table")
 CLOSING_AGAIN = 'then run `sm steps "<root>" --mark first_question=in_progress` again.'

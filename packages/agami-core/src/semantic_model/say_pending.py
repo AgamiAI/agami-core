@@ -3,17 +3,15 @@
 Live runs posted one-line `say`s every time, but a multi-line `say` printed right before a card
 (the closing summary, the examples table) went into a thinking block the person never saw, whatever
 the skill text said. So the command that prints such a `say` also records it here, and the plugin's
-`AskUserQuestion` hook (`plugins/agami/scripts/say_gate.py`) refuses the card, at most twice, until
-the text has been posted.
+`AskUserQuestion` hook (`plugins/agami/scripts/say_gate.py`) shows it to the person as the card is
+asked, unless the assistant has posted it.
 
 The file is `<artifacts_dir>/local/tmp/say-pending.json`: a JSON list of
-`{"id", "kind", "needle", "say", "created_at", "refused", "resumed"}`. `refused` counts the gate's
-refusals; `resumed` is set by the plugin's Stop hook (`plugins/agami/scripts/say_resume.py`) when it
-kept a turn going because the refused card was never asked again, which it does at most once. An
-older engine wrote no `resumed`; the hooks read that as false. This module owns that format. It imports
-only the stdlib because the hook, which never imports the engine, keeps a copy of the reader; a test
-keeps the two in step. Registering is best effort: any failure is silent and leaves the command's
-own output as it would have been, less the `say_id`.
+`{"id", "kind", "needle", "say", "created_at"}`. An earlier engine also wrote `refused` and
+`resumed`, counts for card refusals the hook no longer makes; the hook still reads such an entry.
+This module owns that format. It imports only the stdlib because the hook, which never imports the
+engine, keeps a copy of the reader; a test keeps the two in step. Registering is best effort: any
+failure is silent and leaves the command's own output as it would have been, less the `say_id`.
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ NEEDLE_CHARS = 120
 # summary is about 1,000 fixed characters plus about 140 per subject area (80-character names), so
 # 32,000 covers some 200 areas. A longer summary is still printed, just not gated.
 MAX_SAY_CHARS = 32_000
-FIELDS = ("id", "kind", "needle", "say", "created_at", "refused", "resumed")
+FIELDS = ("id", "kind", "needle", "say", "created_at")
 
 
 def pending_path(artifacts_dir: Path) -> Path:
@@ -115,14 +113,9 @@ def register(artifacts_dir: Path, kind: str, say: str, now: Optional[datetime] =
             entries = []  # a damaged file is replaced: the hook gives no opinion on it meanwhile
         entry_id = secrets.token_hex(4)
         at = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
-        # The same text printed again (a new id each time) keeps its count: the gate refuses a text
-        # at most twice in all, not twice per printing, and the Stop hook resumes a turn for it once.
-        same = [e for e in entries if e.get("kind") == kind and e.get("say") == say]
-        refused = max([e["refused"] for e in same if type(e.get("refused")) is int] or [0])
-        resumed = any(e.get("resumed") is True for e in same)
         entries = [e for e in entries if e.get("kind") != kind]
         entries.append({"id": entry_id, "kind": kind, "needle": needle, "say": say,
-                        "created_at": at.isoformat(), "refused": refused, "resumed": resumed})
+                        "created_at": at.isoformat()})
         save(path, entries)
         return entry_id
     except Exception:  # noqa: BLE001 — best effort, see docstring

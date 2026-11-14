@@ -2025,10 +2025,11 @@ def _examples_out_say(printed: str, args) -> dict[str, Any]:
 
 
 # A multi-line `say` printed right before a card was not posted in live runs (the wrap-up went into
-# a thinking block), so those two are recorded for the plugin's AskUserQuestion hook, which refuses
-# the card until the text is in the chat. The sentence is added only when the record was written:
-# with no record, no card will be refused.
-THEN_GATED = " The card is refused until this text has been posted."
+# a thinking block), so those two are recorded for the plugin's AskUserQuestion hook, which shows
+# the text to the person with the card when it was not posted. The sentence is added only when the
+# record was written. It does not mention that fallback: posting the text is still the better path
+# (the person sees it rendered, in place), and saying a hook will cover it invites skipping it.
+THEN_GATED = " Post it as your visible message, not in thinking."
 
 
 def gate_say(said: dict[str, Any], kind: str) -> dict[str, Any]:

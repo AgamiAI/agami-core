@@ -1,43 +1,43 @@
-"""PreToolUse hook on AskUserQuestion: refuse a card, at most twice, while text the engine handed over
-for the person has not been shown.
+"""PreToolUse hook on AskUserQuestion: show the person the text the engine handed over for them, if
+the assistant has not posted it, as the card is asked.
 
 Live onboarding runs never posted the closing summary, and lately not the examples table, although
 the engine printed both as `say` with a `then` saying to post it before the card: the model wrote its
 wrap-up into a thinking block the person never sees, then asked the card. Instructions did not fix
-it. So the engine records those two `say`s in `<artifacts_dir>/local/tmp/say-pending.json`
-(format owned by `semantic_model/say_pending.py`; the reader below is a copy, kept in step by
-tests/test_say_gate.py), and this hook, before a card, checks the session's transcript:
+it, and neither did refusing the card: three rounds of live runs put the text into thinking again
+after each refusal. So the engine records those two `say`s in `<artifacts_dir>/local/tmp/
+say-pending.json` (format owned by `semantic_model/say_pending.py`; the reader below is a copy, kept
+in step by tests/test_say_gate.py), and this hook, before a card, checks the session's transcript:
 
-  1. Not AskUserQuestion, no pending file, or nothing in it: no opinion.
+  1. Not AskUserQuestion, no pending file, or nothing in it: nothing to say.
   2. Entries older than MAX_AGE, and entries not shaped as the engine writes them (the needle not
      the say's first line, a control character, longer than the engine registers, an unknown
-     kind: forged, since the file's text is posted verbatim), are dropped (the file is rewritten).
+     kind: forged, since the file's text is shown verbatim), are dropped (the file is rewritten).
   3. An entry belongs to this session only if its id is in a tool result in the transcript's tail
      (the engine printed it as `say_id`). Others are left alone.
-  4. One that belongs is satisfied once its needle (the first line of its `say`) is in visible
-     assistant text after that tool result: text blocks only, never thinking. Satisfied ones go.
-  5. If one that belongs is unsatisfied, the oldest is demanded: refused once more and saved, then
-     a deny whose reason is REASON and the `say`. One refused MAX_REFUSALS times already is dropped
-     instead and the card goes ahead (a card is never blocked for good); its `say` is then printed
-     as `systemMessage`, which Claude Code shows the person, with no decision of any kind: live
-     Opus runs put the text into thinking both times, so without it the text was never shown.
+  4. One that belongs is done with once its needle (the first line of its `say`) is in visible
+     assistant text after that tool result: text blocks only, never thinking. It goes, unshown by
+     the hook, so the person never sees it twice.
+  5. The ones that belong and were not posted go too, and their `say`s are printed, in the order
+     the engine registered them, as one `systemMessage` (which Claude Code shows the person), the
+     file saved first: a text is shown once at most, and not at all if the save fails.
 
-It denies nothing but AskUserQuestion, never allows (the give-up message carries no decision), reads only the pending file and the transcript
-path it is handed, and writes only the pending file (through a temp file beside it, for an atomic
-replace). Every doubt prints nothing, so the card goes ahead: input it can't parse, a file it can't
-read or trust, a count it can't save, an exception. Like approve_own_calls.py it imports nothing of
-the plugin or the agami package, and hooks.json runs it with `python3 -I` from PATH.
+Its only output is `systemMessage`: it makes no decision about any call, so the card always goes
+ahead through the normal permission flow. It reads only the pending file and the transcript path it
+is handed, and writes only the pending file (through a temp file beside it, for an atomic replace).
+Every doubt prints nothing: input it can't parse, a file it can't read or trust, a change it can't
+save, an exception. Like approve_own_calls.py it imports nothing of the plugin or the agami package,
+and hooks.json runs it with `python3 -I` from PATH.
 
 Contract (https://code.claude.com/docs/en/hooks): stdin has `transcript_path`, `hook_event_name`,
-`tool_name` and `tool_input` ("Common input fields", "PreToolUse input"); a
-`hookSpecificOutput.permissionDecision` of "deny" prevents the call and its
-`permissionDecisionReason` is "shown to Claude" ("PreToolUse decision control"); exit 0 with no
-output is no decision; a top-level `systemMessage` is a "Warning message shown to the user" ("JSON
-output"), and with no `permissionDecision` the call takes the normal permission flow. The transcript "is written asynchronously and may lag the in-memory
-conversation": in a live session the text posted right before a retried card was not on disk yet
-when the hook ran, and the card was refused a second time. Lines are appended in order, so the gate
+`tool_name`, `tool_input` and `tool_use_id` ("Common input fields", "PreToolUse input"); a top-level
+`systemMessage` is a "Warning message shown to the user" ("JSON output"), and exit 0 with no decision
+lets the call take the normal permission flow. The transcript "is written asynchronously and may lag
+the in-memory conversation": in a live session the text posted right before a card was not on disk
+yet when the hook ran. Lines are appended in order, so when this session has unposted text the hook
 waits (at most CARD_WAIT seconds) until the card's own tool_use line (`tool_use_id`) is in the
-transcript, which puts everything before it there too; if it never appears, no opinion.
+transcript, which puts everything before it there too; without that it would show again text the
+assistant had just posted. If the line never appears: nothing.
 """
 
 from __future__ import annotations
@@ -56,21 +56,11 @@ from typing import Any, Optional
 # Not `agami-…`: approve_own_calls.py lets Write and Read of `agami-*` scratch files through.
 FILE_NAME = "say-pending.json"
 KINDS = ("summary", "examples")
-FIELDS = ("id", "kind", "needle", "say", "created_at", "refused")
-# Set by say_resume.py (the Stop hook) once it kept a turn going for the entry; an older engine wrote
-# entries without it, read as false.
-OPTIONAL = ("resumed",)
+FIELDS = ("id", "kind", "needle", "say", "created_at")
+# Counts an earlier engine kept for the card refusals this hook no longer makes. An entry it wrote
+# may still be on disk: read as usual (the types it wrote, or a doubt), never used.
+LEGACY = ("refused", "resumed")
 NEEDLE_CHARS = 120
-
-# The first sentence is how say_resume.py tells a refusal in the transcript; keep it as it is.
-REFUSAL_MARK = "agami has text for the person that has not been shown yet."
-# Live runs, after the first refusal, put the text in a thinking block and asked again; after the
-# second they posted it and ended the turn with no card. So the sentence names both: visible text,
-# then the same card, in one reply.
-REASON = (f"{REFUSAL_MARK} In this same reply, write the text below as your visible message (not in a "
-          "thinking block), exactly as written, then call AskUserQuestion again with this same card. "
-          "Do not end your turn before the card is asked: the person needs it to answer.")
-MAX_REFUSALS = 2
 MAX_AGE = timedelta(minutes=30)
 # A clock that moved back a little must not hide a fresh entry; one far in the future is not ours.
 MAX_SKEW = timedelta(minutes=5)
@@ -80,8 +70,10 @@ MAX_SKEW = timedelta(minutes=5)
 MAX_INPUT_BYTES = 1024 * 1024
 MAX_PENDING_BYTES = 256 * 1024
 # The longest `say` the engine registers (say_pending.MAX_SAY_CHARS, where the number is derived;
-# a test keeps the two equal). An entry longer than that was not written by the engine.
+# a test keeps the two equal). An entry longer than that was not written by the engine. It is also the
+# cap on the whole message when several texts are shown at one card.
 MAX_SAY_CHARS = 32_000
+SEPARATOR = "\n\n"
 TAIL_LINES = 400
 TAIL_BYTES = 2 * 1024 * 1024
 # How long to wait for the transcript to catch up with the card, well inside the hook's 10 s timeout.
@@ -151,17 +143,17 @@ def _created(entry: dict) -> datetime:
 
 def _check_entry(entry: Any) -> None:
     """Doubt unless `entry` is exactly what the engine writes."""
-    if not isinstance(entry, dict) or set(entry) - set(OPTIONAL) != set(FIELDS):
+    if not isinstance(entry, dict) or set(entry) - set(LEGACY) != set(FIELDS):
         raise Doubt("fields")
     if type(entry.get("resumed", False)) is not bool:
         raise Doubt("resumed")
+    refused = entry.get("refused", 0)
+    if type(refused) is not int or refused < 0:
+        raise Doubt("refused")
     if not isinstance(entry["id"], str) or not ID.fullmatch(entry["id"]):
         raise Doubt("id")
     if not isinstance(entry["needle"], str) or not isinstance(entry["say"], str):
         raise Doubt("needle or say")
-    refused = entry["refused"]
-    if type(refused) is not int or refused < 0:
-        raise Doubt("refused")
     _created(entry)
 
 
@@ -172,9 +164,9 @@ def _first_line(say: str) -> str:
 
 
 def well_formed(entry: dict) -> bool:
-    """Whether `entry` is shaped as the engine writes it. Its `say` is handed to the assistant to
-    post verbatim, so anything else is taken for forged and dropped: an unknown kind, a needle that
-    isn't the say's first line (text hidden below a harmless first line would be demanded anyway), a
+    """Whether `entry` is shaped as the engine writes it. Its `say` is shown to the person verbatim,
+    so anything else is taken for forged and dropped: an unknown kind, a needle that isn't the say's
+    first line (text hidden below a harmless first line would be shown even when that line was), a
     control or format character (the engine's say_text drops them; only its own line breaks and a
     tab remain), or a say longer than the engine ever registers."""
     say = entry["say"]
@@ -332,8 +324,8 @@ def shown_after(needle: str, position: int, texts: list) -> bool:
 
 
 def _sort(entries: list, rows: list) -> tuple:
-    """(entries to keep, the kept ones of this session not yet shown), given the transcript tail:
-    an entry shown after the output carrying its id is done with; one whose id isn't there is
+    """(entries to keep, the kept ones of this session not yet posted), given the transcript tail:
+    an entry posted after the output carrying its id is done with; one whose id isn't there is
     another session's, kept and ignored."""
     results, texts = read_events(rows)
     kept, waiting = [], []
@@ -347,14 +339,21 @@ def _sort(entries: list, rows: list) -> tuple:
     return kept, waiting
 
 
-def _deny(reason: str) -> dict:
-    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
-                                   "permissionDecisionReason": reason}}
+def message(waiting: list) -> str:
+    """The `say`s of `waiting` (in file order, the order the engine registered them) joined by a
+    blank line. Over MAX_SAY_CHARS, the newest that fit whole, still in order; the older ones are
+    left out without a word, as the newest is what the card follows."""
+    says: list = []
+    for entry in reversed(waiting):
+        if len(SEPARATOR.join([entry["say"], *says])) > MAX_SAY_CHARS:
+            break
+        says.insert(0, entry["say"])
+    return SEPARATOR.join(says)
 
 
 def decide(event: Any, now: Optional[datetime] = None) -> Optional[dict]:
-    """The hook's output for `event` (a deny, or on giving up the text as `systemMessage` with no
-    decision), or None to say nothing. Updates the pending file as it goes."""
+    """The hook's output for `event`: `{"systemMessage": <text>}` when this session has text the
+    assistant did not post, else None to say nothing. Updates the pending file as it goes."""
     if not isinstance(event, dict) or event.get("hook_event_name") != "PreToolUse" \
             or event.get("tool_name") != "AskUserQuestion":
         return None
@@ -375,22 +374,17 @@ def decide(event: Any, now: Optional[datetime] = None) -> Optional[dict]:
     rows = transcript_tail(transcript)
     kept, waiting = _sort(entries, rows)
     if waiting:
-        # Only now, with text of this session still unshown, is the lag worth waiting out (see the
-        # module docstring); another session's entry or a shown one costs no wait.
+        # Only now, with text of this session not yet seen posted, is the lag worth waiting out (see
+        # the module docstring): text posted just before the card would otherwise be shown twice.
+        # Another session's entry or a posted one costs no wait.
         kept, waiting = _sort(entries, card_rows(transcript, event.get("tool_use_id"), rows))
-    if not waiting:
-        if len(kept) != len(entries):
-            save(path, kept)
-        return None
-    # File order is the order the engine registered them in; created_at to the second may tie.
-    oldest = min(waiting, key=lambda e: (_created(e), kept.index(e)))
-    if oldest["refused"] >= MAX_REFUSALS:
-        # Saved first, so the message is shown at most once: the entry is gone after this.
-        save(path, [e for e in kept if e is not oldest])
-        return {"systemMessage": oldest["say"]}
-    oldest["refused"] += 1
-    save(path, kept)  # before the deny: a count that can't be saved must not refuse again for ever
-    return _deny(f"{REASON}\n\n{oldest['say']}")
+    # Saved before anything is printed, so a text is shown once at most; a save that fails raises,
+    # and the text is not shown at all.
+    remaining = [e for e in kept if not any(e is w for w in waiting)]
+    if len(remaining) != len(entries):
+        save(path, remaining)
+    text = message(waiting)
+    return {"systemMessage": text} if text else None
 
 
 def main() -> int:

@@ -1,5 +1,5 @@
 {
-  "description": "Approve a short list of read-only agami sm calls and agami's own scratch files under <artifacts_dir>/local/tmp; refuse an AskUserQuestion card, at most twice per text, while text the engine handed over for the person has not been shown; and, once per such text, keep the turn going when the refused card was never asked again. Says nothing about anything else.",
+  "description": "Approve a short list of read-only agami sm calls and agami's own scratch files under <artifacts_dir>/local/tmp; and when an AskUserQuestion card is asked, show the person text the engine handed over for them that was not posted. Says nothing about anything else.",
   "hooks": {
     "PreToolUse": [
       {
@@ -19,17 +19,6 @@
             "type": "command",
             "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/say_gate.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
             "timeout": 10
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "in=$(cat); for p in python3 python; do out=$(printf '%s' \"$in\" | \"$p\" -I \"${CLAUDE_PLUGIN_ROOT}/scripts/say_resume.py\" 2>/dev/null) && { printf '%s' \"$out\"; break; }; done; true",
-            "timeout": 5
           }
         ]
       }

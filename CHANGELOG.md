@@ -57,9 +57,8 @@ below corresponds to one such version.
   stopped for permission 71 times, 42 of them on agami's own commands. The plugin now ships a
   `PreToolUse` hook (`hooks/hooks.json`, `scripts/approve_own_calls.py`, started with `python3` from
   PATH) that answers "allow" only for calls that are harmless even if a document is steering the
-  model, and says nothing about anything else, so the normal permission prompt applies. It never
-  denies; the plugin's hooks deny only `AskUserQuestion`, at most twice per pending text, and only to
-  have the engine's own text shown (next entry). It approves exactly:
+  model, and says nothing about anything else, so the normal permission prompt applies. Neither it
+  nor the plugin's other hook (next entry) ever denies anything. It approves exactly:
   - one call of this plugin's `scripts/sm` (an optional `bash ` before it, nothing else, no shell
     syntax at all) running `steps [--mark <id>=<status>]… [--full]`, `progress [--wait 0-600]`,
     `timing`, `summary [--json]`, `overview`, `areas`, `coverage`, `review-queue`,
@@ -76,36 +75,27 @@ below corresponds to one such version.
   or changes the model or its sign-off is approved, and no `scripts/py` call is. It also runs for
   subagents, so an enricher's result write no longer prompts. The skills keep their
   `allowed-tools`, which cover every `sm` call in the turn a skill starts.
-- **A card waits until the text before it has been shown.** Five live runs in a row never showed
-  the closing summary, and the last two not the examples table, although the engine handed both
-  over as `say`: the model wrote its wrap-up into a thinking block and asked the card. Now
-  `sm steps --mark first_question=in_progress` (when its `say` carries the summary) and
+- **Text that has to come before a card is shown even when it was not posted.** Five live runs in
+  a row never showed the closing summary, and the last two not the examples table, although the
+  engine handed both over as `say`: the model wrote its wrap-up into a thinking block and asked the
+  card. Now `sm steps --mark first_question=in_progress` (when its `say` carries the summary) and
   `sm seed-validate --out` (without `--no-card`) record their `say` in
   `<artifacts_dir>/local/tmp/say-pending.json` (a name the approve hook never waves through, so a
-  subagent can't plant text in it), print its `say_id` just before `say`, and end
-  `then` with "The card is refused until this text has been posted." A second `PreToolUse` hook
-  (`scripts/say_gate.py`, on `AskUserQuestion` only) refuses the card while a recorded text whose
-  `say_id` this session's transcript shows has not been posted as visible text after it, handing
-  the text back in the refusal; it refuses at most twice per text (the same text printed again
-  keeps its count), forgets texts older than 30 minutes, drops an entry not shaped as the engine
-  writes it (needle not the text's first line, a control character, longer than 32,000
-  characters, an unknown kind), and on any doubt says nothing, so the card goes ahead. The transcript is written
-  asynchronously, so when text of this session is still unshown it first waits (up to 3 s) for the
-  card's own line to reach it: without that, a
-  live session refused the retried card although the text had just been posted. When the scratch folder can't be
-  written, the commands print what they printed before, with no `say_id` and no extra sentence.
-  The refusal now says to write the text as the visible message (not in a thinking block) and to
-  ask the same card again in the same reply, without ending the turn: live runs put the text in a
-  thinking block after the first refusal, and after the second posted it and ended the turn with
-  no card. A `Stop` hook (`scripts/say_resume.py`) catches that ending: when the gate refused a
-  card for a text of this session and no card has been asked and the person has said nothing
-  since, it keeps the turn going once, with one fixed sentence ("Ask that card now."), and records
-  `resumed` on the entry so it never does so again for that text (the engine carries `resumed`
-  over when it prints the same text again, as it does `refused`). It never blocks when
-  `stop_hook_active` is true, and on any doubt says nothing, so the turn ends as before. When the
-  gate gives up on a text (the third ask, still not posted: live Opus runs put it into thinking
-  both times), it lets the card through with the text as a `systemMessage`, which Claude Code
-  shows the person, and no decision; once, as the entry is then removed.
+  subagent can't plant text in it), print its `say_id` just before `say`, and end `then` with "Post
+  it as your visible message, not in thinking." A second `PreToolUse` hook (`scripts/say_gate.py`,
+  on `AskUserQuestion` only) checks, when a card is asked, whether each recorded text whose
+  `say_id` this session's transcript shows was posted as visible text after it. One that was not is
+  printed as a `systemMessage`, which Claude Code shows the person, and removed, so it is shown once;
+  several are shown in the order they were recorded, in one message of at most 32,000 characters
+  (over that, the newest that fit). One that was posted is removed and not shown again. The hook
+  makes no decision of any kind, so the card always goes ahead on its first ask. It forgets texts
+  older than 30 minutes, drops an entry not shaped as the engine writes it (needle not the text's
+  first line, a control character, longer than 32,000 characters, an unknown kind), saves the file
+  before printing (a save that fails shows nothing), and on any doubt says nothing. The transcript
+  is written asynchronously, so when text of this session is not yet seen posted it first waits (up
+  to 3 s) for the card's own line to reach it: without that, text posted just before the card would
+  be shown a second time. When the scratch folder can't be written, the commands print what they
+  printed before, with no `say_id` and no extra sentence.
 - **`sm` no longer accepts an abbreviated option.** `--o` used to mean `--out`.
 - **The verbs the hook approves never install, and no launcher imports from your folder.** With
   agami's library missing or older than the plugin, those 13 verbs stop with
