@@ -22,6 +22,9 @@ from semantic_model import cli, curate, steps  # noqa: E402
 from semantic_model import loader as L  # noqa: E402
 
 SAMPLE = PLUGIN / "samples" / "store" / "model"
+# The copied sample, counted on the sign-off step: its metrics were signed off by agami before any
+# run, and its entities ship approved without a signer.
+SIGNED = "8 already signed off, 8 approved by agami"
 LABELS = (
     "Connect your database",
     "Tell agami about your data",
@@ -105,12 +108,13 @@ def test_describe_count_matches_overview(model):
     totals = _totals(model)
     assert s["describe"]["count"] == f"{totals['described_pct']}% described, {totals['metrics']} metrics"
     signoff = curate.signoff_counts(L.load_datasource(model, include_rejected=True))
-    assert s["signoff"]["count"] == (
-        f"{signoff['signed']} of {signoff['signed'] + signoff['waiting']} signed")
+    # No run start given: every person's sign-off counts, as before the run-start rule.
+    assert signoff["signed"] == 8 and signoff["earlier"] == 0
     assert s["examples"]["count"] == (f"{totals['examples']} examples" if totals["examples"] else None)
-    # pinned to the sample, so a count that drifts from overview's totals can't pass by rebuilding it
+    # pinned to the sample, so a count that drifts from overview's totals can't pass by rebuilding it.
+    # The sample's definitions were signed off by agami before this run: never "8 of 8 signed".
     assert [s[i]["count"] for i in ("describe", "signoff", "examples")] == [
-        "40% described, 8 metrics", "8 of 8 signed", "14 examples"]
+        "40% described, 8 metrics", SIGNED, "14 examples"]
 
 
 def test_signoff_counts_only_signed_metrics(model):
@@ -119,7 +123,50 @@ def test_signoff_counts_only_signed_metrics(model):
     doc["review_state"] = "unreviewed"
     metric.write_text(yaml.safe_dump(doc))
     steps.mark(model, "signoff", "done")
-    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == "7 of 8 signed"
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == (
+        "0 of 1 signed, 7 already signed off, 8 approved by agami")
+
+
+def test_only_a_sign_off_the_person_made_in_this_run_counts_as_signed(model):
+    # A live sample run read "9 of 9 signed" though the person signed nothing and then chose "Don't
+    # sign anything yet". A sign-off from this run, by a person, is the only kind called signed.
+    metric = next((model / "subject_areas").glob("*/metrics/*.yaml"))
+    doc = yaml.safe_load(metric.read_text())
+    doc["review_state"] = "unreviewed"
+    metric.write_text(yaml.safe_dump(doc))
+    steps.mark(model, "signoff", "in_progress")
+    res = curate.apply(model, [{"op": "approve", "kind": "metric", "area": "agami-example",
+                                "name": doc["name"]}], signer="you@example.com", role="data_lead")
+    assert res.validated, res.errors
+    steps.mark(model, "signoff", "done")
+    assert _by_id(steps.onboarding_steps(model))["signoff"]["count"] == (
+        "1 of 1 signed, 7 already signed off, 8 approved by agami")
+
+
+def test_a_system_sign_off_is_never_called_signed(model, capsys):
+    # The sample's silent build clears its own gate with a system sign-off: agami approved them.
+    metrics, entities = _unsign_all(model, "metrics"), _unsign_all(model, "entities")
+    steps.mark(model, "signoff", "in_progress")
+    assert cli.main(["approve-queue", str(model), "--signer", "system", "--role", "system"]) == 0
+    capsys.readouterr()
+    steps.mark(model, "signoff", "done")
+    count = _by_id(steps.onboarding_steps(model))["signoff"]["count"]
+    assert count == f"{metrics + entities} approved by agami"
+    assert "signed" not in count
+
+
+def test_hidden_personal_columns_are_counted_on_the_step(model):
+    table = next(f for f in (model / "subject_areas").glob("*/tables/*.yaml")
+                 if any(c.get("sensitive") for c in yaml.safe_load(f.read_text())["columns"]))
+    doc = yaml.safe_load(table.read_text())
+    flagged = [c for c in doc["columns"] if c.get("sensitive")]
+    for c in flagged:
+        c["review_state"] = "rejected"
+    table.write_text(yaml.safe_dump(doc))
+    steps.mark(model, "signoff", "done")
+    count = _by_id(steps.onboarding_steps(model))["signoff"]["count"]
+    noun = "personal column" if len(flagged) == 1 else "personal columns"
+    assert count.endswith(f", {len(flagged)} {noun} hidden")
 
 
 def _unsign_all(root: Path, folder: str) -> int:
@@ -877,7 +924,7 @@ def _done_marks_before_build(tmp_path):  # a `done` mark is no restart; only `in
     return root, None
 
 
-DESCRIBED, SIGNED, EXAMPLES = "40% described, 8 metrics", "8 of 8 signed", "14 examples"
+DESCRIBED, EXAMPLES = "40% described, 8 metrics", "14 examples"
 ALL_COUNTS = {"build": BUILT, "describe": DESCRIBED, "signoff": SIGNED, "examples": EXAMPLES}
 
 # (setup, the nine statuses in order, current, counts that must be shown, problem)
@@ -958,3 +1005,16 @@ def test_status_rules_v2(row, tmp_path):
         assert result["problem"] is None
     else:
         assert result["problem"] and result["problem"].startswith(problem)
+
+
+def test_the_build_count_says_how_many_joins_wait_for_sign_off(model):
+    # A live run said "no join candidates to offer", then "three inferred joins, flagged until you
+    # confirm them", both counted by hand. The joins guessed from names are already in the model,
+    # and the build's own count says how many of them wait.
+    rel = model / "subject_areas" / "agami-example" / "relationships.yaml"
+    doc = yaml.safe_load(rel.read_text())
+    for r in doc["relationships"][:3]:
+        r.update(review_state="unreviewed", signed_off_by=None, signed_off_at=None, signed_off_role=None)
+    rel.write_text(yaml.safe_dump(doc))
+    steps.mark(model, "describe", "in_progress")
+    assert _by_id(steps.onboarding_steps(model))["build"]["count"] == "11 tables, 12 joins, 3 to confirm"

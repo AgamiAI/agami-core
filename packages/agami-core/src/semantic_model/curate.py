@@ -445,12 +445,28 @@ def _entity_item(area: Optional[str], ent) -> dict:
             "maps_to": maps, **_trust(ent)}
 
 
-def signoff_counts(org: Datasource) -> dict[str, int]:
+def _signed_at(obj) -> Optional[float]:
+    raw = getattr(obj, "signed_off_at", None)
+    try:
+        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def signoff_counts(org: Datasource, since: Optional[float] = None) -> dict[str, int]:
     """What the sign-off card counts: metrics, entities and joins awaiting review (`metrics`,
     `entities`, `joins`, summed in `waiting`: the review queue's Rule 1 and Rule 2 items), and those
-    a person already approved (`signed`; engine-approved ones are not counted). The step list and the
-    closing summary both read this, so neither can show a different number from the card."""
-    out = {"metrics": 0, "entities": 0, "joins": 0, "waiting": 0, "signed": 0}
+    a person approved (`signed`). The step list and the closing summary both read this, so neither
+    can show a different number from the card.
+
+    With `since` (the onboarding run's start), `signed` is only what a person signed off from then
+    on; one signed off before it (the sample's ready-made definitions, an earlier session's) is
+    `earlier`. A live sample run read "9 of 9 signed" though the person signed nothing. `by_agami` is
+    the metrics and entities approved with a system sign-off rather than by a person (the sample's
+    silent build); engine-approved joins are structure, never counted."""
+    out = {"metrics": 0, "entities": 0, "joins": 0, "waiting": 0, "signed": 0, "earlier": 0,
+           "by_agami": 0}
     kinds = {"metric": "metrics", "entity": "entities", "relationship": "joins"}
     groups = [(sa.metrics, "metric") for sa in org.subject_areas]
     groups += [(sa.entities, "entity") for sa in org.subject_areas]
@@ -464,14 +480,27 @@ def signoff_counts(org: Datasource) -> dict[str, int]:
                 out[kinds[kind]] += 1
                 out["waiting"] += 1
             elif tab == "manual":
-                out["signed"] += 1
+                at = _signed_at(obj)
+                # An approval with no time (an approve op the caller did not stamp) is not dated before
+                # the run, so it stays the person's.
+                out["signed" if since is None or at is None or at >= since else "earlier"] += 1
+            elif tab == "auto" and kind != "relationship" and getattr(obj, "review_state", None) == "approved":
+                out["by_agami"] += 1
     return out
 
 
-def model_signoff_counts(root: str | Path) -> dict[str, int]:
+def hidden_personal_columns(org: Datasource) -> int:
+    """How many columns flagged personal (`sensitive`) are hidden from queries, on tables still in
+    the model: what "hide personal data" did."""
+    return sum(1 for sa in org.subject_areas for t in sa.tables_defined
+               if getattr(t, "review_state", "approved") != "rejected"
+               for c in t.columns if c.sensitive and getattr(c, "review_state", "approved") == "rejected")
+
+
+def model_signoff_counts(root: str | Path, since: Optional[float] = None) -> dict[str, int]:
     """`signoff_counts` of the model at `root`, loaded as `sm review-queue` loads it (hidden tables
     and what hangs off them left out), so the step list and the summary say the queue's own total."""
-    return signoff_counts(load_datasource(root))
+    return signoff_counts(load_datasource(root), since)
 
 
 def _live(objs: list) -> list:
@@ -2119,6 +2148,13 @@ def _writable_items(root: Path, kind: str, items: list[dict], res: ApplyResult) 
         # passed as the `area` arg; `qname` is a UI locator. Without this, a dashboard
         # new-metric fails with `extra_forbidden` on `area`.
         clean = {k: v for k, v in (item or {}).items() if k not in ("area", "qname")}
+        # An add never signs off, as a join add never does: an item copied from a signed-off
+        # definition kept its sign-off, and the step list then counted it as the person's. Only an
+        # `approve` op (sm curate / approve-queue) records one.
+        if clean.get("review_state") == "approved":
+            clean["review_state"] = "unreviewed"
+        for k in ("signed_off_by", "signed_off_at", "signed_off_role"):
+            clean.pop(k, None)
         try:
             parsed.append((item, Model(**clean)))  # structural validation (required fields, enums, …)
         except Exception as e:

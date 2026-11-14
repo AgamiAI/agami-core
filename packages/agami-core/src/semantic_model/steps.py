@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import loader as L
+from .say_text import count as noun_count
 from .say_text import quoted
 
 STEP_IDS = ("connect", "context", "tables", "build", "describe", "signoff", "examples", "reports",
@@ -217,16 +218,17 @@ def current_run(root: Path) -> Run:
     return _replay_marks(Path(root).expanduser()).run
 
 
-def _totals(root: Path) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+def _totals(root: Path, since: Optional[float] = None) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """(overview totals, None) when the model loads, else (None, a one-line problem). The catch is
     broad on purpose: a built model that stops loading (a hand edit, a missing area, a loader bug)
     must still read as built, with the reason shown, rather than crash the list or send it back to
-    "building"."""
+    "building". `since` is the run's start: only a sign-off from then on is the person's."""
     from . import curate
     try:
         org = L.load_datasource(root, include_rejected=True)
         return {**curate.overview(org, root)["totals"],
-                "signoff": curate.model_signoff_counts(root)}, None
+                "signoff": curate.model_signoff_counts(root, since),
+                "hidden": curate.hidden_personal_columns(org)}, None
     except Exception as exc:  # noqa: BLE001 — see docstring
         first = _load_error(exc)
         # Posted as a `say`: the engine's words first, the folder by name (no absolute path), and
@@ -392,15 +394,39 @@ def _build_count(log: Path) -> Optional[str]:
     return None
 
 
-def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
-    # The sign-off card's own total (metrics, entities and joins), so a run that signs nothing
-    # still reads "0 of 23 signed", and the step never counts metrics alone while the card says 23.
-    signoff = totals["signoff"]
+def _signoff_count(signoff: dict[str, int], hidden: int) -> Optional[str]:
+    """What the sign-off step did, and only that. The card's own total (metrics, entities and
+    joins), so a run that signs nothing still reads "0 of 23 signed", and the step never counts
+    metrics alone while the card says 23. A definition the person did not sign is never counted as
+    signed: one signed before this run "already signed off", one approved by a system sign-off
+    "approved by agami" (a live sample run read "9 of 9 signed" after a person signed nothing)."""
+    parts = []
     to_sign = signoff["waiting"] + signoff["signed"]
+    if to_sign:
+        parts.append(f"{signoff['signed']} of {to_sign} signed")
+    if signoff.get("earlier"):
+        parts.append(f"{signoff['earlier']} already signed off")
+    if signoff.get("by_agami"):
+        parts.append(f"{signoff['by_agami']} approved by agami")
+    if hidden:
+        parts.append(noun_count(hidden, "personal column", "personal columns") + " hidden")
+    return ", ".join(parts) or None
+
+
+def _build_done_count(totals: dict[str, Any]) -> str:
+    """The build's tables and joins, and how many of those joins wait for sign-off. A live run said
+    "no join candidates to offer" and later "three inferred joins, flagged until you confirm them",
+    counted by hand: the joins guessed from names are in the model already, so the count says so."""
+    text = f"{totals['tables']} tables, {totals['joins']} joins"
+    waiting = (totals.get("signoff") or {}).get("joins", 0)
+    return text + (f", {waiting} to confirm" if waiting else "")
+
+
+def _later_counts(totals: dict[str, Any]) -> dict[str, Optional[str]]:
     return {
-        "build": f"{totals['tables']} tables, {totals['joins']} joins",
+        "build": _build_done_count(totals),
         "describe": f"{totals['described_pct']}% described, {totals['metrics']} metrics",
-        "signoff": f"{signoff['signed']} of {to_sign} signed" if to_sign else None,
+        "signoff": _signoff_count(totals["signoff"], totals.get("hidden", 0)),
         "examples": f"{totals['examples']} examples" if totals["examples"] else None,
     }
 
@@ -446,7 +472,8 @@ def onboarding_steps(root: Path, now: Optional[datetime] = None) -> dict[str, An
     replay = _replay_marks(root)
     marks = replay.marks
     status = {i: marks.get(i, "pending") for i in STEP_IDS}
-    totals, load_problem = _totals(root) if model.exists() else (None, None)
+    since = replay.run.times[0] if replay.run.times else None
+    totals, load_problem = _totals(root, since) if model.exists() else (None, None)
     # B: resuming a profile with no marks, or the sample's copied model. Not while a restart is in
     # effect: a reintrospect hasn't reached its build, and the old model mustn't tick it.
     if "build" not in marks and model.exists() and not replay.restarted:

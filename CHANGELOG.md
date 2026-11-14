@@ -334,6 +334,18 @@ below corresponds to one such version.
   bases' table. A base that is in neither is said plainly ("it is built from 'revenue', which is not
   a metric yet: add it first, or in the same file"), with nothing run. When a test run fails in a
   way execute_sql can't classify, the reason is the database's own words, not the generic line.
+- **The task list never says something was signed that the person did not sign.** A live sample run
+  ticked "Sign off definitions and hide personal data — 9 of 9 signed" though no sign-off card was
+  asked and the person then chose "Don't sign anything yet". The sign-off step now counts as signed
+  only a person's sign-off from this run; one dated before the run (the sample's ready-made
+  definitions, an earlier session's) reads "already signed off", and a system sign-off (the sample's
+  silent build) reads "approved by agami". It also says how many personal columns were hidden ("20
+  approved by agami, 3 personal columns hidden"). `sm add` never signs an item off any more, as a
+  join add never did: an item copied from a signed-off definition kept its `review_state: approved`
+  and sign-off, and was then counted as the person's. The build's count says how many of its joins
+  wait to be confirmed ("11 tables, 12 joins, 3 to confirm"), so "no join candidates to offer" and
+  "three inferred joins, flagged until you confirm them" no longer come from counts made by hand.
+  The sample path asks no identity card: nothing on it is signed in the person's name.
 - **Join cards recommend leaving a chance match out again.** Each join candidate in
   `.introspect/join_candidates.json` now carries `recommend`: `add` only when the data clears the
   95% bar and the column's name reads as a reference (named for the key, or the table's word alone

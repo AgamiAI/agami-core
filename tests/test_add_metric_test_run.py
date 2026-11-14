@@ -284,3 +284,22 @@ def test_an_unexpected_database_error_says_the_databases_own_words(tmp_path, mon
     rc, out, _ = _run(tmp_path, monkeypatch, capsys, [_metric("a", "SUM(#)", ["orders"])], runner=generic)
     reason = out["test_run"]["a"]["error"]
     assert "unrecognized token" in reason and "server log" not in reason
+
+
+@pytest.mark.parametrize("kind,folder", [("metric", "metrics"), ("entity", "entities")])
+def test_an_add_never_signs_itself_off(tmp_path, kind, folder):
+    # As a join add never approves (test_curate_add_join): a file item copied from a signed-off
+    # definition carries its sign-off, and the step list then counted it as the person's.
+    from semantic_model import curate
+
+    _write_model(tmp_path, git=False)
+    item = {"name": "copied", "description": "d", "review_state": "approved",
+            "signed_off_by": "you@example.com", "signed_off_at": "2026-01-01T00:00:00Z",
+            "signed_off_role": "maintainer"}
+    item.update(_metric("copied", "COUNT(*)", ["orders"]) if kind == "metric"
+                else {"maps_to": [{"table": "orders", "column": "id"}]})
+    res = curate.write_items(tmp_path, "sales", kind, [item], signer="you@example.com", role="data_lead")
+    assert res.validated, res.errors
+    doc = yaml.safe_load((tmp_path / "subject_areas" / "sales" / folder / "copied.yaml").read_text())
+    assert doc["review_state"] == "unreviewed"
+    assert not {"signed_off_by", "signed_off_at", "signed_off_role"} & set(doc)

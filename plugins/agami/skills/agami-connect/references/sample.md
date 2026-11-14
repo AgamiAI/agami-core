@@ -60,8 +60,9 @@ If `<artifacts_dir>/agami-example/datasource.yaml` already exists, the sample is
        ```bash
        bash "<plugin_root>/scripts/sm" approve-queue "<artifacts_dir>/agami-example" --signer system --role system
        ```
-       (This is only sanctioned for the curated sample; a real database keeps the human sign-off gate.)
-     - **The example run (Phase 6) posts its table and asks no card.** The sample path asks no examples card (its examples stay as written and ran, as its definitions were signed off without a card), so its run passes `--no-card`:
+       (This is only sanctioned for the curated sample; a real database keeps the human sign-off gate.) Nothing here is signed by the person, so never say they signed, approved or confirmed anything: the definitions were approved by agami for the sample. The sign-off step's numbers in `sm steps` say so ("20 approved by agami, 3 personal columns hidden"); the personal-data card is still asked, and what it hid is the person's choice. Name the joins and definitions only with the engine's numbers (`sm steps`, `sm overview`), never with counts of your own.
+     - **No identity card on the sample path.** It asks for an email to record sign-offs under, and nothing on this path is signed in the person's name, so it is never asked here (not before the examples either).
+     - **The example run (Phase 6) posts its table and asks no card.** The sample path asks no examples card (its examples stay as written and ran, as its definitions were approved by agami without a card), so its run passes `--no-card`:
        ```bash
        bash "<plugin_root>/scripts/sm" seed-validate "<artifacts_dir>/agami-example" --profile agami-example --no-card --out "<artifacts_dir>/local/tmp/agami-examples-items-<batch>.json"
        ```
