@@ -167,10 +167,10 @@ From the `model-tree` output, build the groups that apply, skipping anything alr
 - **Personal-data columns**: `sm sensitive`'s `columns` and `suspected` together.
 - **Tables by subject area**: every visible table, grouped by its subject area.
 
-Say in one line how many groups there are to pick from; no table of them, since each option's `preview` lists its members (up to 15, then *"and N more"*) and a table before the card does not reach the person. Then call AskUserQuestion, one multiSelect question (header `Hide`), *"Which of these should queries never read?"*, at most 4 options, the groups that apply in the order above:
+Say in one line how many groups there are to pick from; no table of them before the card, since a table before a card does not reach the person. Each option's description names its members in words (up to six, then *"and N more"*): a multi-select shows no preview in some apps, so a preview may repeat the names, never hold them alone. When a group has more than six members, no card: the groups and their members are the turn's last message, a list, with *Reply "hide the staging tables", "hide personal data", "pick by area" or "nothing for now".* Otherwise call AskUserQuestion, one multiSelect question (header `Hide`), *"Which of these should queries never read?"*, at most 4 options, the groups that apply in the order above:
 
-- **Staging and backup tables (<n>)**: hides every table in the group; its `preview` names them.
-- **Personal-data columns (<n>)**: asks the Phase 2 "Hide these from queries" question next, so the person picks which; its `preview` names them.
+- **Staging and backup tables (<n>)**: hides every table in the group; its description names them.
+- **Personal-data columns (<n>)**: asks the Phase 2 "Hide these from queries" question next, so the person picks which; its description names them.
 - **Pick by subject area**: a follow-up card (below).
 - **Nothing for now**: writes nothing.
 
@@ -418,8 +418,8 @@ You: I never want agami to use the staging tables
 
 agami: 1 group you could hide.
 [card "Hide": Staging and backup tables (2) / Pick by subject area / Nothing for now]
- → Staging and backup tables (2)   (its preview lists sales.stg_leads,
-                                    sales.customer_score_stg)
+ → Staging and backup tables (2)   (its description names Stg leads,
+                                    Customer score stg)
 
 agami: Hidden 2 tables.
 ```

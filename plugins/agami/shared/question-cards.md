@@ -7,6 +7,11 @@ skill; do not copy it. `<plugin_root>` is defined at the top of `invocation-conv
 **Long text ends its turn** ([engine-says.md](engine-says.md)): a card is asked only at the start
 of a turn or after a line or two, never after a table, a list or a summary in the same message.
 
+**Nothing a person needs to answer a card lives only in an option's preview**: some apps show a
+preview only under the option already picked, as plain grey text, and none on a multi-select, so it
+goes in the question or the options' descriptions, or, when it is a real table or list, ends its own
+turn as text with a typed-reply line; a preview only repeats or expands what is already visible.
+
 A card holds 1 to 4 questions. Each question has 2 to 4 options, plus the automatic "Other", and
 may allow several picks (`multiSelect`). `header` is at most 12 characters. Give each question a header no other
 question in the same flow uses: two different questions both headed "Database" read as the same
@@ -56,15 +61,9 @@ follow a result only when the result is a line or two (a count, one name).
 Showing 2 of 2 tables.      (or: "Showing 15 of 42 tables; 27 more.")
 ```
 
-## 3a. Detail goes in an option's preview, not the question
+## 3a. The question and the descriptions carry what decides; a preview only expands it
 
-A card's question is plain text: keep it to the decision alone, in plain words ("Sign off ELA proficiency rate?", not an identifier like `ela_proficiency_rate`), with no result in it. A value that helps decide goes in the option's description. Anything
-longer that they need to see to decide (a SQL formula, a sample of rows, what changed) goes in the
-`preview` of the option it belongs to, which the card shows in a monospace pane while that option
-is focused. Lay SQL out over lines with a short comment on each filter. A live run showed a
-formula in the question as an unreadable wall of text. Anything the person signs off that runs SQL
-shows that SQL this way: a metric's binding, and an example question's statement too, on the
-option that keeps it, so checking it never takes typing "show me the SQL".
+A card's question is plain text: keep it to the decision, in plain words ("Sign off ELA proficiency rate?", not an identifier like `ela_proficiency_rate`), with no result table in it. What the person needs to decide goes where it is always shown: a short list of names in the question (*"What currency are these 3 money columns in: Amount on Orders, Price on Products, Amount on Refunds?"*), the meaning or a value in the option's description. A preview is drawn only under the option already picked in some apps, so it may only repeat or expand what is visible: the identifier, the SQL of a definition the description states in words (laid out over lines, a short comment on each filter), every name of a list the description summarises. Anything the person signs off that runs SQL shows that SQL this way on the option that keeps it. What does not fit the question or a description (a table, a list of more than about six names) ends its own turn as text with a typed-reply line instead of a card (rule 3).
 
 ## 3b. Things are named in plain words
 
@@ -85,17 +84,18 @@ rate*), and a column as *<column> on <table>*.
 ## 4. Lists longer than a card holds are summarised
 
 Group them (by schema, name pattern, subject area, status) and ask about the groups; "Other" takes
-the names of anything to treat differently. **A group option's `preview` lists every item the option
-covers**, one per line (up to 15, then "and N more"), and an option such as "Add all 16" or "Only 1–8" with
-nothing to show which items those are leaves the person nothing to decide by. A chat table of the
-same items goes in an earlier turn, never above the card in its own message (rule 3). When items must be decided one by one, ask up to 4 per
+the names of anything to treat differently. **A group option's description names the items it
+covers** (up to about six, then "and N more"), and an option such as "Add all 16" or "Only 1–8" with
+nothing to show which items those are leaves the person nothing to decide by; its `preview` may list
+every one. When the items themselves must be read to decide, they end their own turn as a table with
+a typed-reply line (rule 3), never above the card in its own message. When items must be decided one by one, ask up to 4 per
 card, one question each, and put "Approve all remaining" (or its equivalent) on every card so a long
 queue can be finished in one press.
 
 ```json
 {"header": "Metric 1/9", "question": "Sign off Revenue?",
  "multiSelect": false,
- "options": [{"label": "Approve", "description": "Total of the order amounts",
+ "options": [{"label": "Approve", "description": "Total of the order amounts, refunds excluded",
               "preview": "-- revenue\nSUM(orders.amount)"},
              {"label": "Approve all remaining", "description": "Sign off the other 8 as well"},
              {"label": "Reject", "description": "Drop it from the model"}]}
@@ -117,10 +117,9 @@ yet").
 
 People use "Other" to ask before they decide: "show me the SQL", "show me the rows", "why do I
 need this?". That is not a change, a stop, or something you can't place. Answer it, then ask the
-same card again, with only the questions still open. The answer must reach the person, so only a
-line or two goes before the card; anything longer goes in the re-asked card's `preview` of the
-option it is about, with one line before the card saying where (*"The SQL is in the preview of
-Approve."*):
+same card again, with only the questions still open. The answer must reach the person: a line or
+two goes before the re-asked card; anything longer (SQL, rows) ends its turn as text, with the
+card's choices as a typed-reply line at its end, and nothing after it (rule 1's exception):
 
 - **The SQL**: the item's SQL (its binding for a metric, the statement for an example or an
   answer), laid out over lines, with the tables it reads.

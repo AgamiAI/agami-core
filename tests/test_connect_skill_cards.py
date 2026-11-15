@@ -86,9 +86,11 @@ def test_1_6_follow_up_card_stays_within_four_options():
 
 def test_1_6_lists_the_first_noise_names_before_the_card():
     s = _section_16()
-    # the names go in the option's preview, not in a list above the card (long text before a card
-    # does not reach the person)
-    assert "first 15 names in `likely_noise`" in s and "and N more" in s
+    # the names go in the option's description, which every app shows (a preview shows only under
+    # the picked option on the web), never in a list above the card; a long list ends its own turn
+    assert "the names it would remove, up to six" in s and "and N more" in s
+    assert "More than six likely-noise tables" in s and "Reply \"keep everything\"" in s
+    assert "Keep everything**'s `preview`" not in s
     assert "schema_count" in s
 
 
@@ -723,16 +725,18 @@ def _join_candidates() -> str:
 
 def test_join_candidates_are_shown_in_the_card_previews_after_one_line():
     s = _join_candidates()
-    assert "**Every join is shown on the card that asks about it, in its options' `preview`.**" in s
+    assert ("**Every join is shown where the person reads it before deciding: on the card's question "
+            "and descriptions, or in a list that ends its turn.**") in s
     assert "| # | Join" not in s and "leads.converted_contact_id → contacts.id" in s
     assert "evidence.match_rate" in s and "low_overlap" in s
 
 
-def test_join_candidate_group_options_preview_the_joins_they_add():
+def test_more_than_four_join_candidates_end_their_turn_as_a_list():
     s = _join_candidates()
-    assert "each option's `preview` lists every join that option adds" in s
+    many = s[s.index("**More than 4:**"):]
+    assert "no card in this turn" in many and "Reply \"add the <k> recommended\"" in many
     assert "Never offer a numbered range" in s
-    assert "Add the remaining recommended" in s and "Add none" in s
+    assert "Add the remaining recommended" in s and "add none" in s
     assert "Add all remaining" not in s   # it would add the chance matches the cards left out
 
 
@@ -749,7 +753,7 @@ def test_join_cards_put_the_engines_recommendation_first():
     assert "only the column's type matched" not in one
     assert "its name does not read as a reference to the table" in one
     many = s[s.index("**More than 4:**"):]
-    assert "`recommend: add`" in many and "**Add none (Recommended)**" in many
+    assert "`recommend: add`" in many and '*"add none"* first' in many
     assert "full matches (Recommended)" not in many
 
 
@@ -808,3 +812,53 @@ def test_the_build_line_names_no_mode():
     text = (SKILL.parent / "references" / "build.md").read_text(encoding="utf-8")
     assert "<catalog|probe> mode" not in text
     assert "Never name the mode" in text
+
+
+# --- task 20: what a live run on the web still showed ----------------------------------------------
+
+
+def _flat_skill() -> str:
+    return " ".join(skill_text("agami-connect").split())
+
+
+def test_the_currency_is_asked_once():
+    """A live run asked "Apply these units?" right after the currency card: the person had just
+    answered. A confirmation is kept only where the plan differs from what they chose."""
+    s = _flat_skill()
+    assert "**The currency is asked once.**" in s
+    assert "apply it straight away with the same command plus `--yes`, ask nothing more" in s
+    assert "To change it later, say which columns are in another currency." in s
+    assert "**A confirmation card only where the plan differs from what they chose**" in s
+    assert "*\"Apply these units?\"*: **Apply all (Recommended)**" not in s
+    # the columns are named in the question itself, never only in a preview
+    assert "their labels in the question itself, up to six" in s
+
+
+def test_a_yes_no_metric_is_offered_as_a_statement_not_a_question_nobody_follows_up():
+    s = _flat_skill()
+    assert "say it once as a statement of what the person can ask for later, never as a question" in s
+    assert 'to add one, say "add a metric for In stock"' in s
+    assert "Say if any is a KPI you track" not in s
+
+
+def test_an_example_is_dropped_by_number_and_a_bare_number_means_the_latest_list():
+    s = _flat_skill()
+    assert '| Drop an example ("drop example 3") | `bash "${CLAUDE_PLUGIN_ROOT}/scripts/sm" remove-example "<root>" --number 3`' in s
+    assert "A bare number always means the most recent numbered list on screen" in s
+    assert '"drop the refunds example"' not in s
+
+
+def test_the_sample_leaves_guessed_joins_for_the_person_and_has_a_description():
+    s = _flat_skill()
+    assert ('approve-queue "<artifacts_dir>/agami-example" --signer system --role system --kind metric '
+            '--kind entity') in s
+    assert "The joins guessed from names stay waiting for the person" in s
+    assert "still write the one-line datasource description as its `generate` answer" in s
+
+
+def test_one_opening_line_before_the_first_card_and_plain_status_lines():
+    s = _flat_skill()
+    assert "**One opening line before the first card.**" in s and "under 150 characters" in s
+    assert "**A Bash command's description and a task's name are read by the person too**" in s
+    assert "Showed onboarding steps on resume" in s  # named as the wrong kind
+    assert 'never "dry run"' in s and "failed the dry run" not in s

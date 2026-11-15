@@ -336,7 +336,7 @@ Apply each individual edit as above. Show the user the combined diff in 4b befor
 
 ### 4b — show the diff to the user, get approval
 
-Build a unified diff (or a compact "before / after" summary) of the proposed change against the existing target file. Name the file in the prompt so the user knows what they're approving. **The diff ends the turn**, with the three choices as one reply line, never a card after it: long text before a card in the same message does not reach the person ([`shared/engine-says.md`](../../shared/engine-says.md)). A one-line change may go on a card instead (header `Approve`), with the change in the `Yes` option's `preview`:
+Build a unified diff (or a compact "before / after" summary) of the proposed change against the existing target file. Name the file in the prompt so the user knows what they're approving. **The diff ends the turn**, with the three choices as one reply line, never a card after it: long text before a card in the same message does not reach the person ([`shared/engine-says.md`](../../shared/engine-says.md)). A one-line change may go on a card instead (header `Approve`), with the change in the card's question in words (*"Join Orders to Customers by User ID instead of Customer ID?"*) and the diff in the `Yes` option's `preview`, which only repeats it ([question-cards.md](../../shared/question-cards.md)):
 
 > I want to update the target file in `<artifacts_dir>/<profile>/subject_areas/<area>/:
 >

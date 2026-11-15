@@ -68,9 +68,22 @@ def test_no_two_questions_in_a_skill_share_a_header():
     assert not offenders, offenders
 
 
-def test_rule_3a_puts_detail_in_the_option_preview():
+def test_rule_3a_puts_what_decides_where_it_is_always_shown():
     text = (PLUGIN / "shared" / "question-cards.md").read_text()
-    assert "## 3a. Detail goes in an option's preview, not the question" in text
+    assert "## 3a. The question and the descriptions carry what decides; a preview only expands it" in text
+
+
+def test_nothing_needed_to_answer_a_card_lives_only_in_a_preview():
+    """A live run on Claude Code on the web: a preview is plain grey text shown only under the option
+    already checked, and a multi-select shows none. The ruling sits next to the long-text rule,
+    with its reason."""
+    text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
+    head = text[:text.index("## 1.")]
+    flat = " ".join(head.split())
+    assert "**Nothing a person needs to answer a card lives only in an option's preview**" in flat
+    assert "only under the option already picked" in flat and "none on a multi-select" in flat
+    assert "a preview only repeats or expands what is already visible" in flat
+    assert flat.index("**Long text ends its turn**") < flat.index("**Nothing a person needs")
 
 
 # A page rendered `--read-only` has no Generate button and no paste-back dialog (rule 6), so the
@@ -145,15 +158,17 @@ def test_the_full_view_is_a_card_option_in_rule_6() -> None:
     six = doc[doc.index("## 6."):doc.index("## 7.")]
     assert "every\nreview or sign-off card that has a page behind it offers **Show the full view**" in six
     three_a = doc[doc.index("## 3a."):doc.index("## 3b.")]
-    assert "an example question's statement too" in three_a
+    assert "Anything the person signs off that runs SQL shows that SQL this way" in three_a
 
 
 def test_rule_4_group_options_show_their_items() -> None:
     """A live run's join card offered "add all 16" and "only 1-8" without the joins themselves."""
     text = (PLUGIN / "shared" / "question-cards.md").read_text(encoding="utf-8")
     rule_4 = text[text.index("## 4. "):text.index("## 5. ")]
-    assert "A group option's `preview` lists every item the option" in rule_4
-    assert "never above the card in its own message (rule 3)" in rule_4
+    flat = " ".join(rule_4.split())
+    assert "A group option's description names the items it covers" in flat
+    assert "its `preview` may list every one" in flat
+    assert "never above the card in its own message" in flat
 
 
 def test_rule_3_ends_the_turn_on_a_result_and_points_at_the_rule() -> None:
@@ -162,5 +177,7 @@ def test_rule_3_ends_the_turn_on_a_result_and_points_at_the_rule() -> None:
     assert "## 3. A result is chat output, and it ends its turn" in text
     assert "**Long text ends its turn** ([engine-says.md](engine-says.md))" in text
     rule_5a = text[text.index("### 5a."):text.index("## 6.")]
-    assert "only a\nline or two goes before the card" in rule_5a
+    flat = " ".join(rule_5a.split())
+    assert "a line or two goes before the re-asked card" in flat
+    assert "anything longer (SQL, rows) ends its turn as text" in flat
     assert "in a fenced block" not in rule_5a

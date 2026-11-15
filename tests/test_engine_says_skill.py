@@ -216,7 +216,10 @@ def test_the_areas_card_comes_before_anything_in_phase_4():
     # so the split is settled on its own card first; one area has nothing to split and skips it
     text = _flat(_read(REFS / "review.md"))
     phase3 = text.split("## Phase 3:", 1)[1].split("## Phase 4:", 1)[0]
-    assert "then one **AskUserQuestion** (header `Areas`)" in phase3
+    assert "one **AskUserQuestion** (header `Areas`, *\"Keep this split?\"*)" in phase3
+    # the split itself is in the always-shown description, or ends its own turn: never a preview only
+    assert "whose `Looks good (Recommended)` description names each area" in phase3
+    assert "Never the split only in a preview" in phase3
     assert "skip the card and say so in one line (*\"One subject area: Store.\"*)" in phase3
     assert "before anything in Phase 4 is read or started" in phase3
     phase4 = text.split("## Phase 4:", 1)[1]

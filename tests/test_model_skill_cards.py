@@ -239,3 +239,13 @@ def test_cards_name_tables_and_columns_in_words() -> None:
     assert "**Email on Customers**" in text and "`customers.email`, or" not in text
     assert "item's `plain_name`" in text
     assert "**Orders (5: Orders, Order items, …)**" in _hide()
+
+
+def test_hide_groups_name_their_members_where_every_app_shows_them():
+    """A multi-select showed no preview at all on the web: a group's members are in its description,
+    and a group too long for one ends its turn as a list."""
+    flat = " ".join(_text().split())
+    assert "Each option's description names its members in words (up to six" in flat
+    assert "a preview may repeat the names, never hold them alone" in flat
+    assert "hides every table in the group; its description names them" in flat
+    assert "its `preview` names them" not in flat

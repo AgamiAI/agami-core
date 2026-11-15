@@ -14,6 +14,16 @@ below corresponds to one such version.
 
 ### Added
 
+- **`sm remove-example --number N`, `sm optins` and `golden_author.py rename`.** The closing message
+  numbers its examples table (`#`) and suggests "drop example 3": a live run's "drop the refunds
+  example" matched two examples. `--number` resolves the number the person saw (kept in
+  `<root>/.introspect/closing.last.json`), says what was dropped in plain words, offers the questions
+  to start with again when one of them was dropped, and refreshes the task list. `sm optins
+  <artifacts_dir>` says whether the GitHub-star ask and the sample's tips were already shown (exit
+  0), replacing a `test -f` that showed a failed command. `golden_author.py rename` renames a test
+  set, never over an existing one: a first "looks right" save now names the set itself instead of
+  asking.
+
 - **The engine's output says what to post and what to do next, at the moment it applies.** A live
   run computed the closing summary without posting it and refreshed its task list after only about
   half of the step changes: the skill text that said to do so was read long before. Now `sm steps`,
@@ -207,6 +217,26 @@ below corresponds to one such version.
   refused.
 
 ### Changed
+
+- **A command that needs the person's decision exits 0.** `golden_author.py` (a replacement, a
+  removal, a departure from the profile's examples), `inventory_summary.py` (names that match
+  nothing or several, a choice that keeps no tables) and `sm remove-example` (no match, or a match in
+  two areas) exited 1, which the app drew as a red "Failed" command right before the question. They
+  now exit 0 with `status` (`needs_confirmation`, `needs_choice`) and a `then`; exit 2 is still a
+  call that could not start. `golden_author.py save --note-convention` writes an answer the person
+  just called right and says a departure in one sentence (`convention_say`) instead of stopping; and
+  the departure check no longer counts an inner join's ON as a filter the outer-join example lacks
+  (a live sample run asked about "outer joins vs inner joins" for the same rows).
+- **What a person reads, after a live run on Claude Code on the web.** The sample is "Sample store"
+  wherever a person reads its name (closing message, overview, enrichment lines); its profile,
+  datasource and area keys stay `agami-example`. The closing message says how many guessed joins wait
+  to be confirmed and how ("review the model"), and the sample leaves its guessed joins for the
+  person (`approve-queue --kind metric --kind entity`) and writes its datasource description, so the
+  "Agents pick this database by its description" line shows on a rebuild too. `sm coverage` and
+  `sm add-example` carry the step list when it moved. Skills: nothing needed to answer a card lives
+  only in an option's preview (question-cards); the currency is asked once; an answer's last line is
+  its reply line, after the follow-ups, with no star ask; one numbered list is live at a time; one
+  opening line before the first card; tool-call descriptions in plain words.
 
 - **Onboarding posts what the engine says, asks fewer card rounds, and shows results as tables.**
   A re-measure and a browser test found the closing summary run but never posted, the task list

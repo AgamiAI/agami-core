@@ -200,10 +200,11 @@ It writes the inventory to `<artifacts_dir>/<profile>/.introspect/inventory.json
 bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_path>"
 ```
 
-It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Post one sentence only: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty). The rest goes in the card's previews, not in a table above it: a table before a card in the same message does not reach the person ([engine-says.md](../../../shared/engine-says.md)).
+It prints `{tables, schemas, schemas_more, likely_noise, noise_all_copies, groups}`. Post one sentence only: *"<N> tables in <K> schemas; <M> look like staging or backups: `stg_*`, `*_bak`, `*_2023`."* (name the real patterns from `groups.noise_by_pattern`; leave the second clause out when `likely_noise` is empty). What the person decides by goes in the options' descriptions, which every app shows; a preview may repeat it in full, never hold it alone ([question-cards.md](../../../shared/question-cards.md)), and a table before a card in the same message does not reach the person ([engine-says.md](../../../shared/engine-says.md)):
 
-- **Keep everything**'s `preview`: one line per entry of `schemas` (`<schema>  <tables> tables`), at most 15, then *"and `schemas_more.schemas` more schemas (`schemas_more.tables` tables)"* when `schemas_more` is not null. Never list tables one by one.
-- **Drop staging and backups**'s `preview`: the first 15 names in `likely_noise` with their `why` and, when it has one, the table it copies (`copy_of`), then "and N more", so the person sees what it would remove (a real table that only looks like a copy shows up here before they press it).
+- **Keep everything**'s description: the schemas with their table counts (`sales 30, ops 12`), up to six, then "and N more". Never list tables one by one.
+- **Drop staging and backups**'s description: the names it would remove, up to six, then "and N more" (a real table that only looks like a copy shows up here before they press it); its `preview` may list the first 15 with their `why` and the table each copies (`copy_of`).
+- **More than six likely-noise tables, and `noise_all_copies` is false**: the person has to read the list to decide, so no card: post the one sentence and a table of `likely_noise` (`Table | Why | Copy of`, at most 15 rows, how many more), ending the turn with *Reply "keep everything", "drop staging and backups", "only some schemas", or name the tables to keep.*, handled as the options below.
 
 Then call AskUserQuestion, one question (header `Tables`), *"Which tables should agami model? Ask to see a schema or a table, or type columns to leave out in Other (`schema.table.column`)."*:
 
@@ -221,17 +222,17 @@ Act on the answer, writing the kept set to `<artifacts_dir>/local/tmp/agami-keep
 | Only some schemas | **When the person shared questions or report SQL in 1.5, lead with the schemas they use**: run the summary again with `--used-by <each shared file>` (`agami-asked-questions.txt`, the files in `local/reconcile/inbox/`, a semantic-layer folder's SQL), and when `used_schemas` is not empty make the first option `The <k> schemas your SQL uses (Recommended)`, naming them in its description; tell the person in one line before the card how much of their material a pick would leave out when it drops one of those schemas. Then ask a follow-up AskUserQuestion, multiSelect. Up to 4 schemas: one option each. More: the options are `groups.schema_groups` (label, schema count and table count), and a picked group keeps all its schemas; "Other" takes schema names to add or to treat on their own. Name each group option's `schema_count` and `tables`. Add a "None of these" option only when that leaves fewer than 4 options; at 4, "Other" is the way out (a card holds 2 to 4 options). Then `--keep schemas:<a,b,c>`. |
 | Let me name them | Write the names (one per line, `schema.table` or a bare table name) with the Write tool to `<artifacts_dir>/local/tmp/agami-names.txt`, then `--keep names:<artifacts_dir>/local/tmp/agami-names.txt`. |
 
-`--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **`{"error": "no tables kept"}` (exit 1, nothing written) means the choice left no tables: say so and ask the same card again.** **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with exit 1 and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
+`--keep` prints `{"tables_file", "kept"}`; say how many tables are kept and pass `--tables-file "<tables_file>"` to 1.7. **`{"error": "no tables kept"}` (`status: needs_choice`, nothing written) means the choice left no tables: say so and ask the same card again.** **A name that matches no table, or a bare name that matches several, comes back as `{"unmatched": [...], "ambiguous": {...}}` with `status: needs_choice` and nothing written: tell the person which ones, and ask the same card again. Never guess.** Column exclusion is not asked here: personal-data columns are handled in review.
 
 If the person asks to skip this ("just introspect everything"), proceed to 1.7 unscoped.
 
-**Showing what is there (when asked).** "What's in sales?", "show me the columns of orders": read it from the inventory, then ask the same card again with it in the `preview` of **Keep everything**, and one line before the card saying it is there ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
+**Showing what is there (when asked).** "What's in sales?", "show me the columns of orders": read it from the inventory and post it as the turn's last message, one per line as below, ending with the same choices as a typed-reply line (*Reply "keep everything", "drop staging and backups", "only some schemas", or name the tables to keep.*) ([question-cards rule 5a](../../../shared/question-cards.md#5a-a-question-typed-in-other-is-answered-then-the-same-card-is-asked-again)).
 
 ```bash
 bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_path>" --show "<schema | schema.table | table>"
 ```
 
-A schema prints its tables with their column counts; a table prints its columns with their types. Show them one per line (`<table>  <columns> columns` or `<column>  <type>`), at most 15, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (exit 1): say which name didn't match, or list the tables it could mean, and ask the same card again.
+A schema prints its tables with their column counts; a table prints its columns with their types. Show them one per line (`<table>  <columns> columns` or `<column>  <type>`), at most 15, and *"and `more` more"* when `more` is not 0. `{"unmatched"}` or `{"ambiguous"}` (`status: needs_choice`): say which name didn't match, or list the tables it could mean, and ask the same card again.
 
 **Columns to leave out, typed in "Other".** Names of the form `schema.table.column` are columns to exclude from the build, whatever the table answer (Keep everything included) or on their own. Write them one per line with the Write tool to `<artifacts_dir>/local/tmp/agami-drop-columns.txt` and check them:
 
@@ -239,7 +240,7 @@ A schema prints its tables with their column counts; a table prints its columns 
 bash "<plugin_root>/scripts/py" inventory_summary.py --inventory "<inventory_path>" --check-columns "<artifacts_dir>/local/tmp/agami-drop-columns.txt"
 ```
 
-`{"exclude_columns": [...]}` → pass them to 1.7 as `--exclude-columns <names…>` and say how many columns are left out. `{"unmatched": [...]}` (exit 1) → say which names are not columns and ask the same card again; never guess. Personal-data columns are asked about again on their own card after the build (Phase 4), and any column can be hidden later from `/agami-model`, so nobody has to find every column now.
+`{"exclude_columns": [...]}` → pass them to 1.7 as `--exclude-columns <names…>` and say how many columns are left out. `{"unmatched": [...]}` (`status: needs_choice`) → say which names are not columns and ask the same card again; never guess. Personal-data columns are asked about again on their own card after the build (Phase 4), and any column can be hidden later from `/agami-model`, so nobody has to find every column now.
 
 Once the kept set is settled (or the person chose to model everything), mark the step done and refresh the task list ([task-list.md](../../../shared/task-list.md)):
 ```bash

@@ -189,7 +189,44 @@ def test_five_numbered_follow_ups_end_the_answers_last_message():
     s = _between("### 4f ", "### 4g ")
     assert "exactly 5 numbered follow-up" in s
     assert "Do not use AskUserQuestion for follow-ups" in s
-    assert "after the reply line (4d.2), at the end of the answer's last message" in s
+    assert "just before the reply line (4d.2), which is the answer's last line" in s
+
+
+def test_the_reply_line_is_the_answers_last_line():
+    """A live run on the web: the reply line sat above a tips block (with a star ask) and the
+    "What next?" list, so the last thing read was "Reply with a number"."""
+    present = _between("## Phase 4: Present", "### 4a ")
+    assert "4f Numbered follow-ups → the reply line (4d.2), always the last line" in present
+    d2 = " ".join(_between("### 4d.2 ", "### 4e ").split())
+    assert "the follow-ups (4f), then this line, **always the answer's last line**" in d2
+    assert 'or reply with a number above to ask it next.' in d2
+    f = _between("### 4f ", "### 4g ")
+    assert "Reply with a number, or ask anything else." not in f
+    footer = f[f.index("Sample-profile orientation footer"):f.index("Why here, not in agami-connect")]
+    assert "before \"What next?\", so the reply line stays last" in " ".join(footer.split())
+    assert "github" not in footer.lower() and "star helps" not in footer
+
+
+def test_a_bare_number_means_the_most_recent_numbered_list():
+    f = " ".join(_between("### 4f ", "### 4g ").split())
+    assert ("**Only one numbered list is live at a time, and a bare number always means the most recent "
+            "numbered list on screen.**") in f
+    assert "the closing message's questions stop being the ones a number picks" in f
+    assert "Never write another numbered list in a reply that is not an answer" in f
+
+
+def test_the_star_check_never_shows_a_failed_command():
+    star = _between("### 4e.5 ", "### 4f ")
+    assert 'scripts/sm" optins "<artifacts_dir>"' in star and "test -f <artifacts_dir>" not in star
+    assert "no star line anywhere in an answer" in star
+
+
+def test_looks_right_saves_without_a_card():
+    d2 = " ".join(_between("### 4d.2 ", "### 4e ").split())
+    row = d2[d2.index("| Looks right |"):d2.index("| Something's off |")]
+    assert "passing `--note-convention` and asking no card" in row
+    assert "names one itself" in row and "how to rename the set" in row
+    assert "`convention_say`" in row
 
 
 def test_star_ask_and_sample_footer_are_kept():
