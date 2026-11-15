@@ -206,7 +206,8 @@ def test_a_metric_computed_in_a_step_matches(org, sql):
 
 def test_restrictions_at_every_level_are_listed(org):
     """A condition inside the step and one in the outer query both restrict the counted rows. The
-    step's comes first: it is written first."""
+    step's comes first: it is written first. The outer one is stated over the table, as the step
+    reads it (ACE-178 part 3): `x.status` names a step a reader of the receipt never sees."""
     item = _one(
         org,
         "WITH x AS (SELECT id, status, total_amount FROM orders WHERE customer_id = 3) "
@@ -214,7 +215,7 @@ def test_restrictions_at_every_level_are_listed(org):
         "n",
     )
     assert (item["status"], item["name"]) == (rt.MATCHED, "total_sales")
-    assert item["restrictions"] == ["customer_id = 3", "x.status = 'shipped'"]
+    assert item["restrictions"] == ["customer_id = 3", "status = 'shipped'"]
 
 
 def test_a_filter_on_a_steps_group_is_a_restriction_on_its_rows(tmp_path, org):
@@ -351,6 +352,8 @@ def test_a_join_the_model_does_not_declare_is_named(tmp_path, sql):
 
 
 def test_a_declared_join_on_the_path_is_not_named(tmp_path):
+    """Not named as undeclared. As an inner join it still drops the orders with no customer, so it
+    is listed as the rows it keeps (ACE-178 part 3)."""
     item = _one(
         _related(tmp_path),
         "SELECT SUM(o.total_amount) AS n FROM orders o JOIN customers c ON o.customer_id = c.id",
@@ -359,7 +362,7 @@ def test_a_declared_join_on_the_path_is_not_named(tmp_path):
     assert (item["name"], item["joins_not_declared"], item["restrictions"]) == (
         "total_sales",
         [],
-        [],
+        ["only rows with a match in customers (o.customer_id = c.id)"],
     )
 
 

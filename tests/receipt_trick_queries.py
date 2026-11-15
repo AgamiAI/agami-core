@@ -448,3 +448,117 @@ STEP_JOIN_TRICKS = [
     "WITH c AS (SELECT * FROM public..customers) SELECT SUM(o.total_amount) AS n "
     "FROM orders o JOIN c ON c.id = o.customer_id",
 ]
+
+
+# Found by auditing real receipts (ACE-178 part 3), rewritten over the synthetic models.
+#
+# An OR among the conditions on the counted rows. A reader joins a restriction list with AND, so
+# each list, joined that way, must keep the rows the statement keeps: `opened >= … AND a OR b` read
+# as `(opened >= … AND a) OR b` counted rows from every year. Over the `acme` model, UNFILTERED.
+OR_GROUPS = [
+    "SELECT COUNT(*) AS n FROM orders WHERE opened >= '2026-01-01' AND (LOWER(status) LIKE '%ship%' "
+    "OR LOWER(status) LIKE '%paid%')",
+    "SELECT COUNT(*) AS n FROM orders WHERE customer_id > 0 AND ((status = 'paid' AND "
+    "total_amount > 5) OR (status IN ('open', 'shipped') AND closed IS NULL) OR "
+    "(status = 'cancelled' AND opened < '2026-03-02') OR status IS NULL)",
+    "SELECT SUM(total_amount) AS n FROM orders WHERE (status = 'paid' OR status = 'open') "
+    "AND (customer_id = 1 OR customer_id = 2)",
+    "SELECT COUNT(DISTINCT number) AS n FROM change_requests WHERE opened >= '2026-01-02' "
+    "AND (type = 'normal' OR state = 'Closed')",
+]
+
+# A set operation whose arms count different things in one output column. Over the `acme` model:
+# no aggregate item of any arm may read `matched`, since the column holds every arm's rows.
+SET_OP_TRICKS = [
+    "SELECT 'paid orders' AS kind, COUNT(*) AS n FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT 'paid payments', COUNT(*) FROM payments WHERE status = 'paid'",
+    "SELECT 'orders' AS kind, COUNT(*) AS completed FROM orders WHERE status = 'paid' UNION ALL "
+    "SELECT 'payments', COUNT(*) FROM payments WHERE status = 'refunded' UNION ALL "
+    "SELECT 'changes', COUNT(DISTINCT number) FROM change_requests WHERE state = 'Closed'",
+    "SELECT SUM(total_amount) AS n FROM orders UNION ALL SELECT SUM(amount) FROM payments",
+    "SELECT COUNT(*) AS n FROM orders UNION SELECT COUNT(DISTINCT number) FROM change_requests",
+    "SELECT COUNT(*) AS n FROM orders UNION ALL (VALUES (3))",
+]
+
+# A filter in a later step on a step column computed from a table's, or renamed from one. Over the
+# `acme` model, UNFILTERED: each lists the condition over the tables (`STEP_BASE_TERMS`), or is not
+# `matched`.
+STEP_BASE_TERMS = {
+    "WITH pop AS (SELECT c.number, c.opened, TRIM(COALESCE(c.type, '')) LIKE 'em%' AS is_em "
+    "FROM change_requests c) SELECT COUNT(DISTINCT p.number) AS n FROM pop AS p WHERE p.is_em":
+        ["TRIM(COALESCE(c.type, '')) LIKE 'em%'"],
+    "SELECT COUNT(DISTINCT p.number) AS n FROM (SELECT c.number, TRIM(COALESCE(c.type, '')) "
+    "LIKE 'em%' AS is_em FROM change_requests c) p WHERE p.is_em":
+        ["TRIM(COALESCE(c.type, '')) LIKE 'em%'"],
+    "WITH pop AS (SELECT c.number, c.type AS kind FROM change_requests c) "
+    "SELECT COUNT(DISTINCT p.number) AS n FROM pop p WHERE p.kind = 'normal'":
+        ["c.type = 'normal'"],
+    "WITH pop AS (SELECT o.id, o.total_amount, o.status = 'paid' AS is_paid FROM orders o) "
+    "SELECT SUM(total_amount) AS n FROM pop WHERE NOT is_paid":
+        ["NOT (o.status = 'paid')"],
+    "WITH a AS (SELECT id, total_amount, status = 'paid' OR status = 'open' AS live FROM orders), "
+    "b AS (SELECT id, total_amount, live AS keep FROM a) SELECT SUM(total_amount) AS n FROM b "
+    "WHERE keep AND id > 1":
+        ["(status = 'paid' OR status = 'open')", "id > 1"],
+}
+
+# The same, where the step column is one no condition over the tables can state: a number a
+# grouping step computed. Not `matched`.
+STEP_UNSTATED = [
+    "WITH g AS (SELECT customer_id, COUNT(*) AS c FROM orders GROUP BY customer_id) "
+    "SELECT SUM(o.total_amount) AS n FROM orders o JOIN g ON g.customer_id = o.customer_id "
+    "WHERE g.c > 1",
+]
+
+# Over the `audit` model of `tests/test_ace178_receipt_audit_fixes.py` (`assets`, `users`,
+# `expense_lines`, `award_departments`, `outages`, `incidents`), which declares three relationships
+# from `assets` to `users`.
+#
+# A condition on a table reached by one of several declared relationships: (statement, what the
+# receipt must say). A restriction list, or None for "not matched" (the link cannot be told).
+LINK_TRICKS = [
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id WHERE NOT u.active",
+     ["users via assets.assigned_to_id → users.id: NOT u.active",
+      "only rows with a match in users (u.id = a.assigned_to_id)"]),
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON a.owned_by_id = u.id "
+     "WHERE u.active = FALSE",
+     ["users via assets.owned_by_id → users.id: u.active = FALSE",
+      "only rows with a match in users (a.owned_by_id = u.id)"]),
+    ("SELECT COUNT(*) AS n FROM assets a LEFT JOIN users u ON u.id = a.managed_by_id "
+     "WHERE u.active",
+     ["users via assets.managed_by_id → users.id: u.active"]),
+    ("SELECT COUNT(*) AS n FROM assets a JOIN users u ON u.id = a.assigned_to_id "
+     "AND u.id = a.managed_by_id WHERE NOT u.active", None),
+]
+
+# An inner join on the counted rows' path: a row with no partner is dropped, so the join is listed.
+# (statement, the restrictions the receipt must list).
+INNER_JOIN_TRICKS = [
+    ("SELECT d.is_central, SUM(e.amount) AS n FROM expense_lines e JOIN award_departments d "
+     "ON d.award_id = e.award_id WHERE e.fiscal_year = 2018 GROUP BY d.is_central",
+     ["e.fiscal_year = 2018", "only rows with a match in award_departments (d.award_id = e.award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e, award_departments d "
+     "WHERE d.award_id = e.award_id",
+     ["only rows with a match in award_departments (d.award_id = e.award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e CROSS JOIN award_departments d "
+     "WHERE d.award_id = e.award_id",
+     ["only rows with a match in award_departments (d.award_id = e.award_id)"]),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e JOIN award_departments d USING (award_id)",
+     ["only rows with a match in award_departments (USING (award_id))"]),
+    ("SELECT SUM(e.amount) AS n FROM award_departments d JOIN expense_lines e "
+     "ON d.award_id = e.award_id",
+     ["only rows with a match in award_departments (d.award_id = e.award_id)"]),
+    ("WITH x AS (SELECT e.amount FROM expense_lines e JOIN award_departments d "
+     "ON d.award_id = e.award_id) SELECT SUM(amount) AS n FROM x",
+     ["only rows with a match in award_departments (d.award_id = e.award_id)"]),
+    # A value condition in the ON narrows the rows as well.
+    ("SELECT COUNT(DISTINCT i.id) AS n FROM outages o JOIN incidents i "
+     "ON i.service_id = o.service_id AND i.opened BETWEEN o.begin_at AND o.end_at",
+     ["i.opened BETWEEN o.begin_at AND o.end_at",
+      "only rows with a match in outages (i.service_id = o.service_id)"]),
+    # An outer join keeps the rows with no partner; a CROSS join drops none.
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e LEFT JOIN award_departments d "
+     "ON d.award_id = e.award_id", []),
+    ("SELECT SUM(e.amount) AS n FROM expense_lines e CROSS JOIN (SELECT MAX(fiscal_year) AS y "
+     "FROM expense_lines) m WHERE e.fiscal_year = m.y", ["e.fiscal_year = m.y"]),
+]

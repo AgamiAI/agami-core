@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import decimal
 import os
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -275,6 +276,12 @@ def _joins(cond: "exp.Expression", refs: "dict[str, set[str] | None]") -> bool:
     return ends[0] != ends[1]
 
 
+# The two restriction forms that are not a condition: an inner join on the counted rows' path, and
+# a condition prefixed with the declared relationship its table was reached by.
+_INNER_JOIN = "only rows with a match in "
+_LINKED = re.compile(r"^\S+ via [^:]+: ")
+
+
 def pair(oc: "rt.OutputColumn", item: dict, applied: list[str], org: Any,
          dialect: "str | None") -> "tuple[str, str] | str":
     """(the statement's arm, the reference) as SQL, or why it cannot be rebuilt.
@@ -299,6 +306,11 @@ def pair(oc: "rt.OutputColumn", item: dict, applied: list[str], org: Any,
     where = oc.sel.args.get("where")
     conds = [c.copy() for c in rt._and_conjuncts(where.this if where else None) if _joins(c, refs)]
     for text in [*item["restrictions"], *applied]:
+        if text.startswith(_INNER_JOIN):
+            continue              # an inner join: kept as written in the FROM
+        linked = _LINKED.match(text)
+        if linked:
+            text = text[linked.end():]    # the declared link the join used: the join is kept
         parsed = rt._parse_declared_predicate(text, dialect)
         if parsed is None:
             if "JOIN" in text.upper():

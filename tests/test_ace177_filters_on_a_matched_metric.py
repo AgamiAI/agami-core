@@ -237,19 +237,25 @@ def test_qualify_is_reported_separately(org):
     assert item["result_filters"] == ["customer_id > 10"]
 
 
-@pytest.mark.parametrize("sql", [
-    "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id",
-    "SELECT COUNT(*) AS n FROM orders o, customers c WHERE c.id = o.customer_id",
+@pytest.mark.parametrize("sql,join", [
+    ("SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id",
+     "customers (c.id = o.customer_id)"),
+    ("SELECT COUNT(*) AS n FROM orders o, customers c WHERE c.id = o.customer_id",
+     "customers (c.id = o.customer_id)"),
     # Unqualified: each side resolves to one table through the model. (`customer_id = id` would
     # not: `id` is on both, so it stays a restriction — see the review tricks.)
-    "SELECT COUNT(*) AS n FROM orders, payments WHERE customer_id = order_id",
-    "SELECT COUNT(*) AS n FROM orders a JOIN orders b ON a.id = b.customer_id",
+    ("SELECT COUNT(*) AS n FROM orders, payments WHERE customer_id = order_id",
+     "payments (customer_id = order_id)"),
+    ("SELECT COUNT(*) AS n FROM orders a JOIN orders b ON a.id = b.customer_id",
+     "orders (a.id = b.customer_id)"),
 ])
-def test_a_joining_condition_is_not_a_restriction(org, sql):
+def test_a_joining_condition_is_not_a_restriction(org, sql, join):
     """A condition that joins two relations is a join (ACE-059's section), on either spelling, and
-    on a self-join too."""
+    on a self-join too: never listed as a condition. ACE-178 part 3: the inner join itself is listed
+    once, as the rows it keeps (a row with no partner is dropped)."""
     item = _one(org, sql, "n")
-    assert (item["status"], item["restrictions"]) == (rt.MATCHED, [])
+    assert (item["status"], item["restrictions"]) == (
+        rt.MATCHED, [f"only rows with a match in {join}"])
 
 
 def test_an_outer_join_condition_is_listed_only_for_the_joined_tables_number(org):
@@ -290,7 +296,7 @@ def test_a_default_filter_is_subtracted_only_for_its_own_table(org):
     the customers table's condition and a slice of the orders counted."""
     item = _one(org, "SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id "
                      "WHERE c.is_deleted = false", "n")
-    assert item["restrictions"] == ["c.is_deleted = FALSE"]
+    assert item["restrictions"] == ["c.is_deleted = FALSE", "only rows with a match in customers (c.id = o.customer_id)"]
 
 
 # --- item 6: restrictions apply only to a column that aggregates --------------------------------
@@ -340,7 +346,7 @@ def test_a_curated_twins_condition_on_another_table_is_not_its_own(org):
     item = _one(org, "SELECT SUM(o.total_amount) AS s FROM orders o JOIN customers c "
                      "ON c.id = o.customer_id WHERE c.status = 'paid'", "s")
     assert not (item["name"] == "paid_sales" and item["restrictions"] == [])
-    assert (item["name"], item["restrictions"]) == ("total_sales", ["c.status = 'paid'"])
+    assert (item["name"], item["restrictions"]) == ("total_sales", ["c.status = 'paid'", "only rows with a match in customers (c.id = o.customer_id)"])
 
 
 @pytest.mark.parametrize("storage_type,sql", SEMI_ANTI)
@@ -372,7 +378,7 @@ def test_a_condition_on_a_reference_the_number_does_not_read_is_not_its_metrics(
 def test_the_same_condition_on_two_references_is_listed_twice(org):
     item = _one(org, "SELECT SUM(o.total_amount) AS s FROM orders o JOIN customers c "
                      "ON c.id = o.customer_id WHERE o.status = 'x' AND c.status = 'x'", "s")
-    assert item["restrictions"] == ["o.status = 'x'", "c.status = 'x'"]
+    assert item["restrictions"] == ["o.status = 'x'", "c.status = 'x'", "only rows with a match in customers (c.id = o.customer_id)"]
 
 
 def test_each_union_arm_lists_its_own_restrictions(org):
@@ -405,8 +411,9 @@ def test_a_value_compared_with_a_sensitive_column_is_withheld(org, cond):
     sql = f"SELECT COUNT(*) AS n FROM orders o JOIN customers c ON c.id = o.customer_id WHERE {cond}"
     receipt = rt.assemble_receipt(org, sql)
     (item,) = [i for i in receipt["columns"]["items"] if i["kind"] == "output"]
-    (text,) = item["restrictions"]
+    text, join = item["restrictions"]
     assert "email" in text.lower() and "<withheld>" in text
+    assert join == "only rows with a match in customers (c.id = o.customer_id)"
     assert SECRET[:9] not in json.dumps(receipt) and SECRET[9:] not in json.dumps(receipt)
 
 
@@ -435,7 +442,7 @@ def test_a_sensitive_value_reached_another_way_is_withheld(org, sql):
 def test_a_sensitive_value_in_an_inner_join_condition_is_withheld(org):
     item = _one(org, "SELECT COUNT(*) AS n FROM orders o JOIN customers c "
                      f"ON c.id = o.customer_id AND c.email = '{SECRET}'", "n")
-    assert item["restrictions"] == ["c.email = <withheld>"]
+    assert item["restrictions"] == ["c.email = <withheld>", "only rows with a match in customers (c.id = o.customer_id)"]
 
 
 def test_a_restriction_is_echo_bounded(org):
@@ -485,7 +492,7 @@ def test_the_same_statement_gives_the_same_item_across_processes(tmp_path):
         outs.add(out)
     assert len(outs) == 1
     assert json.loads(outs.pop())["items"][0]["restrictions"] == [
-        "c.region = 'EU'", "o.customer_id > 3", "c.status <> 'x'"]
+        "c.region = 'EU'", "o.customer_id > 3", "c.status <> 'x'", "only rows with a match in customers (c.id = o.customer_id)"]
 
 
 def test_restrictions_are_built_once_per_select_not_once_per_column(org, monkeypatch):

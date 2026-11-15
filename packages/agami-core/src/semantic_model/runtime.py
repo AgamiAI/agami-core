@@ -1745,6 +1745,42 @@ def _echo_expr(text: str) -> str:
     return safe
 
 
+def _echo_condition(text: str) -> str:
+    """One caller-written CONDITION, bounded like `_echo_expr` but cut so the cut cannot read as a
+    complete, different condition. A receipt's conditions are shown joined by AND, so a cut that
+    leaves a bracket open swallows the conditions after it (`(a OR b… AND c` puts `c` inside the
+    OR), and one inside a string literal turns a prefix into another value (`x = 'ab…'`). So a cut
+    inside a literal backs up to before it, and every bracket left open is closed after the
+    ellipsis: `(a OR b …)`, `x IN ('p', …)`, `x = …`."""
+    safe = " ".join(_ECHO_CONTROL.sub(" ", text).split())
+    if len(safe) <= _ECHO_MAX_EXPR_CHARS:
+        return safe
+    cut = safe[:_ECHO_MAX_EXPR_CHARS]
+    while True:
+        kept, depth = _open_brackets(cut)
+        out = f"{kept.rstrip()} …{')' * depth}"
+        if len(out) <= _ECHO_MAX_EXPR_CHARS + 1:
+            return out
+        cut = cut[:len(cut) - (len(out) - _ECHO_MAX_EXPR_CHARS - 1)]
+
+
+def _open_brackets(text: str) -> tuple[str, int]:
+    """`text` less any quoted string or name it ends inside, and how many brackets it leaves open.
+    A doubled quote (`'it''s'`) closes and reopens, which reads the same."""
+    depth, quote, start, depth_at = 0, "", 0, 0
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote, start, depth_at = ch, i, depth
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+    return (text[:start], depth_at) if quote else (text, depth)
+
+
 def _echo_identifiers(names: list[str]) -> str:
     """Render caller-supplied identifiers for a refusal `detail`: sanitized, shortened, and capped.
 
@@ -4252,6 +4288,46 @@ def _join_site_status(js: "_JoinSite", declared_pairs: list) -> "tuple[str, Opti
     return status, match
 
 
+def _join_links(join_sites: list, declared_pairs: list) -> dict:
+    """id(join) -> (which declared relationship a written join used, the tables a condition on means
+    something different through each), for every join between two tables the model declares MORE
+    than one relationship between (`tickets.assigned_to` and `tickets.opened_by`, both to `users`:
+    a condition on `users` is about a different person through each; one on `tickets` is not). The
+    label is "" when the join's columns fit several of them. Absent for a join between tables with
+    one declared relationship, where there is nothing to tell apart, and for one that fits none,
+    which the item names as a join the model does not declare."""
+    out: dict = {}
+    for js in join_sites:
+        if not js.pinned or not js.pairs:
+            continue
+        ends = js.resolves_to or js.endpoints
+        tables = frozenset({_tkey(_bare(ends[0])), _tkey(_bare(ends[1]))})
+        between = [(rel, pairs) for rel, pairs in declared_pairs if _rel_tables(rel) == tables]
+        if len(between) < 2:
+            continue
+        fit = [rel for rel, pairs in between if pairs is not None and pairs <= js.pairs | js.fixed]
+        if not fit:
+            continue
+        # The far side: a table that keeps the same column across the relationships, so its rows
+        # are told apart only by which one was used. Both, when that cannot be read.
+        far = set()
+        for table in tables:
+            cols = [rel.from_column if _tkey(_bare(rel.from_table)) == table else rel.to_column
+                    for rel, _ in between]
+            if None in cols or len({c.lower() for c in cols}) < len(cols):
+                far.add(table)
+        out[id(js.node)] = (_link_label(fit[0]) if len(fit) == 1 else "", frozenset(far or tables))
+    return out
+
+
+def _link_label(rel: Relationship) -> str:
+    """`via assets.assigned_to_id → users.id`, or the declared `on:` when it is written that way."""
+    if rel.from_column is not None and rel.to_column is not None:
+        return (f"via {_echo_name(_bare(rel.from_table))}.{_echo_name(rel.from_column)} → "
+                f"{_echo_name(_bare(rel.to_table))}.{_echo_name(rel.to_column)}")
+    return f"via {_echo_expr(rel.on or '')}"
+
+
 def _pins(model_version: Optional[str]) -> dict[str, Any]:
     """What every assembled receipt is pinned to: the model version it was checked against, and the
     agami-core version whose rules checked it (ACE-177)."""
@@ -4504,18 +4580,22 @@ def assemble_receipt(
     # ACE-178: one trace per receipt, so each step is read once however many columns pass through
     # it; each written join's status and label, so a number counted through one the model does not
     # declare can name it; and the declared second-order metrics, by what they are built from.
-    trace = _Trace(metric_dialect, tidx, visible, restriction_memo, own_alias_memo, {}, {})
+    trace = _Trace(metric_dialect, tidx, visible, restriction_memo, own_alias_memo, {}, {},
+                   _join_links(join_sites, declared_pairs))
     join_status = {id(js.node): (status, f"{_echo_name(js.endpoints[0])} → {_echo_name(js.endpoints[1])}")
                    for js, (status, _match) in zip(join_sites, join_results)}
     second_order = _second_order_index(candidates, metric_storage_type)
 
-    for oc in output_columns[:_RECEIPT_MAX_REFS]:
-        result = _match_output_column(oc, unread_declarations, by_binding, visible,
-                                      metric_dialect, own_alias_memo,
-                                      by_binding_grouped, binding_shapes,
-                                      tidx=tidx, restriction_memo=restriction_memo,
-                                      trace=trace, join_status=join_status,
-                                      second_order=second_order)
+    shown_columns = output_columns[:_RECEIPT_MAX_REFS]
+    results = _arms_agree(tree, shown_columns, [
+        _match_output_column(oc, unread_declarations, by_binding, visible,
+                             metric_dialect, own_alias_memo,
+                             by_binding_grouped, binding_shapes,
+                             tidx=tidx, restriction_memo=restriction_memo,
+                             trace=trace, join_status=join_status,
+                             second_order=second_order)
+        for oc in shown_columns])
+    for oc, result in zip(shown_columns, results):
         status, match = result.status, result.match
         # Everything a MATCHED metric contributes, and null on every other status. An item that
         # matched nothing must assert nothing about a metric it did not match — ACE-059's review
@@ -9122,6 +9202,7 @@ class _Restriction(NamedTuple):
     refs: frozenset         # every reference its columns name, for telling two spellings apart
     node: "exp.Expression"  # as the statement wrote it, for the item
     default: bool = False   # an applied declared default filter of that reference (ACE-099's report)
+    unstated: bool = False  # it reads a value a step computed that `_stated` cannot write over tables
 
 
 class _ArmRestrictions(NamedTuple):
@@ -9335,6 +9416,9 @@ _WHY_PIVOT = "it goes through a pivot or unpivot"
 _WHY_ROW_ORDER = "it depends on the order of rows"
 _WHY_WINDOW = "it goes through a window function in a step"
 _WHY_UNION = "it comes from a UNION, whose arms can compute or count it differently"
+_WHY_ARMS = "it comes from a UNION or other set operation whose arms do not all compute one declared metric"
+_WHY_LINK = ("it is filtered on a table reached by a join that more than one declared relationship "
+             "between those tables could be")
 _WHY_GROUPS = "a step groups or de-duplicates the rows it is counted over"
 _WHY_STEPS = "it combines numbers computed in different steps"
 _WHY_STAR = "it is every column of a table or step (*)"
@@ -9346,6 +9430,7 @@ _WHY_NAMESAKE = "it reads a name that is both a table and a step, told apart onl
 _WHY_TWICE = "it reads one step through two references"
 _WHY_REAGGREGATE = "it aggregates a number a step already computed"
 _WHY_SRF = "a step uses a function that can return several rows, or one the check does not know"
+_WHY_UNSTATED = "it is filtered on a value a step computed, which the receipt cannot state over the tables"
 # How many steps one number's path may enter before it reads `undetermined` (`_WHY_DEEP`): a bound on
 # the caller's SQL, like `_MAX_CTE_CHAIN`, for a statement whose steps fan out rather than chain.
 _MAX_PATH_VISITS = 256
@@ -9598,39 +9683,69 @@ def _value_columns(node: "exp.Expression", arm: _ArmRestrictions) -> list:
 def _lift(r: _Restriction, sel: "exp.Select", arm: _ArmRestrictions, memo: dict,
           dialect: "str | None") -> _Restriction:
     """One SELECT's restriction in the terms of the whole statement: its references made unique,
-    and a column it reads through a step replaced by the table column behind it, so its key
-    compares with a metric's own condition on that table. Shown as the statement wrote it."""
+    and a column it reads through a step replaced by what the step computes (`_stated`), so it is
+    shown over the tables and its key compares with a metric's own condition on that table."""
     if not _reads_steps(sel, memo):
         return r._replace(ref=_pref(sel, r.ref) if r.ref else None,
                           refs=frozenset(_pref(sel, x) for x in r.refs))
     refs: set = set()
     grounded = True
-    renamed = []                          # (column, the table column it stands for)
     for orig in _value_columns(r.node, arm):
         found = _ground(orig, sel, memo, set())
         if found is None:
             grounded = False
             continue
-        gsel, gref, gcol = found
-        refs.add(_pref(gsel, gref))
-        if _tkey(gcol.name) != _tkey(orig.name):
-            renamed.append((orig, gcol))
+        refs.add(_pref(found[0], found[1]))
     ref = next(iter(refs)) if grounded and len(refs) == 1 else None
-    key = r.key
-    if renamed:
-        # The key strips qualifiers already, so only a RENAMED column changes it: rebuilt then,
-        # on a copy with each renamed column replaced by the one it stands for.
-        node = r.node.copy()
-        pairs = dict(zip(map(id, _value_columns(r.node, arm)), _value_columns(node, arm)))
-        for orig, gcol in renamed:
-            copy = pairs[id(orig)]
-            new = exp.Column(this=gcol.this.copy())
-            if copy is node:
-                node = new
-            else:
-                copy.replace(new)
-        key = _condition_key(node, dialect)
-    return _Restriction(key, ref, frozenset(refs), r.node, r.default)
+    if isinstance(r.node, exp.Join):
+        # A SEMI or ANTI join is listed as the join itself, as written.
+        return _Restriction(r.key, ref, frozenset(refs), r.node, r.default)
+    # Shown, and compared, over the tables: a step's column means nothing to a reader of the
+    # receipt, and a computed one (`status = 'paid' AS is_paid`, then `WHERE p.is_paid`) hides the
+    # condition altogether. When it cannot be written that way the number is undetermined.
+    stated = _stated(r.node, sel, memo)
+    if stated is None:
+        return _Restriction(r.key, ref, frozenset(refs), r.node, r.default, unstated=True)
+    return _Restriction(_condition_key(stated, dialect), ref, frozenset(refs), stated, r.default)
+
+
+# What `_stated` may put in place of a column inside a larger condition without brackets.
+_ATOMIC = (exp.Column, exp.Literal, exp.Paren, exp.Func, exp.Boolean, exp.Null) if _HAVE_SQLGLOT else ()
+
+
+def _stated(node: "exp.Expression", sel: "exp.Select", memo: dict,
+            depth: int = 0) -> "exp.Expression | None":
+    """A condition in `sel` with every column it reads through a step that hands rows back replaced
+    by what that step computes per row, down to table columns as the step wrote them: `p.is_paid`
+    over `o.status = 'paid' AS is_paid` is `o.status = 'paid'`. A table's column, and a one-row
+    lookup step's value, stay as written. None when a column cannot be followed (a step that groups,
+    a star, one this check does not follow): the condition has no statement over the tables."""
+    if depth >= _MAX_CTE_CHAIN:
+        return None
+    out = node.copy()
+    for orig, copy in zip(_own_nodes(node, exp.Column), _own_nodes(out, exp.Column)):
+        src = _source_named(sel, orig, memo)
+        if src is None:
+            if _reads_steps(sel, memo):
+                return None
+            continue
+        step = _step_of(src, memo)
+        if step is None or step.one_row:
+            continue
+        if step.reason or step.computes:
+            return None
+        proj = _projection_for(step.body, orig.name, step.listed)
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if inner is None or isinstance(inner, exp.Star):
+            return None
+        new = _stated(inner, step.body, memo, depth + 1)
+        if new is None:
+            return None
+        if copy is out:
+            out = new
+        else:
+            copy.replace(new if isinstance(new, _ATOMIC) else exp.Paren(this=new))
+    return out
 
 
 def _optional_refs(sel: "exp.Select") -> set:
@@ -9657,6 +9772,7 @@ class _Trace(NamedTuple):
     amemo: dict                 # `_own_alias_map`, per SELECT
     smemo: dict                 # `_step_of`, per source
     pmemo: dict                 # `_path`, per (SELECT, what the number reads)
+    links: dict = {}            # `_join_links`: id(join) -> (the declared link it used, far tables)
 
     def arm(self, sel: "exp.Select") -> _ArmRestrictions:
         return _arm_restrictions(sel, self.dialect, self.tidx, self.visible, self.rmemo,
@@ -9834,6 +9950,25 @@ class _Path(NamedTuple):
     reason: Optional[str]
     full: bool = False          # a FULL join on the path
     outer_used: bool = False    # an outer join's ON condition restricts the number
+    inner: tuple = ()           # (_JoinMatch, the tables it is between, or None): inner joins
+    ref_joins: dict = {}        # path reference -> (its table, the joins on the path it is party to)
+
+
+class _JoinMatch(NamedTuple):
+    """An inner join on the counted rows' path, listed as the restriction it is: a row with no
+    partner on the other side is dropped. Rendered by `_restriction_text`."""
+
+    relation: str                          # the other side, as the statement names it
+    on: "exp.Expression | None"            # its joining condition, when it wrote one
+    using: tuple = ()                      # or the columns of its USING
+
+
+class _Linked(NamedTuple):
+    """A restriction on a table the statement reached by one of several declared relationships
+    between the two tables, with the one it used. Rendered by `_restriction_text`."""
+
+    link: str
+    node: "exp.Expression"
 
 
 def _path(sel: "exp.Select", wide: frozenset, tr: _Trace, skip: "int | None" = None) -> _Path:
@@ -9851,6 +9986,8 @@ def _path(sel: "exp.Select", wide: frozenset, tr: _Trace, skip: "int | None" = N
     mentioned: set = set()
     joins: list = []
     state: dict = {"unseen": False, "reason": None, "full": False, "outer": False, "visits": 0}
+    inner_joins: list = []
+    ref_joins: dict = {}
     # Each step body reached, by which reference. Path references are keyed by the BODY, so two
     # references to one step (`FROM x a JOIN x b`) would collapse into one and a condition on `b`
     # could stand for a metric's own condition on `a`: that is not modelled, so it is undetermined.
@@ -9904,12 +10041,71 @@ def _path(sel: "exp.Select", wide: frozenset, tr: _Trace, skip: "int | None" = N
                 rows.append(_lift(r, s, arm, tr.smemo, tr.dialect))
                 state["outer"] = True
         joins.extend(s.args.get("joins") or [])
+        _inner_joins(s, arm, wide, tr, inner_joins, ref_joins)
 
     visit(sel, 0)
     after.extend(tr.arm(sel).after)
     got = tr.pmemo[key] = _Path(amap, rows, after, frozenset(mentioned), joins,
-                                state["unseen"], state["reason"], state["full"], state["outer"])
+                                state["unseen"], state["reason"], state["full"], state["outer"],
+                                tuple(inner_joins), ref_joins)
     return got
+
+
+def _inner_joins(s: "exp.Select", arm: _ArmRestrictions, wide: frozenset, tr: _Trace,
+                 inner: list, ref_joins: dict) -> None:
+    """The inner joins `s` writes, each as a `_JoinMatch` with the tables it is between (None when a
+    side is not a table), into `inner`; and every reference party to a join, into `ref_joins`.
+
+    The model records no field saying every row has a partner, so every inner join is listed: a
+    plain or INNER join, and a comma or CROSS join the WHERE equates (SQLite parses a comma join
+    as CROSS, so the two are one rule). Not a CROSS join nothing equates (it drops nothing from a
+    table that has rows; repeating them is the aggregates section's), and not a join to a one-row
+    lookup step. Its value conditions are restrictions already (`_arm_restrictions`)."""
+    sources = _own_sources(s)
+
+    def ends(cond: "exp.Expression") -> set:
+        # A `_joins_two` conjunct: both sides resolve, qualified or not.
+        return {_endpoint(cond.this, arm.amap, arm.columns),
+                _endpoint(cond.expression, arm.amap, arm.columns)}
+
+    where = [c for c in _and_conjuncts(_where_predicate(s))
+             if _joins_two(c, arm.amap, arm.columns, arm.values)]
+    for join in s.args.get("joins") or []:
+        here = _tkey(join.this.alias_or_name)
+        if join.args.get("on") is not None:
+            keys = [c for c in _and_conjuncts(join.args["on"])
+                    if _joins_two(c, arm.amap, arm.columns, arm.values)]
+        else:
+            keys = [c for c in where if here in ends(c)]
+        party = {here}.union(*(ends(c) for c in keys))
+        for ref in party:
+            ref_joins.setdefault(_pref(s, ref), (_table_of(ref, arm.amap), []))[1].append(join)
+        kind = (join.args.get("kind") or "").upper()
+        step = _step_of(join.this, tr.smemo)
+        if (join.args.get("side") or kind in ("SEMI", "ANTI")
+                or (step is not None and step.one_row)
+                or (join.args.get("on") is None and not join.args.get("using") and not keys)):
+            continue
+        # Named by its other side: the one the counted rows look for a partner in.
+        other = here
+        if _pref(s, here) in wide:
+            rest = sorted(party - {here})
+            other = rest[0] if len(rest) == 1 else here
+        src = _pick_binding(sources, other)
+        name = _relation_name(src) if src is not None else other
+        on = exp.and_(*(c.copy() for c in keys)) if keys else None
+        using = tuple(c.name for c in join.args.get("using") or [])
+        tables = set()
+        for ref in party:
+            hit = [v for k, v in arm.amap.items() if _tkey(k) == ref]
+            src_ref = _pick_binding(sources, ref)
+            if len(hit) != 1 or not isinstance(src_ref, exp.Table) or _step_of(
+                    src_ref, tr.smemo) is not None:
+                tables = None
+                break
+            tables.add(_tkey(_bare(hit[0])))
+        inner.append((_JoinMatch(name, on, using),
+                      frozenset(tables) if tables is not None else None))
 
 
 def _group_columns(sel: "exp.Select") -> list:
@@ -9989,7 +10185,7 @@ def _upper(flow: _Flow, tr: _Trace) -> "tuple[list, list]":
                                  values=computing.values) if hit else None
             if found is not None:
                 rows.append(_lift(found, flow.sel, computing, tr.smemo, tr.dialect)._replace(
-                    node=r.node, default=False))
+                    default=False))
             else:
                 after.append(r.node)
         after.extend(arm.after)
@@ -10244,8 +10440,20 @@ def _match_output_column(oc: OutputColumn, unread: bool,
                 if r.default or ident in seen or (
                         r.key in conds and _compatible(r, sources, read, path.amap)):
                     continue
+                if r.unstated:
+                    return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNSTATED,
+                                        aggregating=aggregating)
                 seen.add(ident)
-                extras.append(r.node)
+                link = _link_of(r, read, path, tr)
+                if link == "":
+                    return _ColumnMatch(UNDETERMINED, None, reason=_WHY_LINK,
+                                        aggregating=aggregating)
+                extras.append(_Linked(link, r.node) if link else r.node)
+            if aggregating:
+                # Every inner join drops the rows with no partner; one between two of the metric's
+                # own tables is part of what the metric counts. A self-join is not.
+                extras.extend(jm for jm, tables in path.inner
+                              if not (tables and len(tables) > 1 and tables <= sources))
             return _ColumnMatch(MATCHED, cand, tuple(extras), tuple(path.after + upper_after),
                                 joins=_undeclared_joins(path.joins, tr, join_status or {}),
                                 aggregating=aggregating)
@@ -10270,6 +10478,58 @@ def _match_output_column(oc: OutputColumn, unread: bool,
     return _ColumnMatch(status, None, missing=tuple(missing),
                         missing_tables=tuple(lacking_tables), reason=reason,
                         aggregating=aggregating)
+
+
+def _arms_agree(tree: "exp.Expression", columns: list, results: list) -> list:
+    """`results` with every match in a set operation's column undone unless EVERY arm's value in
+    that position matched the same metric. One output column holds all the arms' rows, and a
+    reader takes its label for the whole column: an incident count UNION ALL a request count is
+    not an incident count. When they agree, each arm keeps its own restrictions."""
+    arms = _output_select_arms(tree)
+    if len(arms) < 2:
+        return results
+    by_sel = {id(oc.sel): [] for oc in columns}
+    for oc, result in zip(columns, results):
+        by_sel[id(oc.sel)].append(result)
+    agreed: set = set()
+    for position in range(max(len(v) for v in by_sel.values())):
+        names = set()
+        for arm in arms:
+            got = [by_sel.get(id(sel), [])[position:position + 1] for sel in arm] or [[]]
+            for one in got:
+                names.add(one[0].match.metric.name if one and one[0].status == MATCHED
+                          and one[0].match is not None else None)
+        if len(names) == 1 and None not in names:
+            agreed.add(position)
+    out = []
+    for oc, result in zip(columns, results):
+        position = next(i for i, r in enumerate(by_sel[id(oc.sel)]) if r is result)
+        if result.status == MATCHED and position not in agreed:
+            result = _ColumnMatch(UNDETERMINED, None, reason=_WHY_ARMS,
+                                  aggregating=result.aggregating)
+        out.append(result)
+    return out
+
+
+def _link_of(r: _Restriction, read: set, path: _Path, tr: _Trace) -> "str | None":
+    """Which declared relationship a condition's table was reached by, when the model declares
+    several between it and the table it was joined to (`_join_links`): "<table> via <link>", ""
+    when that cannot be told, None when there is nothing to tell (one relationship, or a condition
+    on what the number itself reads)."""
+    if r.ref is None or r.ref in read or r.ref not in path.ref_joins:
+        return None
+    table, joins = path.ref_joins[r.ref]
+    labels = []
+    for join in joins:
+        link, far = tr.links.get(id(join), (None, frozenset()))
+        if table not in far:
+            continue
+        if link == "":
+            return ""
+        labels.append(link)
+    if not labels:
+        return None
+    return f"{_echo_name(table)} " + "; ".join(dict.fromkeys(labels))
 
 
 def _second_order_index(candidates: list, storage_type: "str | None") -> tuple:
@@ -10345,7 +10605,10 @@ def _match_built_on(oc: OutputColumn, flow: _Flow, unread: bool, by_binding: dic
     if path.reason:
         return _ColumnMatch(UNDETERMINED, None, reason=path.reason, aggregating=True)
     upper_rows, upper_after = _upper(flow, tr)
-    per_group = [r.node for r in path.rows + upper_rows] + list(tr.arm(step.body).after)
+    if any(r.unstated for r in path.rows + upper_rows):
+        return _ColumnMatch(UNDETERMINED, None, reason=_WHY_UNSTATED, aggregating=True)
+    per_group = ([r.node for r in path.rows + upper_rows] + [jm for jm, _ in path.inner]
+                 + list(tr.arm(step.body).after))
     group = step.body.args.get("group")
     built = {
         "metric": inner.match.metric.name,
@@ -10424,7 +10687,19 @@ def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[s
     `tests/test_ace093_byte_identity.py` records: bound to a receipt field and never assigned
     anywhere a driver reads.
     """
-    shown = node.copy()
+    if isinstance(node, _JoinMatch):
+        text = f"only rows with a match in {_echo_name(node.relation)}"
+        if node.using:
+            return f"{text} (USING ({', '.join(_echo_name(c) for c in node.using)}))"
+        if node.on is None:
+            return text
+        return f"{text} ({_restriction_text(node.on, sensitive, dialect, statement_sensitive)})"
+    if isinstance(node, _Linked):
+        return f"{node.link}: {_restriction_text(node.node, sensitive, dialect, statement_sensitive)}"
+    # An OR (or XOR) binds looser than the AND every reader joins a list of conditions with, so it
+    # is shown in brackets: `x = 1` beside `a OR b` must not read as `(x = 1 AND a) OR b`. The
+    # brackets `_and_conjuncts` took off are the ones put back.
+    shown = exp.Paren(this=node.copy()) if isinstance(node, (exp.Or, exp.Xor)) else node.copy()
     # Asked of the ORIGINAL node: whether a column may be renamed depends on the SELECT it sits in.
     if _withholds(node, sensitive, statement_sensitive):
         for leaf in [n for n in shown.walk() if not list(n.iter_expressions())]:
@@ -10433,7 +10708,7 @@ def _restriction_text(node: "exp.Expression", sensitive: "set[str] | frozenset[s
                 continue
             if leaf is not shown:
                 leaf.replace(exp.Var(this=_WITHHELD))
-    return _echo_expr(shown.sql(dialect=dialect))
+    return _echo_condition(shown.sql(dialect=dialect))
 
 
 def _storage_type_of(org: Datasource) -> "str | None":

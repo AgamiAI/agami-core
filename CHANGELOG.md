@@ -68,6 +68,24 @@ below corresponds to one such version.
   out once per statement, and a statement's WITH bindings are kept on its own parse tree rather
   than in one module-wide entry two threads evicted from each other.
 
+- **A receipt claims no more than it can show, from an audit of 100 real receipts.** Five shapes
+  read as more than they were. A condition looser than AND (`a OR b`) is listed in brackets in
+  `restrictions`, `result_filters`, `missing_conditions` and `built_from`, since a reader joins
+  each list with AND; a condition cut to the length bound backs out of a string it ends inside and
+  closes every bracket it left open (`(a OR b …)`), so a cut never reads as a different, complete
+  condition. A column of a UNION or other set operation is `matched` only when every arm's value
+  in it matched the same metric (each arm keeping its own restrictions); otherwise each arm's is
+  `undetermined`. A filter on a step's column is listed over the tables the step reads (`WHERE
+  p.is_open` over `status = 'open' AS is_open` lists `status = 'open'`; a renamed column is listed
+  by its table's name), and a number filtered on a value no condition over the tables can state (a
+  grouping step's count) is `undetermined`. A condition on a table reached by one of several
+  relationships the model declares between two tables names the one used (`users via
+  assets.assigned_to_id → users.id: NOT u.active`), and is `undetermined` when the join fits more
+  than one. And an inner join on the counted rows' path is listed as the rows it keeps (`only rows
+  with a match in customers (c.id = o.customer_id)`), since a row with no partner is dropped and the
+  model records nothing saying every row has one; a join between two of the metric's own tables is
+  not listed, nor is an outer join, a CROSS join nothing equates, or a join to a one-row lookup.
+  New `reason` phrases for the three new `undetermined` cases.
 - **A matched metric says which rows it was counted over (#656).** The receipt's `columns`
   section compared an output column's expression with each metric's binding and nothing else, so
   `COUNT(DISTINCT number) … WHERE state = 'open'` read `matched` to the metric counting every row,
